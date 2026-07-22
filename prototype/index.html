@@ -1,63 +1,648 @@
 <!doctype html>
-<html lang="zh-CN">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#fbf7ef" />
-    <meta name="description" content="暖芽 Android 育儿记录 App 可点击原型" />
-    <title>暖芽 · 育儿记录</title>
-    <link rel="stylesheet" href="styles.css" />
-    <link rel="stylesheet" href="components.css" />
-  </head>
-  <body>
-    <main class="prototype-stage" data-od-id="prototype-stage">
-      <section class="app-shell" aria-label="暖芽 Android 育儿记录应用原型" data-od-id="nuanya-app">
-        <div class="android-statusbar" aria-label="Android 状态栏" data-od-id="android-statusbar">
-          <time datetime="09:41">09:41</time>
-          <div class="status-icons" aria-label="网络良好，电量 82%">
-            <svg viewBox="0 0 18 12" aria-hidden="true"><path d="M2 10h1.5M5.5 8h1.5M9 5.5h1.5M12.5 3h1.5" /></svg>
-            <svg viewBox="0 0 16 12" aria-hidden="true"><path d="M2 4.5a8 8 0 0 1 12 0M4.5 7a4.8 4.8 0 0 1 7 0M7.2 9.3a1.7 1.7 0 0 1 1.6 0" /></svg>
-            <svg viewBox="0 0 22 12" aria-hidden="true"><rect x="1" y="2" width="17" height="8" rx="2" /><path d="M20 4.5v3M3.5 4.5h11" /></svg>
-          </div>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f8f4e9">
+  <meta name="description" content="乐记 — 宝宝喂养、睡眠、尿布与成长记录">
+  <title>乐记 · 今天也好好长大</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="components.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+
+  <div class="app-shell" data-od-id="leji-app-shell">
+    <header class="topbar" data-od-id="app-header">
+      <div class="brand-row">
+        <a class="brand" href="#records" aria-label="乐记首页" data-view-link="records" data-od-id="brand-home">
+          <span class="brand-mark" aria-hidden="true">乐</span>
+          <span class="brand-copy">
+            <strong>乐记</strong>
+            <small>今天也好好长大</small>
+          </span>
+        </a>
+        <div class="top-actions" aria-label="全局工具">
+          <button class="icon-button" type="button" data-open="search-dialog" aria-label="搜索全部记录" data-od-id="header-search">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"></circle><path d="m16 16 4 4"></path></svg>
+          </button>
+          <button class="icon-button" id="theme-toggle" type="button" aria-label="切换深色模式" aria-pressed="false" data-od-id="theme-toggle">
+            <svg class="theme-icon-sun" aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.5"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
+            <svg class="theme-icon-moon" aria-hidden="true" viewBox="0 0 24 24"><path d="M20 15.1A8.5 8.5 0 0 1 8.9 4a8.5 8.5 0 1 0 11.1 11.1Z"></path></svg>
+          </button>
         </div>
+      </div>
 
-        <header class="app-header" id="appHeader" data-od-id="app-header"></header>
-
-        <div class="screen-viewport" id="screenViewport" tabindex="-1" data-od-id="screen-viewport">
-          <section class="screen is-active" id="todayScreen" data-page="today" aria-label="今日"></section>
-          <section class="screen" id="statsScreen" data-page="stats" aria-label="统计" hidden></section>
-          <section class="screen" id="settingsScreen" data-page="settings" aria-label="设置" hidden></section>
-        </div>
-
-        <button class="quick-fab" id="quickFab" type="button" aria-label="快速记录" data-od-id="quick-record-fab">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
-          <span>记录</span>
+      <div class="context-row">
+        <button class="baby-switcher" type="button" data-open="baby-dialog" aria-haspopup="dialog" data-od-id="baby-switcher">
+          <span class="baby-avatar" id="active-baby-avatar" aria-hidden="true">木</span>
+          <span><small>正在记录</small><strong id="active-baby-name">木木</strong></span>
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m8 10 4 4 4-4"></path></svg>
         </button>
+        <div class="date-switcher" aria-label="记录日期">
+          <button class="icon-button compact" id="previous-day" type="button" aria-label="前一天">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"></path></svg>
+          </button>
+          <button class="date-button" id="date-label" type="button" aria-label="回到今天">今天 · 7月22日</button>
+          <button class="icon-button compact" id="next-day" type="button" aria-label="后一天" disabled>
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"></path></svg>
+          </button>
+        </div>
+      </div>
+    </header>
 
-        <nav class="bottom-nav" aria-label="主要页面" data-od-id="bottom-navigation">
-          <button class="nav-item is-active" type="button" data-nav="today" aria-current="page" data-od-id="nav-today">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5.5h14v14H5zM8 3v5M16 3v5M5 9.5h14" /></svg>
-            <span>今日</span>
-          </button>
-          <button class="nav-item" type="button" data-nav="stats" data-od-id="nav-stats">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19V12M12 19V5M19 19V9" /></svg>
-            <span>统计</span>
-          </button>
-          <button class="nav-item" type="button" data-nav="settings" data-od-id="nav-settings">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.2a3.8 3.8 0 1 0 0 7.6 3.8 3.8 0 0 0 0-7.6Z" /><path d="M19.2 13.5a7.8 7.8 0 0 0 0-3l2-1.5-2-3.4-2.4 1a8.5 8.5 0 0 0-2.6-1.5L14 2.5h-4l-.3 2.6a8.5 8.5 0 0 0-2.5 1.5l-2.4-1-2 3.4 2 1.5a7.8 7.8 0 0 0 0 3l-2 1.5 2 3.4 2.4-1a8.5 8.5 0 0 0 2.5 1.5l.3 2.6h4l.3-2.6a8.5 8.5 0 0 0 2.5-1.5l2.4 1 2-3.4-2-1.5Z" /></svg>
-            <span>设置</span>
-          </button>
-        </nav>
+    <aside class="offline-banner" id="offline-banner" hidden role="status" data-od-id="offline-banner">
+      <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4.9 4.9 19.1 19.1M8.5 8.4A8.9 8.9 0 0 1 20 10.8M4 10.8a9 9 0 0 1 1.6-2.4M8.5 14.5a5 5 0 0 1 7 0M12 19h.01"></path></svg>
+      <span><strong>离线演示</strong> · 变更仍会保存在本机</span>
+    </aside>
 
-        <div class="overlay" id="overlay" hidden>
-          <button class="overlay-backdrop" type="button" aria-label="关闭底部面板"></button>
-          <section class="bottom-sheet" id="bottomSheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle" tabindex="-1" data-od-id="bottom-sheet"></section>
+    <aside class="active-session-bar" id="active-session-bar" hidden role="status" data-od-id="active-session" aria-live="polite">
+      <div class="session-bar-copy">
+        <strong id="session-bar-label">记录中</strong>
+        <span id="session-bar-time" class="session-bar-time">00:00</span>
+      </div>
+      <div class="session-bar-actions">
+        <button class="secondary-button compact-label" id="session-bar-secondary" type="button">暂停</button>
+        <button class="primary-button compact-label" id="session-bar-primary" type="button">结束</button>
+      </div>
+    </aside>
+
+    <main id="main-content" tabindex="-1">
+      <section class="view is-active" id="view-records" data-view="records" aria-labelledby="records-title" data-od-id="records-view">
+        <h1 id="records-title" class="sr-only">记录</h1>
+        <div class="records-topbar" data-od-id="today-compact-bar">
+          <span class="eyebrow"><span class="status-dot"></span><span id="hero-demo-label">本地演示 · 今日</span></span>
+          <p class="compact-age" id="hero-age">2个月18天 · 最近记录于 09:26</p>
         </div>
 
-        <div class="toast" id="toast" role="status" aria-live="polite" hidden data-od-id="feedback-toast"></div>
-        <div class="sr-only" id="liveRegion" aria-live="polite"></div>
+        <section class="glance-grid glance-five" aria-label="今日概览" data-od-id="today-glance">
+          <article class="glance-card blue">
+            <span class="glance-icon-wrap"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9 3h6v4l2 3v9a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2v-9l2-3V3ZM9 12h8"></path></svg></span>
+            <strong id="glance-feed-ml">180ml</strong><span>奶量</span>
+          </article>
+          <article class="glance-card blue">
+            <span class="glance-icon-wrap"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3c3.4 4.1 5.2 7.2 5.2 10a5.2 5.2 0 0 1-10.4 0c0-2.8 1.8-5.9 5.2-10Z"></path></svg></span>
+            <strong id="glance-bf-min">20min</strong><span>母乳</span>
+          </article>
+          <article class="glance-card yellow">
+            <span class="glance-icon-wrap"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 15.5A8 8 0 0 1 8.5 4 8 8 0 1 0 20 15.5Z"></path></svg></span>
+            <strong id="glance-sleep">2h 10m</strong><span>睡眠</span>
+          </article>
+          <article class="glance-card cream">
+            <span class="glance-icon-wrap"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 4v4.5a5 5 0 0 0 10 0V4M5 7h14M7 17c2.7 1.3 7.3 1.3 10 0"></path></svg></span>
+            <strong id="glance-pee">1次</strong><span>尿尿</span>
+          </article>
+          <article class="glance-card neutral">
+            <span class="glance-icon-wrap"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 4v4.5a5 5 0 0 0 10 0V4M5 7h14M7 17c2.7 1.3 7.3 1.3 10 0M10 10h4"></path></svg></span>
+            <strong id="glance-poop">1次</strong><span>便便</span>
+          </article>
+        </section>
+
+        <section class="section-block day-rail-card" aria-labelledby="day-rail-title" data-od-id="day-timeline-24h">
+          <div class="section-heading">
+            <div><span class="eyebrow">一天一眼</span><h2 id="day-rail-title">24h 时间轴</h2></div>
+            <span class="section-meta" id="day-record-count">6 条记录</span>
+          </div>
+          <div class="time-rail" id="time-rail" role="img" aria-label="今天二十四小时记录分布">
+            <div class="rail-hours" aria-hidden="true"><span>00</span><span>06</span><span>12</span><span>18</span><span>24</span></div>
+            <div class="rail-lane" data-lane="sleep"><span class="rail-lane-label">睡眠</span><div class="rail-track"><span class="now-line" id="now-line-sleep"></span><div id="rail-events-sleep"></div></div></div>
+            <div class="rail-lane" data-lane="feed"><span class="rail-lane-label">喂养</span><div class="rail-track"><span class="now-line" id="now-line-feed"></span><div id="rail-events-feed"></div></div></div>
+            <div class="rail-lane" data-lane="care"><span class="rail-lane-label">护理</span><div class="rail-track"><span class="now-line" id="now-line-care"></span><div id="rail-events-care"></div></div></div>
+            <div class="rail-legend" aria-hidden="true"><span><i class="sleep"></i>睡眠</span><span><i class="feed"></i>喂养</span><span><i class="care"></i>护理</span></div>
+          </div>
+        </section>
+
+        <section class="section-block activity-section" aria-labelledby="activity-title" data-od-id="activity-timeline">
+          <div class="section-heading">
+            <div><span class="eyebrow">按时间排序</span><h2 id="activity-title">今日记录</h2></div>
+            <button class="text-button" type="button" data-open="status-dialog">演示状态</button>
+          </div>
+          <div id="timeline-state" aria-live="polite"></div>
+          <ol class="activity-list" id="activity-list"></ol>
+        </section>
+
+        <section class="section-block quick-records" aria-labelledby="quick-record-title" data-od-id="quick-records">
+          <div class="section-heading"><h2 id="quick-record-title">快捷入口</h2><span class="section-meta">长按也不迷路</span></div>
+          <div class="quick-grid">
+            <button type="button" class="quick-button" data-record="breastfeed"><span class="quick-icon blue"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3c3.4 4.1 5.2 7.2 5.2 10a5.2 5.2 0 0 1-10.4 0c0-2.8 1.8-5.9 5.2-10Z"></path></svg></span><span><strong>母乳</strong><small>左右计时</small></span></button>
+            <button type="button" class="quick-button" data-record="diaper"><span class="quick-icon yellow"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 4v4.5a5 5 0 0 0 10 0V4M5 7h14M7 17c2.7 1.3 7.3 1.3 10 0"></path></svg></span><span><strong>尿布</strong><small>干湿与便便</small></span></button>
+            <button type="button" class="quick-button" data-record="sleep"><span class="quick-icon cream"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 15.5A8 8 0 0 1 8.5 4 8 8 0 1 0 20 15.5Z"></path></svg></span><span><strong>睡眠</strong><small>开始与结束</small></span></button>
+            <button type="button" class="quick-button" data-record="bottle"><span class="quick-icon neutral"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9 3h6v4l2 3v9a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2v-9l2-3V3ZM9 12h8"></path></svg></span><span><strong>奶瓶</strong><small>奶量与类型</small></span></button>
+          </div>
+        </section>
+      </section>
+
+      <section class="view" id="view-summary" data-view="summary" aria-labelledby="summary-title" data-od-id="summary-view" hidden>
+        <div class="page-heading"><span class="eyebrow">规律，不是压力</span><h1 id="summary-title">汇总</h1><p id="summary-subtitle">木木的今日记录，由本地数据实时计算。</p></div>
+        <div class="segmented-control range-control" aria-label="汇总范围">
+          <button type="button" class="is-selected" data-range="day" aria-pressed="true">今日</button>
+          <button type="button" data-range="week" aria-pressed="false">近 7 天</button>
+          <button type="button" data-range="month" aria-pressed="false">近 30 天</button>
+        </div>
+        <section class="summary-grid" aria-label="关键汇总" data-od-id="summary-key-metrics">
+          <article class="metric-card"><span>喂养</span><strong id="summary-feed-count">2</strong><small id="summary-feed-detail">母乳 20 分钟</small></article>
+          <article class="metric-card"><span>睡眠</span><strong id="summary-sleep-total">2h10m</strong><small id="summary-sleep-detail">1 段睡眠</small></article>
+          <article class="metric-card"><span>尿布</span><strong id="summary-diaper-count">2</strong><small id="summary-diaper-detail">便便 1 次</small></article>
+        </section>
+        <section class="insight-card" data-od-id="feeding-rhythm">
+          <div class="section-heading"><div><span class="eyebrow">记录分布</span><h2>喂养节律</h2></div><span class="section-meta" id="feeding-window">今日</span></div>
+          <div class="rhythm-chart" id="rhythm-chart" aria-label="喂养记录按六小时分布"></div>
+          <p class="support-copy" id="rhythm-insight">当前仅展示已记录的时段，不对宝宝作息作医学判断。</p>
+        </section>
+        <section class="insight-card sleep-card" data-od-id="sleep-summary">
+          <div class="section-heading"><h2>睡眠片段</h2><span class="section-meta">按已完成记录</span></div>
+          <div id="sleep-segments" class="sleep-segments"></div>
+        </section>
+        <section class="insight-card" data-od-id="trend-feed">
+          <div class="section-heading"><div><span class="eyebrow">趋势</span><h2>喂养趋势</h2></div><span class="section-meta" id="trend-feed-compare"></span></div>
+          <div class="trend-chart" id="trend-feed-chart"></div>
+        </section>
+        <section class="insight-card" data-od-id="trend-sleep">
+          <div class="section-heading"><div><span class="eyebrow">趋势</span><h2>睡眠趋势</h2></div><span class="section-meta" id="trend-sleep-compare"></span></div>
+          <div class="trend-chart" id="trend-sleep-chart"></div>
+        </section>
+        <section class="insight-card" data-od-id="trend-diaper">
+          <div class="section-heading"><div><span class="eyebrow">趋势</span><h2>尿布趋势</h2></div><span class="section-meta" id="trend-diaper-compare"></span></div>
+          <div class="trend-chart" id="trend-diaper-chart"></div>
+        </section>
+        <section class="insight-card" data-od-id="trend-temp">
+          <div class="section-heading"><div><span class="eyebrow">趋势</span><h2>体温趋势</h2></div><span class="section-meta" id="trend-temp-compare"></span></div>
+          <div class="trend-chart" id="trend-temp-chart"></div>
+        </section>
+        <div class="state-card" id="summary-empty-state" hidden data-od-id="summary-empty"><div><span class="state-symbol"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 19V9M12 19V4M19 19v-7"></path></svg></span><h3>还没有汇总数据</h3><p>添加记录后，这里会自动生成趋势和对比。</p></div></div>
+        <section class="insight-card" data-od-id="caregiver-summary">
+          <div class="section-heading"><h2>照护记录</h2><span class="stub-badge">本机</span></div>
+          <div class="caregiver-row"><span class="caregiver-avatar">妈</span><div><strong>妈妈</strong><small>当前设备的主要记录者</small></div><span id="caregiver-count">6 条</span></div>
+          <p class="support-copy">家庭协作接入后，这里会按成员展示记录来源。</p>
+        </section>
+      </section>
+
+      <section class="view" id="view-growth" data-view="growth" aria-labelledby="growth-title" data-od-id="growth-view" hidden>
+        <div class="page-heading page-heading-inline"><div><span class="eyebrow">每一次变化都算数</span><h1 id="growth-title">成长</h1></div><button class="primary-button compact-label" type="button" data-open="growth-dialog">新增测量</button></div>
+        <div class="corrected-age-row" id="corrected-age-row" hidden>
+          <label class="toggle-row" style="border:0;padding:0;min-height:auto">
+            <span><strong>修正月龄</strong><small id="corrected-age-label">适用于早产宝宝</small></span>
+            <input id="corrected-age-toggle" type="checkbox" role="switch"><i aria-hidden="true"></i>
+          </label>
+        </div>
+        <div class="segmented-control metric-control" aria-label="成长指标">
+          <button type="button" class="is-selected" data-metric="weight" aria-pressed="true">体重</button>
+          <button type="button" data-metric="height" aria-pressed="false">身高</button>
+          <button type="button" data-metric="head" aria-pressed="false">头围</button>
+        </div>
+        <section class="growth-card" data-od-id="growth-chart-card">
+          <div class="growth-latest"><span id="growth-metric-label">最新体重</span><strong><span id="growth-latest-value">5.8</span><small id="growth-unit">kg</small></strong><small id="growth-change">较上次 +0.4 kg</small></div>
+          <div class="growth-chart-wrap">
+            <svg id="growth-chart" viewBox="0 0 340 190" role="img" aria-labelledby="growth-chart-title growth-chart-desc">
+              <title id="growth-chart-title">体重变化趋势</title><desc id="growth-chart-desc">木木最近三次体重测量趋势</desc>
+              <g class="chart-grid" aria-hidden="true"><path d="M24 25H326M24 72H326M24 119H326M24 166H326"></path></g>
+              <path id="growth-area" class="chart-area" d=""></path>
+              <path id="growth-path" class="chart-line" d=""></path>
+              <g id="growth-points"></g>
+            </svg>
+          </div>
+          <div class="who-badge" id="who-ref-info">
+            <svg aria-hidden="true" viewBox="0 0 24 24" width="14" height="14"><circle cx="12" cy="12" r="9"></circle><path d="M12 8h.01M12 12v4"></path></svg>
+            <span>WHO 示例数据源 · 仅供趋势参考</span>
+          </div>
+          <p class="support-copy">趋势仅用于家庭记录，不替代专业生长评估。</p>
+        </section>
+        <div class="state-card" id="growth-empty-state" hidden data-od-id="growth-empty"><div><span class="state-symbol"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 18 9 13l3 3 7-8M15 8h4v4"></path></svg></span><h3>还没有测量数据</h3><p>点击「新增测量」记录宝宝的成长。</p></div></div>
+        <section class="section-block" aria-labelledby="growth-history-title" data-od-id="growth-history">
+          <div class="section-heading"><h2 id="growth-history-title">测量历史</h2><span class="section-meta" id="growth-record-count">3 次</span></div>
+          <div class="table-wrap"><table><thead><tr><th scope="col">日期</th><th scope="col">体重</th><th scope="col">身高</th><th scope="col">头围</th></tr></thead><tbody id="growth-table-body"></tbody></table></div>
+        </section>
+      </section>
+
+      <section class="view" id="view-account" data-view="account" aria-labelledby="account-title" data-od-id="account-view" hidden>
+        <div class="page-heading"><span class="eyebrow">一起照顾，一起记</span><h1 id="account-title">账户</h1><p>宝宝档案、家庭成员和同步设置都在这里。</p></div>
+        <section class="profile-card" data-od-id="active-baby-profile">
+          <span class="profile-avatar" id="profile-avatar">木</span>
+          <div class="profile-copy"><span class="stub-badge">当前宝宝</span><h2 id="profile-name">木木</h2><p id="profile-detail">2026年5月4日出生 · 女宝</p></div>
+          <button class="secondary-button compact-label" type="button" data-open="baby-dialog">切换</button>
+        </section>
+        <div class="device-id-row" data-od-id="device-notice">
+          <p><strong>数据仅保存在本机</strong> · 无需登录</p>
+          <small>本机 ID：<code id="device-id-value">—</code></small>
+        </div>
+        <section class="section-block" aria-labelledby="baby-list-title" data-od-id="baby-list-section">
+          <div class="section-heading"><h2 id="baby-list-title">宝宝档案</h2><button class="text-button" type="button" data-open="add-baby-dialog">添加宝宝</button></div>
+          <div class="baby-list" id="baby-list"></div>
+        </section>
+        <section class="family-card" data-od-id="family-stub">
+          <div class="section-heading"><div><span class="eyebrow">家庭协作</span><h2>家人一起记</h2></div><span class="stub-badge">功能预览</span></div>
+          <p>邀请家人后，可区分记录来源并同步宝宝动态。当前原型不连接服务器。</p>
+          <div class="family-members"><span class="member-avatar">妈</span><span class="member-avatar muted">+</span><small>1 位本机成员</small></div>
+          <div class="family-stub-btns">
+            <button class="secondary-button compact-label" id="create-family-btn" type="button">新建家庭</button>
+            <button class="secondary-button compact-label" id="join-family-btn" type="button">输入邀请码</button>
+            <button class="secondary-button compact-label" id="generate-share-btn" type="button">扫码加入</button>
+          </div>
+        </section>
+        <section class="settings-list" aria-labelledby="account-settings-title" data-od-id="account-settings">
+          <div class="section-heading"><h2 id="account-settings-title">偏好设置</h2></div>
+          <button class="settings-row" type="button" data-open="settings-dialog"><span class="menu-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"></path></svg></span><span><strong>记录与显示</strong><small id="settings-summary">24 小时制 · 公制</small></span><svg class="row-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"></path></svg></button>
+        </section>
+      </section>
+
+      <section class="view" id="view-menu" data-view="menu" aria-labelledby="menu-title" data-od-id="menu-view" hidden>
+        <div class="page-heading"><span class="eyebrow">低频功能，随用随开</span><h1 id="menu-title">菜单</h1><p>查找记录、切换外观或预览产品状态。</p></div>
+        <section class="menu-group" aria-labelledby="find-group-title">
+          <h2 id="find-group-title">查找与管理</h2>
+          <button class="menu-row" type="button" data-open="search-dialog"><span class="menu-icon blue"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"></circle><path d="m16 16 4 4"></path></svg></span><span><strong>搜索全部记录</strong><small>按类型、详情或备注查找</small></span><svg class="row-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"></path></svg></button>
+          <button class="menu-row" type="button" data-open="status-dialog"><span class="menu-icon yellow"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v5M12 16v5M3 12h5M16 12h5"></path><circle cx="12" cy="12" r="3"></circle></svg></span><span><strong>状态演示</strong><small id="status-summary">当前：正常</small></span><svg class="row-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"></path></svg></button>
+        </section>
+        <section class="menu-group" aria-labelledby="appearance-group-title">
+          <h2 id="appearance-group-title">外观与偏好</h2>
+          <button class="menu-row" id="menu-theme-toggle" type="button" aria-pressed="false"><span class="menu-icon cream"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 15.5A8 8 0 0 1 8.5 4 8 8 0 1 0 20 15.5Z"></path></svg></span><span><strong>深色模式</strong><small id="menu-theme-status">跟随当前设置：关闭</small></span><span class="switch-visual" aria-hidden="true"><i></i></span></button>
+          <button class="menu-row" type="button" data-open="settings-dialog"><span class="menu-icon neutral"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2M10 17h10M14 4v6M6 14v6"></path></svg></span><span><strong>记录设置</strong><small>时间、单位、提醒与动态</small></span><svg class="row-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"></path></svg></button>
+          <button class="menu-row" type="button" data-open="record-config-dialog"><span class="menu-icon blue"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 4h16v16H4zM8 8h8M8 12h8M8 16h5"></path></svg></span><span><strong>记录项目</strong><small>显隐与排序首页快捷入口</small></span><svg class="row-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"></path></svg></button>
+        </section>
+        <section class="menu-group" aria-labelledby="data-group-title">
+          <h2 id="data-group-title">数据</h2>
+          <button class="menu-row" type="button" data-open="export-dialog"><span class="menu-icon neutral"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12M12 3l-4 4M12 3l4 4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"></path></svg></span><span><strong>导出数据</strong><small>TXT 文本预览与下载</small></span><svg class="row-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"></path></svg></button>
+          <button class="menu-row danger-row" id="clear-all-data" type="button"><span class="menu-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"></path></svg></span><span><strong>清除本机全部数据</strong><small>删除所有记录与设置，无法撤销</small></span><svg class="row-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"></path></svg></button>
+          <button class="menu-row" id="reset-demo" type="button"><span class="menu-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 4v6h6M20 20v-6h-6M5.5 15a7.5 7.5 0 0 0 12.8 2.2M18.5 9A7.5 7.5 0 0 0 5.7 6.8"></path></svg></span><span><strong>恢复演示数据</strong><small>清除本机变更并重新载入</small></span><svg class="row-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"></path></svg></button>
+        </section>
+        <section class="menu-group" aria-labelledby="about-group-title">
+          <h2 id="about-group-title">关于</h2>
+          <button class="menu-row" type="button" data-open="about-dialog"><span class="menu-icon cream"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M12 8h.01M12 12v4"></path></svg></span><span><strong>关于乐记</strong><small>版本、包名与产品说明</small></span><svg class="row-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"></path></svg></button>
+        </section>
+        <p class="prototype-note">乐记交互原型 · 数据仅保存在当前浏览器</p>
       </section>
     </main>
-    <script src="app.js" defer></script>
-  </body>
+
+    <nav class="bottom-nav" aria-label="主要导航" data-od-id="five-tab-navigation">
+      <button type="button" class="nav-item is-active" data-view-target="records" aria-current="page"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"></path></svg><span>记录</span></button>
+      <button type="button" class="nav-item" data-view-target="summary"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 19V9M12 19V4M19 19v-7"></path></svg><span>汇总</span></button>
+      <button type="button" class="nav-item" data-view-target="growth"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 18 9 13l3 3 7-8M15 8h4v4"></path></svg><span>成长</span></button>
+      <button type="button" class="nav-item" data-view-target="account"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.5"></circle><path d="M5 20a7 7 0 0 1 14 0"></path></svg><span>账户</span></button>
+      <button type="button" class="nav-item" data-view-target="menu"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg><span>菜单</span></button>
+    </nav>
+
+    <button class="fab" id="record-fab" type="button" data-open="record-sheet" aria-label="添加一条记录" data-od-id="record-fab"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></svg><span>记录</span></button>
+  </div>
+
+  <dialog class="sheet-dialog" id="record-sheet" aria-labelledby="record-sheet-title">
+    <div class="sheet-handle" aria-hidden="true"></div>
+    <div class="dialog-heading"><div><span class="eyebrow">现在发生什么？</span><h2 id="record-sheet-title">添加记录</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+    <div class="record-type-grid">
+      <button type="button" data-record="breastfeed"><span class="record-type-icon blue"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3c3.4 4.1 5.2 7.2 5.2 10a5.2 5.2 0 0 1-10.4 0c0-2.8 1.8-5.9 5.2-10Z"></path></svg></span><strong>母乳</strong><small>左右侧计时</small></button>
+      <button type="button" data-record="bottle"><span class="record-type-icon neutral"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9 3h6v4l2 3v9a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2v-9l2-3V3ZM9 12h8"></path></svg></span><strong>配方奶</strong><small>奶量与类型</small></button>
+      <button type="button" data-record="expressed"><span class="record-type-icon blue"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9 3h6v4l2 3v9a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2v-9l2-3V3ZM9 14h8"></path></svg></span><strong>喂挤出乳</strong><small>已挤母乳喂养</small></button>
+      <button type="button" data-record="pump"><span class="record-type-icon blue"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9 3h6v4l2 3v9a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2v-9l2-3V3ZM9 14h8"></path></svg></span><strong>挤奶</strong><small>奶量与时间</small></button>
+      <button type="button" data-record="diaper"><span class="record-type-icon yellow"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 4v4.5a5 5 0 0 0 10 0V4M5 7h14M7 17c2.7 1.3 7.3 1.3 10 0"></path></svg></span><strong>小便</strong><small>一按即记录</small></button>
+      <button type="button" data-record="poop"><span class="record-type-icon cream"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 4v4.5a5 5 0 0 0 10 0V4M5 7h14M7 17c2.7 1.3 7.3 1.3 10 0M10 10h4"></path></svg></span><strong>便便</strong><small>便量颜色性状</small></button>
+      <button type="button" data-record="both"><span class="record-type-icon yellow"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 4v4.5a5 5 0 0 0 10 0V4M5 7h14M7 17c2.7 1.3 7.3 1.3 10 0M10 10h4"></path></svg></span><strong>都有</strong><small>尿+便</small></button>
+      <button type="button" data-record="sleep"><span class="record-type-icon cream"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 15.5A8 8 0 0 1 8.5 4 8 8 0 1 0 20 15.5Z"></path></svg></span><strong>睡眠</strong><small>开始与醒来</small></button>
+      <button type="button" data-record="temperature"><span class="record-type-icon red"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 9V2M12 9a4 4 0 1 0 0 8M12 17v5M8 13h8"></path></svg></span><strong>体温</strong><small>℃/℉记录</small></button>
+      <button type="button" data-record="memo"><span class="record-type-icon neutral"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 4h16v16H4zM8 8h8M8 12h8M8 16h5"></path></svg></span><strong>备忘</strong><small>随时记一笔</small></button>
+    </div>
+    <div class="more-types-wrap" id="more-types-wrap" hidden>
+      <div class="record-type-grid more-grid">
+        <button type="button" data-record="bath"><span class="record-type-icon blue"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 12h16M6 12v6a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-6M9 4a3 3 0 0 1 6 0v8"></path></svg></span><strong>洗澡</strong></button>
+        <button type="button" data-record="diary"><span class="record-type-icon neutral"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 4h16v16H4zM8 8h8M8 12h8M8 16h5"></path></svg></span><strong>日记</strong></button>
+        <button type="button" data-record="walk"><span class="record-type-icon green"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="5" r="2"></circle><path d="M10 22l2-7 2 7M8 13l4-3 4 3M12 10v4"></path></svg></span><strong>散步</strong></button>
+        <button type="button" data-record="symptom"><span class="record-type-icon red"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 8v4M12 16h.01M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z"></path></svg></span><strong>症状</strong></button>
+        <button type="button" data-record="medication"><span class="record-type-icon neutral"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"></rect><path d="M12 8v8M8 12h8"></path></svg></span><strong>用药</strong></button>
+        <button type="button" data-record="doctor"><span class="record-type-icon blue"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"></circle><path d="M6 20v-2a6 6 0 0 1 12 0v2M16 11h4M18 9v4"></path></svg></span><strong>就医</strong></button>
+        <button type="button" data-record="growth"><span class="record-type-icon green"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 18 9 13l3 3 7-8M15 8h4v4"></path></svg></span><strong>成长</strong></button>
+        <button type="button" data-record="other"><span class="record-type-icon neutral"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg></span><strong>其他</strong></button>
+      </div>
+    </div>
+    <button class="more-types-toggle" id="more-types-toggle" type="button" aria-expanded="false" aria-controls="more-types-wrap">更多记录类型 <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg></button>
+  </dialog>
+
+  <dialog class="modal-dialog" id="breastfeed-dialog" aria-labelledby="breastfeed-title">
+    <form method="dialog" id="breastfeed-form">
+      <div class="dialog-heading"><div><span class="eyebrow">专注计时</span><h2 id="breastfeed-title">母乳喂养</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+      <div class="timer-pair">
+        <button class="timer-side is-selected" type="button" data-timer-side="left" aria-pressed="true"><span>左侧</span><strong id="left-timer">00:00</strong><small id="left-timer-state">点按开始</small></button>
+        <button class="timer-side" type="button" data-timer-side="right" aria-pressed="false"><span>右侧</span><strong id="right-timer">00:00</strong><small id="right-timer-state">点按开始</small></button>
+      </div>
+      <div class="timer-actions"><button class="secondary-button" id="timer-pause" type="button">暂停</button><button class="text-button" id="timer-reset" type="button">归零</button></div>
+      <label class="field"><span>备注（可选）</span><textarea id="breastfeed-notes" rows="2" maxlength="80" placeholder="例如：状态平稳"></textarea></label>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" id="save-breastfeed" type="submit">保存记录</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal-dialog" id="bottle-dialog" aria-labelledby="bottle-title">
+    <form method="dialog" id="bottle-form">
+      <div class="dialog-heading"><div><span class="eyebrow">快速记录</span><h2 id="bottle-title">奶瓶喂养</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+      <fieldset class="field"><legend>奶液类型</legend><div class="segmented-control form-segments"><label><input type="radio" name="milk-type" value="母乳" checked><span>母乳</span></label><label><input type="radio" name="milk-type" value="配方奶"><span>配方奶</span></label><label><input type="radio" name="milk-type" value="混合"><span>混合</span></label></div></fieldset>
+      <div class="field-row"><label class="field"><span>奶量（ml）</span><input id="bottle-amount" type="number" min="1" max="500" inputmode="decimal" value="90" required></label><label class="field"><span>时间</span><input id="bottle-time" type="time" required></label></div>
+      <label class="field"><span>备注（可选）</span><textarea id="bottle-notes" rows="2" maxlength="80" placeholder="例如：拍嗝顺利"></textarea></label>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit">保存记录</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal-dialog" id="expressed-feed-dialog" aria-labelledby="expressed-feed-title">
+    <form method="dialog" id="expressed-feed-form">
+      <div class="dialog-heading"><div><span class="eyebrow">快速喂养</span><h2 id="expressed-feed-title">喂挤出乳</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+      <fieldset class="field"><legend>奶液类型</legend><div class="segmented-control form-segments"><label><input type="radio" name="expressed-milk-type" value="母乳" checked><span>母乳</span></label><label><input type="radio" name="expressed-milk-type" value="配方奶"><span>配方奶</span></label><label><input type="radio" name="expressed-milk-type" value="混合"><span>混合</span></label></div></fieldset>
+      <div class="field-row"><label class="field"><span>奶量（ml）</span><input id="expressed-amount" type="number" min="1" max="500" inputmode="decimal" value="90" required></label><label class="field"><span>时间</span><input id="expressed-time" type="time" required></label></div>
+      <label class="field"><span>备注（可选）</span><textarea id="expressed-notes" rows="2" maxlength="80" placeholder="例如：冰箱解冻母乳"></textarea></label>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit">保存记录</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal-dialog" id="sleep-dialog" aria-labelledby="sleep-title">
+    <form method="dialog" id="sleep-form">
+      <div class="dialog-heading"><div><span class="eyebrow">一段好眠</span><h2 id="sleep-title">记录睡眠</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+      <button class="primary-button full-width" id="sleep-timer-btn" type="button">开始睡眠计时</button>
+      <div class="field-row"><label class="field"><span>入睡</span><input id="sleep-start" type="time" required></label><label class="field"><span>醒来</span><input id="sleep-end" type="time" required></label></div>
+      <fieldset class="field"><legend>睡眠状态</legend><div class="segmented-control form-segments"><label><input type="radio" name="sleep-quality" value="安稳" checked><span>安稳</span></label><label><input type="radio" name="sleep-quality" value="一般"><span>一般</span></label><label><input type="radio" name="sleep-quality" value="易醒"><span>易醒</span></label></div></fieldset>
+      <label class="field"><span>备注（可选）</span><textarea id="sleep-notes" rows="2" maxlength="80" placeholder="例如：白噪音陪睡"></textarea></label>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit">保存记录</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal-dialog" id="diaper-dialog" aria-labelledby="diaper-title">
+    <form method="dialog" id="diaper-form">
+      <div class="dialog-heading"><div><span class="eyebrow">护理记录</span><h2 id="diaper-title">换尿布</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+      <fieldset class="field"><legend>这次有什么？</legend><div class="choice-grid two"><label class="choice-card"><input id="diaper-wet" type="checkbox" checked><span><strong>尿湿</strong><small>记录湿尿布</small></span></label><label class="choice-card"><input id="diaper-poop" type="checkbox"><span><strong>便便</strong><small>补充属性</small></span></label></div></fieldset>
+      <div id="poop-details" hidden>
+        <fieldset class="field"><legend>便量（1–4）</legend><div class="segmented-control form-segments"><label><input type="radio" name="poop-amount" value="微量"><span>微量</span></label><label><input type="radio" name="poop-amount" value="少量"><span>少量</span></label><label><input type="radio" name="poop-amount" value="适中" checked><span>适中</span></label><label><input type="radio" name="poop-amount" value="较多"><span>较多</span></label></div></fieldset>
+        <div class="field-row"><label class="field"><span>颜色（8 档）</span><select id="poop-color"><option>黄色</option><option>黄绿色</option><option>绿色</option><option>褐色</option><option>黑色</option><option>红色/血丝</option><option>白色/灰白</option><option>其他</option></select></label><label class="field"><span>稠度（4 档）</span><select id="poop-texture"><option>水样</option><option>稀软</option><option selected>糊状</option><option>成形</option></select></label></div>
+      </div>
+      <label class="field"><span>时间</span><input id="diaper-time" type="time" required></label>
+      <label class="field"><span>备注（可选）</span><textarea id="diaper-notes" rows="2" maxlength="80" placeholder="例如：皮肤状态正常"></textarea></label>
+      <p class="form-error" id="diaper-error" role="alert" hidden>请至少选择“尿湿”或“便便”。</p>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit">保存记录</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal-dialog" id="growth-dialog" aria-labelledby="growth-dialog-title">
+    <form method="dialog" id="growth-form">
+      <div class="dialog-heading"><div><span class="eyebrow">成长测量</span><h2 id="growth-dialog-title">新增测量</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+      <label class="field"><span>测量日期</span><input id="growth-date" type="date" required></label>
+      <div class="measure-grid"><label class="field"><span>体重（kg）</span><input id="growth-weight" type="number" min="0.5" max="100" step="0.01" inputmode="decimal" required></label><label class="field"><span>身高（cm）</span><input id="growth-height" type="number" min="20" max="220" step="0.1" inputmode="decimal" required></label><label class="field"><span>头围（cm）</span><input id="growth-head" type="number" min="15" max="80" step="0.1" inputmode="decimal" required></label></div>
+      <label class="field"><span>备注（可选）</span><textarea id="growth-notes" rows="2" maxlength="80" placeholder="例如：社区体检"></textarea></label>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit">保存测量</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal-dialog search-dialog" id="search-dialog" aria-labelledby="search-title">
+    <div class="dialog-heading"><div><span class="eyebrow">跨宝宝查找</span><h2 id="search-title">搜索记录</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+    <label class="search-field"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"></circle><path d="m16 16 4 4"></path></svg><span class="sr-only">搜索关键词</span><input id="search-input" type="search" placeholder="试试“母乳”“便便”或备注" autocomplete="off"></label>
+    <div class="search-scope"><label><input id="search-all-babies" type="checkbox"><span>搜索全部宝宝</span></label><small id="search-count">输入关键词开始查找</small></div>
+    <div class="search-results" id="search-results" aria-live="polite"></div>
+  </dialog>
+
+  <dialog class="modal-dialog" id="baby-dialog" aria-labelledby="baby-dialog-title">
+    <div class="dialog-heading"><div><span class="eyebrow">切换档案</span><h2 id="baby-dialog-title">选择宝宝</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+    <div class="baby-picker" id="baby-picker"></div>
+    <button class="secondary-button full-width" type="button" data-open="add-baby-dialog">添加宝宝档案</button>
+  </dialog>
+
+  <dialog class="modal-dialog" id="add-baby-dialog" aria-labelledby="add-baby-title">
+    <form method="dialog" id="add-baby-form">
+      <div class="dialog-heading"><div><span class="eyebrow">新的成长故事</span><h2 id="add-baby-title">添加宝宝</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+      <label class="field"><span>昵称</span><input id="baby-name" type="text" maxlength="12" placeholder="宝宝怎么称呼" required></label>
+      <label class="field"><span>出生日期</span><input id="baby-birthday" type="date" required></label>
+      <label class="field"><span>预产期（可选）</span><input id="due-date-input" type="date"></label>
+      <fieldset class="field"><legend>性别（可选）</legend><div class="segmented-control form-segments"><label><input type="radio" name="baby-gender" value="女宝"><span>女宝</span></label><label><input type="radio" name="baby-gender" value="男宝"><span>男宝</span></label><label><input type="radio" name="baby-gender" value="未设置" checked><span>暂不设置</span></label></div></fieldset>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit">添加并切换</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal-dialog" id="record-actions-dialog" aria-labelledby="record-actions-title">
+    <div class="dialog-heading"><div><span class="eyebrow">管理记录</span><h2 id="record-actions-title">记录详情</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+    <div class="record-preview" id="record-preview"></div>
+    <div class="stack-actions"><button class="secondary-button full-width" id="edit-record-button" type="button">编辑这条记录</button><button class="danger-button full-width" id="delete-record-button" type="button">删除这条记录</button></div>
+  </dialog>
+
+  <dialog class="modal-dialog" id="edit-dialog" aria-labelledby="edit-title">
+    <form method="dialog" id="edit-form">
+      <div class="dialog-heading"><div><span class="eyebrow">保留原始类型</span><h2 id="edit-title">编辑记录</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+      <div class="record-preview" id="edit-preview"></div>
+      <label class="field"><span>时间</span><input id="edit-time" type="time" required></label>
+      <div id="edit-type-fields" class="edit-type-fields"></div>
+      <label class="field"><span>备注</span><textarea id="edit-notes" rows="3" maxlength="80" placeholder="补充这条记录"></textarea></label>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit">保存更改</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal-dialog confirm-dialog" id="confirm-dialog" aria-labelledby="confirm-title">
+    <div class="confirm-symbol" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"></path></svg></div>
+    <h2 id="confirm-title">删除这条记录？</h2><p>删除后会立即更新汇总与时间条，此操作无法撤销。</p>
+    <div class="dialog-actions"><button class="secondary-button" type="button" data-close>保留</button><button class="danger-button" id="confirm-delete" type="button">确认删除</button></div>
+  </dialog>
+
+  <dialog class="modal-dialog" id="settings-dialog" aria-labelledby="settings-title">
+    <form method="dialog" id="settings-form">
+      <div class="dialog-heading"><div><span class="eyebrow">本机偏好</span><h2 id="settings-title">记录设置</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+      <div class="toggle-list">
+        <label class="toggle-row"><span><strong>深色模式</strong><small>降低夜间记录时的亮度</small></span><input id="setting-dark" type="checkbox" role="switch"><i aria-hidden="true"></i></label>
+        <label class="toggle-row"><span><strong>24 小时制</strong><small>统一显示 08:30 形式</small></span><input id="setting-24h" type="checkbox" role="switch" checked><i aria-hidden="true"></i></label>
+        <label class="toggle-row"><span><strong>相对时间</strong><small>时间轴优先显示「几分钟前」</small></span><input id="setting-relative-time" type="checkbox" role="switch"><i aria-hidden="true"></i></label>
+        <label class="toggle-row"><span><strong>记录提醒</strong><small>仅本机偏好，不申请通知权限</small></span><input id="setting-reminders" type="checkbox" role="switch"><i aria-hidden="true"></i></label>
+        <label class="toggle-row"><span><strong>母乳计时入口</strong><small>首页保留母乳快捷入口</small></span><input id="setting-bf-timer" type="checkbox" role="switch" checked><i aria-hidden="true"></i></label>
+        <label class="toggle-row"><span><strong>减少动态</strong><small>关闭非必要过渡效果</small></span><input id="setting-motion" type="checkbox" role="switch"><i aria-hidden="true"></i></label>
+      </div>
+      <fieldset class="field"><legend>测量单位</legend><div class="segmented-control form-segments"><label><input type="radio" name="units" value="metric" checked><span>公制</span></label><label><input type="radio" name="units" value="imperial"><span>英制</span></label></div></fieldset>
+      <label class="field"><span>喂养提醒间隔（小时，仅本机）</span><input id="setting-feed-interval" type="number" min="1" max="12" step="0.5" value="3"></label>
+      <p class="support-copy" id="next-feed-hint">下次提醒示例将按最近喂养推算，不发送系统通知。</p>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit">保存设置</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal-dialog" id="status-dialog" aria-labelledby="status-title">
+    <form method="dialog" id="status-form">
+      <div class="dialog-heading"><div><span class="eyebrow">产品状态预览</span><h2 id="status-title">记录页状态</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+      <fieldset class="status-options"><legend class="sr-only">选择状态</legend>
+        <label><input type="radio" name="demo-status" value="normal" checked><span><strong>正常</strong><small>显示本地记录</small></span></label>
+        <label><input type="radio" name="demo-status" value="loading"><span><strong>加载中</strong><small>骨架与播报</small></span></label>
+        <label><input type="radio" name="demo-status" value="empty"><span><strong>记录空</strong><small>引导添加第一条</small></span></label>
+        <label><input type="radio" name="demo-status" value="summary-empty"><span><strong>汇总空</strong><small>进入汇总空数据</small></span></label>
+        <label><input type="radio" name="demo-status" value="growth-empty"><span><strong>成长空</strong><small>进入成长空数据</small></span></label>
+        <label><input type="radio" name="demo-status" value="recording"><span><strong>记录中</strong><small>展示真实计时条</small></span></label>
+        <label><input type="radio" name="demo-status" value="saved"><span><strong>保存成功</strong><small>Toast 反馈</small></span></label>
+        <label><input type="radio" name="demo-status" value="error"><span><strong>错误</strong><small>提供可操作重试</small></span></label>
+        <label><input type="radio" name="demo-status" value="offline"><span><strong>离线</strong><small>仍允许本机记录</small></span></label>
+        <label><input type="radio" name="demo-status" value="onboarding"><span><strong>启动引导</strong><small>创建宝宝 / 主题色</small></span></label>
+      </fieldset>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit">应用状态</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal-dialog" id="family-dialog" aria-labelledby="family-title">
+    <div class="dialog-heading"><div><span class="eyebrow">功能预览 · Stub</span><h2 id="family-title">邀请家人</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+    <div class="stub-notice"><strong>尚未连接家庭服务</strong><p>这里演示邀请流程和反馈，不会发送真实邀请。</p></div>
+    <label class="field"><span>邀请称呼</span><input id="family-name" type="text" maxlength="12" value="爸爸"></label>
+    <label class="field"><span>演示邀请码</span><div class="copy-field"><input id="family-code" type="text" value="LEJI-MUMU" readonly><button class="secondary-button compact-label" id="copy-family-code" type="button">复制</button></div></label>
+    <button class="primary-button full-width" id="preview-invite" type="button">生成邀请预览</button>
+  </dialog>
+
+  <dialog class="modal-dialog" id="pump-dialog" aria-labelledby="pump-title">
+    <form method="dialog" id="pump-form">
+      <div class="dialog-heading"><div><span class="eyebrow">挤奶记录</span><h2 id="pump-title">挤奶</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+      <div class="field-row"><label class="field"><span>奶量（ml）</span><input id="pump-amount" type="number" min="1" max="500" inputmode="decimal" value="60" required></label><label class="field"><span>时间</span><input id="pump-time" type="time" required></label></div>
+      <label class="field"><span>备注（可选）</span><textarea id="pump-notes" rows="2" maxlength="80" placeholder="例如：左侧较多"></textarea></label>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit">保存记录</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal-dialog" id="poop-dialog" aria-labelledby="poop-title">
+    <form method="dialog" id="poop-form">
+      <div class="dialog-heading"><div><span class="eyebrow">便便记录</span><h2 id="poop-title">便便</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+      <fieldset class="field"><legend>便量（1–4）</legend><div class="segmented-control form-segments"><label><input type="radio" name="poop-only-amount" value="微量"><span>微量</span></label><label><input type="radio" name="poop-only-amount" value="少量"><span>少量</span></label><label><input type="radio" name="poop-only-amount" value="适中" checked><span>适中</span></label><label><input type="radio" name="poop-only-amount" value="较多"><span>较多</span></label></div></fieldset>
+      <div class="field-row"><label class="field"><span>颜色（8 档）</span><select id="poop-only-color"><option>黄色</option><option>黄绿色</option><option>绿色</option><option>褐色</option><option>黑色</option><option>红色/血丝</option><option>白色/灰白</option><option>其他</option></select></label><label class="field"><span>稠度（4 档）</span><select id="poop-only-texture"><option>水样</option><option>稀软</option><option selected>糊状</option><option>成形</option></select></label></div>
+      <label class="field"><span>时间</span><input id="poop-time" type="time" required></label>
+      <label class="field"><span>备注（可选）</span><textarea id="poop-notes" rows="2" maxlength="80" placeholder="例如：颜色正常，性状偏稀"></textarea></label>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit">保存记录</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal-dialog" id="diary-dialog" aria-labelledby="diary-title">
+    <form method="dialog" id="diary-form">
+      <div class="dialog-heading"><div><span class="eyebrow">今日点滴</span><h2 id="diary-title">日记</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+      <label class="field"><span>正文</span><textarea id="diary-content" rows="5" maxlength="800" placeholder="例如：今天第一次对妈妈笑了，眼睛亮亮的。" required></textarea></label>
+      <label class="field"><span>时间</span><input id="diary-time" type="time" required></label>
+      <div class="diary-photo-row">
+        <button class="secondary-button compact-label" id="diary-add-photo" type="button">添加照片</button>
+        <small id="diary-photo-count">未添加照片（原型占位）</small>
+      </div>
+      <div class="diary-thumbs" id="diary-thumbs" hidden aria-label="照片缩略占位"></div>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit">保存日记</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal-dialog" id="onboarding-dialog" aria-labelledby="onboarding-title">
+    <div class="dialog-heading"><div><span class="eyebrow">欢迎使用乐记</span><h2 id="onboarding-title">启动引导</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+    <p class="support-copy">数据仅保存在本机，无需登录。可先创建宝宝档案，或稍后从账户页继续。</p>
+    <div class="stack-actions">
+      <button class="primary-button full-width" type="button" data-open="add-baby-dialog">创建宝宝</button>
+      <button class="secondary-button full-width" id="onboarding-join-stub" type="button">加入家庭（后续版本）</button>
+      <button class="secondary-button full-width" id="onboarding-theme" type="button">切换主题色预览</button>
+    </div>
+  </dialog>
+
+  <dialog class="modal-dialog" id="temperature-dialog" aria-labelledby="temp-title">
+    <form method="dialog" id="temperature-form">
+      <div class="dialog-heading"><div><span class="eyebrow">体温记录</span><h2 id="temp-title">体温</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+      <div class="field-row"><label class="field"><span>体温</span><input id="temp-value" type="number" min="34" max="42" step="0.1" inputmode="decimal" value="36.5" required></label><fieldset class="field"><legend>单位</legend><div class="segmented-control form-segments"><label><input type="radio" name="temp-unit" value="c" checked><span>℃</span></label><label><input type="radio" name="temp-unit" value="f"><span>℉</span></label></div></fieldset></div>
+      <label class="field"><span>时间</span><input id="temp-time" type="time" required></label>
+      <label class="field"><span>备注（可选）</span><textarea id="temp-notes" rows="2" maxlength="80" placeholder="例如：刚睡醒"></textarea></label>
+      <div id="temp-fever-notice" class="stub-notice fever-notice" hidden><strong>注意</strong><p id="temp-fever-text">月龄小于3个月且体温≥38℃，建议及时就医。本提示仅供参考，不构成医疗建议。</p></div>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit">保存记录</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal-dialog" id="memo-dialog" aria-labelledby="memo-title">
+    <form method="dialog" id="memo-form">
+      <div class="dialog-heading"><div><span class="eyebrow">随时记一笔</span><h2 id="memo-title">备忘</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+      <label class="field"><span>内容</span><textarea id="memo-content" rows="4" maxlength="500" placeholder="记录任何想记的事" required></textarea></label>
+      <label class="field"><span>时间</span><input id="memo-time" type="time" required></label>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit">保存备忘</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal-dialog" id="bath-dialog" aria-labelledby="bath-title">
+    <form method="dialog" id="bath-form">
+      <div class="dialog-heading"><div><span class="eyebrow">护理记录</span><h2 id="bath-title">洗澡</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+      <label class="field"><span>时间</span><input id="bath-time" type="time" required></label>
+      <label class="field"><span>备注（可选）</span><textarea id="bath-notes" rows="2" maxlength="80" placeholder="例如：水温合适"></textarea></label>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit">保存记录</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal-dialog" id="walk-dialog" aria-labelledby="walk-title">
+    <form method="dialog" id="walk-form">
+      <div class="dialog-heading"><div><span class="eyebrow">户外活动</span><h2 id="walk-title">散步</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+      <div class="field-row"><label class="field"><span>开始</span><input id="walk-start" type="time" required></label><label class="field"><span>结束</span><input id="walk-end" type="time" required></label></div>
+      <label class="field"><span>备注（可选）</span><textarea id="walk-notes" rows="2" maxlength="80" placeholder="例如：小区花园"></textarea></label>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit">保存记录</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal-dialog" id="symptom-dialog" aria-labelledby="symptom-title">
+    <form method="dialog" id="symptom-form">
+      <div class="dialog-heading"><div><span class="eyebrow">健康观察</span><h2 id="symptom-title">症状</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+      <label class="field"><span>症状描述</span><textarea id="symptom-desc" rows="3" maxlength="200" placeholder="例如：轻微流鼻涕" required></textarea></label>
+      <label class="field"><span>时间</span><input id="symptom-time" type="time" required></label>
+      <label class="field"><span>备注（可选）</span><textarea id="symptom-notes" rows="2" maxlength="80" placeholder="补充信息"></textarea></label>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit">保存记录</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal-dialog" id="medication-dialog" aria-labelledby="medication-title">
+    <form method="dialog" id="medication-form">
+      <div class="dialog-heading"><div><span class="eyebrow">用药记录</span><h2 id="medication-title">用药</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+      <div class="field-row"><label class="field"><span>药品名称</span><input id="med-name" type="text" maxlength="50" placeholder="例如：布洛芬" required></label><label class="field"><span>剂量</span><input id="med-dose" type="text" maxlength="30" placeholder="例如：0.5ml"></label></div>
+      <label class="field"><span>时间</span><input id="med-time" type="time" required></label>
+      <label class="field"><span>备注（可选）</span><textarea id="med-notes" rows="2" maxlength="80" placeholder="例如：饭后服用"></textarea></label>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit">保存记录</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal-dialog" id="doctor-dialog" aria-labelledby="doctor-title">
+    <form method="dialog" id="doctor-form">
+      <div class="dialog-heading"><div><span class="eyebrow">就医记录</span><h2 id="doctor-title">就医</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+      <label class="field"><span>就诊原因</span><input id="doctor-reason" type="text" maxlength="100" placeholder="例如：例行体检" required></label>
+      <label class="field"><span>时间</span><input id="doctor-time" type="time" required></label>
+      <label class="field"><span>医嘱/备注</span><textarea id="doctor-notes" rows="3" maxlength="200" placeholder="记录医生建议"></textarea></label>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit">保存记录</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal-dialog" id="other-dialog" aria-labelledby="other-title">
+    <form method="dialog" id="other-form">
+      <div class="dialog-heading"><div><span class="eyebrow">自定义记录</span><h2 id="other-title">其他</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+      <label class="field"><span>标题</span><input id="other-title-input" type="text" maxlength="30" placeholder="例如：剪指甲" required></label>
+      <label class="field"><span>详情</span><textarea id="other-detail" rows="2" maxlength="120" placeholder="补充说明"></textarea></label>
+      <label class="field"><span>时间</span><input id="other-time" type="time" required></label>
+      <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" type="submit">保存记录</button></div>
+    </form>
+  </dialog>
+
+  <dialog class="modal-dialog calendar-dialog" id="calendar-dialog" aria-labelledby="calendar-title">
+    <div class="dialog-heading"><div><span class="eyebrow">选择日期</span><h2 id="calendar-title">日历</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+    <div class="calendar-nav">
+      <button class="icon-button compact" id="cal-prev" type="button" aria-label="上个月"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"></path></svg></button>
+      <strong id="cal-month-label">2026年7月</strong>
+      <button class="icon-button compact" id="cal-next" type="button" aria-label="下个月"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"></path></svg></button>
+    </div>
+    <div class="calendar-grid" id="calendar-grid" role="grid" aria-label="日期选择"></div>
+    <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" id="cal-today" type="button">回到今天</button></div>
+  </dialog>
+
+  <dialog class="modal-dialog" id="export-dialog" aria-labelledby="export-title">
+    <div class="dialog-heading"><div><span class="eyebrow">导出数据</span><h2 id="export-title">导出</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+    <button class="secondary-button full-width" id="export-txt" type="button">导出为 TXT 文本</button>
+    <div id="export-preview" class="export-preview" hidden></div>
+    <button class="secondary-button full-width" id="export-download" type="button" hidden>下载 TXT 文件</button>
+    <div class="stub-notice" style="margin-top:12px"><p>PDF 导出将在后续版本提供。</p></div>
+  </dialog>
+
+  <dialog class="modal-dialog" id="about-dialog" aria-labelledby="about-title">
+    <div class="dialog-heading"><div><span class="eyebrow">关于乐记</span><h2 id="about-title">关于</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+    <div class="about-content">
+      <div class="about-brand"><span class="brand-mark" aria-hidden="true">乐</span><strong>乐记</strong><small>把宝宝每天的小事，记成一家人的成长史。</small></div>
+      <dl class="about-meta">
+        <dt>版本</dt><dd>1.0.0 原型</dd>
+        <dt>包名</dt><dd>com.lezi.babylog</dd>
+        <dt>特性</dt><dd>无广告 · 无内购 · 数据仅存本机</dd>
+      </dl>
+    </div>
+  </dialog>
+
+  <dialog class="modal-dialog confirm-dialog" id="clear-data-dialog" aria-labelledby="clear-title">
+    <div class="confirm-symbol" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"></path></svg></div>
+    <h2 id="clear-title">清除全部数据？</h2>
+    <p id="clear-step-copy">第一步：确认你要删除本机全部记录与设置。此操作无法撤销。</p>
+    <label class="field" id="clear-step-two" hidden><span>第二步：输入「清除」以最终确认</span><input id="clear-confirm-input" type="text" maxlength="8" placeholder="清除" autocomplete="off"></label>
+    <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="danger-button" id="confirm-clear-data" type="button">继续</button></div>
+  </dialog>
+
+  <dialog class="modal-dialog" id="record-config-dialog" aria-labelledby="record-config-title">
+    <div class="dialog-heading"><div><span class="eyebrow">自定义首页</span><h2 id="record-config-title">记录项目</h2></div><button class="icon-button" type="button" data-close aria-label="关闭"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></svg></button></div>
+    <p class="config-hint">开关控制首页快捷入口显示；上移/下移调整顺序。</p>
+    <div class="config-list" id="record-config-list"></div>
+    <div class="dialog-actions"><button class="secondary-button" type="button" data-close>取消</button><button class="primary-button" id="save-record-config" type="button">保存配置</button></div>
+  </dialog>
+
+  <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+</body>
 </html>
