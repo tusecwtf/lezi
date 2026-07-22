@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#fbf7ef" />
+    <meta name="description" content="暖芽 Android 育儿记录 App 可点击原型" />
+    <title>暖芽 · 育儿记录</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="components.css" />
+  </head>
+  <body>
+    <main class="prototype-stage" data-od-id="prototype-stage">
+      <section class="app-shell" aria-label="暖芽 Android 育儿记录应用原型" data-od-id="nuanya-app">
+        <div class="android-statusbar" aria-label="Android 状态栏" data-od-id="android-statusbar">
+          <time datetime="09:41">09:41</time>
+          <div class="status-icons" aria-label="网络良好，电量 82%">
+            <svg viewBox="0 0 18 12" aria-hidden="true"><path d="M2 10h1.5M5.5 8h1.5M9 5.5h1.5M12.5 3h1.5" /></svg>
+            <svg viewBox="0 0 16 12" aria-hidden="true"><path d="M2 4.5a8 8 0 0 1 12 0M4.5 7a4.8 4.8 0 0 1 7 0M7.2 9.3a1.7 1.7 0 0 1 1.6 0" /></svg>
+            <svg viewBox="0 0 22 12" aria-hidden="true"><rect x="1" y="2" width="17" height="8" rx="2" /><path d="M20 4.5v3M3.5 4.5h11" /></svg>
+          </div>
+        </div>
+
+        <header class="app-header" id="appHeader" data-od-id="app-header"></header>
+
+        <div class="screen-viewport" id="screenViewport" tabindex="-1" data-od-id="screen-viewport">
+          <section class="screen is-active" id="todayScreen" data-page="today" aria-label="今日"></section>
+          <section class="screen" id="statsScreen" data-page="stats" aria-label="统计" hidden></section>
+          <section class="screen" id="settingsScreen" data-page="settings" aria-label="设置" hidden></section>
+        </div>
+
+        <button class="quick-fab" id="quickFab" type="button" aria-label="快速记录" data-od-id="quick-record-fab">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+          <span>记录</span>
+        </button>
+
+        <nav class="bottom-nav" aria-label="主要页面" data-od-id="bottom-navigation">
+          <button class="nav-item is-active" type="button" data-nav="today" aria-current="page" data-od-id="nav-today">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5.5h14v14H5zM8 3v5M16 3v5M5 9.5h14" /></svg>
+            <span>今日</span>
+          </button>
+          <button class="nav-item" type="button" data-nav="stats" data-od-id="nav-stats">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19V12M12 19V5M19 19V9" /></svg>
+            <span>统计</span>
+          </button>
+          <button class="nav-item" type="button" data-nav="settings" data-od-id="nav-settings">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.2a3.8 3.8 0 1 0 0 7.6 3.8 3.8 0 0 0 0-7.6Z" /><path d="M19.2 13.5a7.8 7.8 0 0 0 0-3l2-1.5-2-3.4-2.4 1a8.5 8.5 0 0 0-2.6-1.5L14 2.5h-4l-.3 2.6a8.5 8.5 0 0 0-2.5 1.5l-2.4-1-2 3.4 2 1.5a7.8 7.8 0 0 0 0 3l-2 1.5 2 3.4 2.4-1a8.5 8.5 0 0 0 2.5 1.5l.3 2.6h4l.3-2.6a8.5 8.5 0 0 0 2.5-1.5l2.4 1 2-3.4-2-1.5Z" /></svg>
+            <span>设置</span>
+          </button>
+        </nav>
+
+        <div class="overlay" id="overlay" hidden>
+          <button class="overlay-backdrop" type="button" aria-label="关闭底部面板"></button>
+          <section class="bottom-sheet" id="bottomSheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle" tabindex="-1" data-od-id="bottom-sheet"></section>
+        </div>
+
+        <div class="toast" id="toast" role="status" aria-live="polite" hidden data-od-id="feedback-toast"></div>
+        <div class="sr-only" id="liveRegion" aria-live="polite"></div>
+      </section>
+    </main>
+    <script src="app.js" defer></script>
+  </body>
+</html>
