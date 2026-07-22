@@ -19,6 +19,7 @@
 | [ui.md](./ui.md) | 画风、设计原则、页面与组件 |
 | [data-model.md](./data-model.md) | 实体、字段、本地优先、同步接口契约 |
 | [tech.md](./tech.md) | Android 技术栈、模块、权限、验收 |
+| [prototype-v1/](./prototype-v1/) | **可丢弃**竖版网页原型（V1 全表面交互） |
 
 ---
 
