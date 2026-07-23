@@ -12,11 +12,17 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -35,8 +41,10 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
+import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.designsystem.LeziClockDialDialog
 import com.lezi.babylog.designsystem.LeziCard
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
@@ -46,12 +54,17 @@ import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
+import com.lezi.babylog.designsystem.resolveLeziLocalDateTime
+import com.lezi.babylog.designsystem.timestampOnLeziDate
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.payloadDouble
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import java.time.ZoneOffset
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 import javax.inject.Inject
 import kotlin.math.max
@@ -59,6 +72,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import org.json.JSONArray
@@ -82,10 +96,15 @@ data class GrowthUi(
 @HiltViewModel
 class GrowthViewModel @Inject constructor(
     private val careLog: CareLog,
+    settingsStore: SettingsStore,
 ) : ViewModel() {
     private val metric = MutableStateFlow(GrowthMetric.WEIGHT)
     private val corrected = MutableStateFlow(false)
     private val refresh = MutableStateFlow(0)
+
+    val timeStepMin = settingsStore.settings
+        .map { it.timeStepMin }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 1)
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     val ui = combine(
@@ -156,9 +175,10 @@ class GrowthViewModel @Inject constructor(
         corrected.value = v
     }
 
-    fun addMeasurement(value: Double, onDone: () -> Unit) {
+    fun addMeasurement(value: Double, timestamp: Long, onDone: () -> Unit) {
         viewModelScope.launch {
             val baby = careLog.getCurrentBaby() ?: return@launch
+            if (timestamp > System.currentTimeMillis()) return@launch
             val m = metric.value
             val type: RecordType
             val payload: String
@@ -177,7 +197,7 @@ class GrowthViewModel @Inject constructor(
                     payload = """{"value":$value,"unit":"cm"}"""
                 }
             }
-            careLog.addRecord(baby.id, type, payloadJson = payload)
+            careLog.addRecord(baby.id, type, timestamp = timestamp, payloadJson = payload)
             refresh.value = refresh.value + 1
             onDone()
         }
@@ -192,16 +212,42 @@ class GrowthViewModel @Inject constructor(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun GrowthRoute(vm: GrowthViewModel = hiltViewModel()) {
+fun GrowthRoute(
+    initialDate: LocalDate = LocalDate.now(),
+    vm: GrowthViewModel = hiltViewModel(),
+) {
     val ui by vm.ui.collectAsStateWithLifecycle()
+    val timeStepMin by vm.timeStepMin.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val bands = remember(ui.metric) {
         loadBands(context, ui.metric)
     }
     var showAdd by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
+    var measurementAt by remember(initialDate) {
+        mutableStateOf(timestampOnGrowthDate(initialDate))
+    }
+    var showMeasureDate by remember { mutableStateOf(false) }
+    var showMeasureClock by remember { mutableStateOf(false) }
+    var measurementError by remember { mutableStateOf<String?>(null) }
     val journal = LeziThemeExt.isJournal
+    val openMeasurementDraft = {
+        measurementAt = timestampOnGrowthDate(initialDate)
+        input = ""
+        measurementError = null
+        showMeasureDate = false
+        showMeasureClock = false
+        showAdd = true
+    }
+    val closeMeasurementDraft = {
+        showAdd = false
+        showMeasureDate = false
+        showMeasureClock = false
+        input = ""
+        measurementError = null
+    }
 
     PageScaffoldBackground {
         Column(
@@ -215,7 +261,7 @@ fun GrowthRoute(vm: GrowthViewModel = hiltViewModel()) {
                 eyebrow = if (journal) "百分位网格" else "每一次变化都算数",
                 title = "成长",
                 trailing = {
-                    LeziPrimaryButton("新增测量", onClick = { showAdd = true })
+                    LeziPrimaryButton("新增测量", onClick = openMeasurementDraft)
                 },
             )
 
@@ -253,7 +299,7 @@ fun GrowthRoute(vm: GrowthViewModel = hiltViewModel()) {
                     title = "还没有测量",
                     message = "添加身高或体重后，这里会显示趋势与参考曲线。",
                     actionLabel = "去录入",
-                    onAction = { showAdd = true },
+                    onAction = openMeasurementDraft,
                 )
             } else {
                 val latest = ui.points.last()
@@ -300,7 +346,7 @@ fun GrowthRoute(vm: GrowthViewModel = hiltViewModel()) {
 
     if (showAdd) {
         androidx.compose.material3.AlertDialog(
-            onDismissRequest = { showAdd = false },
+            onDismissRequest = closeMeasurementDraft,
             title = {
                 Text(
                     when (ui.metric) {
@@ -311,31 +357,131 @@ fun GrowthRoute(vm: GrowthViewModel = hiltViewModel()) {
                 )
             },
             text = {
-                OutlinedTextField(
-                    value = input,
-                    onValueChange = { input = it },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    singleLine = true,
-                    label = { Text(if (ui.metric == GrowthMetric.WEIGHT) "公斤" else "厘米") },
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
+                    OutlinedTextField(
+                        value = input,
+                        onValueChange = { input = it },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        label = { Text(if (ui.metric == GrowthMetric.WEIGHT) "公斤" else "厘米") },
+                    )
+                    val measurement = Instant.ofEpochMilli(measurementAt)
+                        .atZone(ZoneId.systemDefault())
+                    Text(
+                        measurement.format(DateTimeFormatter.ofPattern("yyyy年M月d日 HH:mm")),
+                        style = LeziTypography.BodyStrong,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { showMeasureDate = true }) {
+                            Text("修改日期")
+                        }
+                        OutlinedButton(onClick = { showMeasureClock = true }) {
+                            Text("圆盘调时")
+                        }
+                    }
+                    measurementError?.let {
+                        Text(
+                            it,
+                            style = LeziTypography.Meta,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
             },
             confirmButton = {
                 androidx.compose.material3.TextButton(
                     onClick = {
                         input.toDoubleOrNull()?.let { v ->
-                            vm.addMeasurement(v) {
-                                input = ""
-                                showAdd = false
+                            if (measurementAt > System.currentTimeMillis()) {
+                                measurementError = "测量时刻不能晚于现在"
+                                return@let
+                            }
+                            vm.addMeasurement(v, measurementAt) {
+                                closeMeasurementDraft()
                             }
                         }
                     },
                 ) { Text("保存") }
             },
             dismissButton = {
-                androidx.compose.material3.TextButton(onClick = { showAdd = false }) { Text("取消") }
+                androidx.compose.material3.TextButton(onClick = closeMeasurementDraft) { Text("取消") }
             },
         )
     }
+
+    if (showMeasureDate) {
+        val zone = ZoneId.systemDefault()
+        val current = Instant.ofEpochMilli(measurementAt).atZone(zone)
+        val initialUtc = current.toLocalDate()
+            .atStartOfDay(ZoneOffset.UTC)
+            .toInstant()
+            .toEpochMilli()
+        val dateState = rememberDatePickerState(initialSelectedDateMillis = initialUtc)
+        DatePickerDialog(
+            onDismissRequest = { showMeasureDate = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        dateState.selectedDateMillis?.let { millis ->
+                            val selectedDate = Instant.ofEpochMilli(millis)
+                                .atZone(ZoneOffset.UTC)
+                                .toLocalDate()
+                            val safeDate = minOf(selectedDate, LocalDate.now(zone))
+                            val resolved = resolveLeziLocalDateTime(
+                                date = safeDate,
+                                time = current.toLocalTime(),
+                                zone = zone,
+                                preferredOffset = current.offset,
+                            )
+                            if (resolved == null) {
+                                measurementError = "所选日期不存在当前时刻，请改用其他时刻"
+                            } else {
+                                measurementAt = resolved.toInstant().toEpochMilli()
+                                measurementError = if (selectedDate != safeDate) {
+                                    "测量日期不能晚于今天，已保留为今天"
+                                } else {
+                                    null
+                                }
+                            }
+                        }
+                        showMeasureDate = false
+                    },
+                ) { Text("确定") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showMeasureDate = false }) { Text("取消") }
+            },
+        ) {
+            DatePicker(state = dateState)
+        }
+    }
+
+    if (showMeasureClock) {
+        val zone = ZoneId.systemDefault()
+        LeziClockDialDialog(
+            title = "选择测量时刻",
+            value = Instant.ofEpochMilli(measurementAt).atZone(zone),
+            minuteStep = timeStepMin,
+            onConfirm = { picked ->
+                if (picked.isAfter(ZonedDateTime.now(zone))) {
+                    measurementError = "测量时刻不能晚于现在"
+                } else {
+                    measurementAt = picked.toInstant().toEpochMilli()
+                    measurementError = null
+                }
+                showMeasureClock = false
+            },
+            onDismiss = { showMeasureClock = false },
+        )
+    }
+}
+
+internal fun timestampOnGrowthDate(
+    date: LocalDate,
+    zone: ZoneId = ZoneId.systemDefault(),
+    now: ZonedDateTime = ZonedDateTime.now(zone),
+): Long {
+    return timestampOnLeziDate(date, zone, now)
 }
 
 @Composable

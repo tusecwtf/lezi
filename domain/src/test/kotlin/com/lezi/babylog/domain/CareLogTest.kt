@@ -3,6 +3,8 @@ package com.lezi.babylog.domain
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.BabyEntity
+import com.lezi.babylog.core.database.CalendarEventDao
+import com.lezi.babylog.core.database.CalendarEventEntity
 import com.lezi.babylog.core.database.FamilyDao
 import com.lezi.babylog.core.database.FamilyEntity
 import com.lezi.babylog.core.database.LocalUserDao
@@ -17,12 +19,17 @@ import com.lezi.babylog.core.model.SettingsLocal
 import java.time.LocalDate
 import java.time.ZoneOffset
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.take
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.yield
 import org.junit.Test
 
 class CareLogTest {
@@ -138,6 +145,36 @@ class CareLogTest {
     }
 
     @Test
+    fun observeRecords_isLiveAndUsesHalfOpenDateRange() = runTest {
+        val care = Fakes().careLog()
+        val babyId = care.createBaby(
+            CreateBabyInput(nickname = "豆豆", birthdayEpochDay = LocalDate.of(2026, 1, 1).toEpochDay()),
+        )
+        val startDay = LocalDate.of(2026, 7, 17)
+        val endDay = LocalDate.of(2026, 7, 24)
+        val range = care.observeRecords(babyId, startDay, endDay, zone)
+        val emissions = mutableListOf<List<com.lezi.babylog.core.model.Record>>()
+        val collection = backgroundScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            range.take(3).toList(emissions)
+        }
+
+        val atStart = startDay.atStartOfDay(zone).toInstant().toEpochMilli()
+        val id = care.addRecord(babyId, RecordType.PEE, timestamp = atStart)
+        yield()
+        care.deleteRecord(id)
+        yield()
+        collection.join()
+
+        assertThat(emissions.map { records -> records.map { it.id } })
+            .containsExactly(emptyList<Long>(), listOf(id), emptyList<Long>())
+            .inOrder()
+
+        val atEnd = endDay.atStartOfDay(zone).toInstant().toEpochMilli()
+        care.addRecord(babyId, RecordType.POOP, timestamp = atEnd)
+        assertThat(range.first()).isEmpty()
+    }
+
+    @Test
     fun softDelete_removesFromSummary() = runTest {
         val care = Fakes().careLog()
         val babyId = care.createBaby(
@@ -163,6 +200,47 @@ class CareLogTest {
         care.sleepDown(babyId, start)
         care.sleepUp(babyId, start + 90 * 60_000L)
         assertThat(care.daySummary(babyId, day, zone).sleepMinutes).isEqualTo(90)
+    }
+
+    @Test
+    fun observeOpenSleep_isIndependentOfViewedDay() = runTest {
+        val care = Fakes().careLog()
+        val babyId = care.createBaby(
+            CreateBabyInput(nickname = "豆豆", birthdayEpochDay = LocalDate.of(2026, 1, 1).toEpochDay()),
+        )
+        val yesterday = LocalDate.of(2026, 7, 22)
+        val start = yesterday.atTime(23, 30).toInstant(zone).toEpochMilli()
+
+        assertThat(care.observeOpenSleep(babyId).first()).isNull()
+        care.sleepDown(babyId, start)
+        assertThat(care.observeOpenSleep(babyId).first()!!.timestamp).isEqualTo(start)
+        care.sleepUp(babyId, start + 2 * 60 * 60_000L)
+        assertThat(care.observeOpenSleep(babyId).first()).isNull()
+    }
+
+    @Test
+    fun updateRecord_canClearCompletedSleepEnd() = runTest {
+        val care = Fakes().careLog()
+        val babyId = care.createBaby(
+            CreateBabyInput(nickname = "豆豆", birthdayEpochDay = LocalDate.of(2026, 1, 1).toEpochDay()),
+        )
+        val start = LocalDate.of(2026, 7, 22).atTime(20, 0).toInstant(zone).toEpochMilli()
+        val id = care.addRecord(
+            babyId = babyId,
+            type = RecordType.SLEEP,
+            timestamp = start,
+            endTimestamp = start + 90 * 60_000L,
+        )
+
+        care.updateRecord(
+            id = id,
+            timestamp = start,
+            endTimestamp = null,
+            note = null,
+            payloadJson = "{}",
+        )
+
+        assertThat(care.getRecord(id)!!.endTimestamp).isNull()
     }
 
     @Test
@@ -273,6 +351,31 @@ class CareLogTest {
         assertThat(widget.babyName).isEqualTo("豆豆")
     }
 
+    @Test
+    fun calendarEventsStayBehindDomainSeam() = runTest {
+        val care = Fakes().careLog()
+        val babyId = care.createBaby(
+            CreateBabyInput(nickname = "年年", birthdayEpochDay = 1),
+        )
+        val eventAt = 2_000_000L
+
+        val id = care.addCalendarEvent(
+            babyId = babyId,
+            title = "体检",
+            eventAt = eventAt,
+            remindAt = eventAt - 60_000L,
+        )
+        val events = care.observeCalendarEvents(
+            babyId = babyId,
+            startInclusive = 1_000_000L,
+            endExclusive = 3_000_000L,
+        ).first()
+
+        assertThat(id).isGreaterThan(0)
+        assertThat(events).hasSize(1)
+        assertThat(events.single().title).isEqualTo("体检")
+    }
+
 }
 private class Fakes {
     val users = FakeLocalUserDao()
@@ -280,9 +383,68 @@ private class Fakes {
     val memberships = FakeMembershipDao()
     val babies = FakeBabyDao()
     val records = FakeRecordDao()
+    val calendarEvents = FakeCalendarEventDao()
     val settings = FakeSettingsStore()
 
-    fun careLog() = CareLog(babies, records, users, families, memberships, settings, FakeOutboxDao(), com.lezi.babylog.sync.NoOpSyncPort())
+    fun careLog() = CareLog(
+        babies,
+        records,
+        calendarEvents,
+        users,
+        families,
+        memberships,
+        settings,
+        FakeOutboxDao(),
+        com.lezi.babylog.sync.NoOpSyncPort(),
+    )
+}
+
+private class FakeCalendarEventDao : CalendarEventDao {
+    private val items = MutableStateFlow<List<CalendarEventEntity>>(emptyList())
+    private val seq = AtomicLong(1)
+
+    override fun observeRange(
+        babyId: Long,
+        start: Long,
+        end: Long,
+    ): Flow<List<CalendarEventEntity>> = items.map { events ->
+        events.filter {
+            it.babyId == babyId &&
+                it.deletedAt == null &&
+                it.eventAt >= start &&
+                it.eventAt < end
+        }.sortedBy { it.eventAt }
+    }
+
+    override suspend fun listForBaby(babyId: Long): List<CalendarEventEntity> =
+        items.value.filter { it.babyId == babyId && it.deletedAt == null }
+            .sortedBy { it.eventAt }
+
+    override suspend fun upsert(event: CalendarEventEntity): Long {
+        val id = event.id.takeIf { it != 0L } ?: seq.getAndIncrement()
+        items.update { current ->
+            current.filterNot { it.id == id } + event.copy(id = id)
+        }
+        return id
+    }
+
+    override suspend fun update(event: CalendarEventEntity) {
+        items.update { current ->
+            current.map { if (it.id == event.id) event else it }
+        }
+    }
+
+    override suspend fun softDelete(id: Long, deletedAt: Long) {
+        items.update { current ->
+            current.map {
+                if (it.id == id) it.copy(deletedAt = deletedAt, updatedAt = deletedAt) else it
+            }
+        }
+    }
+
+    override suspend fun deleteAll() {
+        items.value = emptyList()
+    }
 }
 
 private class FakeSettingsStore : SettingsStore {
@@ -344,6 +506,8 @@ private class FakeSettingsStore : SettingsStore {
     override suspend fun setAmountStepMl(stepMl: Int) {
         step.value = stepMl
     }
+
+    override suspend fun setTimeStepMin(step: Int) = Unit
 
     override suspend fun setNursingIntervalMin(min: Int) {
         interval.value = min
@@ -481,6 +645,20 @@ private class FakeRecordDao : RecordDao {
     private val items = MutableStateFlow<List<RecordEntity>>(emptyList())
     private val seq = AtomicLong(1)
 
+    override fun observeRange(
+        babyId: Long,
+        startInclusive: Long,
+        endExclusive: Long,
+    ): Flow<List<RecordEntity>> =
+        items.map { list ->
+            list.filter {
+                it.babyId == babyId &&
+                    it.deletedAt == null &&
+                    it.timestamp >= startInclusive &&
+                    it.timestamp < endExclusive
+            }.sortedByDescending { it.timestamp }
+        }
+
     override fun observeDay(
         babyId: Long,
         startInclusive: Long,
@@ -522,6 +700,18 @@ private class FakeRecordDao : RecordDao {
                     it.endTimestamp == null
             }
             .maxByOrNull { it.timestamp }
+
+    override fun observeOpenSleep(babyId: Long): Flow<RecordEntity?> =
+        items.map { records ->
+            records
+                .filter {
+                    it.babyId == babyId &&
+                        it.type == "sleep" &&
+                        it.deletedAt == null &&
+                        it.endTimestamp == null
+                }
+                .maxByOrNull { it.timestamp }
+        }
 
     override suspend fun listForBaby(babyId: Long): List<RecordEntity> =
         items.value.filter { it.babyId == babyId && it.deletedAt == null }

@@ -4,9 +4,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,7 +17,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -41,10 +39,8 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TimePicker
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberDatePickerState
-import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -53,8 +49,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -63,16 +61,29 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.ui.peeAmountLabel
+import com.lezi.babylog.core.ui.stoolAmountLabel
+import com.lezi.babylog.core.ui.stoolColorLabel
+import com.lezi.babylog.core.ui.stoolConsistencyLabel
+import com.lezi.babylog.designsystem.LeziClockDialDialog
+import com.lezi.babylog.designsystem.LeziPeeAmountMark
+import com.lezi.babylog.designsystem.LeziStoolAmountMark
+import com.lezi.babylog.designsystem.LeziStoolColorMark
+import com.lezi.babylog.designsystem.LeziStoolConsistencyMark
+import com.lezi.babylog.designsystem.resolveLeziLocalDateTime
+import com.lezi.babylog.designsystem.timestampOnLeziDate
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.amountCandidates
 import com.lezi.babylog.domain.amountCenterIndex
 import com.lezi.babylog.domain.payloadInt
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
 import java.time.ZoneOffset
+import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import javax.inject.Inject
 import kotlinx.coroutines.flow.first
@@ -85,11 +96,19 @@ class RecordEditViewModel @Inject constructor(
 ) : ViewModel() {
     var stepMl: Int = 5
         private set
+    var timeStepMin: Int = 1
+        private set
     var lastNotes: List<String> = emptyList()
         private set
 
-    suspend fun load(recordId: String?, newTypeKey: String?): EditForm {
-        stepMl = settingsStore.settings.first().amountStepMl
+    suspend fun load(
+        recordId: String?,
+        newTypeKey: String?,
+        initialDate: LocalDate,
+    ): EditForm {
+        val settings = settingsStore.settings.first()
+        stepMl = settings.amountStepMl
+        timeStepMin = settings.timeStepMin
         val baby = careLog.getCurrentBaby()
         if (recordId != null && recordId != "new") {
             val id = recordId.toLongOrNull()
@@ -99,7 +118,11 @@ class RecordEditViewModel @Inject constructor(
             }
         }
         val type = RecordType.fromKey(newTypeKey.orEmpty()) ?: RecordType.MEMO
-        return EditForm(type = type, babyId = baby?.id ?: 0L)
+        return EditForm(
+            type = type,
+            babyId = baby?.id ?: 0L,
+            timestamp = timestampOnDate(initialDate),
+        )
     }
 
     fun save(form: EditForm, onDone: () -> Unit) {
@@ -213,6 +236,7 @@ fun RecordEditRoute(
     recordId: String,
     newTypeKey: String,
     onDone: () -> Unit,
+    initialDate: LocalDate = LocalDate.now(),
     vm: RecordEditViewModel = hiltViewModel(),
 ) {
     var form by remember { mutableStateOf<EditForm?>(null) }
@@ -220,10 +244,11 @@ fun RecordEditRoute(
     var manualMl by remember { mutableStateOf(false) }
     var mlText by remember { mutableStateOf("") }
     var showDatePicker by remember { mutableStateOf(false) }
-    var showTimePicker by remember { mutableStateOf(false) }
+    var clockTarget by remember { mutableStateOf<ClockTarget?>(null) }
+    var clockError by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(recordId, newTypeKey) {
-        form = vm.load(recordId, newTypeKey)
+    LaunchedEffect(recordId, newTypeKey, initialDate) {
+        form = vm.load(recordId, newTypeKey, initialDate)
     }
     val f = form ?: return
     val zone = ZoneId.systemDefault()
@@ -238,6 +263,22 @@ fun RecordEditRoute(
 
     fun saveRecord() {
         val current = form ?: return
+        if (current.timestamp > System.currentTimeMillis()) {
+            clockError = "记录时刻不能晚于现在"
+            return
+        }
+        if (current.type == RecordType.WALK && current.endTimestamp == null) {
+            clockError = "请设置散步结束时刻"
+            return
+        }
+        if (current.endTimestamp != null && current.endTimestamp <= current.timestamp) {
+            clockError = "结束时刻必须晚于开始时刻"
+            return
+        }
+        if (current.endTimestamp != null && current.endTimestamp > System.currentTimeMillis()) {
+            clockError = "结束时刻不能晚于现在"
+            return
+        }
         val toSave = if (manualMl && mlText.toIntOrNull() != null) {
             current.copy(amountMl = mlText.toInt())
         } else {
@@ -314,25 +355,29 @@ fun RecordEditRoute(
                     Text(tsLabel, style = MaterialTheme.typography.bodyLarge)
                     Spacer(Modifier.height(2.dp))
                     Text(
-                        "点按修改日期与时间",
+                        "点按修改日期，时刻统一使用圆盘调整",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = { form = form?.copy(timestamp = (form?.timestamp ?: f.timestamp) - 60_000L) }) {
-                    Text("−1分")
+                OutlinedButton(onClick = { showDatePicker = true }) {
+                    Text("修改日期")
                 }
-                TextButton(onClick = { form = form?.copy(timestamp = (form?.timestamp ?: f.timestamp) + 60_000L) }) {
-                    Text("+1分")
+                OutlinedButton(onClick = {
+                    clockError = null
+                    clockTarget = ClockTarget.Start
+                }) {
+                    Text("圆盘调时")
                 }
-                TextButton(onClick = { form = form?.copy(timestamp = System.currentTimeMillis()) }) {
-                    Text("现在")
-                }
-                TextButton(onClick = { showTimePicker = true }) {
-                    Text("改时刻")
-                }
+            }
+            clockError?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
             }
 
             Spacer(Modifier.height(16.dp))
@@ -377,25 +422,34 @@ fun RecordEditRoute(
                     Spacer(Modifier.height(12.dp))
                     PoopPickers(f) { form = it }
                 }
-                RecordType.SLEEP -> {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = {
-                            form = f.copy(endTimestamp = (f.endTimestamp ?: f.timestamp) - 60_000L)
-                        }) { Text("结束−1分") }
-                        TextButton(onClick = {
-                            form = f.copy(endTimestamp = (f.endTimestamp ?: System.currentTimeMillis()) + 60_000L)
-                        }) { Text("结束+1分") }
-                        TextButton(onClick = {
-                            form = f.copy(endTimestamp = System.currentTimeMillis())
-                        }) { Text("结束=现在") }
-                    }
+                RecordType.SLEEP, RecordType.WALK -> {
+                    val isSleep = f.type == RecordType.SLEEP
                     Text(
                         "开始 ${tsLabel}" + (f.endTimestamp?.let {
-                            " · 结束 " + LocalDateTime.ofInstant(Instant.ofEpochMilli(it), zone)
-                                .format(DateTimeFormatter.ofPattern("HH:mm"))
-                        } ?: " · 进行中"),
+                            val end = Instant.ofEpochMilli(it).atZone(zone)
+                            val nextDay = end.toLocalDate().isAfter(
+                                Instant.ofEpochMilli(f.timestamp).atZone(zone).toLocalDate(),
+                            )
+                            " · 结束 " + (if (nextDay) "次日 " else "") +
+                                end.format(DateTimeFormatter.ofPattern("HH:mm"))
+                        } ?: if (isSleep) " · 进行中" else " · 未设置结束"),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = {
+                                clockError = null
+                                clockTarget = ClockTarget.End
+                            },
+                        ) {
+                            Text(if (f.endTimestamp == null) "设置结束时刻" else "修改结束时刻")
+                        }
+                        if (isSleep && f.endTimestamp != null) {
+                            TextButton(onClick = { form = f.copy(endTimestamp = null) }) {
+                                Text("保持进行中")
+                            }
+                        }
+                    }
                 }
                 RecordType.TEMPERATURE -> {
                     OutlinedTextField(
@@ -471,7 +525,7 @@ fun RecordEditRoute(
     }
 
     if (showDatePicker) {
-        val current = LocalDateTime.ofInstant(Instant.ofEpochMilli(f.timestamp), zone)
+        val current = Instant.ofEpochMilli(f.timestamp).atZone(zone)
         // DatePicker uses UTC midnight millis for calendar days.
         val initialUtc = current.toLocalDate()
             .atStartOfDay(ZoneOffset.UTC)
@@ -488,11 +542,36 @@ fun RecordEditRoute(
                             val newDate = Instant.ofEpochMilli(selected)
                                 .atZone(ZoneOffset.UTC)
                                 .toLocalDate()
-                            val merged = LocalDateTime.of(newDate, current.toLocalTime())
-                            form = f.copy(timestamp = merged.atZone(zone).toInstant().toEpochMilli())
+                            val safeDate = minOf(newDate, LocalDate.now(zone))
+                            val resolved = resolveLeziLocalDateTime(
+                                date = safeDate,
+                                time = current.toLocalTime(),
+                                zone = zone,
+                                preferredOffset = current.offset,
+                            )
+                            if (resolved == null) {
+                                clockError = "所选日期不存在当前时刻，请先选择其他时刻"
+                            } else {
+                                val requestedStart = resolved.toInstant().toEpochMilli()
+                                val nowMillis = System.currentTimeMillis()
+                                val duration = f.endTimestamp
+                                    ?.minus(f.timestamp)
+                                    ?.takeIf { it > 0L }
+                                val latestStart = duration?.let { nowMillis - it } ?: nowMillis
+                                val adjustedStart = minOf(requestedStart, latestStart)
+                                form = f.copy(
+                                    timestamp = adjustedStart,
+                                    endTimestamp = duration?.let { adjustedStart + it },
+                                )
+                                clockError = if (newDate != safeDate || requestedStart != adjustedStart) {
+                                    "记录时段不能晚于现在，已自动调整"
+                                } else {
+                                    null
+                                }
+                                clockTarget = ClockTarget.Start
+                            }
                         }
                         showDatePicker = false
-                        showTimePicker = true
                     },
                 ) { Text("下一步") }
             },
@@ -504,36 +583,91 @@ fun RecordEditRoute(
         }
     }
 
-    if (showTimePicker) {
-        val current = LocalDateTime.ofInstant(Instant.ofEpochMilli(f.timestamp), zone)
-        val timeState = rememberTimePickerState(
-            initialHour = current.hour,
-            initialMinute = current.minute,
-            is24Hour = true,
+    clockTarget?.let { target ->
+        val initialMillis = when (target) {
+            ClockTarget.Start -> f.timestamp
+            ClockTarget.End -> f.endTimestamp
+                ?: maxOf(f.timestamp + 60_000L, System.currentTimeMillis())
+        }
+        LeziClockDialDialog(
+            title = if (target == ClockTarget.Start) "选择记录时刻" else "选择结束时刻",
+            value = Instant.ofEpochMilli(initialMillis).atZone(zone),
+            minuteStep = vm.timeStepMin,
+            onConfirm = { picked ->
+                val now = ZonedDateTime.now(zone)
+                when (target) {
+                    ClockTarget.Start -> {
+                        val existingEnd = f.endTimestamp
+                        when {
+                            picked.isAfter(now) -> {
+                                clockError = "记录时刻不能晚于现在"
+                            }
+                            existingEnd != null &&
+                                picked.toInstant().toEpochMilli() >= existingEnd -> {
+                                clockError = "开始时刻必须早于结束时刻"
+                            }
+                            else -> {
+                                form = f.copy(timestamp = picked.toInstant().toEpochMilli())
+                                clockError = null
+                            }
+                        }
+                    }
+                    ClockTarget.End -> {
+                        val start = Instant.ofEpochMilli(f.timestamp).atZone(zone)
+                        val pickedClock = picked.toLocalTime()
+                        val end = resolveSleepEnd(start, pickedClock)
+                        when {
+                            end == null -> {
+                                clockError = "结束时刻不能与开始时刻相同"
+                            }
+                            end.isAfter(now) -> {
+                                clockError = "结束时刻不能晚于现在"
+                            }
+                            else -> {
+                                form = f.copy(endTimestamp = end.toInstant().toEpochMilli())
+                                clockError = null
+                            }
+                        }
+                    }
+                }
+                clockTarget = null
+            },
+            onDismiss = { clockTarget = null },
         )
-        AlertDialog(
-            onDismissRequest = { showTimePicker = false },
-            title = { Text("选择时间") },
-            text = {
-                TimePicker(state = timeState)
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        val date = LocalDateTime.ofInstant(Instant.ofEpochMilli(f.timestamp), zone)
-                            .toLocalDate()
-                        val merged = LocalDateTime.of(
-                            date,
-                            LocalTime.of(timeState.hour, timeState.minute),
-                        )
-                        form = f.copy(timestamp = merged.atZone(zone).toInstant().toEpochMilli())
-                        showTimePicker = false
-                    },
-                ) { Text("确定") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showTimePicker = false }) { Text("取消") }
-            },
+    }
+}
+
+private enum class ClockTarget { Start, End }
+
+internal fun timestampOnDate(
+    date: LocalDate,
+    zone: ZoneId = ZoneId.systemDefault(),
+    now: ZonedDateTime = ZonedDateTime.now(zone),
+): Long {
+    return timestampOnLeziDate(date, zone, now)
+}
+
+internal fun resolveSleepEnd(
+    start: ZonedDateTime,
+    pickedClock: LocalTime,
+): ZonedDateTime? {
+    if (start.hour == pickedClock.hour && start.minute == pickedClock.minute) {
+        return null
+    }
+    val sameDayCandidate = resolveLeziLocalDateTime(
+        date = start.toLocalDate(),
+        time = pickedClock,
+        zone = start.zone,
+        preferredOffset = start.offset,
+    ) ?: return null
+    return if (sameDayCandidate.isAfter(start)) {
+        sameDayCandidate
+    } else {
+        resolveLeziLocalDateTime(
+            date = start.toLocalDate().plusDays(1),
+            time = pickedClock,
+            zone = start.zone,
+            preferredOffset = start.offset,
         )
     }
 }
@@ -604,34 +738,20 @@ private fun AmountEditor(
 private fun PeeAmountPicker(selected: Int, onSelect: (Int) -> Unit) {
     Text("尿量", style = MaterialTheme.typography.labelLarge)
     Spacer(Modifier.height(8.dp))
-    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-        listOf(1 to "小", 2 to "中", 3 to "大").forEach { (v, label) ->
-            val on = selected == v
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(16.dp))
-                    .clickable { onSelect(v) }
-                    .border(
-                        width = if (on) 2.dp else 1.dp,
-                        color = if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
-                        shape = RoundedCornerShape(16.dp),
-                    )
-                    .padding(12.dp),
+    Row(
+        Modifier.fillMaxWidth().selectableGroup(),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        (1..3).forEach { value ->
+            val label = peeAmountLabel(value)
+            ExcretionChoice(
+                label = label,
+                semanticLabel = "尿量$label",
+                selected = selected == value,
+                onClick = { onSelect(value) },
+                modifier = Modifier.weight(1f),
             ) {
-                Box(
-                    Modifier
-                        .size(if (v == 1) 28.dp else if (v == 2) 36.dp else 44.dp)
-                        .clip(CircleShape)
-                        .background(
-                            if (on) MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)
-                            else MaterialTheme.colorScheme.surfaceVariant,
-                        ),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text("💧", fontSize = (14 + v * 4).sp)
-                }
-                Text(label)
+                LeziPeeAmountMark(value, modifier = Modifier.size(30.dp))
             }
         }
     }
@@ -640,47 +760,110 @@ private fun PeeAmountPicker(selected: Int, onSelect: (Int) -> Unit) {
 @Composable
 private fun PoopPickers(form: EditForm, onChange: (EditForm) -> Unit) {
     Text("便量", style = MaterialTheme.typography.labelLarge)
-    ChipRow((1..4).toList(), form.stoolAmount) { onChange(form.copy(stoolAmount = it)) }
     Spacer(Modifier.height(8.dp))
+    Row(
+        Modifier.fillMaxWidth().selectableGroup(),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        (1..4).forEach { value ->
+            val label = stoolAmountLabel(value)
+            ExcretionChoice(
+                label = label,
+                semanticLabel = "便量$label",
+                selected = form.stoolAmount == value,
+                onClick = { onChange(form.copy(stoolAmount = value)) },
+                modifier = Modifier.weight(1f),
+            ) {
+                LeziStoolAmountMark(value, modifier = Modifier.size(28.dp))
+            }
+        }
+    }
+    Spacer(Modifier.height(12.dp))
     Text("软硬", style = MaterialTheme.typography.labelLarge)
-    ChipRow((1..4).toList(), form.stoolConsistency) { onChange(form.copy(stoolConsistency = it)) }
     Spacer(Modifier.height(8.dp))
+    Row(
+        Modifier.fillMaxWidth().selectableGroup(),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        (1..4).forEach { value ->
+            val label = stoolConsistencyLabel(value)
+            ExcretionChoice(
+                label = label,
+                semanticLabel = "便便软硬$label",
+                selected = form.stoolConsistency == value,
+                onClick = { onChange(form.copy(stoolConsistency = value)) },
+                modifier = Modifier.weight(1f),
+            ) {
+                LeziStoolConsistencyMark(value, modifier = Modifier.size(28.dp))
+            }
+        }
+    }
+    Spacer(Modifier.height(12.dp))
     Text("颜色", style = MaterialTheme.typography.labelLarge)
-    val colors = listOf(
-        0xFF3E2723L, 0xFF5D4037L, 0xFF8D6E63L, 0xFFC4A35AL,
-        0xFFD4E157L, 0xFFFFF176L, 0xFF81C784L, 0xFFE57373L,
-    )
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        colors.forEachIndexed { idx, argb ->
-            val on = form.stoolColor == idx
-            Box(
-                Modifier
-                    .size(36.dp)
-                    .clip(CircleShape)
-                    .background(Color(argb))
-                    .border(
-                        width = if (on) 3.dp else 0.dp,
-                        color = MaterialTheme.colorScheme.onBackground,
-                        shape = CircleShape,
-                    )
-                    .clickable { onChange(form.copy(stoolColor = idx)) },
-            )
+    Spacer(Modifier.height(8.dp))
+    Column(Modifier.selectableGroup(), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        (0..7).chunked(4).forEach { row ->
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                row.forEach { value ->
+                    val label = stoolColorLabel(value)
+                    ExcretionChoice(
+                        label = label,
+                        semanticLabel = "便便颜色$label",
+                        selected = form.stoolColor == value,
+                        onClick = { onChange(form.copy(stoolColor = value)) },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        LeziStoolColorMark(value, modifier = Modifier.size(30.dp))
+                    }
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun ChipRow(values: List<Int>, selected: Int, onSelect: (Int) -> Unit) {
-    Row(
-        Modifier.horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        values.forEach { v ->
-            FilterChip(
-                selected = selected == v,
-                onClick = { onSelect(v) },
-                label = { Text("$v") },
+private fun ExcretionChoice(
+    label: String,
+    semanticLabel: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    mark: @Composable () -> Unit,
+) {
+    Surface(
+        modifier = modifier
+            .heightIn(min = 68.dp)
+            .selectable(
+                selected = selected,
+                onClick = onClick,
+                role = Role.RadioButton,
             )
+            .semantics {
+                contentDescription = semanticLabel
+                stateDescription = if (selected) "已选择" else "未选择"
+            },
+        shape = RoundedCornerShape(8.dp),
+        color = if (selected) {
+            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+        } else {
+            MaterialTheme.colorScheme.surface
+        },
+        border = BorderStroke(
+            if (selected) 2.dp else 1.dp,
+            if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+        ),
+    ) {
+        Column(
+            Modifier.padding(horizontal = 3.dp, vertical = 6.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            mark()
+            Spacer(Modifier.height(2.dp))
+            Text(label, style = MaterialTheme.typography.labelMedium, maxLines = 1)
         }
     }
 }

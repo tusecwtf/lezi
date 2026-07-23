@@ -3,6 +3,8 @@ package com.lezi.babylog.domain
 import com.lezi.babylog.core.common.newClientUuid
 import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.BabyEntity
+import com.lezi.babylog.core.database.CalendarEventDao
+import com.lezi.babylog.core.database.CalendarEventEntity
 import com.lezi.babylog.core.database.FamilyDao
 import com.lezi.babylog.core.database.FamilyEntity
 import com.lezi.babylog.core.database.LocalUserDao
@@ -64,10 +66,21 @@ data class TimeBarSegment(
     val kind: TimeBarKind,
 )
 
+data class CalendarEvent(
+    val id: Long,
+    val clientUuid: String,
+    val babyId: Long,
+    val title: String,
+    val note: String?,
+    val eventAt: Long,
+    val remindAt: Long?,
+)
+
 @Singleton
 class CareLog @Inject constructor(
     private val babyDao: BabyDao,
     private val recordDao: RecordDao,
+    private val calendarEventDao: CalendarEventDao,
     private val localUserDao: LocalUserDao,
     private val familyDao: FamilyDao,
     private val membershipDao: MembershipDao,
@@ -169,14 +182,65 @@ class CareLog @Inject constructor(
         settings.setCurrentBabyId(baby.id)
     }
 
+    /**
+     * Observe records whose start timestamp falls in the half-open local-date range
+     * [startDayInclusive, endDayExclusive).
+     */
+    fun observeRecords(
+        babyId: Long,
+        startDayInclusive: LocalDate,
+        endDayExclusive: LocalDate,
+        zone: ZoneId = ZoneId.systemDefault(),
+    ): Flow<List<Record>> {
+        require(startDayInclusive.isBefore(endDayExclusive)) {
+            "startDayInclusive must be before endDayExclusive"
+        }
+        val start = startDayInclusive.atStartOfDay(zone).toInstant().toEpochMilli()
+        val end = endDayExclusive.atStartOfDay(zone).toInstant().toEpochMilli()
+        return recordDao.observeRange(babyId, start, end).map { list -> list.map { it.toModel() } }
+    }
+
     fun observeDayRecords(
         babyId: Long,
         day: LocalDate,
         zone: ZoneId = ZoneId.systemDefault(),
-    ): Flow<List<Record>> {
-        val start = day.atStartOfDay(zone).toInstant().toEpochMilli()
-        val end = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-        return recordDao.observeDay(babyId, start, end).map { list -> list.map { it.toModel() } }
+    ): Flow<List<Record>> = observeRecords(babyId, day, day.plusDays(1), zone)
+
+    /** Observe the baby's single active sleep independently of the viewed date. */
+    fun observeOpenSleep(babyId: Long): Flow<Record?> =
+        recordDao.observeOpenSleep(babyId).map { it?.toModel() }
+
+    fun observeCalendarEvents(
+        babyId: Long,
+        startInclusive: Long,
+        endExclusive: Long,
+    ): Flow<List<CalendarEvent>> {
+        require(startInclusive < endExclusive) {
+            "startInclusive must be before endExclusive"
+        }
+        return calendarEventDao.observeRange(babyId, startInclusive, endExclusive)
+            .map { events -> events.map { it.toModel() } }
+    }
+
+    suspend fun addCalendarEvent(
+        babyId: Long,
+        title: String,
+        eventAt: Long,
+        remindAt: Long?,
+        note: String? = null,
+    ): Long {
+        val now = System.currentTimeMillis()
+        return calendarEventDao.upsert(
+            CalendarEventEntity(
+                clientUuid = newClientUuid(),
+                babyId = babyId,
+                title = title,
+                note = note,
+                eventAt = eventAt,
+                remindAt = remindAt,
+                updatedAt = now,
+            ),
+        )
     }
 
     suspend fun dayRecords(
@@ -260,33 +324,18 @@ class CareLog @Inject constructor(
 
     suspend fun updateRecord(
         id: Long,
-        timestamp: Long? = null,
-        endTimestamp: Long? = null,
-        note: String? = null,
-        payloadJson: String? = null,
+        timestamp: Long,
+        endTimestamp: Long?,
+        note: String?,
+        payloadJson: String,
     ) {
         val existing = recordDao.get(id) ?: return
         recordDao.update(
             existing.copy(
-                timestamp = timestamp ?: existing.timestamp,
-                endTimestamp = if (endTimestamp != null || timestamp != null) {
-                    endTimestamp ?: existing.endTimestamp
-                } else {
-                    existing.endTimestamp
-                },
-                note = if (note != null) note else existing.note,
-                payloadJson = payloadJson ?: existing.payloadJson,
-                updatedAt = System.currentTimeMillis(),
-            ),
-        )
-    }
-
-    /** Overwrite endTimestamp explicitly (including clearing via sentinel not supported — pass value). */
-    suspend fun updateRecordEnd(id: Long, endTimestamp: Long?) {
-        val existing = recordDao.get(id) ?: return
-        recordDao.update(
-            existing.copy(
+                timestamp = timestamp,
                 endTimestamp = endTimestamp,
+                note = note,
+                payloadJson = payloadJson,
                 updatedAt = System.currentTimeMillis(),
             ),
         )
@@ -438,6 +487,7 @@ class CareLog @Inject constructor(
      */
     suspend fun clearAllLocalData() {
         recordDao.deleteAll()
+        calendarEventDao.deleteAll()
         babyDao.deleteAll()
         membershipDao.deleteAll()
         familyDao.deleteAll()
@@ -576,6 +626,11 @@ class CareLog @Inject constructor(
                         rec.copy(babyId = keeper.id, updatedAt = now),
                     )
                 }
+                for (event in calendarEventDao.listForBaby(extra.id)) {
+                    calendarEventDao.update(
+                        event.copy(babyId = keeper.id, updatedAt = now),
+                    )
+                }
                 babyDao.update(extra.copy(deletedAt = now, updatedAt = now))
             }
             if (currentId == null || list.any { it.id == currentId && it.id != keeper.id }) {
@@ -622,6 +677,17 @@ internal fun RecordEntity.toModel(): Record =
         schemaVersion = schemaVersion,
         updatedAt = updatedAt,
         deletedAt = deletedAt,
+    )
+
+private fun CalendarEventEntity.toModel(): CalendarEvent =
+    CalendarEvent(
+        id = id,
+        clientUuid = clientUuid,
+        babyId = babyId,
+        title = title,
+        note = note,
+        eventAt = eventAt,
+        remindAt = remindAt,
     )
 
 private fun parseSex(raw: String): Sex =

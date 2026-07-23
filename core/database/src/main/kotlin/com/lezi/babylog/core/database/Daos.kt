@@ -92,6 +92,22 @@ interface RecordDao {
         ORDER BY timestamp DESC
         """,
     )
+    fun observeRange(
+        babyId: Long,
+        startInclusive: Long,
+        endExclusive: Long,
+    ): Flow<List<RecordEntity>>
+
+    @Query(
+        """
+        SELECT * FROM records
+        WHERE babyId = :babyId
+          AND deletedAt IS NULL
+          AND timestamp >= :startInclusive
+          AND timestamp < :endExclusive
+        ORDER BY timestamp DESC
+        """,
+    )
     fun observeDay(babyId: Long, startInclusive: Long, endExclusive: Long): Flow<List<RecordEntity>>
 
     @Query(
@@ -124,6 +140,19 @@ interface RecordDao {
         """,
     )
     suspend fun findOpenSleep(babyId: Long): RecordEntity?
+
+    @Query(
+        """
+        SELECT * FROM records
+        WHERE babyId = :babyId
+          AND type = 'sleep'
+          AND deletedAt IS NULL
+          AND endTimestamp IS NULL
+        ORDER BY timestamp DESC
+        LIMIT 1
+        """,
+    )
+    fun observeOpenSleep(babyId: Long): Flow<RecordEntity?>
 
     @Query(
         """

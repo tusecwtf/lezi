@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -51,6 +52,35 @@ fun PreviewJournalOverview() {
             recordCount = 8,
             nowMinOfDay = 600,
         )
+    }
+}
+
+@Preview(name = "Record visuals · unified", widthDp = 390, heightDp = 180, showBackground = true)
+@Composable
+fun PreviewRecordVisuals() {
+    PreviewFrame(visualStyle = "journal") {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceAround,
+        ) {
+            listOf(
+                LeziRecordGlyph.Nursing,
+                LeziRecordGlyph.Bottle,
+                LeziRecordGlyph.Sleep,
+                LeziRecordGlyph.Pee,
+                LeziRecordGlyph.Poop,
+                LeziRecordGlyph.Temperature,
+            ).forEach { glyph ->
+                LeziRecordGlyphIcon(glyph = glyph, size = 28.dp)
+            }
+        }
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceAround,
+        ) {
+            (1..3).forEach { LeziPeeAmountMark(it, Modifier.size(28.dp)) }
+            (1..4).forEach { LeziStoolAmountMark(it, Modifier.size(28.dp)) }
+        }
     }
 }
 

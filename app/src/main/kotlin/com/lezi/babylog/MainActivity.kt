@@ -14,16 +14,16 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ShowChart
+import androidx.compose.material.icons.automirrored.outlined.ShowChart
 import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material.icons.outlined.BarChart
 import androidx.compose.material.icons.outlined.GridView
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Person
-import androidx.compose.material.icons.outlined.ShowChart
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -32,7 +32,11 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -40,6 +44,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
@@ -52,11 +57,12 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.Baby
+import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.ui.UiTags
-import com.lezi.babylog.designsystem.AppBrandBar
-import com.lezi.babylog.designsystem.AppContextRow
+import com.lezi.babylog.designsystem.LeziColors
 import com.lezi.babylog.designsystem.LeziTheme
 import com.lezi.babylog.domain.CareLog
+import com.lezi.babylog.domain.babyAgeLabel
 import com.lezi.babylog.feature.export.ExportRoute
 import com.lezi.babylog.feature.family.FamilyRoute
 import com.lezi.babylog.feature.growth.GrowthRoute
@@ -70,13 +76,22 @@ import com.lezi.babylog.feature.summary.SummaryRoute
 import com.lezi.babylog.feature.timer.TimerRoute
 import dagger.hilt.android.AndroidEntryPoint
 import dagger.hilt.android.lifecycle.HiltViewModel
+import java.time.Duration
+import java.time.Instant
 import java.time.LocalDate
-import java.util.Locale
+import java.time.YearMonth
+import java.time.ZoneId
+import java.time.ZonedDateTime
 import javax.inject.Inject
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @AndroidEntryPoint
@@ -110,23 +125,35 @@ data class RootUi(
     val babies: List<Baby> = emptyList(),
     val darkMode: String = "system",
     val visualStyle: String = "warm",
-    val day: LocalDate = LocalDate.now(),
+    val selectedDate: LocalDate = LocalDate.now(),
+    val today: LocalDate = LocalDate.now(),
+    val calendarRecordDays: Set<LocalDate> = emptySet(),
 )
 
 @HiltViewModel
 class RootViewModel @Inject constructor(
     private val careLog: CareLog,
     private val settings: SettingsStore,
+    private val savedStateHandle: SavedStateHandle,
 ) : ViewModel() {
-    private val dayFlow = MutableStateFlow(LocalDate.now())
+    private val dayFlow = MutableStateFlow(
+        clampSelectedDate(
+            savedStateHandle.get<Long>(SELECTED_DATE_KEY)?.let(LocalDate::ofEpochDay)
+                ?: LocalDate.now(),
+        ),
+    )
+    private val calendarMonthFlow = MutableStateFlow(YearMonth.from(dayFlow.value))
+    private val zone = ZoneId.systemDefault()
+    private val todayFlow = MutableStateFlow(LocalDate.now(zone))
 
     init {
+        savedStateHandle[SELECTED_DATE_KEY] = dayFlow.value.toEpochDay()
         viewModelScope.launch {
             careLog.ensureCurrentBabyHealed()
         }
     }
 
-    val ui = combine(
+    private val baseUi = combine(
         careLog.observeHasBaby(),
         careLog.observeCurrentBaby(),
         careLog.observeBabies(),
@@ -139,7 +166,40 @@ class RootViewModel @Inject constructor(
             babies = babies,
             darkMode = s.darkMode,
             visualStyle = s.visualStyle,
-            day = day,
+            selectedDate = day,
+        )
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val calendarRecordDays = combine(
+        careLog.observeCurrentBaby(),
+        calendarMonthFlow,
+    ) { baby, month ->
+        baby?.id to month
+    }.flatMapLatest { (babyId, month) ->
+        if (babyId == null) {
+            flowOf(emptySet<LocalDate>())
+        } else {
+            careLog.observeRecords(
+                babyId = babyId,
+                startDayInclusive = month.atDay(1),
+                endDayExclusive = month.plusMonths(1).atDay(1),
+                zone = zone,
+            ).map { records ->
+                records
+                    .asSequence()
+                    .map { record ->
+                        Instant.ofEpochMilli(record.timestamp).atZone(zone).toLocalDate()
+                    }
+                    .toSet()
+            }
+        }
+    }
+
+    val ui = combine(baseUi, calendarRecordDays, todayFlow) { base, recordDays, today ->
+        base.copy(
+            calendarRecordDays = recordDays,
+            today = today,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), RootUi())
 
@@ -155,27 +215,43 @@ class RootViewModel @Inject constructor(
     }
 
     fun shiftDay(delta: Long) {
-        val today = LocalDate.now()
-        val next = dayFlow.value.plusDays(delta)
-        dayFlow.value = if (next.isAfter(today)) today else next
+        updateSelectedDate(dayFlow.value.plusDays(delta))
     }
 
     fun setDay(day: LocalDate) {
-        val today = LocalDate.now()
-        dayFlow.value = if (day.isAfter(today)) today else day
+        updateSelectedDate(day)
     }
 
-    fun toggleDark() {
-        viewModelScope.launch {
-            val cur = ui.value.darkMode
-            val next = when (cur) {
-                "dark" -> "light"
-                else -> "dark"
-            }
-            settings.setDarkMode(next)
+    fun setCalendarMonth(month: YearMonth) {
+        val currentMonth = YearMonth.from(todayFlow.value)
+        calendarMonthFlow.value = if (month > currentMonth) currentMonth else month
+    }
+
+    fun refreshToday() {
+        val current = LocalDate.now(zone)
+        val previous = todayFlow.value
+        if (current == previous) return
+        todayFlow.value = current
+        if (dayFlow.value == previous) {
+            updateSelectedDate(current)
         }
     }
+
+    private fun updateSelectedDate(day: LocalDate) {
+        val selected = clampSelectedDate(day, todayFlow.value)
+        dayFlow.value = selected
+        savedStateHandle[SELECTED_DATE_KEY] = selected.toEpochDay()
+    }
+
+    private companion object {
+        const val SELECTED_DATE_KEY = "root_selected_date_epoch_day"
+    }
 }
+
+internal fun clampSelectedDate(
+    requested: LocalDate,
+    today: LocalDate = LocalDate.now(),
+): LocalDate = if (requested.isAfter(today)) today else requested
 
 private enum class TopDest(
     val route: String,
@@ -185,7 +261,12 @@ private enum class TopDest(
 ) {
     Log("log", "记录", Icons.Filled.GridView, Icons.Outlined.GridView),
     Summary("summary", "汇总", Icons.Filled.BarChart, Icons.Outlined.BarChart),
-    Growth("growth", "成长", Icons.Filled.ShowChart, Icons.Outlined.ShowChart),
+    Growth(
+        "growth",
+        "成长",
+        Icons.AutoMirrored.Filled.ShowChart,
+        Icons.AutoMirrored.Outlined.ShowChart,
+    ),
     Family("family", "账户", Icons.Filled.Person, Icons.Outlined.Person),
     Settings("settings", "菜单", Icons.Filled.MoreHoriz, Icons.Outlined.MoreHoriz),
 }
@@ -203,14 +284,25 @@ fun LeziRoot(
     val nav = rememberNavController()
     val backStack by nav.currentBackStackEntryAsState()
     val current = backStack?.destination?.route
-    val today = LocalDate.now()
-    val dayLabel = rememberDayLabel(ui.day, today)
-    val accent = ui.baby?.themeColorArgb?.let { Color(it) } ?: MaterialTheme.colorScheme.primary
+    val today = ui.today
+    var showHeaderCalendar by remember { mutableStateOf(false) }
+    var displayedMonth by remember { mutableStateOf(YearMonth.from(ui.selectedDate)) }
     val hideChrome = current?.startsWith("timer") == true ||
         current?.startsWith("edit") == true ||
         current == "search" ||
         current == "export" ||
         current == "calendar"
+
+    LaunchedEffect(today) {
+        vm.refreshToday()
+        val now = ZonedDateTime.now(ZoneId.systemDefault())
+        val nextMidnight = now.toLocalDate().plusDays(1).atStartOfDay(now.zone)
+        val waitMillis = Duration.between(now, nextMidnight)
+            .toMillis()
+            .coerceAtLeast(1_000L)
+        delay(waitMillis)
+        vm.refreshToday()
+    }
 
     Scaffold(
         modifier = Modifier.testTag(UiTags.ROOT),
@@ -220,22 +312,32 @@ fun LeziRoot(
                 Column(
                     Modifier
                         .fillMaxWidth()
-                        .background(MaterialTheme.colorScheme.background)
+                        .background(
+                            if (dark) {
+                                LeziColors.JournalDarkAccent
+                            } else {
+                                LeziColors.JournalAccent
+                            },
+                        )
                         .statusBarsPadding(),
                 ) {
-                    AppBrandBar(
-                        onSearch = { nav.navigate("search") },
-                        onToggleTheme = { vm.toggleDark() },
-                        dark = dark,
-                    )
-                    AppContextRow(
+                    AppHeaderBar(
                         babyName = ui.baby?.nickname.orEmpty(),
-                        dayLabel = dayLabel,
+                        babyAge = ui.baby?.let { babyAgeLabel(it.birthdayEpochDay) }.orEmpty(),
+                        selectedDate = ui.selectedDate,
+                        today = today,
+                        canCycleBaby = ui.babies.size > 1,
+                        canGoNext = ui.selectedDate.isBefore(today),
+                        dark = dark,
                         onCycleBaby = { vm.cycleBaby() },
-                        onPrevDay = { vm.shiftDay(-1) },
-                        onNextDay = { vm.shiftDay(1) },
-                        canGoNext = ui.day.isBefore(today),
-                        accent = accent,
+                        onPreviousDate = { vm.shiftDay(-1) },
+                        onNextDate = { vm.shiftDay(1) },
+                        onOpenDatePicker = {
+                            displayedMonth = YearMonth.from(ui.selectedDate)
+                            vm.setCalendarMonth(displayedMonth)
+                            showHeaderCalendar = true
+                        },
+                        onSearch = { nav.navigate("search") },
                     )
                 }
             }
@@ -312,15 +414,21 @@ fun LeziRoot(
         ) {
             composable(TopDest.Log.route) {
                 LogRoute(
-                    externalDay = ui.day,
-                    onOpenTimer = { nav.navigate("timer") },
+                    externalDay = ui.selectedDate,
+                    onOpenTimer = {
+                        if (ui.selectedDate == today) {
+                            nav.navigate("timer")
+                        } else {
+                            nav.navigate("edit/new?type=${RecordType.NURSING.key}")
+                        }
+                    },
                     onOpenEdit = { id -> nav.navigate("edit/$id") },
                     onOpenNewEdit = { type -> nav.navigate("edit/new?type=$type") },
-                    onOpenSearch = { nav.navigate("search") },
+                    onGoToday = { vm.setDay(today) },
                 )
             }
-            composable(TopDest.Summary.route) { SummaryRoute() }
-            composable(TopDest.Growth.route) { GrowthRoute() }
+            composable(TopDest.Summary.route) { SummaryRoute(anchorDate = ui.selectedDate) }
+            composable(TopDest.Growth.route) { GrowthRoute(initialDate = ui.selectedDate) }
             composable(TopDest.Family.route) { FamilyRoute() }
             composable(TopDest.Settings.route) {
                 SettingsRoute(
@@ -339,7 +447,10 @@ fun LeziRoot(
                 ExportRoute(onBack = { nav.popBackStack() })
             }
             composable("calendar") {
-                CalendarRoute(onBack = { nav.popBackStack() })
+                CalendarRoute(
+                    onBack = { nav.popBackStack() },
+                    initialDate = ui.selectedDate,
+                )
             }
             composable("timer") {
                 TimerRoute(onDone = { nav.popBackStack() })
@@ -360,19 +471,32 @@ fun LeziRoot(
                 RecordEditRoute(
                     recordId = recordId,
                     newTypeKey = type,
+                    initialDate = ui.selectedDate,
                     onDone = { nav.popBackStack() },
                 )
             }
         }
     }
-}
 
-@Composable
-private fun rememberDayLabel(day: LocalDate, today: LocalDate): String {
-    return if (day == today) {
-        "今天 · ${day.monthValue}月${day.dayOfMonth}日"
-    } else {
-        val wd = day.dayOfWeek.getDisplayName(java.time.format.TextStyle.SHORT, Locale.CHINA)
-        "${day.monthValue}月${day.dayOfMonth}日 ($wd)"
+    if (showHeaderCalendar) {
+        HeaderCalendarDialog(
+            selectedDate = ui.selectedDate,
+            displayedMonth = displayedMonth,
+            today = today,
+            recordDays = ui.calendarRecordDays,
+            onMonthChange = { requested ->
+                displayedMonth = if (requested > YearMonth.from(today)) {
+                    YearMonth.from(today)
+                } else {
+                    requested
+                }
+                vm.setCalendarMonth(displayedMonth)
+            },
+            onSelect = { selected ->
+                vm.setDay(selected)
+                showHeaderCalendar = false
+            },
+            onDismiss = { showHeaderCalendar = false },
+        )
     }
 }

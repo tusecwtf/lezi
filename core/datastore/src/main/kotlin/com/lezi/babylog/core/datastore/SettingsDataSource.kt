@@ -37,7 +37,7 @@ class SettingsDataSource @Inject constructor(
             weekStart = prefs[Keys.WEEK_START] ?: 1,
             unitsJson = prefs[Keys.UNITS] ?: "{}",
             amountStepMl = prefs[Keys.AMOUNT_STEP] ?: 5,
-            timeStepMin = prefs[Keys.TIME_STEP] ?: 1,
+            timeStepMin = (prefs[Keys.TIME_STEP] ?: 1).takeIf { it == 1 || it == 5 } ?: 1,
             curveDataset = prefs[Keys.CURVE_DATASET] ?: "default",
             timelineOrder = prefs[Keys.TIMELINE_ORDER] ?: "newest_first",
         )
@@ -78,6 +78,11 @@ class SettingsDataSource @Inject constructor(
 
     override suspend fun setAmountStepMl(step: Int) {
         dataStore.edit { it[Keys.AMOUNT_STEP] = step }
+    }
+
+    override suspend fun setTimeStepMin(step: Int) {
+        require(step == 1 || step == 5) { "Time step must be 1 or 5 minutes" }
+        dataStore.edit { it[Keys.TIME_STEP] = step }
     }
 
     override suspend fun setNursingIntervalMin(min: Int) {

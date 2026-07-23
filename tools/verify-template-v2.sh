@@ -33,7 +33,8 @@ require_text 'oneHandQuickActionOrder(' feature/log/src/main/kotlin/com/lezi/bab
 require_text 'bottomBar = {' feature/log/src/main/kotlin/com/lezi/babylog/feature/log/RecordEditScreen.kt
 
 # The second template has distinct record, summary, and growth chart grammar.
-require_text 'JournalSummaryStrip' feature/log/src/main/kotlin/com/lezi/babylog/feature/log/LogScreen.kt
+require_text 'RecordSummaryStrip(' core/ui/src/main/kotlin/com/lezi/babylog/core/ui/RecordPresentation.kt
+require_text 'RecordSummaryStrip(' feature/log/src/main/kotlin/com/lezi/babylog/feature/log/LogScreen.kt
 require_text 'JournalTimelineRail' designsystem/src/main/kotlin/com/lezi/babylog/designsystem/Components.kt
 require_text 'JournalWeekGrid' feature/summary/src/main/kotlin/com/lezi/babylog/feature/summary/SummaryScreen.kt
 require_text 'GrowthMetric.HEAD' feature/growth/src/main/kotlin/com/lezi/babylog/feature/growth/GrowthScreen.kt

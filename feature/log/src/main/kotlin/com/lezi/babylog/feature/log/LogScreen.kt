@@ -19,12 +19,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material3.DatePicker
-import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SnackbarHost
@@ -32,7 +27,6 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -45,6 +39,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
@@ -55,11 +51,18 @@ import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SettingsLocal
+import com.lezi.babylog.core.ui.RecordSection
+import com.lezi.babylog.core.ui.RecordSummaryStrip
+import com.lezi.babylog.core.ui.RecordSummaryValue
+import com.lezi.babylog.core.ui.RecordTypeIcon
 import com.lezi.babylog.core.ui.UiTags
+import com.lezi.babylog.core.ui.presentation
+import com.lezi.babylog.core.ui.presentationSummary
+import com.lezi.babylog.core.ui.presentationTone
 import com.lezi.babylog.designsystem.LeziCard
-import com.lezi.babylog.designsystem.JournalSummaryStrip
-import com.lezi.babylog.designsystem.JournalSummaryValue
 import com.lezi.babylog.designsystem.LeziPrimaryButton
+import com.lezi.babylog.designsystem.LeziRecordGlyph
+import com.lezi.babylog.designsystem.LeziRecordGlyphIcon
 import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziShapes
 import com.lezi.babylog.designsystem.LeziSpacing
@@ -74,10 +77,10 @@ import com.lezi.babylog.designsystem.StateKind
 import com.lezi.babylog.designsystem.SummaryMetric
 import com.lezi.babylog.designsystem.TimelineLaneSegment
 import com.lezi.babylog.designsystem.TimelineRailCard
+import com.lezi.babylog.designsystem.leziRecordColor
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.DailySummary
 import com.lezi.babylog.domain.aggregateDaily
-import com.lezi.babylog.domain.babyAgeLabel
 import com.lezi.babylog.domain.formatClock
 import com.lezi.babylog.domain.payloadBool
 import com.lezi.babylog.domain.payloadInt
@@ -85,11 +88,9 @@ import com.lezi.babylog.domain.relativeTimeLabel
 import com.lezi.babylog.feature.settings.NextFeedScheduler
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
-import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
-import java.util.Locale
 import javax.inject.Inject
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -164,7 +165,10 @@ class LogViewModel @Inject constructor(
                 ),
             )
         } else {
-            careLog.observeDayRecords(baby.id, day, zone).map { records ->
+            combine(
+                careLog.observeDayRecords(baby.id, day, zone),
+                careLog.observeOpenSleep(baby.id),
+            ) { records, openSleep ->
                 val entities = records.map {
                     com.lezi.babylog.core.database.RecordEntity(
                         id = it.id,
@@ -196,7 +200,7 @@ class LogViewModel @Inject constructor(
                     feedLanes = lanes.feed,
                     careLanes = lanes.care,
                     settings = settings,
-                    openSleep = records.any { it.type == RecordType.SLEEP && it.endTimestamp == null },
+                    openSleep = openSleep != null,
                     saving = isSaving,
                     error = err,
                 )
@@ -204,27 +208,12 @@ class LogViewModel @Inject constructor(
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), LogUiState())
 
-    fun shiftDay(delta: Long) {
-        dayFlow.value = dayFlow.value.plusDays(delta)
-    }
-
-    fun setDay(day: LocalDate) {
+    fun setExternalDay(day: LocalDate) {
         dayFlow.value = day
     }
 
-    fun goToday() {
-        dayFlow.value = LocalDate.now(zone)
-    }
-
-    fun cycleBaby() {
-        viewModelScope.launch {
-            val state = uiState.value
-            if (state.babies.size < 2) return@launch
-            val cur = state.baby?.id
-            val idx = state.babies.indexOfFirst { it.id == cur }.takeIf { it >= 0 } ?: 0
-            careLog.setCurrentBaby(state.babies[(idx + 1) % state.babies.size].id)
-            _events.emit(LogEvent.Toast("已切换到 ${state.babies[(idx + 1) % state.babies.size].nickname}"))
-        }
+    fun retry() {
+        error.value = null
     }
 
     fun quickAdd(type: RecordType, payloadJson: String = "{}") {
@@ -232,10 +221,14 @@ class LogViewModel @Inject constructor(
             runCatching {
                 saving.value = true
                 error.value = null
-                val babyId = uiState.value.baby?.id ?: error("无宝宝")
+                val state = uiState.value
+                val babyId = state.baby?.id ?: error("无宝宝")
+                val today = LocalDate.now(zone)
+                val timestamp = timestampOnDate(state.day, zone)
                 when (type) {
                     RecordType.SLEEP -> {
-                        if (uiState.value.openSleep) {
+                        check(state.day == today) { "历史日期请使用睡眠编辑页" }
+                        if (state.openSleep) {
                             careLog.sleepUp(babyId)
                             _events.emit(LogEvent.Toast("已记录醒来"))
                         } else {
@@ -244,26 +237,38 @@ class LogViewModel @Inject constructor(
                         }
                     }
                     RecordType.PEE -> {
-                        careLog.addRecord(babyId, RecordType.PEE, payloadJson = """{"pee_amount":2}""")
+                        careLog.addRecord(
+                            babyId,
+                            RecordType.PEE,
+                            timestamp = timestamp,
+                            payloadJson = """{"pee_amount":2}""",
+                        )
                         _events.emit(LogEvent.Toast("已记尿尿"))
                     }
                     RecordType.POOP -> careLog.addRecord(
                         babyId,
                         RecordType.POOP,
+                        timestamp = timestamp,
                         payloadJson = """{"stool_amount":3,"stool_consistency":3,"stool_color":0}""",
                     )
                     RecordType.BOTH_DIAPER -> careLog.addRecord(
                         babyId,
                         RecordType.BOTH_DIAPER,
+                        timestamp = timestamp,
                         payloadJson = """{"pee_amount":2,"stool_amount":3,"stool_consistency":3,"stool_color":0}""",
                     )
                     RecordType.BATH, RecordType.WALK, RecordType.COUGH, RecordType.RASH,
                     RecordType.VOMIT, RecordType.INJURY,
                     -> {
-                        careLog.addRecord(babyId, type)
+                        careLog.addRecord(babyId, type, timestamp = timestamp)
                         _events.emit(LogEvent.Toast("已记录"))
                     }
-                    else -> careLog.addRecord(babyId, type, payloadJson = payloadJson)
+                    else -> careLog.addRecord(
+                        babyId,
+                        type,
+                        timestamp = timestamp,
+                        payloadJson = payloadJson,
+                    )
                 }
             }.onFailure {
                 error.value = it.message ?: "保存失败"
@@ -277,9 +282,17 @@ class LogViewModel @Inject constructor(
         viewModelScope.launch {
             runCatching {
                 saving.value = true
-                val babyId = uiState.value.baby?.id ?: error("无宝宝")
-                careLog.addRecord(babyId, RecordType.FORMULA, payloadJson = """{"amount_ml":$ml}""")
-                nextFeed.scheduleAfterFeed(app)
+                val state = uiState.value
+                val babyId = state.baby?.id ?: error("无宝宝")
+                careLog.addRecord(
+                    babyId,
+                    RecordType.FORMULA,
+                    timestamp = timestampOnDate(state.day, zone),
+                    payloadJson = """{"amount_ml":$ml}""",
+                )
+                if (state.day == LocalDate.now(zone)) {
+                    nextFeed.scheduleAfterFeed(app)
+                }
                 _events.emit(LogEvent.Toast("已记配方奶 ${ml}ml"))
             }.onFailure {
                 error.value = it.message
@@ -333,13 +346,12 @@ fun LogRoute(
     onOpenTimer: () -> Unit,
     onOpenEdit: (Long) -> Unit,
     onOpenNewEdit: (String) -> Unit,
-    onOpenSearch: () -> Unit = {},
+    onGoToday: () -> Unit,
     externalDay: LocalDate? = null,
     vm: LogViewModel = hiltViewModel(),
 ) {
     val state by vm.uiState.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
-    var showCalendar by remember { mutableStateOf(false) }
     var showMore by remember { mutableStateOf(false) }
     var showFormula by remember { mutableStateOf(false) }
     val today = LocalDate.now()
@@ -348,7 +360,7 @@ fun LogRoute(
 
     LaunchedEffect(externalDay) {
         if (externalDay != null && externalDay != state.day) {
-            vm.setDay(externalDay)
+            vm.setExternalDay(externalDay)
         }
     }
 
@@ -366,29 +378,10 @@ fun LogRoute(
     } else {
         null
     }
-    val age = state.baby?.let { babyAgeLabel(it.birthdayEpochDay) }.orEmpty()
 
     PageScaffoldBackground {
         Box(Modifier.fillMaxSize().testTag(UiTags.LOG_HOME)) {
             Column(Modifier.fillMaxSize()) {
-                // Age / local meta under global chrome
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = LeziSpacing.Page, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        if (age.isNotBlank()) "$age · 本地记录" else "本地记录",
-                        style = LeziTypography.Meta,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    TextButton(onClick = onOpenSearch) {
-                        Text("搜索", style = LeziTypography.Label)
-                    }
-                }
-
                 LazyColumn(
                     modifier = Modifier.weight(1f),
                     contentPadding = PaddingValues(bottom = 96.dp),
@@ -397,13 +390,17 @@ fun LogRoute(
                     item {
                         Column(Modifier.padding(horizontal = LeziSpacing.Page)) {
                             if (journal) {
-                                JournalSummaryStrip(
+                                RecordSummaryStrip(
                                     values = listOf(
-                                        JournalSummaryValue("${state.summary.feedMl}", "奶ml", LeziTone.Blue),
-                                        JournalSummaryValue("${state.summary.nursingMinutes}", "母乳min", LeziTone.Blue),
-                                        JournalSummaryValue(formatMinutes(state.summary.sleepMinutes), "睡眠", LeziTone.Cream),
-                                        JournalSummaryValue("${state.summary.peeCount}", "尿", LeziTone.Yellow),
-                                        JournalSummaryValue("${state.summary.poopCount}", "便", LeziTone.Neutral),
+                                        RecordSummaryValue(RecordType.FORMULA, "${state.summary.feedMl}", "奶ml"),
+                                        RecordSummaryValue(RecordType.NURSING, "${state.summary.nursingMinutes}", "母乳min"),
+                                        RecordSummaryValue(
+                                            RecordType.SLEEP,
+                                            formatMinutes(state.summary.sleepMinutes),
+                                            "睡眠",
+                                        ),
+                                        RecordSummaryValue(RecordType.PEE, "${state.summary.peeCount}", "尿"),
+                                        RecordSummaryValue(RecordType.POOP, "${state.summary.poopCount}", "便"),
                                     ),
                                 )
                             } else {
@@ -418,9 +415,7 @@ fun LogRoute(
                                         tone = LeziTone.Blue,
                                         modifier = Modifier.weight(1f),
                                         icon = {
-                                            com.lezi.babylog.designsystem.LeziGlyphIcon(
-                                                com.lezi.babylog.designsystem.LeziGlyph.Bottle,
-                                            )
+                                            RecordTypeIcon(RecordType.FORMULA)
                                         },
                                     )
                                     SummaryMetric(
@@ -429,9 +424,7 @@ fun LogRoute(
                                         tone = LeziTone.Blue,
                                         modifier = Modifier.weight(1f),
                                         icon = {
-                                            com.lezi.babylog.designsystem.LeziGlyphIcon(
-                                                com.lezi.babylog.designsystem.LeziGlyph.Drop,
-                                            )
+                                            RecordTypeIcon(RecordType.NURSING)
                                         },
                                     )
                                     SummaryMetric(
@@ -440,9 +433,7 @@ fun LogRoute(
                                         tone = LeziTone.Yellow,
                                         modifier = Modifier.weight(1f),
                                         icon = {
-                                            com.lezi.babylog.designsystem.LeziGlyphIcon(
-                                                com.lezi.babylog.designsystem.LeziGlyph.Moon,
-                                            )
+                                            RecordTypeIcon(RecordType.SLEEP)
                                         },
                                     )
                                     SummaryMetric(
@@ -451,9 +442,7 @@ fun LogRoute(
                                         tone = LeziTone.Cream,
                                         modifier = Modifier.weight(1f),
                                         icon = {
-                                            com.lezi.babylog.designsystem.LeziGlyphIcon(
-                                                com.lezi.babylog.designsystem.LeziGlyph.Toilet,
-                                            )
+                                            RecordTypeIcon(RecordType.PEE)
                                         },
                                     )
                                     SummaryMetric(
@@ -462,9 +451,7 @@ fun LogRoute(
                                         tone = LeziTone.Neutral,
                                         modifier = Modifier.weight(1f),
                                         icon = {
-                                            com.lezi.babylog.designsystem.LeziGlyphIcon(
-                                                com.lezi.babylog.designsystem.LeziGlyph.Pin,
-                                            )
+                                            RecordTypeIcon(RecordType.POOP)
                                         },
                                     )
                                 }
@@ -486,7 +473,11 @@ fun LogRoute(
                     if (state.day != today) {
                         item {
                             Row(Modifier.padding(horizontal = LeziSpacing.Page)) {
-                                LeziSecondaryButton("返回今天", onClick = vm::goToday, modifier = Modifier.fillMaxWidth())
+                                LeziSecondaryButton(
+                                    "返回今天",
+                                    onClick = onGoToday,
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
                             }
                         }
                     }
@@ -495,7 +486,7 @@ fun LogRoute(
                         Column(Modifier.padding(horizontal = LeziSpacing.Page)) {
                             SectionHeading(
                                 eyebrow = if (journal) null else "按时间排序",
-                                title = if (journal) "记录明细" else "今日记录",
+                                title = if (journal) "记录明细" else "当日记录",
                                 meta = if (journal) "新 → 旧" else null,
                             )
                         }
@@ -506,7 +497,7 @@ fun LogRoute(
                             StateContainer(
                                 kind = StateKind.Loading,
                                 title = "加载中",
-                                message = "正在读取今日记录…",
+                                message = "正在读取当日记录…",
                                 modifier = Modifier.padding(horizontal = LeziSpacing.Page),
                             )
                         }
@@ -516,7 +507,7 @@ fun LogRoute(
                                 title = "出错了",
                                 message = state.error ?: "",
                                 actionLabel = "重试",
-                                onAction = { vm.goToday() },
+                                onAction = vm::retry,
                                 modifier = Modifier.padding(horizontal = LeziSpacing.Page),
                             )
                         }
@@ -538,13 +529,14 @@ fun LogRoute(
                                 anomaly = payloadBool(r.payloadJson, "anomaly_flag") ||
                                     (r.type == RecordType.SLEEP && r.endTimestamp == null),
                                 leading = {
-                                    com.lezi.babylog.designsystem.LeziGlyphIcon(
-                                        typeGlyph(r.type),
-                                        tint = MaterialTheme.colorScheme.onSurface,
-                                    )
+                                    RecordTypeIcon(r.type)
                                 },
                                 onClick = { onOpenEdit(r.id) },
-                                modifier = Modifier.padding(horizontal = LeziSpacing.Page),
+                                modifier = Modifier
+                                    .padding(horizontal = LeziSpacing.Page)
+                                    .semantics {
+                                        contentDescription = "编辑${r.type.presentation.label}"
+                                    },
                             )
                         }
                     }
@@ -555,11 +547,17 @@ fun LogRoute(
             OneHandQuickDock(
                 preferredHand = state.settings.preferredHand,
                 timerEnabled = state.settings.timerEnabled,
-                sleepRunning = state.openSleep,
+                sleepRunning = state.openSleep && state.day == today,
                 saving = state.saving,
                 onNursing = onOpenTimer,
                 onPee = { vm.quickAdd(RecordType.PEE) },
-                onSleep = { vm.quickAdd(RecordType.SLEEP) },
+                onSleep = {
+                    if (state.day == today) {
+                        vm.quickAdd(RecordType.SLEEP)
+                    } else {
+                        onOpenNewEdit(RecordType.SLEEP.key)
+                    }
+                },
                 onFormula = { showFormula = true },
                 onMore = { showMore = true },
                 modifier = Modifier.align(Alignment.BottomCenter),
@@ -567,23 +565,6 @@ fun LogRoute(
 
             SnackbarHost(snackbar, modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 92.dp))
         }
-    }
-
-    if (showCalendar) {
-        val millis = state.day.atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-        val picker = rememberDatePickerState(initialSelectedDateMillis = millis)
-        DatePickerDialog(
-            onDismissRequest = { showCalendar = false },
-            confirmButton = {
-                TextButton(onClick = {
-                    picker.selectedDateMillis?.let {
-                        vm.setDay(Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault()).toLocalDate())
-                    }
-                    showCalendar = false
-                }) { Text("确定") }
-            },
-            dismissButton = { TextButton(onClick = { showCalendar = false }) { Text("取消") } },
-        ) { DatePicker(state = picker) }
     }
 
     if (showMore) {
@@ -597,7 +578,7 @@ fun LogRoute(
                     when (type) {
                         RecordType.NURSING -> onOpenTimer()
                         RecordType.FORMULA -> showFormula = true
-                        RecordType.BATH, RecordType.WALK, RecordType.COUGH, RecordType.RASH,
+                        RecordType.BATH, RecordType.COUGH, RecordType.RASH,
                         RecordType.VOMIT, RecordType.INJURY, RecordType.PEE,
                         -> vm.quickAdd(type)
                         else -> onOpenNewEdit(type.key)
@@ -671,7 +652,6 @@ private fun OneHandQuickDock(
     modifier: Modifier = Modifier,
 ) {
     val journal = LeziThemeExt.isJournal
-    val ext = LeziThemeExt.colors
     val actions = oneHandQuickActionOrder(preferredHand, timerEnabled)
     Surface(
         modifier = modifier
@@ -694,15 +674,18 @@ private fun OneHandQuickDock(
                     OneHandQuickAction.Pee -> "尿尿"
                     OneHandQuickAction.Sleep -> if (sleepRunning) "醒来" else "睡眠"
                     OneHandQuickAction.Nursing -> "母乳"
-                    OneHandQuickAction.Formula -> "奶瓶"
+                    OneHandQuickAction.Formula -> "配方奶"
                     OneHandQuickAction.More -> "更多"
                 }
-                val tint = when (action) {
-                    OneHandQuickAction.Pee -> ext.laneCare
-                    OneHandQuickAction.Sleep -> ext.laneSleep
-                    OneHandQuickAction.Nursing, OneHandQuickAction.Formula -> ext.laneFeed
-                    OneHandQuickAction.More -> MaterialTheme.colorScheme.primary
+                val recordType = when (action) {
+                    OneHandQuickAction.Pee -> RecordType.PEE
+                    OneHandQuickAction.Sleep -> RecordType.SLEEP
+                    OneHandQuickAction.Nursing -> RecordType.NURSING
+                    OneHandQuickAction.Formula -> RecordType.FORMULA
+                    OneHandQuickAction.More -> null
                 }
+                val tint = recordType?.let { leziRecordColor(it.presentation.colorRole) }
+                    ?: MaterialTheme.colorScheme.primary
                 val enabled = !saving ||
                     action == OneHandQuickAction.Nursing ||
                     action == OneHandQuickAction.More
@@ -740,23 +723,13 @@ private fun OneHandQuickDock(
                                 .background(tint.copy(alpha = 0.14f)),
                             contentAlignment = Alignment.Center,
                         ) {
-                            when (action) {
-                                OneHandQuickAction.More -> {
-                                    Icon(Icons.Filled.Add, contentDescription = null, tint = tint)
-                                }
-                                else -> {
-                                    val glyph = when (action) {
-                                        OneHandQuickAction.Pee ->
-                                            com.lezi.babylog.designsystem.LeziGlyph.Drop
-                                        OneHandQuickAction.Sleep ->
-                                            com.lezi.babylog.designsystem.LeziGlyph.Moon
-                                        OneHandQuickAction.Nursing, OneHandQuickAction.Formula ->
-                                            com.lezi.babylog.designsystem.LeziGlyph.Bottle
-                                        OneHandQuickAction.More ->
-                                            com.lezi.babylog.designsystem.LeziGlyph.Plus
-                                    }
-                                    com.lezi.babylog.designsystem.LeziGlyphIcon(glyph, tint = tint)
-                                }
+                            if (recordType == null) {
+                                LeziRecordGlyphIcon(
+                                    glyph = LeziRecordGlyph.Other,
+                                    tint = tint,
+                                )
+                            } else {
+                                RecordTypeIcon(recordType, tint = tint)
                             }
                         }
                         Text(
@@ -778,49 +751,9 @@ private fun OneHandQuickDock(
 
 @Composable
 private fun MoreSheet(onPick: (RecordType) -> Unit) {
-    val groups = listOf(
-        "喂养" to listOf(
-            RecordType.NURSING to "母乳计时",
-            RecordType.FORMULA to "配方奶",
-            RecordType.PUMPED_FEED to "挤出乳",
-            RecordType.PUMP_EXPRESS to "挤奶",
-        ),
-        "排泄" to listOf(
-            RecordType.PEE to "尿尿",
-            RecordType.POOP to "便便",
-            RecordType.BOTH_DIAPER to "尿+便",
-        ),
-        "日常" to listOf(
-            RecordType.SLEEP to "睡眠",
-            RecordType.TEMPERATURE to "体温",
-            RecordType.BATH to "洗澡",
-            RecordType.WALK to "散步",
-            RecordType.MEMO to "备注",
-            RecordType.DIARY to "日记",
-        ),
-        "健康" to listOf(
-            RecordType.MEDICINE to "用药",
-            RecordType.HOSPITAL to "就医",
-            RecordType.COUGH to "咳嗽",
-            RecordType.RASH to "发疹",
-            RecordType.VOMIT to "呕吐",
-            RecordType.INJURY to "受伤",
-            RecordType.VACCINE to "疫苗",
-            RecordType.OTHER to "其他",
-        ),
-        "辅食" to listOf(
-            RecordType.BABY_FOOD to "辅食",
-            RecordType.SNACK to "点心",
-            RecordType.DRINK to "饮料",
-        ),
-        "成长" to listOf(
-            RecordType.HEIGHT to "身高",
-            RecordType.WEIGHT to "体重",
-            RecordType.HEAD to "头围",
-            RecordType.CHEST to "胸围",
-            RecordType.FOOT_SIZE to "足长",
-        ),
-    )
+    val groups = RecordSection.entries.map { section ->
+        section to RecordType.entries.filter { it.presentation.section == section }
+    }
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
         contentPadding = PaddingValues(
@@ -834,23 +767,54 @@ private fun MoreSheet(onPick: (RecordType) -> Unit) {
             Text("添加记录", style = LeziTypography.Title)
             Spacer(Modifier.height(LeziSpacing.Sm))
         }
-        groups.forEach { (title, items) ->
+        groups.forEach { (section, items) ->
             item {
                 Column {
-                    Text(title, style = LeziTypography.Label, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        section.title,
+                        style = LeziTypography.Label,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     Spacer(Modifier.height(LeziSpacing.Xs))
                     items.chunked(4).forEach { rowItems ->
                         Row(
                             Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            rowItems.forEach { (type, label) ->
+                            rowItems.forEach { type ->
+                                val item = type.presentation
+                                val color = leziRecordColor(item.colorRole)
                                 LeziCard(
-                                    modifier = Modifier.weight(1f).heightIn(min = 56.dp),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .heightIn(min = 78.dp)
+                                        .semantics {
+                                            contentDescription = "添加${item.label}，${item.tip}"
+                                        },
                                     onClick = { onPick(type) },
-                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                                    contentPadding = PaddingValues(horizontal = 3.dp, vertical = 7.dp),
                                 ) {
-                                    Text(label, style = LeziTypography.BodyStrong, maxLines = 1)
+                                    Column(
+                                        Modifier.fillMaxWidth(),
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                    ) {
+                                        Box(
+                                            Modifier
+                                                .size(34.dp)
+                                                .clip(LeziShapes.JournalCard)
+                                                .background(color.copy(alpha = 0.14f)),
+                                            contentAlignment = Alignment.Center,
+                                        ) {
+                                            RecordTypeIcon(type, size = 18.dp, tint = color)
+                                        }
+                                        Text(item.label, style = LeziTypography.Label, maxLines = 1)
+                                        Text(
+                                            item.tip,
+                                            style = LeziTypography.Meta,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                        )
+                                    }
                                 }
                             }
                             repeat(4 - rowItems.size) {
@@ -908,119 +872,10 @@ private fun formatMinutes(min: Long): String {
     return if (h == 0L) "${m}m" else if (m == 0L) "${h}h" else "${h}h ${m}m"
 }
 
-private fun toneOf(type: RecordType): LeziTone = when (type) {
-    RecordType.NURSING, RecordType.FORMULA, RecordType.PUMPED_FEED -> LeziTone.Blue
-    RecordType.SLEEP -> LeziTone.Yellow
-    RecordType.PEE, RecordType.POOP, RecordType.BOTH_DIAPER, RecordType.BATH -> LeziTone.Cream
-    else -> LeziTone.Neutral
-}
+private fun toneOf(type: RecordType): LeziTone = type.presentationTone()
 
-internal fun typeLabel(type: RecordType): String = when (type) {
-    RecordType.NURSING -> "母乳"
-    RecordType.FORMULA -> "配方奶"
-    RecordType.PUMPED_FEED -> "挤出乳"
-    RecordType.PUMP_EXPRESS -> "挤奶"
-    RecordType.PEE -> "尿尿"
-    RecordType.POOP -> "便便"
-    RecordType.BOTH_DIAPER -> "尿+便"
-    RecordType.SLEEP -> "睡眠"
-    RecordType.TEMPERATURE -> "体温"
-    RecordType.MEMO -> "备注"
-    RecordType.DIARY -> "日记"
-    RecordType.BATH -> "洗澡"
-    RecordType.WALK -> "散步"
-    RecordType.COUGH -> "咳嗽"
-    RecordType.RASH -> "发疹"
-    RecordType.VOMIT -> "呕吐"
-    RecordType.INJURY -> "受伤"
-    RecordType.MEDICINE -> "用药"
-    RecordType.HOSPITAL -> "就医"
-    RecordType.OTHER -> "其他"
-    RecordType.HEIGHT -> "身高"
-    RecordType.WEIGHT -> "体重"
-    RecordType.BABY_FOOD -> "辅食"
-    RecordType.SNACK -> "点心"
-    RecordType.DRINK -> "饮料"
-    RecordType.VACCINE -> "疫苗"
-    RecordType.HEAD -> "头围"
-    RecordType.CHEST -> "胸围"
-    RecordType.FOOT_SIZE -> "足长"
-    else -> type.key
-}
+internal fun typeLabel(type: RecordType): String = type.presentation.label
 
-internal fun typeGlyph(type: RecordType): com.lezi.babylog.designsystem.LeziGlyph = when (type) {
-    RecordType.NURSING,
-    RecordType.FORMULA,
-    RecordType.PUMPED_FEED,
-    RecordType.PUMP_EXPRESS,
-    RecordType.BABY_FOOD,
-    RecordType.SNACK,
-    RecordType.DRINK,
-    -> com.lezi.babylog.designsystem.LeziGlyph.Bottle
-    RecordType.PEE -> com.lezi.babylog.designsystem.LeziGlyph.Drop
-    RecordType.POOP, RecordType.BOTH_DIAPER -> com.lezi.babylog.designsystem.LeziGlyph.Pin
-    RecordType.SLEEP -> com.lezi.babylog.designsystem.LeziGlyph.Moon
-    RecordType.TEMPERATURE,
-    RecordType.MEDICINE,
-    RecordType.HOSPITAL,
-    RecordType.COUGH,
-    RecordType.RASH,
-    RecordType.VOMIT,
-    RecordType.INJURY,
-    RecordType.VACCINE,
-    RecordType.OTHER,
-    RecordType.HEIGHT,
-    RecordType.WEIGHT,
-    RecordType.HEAD,
-    RecordType.CHEST,
-    RecordType.FOOT_SIZE,
-    -> com.lezi.babylog.designsystem.LeziGlyph.Plus
-    RecordType.MEMO,
-    RecordType.DIARY,
-    RecordType.BATH,
-    RecordType.WALK,
-    RecordType.CUSTOM,
-    -> com.lezi.babylog.designsystem.LeziGlyph.Dot
-}
+internal fun typeGlyph(type: RecordType): LeziRecordGlyph = type.presentation.glyph
 
-internal fun recordSummaryLine(r: Record): String {
-    val p = r.payloadJson
-    val base = when (r.type) {
-        RecordType.FORMULA, RecordType.PUMPED_FEED, RecordType.PUMP_EXPRESS -> {
-            val ml = payloadInt(p, "amount_ml")
-            if (ml > 0) "${ml}ml" else ""
-        }
-        RecordType.NURSING -> {
-            val l = payloadInt(p, "left_min")
-            val rr = payloadInt(p, "right_min")
-            "左${l}分 · 右${rr}分"
-        }
-        RecordType.PEE -> when (payloadInt(p, "pee_amount")) {
-            1 -> "量·小"
-            3 -> "量·大"
-            else -> "量·中"
-        }
-        RecordType.POOP, RecordType.BOTH_DIAPER -> {
-            val a = payloadInt(p, "stool_amount").takeIf { it > 0 } ?: 3
-            val c = payloadInt(p, "stool_consistency").takeIf { it > 0 } ?: 3
-            val color = payloadInt(p, "stool_color")
-            "量$a · 软硬$c · 色$color"
-        }
-        RecordType.SLEEP -> {
-            val end = r.endTimestamp
-            if (end != null) {
-                val min = (end - r.timestamp) / 60_000L
-                "时长 ${formatMinutes(min)}"
-            } else {
-                "进行中"
-            }
-        }
-        RecordType.TEMPERATURE -> {
-            val c = Regex(""""celsius"\s*:\s*(-?\d+(?:\.\d+)?)""").find(p)?.groupValues?.getOrNull(1)
-            c?.let { "${it}℃" }.orEmpty()
-        }
-        else -> ""
-    }
-    val note = r.note?.takeIf { it.isNotBlank() }
-    return listOfNotNull(base.takeIf { it.isNotBlank() }, note).joinToString(" · ").ifBlank { "轻点编辑" }
-}
+internal fun recordSummaryLine(record: Record): String = record.presentationSummary()

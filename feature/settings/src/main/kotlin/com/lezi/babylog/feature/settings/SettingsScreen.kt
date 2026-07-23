@@ -89,6 +89,7 @@ class SettingsViewModel @Inject constructor(
     fun setDark(mode: String) = viewModelScope.launch { settingsStore.setDarkMode(mode) }
     fun setTimer(enabled: Boolean) = viewModelScope.launch { settingsStore.setTimerEnabled(enabled) }
     fun setStep(step: Int) = viewModelScope.launch { settingsStore.setAmountStepMl(step) }
+    fun setTimeStep(step: Int) = viewModelScope.launch { settingsStore.setTimeStepMin(step) }
     fun setInterval(min: Int) = viewModelScope.launch { settingsStore.setNursingIntervalMin(min) }
     fun setRecordAt(v: String) = viewModelScope.launch { settingsStore.setRecordAt(v) }
     fun setCurrent(id: Long) = viewModelScope.launch { careLog.setCurrentBaby(id) }
@@ -275,6 +276,16 @@ fun SettingsRoute(
                                 selected = ui.settings.amountStepMl == s,
                                 onClick = { vm.setStep(s) },
                                 label = { Text("$s") },
+                            )
+                        }
+                    }
+                    Text("圆盘时钟步进", style = LeziTypography.Label)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(1 to "1 分钟", 5 to "5 分钟").forEach { (step, label) ->
+                            FilterChip(
+                                selected = ui.settings.timeStepMin == step,
+                                onClick = { vm.setTimeStep(step) },
+                                label = { Text(label) },
                             )
                         }
                     }

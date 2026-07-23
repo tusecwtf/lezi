@@ -24,13 +24,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.model.Record
+import com.lezi.babylog.core.ui.RecordTypeIcon
+import com.lezi.babylog.core.ui.presentation
+import com.lezi.babylog.core.ui.presentationSummary
+import com.lezi.babylog.core.ui.presentationTone
 import com.lezi.babylog.designsystem.LeziSpacing
-import com.lezi.babylog.designsystem.LeziTone
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.RecordRow
 import com.lezi.babylog.designsystem.StateContainer
@@ -147,11 +152,15 @@ fun SearchRoute(
                         items(ui.results, key = { it.id }) { r ->
                             RecordRow(
                                 time = formatClock(r.timestamp),
-                                title = r.type.key,
-                                summary = listOfNotNull(r.note, r.payloadJson.takeIf { it != "{}" }).joinToString(" · "),
+                                title = r.type.presentation.label,
+                                summary = r.presentationSummary(),
                                 relative = relativeTimeLabel(r.timestamp),
-                                tone = LeziTone.Neutral,
+                                tone = r.type.presentationTone(),
+                                leading = { RecordTypeIcon(r.type) },
                                 onClick = { onOpenEdit(r.id) },
+                                modifier = Modifier.semantics {
+                                    contentDescription = "编辑${r.type.presentation.label}"
+                                },
                             )
                         }
                     }

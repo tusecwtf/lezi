@@ -51,6 +51,7 @@ dependencies {
     ksp(libs.hilt.compiler)
     implementation(libs.kotlinx.coroutines.android)
     debugImplementation(libs.androidx.compose.ui.tooling)
+    testImplementation(libs.junit)
 
     implementation(project(":core:database"))
     implementation(project(":core:datastore"))
