@@ -542,7 +542,12 @@ fun LogRoute(
                                 tone = toneOf(r.type),
                                 anomaly = payloadBool(r.payloadJson, "anomaly_flag") ||
                                     (r.type == RecordType.SLEEP && r.endTimestamp == null),
-                                leading = { Text(typeEmoji(r.type)) },
+                                leading = {
+                                    com.lezi.babylog.designsystem.LeziGlyphIcon(
+                                        typeGlyph(r.type),
+                                        tint = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                },
                                 onClick = { onOpenEdit(r.id) },
                                 modifier = Modifier.padding(horizontal = LeziSpacing.Page),
                             )
@@ -870,21 +875,15 @@ internal fun typeLabel(type: RecordType): String = when (type) {
     else -> type.key
 }
 
-internal fun typeEmoji(type: RecordType): String = when (type) {
-    RecordType.NURSING -> "🍼"
-    RecordType.FORMULA, RecordType.PUMPED_FEED -> "🥛"
-    RecordType.PUMP_EXPRESS -> "🫙"
-    RecordType.PEE -> "💧"
-    RecordType.POOP, RecordType.BOTH_DIAPER -> "💩"
-    RecordType.SLEEP -> "😴"
-    RecordType.TEMPERATURE -> "🌡️"
-    RecordType.MEMO -> "📝"
-    RecordType.DIARY -> "📔"
-    RecordType.BATH -> "🛁"
-    RecordType.WALK -> "🚶"
-    RecordType.MEDICINE -> "💊"
-    RecordType.HOSPITAL -> "🏥"
-    else -> "•"
+internal fun typeGlyph(type: RecordType): com.lezi.babylog.designsystem.LeziGlyph = when (type) {
+    RecordType.NURSING, RecordType.FORMULA, RecordType.PUMPED_FEED, RecordType.PUMP_EXPRESS ->
+        com.lezi.babylog.designsystem.LeziGlyph.Bottle
+    RecordType.PEE -> com.lezi.babylog.designsystem.LeziGlyph.Drop
+    RecordType.POOP, RecordType.BOTH_DIAPER -> com.lezi.babylog.designsystem.LeziGlyph.Pin
+    RecordType.SLEEP -> com.lezi.babylog.designsystem.LeziGlyph.Moon
+    RecordType.TEMPERATURE, RecordType.MEDICINE, RecordType.HOSPITAL ->
+        com.lezi.babylog.designsystem.LeziGlyph.Plus
+    else -> com.lezi.babylog.designsystem.LeziGlyph.Pin
 }
 
 internal fun recordSummaryLine(r: Record): String {
