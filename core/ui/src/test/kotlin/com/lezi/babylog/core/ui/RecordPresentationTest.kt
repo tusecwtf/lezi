@@ -91,16 +91,29 @@ class RecordPresentationTest {
         )
     }
 
+    @Test
+    fun subMinuteSleepUsesHonestNonZeroCopy() {
+        assertEquals(
+            "时长 不足1分",
+            record(
+                type = RecordType.SLEEP,
+                endTimestamp = 1_000L + 30_000L,
+            ).presentationSummary(),
+        )
+    }
+
     private fun record(
         type: RecordType,
         payload: String = "{}",
         note: String? = null,
+        endTimestamp: Long? = null,
     ) = Record(
         id = 1,
         clientUuid = "test",
         babyId = 1,
         type = type,
         timestamp = 1_000,
+        endTimestamp = endTimestamp,
         note = note,
         createdByUserId = 1,
         payloadJson = payload,

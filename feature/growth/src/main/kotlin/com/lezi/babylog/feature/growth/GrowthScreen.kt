@@ -19,6 +19,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -330,6 +331,24 @@ fun GrowthRoute(
                         style = LeziTypography.Metric,
                     )
                     GrowthChart(points = ui.points, bands = bands, metric = ui.metric)
+                    growthRangeWarning(
+                        monthAge = latest.monthAge,
+                        value = latest.value,
+                        bands = bands,
+                    )?.let { warning ->
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            color = MaterialTheme.colorScheme.errorContainer,
+                            contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                            shape = com.lezi.babylog.designsystem.LeziShapes.Sm,
+                        ) {
+                            Text(
+                                warning,
+                                modifier = Modifier.padding(LeziSpacing.Sm),
+                                style = LeziTypography.Meta,
+                            )
+                        }
+                    }
                     if (journal) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             Text("— P3", style = LeziTypography.Meta, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -499,6 +518,45 @@ internal fun timestampOnGrowthDate(
     now: ZonedDateTime = ZonedDateTime.now(zone),
 ): Long {
     return timestampOnLeziDate(date, zone, now)
+}
+
+internal fun growthRangeWarning(
+    monthAge: Float,
+    value: Float,
+    bands: List<CurveBand>,
+): String? {
+    if (bands.isEmpty()) return null
+    val sorted = bands.sortedBy { it.month }
+    val upperIndex = sorted.indexOfFirst { it.month >= monthAge }
+    val lower: CurveBand
+    val upper: CurveBand
+    when {
+        upperIndex < 0 -> {
+            lower = sorted.last()
+            upper = lower
+        }
+        upperIndex == 0 -> {
+            lower = sorted.first()
+            upper = lower
+        }
+        else -> {
+            lower = sorted[upperIndex - 1]
+            upper = sorted[upperIndex]
+        }
+    }
+    val progress = if (upper.month == lower.month) {
+        0f
+    } else {
+        ((monthAge - lower.month) / (upper.month - lower.month)).coerceIn(0f, 1f)
+    }
+    fun interpolate(start: Float, end: Float): Float = start + (end - start) * progress
+    val p3 = interpolate(lower.p3, upper.p3)
+    val p97 = interpolate(lower.p97, upper.p97)
+    return when {
+        value > p97 -> "该数值高于同月龄参考范围，请确认单位和录入值。"
+        value < p3 -> "该数值低于同月龄参考范围，请确认单位和录入值。"
+        else -> null
+    }
 }
 
 @Composable

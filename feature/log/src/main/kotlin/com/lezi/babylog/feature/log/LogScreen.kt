@@ -1,6 +1,5 @@
 package com.lezi.babylog.feature.log
 
-import android.content.Context
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -22,8 +21,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -85,24 +82,19 @@ import com.lezi.babylog.domain.formatClock
 import com.lezi.babylog.domain.payloadBool
 import com.lezi.babylog.domain.payloadInt
 import com.lezi.babylog.domain.relativeTimeLabel
-import com.lezi.babylog.feature.settings.NextFeedScheduler
 import dagger.hilt.android.lifecycle.HiltViewModel
-import dagger.hilt.android.qualifiers.ApplicationContext
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
 import javax.inject.Inject
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.launch
 
 data class LogUiState(
     val loading: Boolean = true,
@@ -116,43 +108,25 @@ data class LogUiState(
     val careLanes: List<TimelineLaneSegment> = emptyList(),
     val settings: SettingsLocal = SettingsLocal(),
     val openSleep: Record? = null,
-    val saving: Boolean = false,
-    val error: String? = null,
 )
-
-sealed interface LogEvent {
-    data class Saved(val message: String) : LogEvent
-    data class Toast(val message: String) : LogEvent
-}
 
 @HiltViewModel
 class LogViewModel @Inject constructor(
     private val careLog: CareLog,
     private val settingsStore: SettingsStore,
-    private val nextFeed: NextFeedScheduler,
-    @ApplicationContext private val app: Context,
 ) : ViewModel() {
     private val zone = ZoneId.systemDefault()
     private val dayFlow = MutableStateFlow(LocalDate.now(zone))
-    private val saving = MutableStateFlow(false)
-    private val error = MutableStateFlow<String?>(null)
-    private val _events = MutableSharedFlow<LogEvent>(extraBufferCapacity = 8)
-    val events = _events.asSharedFlow()
+
     @OptIn(ExperimentalCoroutinesApi::class)
     val uiState = combine(
-        combine(
-            careLog.observeCurrentBaby(),
-            careLog.observeBabies(),
-            dayFlow,
-            settingsStore.settings,
-        ) { baby, babies, day, settings ->
-            Quad(baby, babies, day, settings)
-        },
-        saving,
-        error,
-    ) { quad, isSaving, err ->
-        Triple(quad, isSaving, err)
-    }.flatMapLatest { (quad, isSaving, err) ->
+        careLog.observeCurrentBaby(),
+        careLog.observeBabies(),
+        dayFlow,
+        settingsStore.settings,
+    ) { baby, babies, day, settings ->
+        Quad(baby, babies, day, settings)
+    }.flatMapLatest { quad ->
         val (baby, babies, day, settings) = quad
         if (baby == null) {
             flowOf(
@@ -161,8 +135,6 @@ class LogViewModel @Inject constructor(
                     babies = babies,
                     day = day,
                     settings = settings,
-                    saving = isSaving,
-                    error = err,
                 ),
             )
         } else {
@@ -170,25 +142,9 @@ class LogViewModel @Inject constructor(
                 careLog.observeDayRecords(baby.id, day, zone),
                 careLog.observeOpenSleep(baby.id),
             ) { records, openSleep ->
-                val entities = records.map {
-                    com.lezi.babylog.core.database.RecordEntity(
-                        id = it.id,
-                        clientUuid = it.clientUuid,
-                        babyId = it.babyId,
-                        type = it.type.key,
-                        timestamp = it.timestamp,
-                        endTimestamp = it.endTimestamp,
-                        note = it.note,
-                        createdByUserId = it.createdByUserId,
-                        payloadJson = it.payloadJson,
-                        schemaVersion = it.schemaVersion,
-                        updatedAt = it.updatedAt,
-                        deletedAt = it.deletedAt,
-                    )
-                }
-                val summary = aggregateDaily(entities)
                 val start = day.atStartOfDay(zone).toInstant().toEpochMilli()
                 val end = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
+                val summary = aggregateDaily(records, start, end)
                 val lanes = buildLanes(records, start, end)
                 LogUiState(
                     loading = false,
@@ -202,8 +158,6 @@ class LogViewModel @Inject constructor(
                     careLanes = lanes.care,
                     settings = settings,
                     openSleep = openSleep,
-                    saving = isSaving,
-                    error = err,
                 )
             }
         }
@@ -211,76 +165,6 @@ class LogViewModel @Inject constructor(
 
     fun setExternalDay(day: LocalDate) {
         dayFlow.value = day
-    }
-
-    fun retry() {
-        error.value = null
-    }
-
-    internal fun saveQuickRecord(draft: QuickRecordDraft) {
-        if (!saving.compareAndSet(expect = false, update = true)) return
-        viewModelScope.launch {
-            try {
-                error.value = null
-                val state = uiState.value
-                val babyId = state.baby?.id ?: error("无宝宝")
-                val command = draft.toSaveCommand()
-                val statefulSleep = command.type == RecordType.SLEEP &&
-                    draft.sleepAction in setOf(
-                        SleepDraftAction.SleepDown,
-                        SleepDraftAction.WakeUp,
-                    )
-                if (statefulSleep) {
-                    careLog.confirmSleep(
-                        babyId = babyId,
-                        expectedOpenSleepId = command.existingRecordId,
-                        timestamp = command.timestamp,
-                        endTimestamp = command.endTimestamp,
-                        note = command.note,
-                        payloadJson = command.payloadJson,
-                    )
-                } else if (command.existingRecordId != null) {
-                    careLog.updateRecord(
-                        id = command.existingRecordId,
-                        timestamp = command.timestamp,
-                        endTimestamp = command.endTimestamp,
-                        note = command.note,
-                        payloadJson = command.payloadJson,
-                    )
-                } else {
-                    careLog.addRecord(
-                        babyId,
-                        command.type,
-                        timestamp = command.timestamp,
-                        endTimestamp = command.endTimestamp,
-                        note = command.note,
-                        payloadJson = command.payloadJson,
-                    )
-                }
-                if (
-                    state.day == LocalDate.now(zone) &&
-                    command.type in setOf(
-                        RecordType.NURSING,
-                        RecordType.FORMULA,
-                        RecordType.PUMPED_FEED,
-                    )
-                ) {
-                    runCatching { nextFeed.scheduleAfterFeed(app) }
-                }
-                val message = when (draft.sleepAction) {
-                    SleepDraftAction.SleepDown -> "已开始睡眠"
-                    SleepDraftAction.WakeUp -> "已记录醒来"
-                    SleepDraftAction.Manual, null -> "已记录${command.type.presentation.label}"
-                }
-                _events.emit(LogEvent.Saved(message))
-            } catch (throwable: Throwable) {
-                val message = throwable.message ?: "保存失败"
-                error.value = message
-                _events.emit(LogEvent.Toast(message))
-            } finally {
-                saving.value = false
-            }
-        }
     }
 }
 
@@ -324,60 +208,45 @@ private fun buildLanes(records: List<Record>, dayStart: Long, dayEnd: Long): Lan
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LogRoute(
-    onOpenTimer: (note: String, amountMl: String) -> Unit,
-    onOpenEdit: (Long) -> Unit,
+    onOpenComposer: (RecordComposerRequest) -> Unit,
     onGoToday: () -> Unit,
     externalDay: LocalDate? = null,
     vm: LogViewModel = hiltViewModel(),
 ) {
     val state by vm.uiState.collectAsStateWithLifecycle()
-    val snackbar = remember { SnackbarHostState() }
     var showMore by remember { mutableStateOf(false) }
-    var pendingDraft by remember { mutableStateOf<QuickRecordDraft?>(null) }
     val today = LocalDate.now()
     val zone = ZoneId.systemDefault()
     val ext = LeziThemeExt.colors
     val journal = LeziThemeExt.isJournal
 
     fun openComposer(type: RecordType) {
-        vm.retry()
+        val babyId = state.baby?.id ?: return
         val openSleep = state.openSleep
         val wakingCurrentSleep = type == RecordType.SLEEP && openSleep != null
         val clickedAt = timestampOnDate(
             date = if (wakingCurrentSleep) today else state.day,
             zone = zone,
         )
-        pendingDraft = if (wakingCurrentSleep) {
-            QuickRecordDraft.wakeSleep(checkNotNull(openSleep), clickedAt)
-        } else {
-            val lastAmount = state.records
-                .firstOrNull { it.type == type }
-                ?.let { payloadInt(it.payloadJson, "amount_ml") }
-                ?.takeIf { it > 0 }
-            QuickRecordDraft.create(
+        val lastAmount = state.records
+            .firstOrNull { it.type == type }
+            ?.let { payloadInt(it.payloadJson, "amount_ml") }
+            ?.takeIf { it > 0 }
+        onOpenComposer(
+            RecordComposerRequest.New(
+                babyId = babyId,
                 type = type,
                 timestamp = clickedAt,
                 lastAmountMl = lastAmount,
                 historical = state.day != today,
-            )
-        }
+                openSleepId = openSleep?.id.takeIf { wakingCurrentSleep },
+            ),
+        )
     }
 
     LaunchedEffect(externalDay) {
         if (externalDay != null && externalDay != state.day) {
             vm.setExternalDay(externalDay)
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        vm.events.collect { ev ->
-            when (ev) {
-                is LogEvent.Saved -> {
-                    pendingDraft = null
-                    launch { snackbar.showSnackbar(ev.message) }
-                }
-                is LogEvent.Toast -> launch { snackbar.showSnackbar(ev.message) }
-            }
         }
     }
 
@@ -389,11 +258,10 @@ fun LogRoute(
     }
 
     PageScaffoldBackground {
-        Box(Modifier.fillMaxSize().testTag(UiTags.LOG_HOME)) {
-            Column(Modifier.fillMaxSize()) {
-                LazyColumn(
+        Column(Modifier.fillMaxSize().testTag(UiTags.LOG_HOME)) {
+            LazyColumn(
                     modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(bottom = 96.dp),
+                    contentPadding = PaddingValues(bottom = LeziSpacing.Md),
                     verticalArrangement = Arrangement.spacedBy(if (journal) 4.dp else LeziSpacing.SectionGap),
                 ) {
                     item {
@@ -510,16 +378,6 @@ fun LogRoute(
                                 modifier = Modifier.padding(horizontal = LeziSpacing.Page),
                             )
                         }
-                        state.error != null && state.records.isEmpty() -> item {
-                            StateContainer(
-                                kind = StateKind.Error,
-                                title = "出错了",
-                                message = state.error ?: "",
-                                actionLabel = "重试",
-                                onAction = vm::retry,
-                                modifier = Modifier.padding(horizontal = LeziSpacing.Page),
-                            )
-                        }
                         state.records.isEmpty() -> item {
                             StateContainer(
                                 kind = StateKind.Empty,
@@ -540,7 +398,9 @@ fun LogRoute(
                                 leading = {
                                     RecordTypeIcon(r.type)
                                 },
-                                onClick = { onOpenEdit(r.id) },
+                                onClick = {
+                                    onOpenComposer(RecordComposerRequest.Edit(r.id))
+                                },
                                 modifier = Modifier
                                     .padding(horizontal = LeziSpacing.Page)
                                     .semantics {
@@ -550,69 +410,29 @@ fun LogRoute(
                         }
                     }
 
-                }
             }
-
             OneHandQuickDock(
                 preferredHand = state.settings.preferredHand,
                 timerEnabled = state.settings.timerEnabled,
                 sleepRunning = state.openSleep != null,
-                saving = state.saving,
                 onNursing = { openComposer(RecordType.NURSING) },
                 onPee = { openComposer(RecordType.PEE) },
                 onSleep = { openComposer(RecordType.SLEEP) },
                 onFormula = { openComposer(RecordType.FORMULA) },
                 onMore = { showMore = true },
-                modifier = Modifier.align(Alignment.BottomCenter),
             )
-
-            SnackbarHost(snackbar, modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 92.dp))
         }
     }
 
     if (showMore) {
         ModalBottomSheet(
             onDismissRequest = { showMore = false },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false),
         ) {
             MoreSheet(
                 onPick = { type ->
                     showMore = false
                     openComposer(type)
-                },
-            )
-        }
-    }
-
-    pendingDraft?.let { draft ->
-        ModalBottomSheet(
-            onDismissRequest = {
-                if (!state.saving) pendingDraft = null
-            },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        ) {
-            QuickRecordSheet(
-                draft = draft,
-                amountStepMl = state.settings.amountStepMl,
-                timeStepMin = state.settings.timeStepMin,
-                saving = state.saving,
-                saveError = state.error,
-                canStartNursingTimer = draft.type == RecordType.NURSING &&
-                    state.settings.timerEnabled &&
-                    state.day == today,
-                onDraftChange = {
-                    vm.retry()
-                    pendingDraft = it
-                },
-                onDismiss = {
-                    if (!state.saving) pendingDraft = null
-                },
-                onConfirm = {
-                    vm.saveQuickRecord(it)
-                },
-                onStartNursingTimer = {
-                    pendingDraft = null
-                    onOpenTimer(draft.note, draft.nursingAmountMl)
                 },
             )
         }
@@ -650,7 +470,6 @@ private fun OneHandQuickDock(
     preferredHand: String,
     timerEnabled: Boolean,
     sleepRunning: Boolean,
-    saving: Boolean,
     onNursing: () -> Unit,
     onPee: () -> Unit,
     onSleep: () -> Unit,
@@ -693,15 +512,12 @@ private fun OneHandQuickDock(
                 }
                 val tint = recordType?.let { leziRecordColor(it.presentation.colorRole) }
                     ?: MaterialTheme.colorScheme.primary
-                val enabled = !saving ||
-                    action == OneHandQuickAction.Nursing ||
-                    action == OneHandQuickAction.More
                 Surface(
                     modifier = Modifier
                         .weight(1f)
                         .heightIn(min = 64.dp)
                         .testTag("one_hand_action_${action.name.lowercase()}")
-                        .clickable(enabled = enabled) {
+                        .clickable {
                             when (action) {
                                 OneHandQuickAction.Pee -> onPee()
                                 OneHandQuickAction.Sleep -> onSleep()
@@ -742,11 +558,7 @@ private fun OneHandQuickDock(
                         Text(
                             label,
                             style = LeziTypography.Meta,
-                            color = if (enabled) {
-                                MaterialTheme.colorScheme.onSurface
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
-                            },
+                            color = MaterialTheme.colorScheme.onSurface,
                             maxLines = 1,
                         )
                     }
@@ -773,6 +585,30 @@ private fun MoreSheet(onPick: (RecordType) -> Unit) {
         item {
             Text("添加记录", style = LeziTypography.Title)
             Spacer(Modifier.height(LeziSpacing.Sm))
+            Text(
+                "常用补充",
+                style = LeziTypography.Label,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(LeziSpacing.Xs))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                listOf(
+                    RecordType.POOP,
+                    RecordType.TEMPERATURE,
+                    RecordType.WEIGHT,
+                    RecordType.MEMO,
+                ).forEach { type ->
+                    MoreTypeCard(
+                        type = type,
+                        onClick = { onPick(type) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+            Spacer(Modifier.height(LeziSpacing.Md))
         }
         groups.forEach { (section, items) ->
             item {
@@ -789,44 +625,11 @@ private fun MoreSheet(onPick: (RecordType) -> Unit) {
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             rowItems.forEach { type ->
-                                val item = type.presentation
-                                val color = leziRecordColor(item.colorRole)
-                                LeziCard(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .heightIn(min = 64.dp),
+                                MoreTypeCard(
+                                    type = type,
                                     onClick = { onPick(type) },
-                                    contentPadding = PaddingValues(horizontal = 3.dp, vertical = 5.dp),
-                                ) {
-                                    Column(
-                                        Modifier
-                                            .fillMaxWidth()
-                                            .clearAndSetSemantics {
-                                                contentDescription =
-                                                    moreRecordContentDescription(type)
-                                            },
-                                        horizontalAlignment = Alignment.CenterHorizontally,
-                                    ) {
-                                        Box(
-                                            Modifier
-                                                .size(32.dp)
-                                                .clip(LeziShapes.JournalCard)
-                                                .background(color.copy(alpha = 0.14f)),
-                                            contentAlignment = Alignment.Center,
-                                        ) {
-                                            RecordTypeIcon(type, size = 18.dp, tint = color)
-                                        }
-                                        Spacer(Modifier.height(3.dp))
-                                        Text(
-                                            item.label,
-                                            style = LeziTypography.Label.copy(
-                                                fontSize = 14.sp,
-                                                lineHeight = 18.sp,
-                                            ),
-                                            maxLines = 1,
-                                        )
-                                    }
-                                }
+                                    modifier = Modifier.weight(1f),
+                                )
                             }
                             repeat(4 - rowItems.size) {
                                 Spacer(Modifier.weight(1f))
@@ -837,6 +640,46 @@ private fun MoreSheet(onPick: (RecordType) -> Unit) {
                     Spacer(Modifier.height(4.dp))
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun MoreTypeCard(
+    type: RecordType,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val item = type.presentation
+    val color = leziRecordColor(item.colorRole)
+    LeziCard(
+        modifier = modifier.heightIn(min = 64.dp),
+        onClick = onClick,
+        contentPadding = PaddingValues(horizontal = 3.dp, vertical = 5.dp),
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .clearAndSetSemantics {
+                    contentDescription = moreRecordContentDescription(type)
+                },
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(
+                Modifier
+                    .size(32.dp)
+                    .clip(LeziShapes.JournalCard)
+                    .background(color.copy(alpha = 0.14f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                RecordTypeIcon(type, size = 18.dp, tint = color)
+            }
+            Spacer(Modifier.height(3.dp))
+            Text(
+                item.label,
+                style = LeziTypography.Label.copy(fontSize = 14.sp, lineHeight = 18.sp),
+                maxLines = 1,
+            )
         }
     }
 }

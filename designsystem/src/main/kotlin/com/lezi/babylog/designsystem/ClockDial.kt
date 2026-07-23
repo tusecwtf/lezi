@@ -1,35 +1,59 @@
 package com.lezi.babylog.designsystem
 
+import android.content.res.Configuration
+import android.os.LocaleList
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.CalendarMonth
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TimePicker
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 /**
  * The single clock-editing surface used across Lezi.
  *
- * The dial only changes the local clock fields. The supplied date and zone are
- * preserved so callers cannot accidentally move a record to another day while
- * choosing a time.
+ * Time and date are edited together so every record surface shares one
+ * calendar-aware clock. The zone and preferred offset stay stable; callers
+ * still own business constraints such as "not in the future".
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -43,6 +67,8 @@ fun LeziClockDialDialog(
     val step = normalizedMinuteStep(minuteStep)
     val initialTick = snapClock(value.hour, value.minute, step)
     var clockError by remember(value) { mutableStateOf<String?>(null) }
+    var selectedDate by remember(value) { mutableStateOf(value.toLocalDate()) }
+    var showDatePicker by remember(value) { mutableStateOf(false) }
     val pickerState = rememberTimePickerState(
         initialHour = initialTick.hour,
         initialMinute = initialTick.minute,
@@ -61,6 +87,38 @@ fun LeziClockDialDialog(
         title = { Text(title) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Surface(
+                    onClick = { showDatePicker = true },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics {
+                            contentDescription =
+                                "选择日期，${formatClockDate(selectedDate)}"
+                        },
+                    shape = LeziShapes.Sm,
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Icon(Icons.Outlined.CalendarMonth, contentDescription = null)
+                        Column(Modifier.weight(1f)) {
+                            Text("日期", style = LeziTypography.Meta)
+                            Text(
+                                formatClockDate(selectedDate),
+                                style = LeziTypography.BodyStrong,
+                                maxLines = 1,
+                            )
+                        }
+                        Text(
+                            "日历",
+                            style = LeziTypography.Label,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
                 TimePicker(state = pickerState)
                 if (step > 1) {
                     Text("以 $step 分钟为步进，拖动时自动吸附到最近刻度")
@@ -73,7 +131,13 @@ fun LeziClockDialDialog(
         confirmButton = {
             TextButton(
                 onClick = {
-                    val merged = mergeClock(value, pickerState.hour, pickerState.minute, step)
+                    val merged = mergeDateAndClock(
+                        value = value,
+                        date = selectedDate,
+                        hour = pickerState.hour,
+                        minute = pickerState.minute,
+                        step = step,
+                    )
                     if (merged == null) {
                         clockError = "该时刻因夏令时切换不存在，请选择其他时刻"
                     } else {
@@ -91,6 +155,82 @@ fun LeziClockDialDialog(
             }
         },
     )
+
+    if (showDatePicker) {
+        val selectedUtc = selectedDate
+            .atStartOfDay(ZoneOffset.UTC)
+            .toInstant()
+            .toEpochMilli()
+        val dateState = rememberDatePickerState(
+            initialSelectedDateMillis = selectedUtc,
+        )
+        DatePickerDialog(
+            onDismissRequest = { showDatePicker = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        dateState.selectedDateMillis?.let { millis ->
+                            selectedDate = Instant.ofEpochMilli(millis)
+                                .atZone(ZoneOffset.UTC)
+                                .toLocalDate()
+                        }
+                        showDatePicker = false
+                    },
+                ) {
+                    Text("确定")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDatePicker = false }) {
+                    Text("取消")
+                }
+            },
+        ) {
+            val baseConfiguration = LocalConfiguration.current
+            val baseContext = LocalContext.current
+            val chineseConfiguration = remember(baseConfiguration) {
+                Configuration(baseConfiguration).apply {
+                    setLocales(LocaleList.forLanguageTags("zh-CN"))
+                }
+            }
+            val chineseContext = remember(baseContext, chineseConfiguration) {
+                baseContext.createConfigurationContext(chineseConfiguration)
+            }
+            CompositionLocalProvider(
+                LocalConfiguration provides chineseConfiguration,
+                LocalContext provides chineseContext,
+            ) {
+                DatePicker(
+                    state = dateState,
+                    title = {
+                        Text(
+                            text = "选择日期",
+                            modifier = Modifier.padding(horizontal = 24.dp),
+                            style = LeziTypography.BodyStrong,
+                        )
+                    },
+                    headline = {
+                        Text(
+                            text = dateState.selectedDateMillis?.let { millis ->
+                                formatClockDate(
+                                    Instant.ofEpochMilli(millis)
+                                        .atZone(ZoneOffset.UTC)
+                                        .toLocalDate(),
+                                )
+                            } ?: "请选择日期",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 24.dp),
+                            style = LeziTypography.TitleSm,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    },
+                    showModeToggle = false,
+                )
+            }
+        }
+    }
 }
 
 internal fun normalizedMinuteStep(step: Int): Int = if (step == 5) 5 else 1
@@ -111,15 +251,32 @@ internal fun mergeClock(
     hour: Int,
     minute: Int,
     step: Int,
+): ZonedDateTime? = mergeDateAndClock(
+    value = value,
+    date = value.toLocalDate(),
+    hour = hour,
+    minute = minute,
+    step = step,
+)
+
+internal fun mergeDateAndClock(
+    value: ZonedDateTime,
+    date: LocalDate,
+    hour: Int,
+    minute: Int,
+    step: Int,
 ): ZonedDateTime? {
     val snapped = snapClock(hour, minute, step)
     return resolveLeziLocalDateTime(
-        date = value.toLocalDate(),
+        date = date,
         time = LocalTime.of(snapped.hour, snapped.minute),
         zone = value.zone,
         preferredOffset = value.offset,
     )
 }
+
+private fun formatClockDate(date: LocalDate): String =
+    date.format(DateTimeFormatter.ofPattern("yyyy年M月d日 EEE", Locale.SIMPLIFIED_CHINESE))
 
 /**
  * Resolve a local wall-clock value without silently normalizing a DST gap.

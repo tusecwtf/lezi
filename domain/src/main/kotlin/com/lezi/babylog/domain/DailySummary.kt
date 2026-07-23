@@ -1,6 +1,6 @@
 package com.lezi.babylog.domain
 
-import com.lezi.babylog.core.database.RecordEntity
+import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
 
 data class DailySummary(
@@ -14,8 +14,22 @@ data class DailySummary(
     val feedMl: Int = 0,
 )
 
-/** Pure function — unit-test target. */
-fun aggregateDaily(records: List<RecordEntity>): DailySummary {
+/**
+ * Aggregate records inside a half-open time window.
+ *
+ * Sleep intervals are clipped to the requested window. An open interval ends
+ * at [now], which keeps today's summary live without assigning a cross-midnight
+ * sleep wholly to its start date.
+ */
+fun aggregateDaily(
+    records: List<Record>,
+    windowStartInclusive: Long = Long.MIN_VALUE,
+    windowEndExclusive: Long = Long.MAX_VALUE,
+    now: Long = System.currentTimeMillis(),
+): DailySummary {
+    require(windowStartInclusive < windowEndExclusive) {
+        "windowStartInclusive must be before windowEndExclusive"
+    }
     var sleepMin = 0L
     var pee = 0
     var poop = 0
@@ -25,11 +39,19 @@ fun aggregateDaily(records: List<RecordEntity>): DailySummary {
     var feed = 0
     for (r in records) {
         if (r.deletedAt != null) continue
-        when (RecordType.fromKey(r.type)) {
+        if (
+            r.type != RecordType.SLEEP &&
+            (r.timestamp < windowStartInclusive || r.timestamp >= windowEndExclusive)
+        ) {
+            continue
+        }
+        when (r.type) {
             RecordType.SLEEP -> {
-                val end = r.endTimestamp
-                if (end != null && end >= r.timestamp) {
-                    sleepMin += (end - r.timestamp) / 60_000L
+                val intervalEnd = r.endTimestamp ?: now
+                val clippedStart = maxOf(r.timestamp, windowStartInclusive)
+                val clippedEnd = minOf(intervalEnd, windowEndExclusive)
+                if (clippedEnd > clippedStart) {
+                    sleepMin += (clippedEnd - clippedStart) / 60_000L
                 }
             }
             RecordType.PEE -> pee += 1

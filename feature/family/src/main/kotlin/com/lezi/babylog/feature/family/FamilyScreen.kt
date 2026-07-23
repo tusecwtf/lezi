@@ -44,8 +44,6 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
-import com.lezi.babylog.core.database.FamilyDao
-import com.lezi.babylog.core.database.LocalUserDao
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.core.ui.BabyAvatar
@@ -94,8 +92,6 @@ data class FamilyUi(
 @HiltViewModel
 class FamilyViewModel @Inject constructor(
     private val sync: SyncPort,
-    private val localUserDao: LocalUserDao,
-    private val familyDao: FamilyDao,
     private val careLog: CareLog,
     private val avatarFileStore: BabyAvatarFileStore,
 ) : ViewModel() {
@@ -107,15 +103,14 @@ class FamilyViewModel @Inject constructor(
         careLog.observeCurrentBaby(),
         careLog.observeBabies(),
     ) { st, hasBaby, current, babies ->
-        val user = localUserDao.get()
-        val fam = familyDao.listAll().firstOrNull()
+        val identity = careLog.localFamilyIdentity()
         FamilyUi(
-            deviceId = user?.deviceId ?: "—",
-            displayName = user?.displayName ?: "我（本机）",
+            deviceId = identity.deviceId,
+            displayName = identity.displayName,
             status = st,
             enabled = sync.isEnabled(),
             hasLocalBaby = hasBaby,
-            familyId = fam?.id?.toString() ?: "1",
+            familyId = identity.familyId.toString(),
             current = current,
             babies = babies,
         )
@@ -197,7 +192,7 @@ class FamilyViewModel @Inject constructor(
                     if (error is DuplicateBabyNicknameException) {
                         error.message
                     } else {
-                        error.message ?: "保存失败"
+                        "保存失败，请重试"
                     }
                 }
                 currentCoroutineContext().ensureActive()
@@ -246,7 +241,7 @@ class FamilyViewModel @Inject constructor(
                 result.fold(
                     onSuccess = { "共享码 ${it.code}（24 小时内有效）" },
                     onFailure = {
-                        if (it is SyncNotEnabledException) "家庭同步将在后续版本开放" else (it.message ?: "失败")
+                        familySyncError(it, fallback = "生成共享码失败，请稍后重试")
                     },
                 ),
             )
@@ -268,7 +263,7 @@ class FamilyViewModel @Inject constructor(
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (error: Throwable) {
-                    onMessage(error.message ?: "清空本机数据失败")
+                    onMessage("清空本机数据失败，请重试")
                     return@launch
                 }
             }
@@ -280,7 +275,7 @@ class FamilyViewModel @Inject constructor(
                         "已加入家庭 ${it.id}"
                     },
                     onFailure = {
-                        if (it is SyncNotEnabledException) "家庭同步将在后续版本开放" else (it.message ?: "加入失败")
+                        familySyncError(it, fallback = "加入家庭失败，请稍后重试")
                     },
                 ),
             )
@@ -291,7 +286,12 @@ class FamilyViewModel @Inject constructor(
         viewModelScope.launch {
             val id = ui.value.familyId
             val result = sync.leave(id)
-            onMessage(result.fold({ "已离开家庭" }, { it.message ?: "失败" }))
+            onMessage(
+                result.fold(
+                    onSuccess = { "已离开家庭" },
+                    onFailure = { familySyncError(it, fallback = "离开家庭失败，请稍后重试") },
+                ),
+            )
         }
     }
 
@@ -300,8 +300,32 @@ class FamilyViewModel @Inject constructor(
             val id = ui.value.familyId
             sync.push(id)
             val r = sync.pull(id)
-            onMessage(r.fold({ "已同步" }, { it.message ?: "同步失败" }))
+            onMessage(
+                r.fold(
+                    onSuccess = { "已同步" },
+                    onFailure = { familySyncError(it, fallback = "同步失败，请稍后重试") },
+                ),
+            )
         }
+    }
+}
+
+internal fun familySyncError(error: Throwable, fallback: String): String {
+    val message = error.message.orEmpty()
+    val technicalNetworkDetail = listOf(
+        "http://",
+        "https://",
+        "failed to connect",
+        "connection refused",
+        "java.",
+        "exception",
+    ).any { marker -> message.contains(marker, ignoreCase = true) } ||
+        Regex("""/?\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?""").containsMatchIn(message)
+    return when {
+        error is SyncNotEnabledException -> "家庭同步将在后续版本开放"
+        technicalNetworkDetail -> "家庭同步服务暂未连接，请稍后重试"
+        message.any { it.code in 0x4E00..0x9FFF } -> message
+        else -> fallback
     }
 }
 

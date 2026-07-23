@@ -100,8 +100,8 @@ internal fun AppHeaderBar(
     onSearch: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val background = if (dark) LeziColors.JournalDarkAccent else LeziColors.JournalAccent
-    val content = Color(0xFF271015)
+    val background = if (dark) MaterialTheme.colorScheme.surface else LeziColors.JournalAccent
+    val content = if (dark) MaterialTheme.colorScheme.onSurface else Color(0xFF271015)
     Row(
         modifier = modifier
             .fillMaxWidth()

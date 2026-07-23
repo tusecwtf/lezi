@@ -84,6 +84,12 @@ data class CalendarEvent(
     val remindAt: Long?,
 )
 
+data class LocalFamilyIdentity(
+    val deviceId: String,
+    val displayName: String,
+    val familyId: Long,
+)
+
 @Singleton
 class CareLog @Inject constructor(
     private val babyDao: BabyDao,
@@ -97,7 +103,12 @@ class CareLog @Inject constructor(
     private val syncPort: SyncPort,
     private val transactionRunner: DatabaseTransactionRunner,
 ) {
-    private val sleepConfirmationMutex = Mutex()
+    /**
+     * Serializes every local mutation that can change the active-sleep row.
+     * Room transactions provide atomic writes; this lock also makes the
+     * read-check-write sequence deterministic inside this process.
+     */
+    private val sleepMutationMutex = Mutex()
 
     fun observeHasBaby(): Flow<Boolean> =
         babyDao.observeAll().map { it.isNotEmpty() }
@@ -109,11 +120,7 @@ class CareLog @Inject constructor(
         combine(babyDao.observeAll(), settings.currentBabyId) { babies, storedId ->
             pickCurrent(babies, storedId)
         }.map { entity ->
-            entity?.let {
-                // Suspend heal can't run in map; pure rename check only for display.
-                // Actual DB heal happens in getCurrentBaby / ensureCurrentBabyHealed.
-                it.toModel()
-            }
+            entity?.toModel()
         }
 
     suspend fun createBaby(input: CreateBabyInput): Long = addBaby(input)
@@ -184,11 +191,21 @@ class CareLog @Inject constructor(
         if (stored != entity.id) {
             settings.setCurrentBabyId(entity.id)
         }
-        val healed = healLegacyNickname(entity)
-        return healed.toModel()
+        return entity.toModel()
     }
 
     suspend fun listBabies(): List<Baby> = babyDao.listAll().map { it.toModel() }
+
+    /** Read-only family identity seam for feature modules; never creates rows. */
+    suspend fun localFamilyIdentity(): LocalFamilyIdentity {
+        val user = localUserDao.get()
+        val family = familyDao.listAll().firstOrNull()
+        return LocalFamilyIdentity(
+            deviceId = user?.deviceId ?: "—",
+            displayName = user?.displayName ?: "我（本机）",
+            familyId = family?.id ?: 1L,
+        )
+    }
 
     suspend fun setCurrentBaby(babyId: Long) {
         val baby = babyDao.get(babyId) ?: return
@@ -196,8 +213,8 @@ class CareLog @Inject constructor(
     }
 
     /**
-     * Observe records whose start timestamp falls in the half-open local-date range
-     * [startDayInclusive, endDayExclusive).
+     * Observe records inside the half-open local-date range. Sleep records that
+     * start earlier are also included when their interval overlaps the range.
      */
     fun observeRecords(
         babyId: Long,
@@ -270,10 +287,12 @@ class CareLog @Inject constructor(
         babyId: Long,
         day: LocalDate,
         zone: ZoneId = ZoneId.systemDefault(),
+        now: Long = System.currentTimeMillis(),
     ): DailySummary {
         val start = day.atStartOfDay(zone).toInstant().toEpochMilli()
         val end = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-        return aggregateDaily(recordDao.listDay(babyId, start, end))
+        val records = recordDao.listDay(babyId, start, end).map { it.toModel() }
+        return aggregateDaily(records, start, end, now)
     }
 
     suspend fun dayTimeBar(
@@ -315,6 +334,7 @@ class CareLog @Inject constructor(
         note: String? = null,
         payloadJson: String = "{}",
     ): Long {
+        validateSleepInterval(type, timestamp, endTimestamp)
         val userId = ensureLocalUser(System.currentTimeMillis())
         val now = System.currentTimeMillis()
         val clientUuid = newClientUuid()
@@ -329,8 +349,19 @@ class CareLog @Inject constructor(
             payloadJson = payloadJson,
             updatedAt = now,
         )
-        return transactionRunner.run {
-            insertRecordAndOutbox(record)
+        return if (type == RecordType.SLEEP && endTimestamp == null) {
+            sleepMutationMutex.withLock {
+                transactionRunner.run {
+                    if (recordDao.findOpenSleep(babyId) != null) {
+                        throw SleepStateChangedException()
+                    }
+                    insertRecordAndOutbox(record)
+                }
+            }
+        } else {
+            transactionRunner.run {
+                insertRecordAndOutbox(record)
+            }
         }
     }
 
@@ -342,37 +373,50 @@ class CareLog @Inject constructor(
         payloadJson: String,
     ) {
         val now = System.currentTimeMillis()
-        transactionRunner.run {
-            val existing = recordDao.get(id) ?: return@run
-            updateRecordAndOutbox(
-                existing.copy(
-                    timestamp = timestamp,
-                    endTimestamp = endTimestamp,
-                    note = note,
-                    payloadJson = payloadJson,
-                    updatedAt = now,
-                ),
-            )
+        sleepMutationMutex.withLock {
+            transactionRunner.run {
+                val existing = recordDao.get(id) ?: return@run
+                val type = RecordType.fromKey(existing.type)
+                if (
+                    type == RecordType.SLEEP &&
+                    existing.endTimestamp != null &&
+                    endTimestamp == null
+                ) {
+                    throw IllegalArgumentException("已完成的睡眠不可改为进行中")
+                }
+                validateSleepInterval(type, timestamp, endTimestamp)
+                updateRecordAndOutbox(
+                    existing.copy(
+                        timestamp = timestamp,
+                        endTimestamp = endTimestamp,
+                        note = note,
+                        payloadJson = payloadJson,
+                        updatedAt = now,
+                    ),
+                )
+            }
         }
     }
 
     suspend fun deleteRecord(id: Long) {
         val now = System.currentTimeMillis()
-        transactionRunner.run {
-            val existing = recordDao.get(id)
-            recordDao.softDelete(id, now)
-            if (existing != null) {
-                enqueueOutboxRecord(
-                    existing.clientUuid,
-                    existing.babyId,
-                    existing.type,
-                    existing.timestamp,
-                    existing.endTimestamp,
-                    existing.note,
-                    existing.payloadJson,
-                    now,
-                    now,
-                )
+        sleepMutationMutex.withLock {
+            transactionRunner.run {
+                val existing = recordDao.get(id)
+                recordDao.softDelete(id, now)
+                if (existing != null) {
+                    enqueueOutboxRecord(
+                        existing.clientUuid,
+                        existing.babyId,
+                        existing.type,
+                        existing.timestamp,
+                        existing.endTimestamp,
+                        existing.note,
+                        existing.payloadJson,
+                        now,
+                        now,
+                    )
+                }
             }
         }
     }
@@ -387,6 +431,9 @@ class CareLog @Inject constructor(
         startedAt: Long,
         endedAt: Long,
     ): Long {
+        require(order in NURSING_ORDER_ALLOWLIST) {
+            "不支持的哺乳顺序"
+        }
         val amountPart = amountMl?.let { ""","amount_ml":$it""" } ?: ""
         val payload =
             """{"left_min":$leftMin,"right_min":$rightMin,"order":"$order"$amountPart}"""
@@ -413,7 +460,8 @@ class CareLog @Inject constructor(
         endTimestamp: Long?,
         note: String?,
         payloadJson: String,
-    ): Long = sleepConfirmationMutex.withLock {
+    ): Long = sleepMutationMutex.withLock {
+        validateSleepInterval(RecordType.SLEEP, timestamp, endTimestamp)
         transactionRunner.run {
             val currentOpen = recordDao.findOpenSleep(babyId)
             if (expectedOpenSleepId == null) {
@@ -450,48 +498,75 @@ class CareLog @Inject constructor(
         }
     }
 
-    suspend fun sleepDown(babyId: Long, at: Long = System.currentTimeMillis()): Long {
-        val open = recordDao.findOpenSleep(babyId)
-        if (open != null) {
-            val flagged = withAnomaly(open.payloadJson)
-            if (flagged != open.payloadJson) {
-                recordDao.update(open.copy(payloadJson = flagged, updatedAt = at))
+    suspend fun sleepDown(
+        babyId: Long,
+        at: Long = System.currentTimeMillis(),
+    ): Long = sleepMutationMutex.withLock {
+        transactionRunner.run {
+            val open = recordDao.findOpenSleep(babyId)
+            if (open != null) {
+                val flagged = withAnomaly(open.payloadJson)
+                if (flagged != open.payloadJson) {
+                    updateRecordAndOutbox(
+                        open.copy(
+                            payloadJson = flagged,
+                            updatedAt = System.currentTimeMillis(),
+                        ),
+                    )
+                }
+                return@run open.id
             }
-            return addRecord(
-                babyId = babyId,
-                type = RecordType.SLEEP,
-                timestamp = at,
-                payloadJson = """{"anomaly_flag":true}""",
-            )
-        }
-        return addRecord(
-            babyId = babyId,
-            type = RecordType.SLEEP,
-            timestamp = at,
-            payloadJson = "{}",
-        )
-    }
 
-    suspend fun sleepUp(babyId: Long, at: Long = System.currentTimeMillis()): Long {
-        val open = recordDao.findOpenSleep(babyId)
-        if (open != null) {
-            val end = at.coerceAtLeast(open.timestamp)
-            recordDao.update(
-                open.copy(
-                    endTimestamp = end,
-                    updatedAt = System.currentTimeMillis(),
+            val now = System.currentTimeMillis()
+            insertRecordAndOutbox(
+                RecordEntity(
+                    clientUuid = newClientUuid(),
+                    babyId = babyId,
+                    type = RecordType.SLEEP.key,
+                    timestamp = at,
+                    endTimestamp = null,
+                    note = null,
+                    createdByUserId = ensureLocalUser(now),
+                    payloadJson = "{}",
+                    updatedAt = now,
                 ),
             )
-            return open.id
         }
-        val start = at - 60_000L
-        return addRecord(
-            babyId = babyId,
-            type = RecordType.SLEEP,
-            timestamp = start,
-            endTimestamp = at,
-            payloadJson = """{"anomaly_flag":true}""",
-        )
+    }
+
+    suspend fun sleepUp(
+        babyId: Long,
+        at: Long = System.currentTimeMillis(),
+    ): Long = sleepMutationMutex.withLock {
+        transactionRunner.run {
+            val open = recordDao.findOpenSleep(babyId)
+            if (open != null) {
+                validateSleepInterval(RecordType.SLEEP, open.timestamp, at)
+                updateRecordAndOutbox(
+                    open.copy(
+                        endTimestamp = at,
+                        updatedAt = System.currentTimeMillis(),
+                    ),
+                )
+                return@run open.id
+            }
+
+            val now = System.currentTimeMillis()
+            val start = at - 60_000L
+            insertRecordAndOutbox(
+                RecordEntity(
+                    clientUuid = newClientUuid(),
+                    babyId = babyId,
+                    type = RecordType.SLEEP.key,
+                    timestamp = start,
+                    endTimestamp = at,
+                    note = null,
+                    createdByUserId = ensureLocalUser(now),
+                    payloadJson = """{"anomaly_flag":true}""",
+                    updatedAt = now,
+                ),
+            )
+        }
     }
 
     suspend fun getRecord(id: Long): Record? = recordDao.get(id)?.toModel()
@@ -500,25 +575,31 @@ class CareLog @Inject constructor(
         babyId: Long,
         weekStart: LocalDate,
         zone: ZoneId = ZoneId.systemDefault(),
+        now: Long = System.currentTimeMillis(),
     ): WeekSummary {
         val start = weekStart.atStartOfDay(zone).toInstant().toEpochMilli()
         val end = weekStart.plusDays(7).atStartOfDay(zone).toInstant().toEpochMilli()
-        val rows = recordDao.listRange(babyId, start, end)
-        return aggregateWeek(rows, weekStart, zone)
+        val rows = recordDao.listRange(babyId, start, end).map { it.toModel() }
+        return aggregateWeek(rows, weekStart, zone, now)
     }
 
-    suspend fun search(babyId: Long, query: String): List<com.lezi.babylog.core.model.Record> {
-        val q = query.trim()
-        if (q.isEmpty()) return emptyList()
-        val needle = q.lowercase()
-        return recordDao.listForBaby(babyId).map { it.toModel() }.filter { r ->
-            val noteHit = r.note?.lowercase()?.contains(needle) == true
-            val body = Regex(""""body"\s*:\s*"([^"]*)"""").find(r.payloadJson)?.groupValues?.getOrNull(1)
-            val bodyHit = body?.lowercase()?.contains(needle) == true
-            val payloadHit = r.payloadJson.lowercase().contains(needle) &&
-                (r.type == RecordType.MEMO || r.type == RecordType.DIARY || r.type == RecordType.MEDICINE)
-            noteHit || bodyHit || payloadHit
-        }
+    suspend fun search(babyId: Long, query: String): List<Record> {
+        val normalizedQuery = query.trim().lowercase()
+        if (normalizedQuery.isEmpty()) return emptyList()
+        val matchingTypeKeys = RecordType.entries
+            .filter { type ->
+                type.candidateSearchTerms().any { it.lowercase().contains(normalizedQuery) }
+            }
+            .map { it.key }
+            .ifEmpty { listOf(NO_MATCHING_RECORD_TYPE) }
+        return recordDao.searchCandidates(
+            babyId = babyId,
+            escapedPattern = normalizedQuery.payloadSearchNeedle().toSqlLikePattern(),
+            matchingTypeKeys = matchingTypeKeys,
+        ).asSequence()
+            .map { it.toModel() }
+            .filter { it.matchesVisibleSearchText(normalizedQuery) }
+            .toList()
     }
 
     suspend fun recentCareSummary(babyId: Long, zone: ZoneId = ZoneId.systemDefault()): WidgetSummaryDto {
@@ -536,7 +617,7 @@ class CareLog @Inject constructor(
         )
     }
 
-    suspend fun listMeasurements(babyId: Long, type: RecordType): List<com.lezi.babylog.core.model.Record> =
+    suspend fun listMeasurements(babyId: Long, type: RecordType): List<Record> =
         recordDao.listByType(babyId, type.key).map { it.toModel() }
 
     suspend fun updateBabyDueDate(babyId: Long, dueDateEpochDay: Long?) {
@@ -708,12 +789,20 @@ class CareLog @Inject constructor(
      * soft-delete the rest. Call from app start.
      */
     suspend fun dedupeBabiesByNickname() {
-        val babies = babyDao.listAll()
-        if (babies.size <= 1) return
         val currentId = settings.currentBabyId.first()
+        val replacementId = transactionRunner.run {
+            dedupeBabiesByNicknameInTransaction(currentId)
+        }
+        replacementId?.let { settings.setCurrentBabyId(it) }
+    }
+
+    private suspend fun dedupeBabiesByNicknameInTransaction(currentId: Long?): Long? {
+        val babies = babyDao.listAll()
+        if (babies.size <= 1) return null
         val groups = babies.groupBy { it.nickname.trim() }.filter { it.value.size > 1 }
-        if (groups.isEmpty()) return
+        if (groups.isEmpty()) return null
         val now = System.currentTimeMillis()
+        var replacementId: Long? = null
         for ((_, list) in groups) {
             val keeper = list.firstOrNull { it.id == currentId }
                 ?: list.maxByOrNull { recordDao.listForBaby(it.id).size }
@@ -734,16 +823,35 @@ class CareLog @Inject constructor(
                 babyDao.update(extra.copy(deletedAt = now, updatedAt = now))
             }
             if (currentId == null || list.any { it.id == currentId && it.id != keeper.id }) {
-                settings.setCurrentBabyId(keeper.id)
+                replacementId = replacementId ?: keeper.id
             }
         }
+        return replacementId
     }
 
     /** Call from app start / root to rename legacy demo nicknames and collapse duplicates. */
     suspend fun ensureCurrentBabyHealed() {
-        babyDao.listAll().forEach { healLegacyNickname(it) }
-        dedupeBabiesByNickname()
+        val currentId = settings.currentBabyId.first()
+        val replacementId = transactionRunner.run {
+            babyDao.listAll().forEach { healLegacyNickname(it) }
+            dedupeBabiesByNicknameInTransaction(currentId)
+        }
+        replacementId?.let { settings.setCurrentBabyId(it) }
         getCurrentBaby()
+    }
+}
+
+private val NURSING_ORDER_ALLOWLIST = setOf("L", "R", "LR", "RL")
+
+private fun validateSleepInterval(
+    type: RecordType?,
+    timestamp: Long,
+    endTimestamp: Long?,
+) {
+    if (type == RecordType.SLEEP && endTimestamp != null) {
+        require(endTimestamp > timestamp) {
+            "睡眠结束时间必须晚于开始时间"
+        }
     }
 }
 

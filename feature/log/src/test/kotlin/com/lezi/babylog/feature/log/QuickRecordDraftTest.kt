@@ -172,6 +172,82 @@ class QuickRecordDraftTest {
     }
 
     @Test
+    fun editingRecordRoundTripsUnknownPayloadAndOriginalFields() {
+        val source = Record(
+            id = 88L,
+            clientUuid = "formula-88",
+            babyId = 7L,
+            type = RecordType.FORMULA,
+            timestamp = tappedAt,
+            endTimestamp = null,
+            note = "原备注",
+            createdByUserId = 1L,
+            payloadJson =
+                """{"amount_ml":120,"photos":["a.jpg"],"anomaly_flag":true,"future":{"v":2}}""",
+            updatedAt = tappedAt,
+        )
+
+        val draft = QuickRecordDraft.fromRecord(source).copy(amountMl = 135)
+        val command = draft.toSaveCommand()
+
+        assertTrue(draft.isEditing)
+        assertEquals("保存修改", draft.confirmLabel())
+        assertEquals(88L, command.existingRecordId)
+        assertTrue(command.payloadJson.contains("\"amount_ml\":135"))
+        assertTrue(command.payloadJson.contains("\"photos\":[\"a.jpg\"]"))
+        assertTrue(command.payloadJson.contains("\"anomaly_flag\":true"))
+        assertTrue(command.payloadJson.contains("\"future\":{\"v\":2}"))
+    }
+
+    @Test
+    fun editingCompletedAndOpenSleepKeepsTheirState() {
+        fun sleep(end: Long?) = Record(
+            id = if (end == null) 91L else 92L,
+            clientUuid = "sleep-${end ?: "open"}",
+            babyId = 7L,
+            type = RecordType.SLEEP,
+            timestamp = tappedAt,
+            endTimestamp = end,
+            note = null,
+            createdByUserId = 1L,
+            payloadJson = """{"is_nap":false,"photos":["sleep.jpg"]}""",
+            updatedAt = tappedAt,
+        )
+
+        val openDraft = QuickRecordDraft.fromRecord(sleep(end = null))
+        val completeDraft = QuickRecordDraft.fromRecord(sleep(end = tappedAt + 20 * 60_000L))
+
+        assertEquals(SleepDraftAction.SleepDown, openDraft.sleepAction)
+        assertNull(openDraft.endTimestamp)
+        assertTrue(openDraft.isEditing)
+        assertEquals(SleepDraftAction.Manual, completeDraft.sleepAction)
+        assertEquals(tappedAt + 20 * 60_000L, completeDraft.endTimestamp)
+        assertTrue(completeDraft.toSaveCommand().payloadJson.contains("\"photos\":[\"sleep.jpg\"]"))
+    }
+
+    @Test
+    fun wakeRejectsZeroLengthInterval() {
+        val open = Record(
+            id = 42L,
+            clientUuid = "sleep-42",
+            babyId = 7L,
+            type = RecordType.SLEEP,
+            timestamp = tappedAt,
+            endTimestamp = null,
+            note = null,
+            createdByUserId = 1L,
+            payloadJson = "{}",
+            updatedAt = tappedAt,
+        )
+
+        assertEquals(
+            "醒来时刻必须晚于睡下时刻",
+            QuickRecordDraft.wakeSleep(open, clickedAt = tappedAt)
+                .validationError(nowMillis = tappedAt + 60_000L),
+        )
+    }
+
+    @Test
     fun requiredPurposeInformationBlocksEmptyConfirmation() {
         assertEquals(
             "请填写药品名称",

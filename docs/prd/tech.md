@@ -12,14 +12,14 @@
 | 架构 | 多模块 + ViewModel + StateFlow | |
 | DB | Room | 唯一真相源（V1） |
 | 偏好 | DataStore | SettingsLocal |
-| 异步 | Coroutines + Flow；WorkManager（V2 同步） | |
+| 异步 | Coroutines + Flow | 当前没有 WorkManager 后台同步任务 |
 | DI | Hilt | |
 | 导航 | Navigation Compose | |
 | 图表 | Canvas 时间条 + 轻量图表库（如 Vico） | |
 | 通知 | NotificationCompat + 精确闹钟策略 | 下次喂奶 |
 | 计时 | 前台服务 + 状态持久化 | 关 App 仍跑 |
 | Widget | Glance（V1.5） | |
-| 同步 | `SyncPort` 接口；V1 空实现 | 见 data-model |
+| 同步 | `SyncPort` + `RealSyncPort` 原型 | 当前 DI 使用 RealSync；仍是未通过 V2 安全验收的开发态实现 |
 | IAP / 广告 | **不引入** | |
 | 测试 | JUnit + 聚合纯函数单测 + 关键 Compose 测试 | |
 
@@ -29,7 +29,9 @@
 |----|-----|
 | applicationId | `com.lezi.babylog` |
 | minSdk | 26 |
-| targetSdk | 34+（随政策） |
+| compileSdk | 35 |
+| targetSdk | 35 |
+| versionName | `0.2.0-v2`（版本标签不代表 V2 同步已验收） |
 | 应用名 | 乐记 |
 
 ---
@@ -45,7 +47,7 @@
 :core:ui
 :designsystem
 :domain
-:sync                 # SyncPort + NoOpSync / 日后 RealSync
+:sync                 # SyncPort + NoOpSync + 当前 RealSync 开发原型
 :feature:onboarding
 :feature:log          # 记录首页、编辑、图标网格
 :feature:timer
@@ -58,7 +60,8 @@
 :feature:widget       # V1.5
 ```
 
-依赖方向：`app → feature → domain → core`；feature 互不依赖。  
+目标依赖方向：`app → feature → domain → core`；feature 互不依赖。当前 `domain → sync`
+是 RealSync 原型遗留的 V2 架构问题，已在源码审查中登记并延期到 V2 hardening。
 计时状态落 `core`/`domain`，避免 log ↔ timer 循环依赖。
 
 ---
@@ -69,8 +72,12 @@
 UI 事件
   → domain UseCase
   → Room（立刻成功 → UI 刷新）
-  →（V2）Outbox + SyncPort.push
+  → 当前部分写路径 enqueue Outbox
+  → 用户在家庭页触发 RealSyncPort push / pull
 ```
+
+当前没有 WorkManager 自动同步。RealSync 默认注入、进程内默认开启，连接开发机
+`http://10.0.2.2:8765`；这条链路仅供开发验证，不是可发布的安全同步能力。
 
 计时器：
 
@@ -91,7 +98,7 @@ UI 事件
 | SCHEDULE_EXACT_ALARM / 等效 | 精确提醒 | V1（按系统策略降级） |
 | RECEIVE_BOOT_COMPLETED | 重启恢复闹钟/计时 | V1 |
 | 相册 / Photo Picker | 日记照片 | V1 |
-| INTERNET | 仅 V2 同步 | V2 再声明也可用 runtime 判断 |
+| INTERNET | RealSync 开发原型 | 当前 Manifest 已声明；V2 hardening 后再决定发布策略 |
 | 麦克风 / 定位 | **不申请** | |
 
 拒绝通知：仍可记账，无提醒。
@@ -103,9 +110,15 @@ UI 事件
 | 模块 | V1 | V1.5 | V2 |
 |------|----|------|-----|
 | onboarding / log / timer / settings | ✓ | | |
-| family UI + NoOpSync | ✓ | | |
+| family UI；NoOpSync 实现保留（非默认 DI） | ✓ | | |
 | summary / growth / search / export TXT / widget | | ✓ | |
-| RealSync / PDF / custom / food types / calendar | | | ✓ |
+| PDF / custom / food types / calendar | | | ✓ |
+| RealSync | | 开发原型已存在 | V2 完成安全、鉴权、持久化与后台策略验收 |
+
+> 2026-07-24 源码审查将 V2-1～V2-9（认证与 ACL、明文 HTTP、默认开启、
+> 清库/outbox 完整性、family id 与 cursor 持久化、异常写路径、模块方向、
+> 双 outbox 路径及后台同步测试）明确延期。本期只同步文档事实，不将现有
+> RealSync 原型标记为“已修复”或“可发布”。
 
 ---
 
@@ -147,7 +160,7 @@ UI 事件
 
 ```text
 app/build/outputs/apk/debug/app-debug.apk
-app/build/outputs/apk/release/app-release.apk   # 本地 keystore，密钥不入库
+app/build/outputs/apk/release/app-release-unsigned.apk
 README.md  # ./gradlew assembleDebug
 docs/prd/  # 本产品规格
 ```

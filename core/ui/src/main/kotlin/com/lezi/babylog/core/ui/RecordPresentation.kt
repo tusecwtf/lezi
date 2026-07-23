@@ -406,7 +406,7 @@ private fun Record.payloadBoolean(key: String): Boolean =
         ?: false
 
 private fun formatDuration(minutes: Long): String {
-    if (minutes <= 0) return "0分"
+    if (minutes <= 0) return "不足1分"
     val hours = minutes / 60
     val remaining = minutes % 60
     return when {

@@ -33,8 +33,6 @@ android {
 dependencies {
 
     implementation(project(":core:model"))
-    implementation(project(":core:common"))
-    implementation(project(":core:ui"))
     implementation(project(":designsystem"))
     implementation(project(":domain"))
     implementation(project(":core:datastore"))

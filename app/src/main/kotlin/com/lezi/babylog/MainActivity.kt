@@ -4,6 +4,8 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -30,12 +32,15 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -49,15 +54,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.navigation.NavGraph.Companion.findStartDestination
-import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
-import androidx.navigation.navArgument
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.Baby
-import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.ui.UiTags
 import com.lezi.babylog.designsystem.LeziColors
 import com.lezi.babylog.designsystem.LeziTheme
@@ -67,7 +69,8 @@ import com.lezi.babylog.feature.export.ExportRoute
 import com.lezi.babylog.feature.family.FamilyRoute
 import com.lezi.babylog.feature.growth.GrowthRoute
 import com.lezi.babylog.feature.log.LogRoute
-import com.lezi.babylog.feature.log.RecordEditRoute
+import com.lezi.babylog.feature.log.RecordComposerHost
+import com.lezi.babylog.feature.log.RecordComposerRequest
 import com.lezi.babylog.feature.onboarding.OnboardingRoute
 import com.lezi.babylog.feature.search.SearchRoute
 import com.lezi.babylog.feature.settings.CalendarRoute
@@ -303,13 +306,20 @@ fun LeziRoot(
     val backStack by nav.currentBackStackEntryAsState()
     val current = backStack?.destination?.route
     val today = ui.today
+    val scope = rememberCoroutineScope()
+    val snackbar = remember { SnackbarHostState() }
+    var composerRequest by remember { mutableStateOf<RecordComposerRequest?>(null) }
     var showHeaderCalendar by remember { mutableStateOf(false) }
     var displayedMonth by remember { mutableStateOf(YearMonth.from(ui.selectedDate)) }
     val hideChrome = current?.startsWith("timer") == true ||
-        current?.startsWith("edit") == true ||
         current == "search" ||
         current == "export" ||
         current == "calendar"
+    val showContextHeader = current in setOf(
+        TopDest.Log.route,
+        TopDest.Summary.route,
+        TopDest.Growth.route,
+    )
 
     LaunchedEffect(today) {
         vm.refreshToday()
@@ -325,14 +335,15 @@ fun LeziRoot(
     Scaffold(
         modifier = Modifier.testTag(UiTags.ROOT),
         containerColor = MaterialTheme.colorScheme.background,
+        snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
-            if (!hideChrome) {
+            if (!hideChrome && showContextHeader) {
                 Column(
                     Modifier
                         .fillMaxWidth()
                         .background(
                             if (dark) {
-                                LeziColors.JournalDarkAccent
+                                MaterialTheme.colorScheme.surface
                             } else {
                                 LeziColors.JournalAccent
                             },
@@ -431,22 +442,15 @@ fun LeziRoot(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding),
+            enterTransition = { EnterTransition.None },
+            exitTransition = { ExitTransition.None },
+            popEnterTransition = { EnterTransition.None },
+            popExitTransition = { ExitTransition.None },
         ) {
             composable(TopDest.Log.route) {
                 LogRoute(
                     externalDay = ui.selectedDate,
-                    onOpenTimer = { note, amountMl ->
-                        if (ui.selectedDate == today) {
-                            nav.currentBackStackEntry?.savedStateHandle?.apply {
-                                set(TIMER_SEED_NOTE_KEY, note)
-                                set(TIMER_SEED_AMOUNT_KEY, amountMl)
-                            }
-                            nav.navigate("timer")
-                        } else {
-                            nav.navigate("edit/new?type=${RecordType.NURSING.key}")
-                        }
-                    },
-                    onOpenEdit = { id -> nav.navigate("edit/$id") },
+                    onOpenComposer = { composerRequest = it },
                     onGoToday = { vm.setDay(today) },
                 )
             }
@@ -463,7 +467,9 @@ fun LeziRoot(
             composable("search") {
                 SearchRoute(
                     onBack = { nav.popBackStack() },
-                    onOpenEdit = { id -> nav.navigate("edit/$id") },
+                    onOpenEdit = { id ->
+                        composerRequest = RecordComposerRequest.Edit(id)
+                    },
                 )
             }
             composable("export") {
@@ -483,28 +489,25 @@ fun LeziRoot(
                     onDone = { nav.popBackStack() },
                 )
             }
-            composable(
-                route = "edit/{recordId}?type={type}",
-                arguments = listOf(
-                    navArgument("recordId") { type = NavType.StringType },
-                    navArgument("type") {
-                        type = NavType.StringType
-                        defaultValue = ""
-                        nullable = true
-                    },
-                ),
-            ) { entry ->
-                val recordId = entry.arguments?.getString("recordId").orEmpty()
-                val type = entry.arguments?.getString("type").orEmpty()
-                RecordEditRoute(
-                    recordId = recordId,
-                    newTypeKey = type,
-                    initialDate = ui.selectedDate,
-                    onDone = { nav.popBackStack() },
-                )
-            }
         }
     }
+
+    RecordComposerHost(
+        request = composerRequest,
+        onDismiss = { composerRequest = null },
+        onSaved = { message ->
+            composerRequest = null
+            scope.launch { snackbar.showSnackbar(message) }
+        },
+        onStartNursingTimer = { note, amountMl ->
+            composerRequest = null
+            nav.currentBackStackEntry?.savedStateHandle?.apply {
+                set(TIMER_SEED_NOTE_KEY, note)
+                set(TIMER_SEED_AMOUNT_KEY, amountMl)
+            }
+            nav.navigate("timer")
+        },
+    )
 
     if (showHeaderCalendar) {
         HeaderCalendarDialog(

@@ -1,7 +1,8 @@
 package com.lezi.babylog.domain
 
 import com.google.common.truth.Truth.assertThat
-import com.lezi.babylog.core.database.RecordEntity
+import com.lezi.babylog.core.model.Record
+import com.lezi.babylog.core.model.RecordType
 import org.junit.Test
 
 class DailySummaryTest {
@@ -38,6 +39,34 @@ class DailySummaryTest {
         assertThat(aggregateDaily(records).feedMl).isEqualTo(40)
     }
 
+    @Test
+    fun clipsCrossMidnightSleepAndCountsOpenSleepUntilNow() {
+        val dayStart = 1_700_006_400_000L
+        val dayEnd = dayStart + 24 * 60 * 60_000L
+        val records = listOf(
+            rec(
+                id = 1,
+                type = "sleep",
+                ts = dayStart - 30 * 60_000L,
+                end = dayStart + 45 * 60_000L,
+            ),
+            rec(
+                id = 2,
+                type = "sleep",
+                ts = dayStart + 2 * 60 * 60_000L,
+            ),
+        )
+
+        val summary = aggregateDaily(
+            records = records,
+            windowStartInclusive = dayStart,
+            windowEndExclusive = dayEnd,
+            now = dayStart + 3 * 60 * 60_000L,
+        )
+
+        assertThat(summary.sleepMinutes).isEqualTo(45 + 60)
+    }
+
     private fun rec(
         id: Long,
         type: String,
@@ -45,11 +74,11 @@ class DailySummaryTest {
         payload: String = "{}",
         end: Long? = null,
         deleted: Long? = null,
-    ) = RecordEntity(
+    ) = Record(
         id = id,
         clientUuid = "u$id",
         babyId = 1,
-        type = type,
+        type = RecordType.fromKey(type)!!,
         timestamp = ts,
         endTimestamp = end,
         createdByUserId = 1,

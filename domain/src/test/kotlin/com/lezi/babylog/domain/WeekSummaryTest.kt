@@ -1,7 +1,8 @@
 package com.lezi.babylog.domain
 
 import com.google.common.truth.Truth.assertThat
-import com.lezi.babylog.core.database.RecordEntity
+import com.lezi.babylog.core.model.Record
+import com.lezi.babylog.core.model.RecordType
 import java.time.LocalDate
 import java.time.ZoneOffset
 import org.junit.Test
@@ -45,6 +46,41 @@ class WeekSummaryTest {
         assertThat(w.totalFeedMl).isEqualTo(170)
     }
 
+    @Test
+    fun crossMidnightAndOpenSleepAreSplitAcrossDayWindows() {
+        val weekStart = LocalDate.of(2026, 7, 20)
+        val base = weekStart.atStartOfDay(zone).toInstant().toEpochMilli()
+        val records = listOf(
+            rec(
+                id = 1,
+                type = "sleep",
+                ts = base - 30 * 60_000L,
+                end = base + 30 * 60_000L,
+            ),
+            rec(
+                id = 2,
+                type = "sleep",
+                ts = base + 23 * 60 * 60_000L + 30 * 60_000L,
+                end = base + 24 * 60 * 60_000L + 45 * 60_000L,
+            ),
+            rec(
+                id = 3,
+                type = "sleep",
+                ts = base + 26 * 60 * 60_000L,
+            ),
+        )
+
+        val summary = aggregateWeek(
+            records = records,
+            weekStart = weekStart,
+            zone = zone,
+            now = base + 27 * 60 * 60_000L,
+        )
+
+        assertThat(summary.days[0].sleepMin).isEqualTo(30 + 30)
+        assertThat(summary.days[1].sleepMin).isEqualTo(45 + 60)
+    }
+
     private fun rec(
         id: Long,
         type: String,
@@ -52,11 +88,11 @@ class WeekSummaryTest {
         payload: String = "{}",
         end: Long? = null,
         deleted: Long? = null,
-    ) = RecordEntity(
+    ) = Record(
         id = id,
         clientUuid = "u$id",
         babyId = 1,
-        type = type,
+        type = RecordType.fromKey(type)!!,
         timestamp = ts,
         endTimestamp = end,
         createdByUserId = 1,

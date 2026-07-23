@@ -30,12 +30,14 @@ require_text '"right" to "右手"' feature/settings/src/main/kotlin/com/lezi/bab
 require_text 'OneHandQuickDock(' feature/log/src/main/kotlin/com/lezi/babylog/feature/log/LogScreen.kt
 require_text 'preferredHand = state.settings.preferredHand' feature/log/src/main/kotlin/com/lezi/babylog/feature/log/LogScreen.kt
 require_text 'oneHandQuickActionOrder(' feature/log/src/main/kotlin/com/lezi/babylog/feature/log/LogScreen.kt
-require_text 'bottomBar = {' feature/log/src/main/kotlin/com/lezi/babylog/feature/log/RecordEditScreen.kt
+require_text 'RecordComposerRequest.Edit' feature/log/src/main/kotlin/com/lezi/babylog/feature/log/LogScreen.kt
+require_text 'skipPartiallyExpanded = false' feature/log/src/main/kotlin/com/lezi/babylog/feature/log/RecordComposer.kt
+require_text 'onDelete = if (draft.isEditing)' feature/log/src/main/kotlin/com/lezi/babylog/feature/log/RecordComposer.kt
 
 # The second template has distinct record, summary, and growth chart grammar.
 require_text 'RecordSummaryStrip(' core/ui/src/main/kotlin/com/lezi/babylog/core/ui/RecordPresentation.kt
 require_text 'RecordSummaryStrip(' feature/log/src/main/kotlin/com/lezi/babylog/feature/log/LogScreen.kt
-require_text 'JournalTimelineRail' designsystem/src/main/kotlin/com/lezi/babylog/designsystem/Components.kt
+require_text 'JournalTimelineRail' designsystem/src/main/kotlin/com/lezi/babylog/designsystem/TimelineComponents.kt
 require_text 'JournalWeekGrid' feature/summary/src/main/kotlin/com/lezi/babylog/feature/summary/SummaryScreen.kt
 require_text 'GrowthMetric.HEAD' feature/growth/src/main/kotlin/com/lezi/babylog/feature/growth/GrowthScreen.kt
 require_text 'WHO 示例 P3/P50/P97' feature/growth/src/main/kotlin/com/lezi/babylog/feature/growth/GrowthScreen.kt

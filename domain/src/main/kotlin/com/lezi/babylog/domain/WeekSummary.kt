@@ -1,6 +1,6 @@
 package com.lezi.babylog.domain
 
-import com.lezi.babylog.core.database.RecordEntity
+import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
 import java.time.DayOfWeek
 import java.time.Instant
@@ -41,24 +41,47 @@ fun weekStartFor(day: LocalDate, weekStartSetting: Int): LocalDate {
 }
 
 fun aggregateWeek(
-    records: List<RecordEntity>,
+    records: List<Record>,
     weekStart: LocalDate,
     zone: ZoneId = ZoneId.systemDefault(),
+    now: Long = System.currentTimeMillis(),
 ): WeekSummary {
     val days = (0..6).map { offset ->
         val date = weekStart.plusDays(offset.toLong())
         DayBucket(date = date)
     }.toMutableList()
-    val index = days.associateBy { it.date }
+    val dayIndex = days.mapIndexed { index, bucket -> bucket.date to index }.toMap()
+    val dayWindows = days.map { bucket ->
+        val start = bucket.date.atStartOfDay(zone).toInstant().toEpochMilli()
+        val end = bucket.date.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
+        start to end
+    }
 
     for (r in records) {
         if (r.deletedAt != null) continue
+
+        if (r.type == RecordType.SLEEP) {
+            val intervalEnd = r.endTimestamp ?: now
+            if (intervalEnd <= r.timestamp) continue
+            dayWindows.forEachIndexed { index, (dayStart, dayEnd) ->
+                val clippedStart = maxOf(r.timestamp, dayStart)
+                val clippedEnd = minOf(intervalEnd, dayEnd)
+                if (clippedEnd > clippedStart) {
+                    val sleepMinutes = (clippedEnd - clippedStart) / 60_000L
+                    if (sleepMinutes > 0) {
+                        days[index] = days[index].copy(
+                            sleepMin = days[index].sleepMin + sleepMinutes,
+                        )
+                    }
+                }
+            }
+            continue
+        }
+
         val date = Instant.ofEpochMilli(r.timestamp).atZone(zone).toLocalDate()
-        val bucket = index[date] ?: continue
-        val i = days.indexOfFirst { it.date == date }
-        if (i < 0) continue
+        val i = dayIndex[date] ?: continue
         var b = days[i]
-        when (RecordType.fromKey(r.type)) {
+        when (r.type) {
             RecordType.FORMULA, RecordType.PUMPED_FEED -> {
                 val ml = payloadInt(r.payloadJson, "amount_ml")
                 b = b.copy(feedMl = b.feedMl + ml)
@@ -71,13 +94,7 @@ fun aggregateWeek(
                     feedMl = b.feedMl + payloadInt(r.payloadJson, "amount_ml"),
                 )
             }
-            RecordType.SLEEP -> {
-                val end = r.endTimestamp
-                if (end != null && end >= r.timestamp) {
-                    // Count full duration on start day (product choice).
-                    b = b.copy(sleepMin = b.sleepMin + (end - r.timestamp) / 60_000L)
-                }
-            }
+            RecordType.SLEEP -> Unit // handled and clipped above
             RecordType.PEE -> b = b.copy(pee = b.pee + 1)
             RecordType.POOP -> b = b.copy(poop = b.poop + 1)
             RecordType.BOTH_DIAPER -> b = b.copy(pee = b.pee + 1, poop = b.poop + 1)

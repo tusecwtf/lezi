@@ -87,8 +87,14 @@ interface RecordDao {
         SELECT * FROM records
         WHERE babyId = :babyId
           AND deletedAt IS NULL
-          AND timestamp >= :startInclusive
           AND timestamp < :endExclusive
+          AND (
+              timestamp >= :startInclusive
+              OR (
+                  type = 'sleep'
+                  AND (endTimestamp IS NULL OR endTimestamp > :startInclusive)
+              )
+          )
         ORDER BY timestamp DESC
         """,
     )
@@ -103,8 +109,14 @@ interface RecordDao {
         SELECT * FROM records
         WHERE babyId = :babyId
           AND deletedAt IS NULL
-          AND timestamp >= :startInclusive
           AND timestamp < :endExclusive
+          AND (
+              timestamp >= :startInclusive
+              OR (
+                  type = 'sleep'
+                  AND (endTimestamp IS NULL OR endTimestamp > :startInclusive)
+              )
+          )
         ORDER BY timestamp DESC
         """,
     )
@@ -115,8 +127,14 @@ interface RecordDao {
         SELECT * FROM records
         WHERE babyId = :babyId
           AND deletedAt IS NULL
-          AND timestamp >= :startInclusive
           AND timestamp < :endExclusive
+          AND (
+              timestamp >= :startInclusive
+              OR (
+                  type = 'sleep'
+                  AND (endTimestamp IS NULL OR endTimestamp > :startInclusive)
+              )
+          )
         ORDER BY timestamp DESC
         """,
     )
@@ -164,13 +182,43 @@ interface RecordDao {
     )
     suspend fun listForBaby(babyId: Long): List<RecordEntity>
 
+    /**
+     * Use SQLite to narrow search to rows that can plausibly match. Callers
+     * still inspect type-specific visible fields so JSON keys and hidden
+     * payload values cannot become user-visible false positives.
+     */
     @Query(
         """
         SELECT * FROM records
         WHERE babyId = :babyId
           AND deletedAt IS NULL
-          AND timestamp >= :startInclusive
+          AND (
+              LOWER(COALESCE(note, '')) LIKE :escapedPattern ESCAPE '\'
+              OR LOWER(payloadJson) LIKE :escapedPattern ESCAPE '\'
+              OR type IN (:matchingTypeKeys)
+          )
+        ORDER BY timestamp DESC
+        """,
+    )
+    suspend fun searchCandidates(
+        babyId: Long,
+        escapedPattern: String,
+        matchingTypeKeys: List<String>,
+    ): List<RecordEntity>
+
+    @Query(
+        """
+        SELECT * FROM records
+        WHERE babyId = :babyId
+          AND deletedAt IS NULL
           AND timestamp < :endExclusive
+          AND (
+              timestamp >= :startInclusive
+              OR (
+                  type = 'sleep'
+                  AND (endTimestamp IS NULL OR endTimestamp > :startInclusive)
+              )
+          )
         ORDER BY timestamp ASC
         """,
     )

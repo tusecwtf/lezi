@@ -33,11 +33,8 @@ android {
 dependencies {
 
     implementation(project(":core:model"))
-    implementation(project(":core:common"))
-    implementation(project(":core:ui"))
     implementation(project(":designsystem"))
     implementation(project(":domain"))
-    implementation(project(":feature:settings"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
@@ -55,7 +52,6 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
     testImplementation(libs.junit)
 
-    implementation(project(":core:database"))
     implementation(project(":core:datastore"))
 
 }

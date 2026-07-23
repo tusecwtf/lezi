@@ -32,8 +32,6 @@ android {
 
 dependencies {
 
-    implementation(project(":core:model"))
-    implementation(project(":core:common"))
     implementation(project(":core:ui"))
     implementation(project(":designsystem"))
     implementation(project(":domain"))
@@ -51,8 +49,5 @@ dependencies {
     ksp(libs.hilt.compiler)
     implementation(libs.kotlinx.coroutines.android)
     debugImplementation(libs.androidx.compose.ui.tooling)
-
-    implementation(project(":core:database"))
-    implementation(project(":core:datastore"))
 
 }

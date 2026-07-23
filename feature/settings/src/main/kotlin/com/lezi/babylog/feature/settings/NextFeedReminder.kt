@@ -11,7 +11,13 @@ import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.lezi.babylog.core.datastore.SettingsStore
+import com.lezi.babylog.domain.FeedReminderPort
+import dagger.Binds
+import dagger.Module
 import dagger.hilt.android.AndroidEntryPoint
+import dagger.hilt.InstallIn
+import dagger.hilt.android.qualifiers.ApplicationContext
+import dagger.hilt.components.SingletonComponent
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
@@ -22,8 +28,9 @@ import kotlinx.coroutines.launch
 @Singleton
 class NextFeedScheduler @Inject constructor(
     private val settings: SettingsStore,
-) {
-    suspend fun scheduleAfterFeed(context: Context, atMillis: Long? = null) {
+    @ApplicationContext private val context: Context,
+) : FeedReminderPort {
+    override suspend fun scheduleAfterFeed(atMillis: Long?) {
         val intervalMin = settings.settings.first().nursingIntervalMin
         val whenMs = atMillis ?: (System.currentTimeMillis() + intervalMin * 60_000L)
         settings.setNextFeedAt(whenMs)
@@ -41,13 +48,13 @@ class NextFeedScheduler @Inject constructor(
         }
     }
 
-    suspend fun cancel(context: Context) {
+    suspend fun cancel() {
         settings.clearNextFeedAt()
         val am = context.getSystemService(AlarmManager::class.java)
         am.cancel(pending(context))
     }
 
-    suspend fun rescheduleFromStore(context: Context) {
+    suspend fun rescheduleFromStore() {
         val at = settings.settings.first().nextFeedAt ?: return
         if (at <= System.currentTimeMillis()) return
         ensureChannel(context)
@@ -81,6 +88,14 @@ class NextFeedScheduler @Inject constructor(
             )
         }
     }
+}
+
+@Module
+@InstallIn(SingletonComponent::class)
+abstract class FeedReminderModule {
+    @Binds
+    @Singleton
+    abstract fun bindFeedReminderPort(scheduler: NextFeedScheduler): FeedReminderPort
 }
 
 @AndroidEntryPoint
@@ -126,7 +141,7 @@ class BootReceiver : BroadcastReceiver() {
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                scheduler.rescheduleFromStore(context.applicationContext)
+                scheduler.rescheduleFromStore()
             } finally {
                 pending.finish()
             }

@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -48,7 +49,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -60,7 +60,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.domain.CareLog
-import com.lezi.babylog.feature.settings.NextFeedScheduler
+import com.lezi.babylog.domain.FeedReminderPort
 import dagger.hilt.android.AndroidEntryPoint
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -108,18 +108,29 @@ data class TimerState(
     }.toString()
 
     companion object {
-        fun fromJson(raw: String?): TimerState {
+        fun fromJson(
+            raw: String?,
+            nowElapsed: Long = SystemClock.elapsedRealtime(),
+            nowWall: Long = System.currentTimeMillis(),
+        ): TimerState {
             if (raw.isNullOrBlank()) return TimerState()
             return runCatching {
                 val o = JSONObject(raw)
-                val savedElapsed = o.optLong("savedElapsed", SystemClock.elapsedRealtime())
-                val now = SystemClock.elapsedRealtime()
-                val drift = (now - savedElapsed).coerceAtLeast(0L)
+                val savedElapsed = o.optLong("savedElapsed")
+                    .takeIf { o.has("savedElapsed") && !o.isNull("savedElapsed") }
+                val savedWall = o.optLong("savedWall")
+                    .takeIf { o.has("savedWall") && !o.isNull("savedWall") }
+                val drift = restoredRunningDelta(
+                    savedElapsed = savedElapsed,
+                    savedWall = savedWall,
+                    nowElapsed = nowElapsed,
+                    nowWall = nowWall,
+                )
                 var leftAccum = o.optLong("leftAccumMs")
                 var rightAccum = o.optLong("rightAccumMs")
                 val leftRunning = o.optBoolean("leftRunning")
                 val rightRunning = o.optBoolean("rightRunning")
-                // Convert running sides into accumulated using wall drift (process may have died).
+                // Freeze restored running sides into accumulated time.
                 if (leftRunning) leftAccum += drift
                 if (rightRunning) rightAccum += drift
                 TimerState(
@@ -129,7 +140,10 @@ data class TimerState(
                     rightAccumMs = rightAccum,
                     leftStartedElapsed = null,
                     rightStartedElapsed = null,
-                    sessionStartedAt = o.optLong("sessionStartedAt").takeIf { o.has("sessionStartedAt") && !o.isNull("sessionStartedAt") },
+                    sessionStartedAt = o.optLong("sessionStartedAt")
+                        .takeIf {
+                            o.has("sessionStartedAt") && !o.isNull("sessionStartedAt")
+                        },
                     lastSide = o.optString("lastSide").takeIf { it.isNotBlank() && it != "null" },
                     order = o.optString("order"),
                 )
@@ -138,13 +152,31 @@ data class TimerState(
     }
 }
 
+/**
+ * Calculates time accrued after the last persisted timer snapshot.
+ *
+ * elapsedRealtime is immune to wall-clock edits while the device remains
+ * booted. It rewinds on reboot, so a negative elapsed delta falls back to the
+ * persisted wall-clock pair instead of silently dropping the running time.
+ */
+internal fun restoredRunningDelta(
+    savedElapsed: Long?,
+    savedWall: Long?,
+    nowElapsed: Long,
+    nowWall: Long,
+): Long {
+    val elapsedDelta = savedElapsed?.let { nowElapsed - it }
+    if (elapsedDelta != null && elapsedDelta >= 0L) return elapsedDelta
+    return savedWall?.let { (nowWall - it).coerceAtLeast(0L) } ?: 0L
+}
+
 @HiltViewModel
 class TimerViewModel @Inject constructor(
     private val careLog: CareLog,
     private val settings: SettingsStore,
-    private val nextFeed: NextFeedScheduler,
+    private val nextFeed: FeedReminderPort,
     @ApplicationContext private val app: Context,
- ) : ViewModel() {
+) : ViewModel() {
     private val _state = MutableStateFlow(TimerState())
     val state: StateFlow<TimerState> = _state
     private val completionInFlight = AtomicBoolean(false)
@@ -292,7 +324,7 @@ class TimerViewModel @Inject constructor(
                     startedAt = command.startedAt,
                     endedAt = command.endedAt,
                 )
-                runCatching { nextFeed.scheduleAfterFeed(app) }
+                runCatching { nextFeed.scheduleAfterFeed() }
                 clear()
                 onDone()
             } catch (throwable: Throwable) {
@@ -392,6 +424,7 @@ fun TimerRoute(
     var completionDraft by remember { mutableStateOf<NursingCompletionDraft?>(null) }
     var completionSaving by remember { mutableStateOf(false) }
     var completionSaveError by remember { mutableStateOf<String?>(null) }
+    var showDiscardConfirmation by remember { mutableStateOf(false) }
     val completionSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     Scaffold(
@@ -467,13 +500,44 @@ fun TimerRoute(
                 ) { Text("完成并记录") }
                 TextButton(
                     onClick = {
-                        vm.clear()
-                        onDone()
+                        if (state.hasTimerData()) {
+                            showDiscardConfirmation = true
+                        } else {
+                            vm.clear()
+                            onDone()
+                        }
                     },
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("丢弃") }
             }
         }
+    }
+
+    if (showDiscardConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showDiscardConfirmation = false },
+            title = { Text("丢弃本次计时？") },
+            text = { Text("已累计的喂奶计时将不会保存，此操作无法撤销。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showDiscardConfirmation = false
+                        vm.clear()
+                        onDone()
+                    },
+                ) {
+                    Text(
+                        "确认丢弃",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDiscardConfirmation = false }) {
+                    Text("继续计时")
+                }
+            },
+        )
     }
 
     completionDraft?.let { draft ->
@@ -521,6 +585,13 @@ fun TimerRoute(
         }
     }
 }
+
+internal fun TimerState.hasTimerData(): Boolean =
+    leftRunning ||
+        rightRunning ||
+        leftAccumMs > 0L ||
+        rightAccumMs > 0L ||
+        sessionStartedAt != null
 
 @Composable
 private fun SideButton(

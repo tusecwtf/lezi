@@ -73,6 +73,34 @@ class CareLogTest {
     }
 
     @Test
+    fun getCurrentBabyIsReadOnlyAndStartupMigrationRemainsExplicit() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val id = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
+
+        assertThat(care.getCurrentBaby()!!.nickname).isEqualTo("豆豆")
+        assertThat(fakes.babies.get(id)!!.nickname).isEqualTo("豆豆")
+
+        care.ensureCurrentBabyHealed()
+
+        assertThat(care.getCurrentBaby()!!.nickname).isEqualTo("年年")
+        assertThat(fakes.babies.get(id)!!.nickname).isEqualTo("年年")
+    }
+
+    @Test
+    fun localFamilyIdentityUsesReadOnlyDefaultsBeforeBootstrap() = runTest {
+        val care = Fakes().careLog()
+
+        assertThat(care.localFamilyIdentity()).isEqualTo(
+            LocalFamilyIdentity(
+                deviceId = "—",
+                displayName = "我（本机）",
+                familyId = 1L,
+            ),
+        )
+    }
+
+    @Test
     fun updateBabyProfile_canSetBirthdayAndWeight() = runTest {
         val care = Fakes().careLog()
         val id = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 10))
@@ -219,6 +247,38 @@ class CareLogTest {
     }
 
     @Test
+    fun daySummary_includesPreviousDaySleepAndCountsOpenIntervalToNow() = runTest {
+        val care = Fakes().careLog()
+        val babyId = care.createBaby(
+            CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1),
+        )
+        val day = LocalDate.of(2026, 7, 23)
+        val dayStart = day.atStartOfDay(zone).toInstant().toEpochMilli()
+        care.addRecord(
+            babyId = babyId,
+            type = RecordType.SLEEP,
+            timestamp = dayStart - 30 * 60_000L,
+            endTimestamp = dayStart + 45 * 60_000L,
+        )
+        care.addRecord(
+            babyId = babyId,
+            type = RecordType.SLEEP,
+            timestamp = dayStart + 2 * 60 * 60_000L,
+        )
+
+        val records = care.dayRecords(babyId, day, zone)
+        val summary = care.daySummary(
+            babyId = babyId,
+            day = day,
+            zone = zone,
+            now = dayStart + 3 * 60 * 60_000L,
+        )
+
+        assertThat(records).hasSize(2)
+        assertThat(summary.sleepMinutes).isEqualTo(45 + 60)
+    }
+
+    @Test
     fun observeOpenSleep_isIndependentOfViewedDay() = runTest {
         val care = Fakes().careLog()
         val babyId = care.createBaby(
@@ -277,7 +337,7 @@ class CareLogTest {
     }
 
     @Test
-    fun updateRecord_canClearCompletedSleepEnd() = runTest {
+    fun updateRecord_cannotClearCompletedSleepEnd() = runTest {
         val care = Fakes().careLog()
         val babyId = care.createBaby(
             CreateBabyInput(nickname = "豆豆", birthdayEpochDay = LocalDate.of(2026, 1, 1).toEpochDay()),
@@ -290,30 +350,59 @@ class CareLogTest {
             endTimestamp = start + 90 * 60_000L,
         )
 
-        care.updateRecord(
-            id = id,
-            timestamp = start,
-            endTimestamp = null,
-            note = null,
-            payloadJson = "{}",
-        )
+        val failure = runCatching {
+            care.updateRecord(
+                id = id,
+                timestamp = start,
+                endTimestamp = null,
+                note = null,
+                payloadJson = "{}",
+            )
+        }.exceptionOrNull()
 
-        assertThat(care.getRecord(id)!!.endTimestamp).isNull()
+        assertThat(failure).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(care.getRecord(id)!!.endTimestamp).isEqualTo(start + 90 * 60_000L)
     }
 
     @Test
-    fun sleepDownTwice_marksAnomaly() = runTest {
+    fun sleepEndMustBeStrictlyAfterStart() = runTest {
+        val care = Fakes().careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
+        val start = 1_700_000_000_000L
+
+        val addFailure = runCatching {
+            care.addRecord(
+                babyId = babyId,
+                type = RecordType.SLEEP,
+                timestamp = start,
+                endTimestamp = start,
+            )
+        }.exceptionOrNull()
+        val openId = care.sleepDown(babyId, start)
+        val closeFailure = runCatching {
+            care.sleepUp(babyId, start)
+        }.exceptionOrNull()
+
+        assertThat(addFailure).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(closeFailure).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(care.getRecord(openId)!!.endTimestamp).isNull()
+    }
+
+    @Test
+    fun sleepDownTwice_keepsOneOpenSleepAndMarksAnomaly() = runTest {
         val f = Fakes()
         val care = f.careLog()
         val babyId = care.createBaby(
             CreateBabyInput(nickname = "豆豆", birthdayEpochDay = LocalDate.of(2026, 1, 1).toEpochDay()),
         )
         val t0 = 1_700_000_000_000L
-        care.sleepDown(babyId, t0)
-        care.sleepDown(babyId, t0 + 60_000L)
+        val firstId = care.sleepDown(babyId, t0)
+        val secondId = care.sleepDown(babyId, t0 + 60_000L)
         val all = f.records.listForBaby(babyId)
-        assertThat(all).hasSize(2)
-        assertThat(all.any { it.payloadJson.contains("anomaly_flag") }).isTrue()
+        assertThat(secondId).isEqualTo(firstId)
+        assertThat(all).hasSize(1)
+        assertThat(all.single().endTimestamp).isNull()
+        assertThat(all.single().payloadJson).contains("\"anomaly_flag\":true")
     }
 
     @Test
@@ -340,6 +429,28 @@ class CareLogTest {
         val day = java.time.Instant.ofEpochMilli(start).atZone(zone).toLocalDate()
         assertThat(care.daySummary(babyId, day, zone).nursingMinutes).isEqualTo(20)
         assertThat(care.daySummary(babyId, day, zone).feedMl).isEqualTo(40)
+    }
+
+    @Test
+    fun completeNursing_rejectsUntrustedOrderBeforePersistence() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
+        val maliciousOrder = """LR","injected":true,"order":""""
+
+        val failure = runCatching {
+            care.completeNursing(
+                babyId = babyId,
+                leftMin = 1,
+                rightMin = 2,
+                order = maliciousOrder,
+                startedAt = 1_000L,
+                endedAt = 3_000L,
+            )
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(fakes.records.listForBaby(babyId)).isEmpty()
     }
 
     @Test
@@ -390,9 +501,18 @@ class CareLogTest {
         val ts = day.atStartOfDay(zone).toInstant().toEpochMilli() + 1000
         care.addRecord(babyId, RecordType.MEMO, timestamp = ts, note = "布洛芬 2.5ml", payloadJson = """{"body":"服药"}""")
         care.addRecord(babyId, RecordType.DIARY, timestamp = ts + 1, payloadJson = """{"body":"今天发烧了"}""")
-        care.addRecord(babyId, RecordType.FORMULA, timestamp = ts + 2, payloadJson = """{"amount_ml":120}""")
+        care.addRecord(
+            babyId,
+            RecordType.FORMULA,
+            timestamp = ts + 2,
+            payloadJson = """{"amount_ml":120,"internal_debug":"secretvalue"}""",
+        )
         assertThat(care.search(babyId, "布洛芬")).hasSize(1)
         assertThat(care.search(babyId, "发烧")).hasSize(1)
+        assertThat(care.search(babyId, "配方奶").single().type).isEqualTo(RecordType.FORMULA)
+        assertThat(care.search(babyId, "120ml").single().type).isEqualTo(RecordType.FORMULA)
+        assertThat(care.search(babyId, "amount_ml")).isEmpty()
+        assertThat(care.search(babyId, "secretvalue")).isEmpty()
         assertThat(care.search(babyId, "不存在的词xyz")).isEmpty()
         assertThat(care.search(babyId, "   ")).isEmpty()
         val id = care.addRecord(babyId, RecordType.MEMO, timestamp = ts + 3, note = "临时")
@@ -715,8 +835,7 @@ private class FakeRecordDao : RecordDao {
             list.filter {
                 it.babyId == babyId &&
                     it.deletedAt == null &&
-                    it.timestamp >= startInclusive &&
-                    it.timestamp < endExclusive
+                    it.overlapsRange(startInclusive, endExclusive)
             }.sortedByDescending { it.timestamp }
         }
 
@@ -729,8 +848,7 @@ private class FakeRecordDao : RecordDao {
             list.filter {
                 it.babyId == babyId &&
                     it.deletedAt == null &&
-                    it.timestamp >= startInclusive &&
-                    it.timestamp < endExclusive
+                    it.overlapsRange(startInclusive, endExclusive)
             }.sortedByDescending { it.timestamp }
         }
 
@@ -742,8 +860,7 @@ private class FakeRecordDao : RecordDao {
         items.value.filter {
             it.babyId == babyId &&
                 it.deletedAt == null &&
-                it.timestamp >= startInclusive &&
-                it.timestamp < endExclusive
+                it.overlapsRange(startInclusive, endExclusive)
         }.sortedByDescending { it.timestamp }
 
     override suspend fun get(id: Long): RecordEntity? =
@@ -778,6 +895,28 @@ private class FakeRecordDao : RecordDao {
         items.value.filter { it.babyId == babyId && it.deletedAt == null }
             .sortedByDescending { it.timestamp }
 
+    override suspend fun searchCandidates(
+        babyId: Long,
+        escapedPattern: String,
+        matchingTypeKeys: List<String>,
+    ): List<RecordEntity> {
+        val needle = escapedPattern
+            .removePrefix("%")
+            .removeSuffix("%")
+            .replace("\\%", "%")
+            .replace("\\_", "_")
+            .replace("\\\\", "\\")
+        return items.value.filter {
+            it.babyId == babyId &&
+                it.deletedAt == null &&
+                (
+                    it.note?.lowercase()?.contains(needle) == true ||
+                        it.payloadJson.lowercase().contains(needle) ||
+                        it.type in matchingTypeKeys
+                )
+        }.sortedByDescending { it.timestamp }
+    }
+
     override suspend fun listRange(
         babyId: Long,
         startInclusive: Long,
@@ -786,8 +925,7 @@ private class FakeRecordDao : RecordDao {
         items.value.filter {
             it.babyId == babyId &&
                 it.deletedAt == null &&
-                it.timestamp >= startInclusive &&
-                it.timestamp < endExclusive
+                it.overlapsRange(startInclusive, endExclusive)
         }.sortedBy { it.timestamp }
 
     override suspend fun listByType(babyId: Long, type: String): List<RecordEntity> =
@@ -816,6 +954,21 @@ private class FakeRecordDao : RecordDao {
 
     override suspend fun deleteAll() {
         items.value = emptyList()
+    }
+
+    private fun RecordEntity.overlapsRange(
+        startInclusive: Long,
+        endExclusive: Long,
+    ): Boolean {
+        val sleepEnd = endTimestamp
+        return timestamp < endExclusive &&
+            (
+                timestamp >= startInclusive ||
+                    (
+                        type == RecordType.SLEEP.key &&
+                            (sleepEnd == null || sleepEnd > startInclusive)
+                        )
+                )
     }
 }
 

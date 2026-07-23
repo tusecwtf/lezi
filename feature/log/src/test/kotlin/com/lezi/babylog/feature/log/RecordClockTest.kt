@@ -40,17 +40,15 @@ class RecordClockTest {
     }
 
     @Test
-    fun earlierSleepClockResolvesToNextDay() {
-        val start = ZonedDateTime.of(
-            LocalDate.of(2026, 7, 22),
-            LocalTime.of(23, 30),
-            zone,
+    fun movingIntervalStartKeepsItsDuration() {
+        val oldStart = 1_000_000L
+        val oldEnd = oldStart + 45 * 60_000L
+        val newStart = oldStart - 24 * 60 * 60_000L
+
+        assertEquals(
+            newStart + 45 * 60_000L,
+            shiftStartPreservingDuration(oldStart, oldEnd, newStart),
         )
-
-        val end = resolveSleepEnd(start, LocalTime.of(6, 15))
-
-        assertEquals(LocalDate.of(2026, 7, 23), end!!.toLocalDate())
-        assertEquals(LocalTime.of(6, 15), end.toLocalTime())
-        assertNull(resolveSleepEnd(start, LocalTime.of(23, 30)))
+        assertNull(shiftStartPreservingDuration(oldStart, null, newStart))
     }
 }

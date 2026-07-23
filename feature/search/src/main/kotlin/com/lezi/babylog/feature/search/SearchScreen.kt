@@ -116,15 +116,15 @@ fun SearchRoute(
                 onValueChange = vm::onQuery,
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                label = { Text("备注 / 日记关键字") },
-                placeholder = { Text("例如：布洛芬") },
+                label = { Text("类型 / 详情 / 备注") },
+                placeholder = { Text("例如：睡眠、布洛芬、发烧") },
             )
             when {
                 ui.query.isBlank() -> {
                     StateContainer(
                         kind = StateKind.Empty,
                         title = "输入关键字",
-                        message = "搜索当前宝宝的备注与日记正文",
+                        message = "搜索当前宝宝的记录类型、详情与备注",
                         modifier = Modifier.padding(top = LeziSpacing.Md),
                     )
                 }

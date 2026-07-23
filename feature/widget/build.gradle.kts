@@ -33,8 +33,6 @@ android {
 dependencies {
 
     implementation(project(":core:model"))
-    implementation(project(":core:common"))
-    implementation(project(":core:ui"))
     implementation(project(":designsystem"))
     implementation(project(":domain"))
     implementation(libs.androidx.core.ktx)
@@ -52,7 +50,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.androidx.glance.appwidget)
     implementation(libs.androidx.glance.material3)
-    implementation(project(":core:datastore"))
     debugImplementation(libs.androidx.compose.ui.tooling)
+    testImplementation(libs.junit)
 
 }

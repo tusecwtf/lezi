@@ -40,6 +40,28 @@ class ClockDialTest {
     }
 
     @Test
+    fun mergeDateAndClockUsesCalendarDateAndPreservesZone() {
+        val zone = ZoneId.of("Asia/Shanghai")
+        val source = ZonedDateTime.of(
+            LocalDate.of(2026, 7, 23),
+            LocalTime.of(8, 17),
+            zone,
+        )
+
+        val merged = mergeDateAndClock(
+            value = source,
+            date = LocalDate.of(2026, 7, 20),
+            hour = 23,
+            minute = 58,
+            step = 5,
+        )
+
+        assertEquals(LocalDate.of(2026, 7, 20), merged!!.toLocalDate())
+        assertEquals(LocalTime.of(23, 55), merged.toLocalTime())
+        assertEquals(zone, merged.zone)
+    }
+
+    @Test
     fun dstGapIsRejected() {
         val zone = ZoneId.of("America/New_York")
         val source = ZonedDateTime.of(

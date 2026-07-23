@@ -2,6 +2,9 @@ package com.lezi.babylog.feature.log
 
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.domain.payloadBool
+import com.lezi.babylog.domain.payloadDouble
+import com.lezi.babylog.domain.payloadInt
 import kotlin.math.roundToInt
 
 internal enum class QuickRecordMode {
@@ -153,7 +156,7 @@ internal data class QuickRecordDraft(
                 SleepDraftAction.SleepDown -> null
                 SleepDraftAction.WakeUp -> when {
                     endTimestamp == null -> "请选择醒来时刻"
-                    endTimestamp < timestamp -> "醒来时刻不能早于睡下时刻"
+                    endTimestamp <= timestamp -> "醒来时刻必须晚于睡下时刻"
                     endTimestamp > nowMillis -> "醒来时刻不能晚于现在"
                     else -> null
                 }
@@ -232,11 +235,15 @@ internal data class QuickRecordDraft(
         payloadJson = payloadJson(),
     )
 
-    fun confirmLabel(): String = when (sleepAction) {
-        SleepDraftAction.SleepDown -> "确认睡下"
-        SleepDraftAction.WakeUp -> "确认醒来"
-        SleepDraftAction.Manual, null -> "确认记录"
+    fun confirmLabel(): String = when {
+        sleepAction == SleepDraftAction.WakeUp -> "确认醒来"
+        existingRecordId != null -> "保存修改"
+        sleepAction == SleepDraftAction.SleepDown -> "确认睡下"
+        else -> "确认记录"
     }
+
+    val isEditing: Boolean
+        get() = existingRecordId != null && sleepAction != SleepDraftAction.WakeUp
 
     private fun stoolValidationError(): String? = when {
         stoolAmount !in 1..4 -> "请选择便量"
@@ -246,34 +253,28 @@ internal data class QuickRecordDraft(
     }
 
     private fun payloadJson(): String = when (mode) {
-        QuickRecordMode.Nursing -> jsonObject(
+        QuickRecordMode.Nursing -> sourcePayloadJson.patchJson(
             "left_min" to jsonNumber(leftMin.toIntOrNull() ?: 0),
             "right_min" to jsonNumber(rightMin.toIntOrNull() ?: 0),
             "order" to jsonString(order),
             "amount_ml" to nursingAmountMl.toIntOrNull()?.let(::jsonNumber),
         )
-        QuickRecordMode.Milk -> jsonObject(
+        QuickRecordMode.Milk -> sourcePayloadJson.patchJson(
             "amount_ml" to jsonNumber(amountMl),
             "prepared_ml" to preparedMl.toIntOrNull()?.let(::jsonNumber),
             "duration_min" to durationMin.toIntOrNull()?.let(::jsonNumber),
         )
-        QuickRecordMode.Pee -> jsonObject(
+        QuickRecordMode.Pee -> sourcePayloadJson.patchJson(
             "pee_amount" to jsonNumber(peeAmount),
         )
         QuickRecordMode.Poop -> stoolPayload()
-        QuickRecordMode.BothDiaper -> jsonObject(
+        QuickRecordMode.BothDiaper -> sourcePayloadJson.patchJson(
             "pee_amount" to jsonNumber(peeAmount),
             "stool_amount" to jsonNumber(stoolAmount),
             "stool_consistency" to jsonNumber(stoolConsistency),
             "stool_color" to jsonNumber(stoolColor),
         )
-        QuickRecordMode.Sleep -> {
-            if (sleepAction == SleepDraftAction.WakeUp) {
-                sourcePayloadJson.withBooleanField("is_nap", isNap)
-            } else {
-                jsonObject("is_nap" to isNap.toString())
-            }
-        }
+        QuickRecordMode.Sleep -> sourcePayloadJson.patchJson("is_nap" to isNap.toString())
         QuickRecordMode.Temperature -> {
             val raw = temperature.toDoubleOrNull() ?: 36.5
             val celsius = if (temperatureUnit == TemperatureUnit.Fahrenheit) {
@@ -281,56 +282,56 @@ internal data class QuickRecordDraft(
             } else {
                 raw
             }
-            jsonObject("celsius" to jsonNumber(trimNumber(celsius)))
+            sourcePayloadJson.patchJson("celsius" to jsonNumber(trimNumber(celsius)))
         }
-        QuickRecordMode.Text -> jsonObject("body" to jsonString(body.trim()))
-        QuickRecordMode.Simple -> "{}"
-        QuickRecordMode.Interval -> jsonObject(
+        QuickRecordMode.Text -> sourcePayloadJson.patchJson("body" to jsonString(body.trim()))
+        QuickRecordMode.Simple -> sourcePayloadJson.normalizedJsonObject()
+        QuickRecordMode.Interval -> sourcePayloadJson.patchJson(
             "duration_min" to endTimestamp?.let {
                 jsonNumber(((it - timestamp).coerceAtLeast(0L) / 60_000L).toInt())
             },
         )
-        QuickRecordMode.Symptom -> jsonObject(
+        QuickRecordMode.Symptom -> sourcePayloadJson.patchJson(
             "severity" to jsonNumber(severity),
             "description" to description.trim().takeIf(String::isNotBlank)?.let(::jsonString),
         )
-        QuickRecordMode.Medicine -> jsonObject(
+        QuickRecordMode.Medicine -> sourcePayloadJson.patchJson(
             "name" to jsonString(medicineName.trim()),
             "dose" to medicineDose.trim().takeIf(String::isNotBlank)?.let(::jsonString),
         )
-        QuickRecordMode.Hospital -> jsonObject(
+        QuickRecordMode.Hospital -> sourcePayloadJson.patchJson(
             "reason" to jsonString(hospitalReason.trim()),
             "advice" to hospitalAdvice.trim().takeIf(String::isNotBlank)?.let(::jsonString),
         )
-        QuickRecordMode.CustomText -> jsonObject(
+        QuickRecordMode.CustomText -> sourcePayloadJson.patchJson(
             "title" to jsonString(customTitle.trim()),
             "detail" to customDetail.trim().takeIf(String::isNotBlank)?.let(::jsonString),
         )
         QuickRecordMode.Measurement -> {
             val input = measurementValue.toDoubleOrNull() ?: 0.0
             if (type == RecordType.WEIGHT) {
-                jsonObject(
+                sourcePayloadJson.patchJson(
                     "value" to jsonNumber((input * 1_000.0).roundToInt()),
                     "unit" to jsonString("g"),
                 )
             } else {
-                jsonObject(
+                sourcePayloadJson.patchJson(
                     "value" to jsonNumber(trimNumber(input)),
                     "unit" to jsonString("cm"),
                 )
             }
         }
-        QuickRecordMode.Food -> jsonObject(
+        QuickRecordMode.Food -> sourcePayloadJson.patchJson(
             "content" to jsonString(foodContent.trim()),
             "amount" to foodAmount.trim().takeIf(String::isNotBlank)?.let(::jsonString),
         )
-        QuickRecordMode.Vaccine -> jsonObject(
+        QuickRecordMode.Vaccine -> sourcePayloadJson.patchJson(
             "name" to jsonString(vaccineName.trim()),
             "batch" to vaccineBatch.trim().takeIf(String::isNotBlank)?.let(::jsonString),
         )
     }
 
-    private fun stoolPayload(): String = jsonObject(
+    private fun stoolPayload(): String = sourcePayloadJson.patchJson(
         "stool_amount" to jsonNumber(stoolAmount),
         "stool_consistency" to jsonNumber(stoolConsistency),
         "stool_color" to jsonNumber(stoolColor),
@@ -363,37 +364,188 @@ internal data class QuickRecordDraft(
             sourcePayloadJson = openSleep.payloadJson,
             note = openSleep.note.orEmpty(),
             sleepAction = SleepDraftAction.WakeUp,
-            isNap = payloadBoolean(openSleep.payloadJson, "is_nap"),
+            isNap = payloadBool(openSleep.payloadJson, "is_nap"),
         )
+
+        fun fromRecord(record: Record): QuickRecordDraft {
+            val payload = record.payloadJson
+            val rawMeasurement = payloadDouble(payload, "value")
+            val measurementValue = when {
+                rawMeasurement == null -> ""
+                record.type == RecordType.WEIGHT &&
+                    payload.jsonStringField("unit") == "g" ->
+                    trimNumber(rawMeasurement / 1_000.0).toString()
+                else -> trimNumber(rawMeasurement).toString()
+            }
+            return QuickRecordDraft(
+                type = record.type,
+                timestamp = record.timestamp,
+                endTimestamp = record.endTimestamp,
+                existingRecordId = record.id,
+                sourcePayloadJson = payload,
+                note = record.note.orEmpty(),
+                amountMl = payloadInt(payload, "amount_ml").takeIf { it in 1..999 }
+                    ?: if (record.type == RecordType.PUMP_EXPRESS) 60 else 120,
+                preparedMl = payload.optionalIntText("prepared_ml"),
+                durationMin = payload.optionalIntText("duration_min"),
+                leftMin = payloadInt(payload, "left_min").coerceAtLeast(0).toString(),
+                rightMin = payloadInt(payload, "right_min").coerceAtLeast(0).toString(),
+                order = payload.jsonStringField("order").takeIf {
+                    it in setOf("L", "R", "LR", "RL")
+                } ?: "LR",
+                nursingAmountMl = payload.optionalIntText("amount_ml"),
+                peeAmount = payloadInt(payload, "pee_amount").takeIf { it in 1..3 } ?: 2,
+                stoolAmount = payloadInt(payload, "stool_amount").takeIf { it in 1..4 } ?: 3,
+                stoolConsistency = payloadInt(payload, "stool_consistency")
+                    .takeIf { it in 1..4 } ?: 3,
+                stoolColor = payloadInt(payload, "stool_color").coerceIn(0, 7),
+                sleepAction = if (record.type == RecordType.SLEEP) {
+                    if (record.endTimestamp == null) {
+                        SleepDraftAction.SleepDown
+                    } else {
+                        SleepDraftAction.Manual
+                    }
+                } else {
+                    null
+                },
+                isNap = payloadBool(payload, "is_nap"),
+                temperature = payloadDouble(payload, "celsius")?.let(::trimNumber)?.toString()
+                    ?: "36.5",
+                body = payload.jsonStringField("body"),
+                severity = payloadInt(payload, "severity").takeIf { it in 1..3 } ?: 2,
+                description = payload.jsonStringField("description"),
+                medicineName = payload.jsonStringField("name"),
+                medicineDose = payload.jsonStringField("dose"),
+                hospitalReason = payload.jsonStringField("reason"),
+                hospitalAdvice = payload.jsonStringField("advice"),
+                customTitle = payload.jsonStringField("title"),
+                customDetail = payload.jsonStringField("detail"),
+                measurementValue = measurementValue,
+                foodContent = payload.jsonStringField("content"),
+                foodAmount = payload.jsonStringField("amount"),
+                vaccineName = payload.jsonStringField("name"),
+                vaccineBatch = payload.jsonStringField("batch"),
+            )
+        }
     }
 }
 
-private fun payloadBoolean(json: String, key: String): Boolean =
-    Regex("\"${Regex.escape(key)}\"\\s*:\\s*(true|false)")
-        .find(json)
+private fun String.patchJson(vararg updates: Pair<String, String?>): String {
+    val fields = parseTopLevelJsonObject(this)
+    updates.forEach { (key, value) ->
+        if (value == null) {
+            fields.remove(key)
+        } else {
+            fields[key] = value
+        }
+    }
+    return fields.entries.joinToString(separator = ",", prefix = "{", postfix = "}") {
+        "${jsonString(it.key)}:${it.value}"
+    }
+}
+
+private fun String.normalizedJsonObject(): String =
+    patchJson()
+
+private fun parseTopLevelJsonObject(source: String): LinkedHashMap<String, String> {
+    val result = linkedMapOf<String, String>()
+    val text = source.trim()
+    if (!text.startsWith("{") || !text.endsWith("}")) return result
+    var index = 1
+
+    fun skipWhitespaceAndCommas() {
+        while (index < text.lastIndex && (text[index].isWhitespace() || text[index] == ',')) {
+            index += 1
+        }
+    }
+
+    while (index < text.lastIndex) {
+        skipWhitespaceAndCommas()
+        if (index >= text.lastIndex || text[index] != '"') break
+        val keyStart = ++index
+        var escaped = false
+        while (index < text.lastIndex) {
+            val char = text[index]
+            if (!escaped && char == '"') break
+            escaped = !escaped && char == '\\'
+            if (char != '\\') escaped = false
+            index += 1
+        }
+        if (index >= text.lastIndex) break
+        val key = text.substring(keyStart, index).decodeJsonStringBody()
+        index += 1
+        while (index < text.lastIndex && text[index].isWhitespace()) index += 1
+        if (index >= text.lastIndex || text[index] != ':') break
+        index += 1
+        while (index < text.lastIndex && text[index].isWhitespace()) index += 1
+        val valueStart = index
+        var inString = false
+        var valueEscaped = false
+        var objectDepth = 0
+        var arrayDepth = 0
+        while (index < text.lastIndex) {
+            val char = text[index]
+            if (inString) {
+                if (!valueEscaped && char == '"') inString = false
+                valueEscaped = !valueEscaped && char == '\\'
+                if (char != '\\') valueEscaped = false
+            } else {
+                when (char) {
+                    '"' -> inString = true
+                    '{' -> objectDepth += 1
+                    '}' -> if (objectDepth > 0) objectDepth -= 1 else break
+                    '[' -> arrayDepth += 1
+                    ']' -> if (arrayDepth > 0) arrayDepth -= 1
+                    ',' -> if (objectDepth == 0 && arrayDepth == 0) break
+                }
+            }
+            index += 1
+        }
+        val rawValue = text.substring(valueStart, index).trim()
+        if (rawValue.isNotEmpty()) result[key] = rawValue
+        if (index < text.lastIndex && text[index] == ',') index += 1
+    }
+    return result
+}
+
+private fun String.optionalIntText(key: String): String =
+    Regex("\"${Regex.escape(key)}\"\\s*:\\s*(-?\\d+)")
+        .find(this)
         ?.groupValues
         ?.getOrNull(1)
-        ?.toBooleanStrictOrNull()
-        ?: false
+        .orEmpty()
 
-private fun String.withBooleanField(key: String, value: Boolean): String {
-    val source = trim().takeIf { it.startsWith("{") && it.endsWith("}") } ?: "{}"
-    val field = "${jsonString(key)}:$value"
-    val existing = Regex("\"${Regex.escape(key)}\"\\s*:\\s*(true|false)")
-    if (existing.containsMatchIn(source)) {
-        return existing.replace(source, field)
-    }
-    return if (source == "{}") {
-        "{$field}"
-    } else {
-        "${source.dropLast(1)},$field}"
+private fun String.jsonStringField(key: String): String =
+    Regex("\"${Regex.escape(key)}\"\\s*:\\s*\"((?:\\\\.|[^\"])*)\"")
+        .find(this)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.decodeJsonStringBody()
+        .orEmpty()
+
+private fun String.decodeJsonStringBody(): String = buildString {
+    var index = 0
+    while (index < this@decodeJsonStringBody.length) {
+        val char = this@decodeJsonStringBody[index]
+        if (char != '\\' || index == this@decodeJsonStringBody.lastIndex) {
+            append(char)
+            index += 1
+            continue
+        }
+        val escaped = this@decodeJsonStringBody[index + 1]
+        append(
+            when (escaped) {
+                'n' -> '\n'
+                'r' -> '\r'
+                't' -> '\t'
+                '\\' -> '\\'
+                '"' -> '"'
+                else -> escaped
+            },
+        )
+        index += 2
     }
 }
-
-private fun jsonObject(vararg fields: Pair<String, String?>): String =
-    fields
-        .mapNotNull { (key, value) -> value?.let { "${jsonString(key)}:$it" } }
-        .joinToString(separator = ",", prefix = "{", postfix = "}")
 
 private fun jsonString(value: String): String = buildString {
     append('"')
