@@ -28,6 +28,8 @@ android {
 dependencies {
 
     implementation(project(":core:model"))
+    implementation(project(":core:database"))
+    implementation(libs.androidx.core.ktx)
     implementation(project(":core:common"))
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.hilt.android)

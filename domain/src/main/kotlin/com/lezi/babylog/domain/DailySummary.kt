@@ -10,6 +10,8 @@ data class DailySummary(
     val formulaMl: Int = 0,
     val nursingMinutes: Long = 0,
     val pumpedFeedMl: Int = 0,
+    /** formulaMl + pumpedFeedMl + nursing.amount_ml (pump_express never counts). */
+    val feedMl: Int = 0,
 )
 
 /** Pure function — unit-test target. */
@@ -20,6 +22,7 @@ fun aggregateDaily(records: List<RecordEntity>): DailySummary {
     var formula = 0
     var nursing = 0L
     var pumped = 0
+    var feed = 0
     for (r in records) {
         if (r.deletedAt != null) continue
         when (RecordType.fromKey(r.type)) {
@@ -35,11 +38,24 @@ fun aggregateDaily(records: List<RecordEntity>): DailySummary {
                 pee += 1
                 poop += 1
             }
-            RecordType.FORMULA -> formula += payloadInt(r.payloadJson, "amount_ml")
-            RecordType.PUMPED_FEED -> pumped += payloadInt(r.payloadJson, "amount_ml")
+            RecordType.FORMULA -> {
+                val ml = payloadInt(r.payloadJson, "amount_ml")
+                formula += ml
+                feed += ml
+            }
+            RecordType.PUMPED_FEED -> {
+                val ml = payloadInt(r.payloadJson, "amount_ml")
+                pumped += ml
+                feed += ml
+            }
             RecordType.NURSING -> {
                 nursing += payloadInt(r.payloadJson, "left_min").toLong()
                 nursing += payloadInt(r.payloadJson, "right_min").toLong()
+                // Optional nursing amount_ml counts toward feedMl.
+                feed += payloadInt(r.payloadJson, "amount_ml")
+            }
+            RecordType.PUMP_EXPRESS -> {
+                // Explicitly excluded from feedMl.
             }
             else -> Unit
         }
@@ -51,11 +67,21 @@ fun aggregateDaily(records: List<RecordEntity>): DailySummary {
         formulaMl = formula,
         nursingMinutes = nursing,
         pumpedFeedMl = pumped,
+        feedMl = feed,
     )
 }
 
-internal fun payloadInt(json: String, key: String): Int {
-    // Minimal JSON number extractor: "key": 123 or "key":123
+fun payloadInt(json: String, key: String): Int {
     val pattern = Regex("\"${Regex.escape(key)}\"\\s*:\\s*(-?\\d+)")
     return pattern.find(json)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+}
+
+fun payloadDouble(json: String, key: String): Double? {
+    val pattern = Regex("\"${Regex.escape(key)}\"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)")
+    return pattern.find(json)?.groupValues?.getOrNull(1)?.toDoubleOrNull()
+}
+
+fun payloadBool(json: String, key: String): Boolean {
+    val pattern = Regex("\"${Regex.escape(key)}\"\\s*:\\s*(true|false)")
+    return pattern.find(json)?.groupValues?.getOrNull(1) == "true"
 }

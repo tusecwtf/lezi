@@ -1,29 +1,31 @@
 # 乐记（lezi）
 
 家庭育儿日志 · Android · Kotlin + Jetpack Compose  
-包名：`com.lezi.babylog` · minSdk 26 · targetSdk 35
+包名：`com.lezi.babylog` · minSdk 26 · targetSdk 35 · 显示名「乐记」 · version `0.2.0-v2`
 
-产品规格见 [`docs/prd/`](docs/prd/)。
+产品规格：[`docs/prd/`](docs/prd/)  
+设计同步：[`design/README.md`](design/README.md) · 原型快照 [`prototype/`](prototype/)  
+Open Design 项目：`leji-prd-prototype`（禁止 `nuanya-baby-tracker`）
 
 ## 环境
 
-- JDK 17+（推荐 21，已用 `JAVA_HOME`）
-- Android SDK：`ANDROID_HOME` 指向 SDK（本机默认 `~/Android/Sdk`）
-- 可选模拟器 AVD：`lezi_api35`（`lezi-emu start`）
+- **JDK 21**（`gradle.properties` 已钉 `org.gradle.java.home`；JDK 25 会触发 AGP 失败）
+- Android SDK：`local.properties` → `sdk.dir`
+- 可选模拟器 AVD：`lezi_api35`（`lezi-emu start --window`）
 
 ## 构建
 
 ```bash
 ./gradlew :app:assembleDebug
-# APK
-# app/build/outputs/apk/debug/app-debug.apk
+# APK → app/build/outputs/apk/debug/app-debug.apk
+# debug applicationId = com.lezi.babylog.debug
 ```
 
-安装到已连接设备 / 模拟器：
+安装并启动：
 
 ```bash
 ./gradlew :app:installDebug
-adb shell am start -n com.lezi.babylog.debug/.MainActivity
+adb shell am start -n com.lezi.babylog.debug/com.lezi.babylog.MainActivity
 ```
 
 单测：
@@ -31,6 +33,33 @@ adb shell am start -n com.lezi.babylog.debug/.MainActivity
 ```bash
 ./gradlew test
 ```
+
+## 同步服务（V2）
+
+```bash
+python3 tools/sync-server/server.py
+# health: curl http://127.0.0.1:8765/health
+# 模拟器访问宿主机：BuildConfig.SYNC_BASE_URL = http://10.0.2.2:8765
+```
+
+## 已知限制
+
+- **同步**：本地 stdlib 服务；设置 / 深色模式**不同步**；双端 SLA 依赖前台 pull
+- **成长曲线**：示例 WHO 简化数据，**非医疗诊断**
+- **Widget**：需手动添加到桌面
+- **厂商杀后台**：母乳计时依赖 FGS + DataStore
+- **无广告 / 无 IAP / 无强制登录**
+
+## 设计系统
+
+| 层 | 路径 |
+|----|------|
+| Tokens JSON | `design/tokens.json` |
+| Compose tokens | `designsystem/Tokens.kt` · `Theme.kt` |
+| 通用组件 | `designsystem/Components.kt` |
+| Preview 基线 | `designsystem/ComponentPreviews.kt`（390×844） |
+
+主 seam：`domain/.../CareLog.kt`（feature 禁止直注 DAO）。
 
 ## 模块
 
@@ -41,14 +70,13 @@ designsystem
 domain
 sync
 feature/{onboarding,log,timer,family,settings,summary,growth,export,search,widget}
+tools/sync-server
 ```
 
-依赖方向：`app → feature → domain → core`；`sync` 提供 `SyncPort`（V1 = `NoOpSyncPort`）。
-
-## Agent 调试
+## Agent / 模拟器
 
 ```bash
-lezi-emu start          # 或真机 adb
-lezi-emu shot           # 截图
-lezi-emu dump           # UI 树
+lezi-emu start --window
+lezi-emu shot /tmp/lezi.png
+lezi-emu dump /tmp/lezi-ui.xml
 ```

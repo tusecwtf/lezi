@@ -128,7 +128,7 @@ UI 事件
 
 - 日汇总计算  
 - 睡眠配对与 `anomaly_flag`  
-- 便便枚举边界  
+- 便便枚举边界；尿尿 `pee_amount` 1–3；排泄图标资源存在性（designsystem）  
 - `client_uuid` 幂等合并（为 V2 预埋纯函数）  
 - NoOpSync 不抛未捕获异常  
 

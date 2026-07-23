@@ -37,6 +37,7 @@ dependencies {
     implementation(project(":core:ui"))
     implementation(project(":designsystem"))
     implementation(project(":domain"))
+    implementation(project(":feature:settings"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
@@ -50,6 +51,7 @@ dependencies {
     implementation(libs.hilt.android)
     ksp(libs.hilt.compiler)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.androidx.activity.compose)
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     implementation(project(":core:database"))

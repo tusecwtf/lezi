@@ -77,10 +77,12 @@ data class SettingsLocal(
     val nursingIntervalMin: Int = 180,
     val nextFeedAt: Long? = null,
     val darkMode: String = "system",
+    /** "warm" = original card template; "journal" = compact logbook template. */
+    val visualStyle: String = "warm",
     val dayCountMode: String = "full",
     val weekStart: Int = 1,
     val unitsJson: String = "{}",
-    val amountStepMl: Int = 10,
+    val amountStepMl: Int = 5,
     val timeStepMin: Int = 1,
     val curveDataset: String = "default",
     val timelineOrder: String = "newest_first",

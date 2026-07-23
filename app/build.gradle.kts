@@ -15,7 +15,8 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 1
-        versionName = "0.1.0-v1"
+        versionName = "0.2.0-v2"
+        buildConfigField("String", "SYNC_BASE_URL", "\"http://10.0.2.2:8765\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }
@@ -71,6 +72,9 @@ dependencies {
     implementation(project(":feature:settings"))
     implementation(project(":feature:summary"))
     implementation(project(":feature:growth"))
+    implementation(project(":feature:export"))
+    implementation(project(":feature:search"))
+    implementation(project(":feature:widget"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)

@@ -24,4 +24,8 @@ object DatabaseModule {
     @Provides fun membershipDao(db: LeziDatabase): MembershipDao = db.membershipDao()
     @Provides fun babyDao(db: LeziDatabase): BabyDao = db.babyDao()
     @Provides fun recordDao(db: LeziDatabase): RecordDao = db.recordDao()
+    @Provides fun mediaAssetDao(db: LeziDatabase): MediaAssetDao = db.mediaAssetDao()
+    @Provides fun outboxDao(db: LeziDatabase): OutboxDao = db.outboxDao()
+    @Provides fun customItemDao(db: LeziDatabase): CustomItemDao = db.customItemDao()
+    @Provides fun calendarEventDao(db: LeziDatabase): CalendarEventDao = db.calendarEventDao()
 }

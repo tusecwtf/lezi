@@ -113,7 +113,9 @@ V1 最小路径：创建默认 `Family` + 当前 `LocalUser`（匿名）+ `Baby`
 | `nursing` | `left_min`, `right_min`, `order`, `amount_ml?`, `record_at_mode` |
 | `formula` | `amount_ml`, `prepared_ml?`, `duration_min?` |
 | `pumped_feed` / `pump_express` | `amount_ml` |
-| `poop` / `both_diaper` | `stool_amount?` 1–4, `stool_consistency?` 1–4, `stool_color?` 0–7 |
+| `pee` | `pee_amount` 1=小 · 2=中 · 3=大（默认 2） |
+| `poop` | `stool_amount?` 1–4, `stool_consistency?` 1–4, `stool_color?` 0–7 |
+| `both_diaper` | `pee_amount` + 便便三字段（同上） |
 | `sleep` | `anomaly_flag`, `is_nap?`（起止用 timestamp/end） |
 | `temperature` | `celsius` |
 | `height` / `weight` / … | `value`, `unit` |
@@ -151,7 +153,7 @@ V1 最小路径：创建默认 `Family` + 当前 `LocalUser`（匿名）+ `Baby`
 | `day_count_mode` | 满日龄 / 计数日龄 |
 | `week_start` | |
 | `units` | ml/oz、℃/℉、g/kg、12/24h |
-| `amount_step_ml` | 默认 10 |
+| `amount_step_ml` | 配方奶/挤出乳步进 ml；**默认 5**；可选 5/10/15；改后 UI 立即按新步进渲染 |
 | `time_step_min` | |
 | `curve_dataset` | 曲线包 id |
 | `timeline_order` | `newest_first` / `oldest_first` |

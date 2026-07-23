@@ -1,0 +1,196 @@
+package com.lezi.babylog.designsystem
+
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Typography
+import androidx.compose.runtime.Immutable
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+
+/** OD canvas baseline (styles.css / brand-spec). */
+object LeziCanvas {
+    val Width = 390.dp
+    val Height = 844.dp
+}
+
+object LeziColors {
+    // Light
+    val Bg = Color(0xFFFBF7EE)
+    val Surface = Color(0xFFFEFCF9)
+    val Fg = Color(0xFF1E2C3C)
+    val Muted = Color(0xFF657383)
+    val Border = Color(0xFFCCDBE9)
+    val Accent = Color(0xFF007BAE)
+    val Fab = Color(0xFFAA442B)
+    val Sun = Color(0xFFF0D36A)
+    val Success = Color(0xFF3F9B6A)
+    val Danger = Color(0xFFC0392B)
+    val Warning = Color(0xFFD4A017)
+    val SkySoft = Color(0xFFE5F2F8)
+    val SunSoft = Color(0xFFF8F0D4)
+    val CreamDeep = Color(0xFFF0E6D2)
+
+    // Dark
+    val DarkBg = Color(0xFF0E1721)
+    val DarkSurface = Color(0xFF15202C)
+    val DarkFg = Color(0xFFEDE7DB)
+    val DarkMuted = Color(0xFFA8B3BF)
+    val DarkBorder = Color(0xFF3A4A5A)
+    val DarkAccent = Color(0xFF60B3DC)
+    val DarkFab = Color(0xFFC8664E)
+    val DarkSkySoft = Color(0xFF1A3344)
+    val DarkSunSoft = Color(0xFF3A3420)
+    val DarkCreamDeep = Color(0xFF2A2418)
+
+    // Semantic lane colors (time rail)
+    val LaneSleep = Color(0xFFE09F3E)
+    val LaneFeed = Accent
+    val LaneCare = Color(0xFF7A9E7E)
+
+    /** Compact logbook template. Brand-safe colors derived from the visual study. */
+    val JournalBg = Color(0xFFF4F3F5)
+    val JournalSurface = Color(0xFFF9F7F8)
+    val JournalFg = Color(0xFF36363A)
+    val JournalMuted = Color(0xFF77747A)
+    val JournalBorder = Color(0xFFD7D4D6)
+    val JournalAccent = Color(0xFFEA7C8F)
+    val JournalAccentSoft = Color(0xFFFFE6EB)
+    val JournalSleep = Color(0xFF8B78D1)
+    val JournalFeed = Color(0xFFEC7186)
+    val JournalCare = Color(0xFF59C6A5)
+    val JournalSun = Color(0xFFF3B84B)
+    val JournalChartGrid = Color(0xFFC9CBD2)
+
+    val JournalDarkBg = Color(0xFF202121)
+    val JournalDarkSurface = Color(0xFF262727)
+    val JournalDarkFg = Color(0xFFF1EFF0)
+    val JournalDarkMuted = Color(0xFFAAA5A7)
+    val JournalDarkBorder = Color(0xFF4C4D4D)
+    val JournalDarkAccent = Color(0xFFEC7887)
+    val JournalDarkAccentSoft = Color(0xFF4B252D)
+    val JournalDarkChartGrid = Color(0xFF505058)
+}
+
+@Immutable
+object LeziSpacing {
+    val Xxs: Dp = 4.dp
+    val Xs: Dp = 8.dp
+    val Sm: Dp = 12.dp
+    val Md: Dp = 16.dp
+    val Lg: Dp = 20.dp
+    val Xl: Dp = 24.dp
+    val Xxl: Dp = 32.dp
+    val Touch: Dp = 48.dp
+    val Nav: Dp = 76.dp
+    val Page: Dp = 16.dp
+    val CardPad: Dp = 14.dp
+    val SectionGap: Dp = 12.dp
+}
+
+@Immutable
+object LeziShapes {
+    val Sm = RoundedCornerShape(12.dp)
+    val Md = RoundedCornerShape(20.dp)
+    val Lg = RoundedCornerShape(28.dp)
+    val Pill = RoundedCornerShape(999.dp)
+    val Button = RoundedCornerShape(14.dp)
+    val JournalCard = RoundedCornerShape(8.dp)
+    val JournalButton = RoundedCornerShape(8.dp)
+}
+
+object LeziTypography {
+    private val BodyFamily = FontFamily.SansSerif
+    private val DisplayFamily = FontFamily.Serif
+    private val MonoFamily = FontFamily.Monospace
+
+    val Display = TextStyle(
+        fontFamily = DisplayFamily,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 28.sp,
+        lineHeight = 32.sp,
+        letterSpacing = (-0.4).sp,
+    )
+    val Title = TextStyle(
+        fontFamily = DisplayFamily,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 20.sp,
+        lineHeight = 26.sp,
+        letterSpacing = (-0.2).sp,
+    )
+    val TitleSm = TextStyle(
+        fontFamily = BodyFamily,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 17.sp,
+        lineHeight = 22.sp,
+    )
+    val Body = TextStyle(
+        fontFamily = BodyFamily,
+        fontWeight = FontWeight.Normal,
+        fontSize = 16.sp,
+        lineHeight = 24.sp,
+    )
+    val BodyStrong = Body.copy(fontWeight = FontWeight.SemiBold)
+    val Label = TextStyle(
+        fontFamily = BodyFamily,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 13.sp,
+        lineHeight = 18.sp,
+        letterSpacing = 0.2.sp,
+    )
+    val Meta = TextStyle(
+        fontFamily = BodyFamily,
+        fontWeight = FontWeight.Normal,
+        fontSize = 12.sp,
+        lineHeight = 16.sp,
+    )
+    val Metric = TextStyle(
+        fontFamily = MonoFamily,
+        fontWeight = FontWeight.Bold,
+        fontSize = 22.sp,
+        lineHeight = 28.sp,
+    )
+    val Mono = TextStyle(
+        fontFamily = MonoFamily,
+        fontWeight = FontWeight.Medium,
+        fontSize = 14.sp,
+        lineHeight = 20.sp,
+    )
+    val Eyebrow = TextStyle(
+        fontFamily = BodyFamily,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 11.sp,
+        lineHeight = 14.sp,
+        letterSpacing = 0.6.sp,
+    )
+
+    fun material(journal: Boolean = false): Typography = Typography(
+        displayLarge = if (journal) Display.copy(fontFamily = BodyFamily) else Display,
+        headlineMedium = if (journal) Title.copy(fontFamily = BodyFamily) else Title,
+        titleLarge = TitleSm,
+        titleMedium = TitleSm,
+        bodyLarge = Body,
+        bodyMedium = Body,
+        bodySmall = Meta,
+        labelLarge = Label,
+        labelMedium = Label,
+        labelSmall = Meta,
+    )
+}
+
+// Back-compat aliases used by existing screens
+val LeziBg = LeziColors.Bg
+val LeziSurface = LeziColors.Surface
+val LeziOnBg = LeziColors.Fg
+val LeziMuted = LeziColors.Muted
+val LeziBorder = LeziColors.Border
+val LeziAccent = LeziColors.Accent
+val LeziFab = LeziColors.Fab
+val LeziDarkBg = LeziColors.DarkBg
+val LeziDarkSurface = LeziColors.DarkSurface
+val LeziDarkOn = LeziColors.DarkFg
+val LeziDarkAccent = LeziColors.DarkAccent
+val LeziDarkFab = LeziColors.DarkFab

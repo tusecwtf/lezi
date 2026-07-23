@@ -11,8 +11,11 @@ import androidx.room.RoomDatabase
         BabyEntity::class,
         RecordEntity::class,
         MediaAssetEntity::class,
+        OutboxEntity::class,
+        CustomItemEntity::class,
+        CalendarEventEntity::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = true,
 )
 abstract class LeziDatabase : RoomDatabase() {
@@ -21,4 +24,8 @@ abstract class LeziDatabase : RoomDatabase() {
     abstract fun membershipDao(): MembershipDao
     abstract fun babyDao(): BabyDao
     abstract fun recordDao(): RecordDao
+    abstract fun mediaAssetDao(): MediaAssetDao
+    abstract fun outboxDao(): OutboxDao
+    abstract fun customItemDao(): CustomItemDao
+    abstract fun calendarEventDao(): CalendarEventDao
 }
