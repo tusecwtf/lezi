@@ -31,10 +31,12 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -62,6 +64,7 @@ import com.lezi.babylog.feature.settings.NextFeedScheduler
 import dagger.hilt.android.AndroidEntryPoint
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -144,6 +147,10 @@ class TimerViewModel @Inject constructor(
  ) : ViewModel() {
     private val _state = MutableStateFlow(TimerState())
     val state: StateFlow<TimerState> = _state
+    private val completionInFlight = AtomicBoolean(false)
+    val timeStepMin = settings.settings
+        .map { it.timeStepMin }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 1)
 
     init {
         viewModelScope.launch {
@@ -246,37 +253,53 @@ class TimerViewModel @Inject constructor(
         persist(next)
     }
 
-    fun complete(onDone: () -> Unit) {
+    internal fun freezeCompletion(
+        initialNote: String = "",
+        initialAmountMl: String = "",
+    ): NursingCompletionDraft = freezeNursingCompletion(
+        state = _state.value,
+        nowElapsed = SystemClock.elapsedRealtime(),
+        clickedAt = System.currentTimeMillis(),
+        initialNote = initialNote,
+        initialAmountMl = initialAmountMl,
+    )
+
+    internal fun complete(
+        draft: NursingCompletionDraft,
+        onDone: () -> Unit,
+        onError: (String) -> Unit,
+    ) {
+        if (!completionInFlight.compareAndSet(false, true)) return
         viewModelScope.launch {
-            val now = SystemClock.elapsedRealtime()
-            val cur = _state.value
-            val leftMin = ((cur.leftMs(now) + 30_000) / 60_000L).toInt().coerceAtLeast(0)
-            val rightMin = ((cur.rightMs(now) + 30_000) / 60_000L).toInt().coerceAtLeast(0)
-            if (leftMin == 0 && rightMin == 0) {
+            try {
+                draft.validationError(System.currentTimeMillis())?.let {
+                    onError(it)
+                    return@launch
+                }
+                val baby = careLog.getCurrentBaby()
+                if (baby == null) {
+                    onError("请先添加宝宝")
+                    return@launch
+                }
+                val command = draft.toCommand()
+                careLog.completeNursing(
+                    babyId = baby.id,
+                    leftMin = command.leftMin,
+                    rightMin = command.rightMin,
+                    order = command.order,
+                    amountMl = command.amountMl,
+                    note = command.note,
+                    startedAt = command.startedAt,
+                    endedAt = command.endedAt,
+                )
+                runCatching { nextFeed.scheduleAfterFeed(app) }
                 clear()
                 onDone()
-                return@launch
+            } catch (throwable: Throwable) {
+                onError(throwable.message ?: "保存失败")
+            } finally {
+                completionInFlight.set(false)
             }
-            val baby = careLog.getCurrentBaby() ?: return@launch
-            val started = cur.sessionStartedAt ?: System.currentTimeMillis()
-            val ended = System.currentTimeMillis()
-            val order = when {
-                cur.order in setOf("LR", "RL") -> cur.order
-                leftMin > 0 && rightMin > 0 -> if (cur.lastSide == "R") "LR" else "RL"
-                leftMin > 0 -> "L"
-                else -> "R"
-            }
-            careLog.completeNursing(
-                babyId = baby.id,
-                leftMin = leftMin,
-                rightMin = rightMin,
-                order = order,
-                startedAt = started,
-                endedAt = ended,
-            )
-            nextFeed.scheduleAfterFeed(app)
-            clear()
-            onDone()
         }
     }
 
@@ -351,9 +374,12 @@ class NursingTimerService : Service() {
 @Composable
 fun TimerRoute(
     onDone: () -> Unit,
+    initialNote: String = "",
+    initialAmountMl: String = "",
     vm: TimerViewModel = hiltViewModel(),
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
+    val timeStepMin by vm.timeStepMin.collectAsStateWithLifecycle()
     var tick by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
     LaunchedEffect(state.leftRunning, state.rightRunning) {
         while (true) {
@@ -363,6 +389,10 @@ fun TimerRoute(
     }
     val leftMs = state.leftMs(tick)
     val rightMs = state.rightMs(tick)
+    var completionDraft by remember { mutableStateOf<NursingCompletionDraft?>(null) }
+    var completionSaving by remember { mutableStateOf(false) }
+    var completionSaveError by remember { mutableStateOf<String?>(null) }
+    val completionSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     Scaffold(
         topBar = {
@@ -424,7 +454,13 @@ fun TimerRoute(
 
             Column(Modifier.fillMaxWidth()) {
                 Button(
-                    onClick = { vm.complete(onDone) },
+                    onClick = {
+                        completionSaveError = null
+                        completionDraft = vm.freezeCompletion(
+                            initialNote = initialNote,
+                            initialAmountMl = initialAmountMl,
+                        )
+                    },
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(56.dp),
@@ -437,6 +473,51 @@ fun TimerRoute(
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("丢弃") }
             }
+        }
+    }
+
+    completionDraft?.let { draft ->
+        ModalBottomSheet(
+            onDismissRequest = {
+                if (!completionSaving) {
+                    completionDraft = null
+                    completionSaveError = null
+                }
+            },
+            sheetState = completionSheetState,
+        ) {
+            NursingCompletionSheet(
+                draft = draft,
+                saving = completionSaving,
+                saveError = completionSaveError,
+                timeStepMin = timeStepMin,
+                onDraftChange = {
+                    completionSaveError = null
+                    completionDraft = it
+                },
+                onDismiss = {
+                    if (!completionSaving) {
+                        completionDraft = null
+                        completionSaveError = null
+                    }
+                },
+                onConfirm = { confirmed ->
+                    completionSaving = true
+                    completionSaveError = null
+                    vm.complete(
+                        draft = confirmed,
+                        onDone = {
+                            completionSaving = false
+                            completionDraft = null
+                            onDone()
+                        },
+                        onError = {
+                            completionSaving = false
+                            completionSaveError = it
+                        },
+                    )
+                },
+            )
         }
     }
 }

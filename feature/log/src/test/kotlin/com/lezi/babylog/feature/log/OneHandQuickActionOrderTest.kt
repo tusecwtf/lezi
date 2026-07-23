@@ -5,7 +5,7 @@ import org.junit.Test
 
 class OneHandQuickActionOrderTest {
     @Test
-    fun leftHand_putsOneTapPeeAtLeftThumbEdge() {
+    fun leftHand_putsPeeComposerAtLeftThumbEdge() {
         assertEquals(
             listOf(
                 OneHandQuickAction.Pee,
@@ -19,7 +19,7 @@ class OneHandQuickActionOrderTest {
     }
 
     @Test
-    fun rightHand_putsOneTapPeeAtRightThumbEdge() {
+    fun rightHand_putsPeeComposerAtRightThumbEdge() {
         assertEquals(
             listOf(
                 OneHandQuickAction.More,

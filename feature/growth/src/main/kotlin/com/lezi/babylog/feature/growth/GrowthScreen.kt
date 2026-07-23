@@ -175,7 +175,7 @@ class GrowthViewModel @Inject constructor(
         corrected.value = v
     }
 
-    fun addMeasurement(value: Double, timestamp: Long, onDone: () -> Unit) {
+    fun addMeasurement(value: Double, timestamp: Long, note: String, onDone: () -> Unit) {
         viewModelScope.launch {
             val baby = careLog.getCurrentBaby() ?: return@launch
             if (timestamp > System.currentTimeMillis()) return@launch
@@ -197,7 +197,13 @@ class GrowthViewModel @Inject constructor(
                     payload = """{"value":$value,"unit":"cm"}"""
                 }
             }
-            careLog.addRecord(baby.id, type, timestamp = timestamp, payloadJson = payload)
+            careLog.addRecord(
+                babyId = baby.id,
+                type = type,
+                timestamp = timestamp,
+                note = note.ifBlank { null },
+                payloadJson = payload,
+            )
             refresh.value = refresh.value + 1
             onDone()
         }
@@ -226,6 +232,7 @@ fun GrowthRoute(
     }
     var showAdd by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
+    var note by remember { mutableStateOf("") }
     var measurementAt by remember(initialDate) {
         mutableStateOf(timestampOnGrowthDate(initialDate))
     }
@@ -236,6 +243,7 @@ fun GrowthRoute(
     val openMeasurementDraft = {
         measurementAt = timestampOnGrowthDate(initialDate)
         input = ""
+        note = ""
         measurementError = null
         showMeasureDate = false
         showMeasureClock = false
@@ -246,6 +254,7 @@ fun GrowthRoute(
         showMeasureDate = false
         showMeasureClock = false
         input = ""
+        note = ""
         measurementError = null
     }
 
@@ -365,6 +374,14 @@ fun GrowthRoute(
                         singleLine = true,
                         label = { Text(if (ui.metric == GrowthMetric.WEIGHT) "公斤" else "厘米") },
                     )
+                    OutlinedTextField(
+                        value = note,
+                        onValueChange = { note = it.take(200) },
+                        label = { Text("备注（可选）") },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 2,
+                        supportingText = { Text("${note.length}/200") },
+                    )
                     val measurement = Instant.ofEpochMilli(measurementAt)
                         .atZone(ZoneId.systemDefault())
                     Text(
@@ -396,7 +413,7 @@ fun GrowthRoute(
                                 measurementError = "测量时刻不能晚于现在"
                                 return@let
                             }
-                            vm.addMeasurement(v, measurementAt) {
+                            vm.addMeasurement(v, measurementAt, note) {
                                 closeMeasurementDraft()
                             }
                         }

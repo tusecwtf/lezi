@@ -26,7 +26,6 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -60,7 +59,6 @@ import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.core.ui.presentationSummary
 import com.lezi.babylog.core.ui.presentationTone
 import com.lezi.babylog.designsystem.LeziCard
-import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziRecordGlyph
 import com.lezi.babylog.designsystem.LeziRecordGlyphIcon
 import com.lezi.babylog.designsystem.LeziSecondaryButton
@@ -115,12 +113,13 @@ data class LogUiState(
     val feedLanes: List<TimelineLaneSegment> = emptyList(),
     val careLanes: List<TimelineLaneSegment> = emptyList(),
     val settings: SettingsLocal = SettingsLocal(),
-    val openSleep: Boolean = false,
+    val openSleep: Record? = null,
     val saving: Boolean = false,
     val error: String? = null,
 )
 
 sealed interface LogEvent {
+    data class Saved(val message: String) : LogEvent
     data class Toast(val message: String) : LogEvent
 }
 
@@ -200,7 +199,7 @@ class LogViewModel @Inject constructor(
                     feedLanes = lanes.feed,
                     careLanes = lanes.care,
                     settings = settings,
-                    openSleep = openSleep != null,
+                    openSleep = openSleep,
                     saving = isSaving,
                     error = err,
                 )
@@ -216,89 +215,69 @@ class LogViewModel @Inject constructor(
         error.value = null
     }
 
-    fun quickAdd(type: RecordType, payloadJson: String = "{}") {
+    internal fun saveQuickRecord(draft: QuickRecordDraft) {
+        if (!saving.compareAndSet(expect = false, update = true)) return
         viewModelScope.launch {
-            runCatching {
-                saving.value = true
+            try {
                 error.value = null
                 val state = uiState.value
                 val babyId = state.baby?.id ?: error("无宝宝")
-                val today = LocalDate.now(zone)
-                val timestamp = timestampOnDate(state.day, zone)
-                when (type) {
-                    RecordType.SLEEP -> {
-                        check(state.day == today) { "历史日期请使用睡眠编辑页" }
-                        if (state.openSleep) {
-                            careLog.sleepUp(babyId)
-                            _events.emit(LogEvent.Toast("已记录醒来"))
-                        } else {
-                            careLog.sleepDown(babyId)
-                            _events.emit(LogEvent.Toast("已开始睡眠"))
-                        }
-                    }
-                    RecordType.PEE -> {
-                        careLog.addRecord(
-                            babyId,
-                            RecordType.PEE,
-                            timestamp = timestamp,
-                            payloadJson = """{"pee_amount":2}""",
-                        )
-                        _events.emit(LogEvent.Toast("已记尿尿"))
-                    }
-                    RecordType.POOP -> careLog.addRecord(
-                        babyId,
-                        RecordType.POOP,
-                        timestamp = timestamp,
-                        payloadJson = """{"stool_amount":3,"stool_consistency":3,"stool_color":0}""",
+                val command = draft.toSaveCommand()
+                val statefulSleep = command.type == RecordType.SLEEP &&
+                    draft.sleepAction in setOf(
+                        SleepDraftAction.SleepDown,
+                        SleepDraftAction.WakeUp,
                     )
-                    RecordType.BOTH_DIAPER -> careLog.addRecord(
-                        babyId,
-                        RecordType.BOTH_DIAPER,
-                        timestamp = timestamp,
-                        payloadJson = """{"pee_amount":2,"stool_amount":3,"stool_consistency":3,"stool_color":0}""",
+                if (statefulSleep) {
+                    careLog.confirmSleep(
+                        babyId = babyId,
+                        expectedOpenSleepId = command.existingRecordId,
+                        timestamp = command.timestamp,
+                        endTimestamp = command.endTimestamp,
+                        note = command.note,
+                        payloadJson = command.payloadJson,
                     )
-                    RecordType.BATH, RecordType.WALK, RecordType.COUGH, RecordType.RASH,
-                    RecordType.VOMIT, RecordType.INJURY,
-                    -> {
-                        careLog.addRecord(babyId, type, timestamp = timestamp)
-                        _events.emit(LogEvent.Toast("已记录"))
-                    }
-                    else -> careLog.addRecord(
+                } else if (command.existingRecordId != null) {
+                    careLog.updateRecord(
+                        id = command.existingRecordId,
+                        timestamp = command.timestamp,
+                        endTimestamp = command.endTimestamp,
+                        note = command.note,
+                        payloadJson = command.payloadJson,
+                    )
+                } else {
+                    careLog.addRecord(
                         babyId,
-                        type,
-                        timestamp = timestamp,
-                        payloadJson = payloadJson,
+                        command.type,
+                        timestamp = command.timestamp,
+                        endTimestamp = command.endTimestamp,
+                        note = command.note,
+                        payloadJson = command.payloadJson,
                     )
                 }
-            }.onFailure {
-                error.value = it.message ?: "保存失败"
-                _events.emit(LogEvent.Toast(error.value!!))
-            }
-            saving.value = false
-        }
-    }
-
-    fun addFormula(ml: Int) {
-        viewModelScope.launch {
-            runCatching {
-                saving.value = true
-                val state = uiState.value
-                val babyId = state.baby?.id ?: error("无宝宝")
-                careLog.addRecord(
-                    babyId,
-                    RecordType.FORMULA,
-                    timestamp = timestampOnDate(state.day, zone),
-                    payloadJson = """{"amount_ml":$ml}""",
-                )
-                if (state.day == LocalDate.now(zone)) {
-                    nextFeed.scheduleAfterFeed(app)
+                if (
+                    state.day == LocalDate.now(zone) &&
+                    command.type in setOf(
+                        RecordType.NURSING,
+                        RecordType.FORMULA,
+                        RecordType.PUMPED_FEED,
+                    )
+                ) {
+                    runCatching { nextFeed.scheduleAfterFeed(app) }
                 }
-                _events.emit(LogEvent.Toast("已记配方奶 ${ml}ml"))
-            }.onFailure {
-                error.value = it.message
-                _events.emit(LogEvent.Toast(it.message ?: "保存失败"))
+                val message = when (draft.sleepAction) {
+                    SleepDraftAction.SleepDown -> "已开始睡眠"
+                    SleepDraftAction.WakeUp -> "已记录醒来"
+                    SleepDraftAction.Manual, null -> "已记录${command.type.presentation.label}"
+                }
+                _events.emit(LogEvent.Saved(message))
+            } catch (throwable: Throwable) {
+                val message = throwable.message ?: "保存失败"
+                error.value = message
+                _events.emit(LogEvent.Toast(message))
+            } finally {
+                saving.value = false
             }
-            saving.value = false
         }
     }
 }
@@ -343,9 +322,8 @@ private fun buildLanes(records: List<Record>, dayStart: Long, dayEnd: Long): Lan
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LogRoute(
-    onOpenTimer: () -> Unit,
+    onOpenTimer: (note: String, amountMl: String) -> Unit,
     onOpenEdit: (Long) -> Unit,
-    onOpenNewEdit: (String) -> Unit,
     onGoToday: () -> Unit,
     externalDay: LocalDate? = null,
     vm: LogViewModel = hiltViewModel(),
@@ -353,10 +331,35 @@ fun LogRoute(
     val state by vm.uiState.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     var showMore by remember { mutableStateOf(false) }
-    var showFormula by remember { mutableStateOf(false) }
+    var pendingDraft by remember { mutableStateOf<QuickRecordDraft?>(null) }
     val today = LocalDate.now()
+    val zone = ZoneId.systemDefault()
     val ext = LeziThemeExt.colors
     val journal = LeziThemeExt.isJournal
+
+    fun openComposer(type: RecordType) {
+        vm.retry()
+        val openSleep = state.openSleep
+        val wakingCurrentSleep = type == RecordType.SLEEP && openSleep != null
+        val clickedAt = timestampOnDate(
+            date = if (wakingCurrentSleep) today else state.day,
+            zone = zone,
+        )
+        pendingDraft = if (wakingCurrentSleep) {
+            QuickRecordDraft.wakeSleep(checkNotNull(openSleep), clickedAt)
+        } else {
+            val lastAmount = state.records
+                .firstOrNull { it.type == type }
+                ?.let { payloadInt(it.payloadJson, "amount_ml") }
+                ?.takeIf { it > 0 }
+            QuickRecordDraft.create(
+                type = type,
+                timestamp = clickedAt,
+                lastAmountMl = lastAmount,
+                historical = state.day != today,
+            )
+        }
+    }
 
     LaunchedEffect(externalDay) {
         if (externalDay != null && externalDay != state.day) {
@@ -367,7 +370,11 @@ fun LogRoute(
     LaunchedEffect(Unit) {
         vm.events.collect { ev ->
             when (ev) {
-                is LogEvent.Toast -> snackbar.showSnackbar(ev.message)
+                is LogEvent.Saved -> {
+                    pendingDraft = null
+                    launch { snackbar.showSnackbar(ev.message) }
+                }
+                is LogEvent.Toast -> launch { snackbar.showSnackbar(ev.message) }
             }
         }
     }
@@ -547,18 +554,12 @@ fun LogRoute(
             OneHandQuickDock(
                 preferredHand = state.settings.preferredHand,
                 timerEnabled = state.settings.timerEnabled,
-                sleepRunning = state.openSleep && state.day == today,
+                sleepRunning = state.openSleep != null,
                 saving = state.saving,
-                onNursing = onOpenTimer,
-                onPee = { vm.quickAdd(RecordType.PEE) },
-                onSleep = {
-                    if (state.day == today) {
-                        vm.quickAdd(RecordType.SLEEP)
-                    } else {
-                        onOpenNewEdit(RecordType.SLEEP.key)
-                    }
-                },
-                onFormula = { showFormula = true },
+                onNursing = { openComposer(RecordType.NURSING) },
+                onPee = { openComposer(RecordType.PEE) },
+                onSleep = { openComposer(RecordType.SLEEP) },
+                onFormula = { openComposer(RecordType.FORMULA) },
                 onMore = { showMore = true },
                 modifier = Modifier.align(Alignment.BottomCenter),
             )
@@ -575,37 +576,41 @@ fun LogRoute(
             MoreSheet(
                 onPick = { type ->
                     showMore = false
-                    when (type) {
-                        RecordType.NURSING -> onOpenTimer()
-                        RecordType.FORMULA -> showFormula = true
-                        RecordType.BATH, RecordType.COUGH, RecordType.RASH,
-                        RecordType.VOMIT, RecordType.INJURY, RecordType.PEE,
-                        -> vm.quickAdd(type)
-                        else -> onOpenNewEdit(type.key)
-                    }
+                    openComposer(type)
                 },
             )
         }
     }
 
-    if (showFormula) {
+    pendingDraft?.let { draft ->
         ModalBottomSheet(
-            onDismissRequest = { showFormula = false },
+            onDismissRequest = {
+                if (!state.saving) pendingDraft = null
+            },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         ) {
-            FormulaSheet(
-                step = state.settings.amountStepMl,
-                lastMl = state.records.firstOrNull { it.type == RecordType.FORMULA }
-                    ?.let { payloadInt(it.payloadJson, "amount_ml") }
-                    ?.takeIf { it > 0 },
+            QuickRecordSheet(
+                draft = draft,
+                amountStepMl = state.settings.amountStepMl,
+                timeStepMin = state.settings.timeStepMin,
                 saving = state.saving,
-                onConfirm = { ml ->
-                    showFormula = false
-                    vm.addFormula(ml)
+                saveError = state.error,
+                canStartNursingTimer = draft.type == RecordType.NURSING &&
+                    state.settings.timerEnabled &&
+                    state.day == today,
+                onDraftChange = {
+                    vm.retry()
+                    pendingDraft = it
                 },
-                onOpenFull = {
-                    showFormula = false
-                    onOpenNewEdit(RecordType.FORMULA.key)
+                onDismiss = {
+                    if (!state.saving) pendingDraft = null
+                },
+                onConfirm = {
+                    vm.saveQuickRecord(it)
+                },
+                onStartNursingTimer = {
+                    pendingDraft = null
+                    onOpenTimer(draft.note, draft.nursingAmountMl)
                 },
             )
         }
@@ -622,7 +627,7 @@ internal enum class OneHandQuickAction {
 
 /**
  * The first item is placed nearest the selected thumb edge. The high-frequency
- * one-tap pee action therefore remains the easiest target for either hand.
+ * pee composer therefore remains the easiest target for either hand.
  */
 internal fun oneHandQuickActionOrder(
     preferredHand: String,
@@ -827,41 +832,6 @@ private fun MoreSheet(onPick: (RecordType) -> Unit) {
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun FormulaSheet(
-    step: Int,
-    lastMl: Int?,
-    saving: Boolean,
-    onConfirm: (Int) -> Unit,
-    onOpenFull: () -> Unit,
-) {
-    var ml by remember(lastMl, step) { mutableStateOf(lastMl?.takeIf { it > 0 } ?: 120) }
-    Column(Modifier.padding(LeziSpacing.Lg)) {
-        Text("配方奶", style = LeziTypography.Title)
-        Spacer(Modifier.height(LeziSpacing.Md))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = { ml = (ml - step).coerceAtLeast(1) }) {
-                Text("−$step", style = LeziTypography.Title)
-            }
-            Text("${ml} ml", style = LeziTypography.Display, modifier = Modifier.padding(horizontal = 24.dp))
-            TextButton(onClick = { ml = (ml + step).coerceAtMost(999) }) {
-                Text("+$step", style = LeziTypography.Title)
-            }
-        }
-        Spacer(Modifier.height(LeziSpacing.Md))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            LeziSecondaryButton("详细编辑", onClick = onOpenFull, modifier = Modifier.weight(1f))
-            LeziPrimaryButton(
-                if (saving) "保存中…" else "记录",
-                onClick = { if (!saving) onConfirm(ml) },
-                modifier = Modifier.weight(1f),
-                enabled = !saving,
-            )
-        }
-        Spacer(Modifier.height(LeziSpacing.Xl))
     }
 }
 

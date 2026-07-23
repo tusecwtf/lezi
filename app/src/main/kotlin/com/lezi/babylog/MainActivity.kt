@@ -123,6 +123,7 @@ data class RootUi(
     val hasBaby: Boolean = false,
     val baby: Baby? = null,
     val babies: List<Baby> = emptyList(),
+    val sleeping: Boolean = false,
     val darkMode: String = "system",
     val visualStyle: String = "warm",
     val selectedDate: LocalDate = LocalDate.now(),
@@ -171,6 +172,17 @@ class RootViewModel @Inject constructor(
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
+    private val sleepingBaby = careLog.observeCurrentBaby().flatMapLatest { baby ->
+        if (baby == null) {
+            flowOf(null to false)
+        } else {
+            careLog.observeOpenSleep(baby.id).map { openSleep ->
+                baby.id to (openSleep != null)
+            }
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
     private val calendarRecordDays = combine(
         careLog.observeCurrentBaby(),
         calendarMonthFlow,
@@ -196,8 +208,14 @@ class RootViewModel @Inject constructor(
         }
     }
 
-    val ui = combine(baseUi, calendarRecordDays, todayFlow) { base, recordDays, today ->
+    val ui = combine(
+        baseUi,
+        sleepingBaby,
+        calendarRecordDays,
+        todayFlow,
+    ) { base, (sleepingBabyId, sleeping), recordDays, today ->
         base.copy(
+            sleeping = sleepingBabyId == base.baby?.id && sleeping,
             calendarRecordDays = recordDays,
             today = today,
         )
@@ -324,6 +342,7 @@ fun LeziRoot(
                     AppHeaderBar(
                         babyName = ui.baby?.nickname.orEmpty(),
                         babyAge = ui.baby?.let { babyAgeLabel(it.birthdayEpochDay) }.orEmpty(),
+                        sleeping = ui.sleeping,
                         selectedDate = ui.selectedDate,
                         today = today,
                         canCycleBaby = ui.babies.size > 1,
@@ -415,15 +434,18 @@ fun LeziRoot(
             composable(TopDest.Log.route) {
                 LogRoute(
                     externalDay = ui.selectedDate,
-                    onOpenTimer = {
+                    onOpenTimer = { note, amountMl ->
                         if (ui.selectedDate == today) {
+                            nav.currentBackStackEntry?.savedStateHandle?.apply {
+                                set(TIMER_SEED_NOTE_KEY, note)
+                                set(TIMER_SEED_AMOUNT_KEY, amountMl)
+                            }
                             nav.navigate("timer")
                         } else {
                             nav.navigate("edit/new?type=${RecordType.NURSING.key}")
                         }
                     },
                     onOpenEdit = { id -> nav.navigate("edit/$id") },
-                    onOpenNewEdit = { type -> nav.navigate("edit/new?type=$type") },
                     onGoToday = { vm.setDay(today) },
                 )
             }
@@ -453,7 +475,12 @@ fun LeziRoot(
                 )
             }
             composable("timer") {
-                TimerRoute(onDone = { nav.popBackStack() })
+                val source = nav.previousBackStackEntry?.savedStateHandle
+                TimerRoute(
+                    initialNote = source?.get<String>(TIMER_SEED_NOTE_KEY).orEmpty(),
+                    initialAmountMl = source?.get<String>(TIMER_SEED_AMOUNT_KEY).orEmpty(),
+                    onDone = { nav.popBackStack() },
+                )
             }
             composable(
                 route = "edit/{recordId}?type={type}",
@@ -500,3 +527,6 @@ fun LeziRoot(
         )
     }
 }
+
+private const val TIMER_SEED_NOTE_KEY = "timer_seed_note"
+private const val TIMER_SEED_AMOUNT_KEY = "timer_seed_amount_ml"

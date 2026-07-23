@@ -121,7 +121,11 @@ V1 最小路径：创建默认 `Family` + 当前 `LocalUser`（匿名）+ `Baby`
 | `height` / `weight` / … | `value`, `unit` |
 | `medicine` | `name`, `dose?` |
 | `diary` / `memo` | `body`；媒体走 MediaAsset |
-| `custom` | `custom_item_id` |
+| `cough` / `rash` / `vomit` / `injury` | `severity` 1–3, `description?` |
+| `hospital` | `reason`, `advice?` |
+| `baby_food` / `snack` / `drink` | `content`, `amount?` |
+| `vaccine` | `name`, `batch?` |
+| `other` / `custom` | `title`, `detail?`；后续自定义目录可追加 `custom_item_id` |
 
 **不做**：挤奶库存余额表。
 

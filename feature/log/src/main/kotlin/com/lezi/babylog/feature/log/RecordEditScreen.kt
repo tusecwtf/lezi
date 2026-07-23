@@ -167,37 +167,61 @@ data class EditForm(
     val endTimestamp: Long? = null,
     val note: String = "",
     val amountMl: Int = 120,
+    val preparedMl: Int = 0,
+    val feedingDurationMin: Int = 0,
     val leftMin: Int = 0,
     val rightMin: Int = 0,
     val order: String = "LR",
+    val nursingAmountMl: Int = 0,
     val peeAmount: Int = 2,
     val stoolAmount: Int = 3,
     val stoolConsistency: Int = 3,
     val stoolColor: Int = 0,
+    val isNap: Boolean = false,
+    val anomalyFlag: Boolean = false,
     val celsius: String = "36.5",
     val medicineName: String = "",
     val medicineDose: String = "",
+    val body: String = "",
     val photoUris: List<String> = emptyList(),
+    val rawPayloadJson: String = "{}",
 ) {
     fun toPayload(): String = when (type) {
-        RecordType.FORMULA, RecordType.PUMPED_FEED, RecordType.PUMP_EXPRESS ->
-            """{"amount_ml":$amountMl}"""
-        RecordType.NURSING ->
-            """{"left_min":$leftMin,"right_min":$rightMin,"order":"$order"}"""
+        RecordType.FORMULA -> buildString {
+            append("""{"amount_ml":$amountMl""")
+            if (preparedMl > 0) append(""","prepared_ml":$preparedMl""")
+            if (feedingDurationMin > 0) append(""","duration_min":$feedingDurationMin""")
+            append("}")
+        }
+        RecordType.PUMPED_FEED, RecordType.PUMP_EXPRESS -> """{"amount_ml":$amountMl}"""
+        RecordType.NURSING -> buildString {
+            append("""{"left_min":$leftMin,"right_min":$rightMin,"order":${jsonStr(order)}""")
+            if (nursingAmountMl > 0) append(""","amount_ml":$nursingAmountMl""")
+            append("}")
+        }
         RecordType.PEE ->
             """{"pee_amount":$peeAmount}"""
         RecordType.POOP ->
             """{"stool_amount":$stoolAmount,"stool_consistency":$stoolConsistency,"stool_color":$stoolColor}"""
         RecordType.BOTH_DIAPER ->
             """{"pee_amount":$peeAmount,"stool_amount":$stoolAmount,"stool_consistency":$stoolConsistency,"stool_color":$stoolColor}"""
+        RecordType.SLEEP -> buildString {
+            append("""{"is_nap":$isNap""")
+            if (anomalyFlag) append(""","anomaly_flag":true""")
+            append("}")
+        }
         RecordType.TEMPERATURE ->
             """{"celsius":${celsius.toDoubleOrNull() ?: 36.5}}"""
         RecordType.MEDICINE ->
             """{"name":${jsonStr(medicineName)},"dose":${jsonStr(medicineDose)}}"""
-        RecordType.DIARY, RecordType.MEMO ->
-            if (photoUris.isEmpty()) "{}"
-            else """{"photos":[${photoUris.joinToString(",") { jsonStr(it) }}]}"""
-        else -> "{}"
+        RecordType.DIARY, RecordType.MEMO -> buildString {
+            append("""{"body":${jsonStr(body)}""")
+            if (photoUris.isNotEmpty()) {
+                append(""","photos":[${photoUris.joinToString(",") { jsonStr(it) }}]""")
+            }
+            append("}")
+        }
+        else -> rawPayloadJson.ifBlank { "{}" }
     }
 
     companion object {
@@ -211,17 +235,25 @@ data class EditForm(
                 endTimestamp = r.endTimestamp,
                 note = r.note.orEmpty(),
                 amountMl = payloadInt(p, "amount_ml").takeIf { it > 0 } ?: 120,
+                preparedMl = payloadInt(p, "prepared_ml").coerceAtLeast(0),
+                feedingDurationMin = payloadInt(p, "duration_min").coerceAtLeast(0),
                 leftMin = payloadInt(p, "left_min"),
                 rightMin = payloadInt(p, "right_min"),
                 order = Regex(""""order"\s*:\s*"([^"]+)"""").find(p)?.groupValues?.getOrNull(1) ?: "LR",
+                nursingAmountMl = payloadInt(p, "amount_ml").coerceAtLeast(0),
                 peeAmount = payloadInt(p, "pee_amount").takeIf { it in 1..3 } ?: 2,
                 stoolAmount = payloadInt(p, "stool_amount").takeIf { it in 1..4 } ?: 3,
                 stoolConsistency = payloadInt(p, "stool_consistency").takeIf { it in 1..4 } ?: 3,
                 stoolColor = payloadInt(p, "stool_color").coerceIn(0, 7),
+                isNap = payloadBoolean(p, "is_nap"),
+                anomalyFlag = payloadBoolean(p, "anomaly_flag"),
                 celsius = Regex(""""celsius"\s*:\s*(-?\d+(?:\.\d+)?)""")
                     .find(p)?.groupValues?.getOrNull(1) ?: "36.5",
                 medicineName = Regex(""""name"\s*:\s*"([^"]*)"""").find(p)?.groupValues?.getOrNull(1).orEmpty(),
                 medicineDose = Regex(""""dose"\s*:\s*"([^"]*)"""").find(p)?.groupValues?.getOrNull(1).orEmpty(),
+                body = jsonStringField(p, "body"),
+                photoUris = jsonStringArrayField(p, "photos"),
+                rawPayloadJson = p,
             )
         }
     }
@@ -229,6 +261,41 @@ data class EditForm(
 
 private fun jsonStr(s: String): String =
     "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+private fun payloadBoolean(json: String, key: String): Boolean =
+    Regex("\"${Regex.escape(key)}\"\\s*:\\s*(true|false)")
+        .find(json)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.toBooleanStrictOrNull()
+        ?: false
+
+private fun jsonStringField(json: String, key: String): String =
+    Regex("\"${Regex.escape(key)}\"\\s*:\\s*\"((?:\\\\.|[^\"])*)\"")
+        .find(json)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.replace("\\n", "\n")
+        ?.replace("\\\"", "\"")
+        ?.replace("\\\\", "\\")
+        .orEmpty()
+
+private fun jsonStringArrayField(json: String, key: String): List<String> {
+    val body = Regex("\"${Regex.escape(key)}\"\\s*:\\s*\\[(.*?)]")
+        .find(json)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?: return emptyList()
+    return Regex("\"((?:\\\\.|[^\"])*)\"")
+        .findAll(body)
+        .map { match ->
+            match.groupValues[1]
+                .replace("\\n", "\n")
+                .replace("\\\"", "\"")
+                .replace("\\\\", "\\")
+        }
+        .toList()
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -392,6 +459,28 @@ fun RecordEditRoute(
                         onMlText = { mlText = it },
                         onMl = { form = f.copy(amountMl = it) },
                     )
+                    if (f.type == RecordType.FORMULA) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            OutlinedTextField(
+                                value = f.preparedMl.takeIf { it > 0 }?.toString().orEmpty(),
+                                onValueChange = {
+                                    form = f.copy(preparedMl = it.toIntOrNull() ?: 0)
+                                },
+                                label = { Text("冲调量 ml（可选）") },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.weight(1f),
+                            )
+                            OutlinedTextField(
+                                value = f.feedingDurationMin.takeIf { it > 0 }?.toString().orEmpty(),
+                                onValueChange = {
+                                    form = f.copy(feedingDurationMin = it.toIntOrNull() ?: 0)
+                                },
+                                label = { Text("耗时（分，可选）") },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
                 }
                 RecordType.NURSING -> {
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -414,6 +503,15 @@ fun RecordEditRoute(
                         FilterChip(selected = f.order == "LR", onClick = { form = f.copy(order = "LR") }, label = { Text("左→右") })
                         FilterChip(selected = f.order == "RL", onClick = { form = f.copy(order = "RL") }, label = { Text("右→左") })
                     }
+                    OutlinedTextField(
+                        value = f.nursingAmountMl.takeIf { it > 0 }?.toString().orEmpty(),
+                        onValueChange = {
+                            form = f.copy(nursingAmountMl = it.toIntOrNull() ?: 0)
+                        },
+                        label = { Text("估算奶量 ml（可选）") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                 }
                 RecordType.PEE -> PeeAmountPicker(f.peeAmount) { form = f.copy(peeAmount = it) }
                 RecordType.POOP -> PoopPickers(f) { form = it }
@@ -450,6 +548,18 @@ fun RecordEditRoute(
                             }
                         }
                     }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = !f.isNap,
+                            onClick = { form = f.copy(isNap = false) },
+                            label = { Text("夜间 / 长睡") },
+                        )
+                        FilterChip(
+                            selected = f.isNap,
+                            onClick = { form = f.copy(isNap = true) },
+                            label = { Text("午睡") },
+                        )
+                    }
                 }
                 RecordType.TEMPERATURE -> {
                     OutlinedTextField(
@@ -482,15 +592,28 @@ fun RecordEditRoute(
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
-                RecordType.DIARY -> {
-                    OutlinedButton(
-                        onClick = {
-                            photoPicker.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                            )
+                RecordType.DIARY, RecordType.MEMO -> {
+                    OutlinedTextField(
+                        value = f.body,
+                        onValueChange = { form = f.copy(body = it.take(800)) },
+                        label = {
+                            Text(if (f.type == RecordType.DIARY) "日记正文" else "内容")
                         },
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text("添加照片（${f.photoUris.size}）") }
+                        minLines = if (f.type == RecordType.DIARY) 5 else 2,
+                    )
+                    if (f.type == RecordType.DIARY) {
+                        OutlinedButton(
+                            onClick = {
+                                photoPicker.launch(
+                                    PickVisualMediaRequest(
+                                        ActivityResultContracts.PickVisualMedia.ImageOnly,
+                                    ),
+                                )
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("添加照片（${f.photoUris.size}）") }
+                    }
                 }
                 else -> Unit
             }

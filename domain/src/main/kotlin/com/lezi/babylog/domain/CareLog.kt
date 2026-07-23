@@ -5,6 +5,7 @@ import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.BabyEntity
 import com.lezi.babylog.core.database.CalendarEventDao
 import com.lezi.babylog.core.database.CalendarEventEntity
+import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.FamilyDao
 import com.lezi.babylog.core.database.FamilyEntity
 import com.lezi.babylog.core.database.LocalUserDao
@@ -33,6 +34,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 data class CreateBabyInput(
     val nickname: String,
@@ -57,6 +60,9 @@ data class UpdateBabyInput(
 /** Thrown when another active baby already uses the nickname. */
 class DuplicateBabyNicknameException(val nickname: String) :
     IllegalArgumentException("宝宝昵称「$nickname」已存在")
+
+class SleepStateChangedException :
+    IllegalStateException("睡眠状态已变化，请重新打开睡眠菜单")
 
 enum class TimeBarKind { FEED, SLEEP }
 
@@ -87,7 +93,10 @@ class CareLog @Inject constructor(
     private val settings: SettingsStore,
     private val outboxDao: OutboxDao,
     private val syncPort: SyncPort,
+    private val transactionRunner: DatabaseTransactionRunner,
 ) {
+    private val sleepConfirmationMutex = Mutex()
+
     fun observeHasBaby(): Flow<Boolean> =
         babyDao.observeAll().map { it.isNotEmpty() }
 
@@ -305,21 +314,20 @@ class CareLog @Inject constructor(
         val userId = ensureLocalUser(System.currentTimeMillis())
         val now = System.currentTimeMillis()
         val clientUuid = newClientUuid()
-        val id = recordDao.upsert(
-            RecordEntity(
-                clientUuid = clientUuid,
-                babyId = babyId,
-                type = type.key,
-                timestamp = timestamp,
-                endTimestamp = endTimestamp,
-                note = note,
-                createdByUserId = userId,
-                payloadJson = payloadJson,
-                updatedAt = now,
-            ),
+        val record = RecordEntity(
+            clientUuid = clientUuid,
+            babyId = babyId,
+            type = type.key,
+            timestamp = timestamp,
+            endTimestamp = endTimestamp,
+            note = note,
+            createdByUserId = userId,
+            payloadJson = payloadJson,
+            updatedAt = now,
         )
-        enqueueOutboxRecord(clientUuid, babyId, type.key, timestamp, endTimestamp, note, payloadJson, now, null)
-        return id
+        return transactionRunner.run {
+            insertRecordAndOutbox(record)
+        }
     }
 
     suspend fun updateRecord(
@@ -329,34 +337,39 @@ class CareLog @Inject constructor(
         note: String?,
         payloadJson: String,
     ) {
-        val existing = recordDao.get(id) ?: return
-        recordDao.update(
-            existing.copy(
-                timestamp = timestamp,
-                endTimestamp = endTimestamp,
-                note = note,
-                payloadJson = payloadJson,
-                updatedAt = System.currentTimeMillis(),
-            ),
-        )
+        val now = System.currentTimeMillis()
+        transactionRunner.run {
+            val existing = recordDao.get(id) ?: return@run
+            updateRecordAndOutbox(
+                existing.copy(
+                    timestamp = timestamp,
+                    endTimestamp = endTimestamp,
+                    note = note,
+                    payloadJson = payloadJson,
+                    updatedAt = now,
+                ),
+            )
+        }
     }
 
     suspend fun deleteRecord(id: Long) {
-        val existing = recordDao.get(id)
         val now = System.currentTimeMillis()
-        recordDao.softDelete(id, now)
-        if (existing != null) {
-            enqueueOutboxRecord(
-                existing.clientUuid,
-                existing.babyId,
-                existing.type,
-                existing.timestamp,
-                existing.endTimestamp,
-                existing.note,
-                existing.payloadJson,
-                now,
-                now,
-            )
+        transactionRunner.run {
+            val existing = recordDao.get(id)
+            recordDao.softDelete(id, now)
+            if (existing != null) {
+                enqueueOutboxRecord(
+                    existing.clientUuid,
+                    existing.babyId,
+                    existing.type,
+                    existing.timestamp,
+                    existing.endTimestamp,
+                    existing.note,
+                    existing.payloadJson,
+                    now,
+                    now,
+                )
+            }
         }
     }
 
@@ -366,6 +379,7 @@ class CareLog @Inject constructor(
         rightMin: Int,
         order: String,
         amountMl: Int? = null,
+        note: String? = null,
         startedAt: Long,
         endedAt: Long,
     ): Long {
@@ -377,8 +391,59 @@ class CareLog @Inject constructor(
             type = RecordType.NURSING,
             timestamp = startedAt,
             endTimestamp = endedAt,
+            note = note,
             payloadJson = payload,
         )
+    }
+
+    /**
+     * Confirm a stateful sleep action against the latest open interval.
+     *
+     * The check and local write share one process-level critical section so
+     * two confirmations cannot both act on the same observed sleep state.
+     */
+    suspend fun confirmSleep(
+        babyId: Long,
+        expectedOpenSleepId: Long?,
+        timestamp: Long,
+        endTimestamp: Long?,
+        note: String?,
+        payloadJson: String,
+    ): Long = sleepConfirmationMutex.withLock {
+        transactionRunner.run {
+            val currentOpen = recordDao.findOpenSleep(babyId)
+            if (expectedOpenSleepId == null) {
+                if (currentOpen != null) throw SleepStateChangedException()
+                val now = System.currentTimeMillis()
+                insertRecordAndOutbox(
+                    RecordEntity(
+                        clientUuid = newClientUuid(),
+                        babyId = babyId,
+                        type = RecordType.SLEEP.key,
+                        timestamp = timestamp,
+                        endTimestamp = endTimestamp,
+                        note = note,
+                        createdByUserId = ensureLocalUser(now),
+                        payloadJson = payloadJson,
+                        updatedAt = now,
+                    ),
+                )
+            } else {
+                if (currentOpen?.id != expectedOpenSleepId) {
+                    throw SleepStateChangedException()
+                }
+                updateRecordAndOutbox(
+                    currentOpen.copy(
+                        timestamp = timestamp,
+                        endTimestamp = endTimestamp,
+                        note = note,
+                        payloadJson = payloadJson,
+                        updatedAt = System.currentTimeMillis(),
+                    ),
+                )
+                expectedOpenSleepId
+            }
+        }
     }
 
     suspend fun sleepDown(babyId: Long, at: Long = System.currentTimeMillis()): Long {
@@ -575,6 +640,37 @@ class CareLog @Inject constructor(
                 updatedAt = updatedAt,
                 deletedAt = deletedAt,
             ),
+        )
+    }
+
+    private suspend fun insertRecordAndOutbox(record: RecordEntity): Long {
+        val id = recordDao.upsert(record)
+        enqueueOutboxRecord(
+            clientUuid = record.clientUuid,
+            babyId = record.babyId,
+            type = record.type,
+            timestamp = record.timestamp,
+            endTimestamp = record.endTimestamp,
+            note = record.note,
+            payloadJson = record.payloadJson,
+            updatedAt = record.updatedAt,
+            deletedAt = record.deletedAt,
+        )
+        return id
+    }
+
+    private suspend fun updateRecordAndOutbox(record: RecordEntity) {
+        recordDao.update(record)
+        enqueueOutboxRecord(
+            clientUuid = record.clientUuid,
+            babyId = record.babyId,
+            type = record.type,
+            timestamp = record.timestamp,
+            endTimestamp = record.endTimestamp,
+            note = record.note,
+            payloadJson = record.payloadJson,
+            updatedAt = record.updatedAt,
+            deletedAt = record.deletedAt,
         )
     }
 

@@ -37,4 +37,9 @@ object DatabaseModule {
     @Provides fun outboxDao(db: LeziDatabase): OutboxDao = db.outboxDao()
     @Provides fun customItemDao(db: LeziDatabase): CustomItemDao = db.customItemDao()
     @Provides fun calendarEventDao(db: LeziDatabase): CalendarEventDao = db.calendarEventDao()
+
+    @Provides
+    @Singleton
+    fun transactionRunner(db: LeziDatabase): DatabaseTransactionRunner =
+        RoomDatabaseTransactionRunner(db)
 }

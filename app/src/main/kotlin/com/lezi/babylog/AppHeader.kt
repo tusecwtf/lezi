@@ -1,6 +1,13 @@
 package com.lezi.babylog
 
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -26,10 +33,17 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -57,6 +71,7 @@ import java.util.Locale
 internal fun AppHeaderBar(
     babyName: String,
     babyAge: String,
+    sleeping: Boolean,
     selectedDate: LocalDate,
     today: LocalDate,
     canCycleBaby: Boolean,
@@ -88,24 +103,30 @@ internal fun AppHeaderBar(
                 .padding(horizontal = 4.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(
-                modifier = Modifier
-                    .size(34.dp)
-                    .clip(CircleShape)
-                    .background(content.copy(alpha = 0.18f))
-                    .border(1.dp, content.copy(alpha = 0.45f), CircleShape),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    babyName.take(1).ifBlank { "乐" },
-                    color = content,
-                    style = LeziTypography.BodyStrong,
-                )
+            Box(modifier = Modifier.size(38.dp)) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(content.copy(alpha = 0.18f))
+                        .border(1.dp, content.copy(alpha = 0.45f), CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        babyName.take(1).ifBlank { "乐" },
+                        color = content,
+                        style = LeziTypography.BodyStrong,
+                    )
+                }
+                if (sleeping) {
+                    SleepMoonCap(modifier = Modifier.align(Alignment.TopEnd))
+                }
             }
-            Spacer(Modifier.size(7.dp))
+            Spacer(Modifier.size(3.dp))
             Column {
                 Text(
-                    babyName.ifBlank { "乐记" },
+                    headerBabyPrimaryLabel(babyName, sleeping),
                     color = content,
                     style = LeziTypography.Label,
                     maxLines = 1,
@@ -178,6 +199,92 @@ internal fun AppHeaderBar(
                 Icon(Icons.Outlined.Search, contentDescription = "搜索", tint = content)
             }
         }
+    }
+}
+
+@Composable
+private fun SleepMoonCap(
+    modifier: Modifier = Modifier,
+) {
+    val motion = rememberInfiniteTransition(label = "sleepCapMotion")
+    val bob by motion.animateFloat(
+        initialValue = 0f,
+        targetValue = -1.4f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1_400, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "sleepCapBob",
+    )
+    val tilt by motion.animateFloat(
+        initialValue = -3f,
+        targetValue = 3f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1_800, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "sleepCapTilt",
+    )
+    val capColor = Color(0xFF7965BE)
+    val capEdge = Color(0xFF4B3E7A)
+    val moonColor = Color(0xFFFFE59A)
+
+    Canvas(
+        modifier = modifier
+            .size(width = 25.dp, height = 20.dp)
+            .graphicsLayer {
+                translationY = bob
+                rotationZ = tilt
+                transformOrigin = TransformOrigin(0.2f, 0.82f)
+            },
+    ) {
+        val cap = Path().apply {
+            moveTo(size.width * 0.05f, size.height * 0.72f)
+            quadraticTo(
+                size.width * 0.38f,
+                size.height * 0.12f,
+                size.width * 0.88f,
+                size.height * 0.16f,
+            )
+            quadraticTo(
+                size.width * 0.68f,
+                size.height * 0.45f,
+                size.width * 0.64f,
+                size.height * 0.82f,
+            )
+            quadraticTo(
+                size.width * 0.30f,
+                size.height * 0.94f,
+                size.width * 0.05f,
+                size.height * 0.72f,
+            )
+            close()
+        }
+        drawPath(cap, color = capColor)
+        drawPath(cap, color = capEdge, style = Stroke(width = 1.dp.toPx()))
+        drawLine(
+            color = moonColor,
+            start = Offset(size.width * 0.03f, size.height * 0.72f),
+            end = Offset(size.width * 0.66f, size.height * 0.83f),
+            strokeWidth = 3.dp.toPx(),
+            cap = StrokeCap.Round,
+        )
+
+        val moonCenter = Offset(size.width * 0.47f, size.height * 0.50f)
+        drawCircle(moonColor, radius = size.minDimension * 0.14f, center = moonCenter)
+        drawCircle(
+            capColor,
+            radius = size.minDimension * 0.14f,
+            center = moonCenter.copy(
+                x = moonCenter.x + size.width * 0.055f,
+                y = moonCenter.y - size.height * 0.045f,
+            ),
+        )
+        drawCircle(
+            color = moonColor,
+            radius = size.minDimension * 0.11f,
+            center = Offset(size.width * 0.90f, size.height * 0.13f),
+        )
     }
 }
 
@@ -390,6 +497,14 @@ internal fun calendarMonthCells(month: YearMonth): List<LocalDate?> {
 internal fun calendarContentColor(background: Color): Color =
     if (background.luminance() > 0.179f) Color.Black else Color.White
 
+internal fun headerBabyPrimaryLabel(
+    babyName: String,
+    sleeping: Boolean,
+): String {
+    val displayName = babyName.ifBlank { "乐记" }
+    return if (sleeping) "${displayName}睡觉中" else displayName
+}
+
 @Preview(name = "Global date header", widthDp = 390, heightDp = 92, showBackground = true)
 @Composable
 private fun AppHeaderPreview() {
@@ -397,6 +512,7 @@ private fun AppHeaderPreview() {
         AppHeaderBar(
             babyName = "年年",
             babyAge = "生后 5 个月",
+            sleeping = true,
             selectedDate = LocalDate.of(2026, 7, 23),
             today = LocalDate.of(2026, 7, 23),
             canCycleBaby = true,

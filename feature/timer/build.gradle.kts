@@ -53,6 +53,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.androidx.lifecycle.service)
     debugImplementation(libs.androidx.compose.ui.tooling)
+    testImplementation(libs.junit)
 
     implementation(project(":core:database"))
     implementation(project(":core:datastore"))

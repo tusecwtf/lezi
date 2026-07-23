@@ -64,6 +64,33 @@ class RecordPresentationTest {
         assertEquals("正文/照片", record(RecordType.DIARY).presentationSummary())
     }
 
+    @Test
+    fun quickComposerPayloadsRenderAsReadableTimelineSummaries() {
+        assertEquals(
+            "6.35kg",
+            record(RecordType.WEIGHT, """{"value":6350,"unit":"g"}""")
+                .presentationSummary(),
+        )
+        assertEquals(
+            "明显 · 夜间连续",
+            record(RecordType.COUGH, """{"severity":3,"description":"夜间连续"}""")
+                .presentationSummary(),
+        )
+        assertEquals(
+            "乙肝 · 第2针",
+            record(RecordType.VACCINE, """{"name":"乙肝","batch":"第2针"}""")
+                .presentationSummary(),
+        )
+    }
+
+    @Test
+    fun activeNapSummaryKeepsBothNapAndRunningState() {
+        assertEquals(
+            "午睡 · 进行中",
+            record(RecordType.SLEEP, """{"is_nap":true}""").presentationSummary(),
+        )
+    }
+
     private fun record(
         type: RecordType,
         payload: String = "{}",

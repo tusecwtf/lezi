@@ -19,6 +19,16 @@ class AppHeaderTest {
     }
 
     @Test
+    fun babyPrimaryLabelAnnouncesActiveSleepAndKeepsNormalLabelOtherwise() {
+        assertThat(headerBabyPrimaryLabel("年年", sleeping = true))
+            .isEqualTo("年年睡觉中")
+        assertThat(headerBabyPrimaryLabel("年年", sleeping = false))
+            .isEqualTo("年年")
+        assertThat(headerBabyPrimaryLabel("", sleeping = true))
+            .isEqualTo("乐记睡觉中")
+    }
+
+    @Test
     fun futureDateIsClampedToToday() {
         assertThat(clampSelectedDate(today.plusDays(5), today)).isEqualTo(today)
         assertThat(clampSelectedDate(today.minusDays(5), today)).isEqualTo(today.minusDays(5))

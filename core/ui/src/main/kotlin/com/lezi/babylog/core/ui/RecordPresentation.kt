@@ -313,21 +313,54 @@ fun Record.presentationSummary(): String {
             "尿量$pee · ${stoolSummary()}"
         }
         RecordType.SLEEP -> endTimestamp?.takeIf { it >= timestamp }?.let {
-            "时长 ${formatDuration((it - timestamp) / 60_000L)}"
-        } ?: "进行中"
+            listOf(
+                if (payloadBoolean("is_nap")) "午睡" else null,
+                "时长 ${formatDuration((it - timestamp) / 60_000L)}",
+            ).filterNotNull().joinToString(" · ")
+        } ?: if (payloadBoolean("is_nap")) "午睡 · 进行中" else "进行中"
         RecordType.TEMPERATURE ->
             (payloadNumber("celsius") ?: payloadNumber("value"))?.let { "${it}℃" }.orEmpty()
         RecordType.MEDICINE -> listOf(
             payloadString("name"),
             payloadString("dose"),
         ).filter { it.isNotBlank() }.joinToString(" · ")
+        RecordType.COUGH, RecordType.RASH, RecordType.VOMIT, RecordType.INJURY -> listOf(
+            when (payloadInt("severity")) {
+                1 -> "轻微"
+                2 -> "一般"
+                3 -> "明显"
+                else -> ""
+            },
+            payloadString("description"),
+        ).filter { it.isNotBlank() }.joinToString(" · ")
+        RecordType.HOSPITAL -> listOf(
+            payloadString("reason"),
+            payloadString("advice"),
+        ).filter { it.isNotBlank() }.joinToString(" · ")
+        RecordType.OTHER, RecordType.CUSTOM -> listOf(
+            payloadString("title"),
+            payloadString("detail"),
+        ).filter { it.isNotBlank() }.joinToString(" · ")
         RecordType.HEIGHT, RecordType.HEAD, RecordType.CHEST, RecordType.FOOT_SIZE ->
             payloadNumber("value")?.let { "${it}cm" }.orEmpty()
-        RecordType.WEIGHT -> payloadNumber("value")?.let { "${it}kg" }.orEmpty()
+        RecordType.WEIGHT -> payloadNumber("value")?.toDoubleOrNull()?.let { raw ->
+            val kilograms = if (payloadString("unit") == "g") raw / 1_000.0 else raw
+            val formatted = if (kilograms % 1.0 == 0.0) {
+                kilograms.toInt().toString()
+            } else {
+                "%.2f".format(java.util.Locale.US, kilograms).trimEnd('0').trimEnd('.')
+            }
+            "${formatted}kg"
+        }.orEmpty()
         RecordType.BABY_FOOD, RecordType.SNACK, RecordType.DRINK ->
             listOf(payloadString("content"), payloadString("amount"))
                 .filter { it.isNotBlank() }
                 .joinToString(" · ")
+        RecordType.VACCINE -> listOf(
+            payloadString("name"),
+            payloadString("batch"),
+        ).filter { it.isNotBlank() }.joinToString(" · ")
+        RecordType.MEMO, RecordType.DIARY -> payloadString("body")
         else -> ""
     }
     return listOfNotNull(
@@ -363,6 +396,14 @@ private fun Record.payloadString(key: String): String =
         ?.groupValues
         ?.getOrNull(1)
         .orEmpty()
+
+private fun Record.payloadBoolean(key: String): Boolean =
+    Regex("\"${Regex.escape(key)}\"\\s*:\\s*(true|false)")
+        .find(payloadJson)
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.toBooleanStrictOrNull()
+        ?: false
 
 private fun formatDuration(minutes: Long): String {
     if (minutes <= 0) return "0分"

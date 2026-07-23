@@ -219,6 +219,48 @@ class CareLogTest {
     }
 
     @Test
+    fun confirmSleep_rechecksStateAndOnlyClosesTheExpectedOpenInterval() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(
+            CreateBabyInput(nickname = "豆豆", birthdayEpochDay = LocalDate.of(2026, 1, 1).toEpochDay()),
+        )
+        val start = 1_700_000_000_000L
+        val openId = care.confirmSleep(
+            babyId = babyId,
+            expectedOpenSleepId = null,
+            timestamp = start,
+            endTimestamp = null,
+            note = "午睡",
+            payloadJson = """{"is_nap":true}""",
+        )
+
+        val duplicateFailure = runCatching {
+            care.confirmSleep(
+                babyId = babyId,
+                expectedOpenSleepId = null,
+                timestamp = start + 60_000L,
+                endTimestamp = null,
+                note = null,
+                payloadJson = "{}",
+            )
+        }.exceptionOrNull()
+        assertThat(duplicateFailure).isInstanceOf(SleepStateChangedException::class.java)
+        assertThat(fakes.records.listForBaby(babyId)).hasSize(1)
+
+        care.confirmSleep(
+            babyId = babyId,
+            expectedOpenSleepId = openId,
+            timestamp = start,
+            endTimestamp = start + 30 * 60_000L,
+            note = "午睡",
+            payloadJson = """{"is_nap":true}""",
+        )
+        assertThat(care.observeOpenSleep(babyId).first()).isNull()
+        assertThat(care.getRecord(openId)!!.endTimestamp).isEqualTo(start + 30 * 60_000L)
+    }
+
+    @Test
     fun updateRecord_canClearCompletedSleepEnd() = runTest {
         val care = Fakes().careLog()
         val babyId = care.createBaby(
@@ -396,6 +438,9 @@ private class Fakes {
         settings,
         FakeOutboxDao(),
         com.lezi.babylog.sync.NoOpSyncPort(),
+        object : com.lezi.babylog.core.database.DatabaseTransactionRunner {
+            override suspend fun <T> run(block: suspend () -> T): T = block()
+        },
     )
 }
 
