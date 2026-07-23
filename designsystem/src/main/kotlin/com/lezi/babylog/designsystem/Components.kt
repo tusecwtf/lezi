@@ -320,11 +320,20 @@ fun LeziGlyphIcon(
                 drawLine(tint, Offset(sx(12f), sy(5f)), Offset(sx(12f), sy(19f)), strokeWidth = stroke, cap = StrokeCap.Round)
                 drawLine(tint, Offset(sx(5f), sy(12f)), Offset(sx(19f), sy(12f)), strokeWidth = stroke, cap = StrokeCap.Round)
             }
+            LeziGlyph.Dot -> {
+                val r = s * 0.14f
+                drawCircle(
+                    color = tint,
+                    radius = r,
+                    center = Offset(s / 2f, s / 2f),
+                    style = style,
+                )
+            }
         }
     }
 }
 
-enum class LeziGlyph { Bottle, Drop, Moon, Toilet, Pin, Plus }
+enum class LeziGlyph { Bottle, Drop, Moon, Toilet, Pin, Plus, Dot }
 
 data class TimelineLaneSegment(
     val startMinOfDay: Int,

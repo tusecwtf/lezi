@@ -949,14 +949,38 @@ internal fun typeLabel(type: RecordType): String = when (type) {
 }
 
 internal fun typeGlyph(type: RecordType): com.lezi.babylog.designsystem.LeziGlyph = when (type) {
-    RecordType.NURSING, RecordType.FORMULA, RecordType.PUMPED_FEED, RecordType.PUMP_EXPRESS ->
-        com.lezi.babylog.designsystem.LeziGlyph.Bottle
+    RecordType.NURSING,
+    RecordType.FORMULA,
+    RecordType.PUMPED_FEED,
+    RecordType.PUMP_EXPRESS,
+    RecordType.BABY_FOOD,
+    RecordType.SNACK,
+    RecordType.DRINK,
+    -> com.lezi.babylog.designsystem.LeziGlyph.Bottle
     RecordType.PEE -> com.lezi.babylog.designsystem.LeziGlyph.Drop
     RecordType.POOP, RecordType.BOTH_DIAPER -> com.lezi.babylog.designsystem.LeziGlyph.Pin
     RecordType.SLEEP -> com.lezi.babylog.designsystem.LeziGlyph.Moon
-    RecordType.TEMPERATURE, RecordType.MEDICINE, RecordType.HOSPITAL ->
-        com.lezi.babylog.designsystem.LeziGlyph.Plus
-    else -> com.lezi.babylog.designsystem.LeziGlyph.Pin
+    RecordType.TEMPERATURE,
+    RecordType.MEDICINE,
+    RecordType.HOSPITAL,
+    RecordType.COUGH,
+    RecordType.RASH,
+    RecordType.VOMIT,
+    RecordType.INJURY,
+    RecordType.VACCINE,
+    RecordType.OTHER,
+    RecordType.HEIGHT,
+    RecordType.WEIGHT,
+    RecordType.HEAD,
+    RecordType.CHEST,
+    RecordType.FOOT_SIZE,
+    -> com.lezi.babylog.designsystem.LeziGlyph.Plus
+    RecordType.MEMO,
+    RecordType.DIARY,
+    RecordType.BATH,
+    RecordType.WALK,
+    RecordType.CUSTOM,
+    -> com.lezi.babylog.designsystem.LeziGlyph.Dot
 }
 
 internal fun recordSummaryLine(r: Record): String {
