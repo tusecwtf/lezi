@@ -10,6 +10,8 @@ data class Baby(
     val birthdayEpochDay: Long,
     /** Birth weight in grams; null when not set. */
     val birthWeightGrams: Int? = null,
+    /** App-private relative path for the cropped square avatar. */
+    val avatarPath: String? = null,
     val dueDateEpochDay: Long? = null,
     val themeColorArgb: Int,
     val sortOrder: Int = 0,

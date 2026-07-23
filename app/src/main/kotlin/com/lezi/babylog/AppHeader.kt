@@ -4,8 +4,6 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
@@ -29,6 +27,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -51,12 +50,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -74,16 +72,21 @@ import com.lezi.babylog.designsystem.LeziShapes
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTheme
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.core.ui.BabyAvatar
 import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.YearMonth
 import java.time.format.TextStyle
 import java.util.Locale
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.sin
 
 @Composable
 internal fun AppHeaderBar(
     babyName: String,
     babyAge: String,
+    avatarPath: String?,
     sleeping: Boolean,
     selectedDate: LocalDate,
     today: LocalDate,
@@ -113,28 +116,23 @@ internal fun AppHeaderBar(
                 .height(48.dp)
                 .clip(RoundedCornerShape(12.dp))
                 .clickable(enabled = canCycleBaby, onClick = onCycleBaby)
-                .padding(horizontal = 4.dp, vertical = 6.dp),
+                .padding(horizontal = 4.dp, vertical = 5.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(modifier = Modifier.size(38.dp)) {
-                Box(
+                BabyAvatar(
+                    nickname = babyName,
+                    avatarPath = avatarPath,
+                    fallbackBackground = content.copy(alpha = 0.18f),
+                    fallbackContentColor = content,
+                    borderColor = content.copy(alpha = 0.45f),
                     modifier = Modifier
                         .align(Alignment.BottomStart)
-                        .size(34.dp)
-                        .clip(CircleShape)
-                        .background(content.copy(alpha = 0.18f))
-                        .border(1.dp, content.copy(alpha = 0.45f), CircleShape),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        babyName.take(1).ifBlank { "乐" },
-                        color = content,
-                        style = LeziTypography.BodyStrong,
-                    )
-                }
+                        .size(34.dp),
+                )
                 AnimatedSleepMoonCap(
                     sleeping = sleeping,
-                    modifier = Modifier.align(Alignment.TopEnd),
+                    modifier = Modifier.fillMaxSize(),
                 )
             }
             Spacer(Modifier.size(3.dp))
@@ -259,20 +257,11 @@ private fun AnimatedSleepMoonCap(
                 dampingRatio = 0.58f,
                 stiffness = Spring.StiffnessLow,
             ),
-            // The avatar sits near the screen's left edge. Two cap widths place
-            // the starting point just beyond that edge before the spring settles.
-            initialOffsetX = { width -> -width * 2 },
+            initialOffsetX = { width -> -(width * 3) / 2 },
         ) + fadeIn(
             animationSpec = tween(
                 durationMillis = 180,
                 delayMillis = 40,
-            ),
-        ) + scaleIn(
-            initialScale = 0.72f,
-            transformOrigin = TransformOrigin(0f, 0.8f),
-            animationSpec = spring(
-                dampingRatio = 0.62f,
-                stiffness = Spring.StiffnessMediumLow,
             ),
         ),
         exit = slideOutHorizontally(
@@ -280,18 +269,11 @@ private fun AnimatedSleepMoonCap(
                 durationMillis = 440,
                 easing = FastOutSlowInEasing,
             ),
-            targetOffsetX = { width -> -width * 2 },
+            targetOffsetX = { width -> -(width * 3) / 2 },
         ) + fadeOut(
             animationSpec = tween(
                 durationMillis = 280,
                 delayMillis = 80,
-            ),
-        ) + scaleOut(
-            targetScale = 0.72f,
-            transformOrigin = TransformOrigin(0f, 0.8f),
-            animationSpec = tween(
-                durationMillis = 420,
-                easing = FastOutSlowInEasing,
             ),
         ),
         label = "sleepCapVisibility",
@@ -307,81 +289,90 @@ private fun SleepMoonCap(
     val motion = rememberInfiniteTransition(label = "sleepCapMotion")
     val bob by motion.animateFloat(
         initialValue = 0f,
-        targetValue = -1.4f,
+        targetValue = -0.8f,
         animationSpec = infiniteRepeatable(
             animation = tween(durationMillis = 1_400, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse,
         ),
         label = "sleepCapBob",
     )
-    val tilt by motion.animateFloat(
-        initialValue = -3f,
-        targetValue = 3f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1_800, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "sleepCapTilt",
-    )
     val capColor = Color(0xFF7965BE)
     val capEdge = Color(0xFF4B3E7A)
     val moonColor = Color(0xFFFFE59A)
 
     Canvas(
-        modifier = modifier
-            .size(width = 25.dp, height = 20.dp)
-            .graphicsLayer {
-                translationY = bob
-                rotationZ = tilt
-                transformOrigin = TransformOrigin(0.2f, 0.82f)
-            },
+        modifier = modifier.fillMaxSize(),
     ) {
+        fun px(value: Float): Float = size.width * value / 38f
+        val seamOval = Rect(
+            left = px(0.5f),
+            top = px(4.5f),
+            right = px(33.5f),
+            bottom = px(37.5f),
+        )
+        val seamStartAngle = 205f
+        val seamSweep = 125f
+        fun pointOnSeam(angleDegrees: Float): Offset {
+            val radians = angleDegrees / 180f * PI.toFloat()
+            return Offset(
+                x = seamOval.center.x +
+                    seamOval.width / 2f * cos(radians.toDouble()).toFloat(),
+                y = seamOval.center.y +
+                    seamOval.height / 2f * sin(radians.toDouble()).toFloat(),
+            )
+        }
+        val seamStart = pointOnSeam(seamStartAngle)
+        val seamEnd = pointOnSeam(seamStartAngle + seamSweep)
         val cap = Path().apply {
-            moveTo(size.width * 0.05f, size.height * 0.72f)
-            quadraticTo(
-                size.width * 0.38f,
-                size.height * 0.12f,
-                size.width * 0.88f,
-                size.height * 0.16f,
+            moveTo(seamStart.x, seamStart.y)
+            cubicTo(
+                px(7f),
+                px(4.5f),
+                px(15f),
+                px(0.2f),
+                px(25f),
+                px(0.8f),
             )
             quadraticTo(
-                size.width * 0.68f,
-                size.height * 0.45f,
-                size.width * 0.64f,
-                size.height * 0.82f,
+                px(32.5f),
+                px(1.4f),
+                seamEnd.x,
+                seamEnd.y,
             )
-            quadraticTo(
-                size.width * 0.30f,
-                size.height * 0.94f,
-                size.width * 0.05f,
-                size.height * 0.72f,
+            arcTo(
+                rect = seamOval,
+                startAngleDegrees = seamStartAngle + seamSweep,
+                sweepAngleDegrees = -seamSweep,
+                forceMoveTo = false,
             )
             close()
         }
         drawPath(cap, color = capColor)
         drawPath(cap, color = capEdge, style = Stroke(width = 1.dp.toPx()))
-        drawLine(
+        drawArc(
             color = moonColor,
-            start = Offset(size.width * 0.03f, size.height * 0.72f),
-            end = Offset(size.width * 0.66f, size.height * 0.83f),
-            strokeWidth = 3.dp.toPx(),
-            cap = StrokeCap.Round,
+            startAngle = seamStartAngle,
+            sweepAngle = seamSweep,
+            useCenter = false,
+            topLeft = seamOval.topLeft,
+            size = seamOval.size,
+            style = Stroke(width = 2.4.dp.toPx(), cap = StrokeCap.Round),
         )
 
-        val moonCenter = Offset(size.width * 0.47f, size.height * 0.50f)
-        drawCircle(moonColor, radius = size.minDimension * 0.14f, center = moonCenter)
+        val moonCenter = Offset(px(20.5f), px(4.5f))
+        drawCircle(moonColor, radius = px(2.5f), center = moonCenter)
         drawCircle(
             capColor,
-            radius = size.minDimension * 0.14f,
+            radius = px(2.5f),
             center = moonCenter.copy(
-                x = moonCenter.x + size.width * 0.055f,
-                y = moonCenter.y - size.height * 0.045f,
+                x = moonCenter.x + px(1.1f),
+                y = moonCenter.y - px(0.8f),
             ),
         )
         drawCircle(
             color = moonColor,
-            radius = size.minDimension * 0.11f,
-            center = Offset(size.width * 0.90f, size.height * 0.13f),
+            radius = px(1.8f),
+            center = Offset(px(32f), px(2.4f + bob)),
         )
     }
 }
@@ -610,6 +601,7 @@ private fun AppHeaderPreview() {
         AppHeaderBar(
             babyName = "年年",
             babyAge = "5个月14天",
+            avatarPath = null,
             sleeping = true,
             selectedDate = LocalDate.of(2026, 7, 23),
             today = LocalDate.of(2026, 7, 23),

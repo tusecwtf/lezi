@@ -43,6 +43,7 @@ data class CreateBabyInput(
     val birthdayEpochDay: Long,
     /** Birth weight in grams; null when not set. */
     val birthWeightGrams: Int? = null,
+    val avatarPath: String? = null,
     val themeColorArgb: Int = DEFAULT_THEME_COLOR,
 ) {
     companion object {
@@ -55,6 +56,7 @@ data class UpdateBabyInput(
     val sex: String? = null,
     val birthdayEpochDay: Long,
     val birthWeightGrams: Int? = null,
+    val avatarPath: String? = null,
 )
 
 /** Thrown when another active baby already uses the nickname. */
@@ -130,6 +132,7 @@ class CareLog @Inject constructor(
                 sex = input.sex,
                 birthdayEpochDay = input.birthdayEpochDay,
                 birthWeightGrams = weight,
+                avatarPath = input.avatarPath,
                 themeColorArgb = input.themeColorArgb,
                 clientUuid = newClientUuid(),
                 updatedAt = now,
@@ -153,6 +156,7 @@ class CareLog @Inject constructor(
                 sex = input.sex,
                 birthdayEpochDay = input.birthdayEpochDay,
                 birthWeightGrams = normalizeBirthWeightGrams(input.birthWeightGrams),
+                avatarPath = input.avatarPath,
                 updatedAt = System.currentTimeMillis(),
             ),
         )
@@ -751,6 +755,7 @@ internal fun BabyEntity.toModel(): Baby =
         sex = sex?.let { parseSex(it) },
         birthdayEpochDay = birthdayEpochDay,
         birthWeightGrams = birthWeightGrams,
+        avatarPath = avatarPath,
         dueDateEpochDay = dueDateEpochDay,
         themeColorArgb = themeColorArgb,
         sortOrder = sortOrder,

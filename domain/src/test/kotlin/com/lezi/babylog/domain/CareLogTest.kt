@@ -45,6 +45,7 @@ class CareLogTest {
                 sex = "FEMALE",
                 birthdayEpochDay = day,
                 birthWeightGrams = 3200,
+                avatarPath = "baby_avatars/xiaoman.jpg",
                 themeColorArgb = 0xFFAA442B.toInt(),
             ),
         )
@@ -55,6 +56,7 @@ class CareLogTest {
         assertThat(baby.sex?.name).isEqualTo("FEMALE")
         assertThat(baby.birthdayEpochDay).isEqualTo(day)
         assertThat(baby.birthWeightGrams).isEqualTo(3200)
+        assertThat(baby.avatarPath).isEqualTo("baby_avatars/xiaoman.jpg")
         assertThat(baby.themeColorArgb).isEqualTo(0xFFAA442B.toInt())
         assertThat(care.observeHasBaby().first()).isTrue()
     }
@@ -82,12 +84,26 @@ class CareLogTest {
                 sex = "MALE",
                 birthdayEpochDay = day,
                 birthWeightGrams = 3500,
+                avatarPath = "baby_avatars/doudou.jpg",
             ),
         )
         val baby = care.getCurrentBaby()!!
         assertThat(baby.birthdayEpochDay).isEqualTo(day)
         assertThat(baby.birthWeightGrams).isEqualTo(3500)
+        assertThat(baby.avatarPath).isEqualTo("baby_avatars/doudou.jpg")
         assertThat(baby.sex?.name).isEqualTo("MALE")
+
+        care.updateBabyProfile(
+            id,
+            UpdateBabyInput(
+                nickname = "豆豆",
+                sex = "MALE",
+                birthdayEpochDay = day,
+                birthWeightGrams = 3500,
+                avatarPath = null,
+            ),
+        )
+        assertThat(care.getCurrentBaby()!!.avatarPath).isNull()
     }
 
     @Test

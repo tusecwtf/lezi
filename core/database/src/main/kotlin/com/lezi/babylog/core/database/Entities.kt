@@ -52,6 +52,8 @@ data class BabyEntity(
     val clientUuid: String,
     val updatedAt: Long,
     val deletedAt: Long? = null,
+    /** App-private relative path. Never sync this device-local value. */
+    val avatarPath: String? = null,
 )
 
 @Entity(

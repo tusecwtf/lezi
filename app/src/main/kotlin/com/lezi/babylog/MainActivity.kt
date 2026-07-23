@@ -342,6 +342,7 @@ fun LeziRoot(
                     AppHeaderBar(
                         babyName = ui.baby?.nickname.orEmpty(),
                         babyAge = ui.baby?.let { babyAgeLabel(it.birthdayEpochDay) }.orEmpty(),
+                        avatarPath = ui.baby?.avatarPath,
                         sleeping = ui.sleeping,
                         selectedDate = ui.selectedDate,
                         today = today,

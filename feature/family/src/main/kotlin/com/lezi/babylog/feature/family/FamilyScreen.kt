@@ -1,18 +1,20 @@
 package com.lezi.babylog.feature.family
 
-import androidx.compose.foundation.background
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -34,8 +36,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -46,6 +48,7 @@ import com.lezi.babylog.core.database.FamilyDao
 import com.lezi.babylog.core.database.LocalUserDao
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.SyncStatus
+import com.lezi.babylog.core.ui.BabyAvatar
 import com.lezi.babylog.designsystem.LeziCard
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSecondaryButton
@@ -65,10 +68,17 @@ import java.time.LocalDate
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import javax.inject.Inject
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 data class FamilyUi(
     val deviceId: String = "",
@@ -87,7 +97,10 @@ class FamilyViewModel @Inject constructor(
     private val localUserDao: LocalUserDao,
     private val familyDao: FamilyDao,
     private val careLog: CareLog,
+    private val avatarFileStore: BabyAvatarFileStore,
 ) : ViewModel() {
+    private val profileSaveMutex = Mutex()
+
     val ui = combine(
         sync.status(),
         careLog.observeHasBaby(),
@@ -118,30 +131,97 @@ class FamilyViewModel @Inject constructor(
         sex: String?,
         birthdayEpochDay: Long,
         birthWeightGrams: Int?,
+        avatarJpeg: ByteArray?,
+        removeAvatar: Boolean,
         onDone: (String?) -> Unit,
     ) {
         viewModelScope.launch {
-            val result = runCatching {
-                careLog.updateBabyProfile(
-                    babyId,
-                    UpdateBabyInput(
-                        nickname = nickname,
-                        sex = sex,
-                        birthdayEpochDay = birthdayEpochDay,
-                        birthWeightGrams = birthWeightGrams,
-                    ),
-                )
+            profileSaveMutex.withLock {
+                val existing = careLog.listBabies().firstOrNull { it.id == babyId }
+                if (existing == null) {
+                    onDone("宝宝档案不存在")
+                    return@withLock
+                }
+                var writtenAvatarPath: String? = null
+                var profileCommitted = false
+
+                suspend fun rollbackWrittenAvatar() {
+                    val path = writtenAvatarPath ?: return
+                    withContext(NonCancellable) {
+                        try {
+                            avatarFileStore.delete(path)
+                        } catch (_: Throwable) {
+                            // Preserve the original save failure or cancellation.
+                        }
+                    }
+                }
+
+                val errorMessage = try {
+                    val avatarPath = when {
+                        avatarJpeg != null -> {
+                            avatarFileStore.write(existing.clientUuid, avatarJpeg).also {
+                                writtenAvatarPath = it
+                            }
+                        }
+                        removeAvatar -> null
+                        else -> existing.avatarPath
+                    }
+                    currentCoroutineContext().ensureActive()
+                    withContext(NonCancellable) {
+                        careLog.updateBabyProfile(
+                            babyId,
+                            UpdateBabyInput(
+                                nickname = nickname,
+                                sex = sex,
+                                birthdayEpochDay = birthdayEpochDay,
+                                birthWeightGrams = birthWeightGrams,
+                                avatarPath = avatarPath,
+                            ),
+                        )
+                        profileCommitted = true
+                        if (avatarPath != existing.avatarPath) {
+                            try {
+                                avatarFileStore.delete(existing.avatarPath)
+                            } catch (_: Throwable) {
+                                // The new profile is durable; stale cleanup is best effort.
+                            }
+                        }
+                    }
+                    currentCoroutineContext().ensureActive()
+                    null
+                } catch (cancelled: CancellationException) {
+                    if (!profileCommitted) rollbackWrittenAvatar()
+                    throw cancelled
+                } catch (error: Throwable) {
+                    if (!profileCommitted) rollbackWrittenAvatar()
+                    if (error is DuplicateBabyNicknameException) {
+                        error.message
+                    } else {
+                        error.message ?: "保存失败"
+                    }
+                }
+                currentCoroutineContext().ensureActive()
+                onDone(errorMessage)
             }
-            onDone(result.exceptionOrNull()?.let { e ->
-                if (e is DuplicateBabyNicknameException) e.message
-                else e.message ?: "保存失败"
-            })
         }
     }
 
     fun deleteBaby(babyId: Long, onDone: (String) -> Unit) {
         viewModelScope.launch {
-            val ok = careLog.deleteBaby(babyId)
+            val avatarPath = ui.value.babies.firstOrNull { it.id == babyId }?.avatarPath
+            currentCoroutineContext().ensureActive()
+            val ok = withContext(NonCancellable) {
+                careLog.deleteBaby(babyId).also { deleted ->
+                    if (deleted) {
+                        try {
+                            avatarFileStore.delete(avatarPath)
+                        } catch (_: Throwable) {
+                            // The soft-deleted profile no longer references this local file.
+                        }
+                    }
+                }
+            }
+            currentCoroutineContext().ensureActive()
             onDone(if (ok) "已删除宝宝档案" else "至少保留一位宝宝档案")
         }
     }
@@ -179,7 +259,19 @@ class FamilyViewModel @Inject constructor(
                 onMessage("本机已有宝宝数据。请先 TXT 导出，或选择清空本机后加入。")
                 return@launch
             }
-            if (clearFirst) careLog.clearAllLocalData()
+            if (clearFirst) {
+                try {
+                    withContext(NonCancellable) {
+                        careLog.clearAllLocalData()
+                        avatarFileStore.deleteAll()
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    onMessage(error.message ?: "清空本机数据失败")
+                    return@launch
+                }
+            }
             val result = sync.joinWithCode(code.trim())
             onMessage(
                 result.fold(
@@ -252,19 +344,15 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         val accent = current?.themeColorArgb?.let { Color(it) }
                             ?: MaterialTheme.colorScheme.primary
-                        Box(
-                            Modifier
-                                .size(56.dp)
-                                .clip(CircleShape)
-                                .background(accent),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(
-                                current?.nickname?.take(1) ?: "乐",
-                                color = Color.White,
-                                style = LeziTypography.Title,
-                            )
-                        }
+                        BabyAvatar(
+                            nickname = current?.nickname.orEmpty(),
+                            avatarPath = current?.avatarPath,
+                            fallbackBackground = accent,
+                            fallbackStyle = LeziTypography.Title,
+                            modifier = Modifier.size(56.dp),
+                            borderWidth = 3.dp,
+                            avatarContentDescription = current?.let { "${it.nickname}的头像" },
+                        )
                         Spacer(Modifier.size(LeziSpacing.Sm))
                         Column {
                             Text("当前宝宝", style = LeziTypography.Meta, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -332,15 +420,15 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.weight(1f),
                         ) {
-                            Box(
-                                Modifier
-                                    .size(40.dp)
-                                    .clip(CircleShape)
-                                    .background(Color(b.themeColorArgb)),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Text(b.nickname.take(1), color = Color.White, style = LeziTypography.TitleSm)
-                            }
+                            BabyAvatar(
+                                nickname = b.nickname,
+                                avatarPath = b.avatarPath,
+                                fallbackBackground = Color(b.themeColorArgb),
+                                fallbackStyle = LeziTypography.TitleSm,
+                                modifier = Modifier.size(40.dp),
+                                borderWidth = 2.dp,
+                                avatarContentDescription = "${b.nickname}的头像",
+                            )
                             Spacer(Modifier.size(LeziSpacing.Sm))
                             Column {
                                 Text(
@@ -518,8 +606,25 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
         BabyEditDialog(
             baby = baby,
             onDismiss = { editing = null },
-            onSave = { nick, sex, birthday, weightGrams ->
-                vm.updateBaby(baby.id, nick, sex, birthday, weightGrams) { err ->
+            onSave = {
+                    nick,
+                    sex,
+                    birthday,
+                    weightGrams,
+                    avatarJpeg,
+                    removeAvatar,
+                    onFinished,
+                ->
+                vm.updateBaby(
+                    baby.id,
+                    nick,
+                    sex,
+                    birthday,
+                    weightGrams,
+                    avatarJpeg,
+                    removeAvatar,
+                ) { err ->
+                    onFinished()
                     if (err == null) {
                         editing = null
                         message = "宝宝档案已保存"
@@ -537,7 +642,15 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
 private fun BabyEditDialog(
     baby: Baby,
     onDismiss: () -> Unit,
-    onSave: (nickname: String, sex: String?, birthdayEpochDay: Long, birthWeightGrams: Int?) -> Unit,
+    onSave: (
+        nickname: String,
+        sex: String?,
+        birthdayEpochDay: Long,
+        birthWeightGrams: Int?,
+        avatarJpeg: ByteArray?,
+        removeAvatar: Boolean,
+        onFinished: () -> Unit,
+    ) -> Unit,
 ) {
     var nickname by remember(baby.id) { mutableStateOf(baby.nickname) }
     var sex by remember(baby.id) { mutableStateOf(baby.sex?.name) }
@@ -547,17 +660,89 @@ private fun BabyEditDialog(
     }
     var showDate by remember { mutableStateOf(false) }
     var localError by remember { mutableStateOf<String?>(null) }
+    var pickedAvatarUri by remember(baby.id) { mutableStateOf<Uri?>(null) }
+    var croppedAvatar by remember(baby.id) { mutableStateOf<CroppedAvatar?>(null) }
+    var removeAvatar by remember(baby.id) { mutableStateOf(false) }
+    var saving by remember(baby.id) { mutableStateOf(false) }
+    val avatarPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri != null) pickedAvatarUri = uri
+    }
+    val previewBitmap = remember(croppedAvatar) {
+        croppedAvatar?.bitmap?.asImageBitmap()
+    }
+    val hasAvatar = croppedAvatar != null || (!removeAvatar && baby.avatarPath != null)
     val dateLabel = remember(birthday) {
         LocalDate.ofEpochDay(birthday).format(DateTimeFormatter.ofPattern("yyyy年M月d日"))
     }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = {
+            if (!saving) onDismiss()
+        },
         title = { Text("编辑宝宝档案") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 520.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
+            ) {
+                Text("头像", style = LeziTypography.Label)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
+                ) {
+                    BabyAvatar(
+                        nickname = nickname,
+                        avatarPath = baby.avatarPath.takeUnless { removeAvatar },
+                        previewBitmap = previewBitmap,
+                        fallbackBackground = Color(baby.themeColorArgb),
+                        fallbackStyle = LeziTypography.Title,
+                        modifier = Modifier.size(76.dp),
+                        borderWidth = 3.dp,
+                        avatarContentDescription = "头像保存效果预览",
+                    )
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        OutlinedButton(
+                            enabled = !saving,
+                            onClick = {
+                                avatarPicker.launch(
+                                    PickVisualMediaRequest(
+                                        ActivityResultContracts.PickVisualMedia.ImageOnly,
+                                    ),
+                                )
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(if (hasAvatar) "更换照片" else "选择照片")
+                        }
+                        if (hasAvatar) {
+                            TextButton(
+                                enabled = !saving,
+                                onClick = {
+                                    croppedAvatar = null
+                                    removeAvatar = true
+                                },
+                            ) {
+                                Text("移除照片")
+                            }
+                        }
+                    }
+                }
+                Text(
+                    "圆形区域就是保存后的头像效果",
+                    style = LeziTypography.Meta,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 OutlinedTextField(
                     value = nickname,
+                    enabled = !saving,
                     onValueChange = {
                         nickname = it
                         localError = null
@@ -573,6 +758,7 @@ private fun BabyEditDialog(
                     listOf("FEMALE" to "女宝", "MALE" to "男宝", "UNKNOWN" to "未设置").forEach { (key, label) ->
                         FilterChip(
                             selected = sex == key,
+                            enabled = !saving,
                             onClick = { sex = key },
                             label = { Text(label) },
                         )
@@ -580,11 +766,13 @@ private fun BabyEditDialog(
                 }
                 Text("出生日期", style = LeziTypography.Label)
                 OutlinedButton(
+                    enabled = !saving,
                     onClick = { showDate = true },
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text(dateLabel) }
                 OutlinedTextField(
                     value = weightText,
+                    enabled = !saving,
                     onValueChange = { weightText = it.filter { ch -> ch.isDigit() || ch == '.' } },
                     label = { Text("出生体重（kg，可选）") },
                     placeholder = { Text("例如 3.20") },
@@ -597,7 +785,9 @@ private fun BabyEditDialog(
         },
         confirmButton = {
             TextButton(
+                enabled = !saving,
                 onClick = {
+                    if (saving) return@TextButton
                     if (nickname.isBlank()) {
                         localError = "请填写昵称"
                         return@TextButton
@@ -609,12 +799,22 @@ private fun BabyEditDialog(
                         localError = "出生体重格式不正确"
                         return@TextButton
                     }
-                    onSave(nickname.trim(), sex, birthday, grams)
+                    saving = true
+                    onSave(
+                        nickname.trim(),
+                        sex,
+                        birthday,
+                        grams,
+                        croppedAvatar?.jpegBytes,
+                        removeAvatar,
+                    ) {
+                        saving = false
+                    }
                 },
-            ) { Text("保存") }
+            ) { Text(if (saving) "保存中…" else "保存") }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
+            TextButton(enabled = !saving, onClick = onDismiss) { Text("取消") }
         },
     )
 
@@ -645,5 +845,17 @@ private fun BabyEditDialog(
         ) {
             DatePicker(state = dateState)
         }
+    }
+
+    pickedAvatarUri?.let { sourceUri ->
+        AvatarCropDialog(
+            sourceUri = sourceUri,
+            onDismiss = { pickedAvatarUri = null },
+            onConfirm = { result ->
+                croppedAvatar = result
+                removeAvatar = false
+                pickedAvatarUri = null
+            },
+        )
     }
 }

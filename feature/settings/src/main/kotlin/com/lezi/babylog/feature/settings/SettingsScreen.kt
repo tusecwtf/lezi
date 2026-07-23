@@ -48,6 +48,7 @@ import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.SettingsLocal
+import com.lezi.babylog.core.ui.BabyAvatar
 import com.lezi.babylog.designsystem.LeziCard
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
@@ -194,8 +195,17 @@ fun SettingsRoute(
                 MenuRow(
                     title = b.nickname + if (ui.current?.id == b.id) "（当前）" else "",
                     subtitle = "出生 $birth$weight · 点选切换",
-                    icon = b.nickname.take(1).ifBlank { "宝" },
                     onClick = { vm.setCurrent(b.id) },
+                    leading = {
+                        BabyAvatar(
+                            nickname = b.nickname,
+                            avatarPath = b.avatarPath,
+                            fallbackBackground = Color(b.themeColorArgb),
+                            modifier = Modifier.size(40.dp),
+                            borderWidth = 2.dp,
+                            avatarContentDescription = "${b.nickname}的头像",
+                        )
+                    },
                     trailing = {
                         Box(
                             Modifier
@@ -483,6 +493,7 @@ private fun MenuRow(
     icon: String = "·",
     onClick: (() -> Unit)? = null,
     danger: Boolean = false,
+    leading: (@Composable () -> Unit)? = null,
     trailing: (@Composable () -> Unit)? = null,
 ) {
     LeziCard(
@@ -494,24 +505,28 @@ private fun MenuRow(
             Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(
-                Modifier
-                    .size(40.dp)
-                    .clip(CircleShape)
-                    .background(
-                        if (danger) {
-                            MaterialTheme.colorScheme.error.copy(alpha = 0.12f)
-                        } else {
-                            com.lezi.babylog.designsystem.LeziThemeExt.colors.creamDeep.copy(alpha = 0.85f)
-                        },
-                    ),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    icon,
-                    style = LeziTypography.BodyStrong,
-                    color = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
-                )
+            if (leading != null) {
+                leading()
+            } else {
+                Box(
+                    Modifier
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (danger) {
+                                MaterialTheme.colorScheme.error.copy(alpha = 0.12f)
+                            } else {
+                                com.lezi.babylog.designsystem.LeziThemeExt.colors.creamDeep.copy(alpha = 0.85f)
+                            },
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        icon,
+                        style = LeziTypography.BodyStrong,
+                        color = if (danger) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                    )
+                }
             }
             Spacer(Modifier.size(10.dp))
             Column(Modifier.weight(1f)) {
