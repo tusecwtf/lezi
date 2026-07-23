@@ -8,6 +8,8 @@ data class Baby(
     val nickname: String,
     val sex: Sex? = null,
     val birthdayEpochDay: Long,
+    /** Birth weight in grams; null when not set. */
+    val birthWeightGrams: Int? = null,
     val dueDateEpochDay: Long? = null,
     val themeColorArgb: Int,
     val sortOrder: Int = 0,
@@ -79,6 +81,8 @@ data class SettingsLocal(
     val darkMode: String = "system",
     /** "warm" = original card template; "journal" = compact logbook template. */
     val visualStyle: String = "warm",
+    /** Preferred thumb side for the shared one-handed action dock: "left" or "right". */
+    val preferredHand: String = "right",
     val dayCountMode: String = "full",
     val weekStart: Int = 1,
     val unitsJson: String = "{}",

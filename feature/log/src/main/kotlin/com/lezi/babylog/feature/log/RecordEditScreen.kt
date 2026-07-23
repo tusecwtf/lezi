@@ -3,6 +3,7 @@ package com.lezi.babylog.feature.log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -26,6 +28,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -34,14 +38,16 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TimePicker
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberDatePickerState
+import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -64,7 +70,9 @@ import com.lezi.babylog.domain.payloadInt
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDateTime
+import java.time.LocalTime
 import java.time.ZoneId
+import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import javax.inject.Inject
 import kotlinx.coroutines.flow.first
@@ -211,11 +219,14 @@ fun RecordEditRoute(
     var confirmDelete by remember { mutableStateOf(false) }
     var manualMl by remember { mutableStateOf(false) }
     var mlText by remember { mutableStateOf("") }
+    var showDatePicker by remember { mutableStateOf(false) }
+    var showTimePicker by remember { mutableStateOf(false) }
 
     LaunchedEffect(recordId, newTypeKey) {
         form = vm.load(recordId, newTypeKey)
     }
     val f = form ?: return
+    val zone = ZoneId.systemDefault()
 
     val photoPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia(5),
@@ -223,6 +234,24 @@ fun RecordEditRoute(
         if (uris.isNotEmpty()) {
             form = f.copy(photoUris = f.photoUris + uris.map { it.toString() })
         }
+    }
+
+    fun saveRecord() {
+        val current = form ?: return
+        val toSave = if (manualMl && mlText.toIntOrNull() != null) {
+            current.copy(amountMl = mlText.toInt())
+        } else {
+            current
+        }
+        val normalized = when (toSave.type) {
+            RecordType.POOP, RecordType.BOTH_DIAPER -> toSave.copy(
+                stoolAmount = toSave.stoolAmount.coerceIn(1, 4),
+                stoolConsistency = toSave.stoolConsistency.coerceIn(1, 4),
+                stoolColor = toSave.stoolColor.coerceIn(0, 7),
+            )
+            else -> toSave
+        }
+        vm.save(normalized, onDone)
     }
 
     Scaffold(
@@ -243,6 +272,22 @@ fun RecordEditRoute(
                 },
             )
         },
+        bottomBar = {
+            Surface(
+                color = MaterialTheme.colorScheme.surface,
+                shadowElevation = 8.dp,
+            ) {
+                Button(
+                    onClick = ::saveRecord,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp)
+                        .heightIn(min = 52.dp),
+                ) {
+                    Text("保存")
+                }
+            }
+        },
     ) { padding ->
         Column(
             Modifier
@@ -253,22 +298,41 @@ fun RecordEditRoute(
         ) {
             Text("时间", style = MaterialTheme.typography.labelLarge)
             Spacer(Modifier.height(6.dp))
-            val zone = ZoneId.systemDefault()
             val tsLabel = remember(f.timestamp) {
                 LocalDateTime.ofInstant(Instant.ofEpochMilli(f.timestamp), zone)
                     .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
             }
-            OutlinedTextField(
-                value = tsLabel,
-                onValueChange = {},
-                readOnly = true,
+            // OutlinedTextField is read-only and used to steal focus — open pickers instead.
+            Surface(
+                onClick = { showDatePicker = true },
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
                 modifier = Modifier.fillMaxWidth(),
-                supportingText = { Text("可在保存后通过列表再次编辑；微调用下方分钟") },
-            )
+            ) {
+                Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+                    Text(tsLabel, style = MaterialTheme.typography.bodyLarge)
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        "点按修改日期与时间",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = { form = f.copy(timestamp = f.timestamp - 60_000L) }) { Text("−1分") }
-                TextButton(onClick = { form = f.copy(timestamp = f.timestamp + 60_000L) }) { Text("+1分") }
-                TextButton(onClick = { form = f.copy(timestamp = System.currentTimeMillis()) }) { Text("现在") }
+                TextButton(onClick = { form = form?.copy(timestamp = (form?.timestamp ?: f.timestamp) - 60_000L) }) {
+                    Text("−1分")
+                }
+                TextButton(onClick = { form = form?.copy(timestamp = (form?.timestamp ?: f.timestamp) + 60_000L) }) {
+                    Text("+1分")
+                }
+                TextButton(onClick = { form = form?.copy(timestamp = System.currentTimeMillis()) }) {
+                    Text("现在")
+                }
+                TextButton(onClick = { showTimePicker = true }) {
+                    Text("改时刻")
+                }
             }
 
             Spacer(Modifier.height(16.dp))
@@ -386,27 +450,7 @@ fun RecordEditRoute(
                 minLines = if (f.type == RecordType.DIARY) 5 else 2,
             )
 
-            Spacer(Modifier.height(24.dp))
-            Button(
-                onClick = {
-                    val toSave = if (manualMl && mlText.toIntOrNull() != null) {
-                        f.copy(amountMl = mlText.toInt())
-                    } else f
-                    // Fill stool defaults if any stool field touched for poop types
-                    val normalized = when (toSave.type) {
-                        RecordType.POOP, RecordType.BOTH_DIAPER -> toSave.copy(
-                            stoolAmount = toSave.stoolAmount.coerceIn(1, 4),
-                            stoolConsistency = toSave.stoolConsistency.coerceIn(1, 4),
-                            stoolColor = toSave.stoolColor.coerceIn(0, 7),
-                        )
-                        else -> toSave
-                    }
-                    vm.save(normalized, onDone)
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(52.dp),
-            ) { Text("保存") }
+            Spacer(Modifier.height(16.dp))
         }
     }
 
@@ -422,6 +466,73 @@ fun RecordEditRoute(
             },
             dismissButton = {
                 TextButton(onClick = { confirmDelete = false }) { Text("取消") }
+            },
+        )
+    }
+
+    if (showDatePicker) {
+        val current = LocalDateTime.ofInstant(Instant.ofEpochMilli(f.timestamp), zone)
+        // DatePicker uses UTC midnight millis for calendar days.
+        val initialUtc = current.toLocalDate()
+            .atStartOfDay(ZoneOffset.UTC)
+            .toInstant()
+            .toEpochMilli()
+        val dateState = rememberDatePickerState(initialSelectedDateMillis = initialUtc)
+        DatePickerDialog(
+            onDismissRequest = { showDatePicker = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val selected = dateState.selectedDateMillis
+                        if (selected != null) {
+                            val newDate = Instant.ofEpochMilli(selected)
+                                .atZone(ZoneOffset.UTC)
+                                .toLocalDate()
+                            val merged = LocalDateTime.of(newDate, current.toLocalTime())
+                            form = f.copy(timestamp = merged.atZone(zone).toInstant().toEpochMilli())
+                        }
+                        showDatePicker = false
+                        showTimePicker = true
+                    },
+                ) { Text("下一步") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDatePicker = false }) { Text("取消") }
+            },
+        ) {
+            DatePicker(state = dateState)
+        }
+    }
+
+    if (showTimePicker) {
+        val current = LocalDateTime.ofInstant(Instant.ofEpochMilli(f.timestamp), zone)
+        val timeState = rememberTimePickerState(
+            initialHour = current.hour,
+            initialMinute = current.minute,
+            is24Hour = true,
+        )
+        AlertDialog(
+            onDismissRequest = { showTimePicker = false },
+            title = { Text("选择时间") },
+            text = {
+                TimePicker(state = timeState)
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val date = LocalDateTime.ofInstant(Instant.ofEpochMilli(f.timestamp), zone)
+                            .toLocalDate()
+                        val merged = LocalDateTime.of(
+                            date,
+                            LocalTime.of(timeState.hour, timeState.minute),
+                        )
+                        form = f.copy(timestamp = merged.atZone(zone).toInstant().toEpochMilli())
+                        showTimePicker = false
+                    },
+                ) { Text("确定") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showTimePicker = false }) { Text("取消") }
             },
         )
     }

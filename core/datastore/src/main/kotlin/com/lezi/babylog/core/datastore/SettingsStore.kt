@@ -15,6 +15,7 @@ interface SettingsStore {
     suspend fun setCurrentBabyId(id: Long?)
     suspend fun setDarkMode(mode: String)
     suspend fun setVisualStyle(style: String)
+    suspend fun setPreferredHand(hand: String)
     suspend fun setTimerEnabled(enabled: Boolean)
     suspend fun setAmountStepMl(step: Int)
     suspend fun setNursingIntervalMin(min: Int)

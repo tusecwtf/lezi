@@ -7,6 +7,8 @@ and `docs/prd/visual-refs/`.
 
 - `warm` remains the default; `journal` is selected under 菜单 → 显示 → 界面模板.
 - The selection is persisted in `SettingsLocal.visualStyle` / DataStore.
+- Both templates share the fixed one-hand quick dock; the persisted left/right
+  preference mirrors the action order so the pee shortcut stays thumb-near.
 - Both templates use the same navigation graph, ViewModels, domain services, Room
   records, timer state, summaries, growth measurements and family/account stubs.
 - Journal-only branches are limited to theme tokens, component geometry,
@@ -28,7 +30,12 @@ node tools/verify-template-v2-runtime.mjs
              one-tap pee, formula fields and nursing timer session.
 
 bash tools/verify-template-v2.sh
-  PASS: persisted switch, distinct visual grammar, brand guard and OD snapshot.
+  PASS: persisted switch and handedness, fixed quick dock/save action,
+        distinct visual grammar, brand guard and OD snapshot.
+
+./gradlew :feature:log:testDebugUnitTest \
+  --tests com.lezi.babylog.feature.log.OneHandQuickActionOrderTest
+  PASS: left/right mirroring and timer-disabled action set (3 tests).
 
 ./gradlew test
   BUILD SUCCESSFUL
@@ -42,12 +49,17 @@ bash tools/verify-template-v2.sh
 
 - The Open Design artifact was rendered at exactly 390×844 in headless Chrome.
 - The Android build was inspected on the emulator in both `warm` and `journal`.
+- Warm/right-hand placed pee at the right thumb edge; journal/left-hand mirrored
+  it to the left edge. Both retained the fixed dock above system navigation.
+- Tapping pee once increased today's pee count without opening an edit form.
+- The overflow sheet remained scrollable in a four-column grid, and the
+  type-specific edit form kept its full-width save action fixed at the bottom.
 - Journal record view showed the coral header, five-cell summary, vertical 0–24h
   rail and compact log; summary and growth views showed the week matrix and
   weight/height/head percentile grammar.
-- The emulator selector wrote `visual_style=journal`; after force-stopping and
-  restarting the process, DataStore still reported `journal` and the record
-  screen restored the compact template.
+- The emulator selector wrote `visual_style=journal` and `preferred_hand=left`;
+  after force-stopping and restarting the process, DataStore still reported both
+  values and the record screen restored the compact, left-handed template.
 
 The Open Design project remains `lezi-piyolog-template-v2`; this directory is its
 checked-in source snapshot plus repository-side validation evidence.

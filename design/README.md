@@ -18,6 +18,12 @@ Both keys render the same routes, records, forms, state and persistence. A templ
 
 The second template uses the collected public UI screenshots only to study density, hierarchy and chart grammar. It keeps the 乐记 brand and does not ship reference-product names, mascots, illustrations or icon assets.
 
+Both templates also share the one-handed interaction contract: a fixed bottom
+quick-record dock, a persisted left/right thumb preference, one-tap pee and
+sleep actions, two-tap nursing/formula paths, a scroll-safe “more” sheet, and a
+fixed full-width save action on long record forms. Visual style may restyle the
+dock, but must not move it back into scrolling content.
+
 Canvas baseline: **390 × 844**.
 
 ## Sync flow (every OD change)
@@ -54,5 +60,6 @@ Colors, radii, type scale, and spacing can be generated; navigation, persistence
 | `TimelineLane` / `TimelineRailCard` | 24h three-lane rail |
 | `RecordRow` | Timeline cell |
 | `QuickRecordButton` | OD quick grid tile |
+| `OneHandQuickDock` | Fixed handed dock shared by both templates |
 | `StateContainer` | empty / loading / error / recording / success |
 | `LeziPrimaryButton` / `LeziSecondaryButton` | ≥48dp CTAs |

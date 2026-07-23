@@ -32,6 +32,7 @@ class SettingsDataSource @Inject constructor(
             nextFeedAt = prefs[Keys.NEXT_FEED_AT],
             darkMode = prefs[Keys.DARK_MODE] ?: "system",
             visualStyle = prefs[Keys.VISUAL_STYLE] ?: "warm",
+            preferredHand = prefs[Keys.PREFERRED_HAND] ?: "right",
             dayCountMode = prefs[Keys.DAY_COUNT_MODE] ?: "full",
             weekStart = prefs[Keys.WEEK_START] ?: 1,
             unitsJson = prefs[Keys.UNITS] ?: "{}",
@@ -64,6 +65,11 @@ class SettingsDataSource @Inject constructor(
     override suspend fun setVisualStyle(style: String) {
         require(style == "warm" || style == "journal") { "Unknown visual style: $style" }
         dataStore.edit { it[Keys.VISUAL_STYLE] = style }
+    }
+
+    override suspend fun setPreferredHand(hand: String) {
+        require(hand == "left" || hand == "right") { "Unknown preferred hand: $hand" }
+        dataStore.edit { it[Keys.PREFERRED_HAND] = hand }
     }
 
     override suspend fun setTimerEnabled(enabled: Boolean) {
@@ -136,6 +142,7 @@ class SettingsDataSource @Inject constructor(
         val NEXT_FEED_AT = longPreferencesKey("next_feed_at")
         val DARK_MODE = stringPreferencesKey("dark_mode")
         val VISUAL_STYLE = stringPreferencesKey("visual_style")
+        val PREFERRED_HAND = stringPreferencesKey("preferred_hand")
         val DAY_COUNT_MODE = stringPreferencesKey("day_count_mode")
         val WEEK_START = intPreferencesKey("week_start")
         val UNITS = stringPreferencesKey("units_json")

@@ -37,6 +37,7 @@ class CareLogTest {
                 nickname = "小满",
                 sex = "FEMALE",
                 birthdayEpochDay = day,
+                birthWeightGrams = 3200,
                 themeColorArgb = 0xFFAA442B.toInt(),
             ),
         )
@@ -46,8 +47,77 @@ class CareLogTest {
         assertThat(baby!!.nickname).isEqualTo("小满")
         assertThat(baby.sex?.name).isEqualTo("FEMALE")
         assertThat(baby.birthdayEpochDay).isEqualTo(day)
+        assertThat(baby.birthWeightGrams).isEqualTo(3200)
         assertThat(baby.themeColorArgb).isEqualTo(0xFFAA442B.toInt())
         assertThat(care.observeHasBaby().first()).isTrue()
+    }
+
+    @Test
+    fun addBaby_rejectsDuplicateNickname() = runTest {
+        val care = Fakes().careLog()
+        care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val thrown = runCatching {
+            care.addBaby(CreateBabyInput(nickname = " 年年 ", birthdayEpochDay = 2))
+        }.exceptionOrNull()
+        assertThat(thrown).isInstanceOf(DuplicateBabyNicknameException::class.java)
+        assertThat(care.listBabies()).hasSize(1)
+    }
+
+    @Test
+    fun updateBabyProfile_canSetBirthdayAndWeight() = runTest {
+        val care = Fakes().careLog()
+        val id = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 10))
+        val day = LocalDate.of(2025, 12, 1).toEpochDay()
+        care.updateBabyProfile(
+            id,
+            UpdateBabyInput(
+                nickname = "豆豆",
+                sex = "MALE",
+                birthdayEpochDay = day,
+                birthWeightGrams = 3500,
+            ),
+        )
+        val baby = care.getCurrentBaby()!!
+        assertThat(baby.birthdayEpochDay).isEqualTo(day)
+        assertThat(baby.birthWeightGrams).isEqualTo(3500)
+        assertThat(baby.sex?.name).isEqualTo("MALE")
+    }
+
+    @Test
+    fun deleteBaby_removesExtraProfile() = runTest {
+        val care = Fakes().careLog()
+        val a = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val b = care.addBaby(CreateBabyInput(nickname = "临时", birthdayEpochDay = 2))
+        care.addRecord(babyId = a, type = RecordType.PEE, timestamp = 1_000L, payloadJson = """{"pee_amount":2}""")
+        assertThat(care.listBabies()).hasSize(2)
+        assertThat(care.deleteBaby(b)).isTrue()
+        assertThat(care.listBabies().map { it.nickname }).containsExactly("年年")
+        assertThat(care.getCurrentBaby()!!.id).isEqualTo(a)
+    }
+
+    @Test
+    fun dedupeBabiesByNickname_mergesRecordsOntoKeeper() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val a = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val b = fakes.babies.upsert(
+            BabyEntity(
+                familyId = 1,
+                nickname = "年年",
+                birthdayEpochDay = 2,
+                themeColorArgb = CreateBabyInput.DEFAULT_THEME_COLOR,
+                clientUuid = "dup-niannian",
+                updatedAt = System.currentTimeMillis(),
+            ),
+        )
+        care.addRecord(babyId = a, type = RecordType.PEE, timestamp = 1_000L, payloadJson = """{"pee_amount":2}""")
+        care.addRecord(babyId = b, type = RecordType.FORMULA, timestamp = 2_000L, payloadJson = """{"amount_ml":90}""")
+        care.dedupeBabiesByNickname()
+        val remaining = care.listBabies()
+        assertThat(remaining).hasSize(1)
+        assertThat(remaining.single().nickname).isEqualTo("年年")
+        val keeperId = remaining.single().id
+        assertThat(fakes.records.listForBaby(keeperId)).hasSize(2)
     }
 
     @Test
@@ -180,8 +250,7 @@ class CareLogTest {
     fun searchAndWeekSummary() = runTest {
         val care = Fakes().careLog()
         val babyId = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
-        val day = java.time.LocalDate.of(2026, 7, 22)
-        val zone = java.time.ZoneOffset.UTC
+        val day = LocalDate.now(zone)
         val ts = day.atStartOfDay(zone).toInstant().toEpochMilli() + 1000
         care.addRecord(babyId, RecordType.MEMO, timestamp = ts, note = "布洛芬 2.5ml", payloadJson = """{"body":"服药"}""")
         care.addRecord(babyId, RecordType.DIARY, timestamp = ts + 1, payloadJson = """{"body":"今天发烧了"}""")
@@ -266,6 +335,7 @@ private class FakeSettingsStore : SettingsStore {
     }
 
     override suspend fun setVisualStyle(style: String) = Unit
+    override suspend fun setPreferredHand(hand: String) = Unit
 
     override suspend fun setTimerEnabled(enabled: Boolean) {
         timerEnabled.value = enabled
@@ -376,13 +446,20 @@ private class FakeBabyDao : BabyDao {
     private val items = MutableStateFlow<List<BabyEntity>>(emptyList())
     private val seq = AtomicLong(1)
 
-    override fun observeAll(): Flow<List<BabyEntity>> = items
+    private fun active(): List<BabyEntity> = items.value.filter { it.deletedAt == null }
 
-    override suspend fun listAll(): List<BabyEntity> = items.value
+    override fun observeAll(): Flow<List<BabyEntity>> = items.map { list -> list.filter { it.deletedAt == null } }
 
-    override suspend fun get(id: Long): BabyEntity? = items.value.find { it.id == id }
+    override suspend fun listAll(): List<BabyEntity> = active()
 
-    override suspend fun countActive(): Int = items.value.size
+    override suspend fun get(id: Long): BabyEntity? = active().find { it.id == id }
+
+    override suspend fun countByNickname(nickname: String, excludeId: Long): Int =
+        active().count {
+            it.nickname.trim() == nickname.trim() && (excludeId < 0 || it.id != excludeId)
+        }
+
+    override suspend fun countActive(): Int = active().size
 
     override suspend fun upsert(baby: BabyEntity): Long {
         val id = if (baby.id == 0L) seq.getAndIncrement() else baby.id

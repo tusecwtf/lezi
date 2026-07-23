@@ -36,12 +36,25 @@ data class CreateBabyInput(
     val nickname: String,
     val sex: String? = null,
     val birthdayEpochDay: Long,
+    /** Birth weight in grams; null when not set. */
+    val birthWeightGrams: Int? = null,
     val themeColorArgb: Int = DEFAULT_THEME_COLOR,
 ) {
     companion object {
         const val DEFAULT_THEME_COLOR: Int = 0xFF007BAE.toInt()
     }
 }
+
+data class UpdateBabyInput(
+    val nickname: String,
+    val sex: String? = null,
+    val birthdayEpochDay: Long,
+    val birthWeightGrams: Int? = null,
+)
+
+/** Thrown when another active baby already uses the nickname. */
+class DuplicateBabyNicknameException(val nickname: String) :
+    IllegalArgumentException("宝宝昵称「$nickname」已存在")
 
 enum class TimeBarKind { FEED, SLEEP }
 
@@ -85,12 +98,16 @@ class CareLog @Inject constructor(
         val now = System.currentTimeMillis()
         val userId = ensureLocalUser(now)
         val familyId = ensureFamily(userId, now)
+        val nickname = normalizeNickname(input.nickname)
+        ensureNicknameAvailable(nickname)
+        val weight = normalizeBirthWeightGrams(input.birthWeightGrams)
         val id = babyDao.upsert(
             BabyEntity(
                 familyId = familyId,
-                nickname = input.nickname.trim().ifBlank { "年年" },
+                nickname = nickname,
                 sex = input.sex,
                 birthdayEpochDay = input.birthdayEpochDay,
+                birthWeightGrams = weight,
                 themeColorArgb = input.themeColorArgb,
                 clientUuid = newClientUuid(),
                 updatedAt = now,
@@ -98,6 +115,40 @@ class CareLog @Inject constructor(
         )
         settings.setCurrentBabyId(id)
         return id
+    }
+
+    /**
+     * Update baby profile fields. Nickname must stay unique among active babies.
+     * @throws DuplicateBabyNicknameException when another baby already uses the name
+     */
+    suspend fun updateBabyProfile(babyId: Long, input: UpdateBabyInput) {
+        val existing = babyDao.get(babyId) ?: return
+        val nickname = normalizeNickname(input.nickname)
+        ensureNicknameAvailable(nickname, excludeId = babyId)
+        babyDao.update(
+            existing.copy(
+                nickname = nickname,
+                sex = input.sex,
+                birthdayEpochDay = input.birthdayEpochDay,
+                birthWeightGrams = normalizeBirthWeightGrams(input.birthWeightGrams),
+                updatedAt = System.currentTimeMillis(),
+            ),
+        )
+    }
+
+    /** Soft-delete a baby profile. Reassigns current baby if needed. Keeps at least one baby. */
+    suspend fun deleteBaby(babyId: Long): Boolean {
+        val babies = babyDao.listAll()
+        if (babies.size <= 1) return false
+        val target = babies.find { it.id == babyId } ?: return false
+        val now = System.currentTimeMillis()
+        babyDao.update(target.copy(deletedAt = now, updatedAt = now))
+        val remaining = babyDao.listAll()
+        val currentId = settings.currentBabyId.first()
+        if (currentId == null || currentId == babyId || remaining.none { it.id == currentId }) {
+            remaining.firstOrNull()?.let { settings.setCurrentBabyId(it.id) }
+        }
+        return true
     }
 
     suspend fun getCurrentBaby(): Baby? {
@@ -397,9 +448,24 @@ class CareLog @Inject constructor(
 
     suspend fun renameBaby(babyId: Long, nickname: String) {
         val b = babyDao.get(babyId) ?: return
-        val name = nickname.trim().ifBlank { "年年" }
+        val name = normalizeNickname(nickname)
         if (b.nickname == name) return
+        ensureNicknameAvailable(name, excludeId = babyId)
         babyDao.update(b.copy(nickname = name, updatedAt = System.currentTimeMillis()))
+    }
+
+    private fun normalizeNickname(raw: String): String =
+        raw.trim().ifBlank { "年年" }
+
+    /** Grams; reject non-positive or absurd values as null. */
+    private fun normalizeBirthWeightGrams(grams: Int?): Int? {
+        val g = grams ?: return null
+        return g.takeIf { it in 500..9_000 }
+    }
+
+    private suspend fun ensureNicknameAvailable(nickname: String, excludeId: Long = -1L) {
+        val count = babyDao.countByNickname(nickname, excludeId)
+        if (count > 0) throw DuplicateBabyNicknameException(nickname)
     }
 
     private suspend fun ensureLocalUser(now: Long): Long {
@@ -467,7 +533,10 @@ class CareLog @Inject constructor(
         return storedId?.let { id -> babies.find { it.id == id } } ?: babies.first()
     }
 
-    /** One-shot migrate debug defaults DouDou/豆豆/niannian → 年年. */
+    /**
+     * One-shot migrate debug defaults DouDou/豆豆/niannian → 年年,
+     * only when no other active baby already uses 年年 (avoids manufacturing duplicates).
+     */
     private suspend fun healLegacyNickname(entity: BabyEntity): BabyEntity {
         val raw = entity.nickname.trim()
         val key = raw.lowercase().replace(" ", "")
@@ -475,31 +544,50 @@ class CareLog @Inject constructor(
             "doudou", "dou", "mumu", "niannian", "niennie", "bean",
         ) || raw == "豆豆" || raw == "木木"
         if (!legacy) return entity
-        val updated = entity.copy(nickname = "年年", updatedAt = System.currentTimeMillis())
+        val target = "年年"
+        if (raw == target) return entity
+        val clash = babyDao.countByNickname(target, excludeId = entity.id) > 0
+        if (clash) return entity
+        val updated = entity.copy(nickname = target, updatedAt = System.currentTimeMillis())
         babyDao.update(updated)
         return updated
     }
 
-    /** Call from app start / root to rename legacy demo nicknames. */
-    suspend fun ensureCurrentBabyHealed() {
-        val babies = babyDao.listAll().map { healLegacyNickname(it) }
+    /**
+     * Merge active babies that share the same trimmed nickname: keep one, reassign records,
+     * soft-delete the rest. Call from app start.
+     */
+    suspend fun dedupeBabiesByNickname() {
+        val babies = babyDao.listAll()
+        if (babies.size <= 1) return
         val currentId = settings.currentBabyId.first()
-        val niannian = babies.filter { it.nickname.trim() == "年年" }
-        if (niannian.size > 1) {
-            val keeper = niannian.firstOrNull { it.id == currentId }
-                ?: niannian.firstOrNull { recordDao.listForBaby(it.id).isNotEmpty() }
-                ?: niannian.minByOrNull { it.id }!!
-            val now = System.currentTimeMillis()
-            for (extra in niannian) {
+        val groups = babies.groupBy { it.nickname.trim() }.filter { it.value.size > 1 }
+        if (groups.isEmpty()) return
+        val now = System.currentTimeMillis()
+        for ((_, list) in groups) {
+            val keeper = list.firstOrNull { it.id == currentId }
+                ?: list.maxByOrNull { recordDao.listForBaby(it.id).size }
+                ?: list.minByOrNull { it.id }!!
+            for (extra in list) {
                 if (extra.id == keeper.id) continue
-                if (recordDao.listForBaby(extra.id).isEmpty()) {
-                    babyDao.update(extra.copy(deletedAt = now, updatedAt = now))
+                // Move records onto the kept profile so history is not lost.
+                for (rec in recordDao.listForBaby(extra.id)) {
+                    recordDao.update(
+                        rec.copy(babyId = keeper.id, updatedAt = now),
+                    )
                 }
+                babyDao.update(extra.copy(deletedAt = now, updatedAt = now))
             }
-            if (currentId == null || currentId != keeper.id) {
+            if (currentId == null || list.any { it.id == currentId && it.id != keeper.id }) {
                 settings.setCurrentBabyId(keeper.id)
             }
         }
+    }
+
+    /** Call from app start / root to rename legacy demo nicknames and collapse duplicates. */
+    suspend fun ensureCurrentBabyHealed() {
+        babyDao.listAll().forEach { healLegacyNickname(it) }
+        dedupeBabiesByNickname()
         getCurrentBaby()
     }
 }
@@ -511,6 +599,7 @@ internal fun BabyEntity.toModel(): Baby =
         nickname = nickname,
         sex = sex?.let { parseSex(it) },
         birthdayEpochDay = birthdayEpochDay,
+        birthWeightGrams = birthWeightGrams,
         dueDateEpochDay = dueDateEpochDay,
         themeColorArgb = themeColorArgb,
         sortOrder = sortOrder,

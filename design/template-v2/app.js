@@ -27,7 +27,8 @@
     growth: '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="m4 18 5-5 3 3 7-8M15 8h4v4"/></svg>',
     food: '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 3v8M4 3v5c0 2 1 3 3 3s3-1 3-3V3M7 11v10M16 3v18M16 3c3 2 4 5 4 8h-4"/></svg>',
     vaccine: '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="m5 19 9-9M12 5l7 7M15 2l7 7M4 20l-2 2M8 16l-2-2"/></svg>',
-    other: '<svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>'
+    other: '<svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>',
+    search: '<svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 4.5 4.5"/></svg>'
   };
 
   const TYPES = [
@@ -157,7 +158,22 @@
     if (["other", "custom"].includes(record.type)) return p.detail || p.title || record.note || type.name;
     return record.note || type.name;
   }
-  function showToast(message) { const toast = document.createElement("div"); toast.className = "toast"; toast.textContent = message; $("#toast-region").append(toast); setTimeout(() => toast.remove(), 2400); }
+  let toastTimer = null;
+  function showToast(message) {
+    const region = $("#toast-region");
+    if (!region) return;
+    // Replace any existing toast so rapid actions don't stack a permanent pile of bars.
+    region.replaceChildren();
+    if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
+    const toast = document.createElement("div");
+    toast.className = "toast";
+    toast.textContent = message;
+    region.append(toast);
+    toastTimer = setTimeout(() => {
+      toast.remove();
+      toastTimer = null;
+    }, 2400);
+  }
   function openDialog(dialog) { const current = $("dialog[open]"); if (current && current !== dialog) current.close(); if (!dialog.open) dialog.showModal(); document.body.classList.add("dialog-open"); }
   function closeDialog(dialog) { if (!dialog?.open) return; dialog.close(); }
   document.addEventListener("close", () => { if (!$("dialog[open]")) document.body.classList.remove("dialog-open"); }, true);
@@ -235,7 +251,7 @@
       ["显示", [["other","显示设置","深色、时间、单位、减少动态","settings:display"]]],
       ["数据与关于", [["note","TXT / PDF 导出","TXT 可下载 · PDF Stub","settings:export"],["health","清除全部数据","两步确认后清除本机数据","clear"],["other","关于乐记","版本、包名与隐私说明","settings:about"]]]
     ];
-    $("#menu-groups").innerHTML = groups.map(([title, rows]) => `<section class="menu-group"><h2>${title}</h2>${rows.map(([icon,title,sub,action]) => { const attrs = action.startsWith("open:") ? `data-open="${action.slice(5)}"` : action.startsWith("settings:") ? `data-settings="${action.slice(9)}"` : action === "clear" ? "data-clear-all" : ""; return `<button class="menu-row ${action === "clear" ? "danger" : ""}" type="button" ${attrs}><span class="menu-icon">${ICONS[icon]}</span><span><strong>${title}</strong><small>${sub}</small></span><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>`; }).join("")}</section>`).join("");
+    $("#menu-groups").innerHTML = groups.map(([title, rows]) => `<section class="menu-group"><h2>${title}</h2>${rows.map(([icon,title,sub,action]) => { const attrs = action.startsWith("open:") ? `data-open="${action.slice(5)}"` : action.startsWith("settings:") ? `data-settings="${action.slice(9)}"` : action === "clear" ? "data-clear-all" : ""; return `<button class="menu-row ${action === "clear" ? "danger" : ""}" type="button" ${attrs}><span class="menu-icon">${ICONS[icon] || ICONS.other}</span><span><strong>${title}</strong><small>${sub}</small></span><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>`; }).join("")}</section>`).join("");
   }
   function renderSession() { syncNursing(); const nursing = session.nursing && (session.nursing.leftSec || session.nursing.rightSec || session.nursing.runningSide), sleep = session.sleep?.startedAt, bar = $("#session-bar"); if (!nursing && !sleep) { bar.hidden = true; return; } bar.hidden = false; if (sleep) { const sec = Math.max(0, Math.floor((Date.now() - session.sleep.startedAt) / 1000)); $("#session-label").textContent = "睡眠记录中"; $("#session-detail").textContent = formatTimer(sec); } else { const total = session.nursing.leftSec + session.nursing.rightSec; $("#session-label").textContent = session.nursing.runningSide ? `母乳${session.nursing.runningSide === "left" ? "左侧" : "右侧"}计时中` : "母乳计时已暂停"; $("#session-detail").textContent = `${formatTimer(total)} · 左${formatTimer(session.nursing.leftSec)} / 右${formatTimer(session.nursing.rightSec)}`; } }
   function renderAll() { applySettings(); renderHeader(); renderRecords(); renderQuick(); renderSummary(); renderGrowth(); renderAccount(); renderMenu(); renderSession(); }
@@ -314,7 +330,7 @@
 
   function settingsSwitch(id,label,copy,checked) { return `<label class="switch-row"><span><strong>${label}</strong><small>${copy}</small></span><input id="${id}" type="checkbox" role="switch" ${checked?"checked":""}><i aria-hidden="true"></i></label>`; }
   function openSettings(section, adding = false) { const dialog=$("#settings-dialog"), baby=activeBaby();dialog.dataset.section=section;dialog.dataset.adding=String(adding);let title="设置",content="";
-    if(section==="baby"){title=adding?"添加宝宝":"宝宝设置";content=`<label class="field"><span>昵称</span><input name="babyName" type="text" maxlength="12" value="${adding?"":escapeHTML(baby.name)}" required></label><div class="field-row"><label class="field"><span>出生日期</span><input name="birthday" type="date" value="${adding?localISO():baby.birthday}" required></label><label class="field"><span>预产期（可选）</span><input name="dueDate" type="date" value="${adding?"":baby.dueDate}"></label></div><fieldset class="field"><legend>性别</legend><div class="choice-row">${["女宝","男宝","未设置"].map(v=>choice("sex",v,v,(adding?"未设置":baby.sex)===v)).join("")}</div></fieldset><fieldset class="field"><legend>档案识别色（主界面仍保持珊瑚）</legend><div class="theme-choices">${Object.entries(THEME_COLORS).map(([key,color])=>`<label class="theme-choice"><input type="radio" name="theme" value="${key}" ${(adding?"coral":baby.theme)===key?"checked":""}><span style="--theme-color:${color}">${{coral:"珊瑚",mint:"薄荷",berry:"莓果",sky:"天空"}[key]}</span></label>`).join("")}</div></fieldset>${adding?"":'<button class="secondary-button full" type="button" data-add-baby>添加另一个宝宝</button>'}`;if(!adding){const babyList=state.babies.map(item=>`<button class="menu-row" type="button" data-switch-baby="${item.id}"><span class="account-avatar" style="width:32px;height:32px;font-size:12px;--baby-color:${THEME_COLORS[item.theme]||THEME_COLORS.coral}">${escapeHTML(item.name.slice(0,1))}</span><span><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(babyAge(item))}${item.id===state.activeBabyId?" · 当前":""}</small></span><svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>`).join("");content=`<p class="settings-section-title">切换宝宝</p><div class="config-list">${babyList}</div><p class="settings-section-title">当前宝宝资料</p>${content}`;}}
+    if(section==="baby"){title=adding?"添加宝宝":"宝宝设置";content=`<label class="field"><span>昵称</span><input name="babyName" type="text" maxlength="12" value="${adding?"":escapeHTML(baby.name)}" required></label><div class="field-row"><label class="field"><span>出生日期</span><input name="birthday" type="date" value="${adding?localISO():baby.birthday}" required></label><label class="field"><span>预产期（可选）</span><input name="dueDate" type="date" value="${adding?"":baby.dueDate}"></label></div><fieldset class="field"><legend>性别</legend><div class="choice-row">${["女宝","男宝","未设置"].map(v=>choice("sex",v,v,(adding?"未设置":baby.sex)===v)).join("")}</div></fieldset><fieldset class="field"><legend>档案识别色（主界面仍保持珊瑚）</legend><div class="theme-choices">${Object.entries(THEME_COLORS).map(([key,color])=>`<label class="theme-choice"><input type="radio" name="theme" value="${key}" ${(adding?"coral":baby.theme)===key?"checked":""}><span style="--theme-color:${color}">${{coral:"珊瑚",mint:"薄荷",berry:"莓果",sky:"天空"}[key]}</span></label>`).join("")}</div></fieldset>${adding?"":'<button class="secondary-button full" type="button" data-add-baby>添加另一个宝宝</button>'}`;if(!adding){const babyList=state.babies.map(item=>{const current=item.id===state.activeBabyId;return `<button class="menu-row${current?" is-current":""}" type="button" data-switch-baby="${item.id}" ${current?"aria-current=\"true\"":""}><span class="account-avatar" style="width:32px;height:32px;font-size:12px;--baby-color:${THEME_COLORS[item.theme]||THEME_COLORS.coral}">${escapeHTML(item.name.slice(0,1))}</span><span><strong>${escapeHTML(item.name)}</strong><small>${escapeHTML(babyAge(item))}${current?" · 当前":""}</small></span>${current?'<span class="current-check" aria-hidden="true">✓</span>':'<svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>'}</button>`;}).join("");content=`<p class="settings-section-title">切换宝宝</p><div class="config-list">${babyList}</div><p class="settings-section-title">当前宝宝资料</p>${content}`;}}
     if(section==="items"){title="项目显隐与排序";const order=[...(state.quickItems||QUICK_DEFAULT),...TYPES.map(t=>t.id).filter(id=>!(state.quickItems||[]).includes(id))];content=`<p class="settings-note">前六个未隐藏项目显示在首页快捷带；全部项目仍可从“更多”进入。</p><div class="config-list">${order.map((id,index)=>{const t=typeOf(id),hidden=(state.hiddenItems||[]).includes(id);return `<div class="config-row" data-config-id="${id}">${typeIcon(id)}<strong>${t.name}</strong><span class="config-actions"><button type="button" data-config-move="up" ${index===0?"disabled":""}>↑</button><button type="button" data-config-move="down" ${index===order.length-1?"disabled":""}>↓</button><button type="button" data-config-toggle>${hidden?"显":"隐"}</button></span></div>`;}).join("")}</div>`;}
     if(section==="feeding"){title="喂奶设置";content=`${settingsSwitch("setting-timer","母乳计时入口","关闭后首页不显示母乳快捷入口",state.settings.timerEnabled)}<fieldset class="field"><legend>母乳记录时刻</legend><div class="choice-row">${choice("recordAt","start","开始时",state.settings.recordAt==="start")}${choice("recordAt","end","结束时",state.settings.recordAt!=="start")}</div></fieldset><fieldset class="field"><legend>配方奶/挤出乳步进</legend><div class="choice-row">${[5,10,15].map(n=>choice("amountStep",n,`${n}ml`,Number(state.settings.amountStep)===n)).join("")}</div></fieldset><p class="settings-note">改动会在下一次打开奶量表单时立即生效；仍可手输任意正整数。</p>`;}
     if(section==="display"){title="显示设置";content=`${settingsSwitch("setting-dark","深色模式","夜间降低大面积亮度",state.settings.dark)}${settingsSwitch("setting-relative","相对时间","优先显示几分钟前/几小时前",state.settings.relativeTime)}${settingsSwitch("setting-time24","24 小时制","关闭后显示上午/下午",state.settings.time24)}${settingsSwitch("setting-motion","减少动态","停用非必要过渡",state.settings.reduceMotion)}<fieldset class="field"><legend>测量单位</legend><div class="choice-row">${choice("units","metric","公制",state.settings.units==="metric")}${choice("units","imperial","英制",state.settings.units==="imperial")}</div></fieldset>`;}
@@ -356,7 +372,21 @@
     const photo=event.target.closest("[data-add-photo]");if(photo){const dialog=$("#record-dialog"),count=Number(dialog.dataset.photos||0)+1;dialog.dataset.photos=String(count);$("#photo-count").textContent=`${count} 张照片占位`;return;}
     const timerSide=event.target.closest("[data-timer-side]");if(timerSide){startTimer(timerSide.dataset.timerSide);return;}
     const addBaby=event.target.closest("[data-add-baby]");if(addBaby){openSettings("baby",true);return;}
-    const switchBaby=event.target.closest("[data-switch-baby]");if(switchBaby){state.activeBabyId=switchBaby.dataset.switchBaby;selectedDate=localISO();persist();openSettings("baby");renderAll();showToast(`已切换到 ${activeBaby().name}`);return;}
+    const switchBaby=event.target.closest("[data-switch-baby]");if(switchBaby){
+      event.preventDefault();
+      event.stopPropagation();
+      const nextId=switchBaby.dataset.switchBaby;
+      // Already current: do not re-render/toast (avoids ghost-click loops when DOM is rebuilt under the cursor).
+      if(!nextId||nextId===state.activeBabyId)return;
+      state.activeBabyId=nextId;
+      selectedDate=localISO();
+      persist();
+      renderAll();
+      showToast(`已切换到 ${activeBaby().name}`);
+      // Rebuild settings after the click finishes so replacing the pressed button cannot re-fire.
+      queueMicrotask(()=>openSettings("baby"));
+      return;
+    }
     const config=event.target.closest("[data-config-move]");if(config){configMove(config.closest("[data-config-id]").dataset.configId,config.dataset.configMove);return;}
     const toggle=event.target.closest("[data-config-toggle]");if(toggle){configToggle(toggle.closest("[data-config-id]").dataset.configId);return;}
     const preview=event.target.closest("[data-export-preview]");if(preview){$("#export-preview").textContent=exportText();$("#export-preview").hidden=false;$("[data-export-download]").hidden=false;return;}

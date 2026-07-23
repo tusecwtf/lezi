@@ -57,6 +57,16 @@ interface BabyDao {
     @Query("SELECT * FROM babies WHERE id = :id AND deletedAt IS NULL")
     suspend fun get(id: Long): BabyEntity?
 
+    @Query(
+        """
+        SELECT COUNT(*) FROM babies
+        WHERE deletedAt IS NULL
+          AND TRIM(nickname) = TRIM(:nickname)
+          AND (:excludeId < 0 OR id != :excludeId)
+        """,
+    )
+    suspend fun countByNickname(nickname: String, excludeId: Long = -1L): Int
+
     @Query("SELECT COUNT(*) FROM babies WHERE deletedAt IS NULL")
     suspend fun countActive(): Int
 

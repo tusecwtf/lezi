@@ -15,16 +15,23 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -32,6 +39,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
@@ -47,8 +55,12 @@ import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
+import com.lezi.babylog.domain.DuplicateBabyNicknameException
 import dagger.hilt.android.lifecycle.HiltViewModel
+import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 import javax.inject.Inject
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
@@ -81,16 +93,30 @@ class SettingsViewModel @Inject constructor(
     fun setRecordAt(v: String) = viewModelScope.launch { settingsStore.setRecordAt(v) }
     fun setCurrent(id: Long) = viewModelScope.launch { careLog.setCurrentBaby(id) }
     fun setVisualStyle(key: String) = viewModelScope.launch { settingsStore.setVisualStyle(key) }
+    fun setPreferredHand(hand: String) = viewModelScope.launch { settingsStore.setPreferredHand(hand) }
 
-    fun addBaby(nickname: String, onDone: () -> Unit) {
+    fun addBaby(
+        nickname: String,
+        birthdayEpochDay: Long,
+        birthWeightGrams: Int?,
+        onDone: (String?) -> Unit,
+    ) {
         viewModelScope.launch {
-            careLog.addBaby(
-                CreateBabyInput(
-                    nickname = nickname.ifBlank { "年年" },
-                    birthdayEpochDay = LocalDate.now().toEpochDay(),
-                ),
+            val result = runCatching {
+                careLog.addBaby(
+                    CreateBabyInput(
+                        nickname = nickname,
+                        birthdayEpochDay = birthdayEpochDay,
+                        birthWeightGrams = birthWeightGrams,
+                    ),
+                )
+            }
+            onDone(
+                result.exceptionOrNull()?.let { e ->
+                    if (e is DuplicateBabyNicknameException) e.message
+                    else e.message ?: "添加失败"
+                },
             )
-            onDone()
         }
     }
 
@@ -103,6 +129,7 @@ class SettingsViewModel @Inject constructor(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsRoute(
     onOpenExport: () -> Unit = {},
@@ -113,7 +140,11 @@ fun SettingsRoute(
     val ui by vm.ui.collectAsStateWithLifecycle()
     var showAdd by remember { mutableStateOf(false) }
     var clearStep by remember { mutableIntStateOf(0) }
-    var newName by remember { mutableStateOf("年年") }
+    var newName by remember { mutableStateOf("") }
+    var newBirthday by remember { mutableLongStateOf(LocalDate.now().toEpochDay()) }
+    var newWeight by remember { mutableStateOf("") }
+    var addError by remember { mutableStateOf<String?>(null) }
+    var showAddDate by remember { mutableStateOf(false) }
     var showFeed by remember { mutableStateOf(false) }
     var showDisplay by remember { mutableStateOf(false) }
 
@@ -157,9 +188,12 @@ fun SettingsRoute(
 
             Text("宝宝", style = LeziTypography.Eyebrow, color = MaterialTheme.colorScheme.onSurfaceVariant)
             ui.babies.forEach { b ->
+                val birth = LocalDate.ofEpochDay(b.birthdayEpochDay)
+                    .format(DateTimeFormatter.ofPattern("yyyy-MM-dd"))
+                val weight = b.birthWeightGrams?.let { " · ${it}g" }.orEmpty()
                 MenuRow(
                     title = b.nickname + if (ui.current?.id == b.id) "（当前）" else "",
-                    subtitle = "点选切换 · 档案不可删除",
+                    subtitle = "出生 $birth$weight · 点选切换",
                     icon = b.nickname.take(1).ifBlank { "宝" },
                     onClick = { vm.setCurrent(b.id) },
                     trailing = {
@@ -266,6 +300,21 @@ fun SettingsRoute(
                             )
                         }
                     }
+                    Text("单手操作 · 惯用手", style = LeziTypography.Label)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("left" to "左手", "right" to "右手").forEach { (key, label) ->
+                            FilterChip(
+                                selected = ui.settings.preferredHand == key,
+                                onClick = { vm.setPreferredHand(key) },
+                                label = { Text(label) },
+                            )
+                        }
+                    }
+                    Text(
+                        "常用记录会固定在屏幕底部，并把最高频入口靠近所选拇指侧。",
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     Text("深色模式", style = LeziTypography.Label)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         listOf("system" to "跟随系统", "light" to "浅色", "dark" to "深色").forEach { (k, label) ->
@@ -283,31 +332,106 @@ fun SettingsRoute(
     }
 
     if (showAdd) {
+        val dateLabel = LocalDate.ofEpochDay(newBirthday)
+            .format(DateTimeFormatter.ofPattern("yyyy年M月d日"))
         AlertDialog(
-            onDismissRequest = { showAdd = false },
+            onDismissRequest = {
+                showAdd = false
+                addError = null
+            },
             title = { Text("添加宝宝") },
             text = {
-                OutlinedTextField(
-                    value = newName,
-                    onValueChange = { newName = it },
-                    label = { Text("昵称") },
-                    singleLine = true,
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
+                    OutlinedTextField(
+                        value = newName,
+                        onValueChange = {
+                            newName = it
+                            addError = null
+                        },
+                        label = { Text("昵称（不可重复）") },
+                        singleLine = true,
+                        isError = addError != null,
+                        supportingText = addError?.let { { Text(it) } },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text("出生日期", style = LeziTypography.Label)
+                    OutlinedButton(
+                        onClick = { showAddDate = true },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text(dateLabel) }
+                    OutlinedTextField(
+                        value = newWeight,
+                        onValueChange = { newWeight = it.filter { ch -> ch.isDigit() || ch == '.' } },
+                        label = { Text("出生体重（kg，可选）") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
             },
             confirmButton = {
                 TextButton(
                     onClick = {
-                        vm.addBaby(newName.trim().ifBlank { "年年" }) {
-                            newName = "年年"
-                            showAdd = false
+                        if (newName.isBlank()) {
+                            addError = "请填写昵称"
+                            return@TextButton
+                        }
+                        val grams = newWeight.trim().takeIf { it.isNotEmpty() }?.toDoubleOrNull()
+                            ?.let { (it * 1000).toInt() }
+                        if (newWeight.isNotBlank() && grams == null) {
+                            addError = "出生体重格式不正确"
+                            return@TextButton
+                        }
+                        vm.addBaby(newName.trim(), newBirthday, grams) { err ->
+                            if (err == null) {
+                                newName = ""
+                                newWeight = ""
+                                newBirthday = LocalDate.now().toEpochDay()
+                                addError = null
+                                showAdd = false
+                            } else {
+                                addError = err
+                            }
                         }
                     },
                 ) { Text("添加") }
             },
             dismissButton = {
-                TextButton(onClick = { showAdd = false }) { Text("取消") }
+                TextButton(onClick = {
+                    showAdd = false
+                    addError = null
+                }) { Text("取消") }
             },
         )
+    }
+
+    if (showAddDate) {
+        val initialUtc = LocalDate.ofEpochDay(newBirthday)
+            .atStartOfDay(ZoneOffset.UTC)
+            .toInstant()
+            .toEpochMilli()
+        val dateState = rememberDatePickerState(initialSelectedDateMillis = initialUtc)
+        DatePickerDialog(
+            onDismissRequest = { showAddDate = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        dateState.selectedDateMillis?.let { ms ->
+                            newBirthday = Instant.ofEpochMilli(ms)
+                                .atZone(ZoneOffset.UTC)
+                                .toLocalDate()
+                                .toEpochDay()
+                        }
+                        showAddDate = false
+                    },
+                ) { Text("确定") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddDate = false }) { Text("取消") }
+            },
+        ) {
+            DatePicker(state = dateState)
+        }
     }
 
     if (clearStep == 1) {

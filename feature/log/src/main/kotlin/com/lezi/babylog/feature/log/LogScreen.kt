@@ -1,8 +1,9 @@
 package com.lezi.babylog.feature.log
 
 import android.content.Context
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,27 +13,23 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ChevronLeft
-import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
@@ -47,7 +44,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -71,7 +67,6 @@ import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTone
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.PageScaffoldBackground
-import com.lezi.babylog.designsystem.QuickRecordButton
 import com.lezi.babylog.designsystem.RecordRow
 import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.designsystem.StateContainer
@@ -396,7 +391,7 @@ fun LogRoute(
 
                 LazyColumn(
                     modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(bottom = 200.dp),
+                    contentPadding = PaddingValues(bottom = 96.dp),
                     verticalArrangement = Arrangement.spacedBy(if (journal) 4.dp else LeziSpacing.SectionGap),
                 ) {
                     item {
@@ -554,118 +549,23 @@ fun LogRoute(
                         }
                     }
 
-                    item {
-                        Column(Modifier.padding(horizontal = LeziSpacing.Page)) {
-                            SectionHeading(
-                                title = if (journal) "快速记录" else "快捷入口",
-                                meta = if (journal) "一点即记" else "长按也不迷路",
-                            )
-                            Spacer(Modifier.height(LeziSpacing.Xs))
-                            Row(
-                                Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(if (journal) 5.dp else 10.dp),
-                            ) {
-                                if (state.settings.timerEnabled) {
-                                    QuickRecordButton(
-                                        title = "母乳",
-                                        subtitle = if (state.saving) "保存中…" else "左右计时",
-                                        tone = LeziTone.Blue,
-                                        onClick = onOpenTimer,
-                                        modifier = Modifier.weight(1f),
-                                        icon = {
-                                            com.lezi.babylog.designsystem.LeziGlyphIcon(
-                                                com.lezi.babylog.designsystem.LeziGlyph.Bottle,
-                                            )
-                                        },
-                                    )
-                                }
-                                QuickRecordButton(
-                                    title = "尿布",
-                                    subtitle = "干湿与便便",
-                                    tone = LeziTone.Yellow,
-                                    onClick = { onOpenNewEdit(RecordType.BOTH_DIAPER.key) },
-                                    modifier = Modifier.weight(1f),
-                                    icon = {
-                                        com.lezi.babylog.designsystem.LeziGlyphIcon(
-                                            com.lezi.babylog.designsystem.LeziGlyph.Drop,
-                                        )
-                                    },
-                                )
-                            }
-                            Spacer(Modifier.height(if (journal) 5.dp else 10.dp))
-                            Row(
-                                Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(if (journal) 5.dp else 10.dp),
-                            ) {
-                                QuickRecordButton(
-                                    title = if (state.openSleep) "醒来" else "睡眠",
-                                    subtitle = if (state.openSleep) "结束本段" else "开始与结束",
-                                    tone = LeziTone.Cream,
-                                    onClick = { vm.quickAdd(RecordType.SLEEP) },
-                                    modifier = Modifier.weight(1f),
-                                    icon = {
-                                        com.lezi.babylog.designsystem.LeziGlyphIcon(
-                                            com.lezi.babylog.designsystem.LeziGlyph.Moon,
-                                        )
-                                    },
-                                )
-                                QuickRecordButton(
-                                    title = "奶瓶",
-                                    subtitle = "奶量与类型",
-                                    tone = LeziTone.Neutral,
-                                    onClick = { showFormula = true },
-                                    modifier = Modifier.weight(1f),
-                                    icon = {
-                                        com.lezi.babylog.designsystem.LeziGlyphIcon(
-                                            com.lezi.babylog.designsystem.LeziGlyph.Bottle,
-                                        )
-                                    },
-                                )
-                            }
-                        }
-                    }
                 }
             }
 
-            Row(
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(end = LeziSpacing.Lg, bottom = 28.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                if (journal) {
-                    FloatingActionButton(
-                        onClick = onOpenSearch,
-                        containerColor = MaterialTheme.colorScheme.surface,
-                        contentColor = MaterialTheme.colorScheme.primary,
-                        shape = CircleShape,
-                    ) {
-                        Icon(Icons.Filled.Search, contentDescription = "搜索记录")
-                    }
-                }
-                FloatingActionButton(
-                    onClick = { showMore = true },
-                    containerColor = ext.fab,
-                    contentColor = Color.White,
-                    shape = androidx.compose.foundation.shape.RoundedCornerShape(999.dp),
-                    modifier = Modifier
-                        .height(54.dp)
-                        .widthIn(min = 94.dp),
-                ) {
-                    Row(
-                        Modifier.padding(horizontal = 16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        Icon(Icons.Filled.Add, contentDescription = null)
-                        if (!journal) {
-                            Text("记录", style = LeziTypography.Label, color = Color.White)
-                        }
-                    }
-                }
-            }
+            OneHandQuickDock(
+                preferredHand = state.settings.preferredHand,
+                timerEnabled = state.settings.timerEnabled,
+                sleepRunning = state.openSleep,
+                saving = state.saving,
+                onNursing = onOpenTimer,
+                onPee = { vm.quickAdd(RecordType.PEE) },
+                onSleep = { vm.quickAdd(RecordType.SLEEP) },
+                onFormula = { showFormula = true },
+                onMore = { showMore = true },
+                modifier = Modifier.align(Alignment.BottomCenter),
+            )
 
-            SnackbarHost(snackbar, modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp))
+            SnackbarHost(snackbar, modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 92.dp))
         }
     }
 
@@ -731,6 +631,151 @@ fun LogRoute(
     }
 }
 
+internal enum class OneHandQuickAction {
+    Pee,
+    Sleep,
+    Nursing,
+    Formula,
+    More,
+}
+
+/**
+ * The first item is placed nearest the selected thumb edge. The high-frequency
+ * one-tap pee action therefore remains the easiest target for either hand.
+ */
+internal fun oneHandQuickActionOrder(
+    preferredHand: String,
+    timerEnabled: Boolean,
+): List<OneHandQuickAction> {
+    val thumbFirst = buildList {
+        add(OneHandQuickAction.Pee)
+        add(OneHandQuickAction.Sleep)
+        if (timerEnabled) add(OneHandQuickAction.Nursing)
+        add(OneHandQuickAction.Formula)
+        add(OneHandQuickAction.More)
+    }
+    return if (preferredHand == "left") thumbFirst else thumbFirst.reversed()
+}
+
+@Composable
+private fun OneHandQuickDock(
+    preferredHand: String,
+    timerEnabled: Boolean,
+    sleepRunning: Boolean,
+    saving: Boolean,
+    onNursing: () -> Unit,
+    onPee: () -> Unit,
+    onSleep: () -> Unit,
+    onFormula: () -> Unit,
+    onMore: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val journal = LeziThemeExt.isJournal
+    val ext = LeziThemeExt.colors
+    val actions = oneHandQuickActionOrder(preferredHand, timerEnabled)
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = if (journal) 0.dp else 8.dp, vertical = 4.dp)
+            .testTag("one_hand_quick_dock_$preferredHand"),
+        shape = if (journal) LeziShapes.JournalCard else LeziShapes.Lg,
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.7f)),
+        shadowElevation = if (journal) 2.dp else 8.dp,
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 5.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            actions.forEach { action ->
+                val label = when (action) {
+                    OneHandQuickAction.Pee -> "尿尿"
+                    OneHandQuickAction.Sleep -> if (sleepRunning) "醒来" else "睡眠"
+                    OneHandQuickAction.Nursing -> "母乳"
+                    OneHandQuickAction.Formula -> "奶瓶"
+                    OneHandQuickAction.More -> "更多"
+                }
+                val tint = when (action) {
+                    OneHandQuickAction.Pee -> ext.laneCare
+                    OneHandQuickAction.Sleep -> ext.laneSleep
+                    OneHandQuickAction.Nursing, OneHandQuickAction.Formula -> ext.laneFeed
+                    OneHandQuickAction.More -> MaterialTheme.colorScheme.primary
+                }
+                val enabled = !saving ||
+                    action == OneHandQuickAction.Nursing ||
+                    action == OneHandQuickAction.More
+                Surface(
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 64.dp)
+                        .testTag("one_hand_action_${action.name.lowercase()}")
+                        .clickable(enabled = enabled) {
+                            when (action) {
+                                OneHandQuickAction.Pee -> onPee()
+                                OneHandQuickAction.Sleep -> onSleep()
+                                OneHandQuickAction.Nursing -> onNursing()
+                                OneHandQuickAction.Formula -> onFormula()
+                                OneHandQuickAction.More -> onMore()
+                            }
+                        },
+                    shape = if (journal) LeziShapes.JournalButton else LeziShapes.Sm,
+                    color = if (action == OneHandQuickAction.Pee) {
+                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f)
+                    } else {
+                        Color.Transparent
+                    },
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                ) {
+                    Column(
+                        Modifier.fillMaxWidth().padding(vertical = 5.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                    ) {
+                        Box(
+                            Modifier
+                                .size(30.dp)
+                                .clip(CircleShape)
+                                .background(tint.copy(alpha = 0.14f)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            when (action) {
+                                OneHandQuickAction.More -> {
+                                    Icon(Icons.Filled.Add, contentDescription = null, tint = tint)
+                                }
+                                else -> {
+                                    val glyph = when (action) {
+                                        OneHandQuickAction.Pee ->
+                                            com.lezi.babylog.designsystem.LeziGlyph.Drop
+                                        OneHandQuickAction.Sleep ->
+                                            com.lezi.babylog.designsystem.LeziGlyph.Moon
+                                        OneHandQuickAction.Nursing, OneHandQuickAction.Formula ->
+                                            com.lezi.babylog.designsystem.LeziGlyph.Bottle
+                                        OneHandQuickAction.More ->
+                                            com.lezi.babylog.designsystem.LeziGlyph.Plus
+                                    }
+                                    com.lezi.babylog.designsystem.LeziGlyphIcon(glyph, tint = tint)
+                                }
+                            }
+                        }
+                        Text(
+                            label,
+                            style = LeziTypography.Meta,
+                            color = if (enabled) {
+                                MaterialTheme.colorScheme.onSurface
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+                            },
+                            maxLines = 1,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun MoreSheet(onPick: (RecordType) -> Unit) {
     val groups = listOf(
@@ -776,17 +821,45 @@ private fun MoreSheet(onPick: (RecordType) -> Unit) {
             RecordType.FOOT_SIZE to "足长",
         ),
     )
-    Column(Modifier.padding(LeziSpacing.Md).padding(bottom = LeziSpacing.Xxl)) {
-        Text("添加记录", style = LeziTypography.Title)
-        Spacer(Modifier.height(LeziSpacing.Sm))
+    LazyColumn(
+        modifier = Modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(
+            start = LeziSpacing.Md,
+            top = LeziSpacing.Md,
+            end = LeziSpacing.Md,
+            bottom = LeziSpacing.Xxl,
+        ),
+    ) {
+        item {
+            Text("添加记录", style = LeziTypography.Title)
+            Spacer(Modifier.height(LeziSpacing.Sm))
+        }
         groups.forEach { (title, items) ->
-            Text(title, style = LeziTypography.Label, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(LeziSpacing.Xs))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(bottom = 12.dp)) {
-                items.forEach { (type, label) ->
-                    LeziCard(onClick = { onPick(type) }, contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp)) {
-                        Text(label, style = LeziTypography.BodyStrong)
+            item {
+                Column {
+                    Text(title, style = LeziTypography.Label, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(LeziSpacing.Xs))
+                    items.chunked(4).forEach { rowItems ->
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            rowItems.forEach { (type, label) ->
+                                LeziCard(
+                                    modifier = Modifier.weight(1f).heightIn(min = 56.dp),
+                                    onClick = { onPick(type) },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                                ) {
+                                    Text(label, style = LeziTypography.BodyStrong, maxLines = 1)
+                                }
+                            }
+                            repeat(4 - rowItems.size) {
+                                Spacer(Modifier.weight(1f))
+                            }
+                        }
+                        Spacer(Modifier.height(8.dp))
                     }
+                    Spacer(Modifier.height(4.dp))
                 }
             }
         }

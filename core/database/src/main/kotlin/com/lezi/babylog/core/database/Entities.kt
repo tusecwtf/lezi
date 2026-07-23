@@ -44,6 +44,8 @@ data class BabyEntity(
     val nickname: String,
     val sex: String? = null,
     val birthdayEpochDay: Long,
+    /** Birth weight in grams; null when not set. */
+    val birthWeightGrams: Int? = null,
     val dueDateEpochDay: Long? = null,
     val themeColorArgb: Int,
     val sortOrder: Int = 0,

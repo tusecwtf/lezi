@@ -21,6 +21,17 @@ require_text 'visualStyle = ui.visualStyle' app/src/main/kotlin/com/lezi/babylog
 require_text '"warm" to "温暖卡片"' feature/settings/src/main/kotlin/com/lezi/babylog/feature/settings/SettingsScreen.kt
 require_text '"journal" to "紧凑记录簿"' feature/settings/src/main/kotlin/com/lezi/babylog/feature/settings/SettingsScreen.kt
 
+# Both templates share one persisted, handed one-thumb interaction contract.
+require_text 'val preferredHand: String = "right"' core/model/src/main/kotlin/com/lezi/babylog/core/model/Models.kt
+require_text 'setPreferredHand(hand: String)' core/datastore/src/main/kotlin/com/lezi/babylog/core/datastore/SettingsStore.kt
+require_text 'stringPreferencesKey("preferred_hand")' core/datastore/src/main/kotlin/com/lezi/babylog/core/datastore/SettingsDataSource.kt
+require_text '"left" to "左手"' feature/settings/src/main/kotlin/com/lezi/babylog/feature/settings/SettingsScreen.kt
+require_text '"right" to "右手"' feature/settings/src/main/kotlin/com/lezi/babylog/feature/settings/SettingsScreen.kt
+require_text 'OneHandQuickDock(' feature/log/src/main/kotlin/com/lezi/babylog/feature/log/LogScreen.kt
+require_text 'preferredHand = state.settings.preferredHand' feature/log/src/main/kotlin/com/lezi/babylog/feature/log/LogScreen.kt
+require_text 'oneHandQuickActionOrder(' feature/log/src/main/kotlin/com/lezi/babylog/feature/log/LogScreen.kt
+require_text 'bottomBar = {' feature/log/src/main/kotlin/com/lezi/babylog/feature/log/RecordEditScreen.kt
+
 # The second template has distinct record, summary, and growth chart grammar.
 require_text 'JournalSummaryStrip' feature/log/src/main/kotlin/com/lezi/babylog/feature/log/LogScreen.kt
 require_text 'JournalTimelineRail' designsystem/src/main/kotlin/com/lezi/babylog/designsystem/Components.kt

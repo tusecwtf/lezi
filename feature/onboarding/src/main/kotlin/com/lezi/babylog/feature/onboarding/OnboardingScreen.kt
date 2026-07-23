@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -41,6 +42,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
@@ -48,6 +50,7 @@ import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.ui.UiTags
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
+import com.lezi.babylog.domain.DuplicateBabyNicknameException
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate
@@ -75,8 +78,9 @@ class OnboardingViewModel @Inject constructor(
         nickname: String,
         sex: String?,
         birthdayEpochDay: Long,
+        birthWeightGrams: Int?,
         themeColorArgb: Int,
-        onDone: () -> Unit,
+        onDone: (String?) -> Unit,
     ) {
         viewModelScope.launch {
             try {
@@ -85,12 +89,17 @@ class OnboardingViewModel @Inject constructor(
                         nickname = nickname.trim(),
                         sex = sex,
                         birthdayEpochDay = birthdayEpochDay,
+                        birthWeightGrams = birthWeightGrams,
                         themeColorArgb = themeColorArgb,
                     ),
                 )
-                onDone()
+                onDone(null)
             } catch (t: Throwable) {
                 Log.e("Onboarding", "createBaby failed", t)
+                onDone(
+                    if (t is DuplicateBabyNicknameException) t.message
+                    else t.message ?: "创建失败",
+                )
             }
         }
     }
@@ -105,10 +114,12 @@ fun OnboardingRoute(
     var name by remember { mutableStateOf("年年") }
     var sex by remember { mutableStateOf<String?>(null) }
     var birthday by remember { mutableLongStateOf(LocalDate.now().toEpochDay()) }
+    var weightText by remember { mutableStateOf("") }
     var themeIdx by remember { mutableIntStateOf(0) }
     var showDate by remember { mutableStateOf(false) }
     var showJoinStub by remember { mutableStateOf(false) }
     var nameError by remember { mutableStateOf(false) }
+    var formError by remember { mutableStateOf<String?>(null) }
     val dateLabel = remember(birthday) {
         LocalDate.ofEpochDay(birthday).format(DateTimeFormatter.ofPattern("yyyy年M月d日"))
     }
@@ -133,14 +144,15 @@ fun OnboardingRoute(
             onValueChange = {
                 name = it
                 nameError = false
+                formError = null
             },
             modifier = Modifier.fillMaxWidth(),
-            label = { Text("昵称") },
-            isError = nameError,
-            supportingText = if (nameError) {
-                { Text("请填写昵称") }
-            } else {
-                null
+            label = { Text("昵称（不可重复）") },
+            isError = nameError || formError != null,
+            supportingText = when {
+                nameError -> ({ Text("请填写昵称") })
+                formError != null -> ({ Text(formError!!) })
+                else -> null
             },
             singleLine = true,
         )
@@ -167,6 +179,16 @@ fun OnboardingRoute(
         ) {
             Text(dateLabel)
         }
+        Spacer(Modifier.height(16.dp))
+        OutlinedTextField(
+            value = weightText,
+            onValueChange = { weightText = it.filter { ch -> ch.isDigit() || ch == '.' } },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("出生体重（kg，可选）") },
+            placeholder = { Text("例如 3.20") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+        )
         Spacer(Modifier.height(16.dp))
         Text("主题色", style = MaterialTheme.typography.labelLarge)
         Spacer(Modifier.height(8.dp))
@@ -199,12 +221,22 @@ fun OnboardingRoute(
                     nameError = true
                     return@Button
                 }
+                val grams = weightText.trim().takeIf { it.isNotEmpty() }?.toDoubleOrNull()
+                    ?.let { (it * 1000).toInt() }
+                if (weightText.isNotBlank() && grams == null) {
+                    formError = "出生体重格式不正确"
+                    return@Button
+                }
                 vm.createBaby(
                     nickname = name,
                     sex = sex,
                     birthdayEpochDay = birthday,
+                    birthWeightGrams = grams,
                     themeColorArgb = ThemePalette[themeIdx],
-                    onDone = onFinished,
+                    onDone = { err ->
+                        if (err == null) onFinished()
+                        else formError = err
+                    },
                 )
             },
             modifier = Modifier
