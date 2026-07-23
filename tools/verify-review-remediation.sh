@@ -34,6 +34,10 @@ require_text 'DatePickerDialog(' \
   designsystem/src/main/kotlin/com/lezi/babylog/designsystem/ClockDial.kt
 require_text 'formatClockDate(selectedDate)' \
   designsystem/src/main/kotlin/com/lezi/babylog/designsystem/ClockDial.kt
+require_text 'sessionGate.deliver(session)' \
+  feature/log/src/main/kotlin/com/lezi/babylog/feature/log/RecordComposer.kt
+require_text 'actionsEnabled = !saving && !deleting' \
+  feature/log/src/main/kotlin/com/lezi/babylog/feature/log/QuickRecordSheet.kt
 
 # Source-review safety and architecture gates.
 require_text 'android:allowBackup="false"' app/src/main/AndroidManifest.xml
@@ -50,6 +54,8 @@ fi
 
 # UI/ops review gates.
 require_text 'MaterialTheme.colorScheme.surface' app/src/main/kotlin/com/lezi/babylog/AppHeader.kt
+require_text 'SystemBarStyle.dark(navigationScrim)' \
+  app/src/main/kotlin/com/lezi/babylog/MainActivity.kt
 require_text 'showContextHeader' app/src/main/kotlin/com/lezi/babylog/MainActivity.kt
 require_text 'EnterTransition.None' app/src/main/kotlin/com/lezi/babylog/MainActivity.kt
 require_text 'LeziStoolColorMark' \
@@ -62,6 +68,12 @@ require_text '高于同月龄参考范围' \
   feature/growth/src/main/kotlin/com/lezi/babylog/feature/growth/GrowthScreen.kt
 require_text '不足1分' core/ui/src/main/kotlin/com/lezi/babylog/core/ui/RecordPresentation.kt
 require_text '丢弃本次计时？' \
+  feature/timer/src/main/kotlin/com/lezi/babylog/feature/timer/TimerScreen.kt
+require_text 'Settings.Global.BOOT_COUNT' \
+  feature/timer/src/main/kotlin/com/lezi/babylog/feature/timer/TimerScreen.kt
+require_text 'if (savedBootCount != nowBootCount)' \
+  feature/timer/src/main/kotlin/com/lezi/babylog/feature/timer/TimerScreen.kt
+require_text 'if (savedBootCount == null && nowBootCount != null)' \
   feature/timer/src/main/kotlin/com/lezi/babylog/feature/timer/TimerScreen.kt
 require_text '为保护隐私，请打开应用查看记录' \
   feature/widget/src/main/kotlin/com/lezi/babylog/feature/widget/CareWidget.kt

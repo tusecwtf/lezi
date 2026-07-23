@@ -29,6 +29,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -58,6 +59,7 @@ internal fun PurposeFields(
     draft: QuickRecordDraft,
     amountStepMl: Int,
     canStartNursingTimer: Boolean,
+    actionsEnabled: Boolean,
     onDraftChange: (QuickRecordDraft) -> Unit,
     onStartNursingTimer: () -> Unit,
 ) {
@@ -65,6 +67,7 @@ internal fun PurposeFields(
         QuickRecordMode.Nursing -> NursingFields(
             draft,
             canStartNursingTimer,
+            actionsEnabled,
             onDraftChange,
             onStartNursingTimer,
         )
@@ -100,6 +103,7 @@ internal fun PurposeFields(
 private fun NursingFields(
     draft: QuickRecordDraft,
     canStartNursingTimer: Boolean,
+    actionsEnabled: Boolean,
     onDraftChange: (QuickRecordDraft) -> Unit,
     onStartNursingTimer: () -> Unit,
 ) {
@@ -128,7 +132,10 @@ private fun NursingFields(
     if (canStartNursingTimer) {
         Surface(
             onClick = onStartNursingTimer,
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .alpha(if (actionsEnabled) 1f else 0.45f),
+            enabled = actionsEnabled,
             shape = LeziShapes.Sm,
             color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
         ) {

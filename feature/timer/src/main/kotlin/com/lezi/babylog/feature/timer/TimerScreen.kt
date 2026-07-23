@@ -11,6 +11,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
+import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -93,7 +94,11 @@ data class TimerState(
     fun rightMs(nowElapsed: Long = SystemClock.elapsedRealtime()): Long =
         rightAccumMs + if (rightRunning && rightStartedElapsed != null) nowElapsed - rightStartedElapsed else 0L
 
-    fun toJson(): String = JSONObject().apply {
+    fun toJson(
+        savedElapsed: Long = SystemClock.elapsedRealtime(),
+        savedWall: Long = System.currentTimeMillis(),
+        savedBootCount: Long? = null,
+    ): String = JSONObject().apply {
         put("leftRunning", leftRunning)
         put("rightRunning", rightRunning)
         put("leftAccumMs", leftAccumMs)
@@ -103,8 +108,9 @@ data class TimerState(
         put("sessionStartedAt", sessionStartedAt ?: JSONObject.NULL)
         put("lastSide", lastSide ?: JSONObject.NULL)
         put("order", order)
-        put("savedElapsed", SystemClock.elapsedRealtime())
-        put("savedWall", System.currentTimeMillis())
+        put("savedElapsed", savedElapsed)
+        put("savedWall", savedWall)
+        savedBootCount?.let { put("savedBootCount", it) }
     }.toString()
 
     companion object {
@@ -112,6 +118,7 @@ data class TimerState(
             raw: String?,
             nowElapsed: Long = SystemClock.elapsedRealtime(),
             nowWall: Long = System.currentTimeMillis(),
+            nowBootCount: Long? = null,
         ): TimerState {
             if (raw.isNullOrBlank()) return TimerState()
             return runCatching {
@@ -120,11 +127,19 @@ data class TimerState(
                     .takeIf { o.has("savedElapsed") && !o.isNull("savedElapsed") }
                 val savedWall = o.optLong("savedWall")
                     .takeIf { o.has("savedWall") && !o.isNull("savedWall") }
+                val savedBootCount = o.optLong("savedBootCount")
+                    .takeIf {
+                        o.has("savedBootCount") &&
+                            !o.isNull("savedBootCount") &&
+                            it >= 0L
+                    }
                 val drift = restoredRunningDelta(
                     savedElapsed = savedElapsed,
                     savedWall = savedWall,
                     nowElapsed = nowElapsed,
                     nowWall = nowWall,
+                    savedBootCount = savedBootCount,
+                    nowBootCount = nowBootCount,
                 )
                 var leftAccum = o.optLong("leftAccumMs")
                 var rightAccum = o.optLong("rightAccumMs")
@@ -156,19 +171,50 @@ data class TimerState(
  * Calculates time accrued after the last persisted timer snapshot.
  *
  * elapsedRealtime is immune to wall-clock edits while the device remains
- * booted. It rewinds on reboot, so a negative elapsed delta falls back to the
- * persisted wall-clock pair instead of silently dropping the running time.
+ * booted. Android's boot count identifies a reboot even when the new uptime is
+ * already greater than the persisted uptime. Legacy snapshots without a boot
+ * count retain the previous conservative uptime-rewind fallback.
  */
 internal fun restoredRunningDelta(
     savedElapsed: Long?,
     savedWall: Long?,
     nowElapsed: Long,
     nowWall: Long,
+    savedBootCount: Long? = null,
+    nowBootCount: Long? = null,
 ): Long {
+    if (savedBootCount == null && nowBootCount != null) {
+        // A pre-boot-count snapshot may already span a reboot even when the
+        // new uptime is larger. Its wall pair is the only cross-boot clock
+        // available, so migrate it conservatively on this first restore.
+        return savedWall?.let { (nowWall - it).coerceAtLeast(0L) } ?: 0L
+    }
+    if (savedBootCount != null && nowBootCount != null) {
+        if (savedBootCount != nowBootCount) {
+            return savedWall?.let { (nowWall - it).coerceAtLeast(0L) } ?: 0L
+        }
+        return savedElapsed?.let { (nowElapsed - it).coerceAtLeast(0L) } ?: 0L
+    }
+
     val elapsedDelta = savedElapsed?.let { nowElapsed - it }
     if (elapsedDelta != null && elapsedDelta >= 0L) return elapsedDelta
     return savedWall?.let { (nowWall - it).coerceAtLeast(0L) } ?: 0L
 }
+
+internal fun safeBootCount(readBootCount: () -> Int): Long? =
+    try {
+        readBootCount().toLong().takeIf { it >= 0L }
+    } catch (_: Exception) {
+        null
+    }
+
+private fun currentBootCount(context: Context): Long? =
+    safeBootCount {
+        Settings.Global.getInt(
+            context.contentResolver,
+            Settings.Global.BOOT_COUNT,
+        )
+    }
 
 @HiltViewModel
 class TimerViewModel @Inject constructor(
@@ -187,14 +233,28 @@ class TimerViewModel @Inject constructor(
     init {
         viewModelScope.launch {
             val raw = settings.nursingTimerJson.first()
-            _state.value = TimerState.fromJson(raw)
+            _state.value = TimerState.fromJson(
+                raw = raw,
+                nowBootCount = currentBootCount(app),
+            )
         }
     }
 
     private fun persist(s: TimerState) {
         _state.value = s
         viewModelScope.launch {
-            settings.setNursingTimerJson(if (s.leftAccumMs == 0L && s.rightAccumMs == 0L && !s.leftRunning && !s.rightRunning && s.sessionStartedAt == null) null else s.toJson())
+            settings.setNursingTimerJson(
+                if (s.leftAccumMs == 0L &&
+                    s.rightAccumMs == 0L &&
+                    !s.leftRunning &&
+                    !s.rightRunning &&
+                    s.sessionStartedAt == null
+                ) {
+                    null
+                } else {
+                    s.toJson(savedBootCount = currentBootCount(app))
+                },
+            )
         }
         updateService(s)
     }

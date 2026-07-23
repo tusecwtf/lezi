@@ -2,6 +2,7 @@ package com.lezi.babylog
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.EnterTransition
@@ -37,6 +38,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -44,6 +46,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
@@ -116,6 +119,22 @@ class MainActivity : ComponentActivity() {
                 babyThemeArgb = ui.baby?.themeColorArgb,
                 visualStyle = ui.visualStyle,
             ) {
+                val transparent = Color.Transparent.toArgb()
+                val navigationScrim = MaterialTheme.colorScheme.surface.toArgb()
+                SideEffect {
+                    this@MainActivity.enableEdgeToEdge(
+                        statusBarStyle = if (dark) {
+                            SystemBarStyle.dark(transparent)
+                        } else {
+                            SystemBarStyle.light(transparent, transparent)
+                        },
+                        navigationBarStyle = if (dark) {
+                            SystemBarStyle.dark(navigationScrim)
+                        } else {
+                            SystemBarStyle.light(navigationScrim, navigationScrim)
+                        },
+                    )
+                }
                 LeziRoot(vm = vm, dark = dark)
             }
         }

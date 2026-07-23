@@ -81,10 +81,14 @@ class RecordComposerViewModel @Inject constructor(
 ) : ViewModel() {
     private val _state = MutableStateFlow(RecordComposerUiState())
     internal val state = _state.asStateFlow()
+    private val sessionGate = RecordComposerSessionGate()
     private var loadJob: Job? = null
+    private var actionJob: Job? = null
 
     internal fun open(request: RecordComposerRequest) {
+        val session = sessionGate.open()
         loadJob?.cancel()
+        actionJob?.cancel()
         _state.value = RecordComposerUiState(activeRequest = request, loading = true)
         loadJob = viewModelScope.launch {
             val settings = try {
@@ -92,10 +96,13 @@ class RecordComposerViewModel @Inject constructor(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
-                _state.value = RecordComposerUiState(
-                    activeRequest = request,
-                    error = error.message ?: "记录设置加载失败",
-                )
+                currentCoroutineContext().ensureActive()
+                sessionGate.deliver(session) {
+                    _state.value = RecordComposerUiState(
+                        activeRequest = request,
+                        error = error.message ?: "记录设置加载失败",
+                    )
+                }
                 return@launch
             }
             val loaded = try {
@@ -134,28 +141,41 @@ class RecordComposerViewModel @Inject constructor(
                 throw cancelled
             } catch (error: Throwable) {
                 currentCoroutineContext().ensureActive()
-                _state.value = RecordComposerUiState(
-                    activeRequest = request,
-                    amountStepMl = settings.amountStepMl,
-                    timeStepMin = settings.timeStepMin,
-                    error = error.message ?: "记录加载失败",
-                )
+                sessionGate.deliver(session) {
+                    _state.value = RecordComposerUiState(
+                        activeRequest = request,
+                        amountStepMl = settings.amountStepMl,
+                        timeStepMin = settings.timeStepMin,
+                        error = error.message ?: "记录加载失败",
+                    )
+                }
                 return@launch
             }
             currentCoroutineContext().ensureActive()
             val (babyId, draft) = loaded
-            _state.value = RecordComposerUiState(
-                activeRequest = request,
-                draft = draft,
-                babyId = babyId,
-                amountStepMl = settings.amountStepMl,
-                timeStepMin = settings.timeStepMin,
-                canStartNursingTimer = request is RecordComposerRequest.New &&
-                    !request.historical &&
-                    request.type == RecordType.NURSING &&
-                    settings.timerEnabled,
-            )
+            sessionGate.deliver(session) {
+                _state.value = RecordComposerUiState(
+                    activeRequest = request,
+                    draft = draft,
+                    babyId = babyId,
+                    amountStepMl = settings.amountStepMl,
+                    timeStepMin = settings.timeStepMin,
+                    canStartNursingTimer = request is RecordComposerRequest.New &&
+                        !request.historical &&
+                        request.type == RecordType.NURSING &&
+                        settings.timerEnabled,
+                )
+            }
         }
+    }
+
+    internal fun close() {
+        sessionGate.close()
+        loadJob?.cancel()
+        actionJob?.cancel()
+        loadJob = null
+        actionJob = null
+        _state.value = RecordComposerUiState()
     }
 
     internal fun updateDraft(draft: QuickRecordDraft) {
@@ -172,9 +192,10 @@ class RecordComposerViewModel @Inject constructor(
             _state.update { it.copy(error = validation) }
             return
         }
+        val session = sessionGate.current() ?: return
         _state.update { it.copy(saving = true, error = null) }
-        viewModelScope.launch {
-            runCatching {
+        actionJob = viewModelScope.launch {
+            val message = try {
                 val command = draft.toSaveCommand()
                 val statefulSleep = command.type == RecordType.SLEEP &&
                     draft.sleepAction in setOf(
@@ -213,7 +234,13 @@ class RecordComposerViewModel @Inject constructor(
                         .atZone(ZoneId.systemDefault())
                         .toLocalDate() == LocalDate.now()
                 ) {
-                    runCatching { feedReminder.scheduleAfterFeed() }
+                    try {
+                        feedReminder.scheduleAfterFeed()
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Throwable) {
+                        // The record is already durable; reminder failure is non-fatal.
+                    }
                 }
                 when {
                     draft.sleepAction == SleepDraftAction.SleepDown -> "已开始睡眠"
@@ -221,13 +248,23 @@ class RecordComposerViewModel @Inject constructor(
                     draft.isEditing -> "已保存修改"
                     else -> "已记录${command.type.presentation.label}"
                 }
-            }.onSuccess(onSaved).onFailure { error ->
-                _state.update {
-                    it.copy(
-                        saving = false,
-                        error = error.message ?: "保存失败，请重试",
-                    )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                currentCoroutineContext().ensureActive()
+                sessionGate.deliver(session) {
+                    _state.update {
+                        it.copy(
+                            saving = false,
+                            error = error.message ?: "保存失败，请重试",
+                        )
+                    }
                 }
+                return@launch
+            }
+            currentCoroutineContext().ensureActive()
+            sessionGate.deliver(session) {
+                onSaved(message)
             }
         }
     }
@@ -236,11 +273,16 @@ class RecordComposerViewModel @Inject constructor(
         val snapshot = _state.value
         val recordId = snapshot.draft?.existingRecordId ?: return
         if (snapshot.saving || snapshot.deleting) return
+        val session = sessionGate.current() ?: return
         _state.update { it.copy(deleting = true, error = null) }
-        viewModelScope.launch {
-            runCatching { careLog.deleteRecord(recordId) }
-                .onSuccess { onDeleted("已删除记录") }
-                .onFailure { error ->
+        actionJob = viewModelScope.launch {
+            try {
+                careLog.deleteRecord(recordId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                currentCoroutineContext().ensureActive()
+                sessionGate.deliver(session) {
                     _state.update {
                         it.copy(
                             deleting = false,
@@ -248,6 +290,12 @@ class RecordComposerViewModel @Inject constructor(
                         )
                     }
                 }
+                return@launch
+            }
+            currentCoroutineContext().ensureActive()
+            sessionGate.deliver(session) {
+                onDeleted("已删除记录")
+            }
         }
     }
 
@@ -274,13 +322,20 @@ fun RecordComposerHost(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
 
     LaunchedEffect(request) {
-        request?.let(vm::open)
+        if (request == null) {
+            vm.close()
+        } else {
+            vm.open(request)
+        }
     }
 
     if (request != null) {
         ModalBottomSheet(
             onDismissRequest = {
-                if (!state.saving && !state.deleting) onDismiss()
+                if (!state.saving && !state.deleting) {
+                    vm.close()
+                    onDismiss()
+                }
             },
             sheetState = sheetState,
         ) {
@@ -297,7 +352,10 @@ fun RecordComposerHost(
                     title = "无法打开记录",
                     message = state.error ?: "记录加载失败",
                     actionLabel = "关闭",
-                    onAction = onDismiss,
+                    onAction = {
+                        vm.close()
+                        onDismiss()
+                    },
                 )
                 else -> QuickRecordSheet(
                     draft = draft,
@@ -309,7 +367,10 @@ fun RecordComposerHost(
                     canStartNursingTimer =
                         state.canStartNursingTimer,
                     onDraftChange = vm::updateDraft,
-                    onDismiss = onDismiss,
+                    onDismiss = {
+                        vm.close()
+                        onDismiss()
+                    },
                     onDelete = if (draft.isEditing) {
                         { confirmDelete = true }
                     } else {

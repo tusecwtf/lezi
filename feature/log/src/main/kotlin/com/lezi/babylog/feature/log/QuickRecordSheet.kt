@@ -62,6 +62,7 @@ internal fun QuickRecordSheet(
 ) {
     val zone = ZoneId.systemDefault()
     val typeColor = leziRecordColor(draft.type.presentation.colorRole)
+    val actionsEnabled = !saving && !deleting
     var clockTarget by remember(draft.type, draft.existingRecordId) {
         mutableStateOf<QuickClockTarget?>(null)
     }
@@ -125,6 +126,7 @@ internal fun QuickRecordSheet(
                 draft = draft,
                 amountStepMl = amountStepMl,
                 canStartNursingTimer = canStartNursingTimer,
+                actionsEnabled = actionsEnabled,
                 onDraftChange = ::update,
                 onStartNursingTimer = onStartNursingTimer,
             )
@@ -177,7 +179,9 @@ internal fun QuickRecordSheet(
             LeziSecondaryButton(
                 label = "取消",
                 onClick = onDismiss,
-                modifier = Modifier.weight(1f),
+                enabled = actionsEnabled,
+                modifier = Modifier
+                    .weight(1f),
             )
             LeziPrimaryButton(
                 label = when {
@@ -186,7 +190,7 @@ internal fun QuickRecordSheet(
                     else -> draft.confirmLabel()
                 },
                 onClick = {
-                    if (saving || deleting) return@LeziPrimaryButton
+                    if (!actionsEnabled) return@LeziPrimaryButton
                     val validation = draft.validationError()
                     if (validation == null) {
                         onConfirm(draft)
@@ -195,7 +199,7 @@ internal fun QuickRecordSheet(
                     }
                 },
                 modifier = Modifier.weight(1f),
-                enabled = !saving && !deleting,
+                enabled = actionsEnabled,
             )
         }
         Spacer(Modifier.weight(1f))

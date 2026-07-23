@@ -190,16 +190,30 @@ fun LeziSecondaryButton(
     label: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
 ) {
     val journal = LeziThemeExt.isJournal
     val shape = if (journal) LeziShapes.JournalButton else LeziShapes.Button
     Surface(
         modifier = modifier
             .heightIn(min = LeziSpacing.Touch)
-            .border(1.dp, MaterialTheme.colorScheme.outline, shape)
-            .clickable(onClick = onClick),
+            .border(
+                width = 1.dp,
+                color = MaterialTheme.colorScheme.outline.copy(
+                    alpha = if (enabled) 1f else 0.45f,
+                ),
+                shape = shape,
+            )
+            .clickable(enabled = enabled, onClick = onClick),
         shape = shape,
-        color = MaterialTheme.colorScheme.surface,
+        color = if (enabled) {
+            MaterialTheme.colorScheme.surface
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+        },
+        contentColor = MaterialTheme.colorScheme.onSurface.copy(
+            alpha = if (enabled) 1f else 0.38f,
+        ),
     ) {
         Box(
             Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
