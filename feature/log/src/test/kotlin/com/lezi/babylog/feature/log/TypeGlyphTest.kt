@@ -27,4 +27,15 @@ class TypeGlyphTest {
         assertNotEquals(typeGlyph(RecordType.NURSING), typeGlyph(RecordType.FORMULA))
         assertNotEquals(typeGlyph(RecordType.PEE), typeGlyph(RecordType.POOP))
     }
+
+    @Test
+    fun moreRecordAccessibilityLabelContainsOnlyThePrimaryLabel() {
+        RecordType.entries.forEach { type ->
+            assertEquals(
+                type.name,
+                "添加${type.presentation.label}",
+                moreRecordContentDescription(type),
+            )
+        }
+    }
 }

@@ -38,9 +38,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -792,31 +794,35 @@ private fun MoreSheet(onPick: (RecordType) -> Unit) {
                                 LeziCard(
                                     modifier = Modifier
                                         .weight(1f)
-                                        .heightIn(min = 78.dp)
-                                        .semantics {
-                                            contentDescription = "添加${item.label}，${item.tip}"
-                                        },
+                                        .heightIn(min = 64.dp),
                                     onClick = { onPick(type) },
-                                    contentPadding = PaddingValues(horizontal = 3.dp, vertical = 7.dp),
+                                    contentPadding = PaddingValues(horizontal = 3.dp, vertical = 5.dp),
                                 ) {
                                     Column(
-                                        Modifier.fillMaxWidth(),
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .clearAndSetSemantics {
+                                                contentDescription =
+                                                    moreRecordContentDescription(type)
+                                            },
                                         horizontalAlignment = Alignment.CenterHorizontally,
                                     ) {
                                         Box(
                                             Modifier
-                                                .size(34.dp)
+                                                .size(32.dp)
                                                 .clip(LeziShapes.JournalCard)
                                                 .background(color.copy(alpha = 0.14f)),
                                             contentAlignment = Alignment.Center,
                                         ) {
                                             RecordTypeIcon(type, size = 18.dp, tint = color)
                                         }
-                                        Text(item.label, style = LeziTypography.Label, maxLines = 1)
+                                        Spacer(Modifier.height(3.dp))
                                         Text(
-                                            item.tip,
-                                            style = LeziTypography.Meta,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            item.label,
+                                            style = LeziTypography.Label.copy(
+                                                fontSize = 14.sp,
+                                                lineHeight = 18.sp,
+                                            ),
                                             maxLines = 1,
                                         )
                                     }
@@ -847,5 +853,8 @@ private fun toneOf(type: RecordType): LeziTone = type.presentationTone()
 internal fun typeLabel(type: RecordType): String = type.presentation.label
 
 internal fun typeGlyph(type: RecordType): LeziRecordGlyph = type.presentation.glyph
+
+internal fun moreRecordContentDescription(type: RecordType): String =
+    "添加${type.presentation.label}"
 
 internal fun recordSummaryLine(record: Record): String = record.presentationSummary()

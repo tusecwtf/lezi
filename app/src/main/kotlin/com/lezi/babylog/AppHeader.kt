@@ -1,10 +1,23 @@
 package com.lezi.babylog
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
@@ -96,7 +109,7 @@ internal fun AppHeaderBar(
     ) {
         Row(
             modifier = Modifier
-                .weight(0.9f)
+                .weight(1f)
                 .height(48.dp)
                 .clip(RoundedCornerShape(12.dp))
                 .clickable(enabled = canCycleBaby, onClick = onCycleBaby)
@@ -119,18 +132,49 @@ internal fun AppHeaderBar(
                         style = LeziTypography.BodyStrong,
                     )
                 }
-                if (sleeping) {
-                    SleepMoonCap(modifier = Modifier.align(Alignment.TopEnd))
-                }
+                AnimatedSleepMoonCap(
+                    sleeping = sleeping,
+                    modifier = Modifier.align(Alignment.TopEnd),
+                )
             }
             Spacer(Modifier.size(3.dp))
-            Column {
-                Text(
-                    headerBabyPrimaryLabel(babyName, sleeping),
-                    color = content,
-                    style = LeziTypography.Label,
-                    maxLines = 1,
-                )
+            Column(modifier = Modifier.weight(1f)) {
+                AnimatedContent(
+                    targetState = sleeping,
+                    modifier = Modifier.fillMaxWidth(),
+                    transitionSpec = {
+                        (fadeIn(
+                            animationSpec = tween(
+                                durationMillis = 260,
+                                delayMillis = 60,
+                            ),
+                        ) + slideInVertically(
+                            animationSpec = tween(
+                                durationMillis = 320,
+                                easing = FastOutSlowInEasing,
+                            ),
+                            initialOffsetY = { height -> height / 4 },
+                        )).togetherWith(
+                            fadeOut(animationSpec = tween(durationMillis = 180)) +
+                                slideOutVertically(
+                                    animationSpec = tween(
+                                        durationMillis = 220,
+                                        easing = FastOutSlowInEasing,
+                                    ),
+                                    targetOffsetY = { height -> -height / 4 },
+                                ),
+                        )
+                    },
+                    contentAlignment = Alignment.CenterStart,
+                    label = "sleepingBabyLabel",
+                ) { isSleeping ->
+                    Text(
+                        headerBabyPrimaryLabel(babyName, isSleeping),
+                        color = content,
+                        style = LeziTypography.Label,
+                        maxLines = 1,
+                    )
+                }
                 Text(
                     babyAge.ifBlank { "本地记录" },
                     color = content.copy(alpha = 0.82f),
@@ -199,6 +243,60 @@ internal fun AppHeaderBar(
                 Icon(Icons.Outlined.Search, contentDescription = "搜索", tint = content)
             }
         }
+    }
+}
+
+@Composable
+private fun AnimatedSleepMoonCap(
+    sleeping: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    AnimatedVisibility(
+        visible = sleeping,
+        modifier = modifier,
+        enter = slideInHorizontally(
+            animationSpec = spring(
+                dampingRatio = 0.58f,
+                stiffness = Spring.StiffnessLow,
+            ),
+            // The avatar sits near the screen's left edge. Two cap widths place
+            // the starting point just beyond that edge before the spring settles.
+            initialOffsetX = { width -> -width * 2 },
+        ) + fadeIn(
+            animationSpec = tween(
+                durationMillis = 180,
+                delayMillis = 40,
+            ),
+        ) + scaleIn(
+            initialScale = 0.72f,
+            transformOrigin = TransformOrigin(0f, 0.8f),
+            animationSpec = spring(
+                dampingRatio = 0.62f,
+                stiffness = Spring.StiffnessMediumLow,
+            ),
+        ),
+        exit = slideOutHorizontally(
+            animationSpec = tween(
+                durationMillis = 440,
+                easing = FastOutSlowInEasing,
+            ),
+            targetOffsetX = { width -> -width * 2 },
+        ) + fadeOut(
+            animationSpec = tween(
+                durationMillis = 280,
+                delayMillis = 80,
+            ),
+        ) + scaleOut(
+            targetScale = 0.72f,
+            transformOrigin = TransformOrigin(0f, 0.8f),
+            animationSpec = tween(
+                durationMillis = 420,
+                easing = FastOutSlowInEasing,
+            ),
+        ),
+        label = "sleepCapVisibility",
+    ) {
+        SleepMoonCap()
     }
 }
 
@@ -511,7 +609,7 @@ private fun AppHeaderPreview() {
     LeziTheme(visualStyle = "journal") {
         AppHeaderBar(
             babyName = "年年",
-            babyAge = "生后 5 个月",
+            babyAge = "5个月14天",
             sleeping = true,
             selectedDate = LocalDate.of(2026, 7, 23),
             today = LocalDate.of(2026, 7, 23),

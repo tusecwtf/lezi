@@ -1071,12 +1071,14 @@ fun PageHero(
             verticalAlignment = Alignment.Top,
         ) {
             Column(Modifier.weight(1f, fill = false).padding(end = if (trailing != null) 12.dp else 0.dp)) {
-                Text(
-                    eyebrow,
-                    style = LeziTypography.Eyebrow,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(2.dp))
+                if (eyebrow.isNotBlank()) {
+                    Text(
+                        eyebrow,
+                        style = LeziTypography.Eyebrow,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(2.dp))
+                }
                 Text(
                     title,
                     style = LeziTypography.Display.copy(fontSize = 34.sp, lineHeight = 40.sp),

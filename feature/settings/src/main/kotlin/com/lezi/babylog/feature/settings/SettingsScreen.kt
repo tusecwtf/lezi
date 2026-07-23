@@ -158,9 +158,8 @@ fun SettingsRoute(
             verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
         ) {
             com.lezi.babylog.designsystem.PageHero(
-                eyebrow = "低频功能，随用随开",
+                eyebrow = "",
                 title = "菜单",
-                subtitle = "查找记录、切换外观或预览产品状态。",
             )
 
             Text("查找与管理", style = LeziTypography.Eyebrow, color = MaterialTheme.colorScheme.onSurfaceVariant)

@@ -812,11 +812,27 @@ private fun withAnomaly(payloadJson: String): String {
 fun babyAgeLabel(birthdayEpochDay: Long, today: LocalDate = LocalDate.now()): String {
     val birth = LocalDate.ofEpochDay(birthdayEpochDay)
     if (birth.isAfter(today)) return "未出生"
-    val days = ChronoUnit.DAYS.between(birth, today).toInt()
-    if (days < 60) return "生后 $days 日"
-    val months = ChronoUnit.MONTHS.between(birth, today).toInt()
-    val remDays = ChronoUnit.DAYS.between(birth.plusMonths(months.toLong()), today).toInt()
-    return if (remDays == 0) "生后 $months 个月" else "生后 $months 个月 $remDays 天"
+
+    if (today.isBefore(birth.plusYears(1))) {
+        val months = completedCalendarMonthsBetween(birth, today)
+        val days = ChronoUnit.DAYS.between(birth.plusMonths(months.toLong()), today).toInt()
+        return "${months}个月${days}天"
+    }
+
+    var years = today.year - birth.year
+    var yearAnchor = birth.plusYears(years.toLong())
+    if (today.isBefore(yearAnchor)) {
+        years -= 1
+        yearAnchor = birth.plusYears(years.toLong())
+    }
+    val months = completedCalendarMonthsBetween(yearAnchor, today)
+    return "${years}岁${months}个月"
+}
+
+private fun completedCalendarMonthsBetween(start: LocalDate, end: LocalDate): Int {
+    var months = (end.year - start.year) * 12 + end.monthValue - start.monthValue
+    if (end.isBefore(start.plusMonths(months.toLong()))) months -= 1
+    return months
 }
 
 fun relativeTimeLabel(timestamp: Long, now: Long = System.currentTimeMillis()): String {

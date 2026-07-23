@@ -191,13 +191,8 @@ fun SummaryRoute(
             verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
         ) {
             PageHero(
-                eyebrow = if (journal) "7 日记录矩阵" else "规律，不是压力",
+                eyebrow = "",
                 title = "汇总",
-                subtitle = if (ui.babyName.isNotBlank()) {
-                    "${ui.babyName}的记录，由本地数据实时计算。"
-                } else {
-                    "由本地数据实时计算。"
-                },
             )
 
             RangeTabs(
@@ -300,11 +295,6 @@ fun SummaryRoute(
 
             LeziCard(Modifier.fillMaxWidth()) {
                 Text("睡眠片段", style = LeziTypography.TitleSm)
-                Text(
-                    "按已完成记录",
-                    style = LeziTypography.Meta,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
                 Spacer(Modifier.height(8.dp))
                 if (t.sleepMin == 0L) {
                     Text(
@@ -540,10 +530,7 @@ private fun JournalWeekGrid(summary: WeekSummary) {
         modifier = Modifier.fillMaxWidth(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(10.dp),
     ) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("周节律网格", style = LeziTypography.Label)
-            Text("汇总量，不代表发生时刻", style = LeziTypography.Meta, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
+        Text("周节律网格", style = LeziTypography.Label)
         Spacer(Modifier.height(8.dp))
         Row(Modifier.fillMaxWidth()) {
             Column(
