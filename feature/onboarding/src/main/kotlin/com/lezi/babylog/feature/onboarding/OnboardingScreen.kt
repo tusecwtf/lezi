@@ -48,6 +48,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.ui.UiTags
+import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
 import com.lezi.babylog.domain.DuplicateBabyNicknameException
@@ -128,6 +129,7 @@ fun OnboardingRoute(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
+            .dismissKeyboardOnTap()
             .padding(24.dp)
             .testTag(UiTags.ONBOARDING),
         verticalArrangement = Arrangement.Center,

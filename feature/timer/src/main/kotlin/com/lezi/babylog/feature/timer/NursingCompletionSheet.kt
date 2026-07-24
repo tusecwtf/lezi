@@ -34,6 +34,8 @@ import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziShapes
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.designsystem.dismissKeyboardOnTap
+import com.lezi.babylog.designsystem.rememberDismissKeyboard
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -49,6 +51,7 @@ internal fun NursingCompletionSheet(
     onConfirm: (NursingCompletionDraft) -> Unit,
 ) {
     val zone = ZoneId.systemDefault()
+    val dismissKeyboard = rememberDismissKeyboard()
     var showClock by remember(draft.capturedAt) { mutableStateOf(false) }
     var error by remember(draft.capturedAt) { mutableStateOf<String?>(null) }
 
@@ -61,7 +64,8 @@ internal fun NursingCompletionSheet(
         modifier = Modifier
             .fillMaxWidth()
             .navigationBarsPadding()
-            .imePadding(),
+            .imePadding()
+            .dismissKeyboardOnTap(),
     ) {
         Column(
             modifier = Modifier.padding(horizontal = LeziSpacing.Lg),
@@ -81,6 +85,7 @@ internal fun NursingCompletionSheet(
                 .fillMaxWidth()
                 .heightIn(max = 530.dp)
                 .verticalScroll(rememberScrollState())
+                .dismissKeyboardOnTap()
                 .padding(horizontal = LeziSpacing.Lg, vertical = LeziSpacing.Md),
             verticalArrangement = Arrangement.spacedBy(LeziSpacing.Md),
         ) {
@@ -127,6 +132,7 @@ internal fun NursingCompletionSheet(
             ReadOnlyTimeField("开始时刻", draft.startedAt, zone)
             Surface(
                 onClick = {
+                    dismissKeyboard()
                     error = null
                     showClock = true
                 },
@@ -134,7 +140,7 @@ internal fun NursingCompletionSheet(
                     .fillMaxWidth()
                     .semantics {
                         contentDescription =
-                            "结束时刻，${formatTime(draft.endedAt, zone)}，圆盘调时"
+                            "结束时刻，${formatTime(draft.endedAt, zone)}，选择时间"
                     },
                 shape = LeziShapes.Sm,
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
@@ -149,7 +155,7 @@ internal fun NursingCompletionSheet(
                         Text(formatTime(draft.endedAt, zone), style = LeziTypography.BodyStrong)
                     }
                     Text(
-                        "圆盘调时",
+                        "选择时间",
                         style = LeziTypography.Label,
                         color = MaterialTheme.colorScheme.primary,
                     )
@@ -190,13 +196,17 @@ internal fun NursingCompletionSheet(
         ) {
             LeziSecondaryButton(
                 label = "取消",
-                onClick = onDismiss,
+                onClick = {
+                    dismissKeyboard()
+                    onDismiss()
+                },
                 modifier = Modifier.weight(1f),
             )
             LeziPrimaryButton(
                 label = if (saving) "保存中…" else "确认记录",
                 onClick = {
                     if (saving) return@LeziPrimaryButton
+                    dismissKeyboard()
                     val validation = draft.validationError(System.currentTimeMillis())
                     if (validation == null) {
                         onConfirm(draft)

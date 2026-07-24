@@ -38,7 +38,6 @@ enum class RecordSection(val title: String) {
     Excretion("排泄"),
     Routine("日常"),
     Health("健康"),
-    Food("辅食"),
     Growth("成长"),
 }
 
@@ -73,11 +72,12 @@ val RecordType.presentation: RecordTypePresentation
             LeziRecordColorRole.Milk, RecordSection.Feeding, RecordChartMark.Circle,
         )
         RecordType.PUMPED_FEED -> RecordTypePresentation(
-            "喂挤出乳", "奶量", LeziRecordGlyph.Bottle,
+            "母乳瓶喂", "奶量", LeziRecordGlyph.Bottle,
             LeziRecordColorRole.Nursing, RecordSection.Feeding, RecordChartMark.Circle,
         )
+        // Still present for historical records; hidden from the add-record picker.
         RecordType.PUMP_EXPRESS -> RecordTypePresentation(
-            "挤奶", "无库存", LeziRecordGlyph.Pump,
+            "挤奶", "历史记录", LeziRecordGlyph.Pump,
             LeziRecordColorRole.Nursing, RecordSection.Feeding, RecordChartMark.Circle,
         )
         RecordType.PEE -> RecordTypePresentation(
@@ -154,15 +154,15 @@ val RecordType.presentation: RecordTypePresentation
         )
         RecordType.BABY_FOOD -> RecordTypePresentation(
             "辅食", "内容/备注", LeziRecordGlyph.Food,
-            LeziRecordColorRole.Milk, RecordSection.Food, RecordChartMark.Circle,
+            LeziRecordColorRole.Milk, RecordSection.Feeding, RecordChartMark.Circle,
         )
         RecordType.SNACK -> RecordTypePresentation(
             "点心", "内容/备注", LeziRecordGlyph.Food,
-            LeziRecordColorRole.Milk, RecordSection.Food, RecordChartMark.Circle,
+            LeziRecordColorRole.Milk, RecordSection.Feeding, RecordChartMark.Circle,
         )
         RecordType.DRINK -> RecordTypePresentation(
             "饮料", "内容/量", LeziRecordGlyph.Bottle,
-            LeziRecordColorRole.Milk, RecordSection.Food, RecordChartMark.Circle,
+            LeziRecordColorRole.Milk, RecordSection.Feeding, RecordChartMark.Circle,
         )
         RecordType.HEAD -> RecordTypePresentation(
             "头围", "成长测量", LeziRecordGlyph.Growth,

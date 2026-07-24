@@ -12,19 +12,22 @@ import androidx.compose.material.icons.outlined.CalendarMonth
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TimePicker
 import androidx.compose.material3.rememberDatePickerState
-import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -32,7 +35,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -49,11 +51,11 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 /**
- * The single clock-editing surface used across Lezi.
+ * Shared date + time editor used across Lezi.
  *
- * Time and date are edited together so every record surface shares one
- * calendar-aware clock. The zone and preferred offset stay stable; callers
- * still own business constraints such as "not in the future".
+ * Time is always **24-hour dropdowns** (hour 0–23, minute by step) so AM/PM
+ * cannot flip sleep or feed intervals. Date stays a separate calendar card.
+ * Callers still enforce domain rules such as "not in the future".
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -61,6 +63,8 @@ fun LeziClockDialDialog(
     title: String,
     value: ZonedDateTime,
     minuteStep: Int = 1,
+    /** Sleep-only: explain that overnight spans need a next-day date. */
+    showCrossDayHint: Boolean = false,
     onConfirm: (ZonedDateTime) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -68,25 +72,22 @@ fun LeziClockDialDialog(
     val initialTick = snapClock(value.hour, value.minute, step)
     var clockError by remember(value) { mutableStateOf<String?>(null) }
     var selectedDate by remember(value) { mutableStateOf(value.toLocalDate()) }
+    var selectedHour by remember(value) { mutableIntStateOf(initialTick.hour) }
+    var selectedMinute by remember(value) { mutableIntStateOf(initialTick.minute) }
     var showDatePicker by remember(value) { mutableStateOf(false) }
-    val pickerState = rememberTimePickerState(
-        initialHour = initialTick.hour,
-        initialMinute = initialTick.minute,
-        is24Hour = true,
-    )
-    LaunchedEffect(pickerState.hour, pickerState.minute, step) {
-        val snapped = snapClock(pickerState.hour, pickerState.minute, step)
-        if (pickerState.hour != snapped.hour || pickerState.minute != snapped.minute) {
-            pickerState.minute = snapped.minute
-            pickerState.hour = snapped.hour
-        }
+
+    val hourOptions = remember { (0..23).toList() }
+    val minuteOptions = remember(step) {
+        generateSequence(0) { it + step }
+            .takeWhile { it < 60 }
+            .toList()
     }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Surface(
                     onClick = { showDatePicker = true },
                     modifier = Modifier
@@ -119,12 +120,62 @@ fun LeziClockDialDialog(
                         )
                     }
                 }
-                TimePicker(state = pickerState)
+
+                Text(
+                    "时间（24 小时制）",
+                    style = LeziTypography.Label,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    formatClockTime(selectedHour, selectedMinute),
+                    style = LeziTypography.TitleSm,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    TimeDropdownField(
+                        label = "时",
+                        value = selectedHour,
+                        options = hourOptions,
+                        format = { hour -> "%02d".format(hour) },
+                        onSelect = {
+                            selectedHour = it
+                            clockError = null
+                        },
+                        modifier = Modifier.weight(1f),
+                        contentDescription = "选择小时，24 小时制",
+                    )
+                    TimeDropdownField(
+                        label = "分",
+                        value = selectedMinute,
+                        options = minuteOptions,
+                        format = { minute -> "%02d".format(minute) },
+                        onSelect = {
+                            selectedMinute = it
+                            clockError = null
+                        },
+                        modifier = Modifier.weight(1f),
+                        contentDescription = "选择分钟",
+                    )
+                }
                 if (step > 1) {
-                    Text("以 $step 分钟为步进，拖动时自动吸附到最近刻度")
+                    Text(
+                        "分钟按 $step 分钟步进可选",
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (showCrossDayHint) {
+                    Text(
+                        "跨天请先改日期：例如 22:00 睡下、次日 06:00 醒来。",
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 clockError?.let {
-                    Text(it, color = MaterialTheme.colorScheme.error)
+                    Text(it, color = MaterialTheme.colorScheme.error, style = LeziTypography.Meta)
                 }
             }
         },
@@ -134,8 +185,8 @@ fun LeziClockDialDialog(
                     val merged = mergeDateAndClock(
                         value = value,
                         date = selectedDate,
-                        hour = pickerState.hour,
-                        minute = pickerState.minute,
+                        hour = selectedHour,
+                        minute = selectedMinute,
                         step = step,
                     )
                     if (merged == null) {
@@ -233,6 +284,52 @@ fun LeziClockDialDialog(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TimeDropdownField(
+    label: String,
+    value: Int,
+    options: List<Int>,
+    format: (Int) -> String,
+    onSelect: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+    contentDescription: String,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = it },
+        modifier = modifier,
+    ) {
+        OutlinedTextField(
+            value = format(value),
+            onValueChange = {},
+            readOnly = true,
+            label = { Text(label) },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            modifier = Modifier
+                .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                .fillMaxWidth()
+                .semantics { this.contentDescription = contentDescription },
+            singleLine = true,
+        )
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            options.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(format(option)) },
+                    onClick = {
+                        onSelect(option)
+                        expanded = false
+                    },
+                )
+            }
+        }
+    }
+}
+
 internal fun normalizedMinuteStep(step: Int): Int = if (step == 5) 5 else 1
 
 internal data class ClockTick(val hour: Int, val minute: Int)
@@ -278,6 +375,9 @@ internal fun mergeDateAndClock(
 private fun formatClockDate(date: LocalDate): String =
     date.format(DateTimeFormatter.ofPattern("yyyy年M月d日 EEE", Locale.SIMPLIFIED_CHINESE))
 
+private fun formatClockTime(hour: Int, minute: Int): String =
+    "%02d:%02d".format(hour.coerceIn(0, 23), minute.coerceIn(0, 59))
+
 /**
  * Resolve a local wall-clock value without silently normalizing a DST gap.
  * During an overlap, the caller's existing offset wins when it is still valid.
@@ -316,7 +416,7 @@ fun timestampOnLeziDate(
         .toEpochMilli()
 }
 
-@Preview(name = "Shared clock dial", widthDp = 390, heightDp = 844, showBackground = true)
+@Preview(name = "Shared 24h time dropdown", widthDp = 390, heightDp = 844, showBackground = true)
 @Composable
 private fun ClockDialPreview() {
     LeziTheme(visualStyle = "journal") {
@@ -324,7 +424,7 @@ private fun ClockDialPreview() {
             title = "选择记录时刻",
             value = ZonedDateTime.of(
                 LocalDate.of(2026, 7, 23),
-                LocalTime.of(14, 25),
+                LocalTime.of(22, 0),
                 ZoneId.of("Asia/Shanghai"),
             ),
             minuteStep = 5,

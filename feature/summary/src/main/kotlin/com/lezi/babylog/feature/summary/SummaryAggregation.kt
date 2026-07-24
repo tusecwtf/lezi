@@ -39,6 +39,16 @@ internal fun buildSummaryUi(
         )
     }
     val allTemperatures = rangeDays.flatMap { it.bucket.temps }
+    val anchorDay = detailDays.lastOrNull()
+    val chartWindows = ChartWindowTotals(
+        dayFeedMl = anchorDay?.bucket?.feedMl ?: 0,
+        dayNursingMin = anchorDay?.bucket?.nursingMin ?: 0L,
+        dayFeedCount = anchorDay?.feedCount ?: 0,
+        daySleepMin = anchorDay?.bucket?.sleepMin ?: 0L,
+        daySleepSegments = anchorDay?.sleepSegments ?: 0,
+        dayPee = anchorDay?.bucket?.pee ?: 0,
+        dayPoop = anchorDay?.bucket?.poop ?: 0,
+    )
     val totals = SummaryTotals(
         feedMl = rangeDays.sumOf { it.bucket.feedMl },
         nursingMin = rangeDays.sumOf { it.bucket.nursingMin },
@@ -51,6 +61,8 @@ internal fun buildSummaryUi(
         tempDays = rangeDays.count { it.bucket.temps.isNotEmpty() },
         dayValuesFeed = rangeDays.map { it.bucket.feedMl.toFloat() },
         dayValuesSleep = rangeDays.map { it.bucket.sleepMin.toFloat() },
+        dayValuesPee = rangeDays.map { it.bucket.pee.toFloat() },
+        dayValuesPoop = rangeDays.map { it.bucket.poop.toFloat() },
         dayValuesDiaper = rangeDays.map { (it.bucket.pee + it.bucket.poop).toFloat() },
         dayValuesTemp = rangeDays.map { day ->
             day.bucket.temps.takeIf { it.isNotEmpty() }?.average()?.toFloat() ?: 0f
@@ -60,6 +72,7 @@ internal fun buildSummaryUi(
             date = anchorDate,
             zone = zone,
         ),
+        chartWindows = chartWindows,
     )
     val empty = totals.feedCount == 0 &&
         totals.feedMl == 0 &&

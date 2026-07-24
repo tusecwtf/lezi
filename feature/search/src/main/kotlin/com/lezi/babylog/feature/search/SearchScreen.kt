@@ -38,6 +38,7 @@ import com.lezi.babylog.core.ui.presentationTone
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.RecordRow
+import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
 import com.lezi.babylog.domain.CareLog
@@ -109,7 +110,8 @@ fun SearchRoute(
             Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(LeziSpacing.Page),
+                .padding(LeziSpacing.Page)
+                .dismissKeyboardOnTap(),
         ) {
             OutlinedTextField(
                 value = ui.query,

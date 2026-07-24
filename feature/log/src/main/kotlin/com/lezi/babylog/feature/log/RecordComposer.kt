@@ -65,6 +65,8 @@ internal data class RecordComposerUiState(
     val loading: Boolean = false,
     val draft: QuickRecordDraft? = null,
     val babyId: Long? = null,
+    /** Used for age-based tips (e.g. complementary food). */
+    val birthdayEpochDay: Long? = null,
     val amountStepMl: Int = 5,
     val timeStepMin: Int = 1,
     val canStartNursingTimer: Boolean = false,
@@ -108,8 +110,8 @@ class RecordComposerViewModel @Inject constructor(
             val loaded = try {
                 when (request) {
                     is RecordComposerRequest.New -> {
-                        val babyExists = careLog.listBabies().any { it.id == request.babyId }
-                        check(babyExists) { "宝宝档案不存在，请返回后重试" }
+                        val baby = careLog.listBabies().firstOrNull { it.id == request.babyId }
+                            ?: error("宝宝档案不存在，请返回后重试")
                         val draft = if (request.openSleepId != null) {
                             val openSleep = careLog.getRecord(request.openSleepId)
                             check(
@@ -129,12 +131,15 @@ class RecordComposerViewModel @Inject constructor(
                                 historical = request.historical,
                             )
                         }
-                        request.babyId to draft
+                        Triple(request.babyId, baby.birthdayEpochDay, draft)
                     }
                     is RecordComposerRequest.Edit -> {
                         val record = careLog.getRecord(request.recordId)
                             ?: error("这条记录不存在或已被删除")
-                        record.babyId to QuickRecordDraft.fromRecord(record)
+                        val birthday = careLog.listBabies()
+                            .firstOrNull { it.id == record.babyId }
+                            ?.birthdayEpochDay
+                        Triple(record.babyId, birthday, QuickRecordDraft.fromRecord(record))
                     }
                 }
             } catch (cancelled: CancellationException) {
@@ -152,12 +157,13 @@ class RecordComposerViewModel @Inject constructor(
                 return@launch
             }
             currentCoroutineContext().ensureActive()
-            val (babyId, draft) = loaded
+            val (babyId, birthdayEpochDay, draft) = loaded
             sessionGate.deliver(session) {
                 _state.value = RecordComposerUiState(
                     activeRequest = request,
                     draft = draft,
                     babyId = babyId,
+                    birthdayEpochDay = birthdayEpochDay,
                     amountStepMl = settings.amountStepMl,
                     timeStepMin = settings.timeStepMin,
                     canStartNursingTimer = request is RecordComposerRequest.New &&
@@ -361,6 +367,7 @@ fun RecordComposerHost(
                     draft = draft,
                     amountStepMl = state.amountStepMl,
                     timeStepMin = state.timeStepMin,
+                    birthdayEpochDay = state.birthdayEpochDay,
                     saving = state.saving,
                     deleting = state.deleting,
                     saveError = state.error,

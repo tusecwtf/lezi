@@ -36,7 +36,9 @@ import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.designsystem.leziRecordColor
+import com.lezi.babylog.designsystem.rememberDismissKeyboard
 import java.time.Instant
 import java.time.ZoneId
 
@@ -50,6 +52,7 @@ internal fun QuickRecordSheet(
     draft: QuickRecordDraft,
     amountStepMl: Int,
     timeStepMin: Int,
+    birthdayEpochDay: Long? = null,
     saving: Boolean,
     deleting: Boolean,
     saveError: String?,
@@ -63,6 +66,7 @@ internal fun QuickRecordSheet(
     val zone = ZoneId.systemDefault()
     val typeColor = leziRecordColor(draft.type.presentation.colorRole)
     val actionsEnabled = !saving && !deleting
+    val dismissKeyboard = rememberDismissKeyboard()
     var clockTarget by remember(draft.type, draft.existingRecordId) {
         mutableStateOf<QuickClockTarget?>(null)
     }
@@ -78,7 +82,8 @@ internal fun QuickRecordSheet(
             .fillMaxWidth()
             .fillMaxHeight(0.96f)
             .navigationBarsPadding()
-            .imePadding(),
+            .imePadding()
+            .dismissKeyboardOnTap(),
     ) {
         Row(
             modifier = Modifier
@@ -118,6 +123,7 @@ internal fun QuickRecordSheet(
                 .fillMaxWidth()
                 .heightIn(max = 620.dp)
                 .verticalScroll(rememberScrollState())
+                .dismissKeyboardOnTap()
                 .padding(horizontal = LeziSpacing.Lg, vertical = LeziSpacing.Md),
             verticalArrangement = Arrangement.spacedBy(LeziSpacing.Md),
         ) {
@@ -125,6 +131,7 @@ internal fun QuickRecordSheet(
             PurposeFields(
                 draft = draft,
                 amountStepMl = amountStepMl,
+                birthdayEpochDay = birthdayEpochDay,
                 canStartNursingTimer = canStartNursingTimer,
                 actionsEnabled = actionsEnabled,
                 onDraftChange = ::update,
@@ -135,10 +142,12 @@ internal fun QuickRecordSheet(
                 draft = draft,
                 zone = zone,
                 onOpenStart = {
+                    dismissKeyboard()
                     error = null
                     clockTarget = QuickClockTarget.Start
                 },
                 onOpenEnd = {
+                    dismissKeyboard()
                     error = null
                     clockTarget = QuickClockTarget.End
                 },
@@ -178,7 +187,10 @@ internal fun QuickRecordSheet(
         ) {
             LeziSecondaryButton(
                 label = "取消",
-                onClick = onDismiss,
+                onClick = {
+                    dismissKeyboard()
+                    onDismiss()
+                },
                 enabled = actionsEnabled,
                 modifier = Modifier
                     .weight(1f),
@@ -191,6 +203,7 @@ internal fun QuickRecordSheet(
                 },
                 onClick = {
                     if (!actionsEnabled) return@LeziPrimaryButton
+                    dismissKeyboard()
                     val validation = draft.validationError()
                     if (validation == null) {
                         onConfirm(draft)
@@ -210,6 +223,7 @@ internal fun QuickRecordSheet(
             QuickClockTarget.Start -> draft.timestamp
             QuickClockTarget.End -> draft.endTimestamp ?: draft.timestamp
         }
+        val isSleep = draft.mode == QuickRecordMode.Sleep
         LeziClockDialDialog(
             title = when {
                 target == QuickClockTarget.Start &&
@@ -221,6 +235,7 @@ internal fun QuickRecordSheet(
             },
             value = Instant.ofEpochMilli(initialMillis).atZone(zone),
             minuteStep = timeStepMin,
+            showCrossDayHint = isSleep,
             onConfirm = { picked ->
                 val pickedMillis = picked.toInstant().toEpochMilli()
                 val nowMillis = System.currentTimeMillis()
@@ -247,7 +262,11 @@ internal fun QuickRecordSheet(
                     QuickClockTarget.End -> {
                         when {
                             pickedMillis <= draft.timestamp ->
-                                error = "结束时刻必须晚于开始时刻，请点日期选择跨天"
+                                error = if (isSleep) {
+                                    "结束时刻必须晚于开始时刻。跨天请先把日期改为次日，再选醒来时刻"
+                                } else {
+                                    "结束时刻必须晚于开始时刻"
+                                }
                             pickedMillis > nowMillis ->
                                 error = "结束时刻不能晚于现在"
                             else -> update(draft.copy(endTimestamp = pickedMillis))

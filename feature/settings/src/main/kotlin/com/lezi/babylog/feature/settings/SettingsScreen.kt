@@ -54,6 +54,7 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.designsystem.SectionHeading
+import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
 import com.lezi.babylog.domain.DuplicateBabyNicknameException
@@ -288,7 +289,7 @@ fun SettingsRoute(
                             )
                         }
                     }
-                    Text("圆盘时钟步进", style = LeziTypography.Label)
+                    Text("时间选择分钟步进", style = LeziTypography.Label)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         listOf(1 to "1 分钟", 5 to "5 分钟").forEach { (step, label) ->
                             FilterChip(
@@ -361,7 +362,10 @@ fun SettingsRoute(
             },
             title = { Text("添加宝宝") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
+                Column(
+                    Modifier.dismissKeyboardOnTap(),
+                    verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
+                ) {
                     OutlinedTextField(
                         value = newName,
                         onValueChange = {

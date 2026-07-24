@@ -88,7 +88,7 @@ private fun TimeButton(
         onClick = onClick,
         modifier = Modifier
             .fillMaxWidth()
-            .semantics { contentDescription = "$label，${formatRecordTime(millis, zone)}，圆盘调时" },
+            .semantics { contentDescription = "$label，${formatRecordTime(millis, zone)}，选择时间" },
         shape = LeziShapes.Sm,
         color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
     ) {
@@ -101,7 +101,7 @@ private fun TimeButton(
                 Text(label, style = LeziTypography.Meta)
                 Text(formatRecordTime(millis, zone), style = LeziTypography.BodyStrong)
             }
-            Text("圆盘调时", style = LeziTypography.Label, color = MaterialTheme.colorScheme.primary)
+            Text("选择时间", style = LeziTypography.Label, color = MaterialTheme.colorScheme.primary)
         }
     }
 }

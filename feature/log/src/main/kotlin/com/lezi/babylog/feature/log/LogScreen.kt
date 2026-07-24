@@ -180,30 +180,136 @@ private fun buildLanes(records: List<Record>, dayStart: Long, dayEnd: Long): Lan
     val sleep = mutableListOf<TimelineLaneSegment>()
     val feed = mutableListOf<TimelineLaneSegment>()
     val care = mutableListOf<TimelineLaneSegment>()
+    val zone = ZoneId.systemDefault()
     for (r in records) {
         val startMs = r.timestamp.coerceIn(dayStart, dayEnd - 1)
         fun mins(ms: Long) = ((ms - dayStart) / 60_000L).toInt().coerceIn(0, 24 * 60)
+        fun clock(ms: Long): String = formatClock(ms, zone)
         when (r.type) {
             RecordType.SLEEP -> {
+                val open = r.endTimestamp == null
                 val endMs = (r.endTimestamp ?: System.currentTimeMillis()).coerceIn(dayStart + 1, dayEnd)
                 if (endMs > startMs) {
-                    sleep += TimelineLaneSegment(mins(startMs), mins(endMs).coerceAtLeast(mins(startMs) + 1), Color(0xFFE09F3E))
+                    val startMin = mins(startMs)
+                    val endMin = mins(endMs).coerceAtLeast(startMin + 1)
+                    val durationMin = ((endMs - startMs) / 60_000L).coerceAtLeast(1)
+                    val nap = payloadBool(r.payloadJson, "is_nap") == true
+                    val title = if (nap) "午睡" else "睡眠"
+                    val detail = buildString {
+                        append(clock(startMs))
+                        append("–")
+                        append(if (open) "进行中" else clock(endMs))
+                        append(" · ")
+                        append(formatDurationMinutes(durationMin))
+                        if (open) append("（未结束）")
+                    }
+                    sleep += TimelineLaneSegment(
+                        startMinOfDay = startMin,
+                        endMinOfDay = endMin,
+                        color = Color(0xFFE09F3E),
+                        title = title,
+                        detail = detail,
+                        isEvent = false,
+                    )
                 }
             }
             RecordType.FORMULA, RecordType.NURSING, RecordType.PUMPED_FEED -> {
-                val endMs = (r.endTimestamp ?: (r.timestamp + 15 * 60_000L)).coerceAtMost(dayEnd)
-                feed += TimelineLaneSegment(mins(startMs), mins(endMs).coerceAtLeast(mins(startMs) + 1), Color(0xFF007BAE))
+                // Point-in-time mark: keep start==end so UI draws a pin, not a fake duration bar.
+                val startMin = mins(startMs)
+                val title = r.type.presentation.label
+                val detail = buildString {
+                    append(clock(startMs))
+                    when (r.type) {
+                        RecordType.FORMULA, RecordType.PUMPED_FEED -> {
+                            val ml = payloadInt(r.payloadJson, "amount_ml")
+                            if (ml > 0) append(" · ${ml}ml")
+                        }
+                        RecordType.NURSING -> {
+                            val left = payloadInt(r.payloadJson, "left_min")
+                            val right = payloadInt(r.payloadJson, "right_min")
+                            if (left + right > 0) append(" · 左${left}分/右${right}分")
+                        }
+                        else -> Unit
+                    }
+                    r.note?.takeIf { it.isNotBlank() }?.let { append(" · $it") }
+                }
+                feed += TimelineLaneSegment(
+                    startMinOfDay = startMin,
+                    endMinOfDay = startMin,
+                    color = Color(0xFF007BAE),
+                    title = title,
+                    detail = detail,
+                    isEvent = true,
+                )
             }
             RecordType.PEE, RecordType.POOP, RecordType.BOTH_DIAPER, RecordType.BATH,
             RecordType.TEMPERATURE, RecordType.MEDICINE,
             -> {
-                care += TimelineLaneSegment(mins(startMs), (mins(startMs) + 8).coerceAtMost(24 * 60), Color(0xFF7A9E7E))
+                val startMin = mins(startMs)
+                val notePart = r.note?.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
+                // 尿尿=绿点，便便=黄点；「尿+便」同时落两个圆点便于统计与辨认。
+                when (r.type) {
+                    RecordType.PEE -> care += TimelineLaneSegment(
+                        startMinOfDay = startMin,
+                        endMinOfDay = startMin,
+                        color = Color(CARE_PEE),
+                        title = "尿尿",
+                        detail = "${clock(startMs)}$notePart · 护理",
+                        isEvent = true,
+                    )
+                    RecordType.POOP -> care += TimelineLaneSegment(
+                        startMinOfDay = startMin,
+                        endMinOfDay = startMin,
+                        color = Color(CARE_POOP),
+                        title = "便便",
+                        detail = "${clock(startMs)}$notePart · 护理",
+                        isEvent = true,
+                    )
+                    RecordType.BOTH_DIAPER -> {
+                        care += TimelineLaneSegment(
+                            startMinOfDay = startMin,
+                            endMinOfDay = startMin,
+                            color = Color(CARE_PEE),
+                            title = "尿尿",
+                            detail = "${clock(startMs)}$notePart · 尿+便（尿）",
+                            isEvent = true,
+                        )
+                        care += TimelineLaneSegment(
+                            startMinOfDay = startMin,
+                            endMinOfDay = startMin,
+                            color = Color(CARE_POOP),
+                            title = "便便",
+                            detail = "${clock(startMs)}$notePart · 尿+便（便）",
+                            isEvent = true,
+                        )
+                    }
+                    else -> care += TimelineLaneSegment(
+                        startMinOfDay = startMin,
+                        endMinOfDay = startMin,
+                        color = Color(CARE_OTHER),
+                        title = r.type.presentation.label,
+                        detail = "${clock(startMs)}$notePart · 护理",
+                        isEvent = true,
+                    )
+                }
             }
             else -> Unit
         }
     }
     return Lanes(sleep, feed, care)
 }
+
+private fun formatDurationMinutes(minutes: Long): String {
+    if (minutes < 60) return "${minutes}分钟"
+    val h = minutes / 60
+    val m = minutes % 60
+    return if (m == 0L) "${h}小时" else "${h}小时${m}分"
+}
+
+/** Care-lane pin colors: pee green, poop yellow, other muted green. */
+private const val CARE_PEE = 0xFF7A9E7E
+private const val CARE_POOP = 0xFFF3B84B
+private const val CARE_OTHER = 0xFF8FB894
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -340,7 +446,16 @@ fun LogRoute(
                         TimelineRailCard(
                             sleep = state.sleepLanes.map { it.copy(color = ext.laneSleep) },
                             feed = state.feedLanes.map { it.copy(color = ext.laneFeed) },
-                            care = state.careLanes.map { it.copy(color = ext.laneCare) },
+                            // Keep pee/poop distinct: 绿=尿尿，黄=便便（do not paint all care as laneCare).
+                            care = state.careLanes.map { seg ->
+                                seg.copy(
+                                    color = when (seg.title) {
+                                        "便便" -> ext.sun
+                                        "尿尿" -> ext.laneCare
+                                        else -> ext.laneCare.copy(alpha = 0.75f)
+                                    },
+                                )
+                            },
                             recordCount = state.records.size,
                             nowMinOfDay = nowMin,
                             modifier = Modifier.padding(horizontal = LeziSpacing.Page),
@@ -571,7 +686,9 @@ private fun OneHandQuickDock(
 @Composable
 private fun MoreSheet(onPick: (RecordType) -> Unit) {
     val groups = RecordSection.entries.map { section ->
-        section to RecordType.entries.filter { it.presentation.section == section }
+        section to RecordType.entries.filter {
+            it.presentation.section == section && it != RecordType.PUMP_EXPRESS
+        }
     }
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),

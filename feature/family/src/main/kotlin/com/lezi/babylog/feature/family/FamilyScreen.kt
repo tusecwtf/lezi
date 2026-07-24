@@ -54,6 +54,7 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.designsystem.SectionHeading
+import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.DuplicateBabyNicknameException
 import com.lezi.babylog.domain.UpdateBabyInput
@@ -540,7 +541,7 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
             onDismissRequest = { showJoin = false },
             title = { Text("加入家庭") },
             text = {
-                Column {
+                Column(Modifier.dismissKeyboardOnTap()) {
                     Text("加入后将全量共享该家庭数据。若本机已有宝宝，默认拒绝；可先导出 TXT。")
                     Spacer(Modifier.height(LeziSpacing.Sm))
                     OutlinedTextField(
@@ -710,7 +711,8 @@ private fun BabyEditDialog(
             Column(
                 modifier = Modifier
                     .heightIn(max = 520.dp)
-                    .verticalScroll(rememberScrollState()),
+                    .verticalScroll(rememberScrollState())
+                    .dismissKeyboardOnTap(),
                 verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
             ) {
                 Text("头像", style = LeziTypography.Label)

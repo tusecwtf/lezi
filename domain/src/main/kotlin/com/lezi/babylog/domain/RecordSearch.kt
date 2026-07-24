@@ -28,7 +28,7 @@ internal fun String.payloadSearchNeedle(): String {
 private fun RecordType.searchTerms(): List<String> = when (this) {
     RecordType.NURSING -> listOf("母乳", "哺乳", "亲喂", "nursing")
     RecordType.FORMULA -> listOf("配方奶", "奶粉", "奶量", "formula")
-    RecordType.PUMPED_FEED -> listOf("喂挤出乳", "瓶喂母乳", "pumped feed")
+    RecordType.PUMPED_FEED -> listOf("母乳瓶喂", "喂挤出乳", "瓶喂母乳", "pumped feed")
     RecordType.PUMP_EXPRESS -> listOf("挤奶", "吸奶", "pump express")
     RecordType.PEE -> listOf("尿尿", "小便", "换尿布", "pee")
     RecordType.POOP -> listOf("便便", "大便", "换尿布", "poop")

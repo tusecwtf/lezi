@@ -30,11 +30,15 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.dp
+import android.graphics.Paint as AndroidPaint
+import android.graphics.Typeface
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -72,6 +76,19 @@ enum class SummaryRange(
     Month("月", "近 30 天", 30),
 }
 
+/** Totals for the selected anchor date only (shown on charts / metric cards). */
+data class ChartWindowTotals(
+    val dayFeedMl: Int = 0,
+    val dayNursingMin: Long = 0,
+    val dayFeedCount: Int = 0,
+    val daySleepMin: Long = 0,
+    val daySleepSegments: Int = 0,
+    val dayPee: Int = 0,
+    val dayPoop: Int = 0,
+) {
+    val dayDiaper: Int get() = dayPee + dayPoop
+}
+
 data class SummaryTotals(
     val feedMl: Int = 0,
     val nursingMin: Long = 0,
@@ -84,13 +101,17 @@ data class SummaryTotals(
     val tempDays: Int = 0,
     val dayValuesFeed: List<Float> = emptyList(),
     val dayValuesSleep: List<Float> = emptyList(),
+    /** Combined pee+poop per day (kept for empty checks / a11y). */
     val dayValuesDiaper: List<Float> = emptyList(),
+    val dayValuesPee: List<Float> = emptyList(),
+    val dayValuesPoop: List<Float> = emptyList(),
     val dayValuesTemp: List<Float> = emptyList(),
     val feedTimeBuckets: List<Float> = List(4) { 0f },
+    val chartWindows: ChartWindowTotals = ChartWindowTotals(),
 )
 
 data class SummaryUi(
-    val range: SummaryRange = SummaryRange.Week,
+    val range: SummaryRange = SummaryRange.Day,
     val anchorDate: LocalDate = LocalDate.now(),
     val totals: SummaryTotals = SummaryTotals(),
     val week: WeekSummary? = null,
@@ -112,7 +133,7 @@ class SummaryViewModel @Inject constructor(
     private val settings: SettingsStore,
 ) : ViewModel() {
     private val zone = ZoneId.systemDefault()
-    private val range = MutableStateFlow(SummaryRange.Week)
+    private val range = MutableStateFlow(SummaryRange.Day)
     private val anchorDate = MutableStateFlow(LocalDate.now(zone))
 
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -200,35 +221,40 @@ fun SummaryRoute(
                 onSelect = vm::setRange,
             )
 
-            // Prototype: three metric cards in one row.
+            // Metric cards always show the selected calendar day (not week/month range).
+            val windows = t.chartWindows
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 CompactMetricCard(
                     title = "喂养",
-                    value = if (t.feedCount == 0 && t.feedMl == 0) "0次" else "${t.feedCount}次",
-                    detail = if (t.feedMl == 0 && t.nursingMin == 0L) "暂无详情" else {
-                        buildString {
-                            if (t.feedMl > 0) append("${t.feedMl}ml")
-                            if (t.nursingMin > 0) {
-                                if (isNotEmpty()) append(" · ")
-                                append("母乳 ${t.nursingMin} 分")
-                            }
-                        }
+                    value = if (windows.dayFeedCount == 0 && windows.dayFeedMl == 0) {
+                        "0次"
+                    } else {
+                        "${windows.dayFeedCount}次"
+                    },
+                    detail = if (windows.dayFeedMl == 0 && windows.dayNursingMin == 0L) {
+                        "当日暂无详情"
+                    } else {
+                        formatFeedWindowTotal(windows.dayFeedMl, windows.dayNursingMin)
                     },
                     modifier = Modifier.weight(1f),
                 )
                 CompactMetricCard(
                     title = "睡眠",
-                    value = formatMin(t.sleepMin),
-                    detail = if (t.sleepSegments == 0) "0 段睡眠" else "${t.sleepSegments} 段睡眠",
+                    value = formatMin(windows.daySleepMin),
+                    detail = if (windows.daySleepSegments == 0) {
+                        "当日 0 段"
+                    } else {
+                        "当日 ${windows.daySleepSegments} 段"
+                    },
                     modifier = Modifier.weight(1f),
                 )
                 CompactMetricCard(
                     title = "尿布",
-                    value = "${t.pee + t.poop}",
-                    detail = "尿 ${t.pee} · 便 ${t.poop}",
+                    value = "${windows.dayDiaper}",
+                    detail = "当日 尿 ${windows.dayPee} · 便 ${windows.dayPoop}",
                     modifier = Modifier.weight(1f),
                 )
             }
@@ -237,23 +263,33 @@ fun SummaryRoute(
                 JournalWeekGrid(ui.week!!)
             }
 
-            // Prototype "记录分布 / 喂养节律" combined card with 4 buckets for Day.
+            // Charts: title row always carries the total of the currently plotted range.
+            val feedChartTotal = when (ui.range) {
+                SummaryRange.Day -> formatFeedWindowTotal(windows.dayFeedMl, windows.dayNursingMin)
+                SummaryRange.Week, SummaryRange.Month ->
+                    formatFeedWindowTotal(t.feedMl, t.nursingMin)
+            }
+            val sleepChartTotal = when (ui.range) {
+                SummaryRange.Day -> formatMin(windows.daySleepMin)
+                SummaryRange.Week, SummaryRange.Month -> formatMin(t.sleepMin)
+            }
+            val diaperChartTotal = when (ui.range) {
+                SummaryRange.Day -> formatDiaperTotal(windows.dayPee, windows.dayPoop)
+                SummaryRange.Week, SummaryRange.Month -> formatDiaperTotal(t.pee, t.poop)
+            }
+            val chartTotalScope = when (ui.range) {
+                SummaryRange.Day -> "当日"
+                SummaryRange.Week -> "本周"
+                SummaryRange.Month -> "本月"
+            }
+
             LeziCard(Modifier.fillMaxWidth()) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Column {
-                        Text(
-                            "记录分布",
-                            style = LeziTypography.Eyebrow,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Text("喂养节律", style = LeziTypography.TitleSm)
-                    }
-                    Text(
-                        ui.range.periodLabel,
-                        style = LeziTypography.Meta,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+                ChartCardHeader(
+                    eyebrow = "记录分布",
+                    title = "喂养节律",
+                    scopeLabel = chartTotalScope,
+                    totalValue = feedChartTotal,
+                )
                 Spacer(Modifier.height(12.dp))
                 if (ui.range == SummaryRange.Day) {
                     if (t.feedTimeBuckets.any { it > 0f }) {
@@ -275,7 +311,7 @@ fun SummaryRoute(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                } else if (ui.empty) {
+                } else if (t.dayValuesFeed.all { it <= 0f } && t.nursingMin == 0L) {
                     Text(
                         "范围内暂无喂养记录。",
                         style = LeziTypography.Body,
@@ -287,16 +323,19 @@ fun SummaryRoute(
                         dates = chartDates,
                         metricLabel = "喂养量",
                         color = ext.laneFeed,
+                        valueFormatter = { v -> if (v <= 0f) "" else "${v.toInt()}ml" },
                     )
                 }
             }
 
-
-
             LeziCard(Modifier.fillMaxWidth()) {
-                Text("睡眠片段", style = LeziTypography.TitleSm)
+                ChartCardHeader(
+                    title = "睡眠片段",
+                    scopeLabel = chartTotalScope,
+                    totalValue = sleepChartTotal,
+                )
                 Spacer(Modifier.height(8.dp))
-                if (t.sleepMin == 0L) {
+                if (t.dayValuesSleep.all { it <= 0f }) {
                     Text(
                         "范围内暂无已完成睡眠记录",
                         style = LeziTypography.Body,
@@ -308,17 +347,40 @@ fun SummaryRoute(
                         dates = chartDates,
                         metricLabel = "睡眠分钟",
                         color = ext.laneSleep,
+                        valueFormatter = { v ->
+                            if (v <= 0f) "" else formatMin(v.toLong())
+                        },
                     )
                 }
             }
 
-            if (t.dayValuesDiaper.any { it > 0f }) {
-                WeekBarChart(
+            LeziCard(Modifier.fillMaxWidth()) {
+                ChartCardHeader(
                     title = "尿布趋势",
-                    values = t.dayValuesDiaper,
-                    dates = chartDates,
-                    color = ext.laneCare,
+                    scopeLabel = chartTotalScope,
+                    totalValue = diaperChartTotal,
                 )
+                Spacer(Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    DiaperLegendDot(color = ext.laneCare, label = "尿尿")
+                    DiaperLegendDot(color = ext.sun, label = "便便")
+                }
+                Spacer(Modifier.height(8.dp))
+                if (t.dayValuesDiaper.all { it <= 0f }) {
+                    Text(
+                        "范围内暂无尿布记录",
+                        style = LeziTypography.Body,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    StackedDiaperBarChart(
+                        pee = t.dayValuesPee,
+                        poop = t.dayValuesPoop,
+                        dates = chartDates,
+                        peeColor = ext.laneCare,
+                        poopColor = ext.sun,
+                    )
+                }
             }
             if (t.tempAvg != null) {
                 MetricRow(
@@ -415,13 +477,51 @@ private fun CompactMetricCard(
 }
 
 @Composable
+private fun ChartCardHeader(
+    title: String,
+    scopeLabel: String,
+    totalValue: String,
+    eyebrow: String? = null,
+) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.Top,
+    ) {
+        Column(Modifier.weight(1f)) {
+            if (eyebrow != null) {
+                Text(
+                    eyebrow,
+                    style = LeziTypography.Eyebrow,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(title, style = LeziTypography.TitleSm)
+        }
+        Column(horizontalAlignment = Alignment.End) {
+            Text(
+                scopeLabel,
+                style = LeziTypography.Meta,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                totalValue,
+                style = LeziTypography.BodyStrong,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+    }
+}
+
+@Composable
 private fun FourBucketBars(values: List<Float>, color: Color) {
     val grid = LeziThemeExt.colors.chartGrid
+    val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
     val max = (values.maxOrNull() ?: 0f).coerceAtLeast(1f)
     Canvas(
         Modifier
             .fillMaxWidth()
-            .height(96.dp)
+            .height(108.dp)
             .semantics {
                 contentDescription = listOf("00到06", "06到12", "12到18", "18到24")
                     .zip(values)
@@ -430,22 +530,39 @@ private fun FourBucketBars(values: List<Float>, color: Color) {
                     }
             },
     ) {
+        val topPad = 16.dp.toPx()
+        val plotH = (size.height - topPad).coerceAtLeast(1f)
         for (i in 0..3) {
-            val y = size.height * i / 3f
+            val y = topPad + plotH * i / 3f
             drawLine(grid.copy(alpha = 0.4f), Offset(0f, y), Offset(size.width, y), 1f)
         }
         val gap = 10.dp.toPx()
         val barW = (size.width - gap * 5) / 4f
+        val textPaint = AndroidPaint().apply {
+            isAntiAlias = true
+            textAlign = AndroidPaint.Align.CENTER
+            textSize = 10.sp.toPx()
+            typeface = Typeface.DEFAULT
+            this.color = labelColor.toArgb()
+        }
         values.take(4).forEachIndexed { i, value ->
-            if (value <= 0f) return@forEachIndexed
             val x = gap + i * (barW + gap)
-            val height = (value / max) * size.height * 0.82f
-            drawRoundRect(
-                color = color.copy(alpha = 0.86f),
-                topLeft = Offset(x, size.height - height),
-                size = Size(barW, height),
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(10f, 10f),
-            )
+            if (value > 0f) {
+                val height = (value / max) * plotH * 0.82f
+                val barTop = size.height - height
+                drawRoundRect(
+                    color = color.copy(alpha = 0.86f),
+                    topLeft = Offset(x, barTop),
+                    size = Size(barW, height),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(10f, 10f),
+                )
+                drawContext.canvas.nativeCanvas.drawText(
+                    "${value.toInt()}次",
+                    x + barW / 2f,
+                    (barTop - 4f).coerceAtLeast(textPaint.textSize),
+                    textPaint,
+                )
+            }
         }
     }
 }
@@ -484,39 +601,184 @@ private fun MetricRow(title: String, value: String, detail: String, compare: Str
 }
 
 @Composable
+private fun DiaperLegendDot(color: Color, label: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(
+            Modifier
+                .height(10.dp)
+                .width(10.dp)
+                .clip(RoundedCornerShape(3.dp))
+                .background(color),
+        )
+        Text(label, style = LeziTypography.Meta, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/**
+ * Stacked bars: green pee (bottom) + yellow poop (top).
+ * Label on top is pee+poop total for that day.
+ */
+@Composable
+private fun StackedDiaperBarChart(
+    pee: List<Float>,
+    poop: List<Float>,
+    dates: List<LocalDate>,
+    peeColor: Color,
+    poopColor: Color,
+) {
+    val n = maxOf(pee.size, poop.size, 1)
+    val peeValues = pee + List((n - pee.size).coerceAtLeast(0)) { 0f }
+    val poopValues = poop + List((n - poop.size).coerceAtLeast(0)) { 0f }
+    val totals = List(n) { i -> peeValues[i] + poopValues[i] }
+    val grid = LeziThemeExt.colors.chartGrid
+    val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val max = (totals.maxOrNull() ?: 0f).coerceAtLeast(1f)
+    val showBarLabels = n <= 7 || totals.count { it > 0f } <= 12
+    val labelAllBars = n <= 7
+    Column {
+        Canvas(
+            Modifier
+                .fillMaxWidth()
+                .height(if (showBarLabels) 108.dp else 88.dp)
+                .semantics {
+                    contentDescription = dates.zip(peeValues.zip(poopValues)).joinToString("；") { (date, pair) ->
+                        val (p, o) = pair
+                        "${date.monthValue}月${date.dayOfMonth}日 尿${p.toInt()}次 便${o.toInt()}次 共${(p + o).toInt()}次"
+                    }
+                },
+        ) {
+            val topPad = if (showBarLabels) 16.dp.toPx() else 0f
+            val plotH = (size.height - topPad).coerceAtLeast(1f)
+            for (i in 0..3) {
+                val y = topPad + plotH * i / 3f
+                drawLine(grid.copy(alpha = 0.45f), Offset(0f, y), Offset(size.width, y), 1f)
+            }
+            val gap = if (n > 14) 2.dp.toPx() else 4.dp.toPx()
+            val barW = ((size.width - gap * (n + 1)) / n).coerceAtLeast(2f)
+            val textPaint = AndroidPaint().apply {
+                isAntiAlias = true
+                textAlign = AndroidPaint.Align.CENTER
+                textSize = if (n > 14) 8.sp.toPx() else 10.sp.toPx()
+                typeface = Typeface.DEFAULT
+                this.color = labelColor.toArgb()
+            }
+            val radius = androidx.compose.ui.geometry.CornerRadius(6f, 6f)
+            for (i in 0 until n) {
+                val peeV = peeValues[i]
+                val poopV = poopValues[i]
+                val total = peeV + poopV
+                val x = gap + i * (barW + gap)
+                val totalH = (total / max) * (plotH * 0.85f)
+                val peeH = if (total <= 0f) 0f else totalH * (peeV / total)
+                val poopH = (totalH - peeH).coerceAtLeast(0f)
+                var yCursor = size.height
+                if (peeV > 0f) {
+                    val h = peeH.coerceAtLeast(2f)
+                    yCursor -= h
+                    drawRoundRect(
+                        color = peeColor.copy(alpha = 0.9f),
+                        topLeft = Offset(x, yCursor),
+                        size = Size(barW, h),
+                        cornerRadius = if (poopV > 0f) {
+                            androidx.compose.ui.geometry.CornerRadius(0f, 0f)
+                        } else {
+                            radius
+                        },
+                    )
+                }
+                if (poopV > 0f) {
+                    val h = poopH.coerceAtLeast(2f)
+                    yCursor -= h
+                    drawRoundRect(
+                        color = poopColor.copy(alpha = 0.92f),
+                        topLeft = Offset(x, yCursor),
+                        size = Size(barW, h),
+                        cornerRadius = radius,
+                    )
+                }
+                val shouldLabel = showBarLabels && (labelAllBars || total > 0f)
+                if (shouldLabel && total > 0f) {
+                    drawContext.canvas.nativeCanvas.drawText(
+                        "${total.toInt()}",
+                        x + barW / 2f,
+                        (yCursor - 4f).coerceAtLeast(textPaint.textSize),
+                        textPaint,
+                    )
+                }
+            }
+        }
+        DateAxis(if (dates.size >= n) dates.take(n) else dates)
+    }
+}
+
+@Composable
 private fun MiniBarChart(
     values: List<Float>,
     dates: List<LocalDate>,
     metricLabel: String,
     color: Color,
+    valueFormatter: (Float) -> String = { v ->
+        if (v <= 0f) "" else if (v % 1f == 0f) "${v.toInt()}" else "%.1f".format(v)
+    },
 ) {
     val grid = LeziThemeExt.colors.chartGrid
+    val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
     val max = (values.maxOrNull() ?: 0f).coerceAtLeast(1f)
+    // Day/Week: label every bar. Month: only non-zero bars to reduce clutter.
+    val showBarLabels = values.size <= 7 || values.count { it > 0f } <= 12
+    val labelAllBars = values.size <= 7
     Column {
         Canvas(
             Modifier
                 .fillMaxWidth()
-                .height(88.dp)
+                .height(if (showBarLabels) 108.dp else 88.dp)
                 .semantics {
                     contentDescription = chartDescription(metricLabel, dates, values)
                 },
         ) {
+            val topPad = if (showBarLabels) 16.dp.toPx() else 0f
+            val plotH = (size.height - topPad).coerceAtLeast(1f)
             for (i in 0..3) {
-                val y = size.height * i / 3f
+                val y = topPad + plotH * i / 3f
                 drawLine(grid.copy(alpha = 0.45f), Offset(0f, y), Offset(size.width, y), 1f)
             }
             val n = values.size.coerceAtLeast(1)
-            val gap = 4.dp.toPx()
+            val gap = if (n > 14) 2.dp.toPx() else 4.dp.toPx()
             val barW = ((size.width - gap * (n + 1)) / n).coerceAtLeast(2f)
+            val textPaint = AndroidPaint().apply {
+                isAntiAlias = true
+                textAlign = AndroidPaint.Align.CENTER
+                textSize = if (n > 14) 8.sp.toPx() else 10.sp.toPx()
+                typeface = Typeface.DEFAULT
+                this.color = labelColor.toArgb()
+            }
             values.forEachIndexed { i, v ->
-                val h = (v / max) * (size.height * 0.85f)
+                val h = (v / max) * (plotH * 0.85f)
                 val x = gap + i * (barW + gap)
-                drawRoundRect(
-                    color = color.copy(alpha = 0.85f),
-                    topLeft = Offset(x, size.height - h.coerceAtLeast(2f)),
-                    size = Size(barW, h.coerceAtLeast(2f)),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(6f, 6f),
-                )
+                val barTop = size.height - h.coerceAtLeast(if (v > 0f) 2f else 0f)
+                if (v > 0f) {
+                    drawRoundRect(
+                        color = color.copy(alpha = 0.85f),
+                        topLeft = Offset(x, barTop),
+                        size = Size(barW, h.coerceAtLeast(2f)),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(6f, 6f),
+                    )
+                }
+                val shouldLabel = showBarLabels && (labelAllBars || v > 0f)
+                if (shouldLabel) {
+                    val label = valueFormatter(v)
+                    if (label.isNotEmpty()) {
+                        drawContext.canvas.nativeCanvas.drawText(
+                            label,
+                            x + barW / 2f,
+                            (barTop - 4f).coerceAtLeast(textPaint.textSize),
+                            textPaint,
+                        )
+                    }
+                }
             }
         }
         DateAxis(dates)
@@ -613,20 +875,6 @@ private fun JournalWeekGrid(summary: WeekSummary) {
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun WeekBarChart(
-    title: String,
-    values: List<Float>,
-    dates: List<LocalDate>,
-    color: Color,
-) {
-    LeziCard(modifier = Modifier.fillMaxWidth()) {
-        Text(title, style = LeziTypography.TitleSm)
-        Spacer(Modifier.height(8.dp))
-        MiniBarChart(values = values, dates = dates, metricLabel = title, color = color)
     }
 }
 
@@ -732,4 +980,20 @@ private fun formatMin(min: Long): String {
     val h = min / 60
     val m = min % 60
     return if (h == 0L) "${m}m" else if (m == 0L) "${h}h" else "${h}h${m}m"
+}
+
+private fun formatFeedWindowTotal(feedMl: Int, nursingMin: Long): String {
+    return buildString {
+        append(if (feedMl > 0) "${feedMl}ml" else "0ml")
+        if (nursingMin > 0L) {
+            append(" · 母乳 ")
+            append(formatMin(nursingMin))
+        }
+    }
+}
+
+/** Diaper chart total: pee + poop, with a breakdown. */
+private fun formatDiaperTotal(pee: Int, poop: Int): String {
+    val total = pee + poop
+    return "${total}次（尿$pee · 便$poop）"
 }

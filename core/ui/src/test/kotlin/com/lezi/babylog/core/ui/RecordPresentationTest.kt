@@ -30,6 +30,13 @@ class RecordPresentationTest {
 
         assertEquals(RecordSection.entries.toSet(), grouped.keys)
         assertEquals(RecordType.entries.toSet(), grouped.values.flatten().toSet())
+        // Complementary food lives under feeding; there is no separate 辅食 section.
+        assertEquals(
+            RecordSection.Feeding,
+            RecordType.BABY_FOOD.presentation.section,
+        )
+        assertEquals(RecordSection.Feeding, RecordType.SNACK.presentation.section)
+        assertEquals(RecordSection.Feeding, RecordType.DRINK.presentation.section)
     }
 
     @Test

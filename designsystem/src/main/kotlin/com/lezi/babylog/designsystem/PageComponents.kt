@@ -53,7 +53,8 @@ fun PageScaffoldBackground(content: @Composable BoxScope.() -> Unit) {
                     center = Offset(Float.POSITIVE_INFINITY, 0f),
                     radius = 520f,
                 ),
-            ),
+            )
+            .dismissKeyboardOnTap(),
         content = content,
     )
 }

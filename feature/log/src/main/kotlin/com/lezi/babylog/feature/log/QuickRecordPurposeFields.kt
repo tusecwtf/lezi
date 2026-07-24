@@ -8,6 +8,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -17,8 +18,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -26,7 +29,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -58,6 +63,7 @@ import kotlin.math.sin
 internal fun PurposeFields(
     draft: QuickRecordDraft,
     amountStepMl: Int,
+    birthdayEpochDay: Long? = null,
     canStartNursingTimer: Boolean,
     actionsEnabled: Boolean,
     onDraftChange: (QuickRecordDraft) -> Unit,
@@ -84,7 +90,7 @@ internal fun PurposeFields(
         QuickRecordMode.Simple -> SimpleFields(draft.type)
         QuickRecordMode.Interval -> {
             Text(
-                "分别用下方圆盘设置开始与结束时刻。",
+                "分别设置开始与结束时刻（24 小时制）。",
                 style = LeziTypography.Body,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -94,7 +100,7 @@ internal fun PurposeFields(
         QuickRecordMode.Hospital -> HospitalFields(draft, onDraftChange)
         QuickRecordMode.CustomText -> CustomTextFields(draft, onDraftChange)
         QuickRecordMode.Measurement -> MeasurementFields(draft, onDraftChange)
-        QuickRecordMode.Food -> FoodFields(draft, onDraftChange)
+        QuickRecordMode.Food -> FoodFields(draft, birthdayEpochDay, onDraftChange)
         QuickRecordMode.Vaccine -> VaccineFields(draft, onDraftChange)
     }
 }
@@ -658,8 +664,19 @@ private fun MeasurementFields(
 @Composable
 private fun FoodFields(
     draft: QuickRecordDraft,
+    birthdayEpochDay: Long?,
     onDraftChange: (QuickRecordDraft) -> Unit,
 ) {
+    if (draft.type == RecordType.BABY_FOOD && birthdayEpochDay != null) {
+        BabyFoodGuidancePanel(
+            birthdayEpochDay = birthdayEpochDay,
+            atMillis = draft.timestamp,
+            selectedContent = draft.foodContent,
+            onSuggestionClick = { suggestion ->
+                onDraftChange(draft.copy(foodContent = suggestion.take(80)))
+            },
+        )
+    }
     OutlinedTextField(
         value = draft.foodContent,
         onValueChange = { onDraftChange(draft.copy(foodContent = it.take(80))) },
@@ -676,6 +693,80 @@ private fun FoodFields(
         placeholder = { Text(if (draft.type == RecordType.DRINK) "例如 80 ml" else "例如 半碗") },
         singleLine = true,
     )
+}
+
+@Composable
+private fun BabyFoodGuidancePanel(
+    birthdayEpochDay: Long,
+    atMillis: Long,
+    selectedContent: String,
+    onSuggestionClick: (String) -> Unit,
+) {
+    val guidance = remember(birthdayEpochDay, atMillis) {
+        babyFoodGuidanceAt(birthdayEpochDay, atMillis)
+    }
+    var expanded by remember(guidance.stage.id) { mutableStateOf(false) }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = LeziShapes.Sm,
+        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f),
+    ) {
+        Column(
+            Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                "${guidance.ageLabel} · ${guidance.stage.title}",
+                style = LeziTypography.BodyStrong,
+            )
+            if (guidance.stage.suggestions.isEmpty()) {
+                Text(
+                    "此阶段一般仍以母乳或配方奶为主；满约 6 月龄再考虑泥糊起步。",
+                    style = LeziTypography.Meta,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                Text(
+                    "本阶段可尝试（点选填入内容）",
+                    style = LeziTypography.Meta,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    guidance.stage.suggestions.forEach { item ->
+                        FilterChip(
+                            selected = selectedContent == item,
+                            onClick = { onSuggestionClick(item) },
+                            label = { Text(item) },
+                        )
+                    }
+                }
+            }
+            TextButton(
+                onClick = { expanded = !expanded },
+                modifier = Modifier.padding(start = 0.dp),
+            ) {
+                Text(if (expanded) "收起阶段说明" else "为什么这样建议")
+            }
+            if (expanded) {
+                Text(
+                    guidance.stage.explanation,
+                    style = LeziTypography.Meta,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Text(
+                BABY_FOOD_DISCLAIMER,
+                style = LeziTypography.Meta,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
 }
 
 @Composable

@@ -58,6 +58,7 @@ import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
+import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.designsystem.resolveLeziLocalDateTime
 import com.lezi.babylog.designsystem.timestampOnLeziDate
 import com.lezi.babylog.domain.CareLog
@@ -464,7 +465,10 @@ fun GrowthRoute(
                 )
             },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
+                Column(
+                    Modifier.dismissKeyboardOnTap(),
+                    verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
+                ) {
                     OutlinedTextField(
                         value = activeDraft.valueText,
                         onValueChange = { text ->
@@ -495,7 +499,7 @@ fun GrowthRoute(
                             Text("修改日期")
                         }
                         OutlinedButton(onClick = { showMeasureClock = true }) {
-                            Text("圆盘调时")
+                            Text("选择时间")
                         }
                     }
                     if (isEditing) {

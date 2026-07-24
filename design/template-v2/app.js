@@ -15,7 +15,7 @@
     bottle: '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9 3h6v4l2 3v9a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2v-9l2-3V3ZM8 13h8M10 6h4"/></svg>',
     pump: '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 4h7v5H7zM10.5 9v3M7 12h7v8H7zM16 7h3v11h-3M14 15h2"/></svg>',
     pee: '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 4c2.3 3.2 3.4 5.5 3.4 7.3A3.4 3.4 0 0 1 4.6 11C4.6 9.4 5.7 7 8 4ZM16 7c2.2 3 3.2 5.1 3.2 6.8a3.2 3.2 0 0 1-6.4 0C12.8 12.1 13.8 10 16 7Z"/></svg>',
-    poop: '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 8c0-2 1.2-3.4 3.4-3.8-.3 1.8.2 3 1.7 3.7 2.7-.1 4.2 1 4.5 3.3 2.1.5 3.1 1.9 2.8 4.2-.3 2.8-2.2 4.3-5.7 4.3H8c-3.2 0-4.9-1.4-4.9-4.1 0-2.2 1.1-3.5 3.4-4 .1-1.6.6-2.8 1.5-3.6Z"/></svg>',
+    poop: '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9.2 8.1c.1-2.1 1.5-3.5 3.6-3.8.2 1.5.9 2.4 2.1 2.9 2.2.1 3.6 1.3 3.9 3.3 1.8.4 2.7 1.7 2.5 3.7-.3 2.5-2.1 3.9-5.3 3.9H8.1c-2.9 0-4.5-1.3-4.5-3.7 0-2 .9-3.2 2.9-3.6.2-1.4.8-2.5 1.7-3.3.3-.3.6-.5 1-.6Z"/><circle cx="10.2" cy="14.2" r="0.55" fill="currentColor" stroke="none"/><circle cx="13.8" cy="14.2" r="0.55" fill="currentColor" stroke="none"/><path d="M11 15.6c.4.45 1.6.45 2 0"/></svg>',
     sleep: '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 15.2A8.2 8.2 0 0 1 8.8 4 8.2 8.2 0 1 0 20 15.2Z"/></svg>',
     temperature: '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M14 14.8V5a3 3 0 0 0-6 0v9.8a5 5 0 1 0 6 0ZM11 7v9"/></svg>',
     note: '<svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg>',
@@ -34,8 +34,7 @@
   const TYPES = [
     { id: "nursing", name: "母乳", mode: "nursing", icon: "nursing", color: "nursing", group: "feed", tip: "左右计时" },
     { id: "formula", name: "配方奶", mode: "milk", icon: "bottle", color: "milk", group: "feed", tip: "奶量" },
-    { id: "pumped_feed", name: "喂挤出乳", mode: "milk", icon: "bottle", color: "nursing", group: "feed", tip: "奶量" },
-    { id: "pump_express", name: "挤奶", mode: "milk", icon: "pump", color: "nursing", group: "feed", tip: "无库存" },
+    { id: "pumped_feed", name: "母乳瓶喂", mode: "milk", icon: "bottle", color: "nursing", group: "feed", tip: "奶量" },
     { id: "pee", name: "尿尿", mode: "pee", icon: "pee", color: "pee", group: "diaper", tip: "小中大" },
     { id: "poop", name: "便便", mode: "poop", icon: "poop", color: "poop", group: "diaper", tip: "三组分档" },
     { id: "both_diaper", name: "尿+便", mode: "both", icon: "poop", color: "poop", group: "diaper", tip: "完整分档" },

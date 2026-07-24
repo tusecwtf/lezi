@@ -57,6 +57,20 @@ class SummaryAggregationTest {
         assertThat(week.totals.tempAvg!!).isWithin(0.001).of(37.0)
         assertThat(week.totals.tempDays).isEqualTo(2)
         assertThat(week.totals.dayValuesFeed).hasSize(7)
+        // Anchor day 7/23 has pee + both_diaper → pee=2, poop=1 on that day index 6
+        assertThat(week.totals.dayValuesPee).hasSize(7)
+        assertThat(week.totals.dayValuesPoop).hasSize(7)
+        assertThat(week.totals.dayValuesPee[6]).isEqualTo(2f)
+        assertThat(week.totals.dayValuesPoop[6]).isEqualTo(1f)
+        assertThat(week.totals.dayValuesDiaper[6]).isEqualTo(3f)
+        // Anchor day 7/23: formula 100 + pumped 50; sleep 90; pee+both → pee 2, poop 1
+        assertThat(week.totals.chartWindows.dayFeedMl).isEqualTo(150)
+        assertThat(week.totals.chartWindows.dayFeedCount).isEqualTo(2)
+        assertThat(week.totals.chartWindows.daySleepMin).isEqualTo(90)
+        assertThat(week.totals.chartWindows.daySleepSegments).isEqualTo(1)
+        assertThat(week.totals.chartWindows.dayPee).isEqualTo(2)
+        assertThat(week.totals.chartWindows.dayPoop).isEqualTo(1)
+        assertThat(week.totals.chartWindows.dayDiaper).isEqualTo(3)
         assertThat(week.week!!.days.map { it.date })
             .containsExactlyElementsIn(
                 (0L..6L).map { LocalDate.of(2026, 7, 17).plusDays(it) },

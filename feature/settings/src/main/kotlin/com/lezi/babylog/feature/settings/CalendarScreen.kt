@@ -45,6 +45,7 @@ import com.lezi.babylog.designsystem.LeziCard
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.designsystem.resolveLeziLocalDateTime
 import com.lezi.babylog.domain.CareLog
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -192,7 +193,10 @@ fun CalendarRoute(
             onDismissRequest = closeCalendarDraft,
             title = { Text("新日程") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
+                Column(
+                    Modifier.dismissKeyboardOnTap(),
+                    verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
+                ) {
                     OutlinedTextField(
                         value = title,
                         onValueChange = {
@@ -213,7 +217,7 @@ fun CalendarRoute(
                             Text("修改日期")
                         }
                         OutlinedButton(onClick = { clockTarget = CalendarClockTarget.Event }) {
-                            Text("圆盘调时")
+                            Text("选择时间")
                         }
                     }
                     Row(
