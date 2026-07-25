@@ -45,6 +45,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -57,6 +58,7 @@ import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.core.ui.BabyAvatar
+import com.lezi.babylog.core.ui.CameraCapture
 import com.lezi.babylog.designsystem.LeziCard
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSecondaryButton
@@ -490,7 +492,7 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
     val novice = remember {
         com.lezi.babylog.sync.HomeLanServerConfig.noviceUiDefaults(vm.currentWifiSsid())
     }
-    // Empty persisted config → show novice defaults; otherwise show saved values.
+    // Defaults prefill an empty form but are not persisted until save.
     val persistedEmpty = ui.serverHost.isBlank() && ui.baseUrl.isBlank()
     var serverHost by remember(ui.serverHost, ui.baseUrl) {
         mutableStateOf(
@@ -530,11 +532,35 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
     var mergeSource by remember { mutableStateOf<Baby?>(null) }
     var mergePreview by remember { mutableStateOf<BabyMergePreview?>(null) }
     var inviteView by remember { mutableStateOf<FamilyInviteView?>(null) }
+    val familyContext = LocalContext.current
     val scanInvite = rememberLauncherForActivityResult(ScanContract()) { result ->
         val payload = result.contents?.trim().orEmpty()
         if (payload.isNotEmpty()) {
             joinCode = payload
             showJoin = true
+        }
+    }
+    fun launchInviteScan() {
+        if (!CameraCapture.hasCameraHardware(familyContext)) {
+            message = "此设备没有可用相机，请改用输入邀请码"
+            return
+        }
+        scanInvite.launch(
+            ScanOptions()
+                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                .setPrompt("扫描家庭邀请二维码")
+                .setBeepEnabled(false)
+                .setOrientationLocked(false)
+                .setBarcodeImageEnabled(false),
+        )
+    }
+    val scanCameraPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            launchInviteScan()
+        } else {
+            message = "需要相机权限才能扫码，请在系统设置中开启，或改用输入邀请码"
         }
     }
     val current = ui.current
@@ -559,7 +585,6 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                 subtitle = "宝宝档案、家庭成员和同步设置都在这里。",
             )
 
-            // Current baby card (prototype account hero)
             LeziCard(modifier = Modifier.fillMaxWidth()) {
                 Row(
                     Modifier.fillMaxWidth(),
@@ -694,7 +719,7 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
 
             SectionHeading(title = "家人一起记")
             if (controls.showServerSetup || true) {
-                // Always show network config (host/SSID) even when joined so user can rebind SSID / repoint host.
+                // Keep network settings editable after joining so the host or SSID can be rebound.
                 OutlinedTextField(
                     value = serverHost,
                     onValueChange = { serverHost = it },
@@ -796,13 +821,11 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                 LeziSecondaryButton(
                     "扫码加入",
                     onClick = {
-                        scanInvite.launch(
-                            ScanOptions()
-                                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                                .setPrompt("扫描家庭邀请二维码")
-                                .setBeepEnabled(false)
-                                .setOrientationLocked(false),
-                        )
+                        if (CameraCapture.hasPermission(familyContext)) {
+                            launchInviteScan()
+                        } else {
+                            scanCameraPermission.launch(CameraCapture.PERMISSION)
+                        }
                     },
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -871,7 +894,6 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
     }
 
     inviteView?.let { invite ->
-        // Block screenshots/recents while the invite QR/code is on screen (ISS-021).
         SecureWindowWhileVisible()
         var showPayload by remember(invite.code) { mutableStateOf(false) }
         val qrBitmap = remember(invite.payload) {
@@ -1101,10 +1123,49 @@ private fun BabyEditDialog(
     var croppedAvatar by remember(baby.id) { mutableStateOf<CroppedAvatar?>(null) }
     var removeAvatar by remember(baby.id) { mutableStateOf(false) }
     var saving by remember(baby.id) { mutableStateOf(false) }
+    var avatarError by remember(baby.id) { mutableStateOf<String?>(null) }
+    var pendingAvatarCameraUri by remember(baby.id) { mutableStateOf<Uri?>(null) }
+    val avatarContext = LocalContext.current
     val avatarPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia(),
     ) { uri ->
-        if (uri != null) pickedAvatarUri = uri
+        if (uri != null) {
+            removeAvatar = false
+            pickedAvatarUri = uri
+        }
+    }
+    val avatarTakePicture = rememberLauncherForActivityResult(
+        ActivityResultContracts.TakePicture(),
+    ) { success ->
+        val uri = pendingAvatarCameraUri
+        pendingAvatarCameraUri = null
+        if (success && uri != null) {
+            removeAvatar = false
+            pickedAvatarUri = uri
+        }
+    }
+    fun launchAvatarCamera() {
+        avatarError = null
+        if (!CameraCapture.hasCameraHardware(avatarContext)) {
+            avatarError = "此设备没有可用相机"
+            return
+        }
+        runCatching {
+            val uri = CameraCapture.createOutputUri(avatarContext)
+            pendingAvatarCameraUri = uri
+            avatarTakePicture.launch(uri)
+        }.onFailure {
+            avatarError = "无法打开相机，请稍后重试"
+        }
+    }
+    val avatarCameraPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            launchAvatarCamera()
+        } else {
+            avatarError = "需要相机权限才能拍照"
+        }
     }
     val previewBitmap = remember(croppedAvatar) {
         croppedAvatar?.bitmap?.asImageBitmap()
@@ -1151,6 +1212,7 @@ private fun BabyEditDialog(
                             OutlinedButton(
                                 enabled = !saving,
                                 onClick = {
+                                    avatarError = null
                                     avatarPicker.launch(
                                         PickVisualMediaRequest(
                                             ActivityResultContracts.PickVisualMedia.ImageOnly,
@@ -1159,7 +1221,20 @@ private fun BabyEditDialog(
                                 },
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
-                                Text(if (hasAvatar) "更换照片" else "选择照片")
+                                Text(if (hasAvatar) "相册更换" else "从相册选择")
+                            }
+                            OutlinedButton(
+                                enabled = !saving,
+                                onClick = {
+                                    if (CameraCapture.hasPermission(avatarContext)) {
+                                        launchAvatarCamera()
+                                    } else {
+                                        avatarCameraPermission.launch(CameraCapture.PERMISSION)
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text("拍照")
                             }
                         }
                         if (canEditAvatar && hasAvatar) {
@@ -1181,6 +1256,13 @@ private fun BabyEditDialog(
                             )
                         }
                     }
+                }
+                avatarError?.let {
+                    Text(
+                        it,
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.error,
+                    )
                 }
                 Text(
                     "圆形区域就是保存后的头像效果",

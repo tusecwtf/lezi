@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
+    <!-- PDF / share exports -->
     <cache-path name="export" path="export/" />
+    <!-- Camera TakePicture outputs (diary photos, avatar) -->
+    <cache-path name="camera" path="camera/" />
 </paths>

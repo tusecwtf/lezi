@@ -5,3 +5,9 @@
 # persisted entities makes release shrinking resilient to schema/adapter changes.
 -keep class com.lezi.babylog.core.database.LeziDatabase { *; }
 -keep class com.lezi.babylog.core.database.**Entity { *; }
+
+# ZXing / journeyapps barcode scanner — readers are often reached via reflection
+# and R8 otherwise strips MultiFormatReader / QRCodeReader (breaks release 扫码).
+-keep class com.journeyapps.barcodescanner.** { *; }
+-keep class com.google.zxing.** { *; }
+-dontwarn com.google.zxing.**

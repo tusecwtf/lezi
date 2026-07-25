@@ -1,6 +1,7 @@
 package com.lezi.babylog.feature.log
 
 import android.graphics.BitmapFactory
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -39,7 +40,9 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.lezi.babylog.core.ui.CameraCapture
 import com.lezi.babylog.core.ui.RecordTypeIcon
 import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.core.model.RecordTime
@@ -100,10 +103,59 @@ internal fun QuickRecordSheet(
     var attemptedConfirm by remember(interactionKey) {
         mutableStateOf(false)
     }
+    val context = LocalContext.current
+    var photoActionError by remember(interactionKey) { mutableStateOf<String?>(null) }
+    var pendingCameraUri by remember(interactionKey) { mutableStateOf<Uri?>(null) }
     val photoPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia(9),
         onImportPhotos,
     )
+    val takePicture = rememberLauncherForActivityResult(
+        ActivityResultContracts.TakePicture(),
+    ) { success ->
+        val uri = pendingCameraUri
+        pendingCameraUri = null
+        if (success && uri != null) {
+            onImportPhotos(listOf(uri))
+        }
+    }
+    val cameraPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (!granted) {
+            photoActionError = "需要相机权限才能拍照，请在系统设置中开启"
+            return@rememberLauncherForActivityResult
+        }
+        if (!CameraCapture.hasCameraHardware(context)) {
+            photoActionError = "此设备没有可用相机"
+            return@rememberLauncherForActivityResult
+        }
+        runCatching {
+            val uri = CameraCapture.createOutputUri(context)
+            pendingCameraUri = uri
+            takePicture.launch(uri)
+        }.onFailure {
+            photoActionError = "无法打开相机，请稍后重试"
+        }
+    }
+    fun launchCameraCapture() {
+        photoActionError = null
+        if (!CameraCapture.hasCameraHardware(context)) {
+            photoActionError = "此设备没有可用相机"
+            return
+        }
+        if (CameraCapture.hasPermission(context)) {
+            runCatching {
+                val uri = CameraCapture.createOutputUri(context)
+                pendingCameraUri = uri
+                takePicture.launch(uri)
+            }.onFailure {
+                photoActionError = "无法打开相机，请稍后重试"
+            }
+        } else {
+            cameraPermission.launch(CameraCapture.PERMISSION)
+        }
+    }
     val isIntervalMode = draft.mode == QuickRecordMode.Sleep
     val visibleIntervalPreview = draft.visibleIntervalDurationPreview(
         nowMillis = nowMillis,
@@ -289,14 +341,31 @@ internal fun QuickRecordSheet(
                         }
                     }
                 }
-                TextButton(
-                    enabled = draft.photos.size < 9,
-                    onClick = {
-                        photoPicker.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                        )
-                    },
-                ) { Text("选择图片") }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    TextButton(
+                        enabled = draft.photos.size < 9,
+                        onClick = {
+                            photoActionError = null
+                            photoPicker.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                            )
+                        },
+                    ) { Text("相册") }
+                    TextButton(
+                        enabled = draft.photos.size < 9,
+                        onClick = { launchCameraCapture() },
+                    ) { Text("拍照") }
+                }
+                photoActionError?.let {
+                    Text(
+                        it,
+                        color = MaterialTheme.colorScheme.error,
+                        style = LeziTypography.Meta,
+                    )
+                }
             }
 
             footerError?.let {
@@ -334,8 +403,7 @@ internal fun QuickRecordSheet(
                     .weight(1f)
                     .pointerInput(interactionKey, actionsEnabled, confirmEnabled) {
                         if (actionsEnabled && !confirmEnabled) {
-                            // Save stays visually and semantically disabled; a physical tap only
-                            // reveals the delayed validation reason required by "打开不吼".
+                            // Keep save disabled; an attempted tap only reveals deferred validation.
                             detectTapGestures {
                                 attemptedConfirm = true
                                 dismissKeyboard()
