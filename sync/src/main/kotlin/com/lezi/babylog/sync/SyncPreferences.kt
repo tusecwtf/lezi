@@ -42,17 +42,20 @@ interface SyncPreferences {
     suspend fun ensureCreateRequestId(): String
     suspend fun clearCreateRequestId()
     suspend fun clearFamilySession()
+    /** Move legacy plaintext secrets into the secure store when present. */
+    suspend fun migrateSecretsIfNeeded() {}
 }
 
 @Singleton
 class DataStoreSyncPreferences @Inject constructor(
     private val dataStore: DataStore<Preferences>,
+    private val secureTokenStore: SecureFamilyTokenStore,
 ) : SyncPreferences {
     override val session: Flow<SyncSession> = dataStore.data.map { prefs ->
         SyncSession(
             baseUrl = prefs[Keys.BASE_URL].orEmpty(),
             familyId = prefs[Keys.FAMILY_ID].orEmpty(),
-            familyToken = prefs[Keys.FAMILY_TOKEN].orEmpty(),
+            familyToken = resolveFamilyToken(prefs),
             deviceId = prefs[Keys.DEVICE_ID].orEmpty(),
             role = prefs[Keys.ROLE]?.let { runCatching { FamilyRole.valueOf(it) }.getOrNull() }
                 ?: FamilyRole.None,
@@ -73,10 +76,12 @@ class DataStoreSyncPreferences @Inject constructor(
     }
 
     override suspend fun saveSession(session: SyncSession) {
+        secureTokenStore.setToken(session.familyToken)
         dataStore.edit { prefs ->
             prefs[Keys.BASE_URL] = normalizeBaseUrl(session.baseUrl)
             prefs[Keys.FAMILY_ID] = session.familyId
-            prefs[Keys.FAMILY_TOKEN] = session.familyToken
+            // Token lives only in the Keystore-wrapped store after this write.
+            prefs.remove(Keys.FAMILY_TOKEN)
             prefs[Keys.DEVICE_ID] = session.deviceId
             prefs[Keys.ROLE] = session.role.name
             prefs[Keys.PULL_CURSOR] = session.pullCursor
@@ -94,6 +99,7 @@ class DataStoreSyncPreferences @Inject constructor(
     }
 
     override suspend fun updateCursor(cursor: Long, generation: String) {
+        migratePlaintextTokenIfPresent()
         dataStore.edit {
             it[Keys.PULL_CURSOR] = cursor.coerceAtLeast(0)
             if (generation.isBlank()) {
@@ -105,10 +111,12 @@ class DataStoreSyncPreferences @Inject constructor(
     }
 
     override suspend fun markSuccess(atMillis: Long) {
+        migratePlaintextTokenIfPresent()
         dataStore.edit { it[Keys.LAST_SUCCESS_AT] = atMillis }
     }
 
     override suspend fun ensureDeviceId(): String {
+        migratePlaintextTokenIfPresent()
         session.first().deviceId.takeIf { it.isNotBlank() }?.let { return it }
         val generated = UUID.randomUUID().toString()
         dataStore.edit { prefs ->
@@ -118,6 +126,7 @@ class DataStoreSyncPreferences @Inject constructor(
     }
 
     override suspend fun ensureCreateRequestId(): String {
+        migratePlaintextTokenIfPresent()
         dataStore.data.first()[Keys.CREATE_REQUEST_ID]
             ?.takeIf(String::isNotBlank)
             ?.let { return it }
@@ -138,6 +147,30 @@ class DataStoreSyncPreferences @Inject constructor(
         dataStore.edit(::clearFamilyValues)
     }
 
+    override suspend fun migrateSecretsIfNeeded() = migratePlaintextTokenIfPresent()
+
+    /**
+     * One-shot migration for upgrades that still hold `sync_family_token` in
+     * plaintext DataStore preferences.
+     */
+    suspend fun migratePlaintextTokenIfPresent() {
+        dataStore.edit { prefs ->
+            val legacy = prefs[Keys.FAMILY_TOKEN]
+            if (!legacy.isNullOrBlank()) {
+                if (secureTokenStore.getToken().isBlank()) {
+                    secureTokenStore.setToken(legacy)
+                }
+                prefs.remove(Keys.FAMILY_TOKEN)
+            }
+        }
+    }
+
+    private fun resolveFamilyToken(prefs: Preferences): String {
+        val secure = secureTokenStore.getToken()
+        if (secure.isNotBlank()) return secure
+        return prefs[Keys.FAMILY_TOKEN].orEmpty()
+    }
+
     private fun normalizeBaseUrl(value: String): String {
         val normalized = value.trim().trimEnd('/')
         if (normalized.isEmpty()) return ""
@@ -153,11 +186,13 @@ class DataStoreSyncPreferences @Inject constructor(
         prefs.remove(Keys.PULL_GENERATION)
         prefs.remove(Keys.LAST_SUCCESS_AT)
         prefs.remove(Keys.CREATE_REQUEST_ID)
+        secureTokenStore.clearToken()
     }
 
     private object Keys {
         val BASE_URL = stringPreferencesKey("sync_base_url")
         val FAMILY_ID = stringPreferencesKey("sync_family_id")
+        /** Legacy plaintext key — migrated out on first secure write/read path. */
         val FAMILY_TOKEN = stringPreferencesKey("sync_family_token")
         val DEVICE_ID = stringPreferencesKey("sync_device_id")
         val ROLE = stringPreferencesKey("sync_family_role")

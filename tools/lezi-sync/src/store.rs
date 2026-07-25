@@ -574,6 +574,58 @@ impl Store {
                 .map(str::to_owned)),
         }
     }
+
+    /// Bump a live media entity's revision after its bytes become available so
+    /// pull clients that advanced past the incomplete metadata rev see it again.
+    pub fn republish_media(
+        &self,
+        family_id: &str,
+        client_uuid: &str,
+    ) -> Result<bool, StoreError> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let live = transaction
+            .query_row(
+                "
+                SELECT 1 FROM entities
+                WHERE family_id = ?1
+                  AND entity_type = 'media'
+                  AND client_uuid = ?2
+                  AND deleted_at IS NULL
+                ",
+                params![family_id, client_uuid],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !live {
+            return Ok(false);
+        }
+        let mut cursor: i64 = transaction.query_row(
+            "SELECT rev FROM family_meta WHERE family_id = ?1",
+            params![family_id],
+            |row| row.get(0),
+        )?;
+        cursor += 1;
+        transaction.execute(
+            "
+            UPDATE entities
+            SET rev = ?1
+            WHERE family_id = ?2
+              AND entity_type = 'media'
+              AND client_uuid = ?3
+              AND deleted_at IS NULL
+            ",
+            params![cursor, family_id, client_uuid],
+        )?;
+        transaction.execute(
+            "UPDATE family_meta SET rev = ?1 WHERE family_id = ?2",
+            params![cursor, family_id],
+        )?;
+        transaction.commit()?;
+        self.secure_database_files()?;
+        Ok(true)
+    }
 }
 
 fn table_columns(connection: &Connection, table: &str) -> Result<BTreeSet<String>, StoreError> {

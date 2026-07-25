@@ -2,16 +2,21 @@ package com.lezi.babylog.feature.export
 
 import android.content.Context
 import android.content.Intent
-import android.graphics.Paint
 import android.graphics.BitmapFactory
+import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.pdf.PdfDocument
+import android.os.Handler
+import android.os.Looper
 import androidx.core.content.FileProvider
 import java.io.File
 import java.io.FileOutputStream
 import java.time.LocalDate
 
 object PdfExport {
+    /** Best-effort delete of shared PDF after the system share sheet has had time to open. */
+    private const val CLEANUP_DELAY_MS = 60_000L
+
     fun writeAndShare(
         context: Context,
         title: String,
@@ -65,7 +70,8 @@ object PdfExport {
             }
         }
         doc.finishPage(page)
-        photoPaths.forEach { path ->
+        val safePhotos = photoPaths.filter { isAllowedExportPhotoPath(context, it) }
+        safePhotos.forEach { path ->
             val bitmap = BitmapFactory.decodeFile(path) ?: return@forEach
             pageNumber++
             pageInfo = PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNumber).create()
@@ -89,8 +95,8 @@ object PdfExport {
             doc.finishPage(page)
             bitmap.recycle()
         }
-        val dir = File(context.cacheDir, "export").apply { mkdirs() }
-        dir.listFiles()?.forEach { old -> runCatching { old.delete() } }
+        val dir = exportCacheDir(context)
+        clearExportCache(dir)
         val file = File(dir, "lezi-${LocalDate.now()}.pdf")
         FileOutputStream(file).use { doc.writeTo(it) }
         doc.close()
@@ -101,5 +107,45 @@ object PdfExport {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         context.startActivity(Intent.createChooser(send, "分享 PDF"))
+        // Lazy cleanup residual: remove this PDF shortly after share so cache is not retained
+        // indefinitely when the user never exports again (ISS-020).
+        scheduleExportCleanup(context, file)
+    }
+
+    internal fun exportCacheDir(context: Context): File =
+        File(context.cacheDir, "export").apply { mkdirs() }
+
+    internal fun clearExportCache(dir: File) {
+        dir.listFiles()?.forEach { old -> runCatching { old.delete() } }
+    }
+
+    /**
+     * Only decode photos under the app-private record-media tree (canonical prefix).
+     * Blocks path-traversal payloads from embedding arbitrary readable files into the PDF.
+     */
+    internal fun isAllowedExportPhotoPath(context: Context, path: String): Boolean {
+        if (path.isBlank()) return false
+        return runCatching {
+            val allowedRoot = File(context.filesDir, "record-media").canonicalFile
+            isUnderCanonicalRoot(allowedRoot, File(path))
+        }.getOrDefault(false)
+    }
+
+    /** Pure path clamp used by unit tests and [isAllowedExportPhotoPath]. */
+    internal fun isUnderCanonicalRoot(allowedRoot: File, candidate: File): Boolean {
+        val root = allowedRoot.canonicalFile
+        val file = candidate.canonicalFile
+        return file.path == root.path || file.path.startsWith(root.path + File.separator)
+    }
+
+    private fun scheduleExportCleanup(context: Context, file: File) {
+        val appContext = context.applicationContext
+        Handler(Looper.getMainLooper()).postDelayed({
+            runCatching {
+                if (file.exists()) file.delete()
+                // Also sweep any other leftover export files under cache/export.
+                clearExportCache(exportCacheDir(appContext))
+            }
+        }, CLEANUP_DELAY_MS)
     }
 }

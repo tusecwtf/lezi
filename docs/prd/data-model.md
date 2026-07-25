@@ -254,6 +254,8 @@ enum class SyncStatus {
 
 ### 6.2 接口（契约级，语言示意）
 
+以 `sync/.../SyncPort.kt` 为准：
+
 ```text
 interface SyncPort {
   fun status(): Flow<SyncStatus>
@@ -269,10 +271,21 @@ interface SyncPort {
   suspend fun createFamily(displayName: String?): Result<SyncSession>
   suspend fun sync(trigger: SyncTrigger): Result<Unit>
 
+  /** 显式触发；内部走同一前台/门闩路径 */
+  suspend fun pull(familyId: String): Result<Unit>
+  suspend fun push(familyId: String): Result<Unit>
+
   suspend fun createInvite(familyId: String): Result<Invite>
+  /** 邀请码或完整载荷；返回 SyncSession（server family_id 为 UUID 字符串） */
+  suspend fun joinWithCode(code: String): Result<SyncSession>
   suspend fun joinWithPayload(payload: String): Result<SyncSession>
   suspend fun leave(familyId: String): Result<Unit>
   suspend fun deleteFamily(): Result<Unit>
+
+  /** 清本机记录副本 + 日志媒体/文件；保留会话 generation */
+  suspend fun clearLocalRecords(clearLocal: suspend () -> Unit): Result<Unit>
+  /** 全量 wipe（含 outbox/头像媒体），join 前用 */
+  suspend fun clearAllLocalData(clearLocal: suspend () -> Unit): Result<Unit>
 }
 ```
 

@@ -482,6 +482,90 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun clearAllLocalDataRemovesOutboxAllMediaAndFilesIncludingAvatars() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(
+                pullCursor = 11,
+                pullGeneration = "known-generation",
+            ),
+        )
+        val logUuid = "88888888-8888-8888-8888-888888888888"
+        val avatarUuid = "99999999-9999-9999-9999-999999999999"
+        val babyId = rig.babies.seed(
+            localBaby().copy(
+                avatarMediaUuid = avatarUuid,
+                avatarPath = "baby_avatars/stale.jpg",
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                clientUuid = logUuid,
+                kind = "log",
+                recordId = 1,
+                localUri = "photos/log.jpg",
+                createdAt = 1,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                clientUuid = avatarUuid,
+                kind = "avatar",
+                babyId = babyId,
+                localUri = "baby_avatars/stale.jpg",
+                createdAt = 1,
+            ),
+        )
+        rig.records.seed(
+            localRecord(babyId).copy(
+                payloadJson = """{"photos":["photos/inline.jpg"]}""",
+            ),
+        )
+        listOf(
+            OutboxEntity(
+                familyId = "family-a",
+                entityType = "record",
+                clientUuid = "record-local",
+                payloadJson = "{}",
+                updatedAt = 1,
+            ),
+            OutboxEntity(
+                familyId = "family-a",
+                entityType = "media",
+                clientUuid = avatarUuid,
+                payloadJson = "{}",
+                updatedAt = 1,
+            ),
+            OutboxEntity(
+                familyId = "family-b",
+                entityType = "baby",
+                clientUuid = "other-family-baby",
+                payloadJson = "{}",
+                updatedAt = 1,
+            ),
+        ).forEach { rig.outbox.enqueue(it) }
+
+        assertThat(
+            rig.port.clearAllLocalData {
+                rig.records.deleteAll()
+                rig.babies.deleteAll()
+            }.isSuccess,
+        ).isTrue()
+
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(0)
+        assertThat(rig.preferences.current().pullGeneration).isEmpty()
+        assertThat(rig.records.listAllIncludingDeleted()).isEmpty()
+        assertThat(rig.babies.listAllIncludingDeleted()).isEmpty()
+        assertThat(rig.media.listAllIncludingDeleted()).isEmpty()
+        assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
+        assertThat(rig.outbox.peek("family-b", 10)).isEmpty()
+        assertThat(rig.mediaFiles.deleted).containsExactly(
+            "photos/log.jpg",
+            "baby_avatars/stale.jpg",
+            "photos/inline.jpg",
+        )
+    }
+
+    @Test
     fun clearKeepsGenerationSoDirtyMemberRecoversBeforeWritingToRestoredServer() = runTest {
         val rig = SyncRig(
             session = joinedSession("family-a").copy(
@@ -1149,6 +1233,62 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun equalUpdatedAtKeepsLocalOnPullMatchingServerLww() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        val babyId = rig.babies.seed(
+            localBaby().copy(
+                clientUuid = "baby-remote",
+                nickname = "本地先到",
+                updatedAt = 200,
+                syncDirty = false,
+            ),
+        )
+        rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "record-remote",
+                payloadJson = """{"amount_ml":120}""",
+                updatedAt = 210,
+                syncDirty = false,
+            ),
+        )
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                remoteBaby().copy(
+                    payloadJson = """
+                        {
+                          "nickname":"远端同戳",
+                          "birthday":"2024-01-01",
+                          "sort_order":0
+                        }
+                    """.trimIndent(),
+                    updatedAt = 200,
+                ),
+                remoteRecord().copy(
+                    payloadJson = """
+                        {
+                          "baby_client_uuid":"baby-remote",
+                          "created_by_device_id":"device-b",
+                          "type":"formula",
+                          "timestamp":210,
+                          "payload_json":{"amount_ml":90},
+                          "schema_version":1
+                        }
+                    """.trimIndent(),
+                    updatedAt = 210,
+                ),
+            ),
+            cursor = 9,
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+
+        assertThat(rig.babies.getByClientUuid("baby-remote")?.nickname).isEqualTo("本地先到")
+        assertThat(rig.records.getByClientUuid("record-remote")?.payloadJson)
+            .isEqualTo("""{"amount_ml":120}""")
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(9)
+    }
+
+    @Test
     fun pullAdvancesCursorOnlyAfterAllReferencesApply() = runTest {
         val rig = SyncRig(
             session = joinedSession("family-a").copy(
@@ -1453,6 +1593,99 @@ class RealSyncPortTest {
         """.trimIndent(),
         updatedAt = 210,
     )
+
+    @Test
+    fun mediaGet404DoesNotBlockPullCursorAdvance() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val recordId = rig.records.seed(localRecord(babyId).copy(syncDirty = false))
+        val mediaUuid = "55555555-5555-5555-5555-555555555555"
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = mediaUuid,
+                kind = "log",
+                localUri = "",
+                remoteUri = mediaUuid,
+                mime = "image/jpeg",
+                byteSize = 12,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+        rig.backend.getMediaFailure = SyncHttpException(404, "not found")
+        rig.backend.nextPull = PullResult(
+            emptyList(),
+            cursor = 42,
+            generation = "gen-after-missing-media",
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(42)
+        assertThat(rig.preferences.current().pullGeneration)
+            .isEqualTo("gen-after-missing-media")
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.localUri).isEmpty()
+        assertThat(rig.media.listMissingLocalBytes().map(MediaAssetEntity::clientUuid))
+            .containsExactly(mediaUuid)
+    }
+
+    @Test
+    fun pullWithMultipleOpenSleepsKeepsOnlyLatestOpen() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        rig.babies.seed(localBaby().copy(syncDirty = false, clientUuid = "baby-remote"))
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "record",
+                    clientUuid = "sleep-old",
+                    payloadJson = """
+                        {
+                          "baby_client_uuid":"baby-remote",
+                          "created_by_device_id":"device-b",
+                          "type":"sleep",
+                          "timestamp":1000,
+                          "payload_json":{},
+                          "schema_version":2
+                        }
+                    """.trimIndent(),
+                    updatedAt = 1000,
+                ),
+                SyncEntity(
+                    type = "record",
+                    clientUuid = "sleep-new",
+                    payloadJson = """
+                        {
+                          "baby_client_uuid":"baby-remote",
+                          "created_by_device_id":"device-b",
+                          "type":"sleep",
+                          "timestamp":2000,
+                          "payload_json":{},
+                          "schema_version":2
+                        }
+                    """.trimIndent(),
+                    updatedAt = 2000,
+                ),
+            ),
+            cursor = 7,
+            generation = "gen-sleep",
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+
+        val babyId = requireNotNull(rig.babies.getByClientUuid("baby-remote")).id
+        val opens = rig.records.listOpenSleeps(babyId)
+        assertThat(opens).hasSize(1)
+        assertThat(opens.single().clientUuid).isEqualTo("sleep-new")
+        assertThat(opens.single().endTimestamp).isNull()
+
+        val old = requireNotNull(rig.records.getByClientUuid("sleep-old"))
+        assertThat(old.endTimestamp).isEqualTo(2000L)
+        assertThat(old.payloadJson).contains("\"anomaly_flag\":true")
+        assertThat(old.syncDirty).isTrue()
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(7)
+    }
 }
 
 private data class PushedBatch(
@@ -1481,6 +1714,7 @@ private class RecordingSyncBackend : SyncBackend {
     var rejectMemberAvatarPointers = false
     var beforeGetMediaReturn: (suspend () -> Unit)? = null
     var beforePullReturn: (suspend () -> Unit)? = null
+    var getMediaFailure: Throwable? = null
     val createRequestIds = mutableListOf<String>()
     var joinCalls = 0
     private val knownEntities = mutableSetOf<Pair<String, String>>()
@@ -1584,6 +1818,7 @@ private class RecordingSyncBackend : SyncBackend {
 
     override suspend fun getMedia(session: SyncSession, clientUuid: String): ByteArray {
         beforeGetMediaReturn?.also { beforeGetMediaReturn = null }?.invoke()
+        getMediaFailure?.let { throw it }
         return byteArrayOf(1)
     }
 }
@@ -1985,12 +2220,17 @@ private class MemoryRecordDao : RecordDao {
     }
 
     override suspend fun findOpenSleep(babyId: Long): RecordEntity? =
+        listOpenSleeps(babyId).firstOrNull()
+
+    override suspend fun listOpenSleeps(babyId: Long): List<RecordEntity> =
         rows.value.filter {
             it.babyId == babyId &&
                 it.type == "sleep" &&
                 it.deletedAt == null &&
                 it.endTimestamp == null
-        }.maxByOrNull(RecordEntity::timestamp)
+        }.sortedWith(
+            compareByDescending<RecordEntity> { it.timestamp }.thenByDescending { it.id },
+        )
 
     override fun observeOpenSleep(babyId: Long): Flow<RecordEntity?> =
         rows.map {
@@ -1999,7 +2239,9 @@ private class MemoryRecordDao : RecordDao {
                     record.type == "sleep" &&
                     record.deletedAt == null &&
                     record.endTimestamp == null
-            }.maxByOrNull(RecordEntity::timestamp)
+            }.maxWithOrNull(
+                compareBy<RecordEntity> { it.timestamp }.thenBy { it.id },
+            )
         }
 
     override suspend fun listForBaby(babyId: Long): List<RecordEntity> =

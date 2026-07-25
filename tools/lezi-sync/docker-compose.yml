@@ -1,39 +1,67 @@
+# Default: non-root (uid 10001) + host publish bound to loopback only.
+# Phones on the LAN should reach lezi-sync via a reverse proxy on the host
+# (Caddy/Nginx/Synology) or by overriding LEZI_SYNC_PUBLISH (see README).
+#
+# NAS bind mounts that cannot chown to 10001: use the isolated root profile:
+#   docker compose --profile nas-root up -d lezi-sync-nas-root
+# Do not run both services against the same data directory.
+
+x-lezi-sync-common: &lezi-sync-common
+  image: ${LEZI_SYNC_IMAGE:-lezi-sync:0.2.3}
+  build:
+    context: .
+    dockerfile: Dockerfile
+    args:
+      LEZI_SYNC_VERSION: ${LEZI_SYNC_VERSION:-0.2.3}
+  restart: unless-stopped
+  stop_grace_period: 30s
+  init: true
+  environment: &lezi-sync-env
+    LEZI_DATA_DIR: /data
+    LEZI_HOST: "0.0.0.0"
+    LEZI_PORT: "8765"
+    LEZI_INVITE_TTL_HOURS: ${LEZI_INVITE_TTL_HOURS:-24}
+    LEZI_MAX_MEDIA_BYTES: ${LEZI_MAX_MEDIA_BYTES:-10485760}
+    # Production: set a long random value. Empty keeps /v1/family/create open
+    # until the first family exists (dev/compat only; documented fail-closed).
+    LEZI_BOOTSTRAP_SECRET: ${LEZI_BOOTSTRAP_SECRET:-}
+  volumes:
+    - ${LEZI_DATA_HOST_PATH:-./data}:/data
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+  healthcheck:
+    test: ["CMD", "lezi-sync", "healthcheck"]
+    interval: 30s
+    timeout: 3s
+    retries: 3
+    start_period: 5s
+
 services:
   lezi-sync:
-    image: ${LEZI_SYNC_IMAGE:-lezi-sync:0.2.2}
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        LEZI_SYNC_VERSION: ${LEZI_SYNC_VERSION:-0.2.2}
-    restart: unless-stopped
-    stop_grace_period: 30s
-    init: true
+    <<: *lezi-sync-common
+    user: "10001:10001"
+    # Host-side bind defaults to loopback. Override, e.g.:
+    #   LEZI_SYNC_PUBLISH=0.0.0.0:8765  (or a LAN IP) for direct phone access.
     ports:
-      - "${LEZI_SYNC_PORT:-8765}:8765"
-    environment:
-      LEZI_DATA_DIR: /data
-      LEZI_HOST: "0.0.0.0"
-      LEZI_PORT: "8765"
-      LEZI_INVITE_TTL_HOURS: ${LEZI_INVITE_TTL_HOURS:-24}
-      LEZI_MAX_MEDIA_BYTES: ${LEZI_MAX_MEDIA_BYTES:-10485760}
-    volumes:
-      - ${LEZI_DATA_HOST_PATH:-./data}:/data
+      - "${LEZI_SYNC_PUBLISH:-127.0.0.1:8765}:8765"
+    cap_drop:
+      - ALL
+
+  # Optional root profile for NAS volumes that refuse non-root ownership.
+  # Explicitly opt-in; not the default security baseline.
+  lezi-sync-nas-root:
+    <<: *lezi-sync-common
+    profiles: ["nas-root"]
+    user: "0:0"
+    ports:
+      - "${LEZI_SYNC_PUBLISH:-127.0.0.1:8765}:8765"
     cap_drop:
       - ALL
     cap_add:
       - DAC_OVERRIDE
       - FOWNER
-    security_opt:
-      - no-new-privileges:true
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    healthcheck:
-      test: ["CMD", "lezi-sync", "healthcheck"]
-      interval: 30s
-      timeout: 3s
-      retries: 3
-      start_period: 5s

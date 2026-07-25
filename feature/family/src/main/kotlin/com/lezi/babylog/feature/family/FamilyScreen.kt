@@ -1,6 +1,10 @@
 package com.lezi.babylog.feature.family
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.net.Uri
+import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -31,6 +35,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -40,12 +45,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
+import com.lezi.babylog.core.common.looksTechnicalDetail
+import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.core.ui.BabyAvatar
@@ -67,7 +75,9 @@ import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.sync.InvitePayload
 import com.lezi.babylog.sync.InvitePayloadCodec
+import com.lezi.babylog.sync.PUBLIC_CLEARTEXT_WARNING
 import com.lezi.babylog.sync.SyncTrigger
+import com.lezi.babylog.sync.isPublicCleartextBaseUrl
 import com.google.zxing.BarcodeFormat
 import com.journeyapps.barcodescanner.BarcodeEncoder
 import com.journeyapps.barcodescanner.ScanContract
@@ -302,7 +312,7 @@ class FamilyViewModel @Inject constructor(
             onMessage(
                 result.fold(
                     onSuccess = {
-                        "已加入家庭 ${it.familyId}"
+                        "已加入家庭"
                     },
                     onFailure = {
                         familySyncError(it, fallback = "加入家庭失败，请稍后重试")
@@ -366,22 +376,34 @@ class FamilyViewModel @Inject constructor(
 }
 
 internal fun familySyncError(error: Throwable, fallback: String): String {
-    val message = error.message.orEmpty()
-    val technicalNetworkDetail = listOf(
-        "http://",
-        "https://",
-        "failed to connect",
-        "connection refused",
-        "java.",
-        "exception",
-    ).any { marker -> message.contains(marker, ignoreCase = true) } ||
-        Regex("""/?\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?""").containsMatchIn(message)
-    return when {
-        error is SyncNotEnabledException -> "请先填写家庭服务器地址并加入家庭"
-        technicalNetworkDetail -> "家庭同步服务暂未连接，请稍后重试"
-        message.any { it.code in 0x4E00..0x9FFF } -> message
-        else -> fallback
+    if (error is SyncNotEnabledException) {
+        return "请先填写家庭服务器地址并加入家庭"
     }
+    val message = error.message.orEmpty()
+    // Network/host/path leaks always collapse to a fixed product line.
+    if (looksTechnicalDetail(message)) {
+        return "家庭同步服务暂未连接，请稍后重试"
+    }
+    return productUiError(error, fallback)
+}
+
+/** Apply FLAG_SECURE for the lifetime of the current composition (invite QR). */
+@Composable
+private fun SecureWindowWhileVisible() {
+    val view = LocalView.current
+    DisposableEffect(Unit) {
+        val window = view.context.findActivity()?.window
+        window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        onDispose {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+    }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }
 
 internal fun syncStatusLabel(status: SyncStatus): String = when (status) {
@@ -611,6 +633,13 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
+                if (isPublicCleartextBaseUrl(serverAddress)) {
+                    Text(
+                        PUBLIC_CLEARTEXT_WARNING,
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
                 LeziSecondaryButton(
                     "保存服务器地址",
                     onClick = { vm.saveServer(serverAddress) { message = it } },
@@ -721,6 +750,9 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
     }
 
     inviteView?.let { invite ->
+        // Block screenshots/recents while the invite QR/code is on screen (ISS-021).
+        SecureWindowWhileVisible()
+        var showPayload by remember(invite.code) { mutableStateOf(false) }
         val qrBitmap = remember(invite.payload) {
             BarcodeEncoder()
                 .encodeBitmap(invite.payload, BarcodeFormat.QR_CODE, 640, 640)
@@ -734,6 +766,11 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
                 ) {
+                    Text(
+                        "请勿在公共场合展示；截屏与录屏已暂时禁用。",
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     Image(
                         bitmap = qrBitmap,
                         contentDescription = "家庭邀请二维码",
@@ -744,12 +781,17 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                             java.text.DateFormat.getDateTimeInstance().format(invite.expiresAt),
                         style = LeziTypography.BodyStrong,
                     )
-                    SelectionContainer {
-                        Text(
-                            invite.payload,
-                            style = LeziTypography.Meta,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                    TextButton(onClick = { showPayload = !showPayload }) {
+                        Text(if (showPayload) "隐藏完整载荷" else "显示完整载荷（含服务器地址）")
+                    }
+                    if (showPayload) {
+                        SelectionContainer {
+                            Text(
+                                invite.payload,
+                                style = LeziTypography.Meta,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
                 }
             },

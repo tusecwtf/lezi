@@ -1,7 +1,7 @@
 # 乐记 — 产品 PRD
 
 > **个人/家庭使用** · Android · 无商业化
-> 决策日：2026-07-25 · 当前发布：**0.2.0-offline-v2-beta**
+> 决策日：2026-07-25 · 当前发布：**0.2.3**
 > 需求参考调研：`docs/research/`（只读归档）
 
 | 项 | 内容 |
@@ -13,9 +13,13 @@
 | 商业 | **无**广告 / 会员 / IAP / 付费主题墙 |
 | 数据 | **V1 纯本地**；模型与 UI 按家庭设计；同步见 [`data-model.md`](./data-model.md) 与 [`sync-home-lan.md`](./sync-home-lan.md) |
 
-当前版本名仍为 **Offline V2 Beta**。家庭局域网同步的 Android 与服务端实现
-及自动化测试已完成，但 Docker 镜像运行、NAS 实机和双设备前台路径尚未在
-当前环境验收；因此不将其表述为已部署或已通过双机交付。
+当前版本 **0.2.3**（`versionName` 不再含 `offline`）。家庭局域网同步的
+Android 与服务端实现、自动化测试、**本机 Docker 运行**与**双模拟器前台
+formula/pee 交叉可见**路径已有支撑验收（见
+[`docs/reviews/home-lan-sync-docker-acceptance-2026-07-25/`](../reviews/home-lan-sync-docker-acceptance-2026-07-25/)
+与 [`docs/reviews/device-family-dual-emu-09/`](../reviews/device-family-dual-emu-09/)）。
+**物理 NAS / 双真机 / 相机扫码 / 蜂窝门闩硬件**仍待目标环境执行，故不宣称
+已生产部署。
 
 **子文档**
 
@@ -25,7 +29,8 @@
 | [data-model.md](./data-model.md) | 实体、字段、本地优先、SyncPort 契约 |
 | [sync-home-lan.md](./sync-home-lan.md) | **V2 家庭局域网同步**：门闩、前台策略、NAS Docker（`lezi-sync`） |
 | [tech.md](./tech.md) | Android 技术栈、模块、权限、验收 |
-| [prototype-v1/](./prototype-v1/) | **可丢弃**竖版网页原型（V1 全表面交互） |
+| [prototype/](../../prototype/) | **可丢弃**竖版网页原型（V1 全表面交互；仓根 `prototype/`） |
+| [design/template-v2/](../../design/template-v2/) | 设计模板 v2（画风/组件参考） |
 | [assets-notes.md](./assets-notes.md) | 排泄图标资源约定（尿尿量档 / 便便分档） |
 | [visual-refs/](./visual-refs/) | PiyoLog 公开界面视觉参考（截图/图表；设计对照，非发货资源） |
 
@@ -52,7 +57,7 @@
 | 日视图 | 时间轴、日汇总、一日时间条、日历跳日、图标显隐排序 |
 | 提醒 | 下次喂奶提醒（本机） |
 | 宝宝 | 多宝宝、每宝宝主题色、日龄 |
-| 家庭 UI | 账户/共享入口（V1 Stub，V2 真同步） |
+| 家庭 UI | 账户/共享入口（默认 RealSync；邀请码 / 同步状态 / 家网门闩） |
 | 汇总 | 周图（喂养/睡眠/排泄/体温） |
 | 成长 | 身长体重等 + 百分位曲线（可插拔数据源） |
 | 其它 | 搜索、TXT/PDF 导出、桌面小组件、深色模式、自定义项目 |
@@ -227,8 +232,8 @@
 
 | 阶段 | 行为 |
 |------|------|
-| **V1** | 引导可选「创建家庭」或「加入家庭」；发码/扫码 UI 存在；**SyncPort 为空实现**；文案说明「同步即将支持」；本机完整可用 |
-| **V2** | **家庭局域网中心化**：自建 NAS Docker `lezi-sync`；**仅家 Wi‑Fi + NAS 可达**；**仅前台**同步（回前台 / 下拉 / 写成功 push）；邀请码 + family token；同步 **Baby + Record + 日志媒体**（头像仅管理员可改） |
+| **历史 V1 Stub** | 曾用空 `SyncPort` +「同步即将支持」文案；**不再是默认交付** |
+| **现行 V2（默认 DI）** | **家庭局域网中心化**：自建 NAS Docker `lezi-sync`；**仅家 Wi‑Fi + NAS 可达**；**仅前台**同步（回前台 / 下拉 / 写成功 push）；邀请码 + family token；同步 **Baby + Record + 日志媒体**（头像仅管理员可改）；`RealSyncPort` 为默认绑定 |
 | 本机独立 | 主题、图标排序、暗色、下次喂奶提醒、时间制等 **不同步** |
 | 不做 | 部分字段共享、伴侣推送/即时通知同步、后台轮询同步、P2P 主路径、奶库、公网强制云 |
 
@@ -246,8 +251,9 @@
 | 深色模式 | V1 |
 | 多宝宝切换（点昵称 / 长按 Tab） | V1 |
 
-Widget 每个实例独立保存 `widgetId`、绑定 `babyId` 和快捷记录类型；展示最近喂养、
-睡眠、排泄摘要。快捷入口只打开对应 Composer，必须由用户确认后写入。
+Widget 每个实例独立保存 `widgetId`、绑定 `babyId` 和快捷记录类型；**有意展示**
+最近喂养、睡眠、排泄摘要与宝宝昵称（仅 `home_screen` 类别，非锁屏）。
+肩窥残差为家用场景接受风险；快捷入口只打开对应 Composer，必须由用户确认后写入。
 
 ---
 
@@ -256,13 +262,13 @@ Widget 每个实例独立保存 `widgetId`、绑定 `babyId` 和快捷记录类�
 ```text
 启动
  ├─ 开始（新建宝宝）→ 昵称/性别/生日 → 主题色 → 记录
- └─ 加入家庭（V1 Stub / V2 真同步）
+ └─ 加入家庭（真同步：粘贴/扫邀请载荷）
 
 底部导航
  ├─ 记录      （主路径）
- ├─ 汇总      （V1.5；V1 可占位）
- ├─ 成长曲线  （V1.5；V1 可占位）
- ├─ 账户      （家庭/共享 Stub）
+ ├─ 汇总      （已交付）
+ ├─ 成长曲线  （已交付）
+ ├─ 账户      （家庭/共享 · RealSync）
  └─ 菜单      （设置、导出、宝宝管理、关于）
 ```
 
@@ -292,17 +298,19 @@ Widget 每个实例独立保存 `widgetId`、绑定 `babyId` 和快捷记录类�
 
 ### 6.2 V1.5
 
-- [ ] 周汇总四类图
-- [ ] 身长体重 + 至少一套曲线
-- [ ] 搜索、TXT 导出、Widget
+- [x] 周汇总四类图（本机已交付；设备级 residual 另记）
+- [x] 身长体重 + 至少一套曲线（WHO 0–24 月内置）
+- [x] 搜索、TXT 导出、Widget
 
 ### 6.3 V2
 
 - [x] Android `SyncPort`、家网门闩、前台触发、Outbox、媒体与家庭 UI 实现
 - [x] NAS `tools/lezi-sync` API、SQLite、Docker/Compose 单数据根配置与自动化测试
-- [ ] 在 Docker/Podman 环境实际构建并启动镜像
-- [ ] **家局域网 NAS** 双设备前台验收（见 [sync-home-lan.md](./sync-home-lan.md) §5.4）
-- [ ] PDF、自定义项目、辅食类、扩展测量、疫苗手记、日程
+- [x] 本机 Docker 镜像构建与运行（见 reviews `home-lan-sync-docker-acceptance`）
+- [x] 双模拟器前台 formula/pee 交叉可见（见 reviews `device-family-dual-emu-09`）
+- [ ] **物理 NAS / 双真机 / 相机扫码** 目标环境验收（见 [sync-home-lan.md](./sync-home-lan.md) §5.4）
+- [x] **本机** PDF、自定义项目、辅食类、扩展测量、疫苗手记、日程
+- [ ] CustomItem / CalendarEvent **出站家庭同步**（本机功能已有；同步域后置）
 
 ### 6.4 APK 交付
 

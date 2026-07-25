@@ -1,6 +1,6 @@
 [package]
 name = "lezi-sync"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 description = "Lezi family home-LAN sync server for NAS"
 license = "MIT"

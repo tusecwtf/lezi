@@ -1,6 +1,8 @@
 package com.lezi.babylog.sync
 
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
 import com.google.common.truth.Truth.assertThat
 import java.io.File
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -15,12 +17,18 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class SyncPreferencesTest {
+    private fun preferences(
+        store: androidx.datastore.core.DataStore<androidx.datastore.preferences.core.Preferences>,
+        tokens: SecureFamilyTokenStore = InMemorySecureFamilyTokenStore(),
+    ) = DataStoreSyncPreferences(store, tokens)
+
     @Test
     fun sessionAndCursorSurviveStoreRecreation() = runTest {
         val file = File.createTempFile("lezi-sync-", ".preferences_pb").also { it.delete() }
+        val tokens = InMemorySecureFamilyTokenStore()
         val firstScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
         val firstStore = PreferenceDataStoreFactory.create(scope = firstScope) { file }
-        val first = DataStoreSyncPreferences(firstStore)
+        val first = preferences(firstStore, tokens)
         first.saveSession(
             SyncSession(
                 baseUrl = "http://nas:8765",
@@ -37,20 +45,72 @@ class SyncPreferencesTest {
 
         val secondScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
         val secondStore = PreferenceDataStoreFactory.create(scope = secondScope) { file }
-        val restored = DataStoreSyncPreferences(secondStore)
+        // Same secure store process-local mock stands in for Keystore-wrapped prefs
+        // that would also survive process recreation on device.
+        val restored = preferences(secondStore, tokens)
 
         assertThat(restored.session.first().pullCursor).isEqualTo(41)
         assertThat(restored.session.first().pullGeneration).isEqualTo("server-generation")
         assertThat(restored.session.first().familyToken).isEqualTo("secret-token")
+        assertThat(tokens.getToken()).isEqualTo("secret-token")
         secondScope.cancel()
+        file.delete()
+    }
+
+    @Test
+    fun familyTokenIsNotWrittenToPlaintextDataStore() = runTest {
+        val file = File.createTempFile("lezi-sync-", ".preferences_pb").also { it.delete() }
+        val tokens = InMemorySecureFamilyTokenStore()
+        val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
+        val preferences = preferences(store, tokens)
+        preferences.saveSession(
+            SyncSession(
+                baseUrl = "http://nas:8765",
+                familyId = "family",
+                familyToken = "secret-token",
+                deviceId = "device",
+                role = FamilyRole.Owner,
+            ),
+        )
+
+        val raw = store.data.first()
+        assertThat(raw[stringPreferencesKey("sync_family_token")]).isNull()
+        assertThat(tokens.getToken()).isEqualTo("secret-token")
+        assertThat(preferences.session.first().familyToken).isEqualTo("secret-token")
+        file.delete()
+    }
+
+    @Test
+    fun migratesLegacyPlaintextFamilyTokenIntoSecureStore() = runTest {
+        val file = File.createTempFile("lezi-sync-", ".preferences_pb").also { it.delete() }
+        val tokens = InMemorySecureFamilyTokenStore()
+        val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
+        store.edit { prefs ->
+            prefs[stringPreferencesKey("sync_base_url")] = "http://nas:8765"
+            prefs[stringPreferencesKey("sync_family_id")] = "family"
+            prefs[stringPreferencesKey("sync_family_token")] = "legacy-plaintext-token"
+            prefs[stringPreferencesKey("sync_device_id")] = "device"
+            prefs[stringPreferencesKey("sync_family_role")] = FamilyRole.Owner.name
+        }
+
+        val preferences = preferences(store, tokens)
+        // Readable immediately from legacy key before migration runs.
+        assertThat(preferences.session.first().familyToken).isEqualTo("legacy-plaintext-token")
+
+        preferences.migratePlaintextTokenIfPresent()
+
+        assertThat(tokens.getToken()).isEqualTo("legacy-plaintext-token")
+        assertThat(store.data.first()[stringPreferencesKey("sync_family_token")]).isNull()
+        assertThat(preferences.session.first().familyToken).isEqualTo("legacy-plaintext-token")
         file.delete()
     }
 
     @Test
     fun clearingFamilyKeepsConfiguredServer() = runTest {
         val file = File.createTempFile("lezi-sync-", ".preferences_pb").also { it.delete() }
+        val tokens = InMemorySecureFamilyTokenStore()
         val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
-        val preferences = DataStoreSyncPreferences(store)
+        val preferences = preferences(store, tokens)
         preferences.saveSession(
             SyncSession(
                 baseUrl = "http://nas:8765",
@@ -65,13 +125,15 @@ class SyncPreferencesTest {
 
         assertThat(preferences.session.first().baseUrl).isEqualTo("http://nas:8765")
         assertThat(preferences.session.first().familyToken).isEmpty()
+        assertThat(tokens.getToken()).isEmpty()
     }
 
     @Test
     fun changingServerAtomicallyDropsCredentialsAndCursor() = runTest {
         val file = File.createTempFile("lezi-sync-", ".preferences_pb").also { it.delete() }
+        val tokens = InMemorySecureFamilyTokenStore()
         val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
-        val preferences = DataStoreSyncPreferences(store)
+        val preferences = preferences(store, tokens)
         preferences.saveSession(
             SyncSession(
                 baseUrl = "http://old-nas:8765",
@@ -93,13 +155,14 @@ class SyncPreferencesTest {
                 deviceId = "stable-device",
             ),
         )
+        assertThat(tokens.getToken()).isEmpty()
     }
 
     @Test
     fun replacingSessionDoesNotLeakPreviousFamiliesSuccessTime() = runTest {
         val file = File.createTempFile("lezi-sync-", ".preferences_pb").also { it.delete() }
         val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
-        val preferences = DataStoreSyncPreferences(store)
+        val preferences = preferences(store)
         preferences.saveSession(
             SyncSession(
                 baseUrl = "http://old-nas:8765",
@@ -126,6 +189,7 @@ class SyncPreferencesTest {
         assertThat(preferences.session.first().lastSuccessAt).isNull()
         assertThat(preferences.session.first().pullCursor).isEqualTo(0)
         assertThat(preferences.session.first().pullGeneration).isEmpty()
+        assertThat(preferences.session.first().familyToken).isEqualTo("new-token")
     }
 
     @Test
@@ -133,7 +197,7 @@ class SyncPreferencesTest {
         val file = File.createTempFile("lezi-sync-", ".preferences_pb").also { it.delete() }
         val firstScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
         val firstStore = PreferenceDataStoreFactory.create(scope = firstScope) { file }
-        val first = DataStoreSyncPreferences(firstStore)
+        val first = preferences(firstStore)
         val requestId = first.ensureCreateRequestId()
         assertThat(first.ensureCreateRequestId()).isEqualTo(requestId)
         firstScope.cancel()
@@ -141,7 +205,7 @@ class SyncPreferencesTest {
 
         val secondScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
         val secondStore = PreferenceDataStoreFactory.create(scope = secondScope) { file }
-        val restored = DataStoreSyncPreferences(secondStore)
+        val restored = preferences(secondStore)
         assertThat(restored.ensureCreateRequestId()).isEqualTo(requestId)
 
         restored.clearCreateRequestId()

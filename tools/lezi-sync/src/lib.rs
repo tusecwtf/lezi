@@ -1,20 +1,20 @@
 mod model;
 mod store;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, Request, State};
 use axum::http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, WWW_AUTHENTICATE};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -37,12 +37,31 @@ use uuid::Uuid;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const DEFAULT_INVITE_TTL_HOURS: u16 = 24;
 pub const DEFAULT_MAX_MEDIA_BYTES: usize = 10 * 1024 * 1024;
+pub const DEFAULT_CREATE_RATE_LIMIT: u32 = 20;
+pub const DEFAULT_JOIN_RATE_LIMIT: u32 = 60;
+pub const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: i64 = 60;
+const BOOTSTRAP_SECRET_HEADER: HeaderName = HeaderName::from_static("x-lezi-bootstrap-secret");
 
 #[cfg(unix)]
 static PERMISSION_HARDENING_DISABLED: AtomicBool = AtomicBool::new(false);
 
 type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 type InviteCodeFactory = Arc<dyn Fn() -> String + Send + Sync>;
+
+#[derive(Clone, Debug)]
+pub struct RateLimitConfig {
+    pub max_attempts: u32,
+    pub window_seconds: i64,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: DEFAULT_CREATE_RATE_LIMIT,
+            window_seconds: DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct ServerConfig {
@@ -52,6 +71,12 @@ pub struct ServerConfig {
     pub invite_ttl_hours: u16,
     pub server_secret: Option<Vec<u8>>,
     pub generation: Option<String>,
+    /// When set (non-empty), POST /v1/family/create requires matching
+    /// `X-Lezi-Bootstrap-Secret`. Empty/None keeps create open for Android
+    /// wire compatibility; production docs require setting this fail-closed.
+    pub bootstrap_secret: Option<String>,
+    pub create_rate_limit: RateLimitConfig,
+    pub join_rate_limit: RateLimitConfig,
     clock: Clock,
     invite_code_factory: InviteCodeFactory,
 }
@@ -65,6 +90,15 @@ impl ServerConfig {
             invite_ttl_hours: DEFAULT_INVITE_TTL_HOURS,
             server_secret: None,
             generation: None,
+            bootstrap_secret: None,
+            create_rate_limit: RateLimitConfig {
+                max_attempts: DEFAULT_CREATE_RATE_LIMIT,
+                window_seconds: DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+            },
+            join_rate_limit: RateLimitConfig {
+                max_attempts: DEFAULT_JOIN_RATE_LIMIT,
+                window_seconds: DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+            },
             clock: Arc::new(system_epoch_seconds),
             invite_code_factory: Arc::new(secure_invite_code),
         }
@@ -79,6 +113,21 @@ impl ServerConfig {
         config.version = std::env::var("LEZI_SYNC_VERSION").unwrap_or_else(|_| VERSION.to_owned());
         config.max_media_bytes = parse_env("LEZI_MAX_MEDIA_BYTES", DEFAULT_MAX_MEDIA_BYTES)?;
         config.invite_ttl_hours = parse_env("LEZI_INVITE_TTL_HOURS", DEFAULT_INVITE_TTL_HOURS)?;
+        config.bootstrap_secret = match std::env::var("LEZI_BOOTSTRAP_SECRET") {
+            Ok(value) if !value.is_empty() => Some(value),
+            Ok(_) | Err(std::env::VarError::NotPresent) => None,
+            Err(error) => return Err(format!("LEZI_BOOTSTRAP_SECRET: {error}")),
+        };
+        config.create_rate_limit.max_attempts =
+            parse_env("LEZI_CREATE_RATE_LIMIT", DEFAULT_CREATE_RATE_LIMIT)?;
+        config.join_rate_limit.max_attempts =
+            parse_env("LEZI_JOIN_RATE_LIMIT", DEFAULT_JOIN_RATE_LIMIT)?;
+        let window = parse_env(
+            "LEZI_RATE_LIMIT_WINDOW_SECONDS",
+            DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+        )?;
+        config.create_rate_limit.window_seconds = window;
+        config.join_rate_limit.window_seconds = window;
         config.validate()?;
         Ok(config)
     }
@@ -103,7 +152,54 @@ impl ServerConfig {
         if self.max_media_bytes == 0 {
             return Err("LEZI_MAX_MEDIA_BYTES must be greater than zero".to_owned());
         }
+        if self.create_rate_limit.max_attempts == 0 || self.join_rate_limit.max_attempts == 0 {
+            return Err("rate limit max_attempts must be greater than zero".to_owned());
+        }
+        if self.create_rate_limit.window_seconds <= 0 || self.join_rate_limit.window_seconds <= 0 {
+            return Err("LEZI_RATE_LIMIT_WINDOW_SECONDS must be greater than zero".to_owned());
+        }
+        if self
+            .bootstrap_secret
+            .as_ref()
+            .is_some_and(|secret| secret.len() < 16)
+        {
+            return Err("LEZI_BOOTSTRAP_SECRET must be at least 16 characters when set".to_owned());
+        }
         Ok(())
+    }
+}
+
+struct RateLimiter {
+    max_attempts: u32,
+    window_seconds: i64,
+    windows: StdMutex<HashMap<String, VecDeque<i64>>>,
+}
+
+impl RateLimiter {
+    fn new(config: RateLimitConfig) -> Self {
+        Self {
+            max_attempts: config.max_attempts,
+            window_seconds: config.window_seconds,
+            windows: StdMutex::new(HashMap::new()),
+        }
+    }
+
+    fn check_and_record(&self, key: &str, now: i64) -> bool {
+        let Ok(mut windows) = self.windows.lock() else {
+            return false;
+        };
+        let queue = windows.entry(key.to_owned()).or_default();
+        while queue
+            .front()
+            .is_some_and(|timestamp| now - *timestamp >= self.window_seconds)
+        {
+            queue.pop_front();
+        }
+        if queue.len() as u32 >= self.max_attempts {
+            return false;
+        }
+        queue.push_back(now);
+        true
     }
 }
 
@@ -119,6 +215,9 @@ struct AppState {
     clock: Clock,
     invite_code_factory: InviteCodeFactory,
     family_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    bootstrap_secret: Option<Arc<str>>,
+    create_limiter: Arc<RateLimiter>,
+    join_limiter: Arc<RateLimiter>,
 }
 
 impl AppState {
@@ -186,6 +285,12 @@ pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
         }
         None => load_or_create_server_secret(&config.data_dir)?,
     };
+    let bootstrap_secret = config.bootstrap_secret.filter(|value| !value.is_empty());
+    if bootstrap_secret.is_none() {
+        tracing::warn!(
+            "LEZI_BOOTSTRAP_SECRET is unset; POST /v1/family/create is open to the LAN until a family exists (set a secret for production)"
+        );
+    }
     let state = AppState {
         store: Store::open(config.data_dir.join("lezi.db"))?,
         media_root,
@@ -197,6 +302,9 @@ pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
         clock: config.clock,
         invite_code_factory: config.invite_code_factory,
         family_locks: Arc::new(Mutex::new(HashMap::new())),
+        bootstrap_secret: bootstrap_secret.map(|value| Arc::from(value.into_boxed_str())),
+        create_limiter: Arc::new(RateLimiter::new(config.create_rate_limit)),
+        join_limiter: Arc::new(RateLimiter::new(config.join_rate_limit)),
     };
     let body_limit = state.max_media_bytes.max(16 * 1024 * 1024);
     Ok(Router::new()
@@ -220,8 +328,18 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
 
 async fn create_family(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     body: Result<Json<FamilyCreateRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if !state
+        .create_limiter
+        .check_and_record("family_create", state.now())
+    {
+        return Err(ApiError::too_many_requests(
+            "Too many family create attempts; try again later",
+        ));
+    }
+    require_bootstrap_secret(&state, &headers)?;
     let request = json_body(body)?;
     request.validate()?;
     let signing_state = state.clone();
@@ -289,6 +407,11 @@ async fn join(
     State(state): State<Arc<AppState>>,
     body: Result<Json<JoinRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
+    if !state.join_limiter.check_and_record("family_join", state.now()) {
+        return Err(ApiError::too_many_requests(
+            "Too many join attempts; try again later",
+        ));
+    }
     let request = json_body(body)?;
     request.validate()?;
     let signing_state = state.clone();
@@ -440,6 +563,12 @@ async fn pull_entities(
         }
         Err(error) => return Err(error.into()),
     };
+    // Incomplete media (metadata without bytes) is omitted so clients can advance
+    // the pull cursor without GET /media 404 loops. Successful PUT republishes.
+    let entities = entities
+        .into_iter()
+        .filter(|entity| media_entity_is_pullable(state.as_ref(), &principal.family_id, entity))
+        .collect::<Vec<_>>();
     Ok(Json(json!({
         "entities": entities,
         "cursor": cursor,
@@ -483,11 +612,19 @@ async fn put_media(
         content.extend_from_slice(&chunk);
     }
     let path = state.media_path(&principal.family_id, client_uuid)?;
+    let was_missing = !path.is_file();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
         secure_directory(parent)?;
     }
     write_private_file(&path, &content)?;
+    if was_missing {
+        // Metadata may already have been pulled and skipped; bump rev so peers
+        // observe the media once bytes are durable.
+        state
+            .store
+            .republish_media(&principal.family_id, &client_uuid.to_string())?;
+    }
     Ok(Json(json!({"ok": true, "size": content.len()})))
 }
 
@@ -530,6 +667,49 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Principal, ApiE
         .store
         .authenticate(token)?
         .ok_or_else(ApiError::unauthorized)
+}
+
+fn require_bootstrap_secret(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let Some(expected) = state.bootstrap_secret.as_deref() else {
+        return Ok(());
+    };
+    let provided = headers
+        .get(BOOTSTRAP_SECRET_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
+        return Err(ApiError::unauthorized_detail(
+            "Bootstrap secret required or invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right.iter())
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+        == 0
+}
+
+fn media_entity_is_pullable(
+    state: &AppState,
+    family_id: &str,
+    entity: &store::PulledEntity,
+) -> bool {
+    if entity.entity_type != "media" || entity.deleted_at.is_some() {
+        return true;
+    }
+    let Ok(client_uuid) = Uuid::parse_str(&entity.client_uuid) else {
+        return false;
+    };
+    match state.media_path(family_id, client_uuid) {
+        Ok(path) => path.is_file(),
+        Err(_) => false,
+    }
 }
 
 fn require_owner(state: &AppState, headers: &HeaderMap) -> Result<Principal, ApiError> {
@@ -638,18 +818,38 @@ fn set_mode(path: &Path, mode: u32) -> Result<(), std::io::Error> {
     match fs::set_permissions(path, fs::Permissions::from_mode(mode)) {
         Ok(()) => Ok(()),
         Err(error) if is_compatible_permission_hardening_error(&error) => {
-            if !PERMISSION_HARDENING_DISABLED.swap(true, Ordering::AcqRel) {
-                tracing::warn!(
+            // Fail-closed by default (ISS-022 / F-D-11). NAS filesystems that
+            // cannot chmod must opt in via LEZI_ALLOW_PERMISSION_HARDENING_SKIP=1.
+            if permission_hardening_skip_allowed() {
+                if !PERMISSION_HARDENING_DISABLED.swap(true, Ordering::AcqRel) {
+                    tracing::warn!(
+                        path = %path.display(),
+                        requested_mode = format_args!("{mode:o}"),
+                        %error,
+                        "filesystem does not allow chmod; continuing with NAS-managed permissions (LEZI_ALLOW_PERMISSION_HARDENING_SKIP=1)"
+                    );
+                }
+                Ok(())
+            } else {
+                tracing::error!(
                     path = %path.display(),
                     requested_mode = format_args!("{mode:o}"),
                     %error,
-                    "filesystem does not allow chmod; continuing with NAS-managed permissions"
+                    "filesystem does not allow chmod; set LEZI_ALLOW_PERMISSION_HARDENING_SKIP=1 to continue with NAS-managed permissions"
                 );
+                Err(error)
             }
-            Ok(())
         }
         Err(error) => Err(error),
     }
+}
+
+#[cfg(unix)]
+fn permission_hardening_skip_allowed() -> bool {
+    matches!(
+        std::env::var("LEZI_ALLOW_PERMISSION_HARDENING_SKIP").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+    )
 }
 
 #[cfg(unix)]
@@ -721,8 +921,20 @@ impl ApiError {
         }
     }
 
+    fn unauthorized_detail(detail: impl Into<Value>) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            detail: detail.into(),
+            authenticate: false,
+        }
+    }
+
     fn forbidden(detail: impl Into<Value>) -> Self {
         Self::new(StatusCode::FORBIDDEN, detail)
+    }
+
+    fn too_many_requests(detail: impl Into<Value>) -> Self {
+        Self::new(StatusCode::TOO_MANY_REQUESTS, detail)
     }
 
     fn not_found(detail: impl Into<Value>) -> Self {
@@ -801,6 +1013,20 @@ mod tests {
         config.invite_ttl_hours = 24;
         config.max_media_bytes = 0;
         assert!(config.validate().is_err());
+        config.max_media_bytes = DEFAULT_MAX_MEDIA_BYTES;
+        config.bootstrap_secret = Some("short".to_owned());
+        assert!(config.validate().is_err());
+        config.bootstrap_secret = Some("sixteen-chars!!!!".to_owned());
+        assert!(config.validate().is_ok());
+        config.create_rate_limit.max_attempts = 0;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_mismatched_secrets() {
+        assert!(constant_time_eq(b"same-secret-value", b"same-secret-value"));
+        assert!(!constant_time_eq(b"same-secret-value", b"other-secret-val"));
+        assert!(!constant_time_eq(b"short", b"longer-value"));
     }
 
     #[cfg(unix)]
@@ -813,5 +1039,23 @@ mod tests {
 
         let read_only = std::io::Error::from_raw_os_error(libc::EROFS);
         assert!(!is_compatible_permission_hardening_error(&read_only));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_hardening_skip_is_opt_in() {
+        // Ensure the helper reads the env flag; do not leave a sticky value for other tests.
+        let key = "LEZI_ALLOW_PERMISSION_HARDENING_SKIP";
+        let previous = std::env::var_os(key);
+        std::env::remove_var(key);
+        assert!(!permission_hardening_skip_allowed());
+        std::env::set_var(key, "1");
+        assert!(permission_hardening_skip_allowed());
+        std::env::set_var(key, "0");
+        assert!(!permission_hardening_skip_allowed());
+        match previous {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
     }
 }

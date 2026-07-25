@@ -7,7 +7,7 @@ RUN cargo build --locked --release
 
 FROM debian:bookworm-slim
 
-ARG LEZI_SYNC_VERSION=0.2.2
+ARG LEZI_SYNC_VERSION=0.2.3
 
 LABEL org.opencontainers.image.title="lezi-sync" \
       org.opencontainers.image.description="Rust home-LAN sync server for Lezi" \
@@ -20,11 +20,16 @@ ENV LEZI_SYNC_VERSION=${LEZI_SYNC_VERSION} \
     LEZI_INVITE_TTL_HOURS=24 \
     LEZI_MAX_MEDIA_BYTES=10485760
 
-RUN install -d -m 0700 /data /data/media
+# Default non-root runtime uid/gid. NAS bind mounts that cannot chown to 10001
+# should use compose profile `nas-root` (user 0:0) instead of baking root into
+# the default image path.
+RUN groupadd --system --gid 10001 lezi \
+    && useradd --system --uid 10001 --gid 10001 --home-dir /data --shell /usr/sbin/nologin lezi \
+    && install -d -o lezi -g lezi -m 0700 /data /data/media
 
 COPY --from=builder /build/target/release/lezi-sync /usr/local/bin/lezi-sync
 
-USER 0:0
+USER 10001:10001
 
 EXPOSE 8765
 VOLUME ["/data"]

@@ -31,7 +31,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import android.util.Log
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -47,11 +46,11 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.ui.UiTags
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
-import com.lezi.babylog.domain.DuplicateBabyNicknameException
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate
@@ -95,12 +94,11 @@ class OnboardingViewModel @Inject constructor(
                     ),
                 )
                 onDone(null)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
             } catch (t: Throwable) {
-                Log.e("Onboarding", "createBaby failed", t)
-                onDone(
-                    if (t is DuplicateBabyNicknameException) t.message
-                    else t.message ?: "创建失败",
-                )
+                // Do not Log the throwable: message/stack may contain nickname or paths (ISS-037).
+                onDone(productUiError(t, "创建失败"))
             }
         }
     }

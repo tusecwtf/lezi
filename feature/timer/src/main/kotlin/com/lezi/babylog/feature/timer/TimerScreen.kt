@@ -64,6 +64,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
+import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.FeedReminderPort
@@ -80,6 +81,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -239,6 +242,103 @@ private fun currentBootCount(context: Context): Long? =
         )
     }
 
+/**
+ * Pure left-side toggle transition used by [TimerViewModel.toggleLeft].
+ *
+ * When starting the left side while [TimerState.babyId] is null, [babyIdForStart]
+ * must be supplied; otherwise this returns null so the caller can abort.
+ * Callers that serialize concurrent toggles (mutex / single queue) must re-read
+ * the latest state before each application so neither side's accum is lost.
+ */
+internal fun TimerState.withToggleLeft(
+    nowElapsed: Long,
+    nowWall: Long,
+    babyIdForStart: Long? = null,
+): TimerState? {
+    var cur = this
+    if (!cur.leftRunning && cur.babyId == null) {
+        val babyId = babyIdForStart ?: return null
+        cur = cur.copy(babyId = babyId)
+    }
+    return if (cur.leftRunning) {
+        cur.copy(
+            leftRunning = false,
+            leftAccumMs = cur.leftMs(nowElapsed),
+            leftStartedElapsed = null,
+            lastSide = "L",
+        )
+    } else {
+        val pausedRight = if (cur.rightRunning) {
+            cur.copy(
+                rightRunning = false,
+                rightAccumMs = cur.rightMs(nowElapsed),
+                rightStartedElapsed = null,
+                lastSide = "R",
+            )
+        } else {
+            cur
+        }
+        pausedRight.copy(
+            leftRunning = true,
+            leftStartedElapsed = nowElapsed,
+            sessionStartedAt = pausedRight.sessionStartedAt ?: nowWall,
+            order = when {
+                pausedRight.order.isEmpty() -> "L"
+                pausedRight.order == "R" -> "RL"
+                else -> pausedRight.order
+            },
+            lastSide = "L",
+        )
+    }
+}
+
+/**
+ * Pure right-side toggle transition used by [TimerViewModel.toggleRight].
+ *
+ * See [withToggleLeft] for baby-id and concurrency notes.
+ */
+internal fun TimerState.withToggleRight(
+    nowElapsed: Long,
+    nowWall: Long,
+    babyIdForStart: Long? = null,
+): TimerState? {
+    var cur = this
+    if (!cur.rightRunning && cur.babyId == null) {
+        val babyId = babyIdForStart ?: return null
+        cur = cur.copy(babyId = babyId)
+    }
+    return if (cur.rightRunning) {
+        cur.copy(
+            rightRunning = false,
+            rightAccumMs = cur.rightMs(nowElapsed),
+            rightStartedElapsed = null,
+            lastSide = "R",
+        )
+    } else {
+        val pausedLeft = if (cur.leftRunning) {
+            cur.copy(
+                leftRunning = false,
+                leftAccumMs = cur.leftMs(nowElapsed),
+                leftStartedElapsed = null,
+                lastSide = "L",
+            )
+        } else {
+            cur
+        }
+        pausedLeft.copy(
+            rightRunning = true,
+            rightStartedElapsed = nowElapsed,
+            sessionStartedAt = pausedLeft.sessionStartedAt ?: nowWall,
+            lastSide = "R",
+            order = when {
+                pausedLeft.order.isEmpty() -> "R"
+                pausedLeft.order == "L" -> "LR"
+                else -> pausedLeft.order
+            },
+        )
+    }
+}
+
 @HiltViewModel
 class TimerViewModel @Inject constructor(
     private val careLog: CareLog,
@@ -249,6 +349,8 @@ class TimerViewModel @Inject constructor(
     private val _state = MutableStateFlow(TimerState())
     val state: StateFlow<TimerState> = _state
     private val completionInFlight = AtomicBoolean(false)
+    /** Serializes L/R toggles so concurrent launches cannot clobber either side. */
+    private val toggleMutex = Mutex()
     val timeStepMin = settings.settings
         .map { it.timeStepMin }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 1)
@@ -303,81 +405,43 @@ class TimerViewModel @Inject constructor(
 
     fun toggleLeft() {
         viewModelScope.launch {
-            val now = SystemClock.elapsedRealtime()
-            var cur = _state.value
-            if (!cur.leftRunning && cur.babyId == null) {
-                val baby = careLog.getCurrentBaby() ?: return@launch
-                cur = cur.copy(babyId = baby.id)
+            toggleMutex.withLock {
+                val now = SystemClock.elapsedRealtime()
+                val wall = System.currentTimeMillis()
+                val cur = _state.value
+                val babyIdForStart = if (!cur.leftRunning && cur.babyId == null) {
+                    careLog.getCurrentBaby()?.id ?: return@withLock
+                } else {
+                    null
+                }
+                val next = cur.withToggleLeft(
+                    nowElapsed = now,
+                    nowWall = wall,
+                    babyIdForStart = babyIdForStart,
+                ) ?: return@withLock
+                persist(next)
             }
-            val next = if (cur.leftRunning) {
-                cur.copy(
-                    leftRunning = false,
-                    leftAccumMs = cur.leftMs(now),
-                    leftStartedElapsed = null,
-                    lastSide = "L",
-                )
-            } else {
-                val pausedRight = if (cur.rightRunning) {
-                    cur.copy(
-                        rightRunning = false,
-                        rightAccumMs = cur.rightMs(now),
-                        rightStartedElapsed = null,
-                        lastSide = "R",
-                    )
-                } else cur
-                pausedRight.copy(
-                    leftRunning = true,
-                    leftStartedElapsed = now,
-                    sessionStartedAt = pausedRight.sessionStartedAt ?: System.currentTimeMillis(),
-                    order = when {
-                        pausedRight.order.isEmpty() -> "L"
-                        pausedRight.order == "R" -> "RL"
-                        else -> pausedRight.order
-                    },
-                    lastSide = "L",
-                )
-            }
-            persist(next)
         }
     }
 
     fun toggleRight() {
         viewModelScope.launch {
-            val now = SystemClock.elapsedRealtime()
-            var cur = _state.value
-            if (!cur.rightRunning && cur.babyId == null) {
-                val baby = careLog.getCurrentBaby() ?: return@launch
-                cur = cur.copy(babyId = baby.id)
+            toggleMutex.withLock {
+                val now = SystemClock.elapsedRealtime()
+                val wall = System.currentTimeMillis()
+                val cur = _state.value
+                val babyIdForStart = if (!cur.rightRunning && cur.babyId == null) {
+                    careLog.getCurrentBaby()?.id ?: return@withLock
+                } else {
+                    null
+                }
+                val next = cur.withToggleRight(
+                    nowElapsed = now,
+                    nowWall = wall,
+                    babyIdForStart = babyIdForStart,
+                ) ?: return@withLock
+                persist(next)
             }
-            val next = if (cur.rightRunning) {
-                cur.copy(
-                    rightRunning = false,
-                    rightAccumMs = cur.rightMs(now),
-                    rightStartedElapsed = null,
-                    lastSide = "R",
-                )
-            } else {
-                val pausedLeft = if (cur.leftRunning) {
-                    cur.copy(
-                        leftRunning = false,
-                        leftAccumMs = cur.leftMs(now),
-                        leftStartedElapsed = null,
-                        lastSide = "L",
-                    )
-                } else cur
-                pausedLeft.copy(
-                    rightRunning = true,
-                    rightStartedElapsed = now,
-                    sessionStartedAt = pausedLeft.sessionStartedAt ?: System.currentTimeMillis(),
-                    lastSide = "R",
-                    order = when {
-                        pausedLeft.order.isEmpty() -> "R"
-                        pausedLeft.order == "L" -> "LR"
-                        else -> pausedLeft.order
-                    },
-                )
-            }
-            persist(next)
         }
     }
 
@@ -424,8 +488,10 @@ class TimerViewModel @Inject constructor(
                 )
                 clear()
                 onDone()
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
             } catch (throwable: Throwable) {
-                onError(throwable.message ?: "保存失败")
+                onError(productUiError(throwable, "保存失败"))
             } finally {
                 completionInFlight.set(false)
             }

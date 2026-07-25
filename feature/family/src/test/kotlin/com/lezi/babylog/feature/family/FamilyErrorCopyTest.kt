@@ -2,9 +2,12 @@ package com.lezi.babylog.feature.family
 
 import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.sync.FamilyRole
+import com.lezi.babylog.sync.PUBLIC_CLEARTEXT_WARNING
 import com.lezi.babylog.sync.SyncNotEnabledException
+import com.lezi.babylog.sync.isPublicCleartextBaseUrl
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FamilyErrorCopyTest {
@@ -21,6 +24,21 @@ class FamilyErrorCopyTest {
             "家庭同步服务暂未连接，请稍后重试",
             familySyncError(
                 IllegalStateException("连接失败：Failed to connect to /10.0.2.2:8765"),
+                "同步失败",
+            ),
+        )
+        // Chinese + host/path must not bypass the filter (ISS-017 / F-C-004).
+        assertEquals(
+            "家庭同步服务暂未连接，请稍后重试",
+            familySyncError(
+                IllegalStateException("连接失败：nas.local:8765"),
+                "同步失败",
+            ),
+        )
+        assertEquals(
+            "家庭同步服务暂未连接，请稍后重试",
+            familySyncError(
+                IllegalStateException("同步错误 /data/user/0/com.lezi/files"),
                 "同步失败",
             ),
         )
@@ -114,5 +132,12 @@ class FamilyErrorCopyTest {
             "legacy-device",
             familyDeviceId(syncDeviceId = "", localDeviceId = "legacy-device"),
         )
+    }
+
+    @Test
+    fun publicCleartextServerAddressUsesSharedWarningCopy() {
+        assertTrue(isPublicCleartextBaseUrl("http://example.com:8765"))
+        assertFalse(isPublicCleartextBaseUrl("http://192.168.50.4:8765"))
+        assertTrue(PUBLIC_CLEARTEXT_WARNING.contains("公网 HTTP"))
     }
 }

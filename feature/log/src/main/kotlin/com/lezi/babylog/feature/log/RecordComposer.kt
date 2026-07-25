@@ -32,6 +32,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
+import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.ui.presentation
@@ -114,7 +115,7 @@ class RecordComposerViewModel @Inject constructor(
                 sessionGate.deliver(session) {
                     _state.value = RecordComposerUiState(
                         activeRequest = request,
-                        error = error.message ?: "记录设置加载失败",
+                        error = productUiError(error, "记录设置加载失败"),
                     )
                 }
                 return@launch
@@ -201,7 +202,7 @@ class RecordComposerViewModel @Inject constructor(
                         timePickerStyle = settings.timePickerStyle,
                         preferredHand = settings.preferredHand,
                         infantFeverAdviceEnabled = settings.infantFeverAdviceEnabled,
-                        error = error.message ?: "记录加载失败",
+                        error = productUiError(error, "记录加载失败"),
                     )
                 }
                 return@launch
@@ -246,22 +247,32 @@ class RecordComposerViewModel @Inject constructor(
     internal fun importPhotos(uris: List<Uri>) {
         val draft = _state.value.draft ?: return
         if (draft.mode != QuickRecordMode.Text || uris.isEmpty()) return
+        val session = sessionGate.current() ?: return
         actionJob = viewModelScope.launch {
-            val imported = runCatching {
-                photoStore.import(uris.take((MAX_RECORD_PHOTOS - draft.photos.size).coerceAtLeast(0)))
-            }
-                .getOrElse { error ->
-                    _state.update { it.copy(error = error.message ?: "图片导入失败") }
-                    return@launch
-                }
-            _state.update { state ->
-                val current = state.draft ?: return@update state
-                state.copy(
-                    draft = current.copy(
-                        photos = (current.photos + imported).distinct().take(MAX_RECORD_PHOTOS),
-                    ),
-                    error = null,
+            val imported = try {
+                photoStore.import(
+                    uris.take((MAX_RECORD_PHOTOS - draft.photos.size).coerceAtLeast(0)),
                 )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                currentCoroutineContext().ensureActive()
+                sessionGate.deliver(session) {
+                    _state.update { it.copy(error = productUiError(error, "图片导入失败")) }
+                }
+                return@launch
+            }
+            currentCoroutineContext().ensureActive()
+            sessionGate.deliver(session) {
+                _state.update { state ->
+                    val current = state.draft ?: return@update state
+                    state.copy(
+                        draft = current.copy(
+                            photos = (current.photos + imported).distinct().take(MAX_RECORD_PHOTOS),
+                        ),
+                        error = null,
+                    )
+                }
             }
         }
     }
@@ -323,9 +334,6 @@ class RecordComposerViewModel @Inject constructor(
                     )
                 }
                 photoStore.delete(draft.sourcePhotos - draft.photos.toSet())
-                _state.update {
-                    it.copy(draft = it.draft?.copy(sourcePhotos = draft.photos))
-                }
                 val message = when {
                     draft.sleepAction == SleepDraftAction.SleepDown &&
                         draft.endTimestamp == null -> "已开始睡眠"
@@ -346,14 +354,19 @@ class RecordComposerViewModel @Inject constructor(
                     _state.update {
                         it.copy(
                             saving = false,
-                            error = error.message ?: "保存失败，请重试",
+                            error = productUiError(error, "保存失败，请重试"),
                         )
                     }
                 }
                 return@launch
             }
             currentCoroutineContext().ensureActive()
+            // Post-write UI (sourcePhotos mark + success callback) only when this
+            // request is still active — never side-write a newer draft/session.
             sessionGate.deliver(session) {
+                _state.update {
+                    it.copy(draft = it.draft?.copy(sourcePhotos = draft.photos))
+                }
                 onSaved(message.first, message.second)
             }
         }
@@ -387,7 +400,7 @@ class RecordComposerViewModel @Inject constructor(
                     _state.update {
                         it.copy(
                             deleting = false,
-                            error = error.message ?: "删除失败，请重试",
+                            error = productUiError(error, "删除失败，请重试"),
                         )
                     }
                 }

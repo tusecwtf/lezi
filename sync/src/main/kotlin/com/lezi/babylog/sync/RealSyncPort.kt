@@ -10,7 +10,10 @@ import com.lezi.babylog.core.database.OutboxDao
 import com.lezi.babylog.core.database.OutboxEntity
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
-import com.lezi.babylog.core.model.Family
+import com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
+import com.lezi.babylog.core.model.RecordPayloadCodec
+import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.SleepPayload
 import com.lezi.babylog.core.model.SyncStatus
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -22,6 +25,7 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -87,15 +91,22 @@ interface SyncBackend {
     suspend fun getMedia(session: SyncSession, clientUuid: String): ByteArray
 }
 
-/** Deterministic in-memory backend for coordinator and dual-client tests. */
+/**
+ * Deterministic in-memory backend for coordinator and dual-client tests.
+ *
+ * Mirrors core lezi-sync push rules used by client tests: LWW with existing
+ * win on equal `updatedAt`, member avatar ACL, immutable media association,
+ * and basic baby/record/media reference checks.
+ */
 class FakeSyncBackend : SyncBackend {
     private data class Row(val entity: SyncEntity, val rev: Long)
     private val rows = mutableMapOf<String, MutableMap<String, Row>>()
+    private val mediaBytes = mutableMapOf<String, MutableMap<String, ByteArray>>()
     private val invites = mutableMapOf<String, Pair<String, Long>>()
     private var revision = 0L
 
     suspend fun push(familyId: String, deviceId: String, entities: List<SyncEntity>): Result<Int> =
-        runCatching { pushRows(familyId, entities) }
+        runCatching { pushRows(familyId, entities, FamilyRole.Owner) }
 
     suspend fun pull(familyId: String, cursor: Long): Result<PullResult> =
         runCatching { pullRows(familyId, cursor) }
@@ -122,30 +133,135 @@ class FakeSyncBackend : SyncBackend {
         JoinResult("family-${rows.size + 1}", "owner-token", FamilyRole.Owner)
 
     override suspend fun push(session: SyncSession, entities: List<SyncEntity>) =
-        pushRows(session.familyId, entities)
+        pushRows(session.familyId, entities, session.role)
 
     override suspend fun pull(session: SyncSession) = pullRows(session.familyId, session.pullCursor)
     override suspend fun invite(session: SyncSession) = invite(session.familyId).getOrThrow()
     override suspend fun join(baseUrl: String, code: String, deviceId: String) =
         join(code, deviceId).getOrThrow()
     override suspend fun leave(session: SyncSession) = Unit
-    override suspend fun deleteFamily(session: SyncSession) { rows.remove(session.familyId) }
-    override suspend fun putMedia(session: SyncSession, clientUuid: String, bytes: ByteArray, mime: String?) = Unit
-    override suspend fun getMedia(session: SyncSession, clientUuid: String) = byteArrayOf()
+    override suspend fun deleteFamily(session: SyncSession) {
+        rows.remove(session.familyId)
+        mediaBytes.remove(session.familyId)
+    }
 
-    private fun pushRows(familyId: String, entities: List<SyncEntity>): Int {
+    override suspend fun putMedia(
+        session: SyncSession,
+        clientUuid: String,
+        bytes: ByteArray,
+        mime: String?,
+    ) {
+        val existing = rows[session.familyId]?.get("media:$clientUuid")?.entity
+        val kind = existing?.let(::mediaKind)
+        if (session.role == FamilyRole.Member && kind == "avatar") {
+            throw SyncHttpException(403, "Only owner may change avatar")
+        }
+        mediaBytes.getOrPut(session.familyId) { mutableMapOf() }[clientUuid] = bytes
+    }
+
+    override suspend fun getMedia(session: SyncSession, clientUuid: String): ByteArray =
+        mediaBytes[session.familyId]?.get(clientUuid) ?: byteArrayOf()
+
+    private fun pushRows(familyId: String, entities: List<SyncEntity>, role: FamilyRole): Int {
         val family = rows.getOrPut(familyId) { mutableMapOf() }
-        var applied = 0
+        // Apply LWW first so validation sees the same effective set as the server.
+        val winners = LinkedHashMap<String, SyncEntity>()
         entities.forEach { entity ->
             val key = "${entity.type}:${entity.clientUuid}"
             val existing = family[key]
             if (existing != null && existing.entity.updatedAt >= entity.updatedAt) return@forEach
+            val previous = winners[key]
+            if (previous == null || entity.updatedAt > previous.updatedAt) {
+                winners[key] = entity
+            }
+        }
+        validatePush(role, family, winners.values.toList())
+        var applied = 0
+        winners.values.forEach { entity ->
+            val key = "${entity.type}:${entity.clientUuid}"
             revision++
             family[key] = Row(entity, revision)
             applied++
         }
         return applied
     }
+
+    private fun validatePush(
+        role: FamilyRole,
+        family: Map<String, Row>,
+        winners: List<SyncEntity>,
+    ) {
+        val babyIds = family.keys
+            .filter { it.startsWith("baby:") }
+            .map { it.removePrefix("baby:") }
+            .toMutableSet()
+        babyIds += winners.filter { it.type == "baby" }.map { it.clientUuid }
+
+        val recordIds = family.keys
+            .filter { it.startsWith("record:") }
+            .map { it.removePrefix("record:") }
+            .toMutableSet()
+        recordIds += winners.filter { it.type == "record" }.map { it.clientUuid }
+
+        winners.forEach { entity ->
+            when (entity.type) {
+                "record" -> {
+                    val babyUuid = payloadString(entity, "baby_client_uuid")
+                        ?: throw SyncHttpException(409, "record baby_client_uuid does not exist")
+                    if (babyUuid !in babyIds) {
+                        throw SyncHttpException(409, "record baby_client_uuid does not exist")
+                    }
+                }
+                "media" -> {
+                    val kind = mediaKind(entity)
+                    val existing = family["media:${entity.clientUuid}"]?.entity
+                    val existingKind = existing?.let(::mediaKind)
+                    if (role == FamilyRole.Member && (kind == "avatar" || existingKind == "avatar")) {
+                        throw SyncHttpException(403, "Only owner may change avatar")
+                    }
+                    if (existing != null && mediaAssociation(existing) != mediaAssociation(entity)) {
+                        throw SyncHttpException(409, "Media kind and association are immutable")
+                    }
+                    when (kind) {
+                        "avatar" -> {
+                            val babyUuid = payloadString(entity, "baby_client_uuid")
+                            if (babyUuid == null || babyUuid !in babyIds) {
+                                throw SyncHttpException(
+                                    409,
+                                    "avatar baby_client_uuid does not exist",
+                                )
+                            }
+                        }
+                        "log" -> {
+                            val recordUuid = payloadString(entity, "record_client_uuid")
+                            if (recordUuid == null || recordUuid !in recordIds) {
+                                throw SyncHttpException(
+                                    409,
+                                    "log record_client_uuid does not exist",
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun mediaKind(entity: SyncEntity): String? = payloadString(entity, "kind")
+
+    private fun mediaAssociation(entity: SyncEntity): Triple<String?, String?, String?> =
+        Triple(
+            mediaKind(entity),
+            payloadString(entity, "record_client_uuid"),
+            payloadString(entity, "baby_client_uuid"),
+        )
+
+    private fun payloadString(entity: SyncEntity, key: String): String? =
+        runCatching {
+            Json.parseToJsonElement(entity.payloadJson).jsonObject[key]
+                ?.jsonPrimitive
+                ?.contentOrNull
+        }.getOrNull()
 
     private fun pullRows(familyId: String, cursor: Long): PullResult {
         val changed = rows[familyId].orEmpty().values.filter { it.rev > cursor }.sortedBy { it.rev }
@@ -328,6 +444,9 @@ class RealSyncPort @Inject constructor(
 
     init {
         processScope.launch {
+            preferences.migrateSecretsIfNeeded()
+        }
+        processScope.launch {
             preferences.session.collect { session ->
                 cachedSession = session
                 if (!session.isJoined) {
@@ -406,8 +525,8 @@ class RealSyncPort @Inject constructor(
         }
     }.onFailure(::updateFailureStatus)
 
-    override suspend fun joinWithCode(code: String): Result<Family> =
-        joinWithPayload(code).map { Family(it.familyId.toLongOrNull() ?: 1, 0, System.currentTimeMillis()) }
+    override suspend fun joinWithCode(code: String): Result<SyncSession> =
+        joinWithPayload(code)
 
     override suspend fun createInvite(familyId: String): Result<Invite> = withAllowedSession {
         require(it.role == FamilyRole.Owner) { "仅家庭管理员可生成邀请" }
@@ -529,6 +648,33 @@ class RealSyncPort @Inject constructor(
                 }
             }
             mediaDao.deleteLogMedia()
+            localMediaPaths.forEach { localUri ->
+                runCatching { mediaFiles.delete(localUri) }
+            }
+            cachedSession = preferences.session.first()
+        }
+    }.onFailure(::updateFailureStatus)
+
+    override suspend fun clearAllLocalData(clearLocal: suspend () -> Unit): Result<Unit> = runCatching {
+        syncMutex.withLock {
+            val allMedia = mediaDao.listAllIncludingDeleted()
+            val localMediaPaths = buildList {
+                addAll(allMedia.map(MediaAssetEntity::localUri))
+                recordDao.listAllIncludingDeleted().forEach { record ->
+                    addAll(localPhotoPaths(record.payloadJson))
+                }
+                babyDao.listAllIncludingDeleted().forEach { baby ->
+                    baby.avatarPath?.takeIf(String::isNotBlank)?.let(::add)
+                }
+            }.filter(String::isNotBlank).distinct()
+            // Same barrier as clearLocalRecords: domain wipe + outbox/media/files
+            // must not interleave with pull/apply.
+            clearLocal()
+            // Full wipe leaves no local replica. Drop generation so the next
+            // join/create starts from a clean push precondition.
+            preferences.updateCursor(0, generation = "")
+            outboxDao.deleteAll()
+            mediaDao.deleteAll()
             localMediaPaths.forEach { localUri ->
                 runCatching { mediaFiles.delete(localUri) }
             }
@@ -688,6 +834,10 @@ class RealSyncPort @Inject constructor(
             require(unresolved.isEmpty()) {
                 "同步数据引用尚未就绪，保留 cursor 以便重试"
             }
+            entities.filter { it.type == "record" }
+                .mapNotNull { entity -> recordDao.getByClientUuid(entity.clientUuid)?.babyId }
+                .distinct()
+                .forEach { healDuplicateOpenSleeps(it) }
             val affectedRecords = (
                 entities.filter { it.type == "record" }
                     .mapNotNull { entity -> recordDao.getByClientUuid(entity.clientUuid)?.id } +
@@ -725,7 +875,8 @@ class RealSyncPort @Inject constructor(
     private suspend fun applyBaby(session: SyncSession, entity: SyncEntity): Boolean {
         val existing = babyDao.getByClientUuid(entity.clientUuid)
         val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
-        if (existing != null && existing.updatedAt > entity.updatedAt) {
+        // Match server LWW: existing wins on equal updatedAt (>= skip).
+        if (existing != null && existing.updatedAt >= entity.updatedAt) {
             if (session.role == FamilyRole.Member && "avatar_media_uuid" in payload) {
                 val remoteAvatar = payload.string("avatar_media_uuid")
                 if (existing.avatarMediaUuid != remoteAvatar) {
@@ -780,7 +931,8 @@ class RealSyncPort @Inject constructor(
 
     private suspend fun applyRecord(entity: SyncEntity): Boolean {
         val existing = recordDao.getByClientUuid(entity.clientUuid)
-        if (existing != null && existing.updatedAt > entity.updatedAt) return true
+        // Match server LWW: existing wins on equal updatedAt (>= skip).
+        if (existing != null && existing.updatedAt >= entity.updatedAt) return true
         val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
         val babyUuid = payload.string("baby_client_uuid") ?: return false
         val baby = babyDao.getByClientUuid(babyUuid) ?: return false
@@ -809,6 +961,61 @@ class RealSyncPort @Inject constructor(
         return true
     }
 
+    /**
+     * Keep at most one open sleep per baby after sync apply. Older open
+     * intervals are closed at the next open's start and flagged as anomaly so
+     * sleep aggregates cannot double-count forever.
+     */
+    private suspend fun healDuplicateOpenSleeps(babyId: Long) {
+        val opens = recordDao.listOpenSleeps(babyId)
+        if (opens.size <= 1) return
+        // listOpenSleeps is newest-first; keep the latest open, close the rest.
+        val keep = opens.first()
+        val stale = opens.drop(1).sortedWith(
+            compareBy<RecordEntity> { it.timestamp }.thenBy { it.id },
+        )
+        val chain = stale + keep
+        val now = clock.nowMillis()
+        for (index in 0 until chain.lastIndex) {
+            val current = chain[index]
+            val nextStart = chain[index + 1].timestamp
+            val end = if (nextStart > current.timestamp) {
+                nextStart
+            } else {
+                current.timestamp + 60_000L
+            }
+            val flagged = withSleepAnomaly(current.payloadJson, current.schemaVersion)
+            val updatedAt = if (current.updatedAt == Long.MAX_VALUE) {
+                Long.MAX_VALUE
+            } else {
+                maxOf(now, current.updatedAt + 1)
+            }
+            recordDao.update(
+                current.copy(
+                    endTimestamp = end,
+                    payloadJson = flagged.first,
+                    schemaVersion = flagged.second,
+                    updatedAt = updatedAt,
+                    syncDirty = true,
+                ),
+            )
+        }
+    }
+
+    private fun withSleepAnomaly(
+        payloadJson: String,
+        schemaVersion: Int,
+    ): Pair<String, Int> {
+        val document = RecordPayloadCodec.decode(RecordType.SLEEP, payloadJson, schemaVersion)
+        val sleep = document.payload as? SleepPayload
+            ?: return payloadJson to schemaVersion
+        val normalized = document.copy(
+            payload = sleep.copy(anomaly = true),
+            schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+        )
+        return RecordPayloadCodec.encode(normalized) to CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
+    }
+
     private suspend fun applyMedia(
         session: SyncSession,
         entity: SyncEntity,
@@ -816,7 +1023,8 @@ class RealSyncPort @Inject constructor(
     ): Boolean {
         val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
         val existing = mediaDao.getByClientUuid(entity.clientUuid)
-        if (existing != null && existing.updatedAt > entity.updatedAt) return true
+        // Match server LWW: existing wins on equal updatedAt (>= skip).
+        if (existing != null && existing.updatedAt >= entity.updatedAt) return true
         val kind = payload.string("kind") ?: existing?.kind ?: return false
         val recordId = payload.string("record_client_uuid")
             ?.let { recordDao.getByClientUuid(it)?.id }
@@ -1272,7 +1480,16 @@ class RealSyncPort @Inject constructor(
             .filter { it.hasReceiptFor(session) }
             .forEach { media ->
                 requireAllowed(policy.evaluate(session.baseUrl, foregroundState.isForeground()))
-                val bytes = backend.getMedia(session, media.clientUuid)
+                // Soft-fail missing remote bytes (half-upload / 404) and other
+                // media GET failures so the pull cursor can still advance.
+                // Empty localUri keeps the asset queued for a later retry.
+                val bytes = try {
+                    backend.getMedia(session, media.clientUuid)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    return@forEach
+                }
                 val localUri = mediaFiles.saveDownloaded(
                     media.clientUuid,
                     media.kind,

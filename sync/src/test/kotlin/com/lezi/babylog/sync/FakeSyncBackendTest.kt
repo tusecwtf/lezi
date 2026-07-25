@@ -99,4 +99,74 @@ class FakeSyncBackendTest {
         assertThat(join.cursor).isEqualTo(3)
         assertThat(backend.pull("another-family", 0).getOrThrow().entities).isEmpty()
     }
+
+    @Test
+    fun memberCannotPushAvatarMediaAndReferencesMustResolve() = runBlocking {
+        val backend = FakeSyncBackend()
+        val family = "fam-acl"
+        val owner = SyncSession(
+            baseUrl = "http://lan",
+            familyId = family,
+            familyToken = "owner",
+            deviceId = "owner-device",
+            role = FamilyRole.Owner,
+        )
+        val member = owner.copy(familyToken = "member", deviceId = "member-device", role = FamilyRole.Member)
+        val baby = SyncEntity(
+            type = "baby",
+            clientUuid = "baby-a",
+            payloadJson = """{"nickname":"年年","birthday":"2024-01-01","sort_order":0}""",
+            updatedAt = 100,
+        )
+        assertThat(backend.push(owner, listOf(baby))).isEqualTo(1)
+
+        val avatar = SyncEntity(
+            type = "media",
+            clientUuid = "media-avatar",
+            payloadJson = """{"kind":"avatar","baby_client_uuid":"baby-a","mime":"image/jpeg"}""",
+            updatedAt = 200,
+        )
+        val denied = runCatching { backend.push(member, listOf(avatar)) }.exceptionOrNull()
+        assertThat(denied).isInstanceOf(SyncHttpException::class.java)
+        assertThat((denied as SyncHttpException).statusCode).isEqualTo(403)
+
+        assertThat(backend.push(owner, listOf(avatar))).isEqualTo(1)
+
+        val orphanRecord = SyncEntity(
+            type = "record",
+            clientUuid = "record-orphan",
+            payloadJson = """
+                {
+                  "baby_client_uuid":"missing-baby",
+                  "type":"pee",
+                  "timestamp":300,
+                  "payload_json":{},
+                  "schema_version":1
+                }
+            """.trimIndent(),
+            updatedAt = 300,
+        )
+        val unresolved = runCatching { backend.push(owner, listOf(orphanRecord)) }.exceptionOrNull()
+        assertThat(unresolved).isInstanceOf(SyncHttpException::class.java)
+        assertThat((unresolved as SyncHttpException).statusCode).isEqualTo(409)
+    }
+
+    @Test
+    fun equalUpdatedAtKeepsExistingOnPush() = runBlocking {
+        val backend = FakeSyncBackend()
+        val family = "fam-lww"
+        val first = SyncEntity(
+            type = "baby",
+            clientUuid = "baby-a",
+            payloadJson = """{"nickname":"先到","birthday":"2024-01-01","sort_order":0}""",
+            updatedAt = 500,
+        )
+        val tie = first.copy(
+            payloadJson = """{"nickname":"后到","birthday":"2024-01-01","sort_order":0}""",
+        )
+        assertThat(backend.push(family, "A", listOf(first)).getOrThrow()).isEqualTo(1)
+        assertThat(backend.push(family, "B", listOf(tie)).getOrThrow()).isEqualTo(0)
+        val pulled = backend.pull(family, 0).getOrThrow()
+        assertThat(pulled.entities.single().payloadJson).contains("先到")
+    }
 }

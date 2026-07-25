@@ -1,6 +1,5 @@
 package com.lezi.babylog.sync
 
-import com.lezi.babylog.core.model.Family
 import com.lezi.babylog.core.model.SyncStatus
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -33,11 +32,23 @@ interface SyncPort {
     suspend fun pull(familyId: String): Result<Unit>
     suspend fun push(familyId: String): Result<Unit>
     suspend fun createInvite(familyId: String): Result<Invite>
-    suspend fun joinWithCode(code: String): Result<Family>
+    /**
+     * Join via invite code or full invite payload.
+     * Prefer [joinWithPayload] from UI; this is a thin alias that returns the
+     * same [SyncSession] (server `family_id` is a UUID string — never a local Long).
+     */
+    suspend fun joinWithCode(code: String): Result<SyncSession>
     suspend fun joinWithPayload(payload: String): Result<SyncSession>
     suspend fun leave(familyId: String): Result<Unit>
     suspend fun deleteFamily(): Result<Unit>
     suspend fun clearLocalRecords(clearLocal: suspend () -> Unit): Result<Unit>
+    /**
+     * Full local replica wipe (records, media, outbox, files) under the same
+     * sync barrier as pull/apply. Domain tables beyond records are cleared via
+     * [clearLocal]. Unlike [clearLocalRecords], avatar media and all outbox
+     * rows are removed so a subsequent join cannot push stale residue.
+     */
+    suspend fun clearAllLocalData(clearLocal: suspend () -> Unit): Result<Unit>
 }
 
 @Singleton
@@ -54,11 +65,15 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
     override suspend fun pull(familyId: String) = Result.success(Unit)
     override suspend fun push(familyId: String) = Result.success(Unit)
     override suspend fun createInvite(familyId: String) = Result.failure<Invite>(SyncNotEnabledException())
-    override suspend fun joinWithCode(code: String) = Result.failure<Family>(SyncNotEnabledException())
+    override suspend fun joinWithCode(code: String) = Result.failure<SyncSession>(SyncNotEnabledException())
     override suspend fun joinWithPayload(payload: String) = Result.failure<SyncSession>(SyncNotEnabledException())
     override suspend fun leave(familyId: String) = Result.failure<Unit>(SyncNotEnabledException())
     override suspend fun deleteFamily() = Result.failure<Unit>(SyncNotEnabledException())
     override suspend fun clearLocalRecords(clearLocal: suspend () -> Unit) = runCatching {
+        clearLocal()
+    }
+
+    override suspend fun clearAllLocalData(clearLocal: suspend () -> Unit) = runCatching {
         clearLocal()
     }
 }

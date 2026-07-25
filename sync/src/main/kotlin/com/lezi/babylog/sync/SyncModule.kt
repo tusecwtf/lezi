@@ -10,6 +10,9 @@ import javax.inject.Singleton
 @InstallIn(SingletonComponent::class)
 abstract class SyncModule {
     @Binds @Singleton abstract fun syncPreferences(impl: DataStoreSyncPreferences): SyncPreferences
+    @Binds @Singleton abstract fun secureFamilyTokenStore(
+        impl: EncryptedSecureFamilyTokenStore,
+    ): SecureFamilyTokenStore
     @Binds @Singleton abstract fun networkState(impl: AndroidNetworkState): NetworkState
     @Binds @Singleton abstract fun healthProbe(impl: HttpHealthProbe): HealthProbe
     @Binds @Singleton abstract fun policyClock(impl: SystemPolicyClock): PolicyClock

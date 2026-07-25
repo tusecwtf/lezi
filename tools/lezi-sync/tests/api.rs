@@ -9,7 +9,7 @@ use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
-use lezi_sync::{build_app, ServerConfig, VERSION};
+use lezi_sync::{build_app, RateLimitConfig, ServerConfig, VERSION};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokio::sync::oneshot;
@@ -24,9 +24,13 @@ struct Rig {
 
 impl Rig {
     fn new() -> Self {
+        Self::with_config(|_config| {})
+    }
+
+    fn with_config(configure: impl FnOnce(&mut ServerConfig)) -> Self {
         let directory = TempDir::new().unwrap();
         let now = Arc::new(AtomicI64::new(1_753_418_400));
-        let app = app_for(directory.path(), "generation-a", now.clone(), 8);
+        let app = app_for(directory.path(), "generation-a", now.clone(), 8, configure);
         Self {
             directory,
             app,
@@ -35,7 +39,13 @@ impl Rig {
     }
 
     fn restart(&self, generation: &str) -> Router {
-        app_for(self.directory.path(), generation, self.now.clone(), 8)
+        app_for(
+            self.directory.path(),
+            generation,
+            self.now.clone(),
+            8,
+            |_| {},
+        )
     }
 }
 
@@ -44,12 +54,24 @@ fn app_for(
     generation: &str,
     now: Arc<AtomicI64>,
     max_media_bytes: usize,
+    configure: impl FnOnce(&mut ServerConfig),
 ) -> Router {
     static INVITE_COUNTER: AtomicU64 = AtomicU64::new(1);
     let clock = now.clone();
     let mut config = ServerConfig::new(directory);
     config.generation = Some(generation.to_owned());
     config.max_media_bytes = max_media_bytes;
+    // Integration tests create/join many times within one process; keep limits high
+    // unless a test tightens them deliberately.
+    config.create_rate_limit = RateLimitConfig {
+        max_attempts: 10_000,
+        window_seconds: 60,
+    };
+    config.join_rate_limit = RateLimitConfig {
+        max_attempts: 10_000,
+        window_seconds: 60,
+    };
+    configure(&mut config);
     config = config
         .with_clock(move || clock.load(Ordering::SeqCst))
         .with_invite_code_factory(|| {
@@ -66,12 +88,27 @@ async fn request(
     body: Body,
     content_type: Option<&str>,
 ) -> axum::response::Response {
+    request_with_headers(app, method, uri, token, body, content_type, &[]).await
+}
+
+async fn request_with_headers(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    token: Option<&str>,
+    body: Body,
+    content_type: Option<&str>,
+    extra_headers: &[(&str, &str)],
+) -> axum::response::Response {
     let mut builder = Request::builder().method(method).uri(uri);
     if let Some(token) = token {
         builder = builder.header(AUTHORIZATION, format!("Bearer {token}"));
     }
     if let Some(content_type) = content_type {
         builder = builder.header(CONTENT_TYPE, content_type);
+    }
+    for (name, value) in extra_headers {
+        builder = builder.header(*name, *value);
     }
     app.clone()
         .oneshot(builder.body(body).unwrap())
@@ -86,13 +123,25 @@ async fn json_request(
     token: Option<&str>,
     body: Value,
 ) -> (StatusCode, Value) {
-    let response = request(
+    json_request_with_headers(app, method, uri, token, body, &[]).await
+}
+
+async fn json_request_with_headers(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    token: Option<&str>,
+    body: Value,
+    extra_headers: &[(&str, &str)],
+) -> (StatusCode, Value) {
+    let response = request_with_headers(
         app,
         method,
         uri,
         token,
         Body::from(body.to_string()),
         Some("application/json"),
+        extra_headers,
     )
     .await;
     let status = response.status();
@@ -545,12 +594,35 @@ async fn strict_entity_contract_orders_same_batch_references_and_strips_sort_ord
         .iter()
         .map(|entity| entity["type"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(types, ["baby", "record", "media"]);
+    // Media without durable bytes is omitted so clients can advance past half-uploads.
+    assert_eq!(types, ["baby", "record"]);
     assert!(pulled["entities"][0]["payload"]
         .as_object()
         .unwrap()
         .get("sort_order")
         .is_none());
+    assert_eq!(pulled["cursor"], 3);
+
+    let uploaded = request(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/media/{media_id}"),
+        Some(token),
+        Body::from("log"),
+        Some("application/octet-stream"),
+    )
+    .await;
+    assert_eq!(uploaded.status(), StatusCode::OK);
+    let (_, after_bytes) = get_json(&rig.app, "/v1/pull?cursor=3", Some(token)).await;
+    let media_types = after_bytes["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entity| entity["type"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(media_types, ["media"]);
+    assert_eq!(after_bytes["entities"][0]["client_uuid"], media_id);
+    assert_eq!(after_bytes["cursor"], 4);
 }
 
 #[tokio::test]
@@ -981,4 +1053,217 @@ async fn owner_delete_cleans_family_media_and_allows_replacement() {
     )
     .await;
     assert_ne!(replacement["family_id"], family_id);
+}
+
+#[tokio::test]
+async fn bootstrap_secret_gates_family_create_when_configured() {
+    let secret = "production-bootstrap-secret";
+    let rig = Rig::with_config(|config| {
+        config.bootstrap_secret = Some(secret.to_owned());
+    });
+    let body = json!({
+        "create_request_id": "bootstrap-owner-request-000000000001",
+        "device_id": "owner-device",
+        "display_name": "妈妈",
+    });
+    let (missing, detail) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        body.clone(),
+    )
+    .await;
+    assert_eq!(missing, StatusCode::UNAUTHORIZED, "{detail}");
+    let (wrong, _) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        body.clone(),
+        &[("x-lezi-bootstrap-secret", "wrong-bootstrap-secret!!")],
+    )
+    .await;
+    assert_eq!(wrong, StatusCode::UNAUTHORIZED);
+    let (created, family) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        body,
+        &[("x-lezi-bootstrap-secret", secret)],
+    )
+    .await;
+    assert_eq!(created, StatusCode::CREATED, "{family}");
+    assert_eq!(family["role"], "owner");
+}
+
+#[tokio::test]
+async fn create_and_join_are_rate_limited() {
+    let rig = Rig::with_config(|config| {
+        config.create_rate_limit = RateLimitConfig {
+            max_attempts: 2,
+            window_seconds: 60,
+        };
+        config.join_rate_limit = RateLimitConfig {
+            max_attempts: 2,
+            window_seconds: 60,
+        };
+    });
+    let first = create_family(
+        &rig.app,
+        "owner-device",
+        "rate-limit-owner-request-0000000001",
+    )
+    .await;
+    let owner_token = first["token"].as_str().unwrap();
+    // Second create (different request id) still counts against the window even
+    // though it conflicts with the single-family stack.
+    let (second, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": "rate-limit-owner-request-0000000002",
+            "device_id": "other-device",
+        }),
+    )
+    .await;
+    assert_eq!(second, StatusCode::CONFLICT);
+    let (limited, body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": "rate-limit-owner-request-0000000003",
+            "device_id": "other-device",
+        }),
+    )
+    .await;
+    assert_eq!(limited, StatusCode::TOO_MANY_REQUESTS, "{body}");
+
+    let (invite_status, invitation) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/invite",
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(invite_status, StatusCode::CREATED);
+    let code = invitation["code"].as_str().unwrap();
+    for device in ["member-a", "member-b"] {
+        let (status, _) = json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/join",
+            None,
+            json!({"code": code, "device_id": device}),
+        )
+        .await;
+        // First join may succeed; second device may conflict or 429 after budget.
+        assert!(
+            matches!(
+                status,
+                StatusCode::OK | StatusCode::CONFLICT | StatusCode::TOO_MANY_REQUESTS
+            ),
+            "{status}"
+        );
+    }
+    let (join_limited, join_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/join",
+        None,
+        json!({"code": code, "device_id": "member-c"}),
+    )
+    .await;
+    assert_eq!(join_limited, StatusCode::TOO_MANY_REQUESTS, "{join_body}");
+}
+
+#[tokio::test]
+async fn pull_omits_incomplete_media_until_bytes_are_uploaded() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "owner-device",
+        "integrity-owner-request-00000000001",
+    )
+    .await;
+    let token = owner["token"].as_str().unwrap();
+    let baby_id = Uuid::new_v4().to_string();
+    let record_id = Uuid::new_v4().to_string();
+    let media_id = Uuid::new_v4().to_string();
+    let (pushed, push_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({"entities":[
+            {"type":"baby","client_uuid":baby_id,"updated_at":1,
+             "payload":baby_payload("年年", None)},
+            {"type":"record","client_uuid":record_id,"updated_at":1,
+             "payload":record_payload(&baby_id)},
+            {"type":"media","client_uuid":media_id,"updated_at":1,
+             "payload":log_media_payload(&record_id)}
+        ]}),
+    )
+    .await;
+    assert_eq!(pushed, StatusCode::OK, "{push_body}");
+    assert_eq!(push_body["cursor"], 3);
+
+    let (status, pulled) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(pulled["cursor"], 3);
+    let entities = pulled["entities"].as_array().unwrap();
+    assert_eq!(entities.len(), 2);
+    assert!(entities
+        .iter()
+        .all(|entity| entity["type"] != "media"));
+
+    let missing = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    let uploaded = request(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/media/{media_id}"),
+        Some(token),
+        Body::from("log"),
+        Some("application/octet-stream"),
+    )
+    .await;
+    assert_eq!(uploaded.status(), StatusCode::OK);
+
+    let (status, ready) = get_json(&rig.app, "/v1/pull?cursor=3", Some(token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ready["cursor"], 4);
+    assert_eq!(ready["entities"].as_array().unwrap().len(), 1);
+    assert_eq!(ready["entities"][0]["type"], "media");
+    assert_eq!(ready["entities"][0]["client_uuid"], media_id);
+
+    let downloaded = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(downloaded.status(), StatusCode::OK);
+    assert_eq!(
+        downloaded.into_body().collect().await.unwrap().to_bytes(),
+        "log"
+    );
 }

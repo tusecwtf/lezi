@@ -70,6 +70,9 @@ interface CalendarEventDao {
     @Query("SELECT * FROM calendar_events WHERE babyId = :babyId AND deletedAt IS NULL ORDER BY eventAt ASC")
     suspend fun listForBaby(babyId: Long): List<CalendarEventEntity>
 
+    @Query("SELECT * FROM calendar_events WHERE babyId = :babyId ORDER BY eventAt ASC, id ASC")
+    suspend fun listForBabyIncludingDeleted(babyId: Long): List<CalendarEventEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(event: CalendarEventEntity): Long
 

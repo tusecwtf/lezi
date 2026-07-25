@@ -45,6 +45,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
+import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.RecordType
@@ -59,7 +60,6 @@ import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
 import com.lezi.babylog.domain.CustomRecordItem
-import com.lezi.babylog.domain.DuplicateBabyNicknameException
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate
@@ -192,8 +192,7 @@ class SettingsViewModel @Inject constructor(
             }
             onDone(
                 result.exceptionOrNull()?.let { e ->
-                    if (e is DuplicateBabyNicknameException) e.message
-                    else e.message ?: "添加失败"
+                    productUiError(e, "添加失败")
                 },
             )
         }
@@ -202,14 +201,14 @@ class SettingsViewModel @Inject constructor(
     fun addCustomItem(name: String, iconSlot: Int, onDone: (String?) -> Unit) {
         viewModelScope.launch {
             val result = runCatching { careLog.addCustomItem(name, iconSlot) }
-            onDone(result.exceptionOrNull()?.message)
+            onDone(result.exceptionOrNull()?.let { productUiError(it, "添加失败") })
         }
     }
 
     fun updateCustomItem(item: CustomRecordItem, onDone: (String?) -> Unit) {
         viewModelScope.launch {
             val result = runCatching { careLog.updateCustomItem(item) }
-            onDone(result.exceptionOrNull()?.message)
+            onDone(result.exceptionOrNull()?.let { productUiError(it, "保存失败") })
         }
     }
 

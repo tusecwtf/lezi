@@ -70,15 +70,29 @@ class WeekSummaryTest {
             ),
         )
 
+        val now = base + 27 * 60 * 60_000L
         val summary = CareAggregation.week(
             records = records,
             weekStart = weekStart,
             zone = zone,
-            now = base + 27 * 60 * 60_000L,
+            now = now,
+        )
+        val range = CareAggregation.range(
+            records = records,
+            startDate = weekStart,
+            dayCount = 7,
+            zone = zone,
+            now = now,
         )
 
         assertThat(summary.days[0].sleepMin).isEqualTo(30 + 30)
         assertThat(summary.days[1].sleepMin).isEqualTo(45 + 60)
+        // Minutes clip per day; physical segments count only on the start day
+        // (record1 started before weekStart → no segment on day0; record2 day0;
+        // record3 day1).
+        assertThat(range.days[0].sleepSegments).isEqualTo(1)
+        assertThat(range.days[1].sleepSegments).isEqualTo(1)
+        assertThat(range.sleepSegments).isEqualTo(2)
     }
 
     private fun rec(

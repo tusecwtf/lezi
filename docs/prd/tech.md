@@ -15,7 +15,7 @@
 | 异步 | Coroutines + Flow | **同步不做** WorkManager 后台轮询（规格：仅前台） |
 | DI | Hilt | |
 | 导航 | Navigation Compose | |
-| 图表 | Canvas 时间条 + 轻量图表库（如 Vico） | |
+| 图表 | Canvas 时间条 + Compose 自绘 | 未引入第三方图表库（Vico 等为可选未来项，仓库无依赖） |
 | 通知 | NotificationCompat + **非精确**本地闹钟 | 下次喂奶 / 日程；**不要求** `SCHEDULE_EXACT_ALARM`；**不为同步/伴侣新记录推送** |
 | 计时 | 前台服务 + 状态持久化 | 关 App 仍跑 |
 | Widget | Glance（V1.5） | |
@@ -32,7 +32,8 @@
 | minSdk | 26 |
 | compileSdk | 35 |
 | targetSdk | 35 |
-| versionName | `0.2.0-offline-v2-beta`（同步实现已入工作树，环境验收待补） |
+| versionName | `0.2.3` |
+| versionCode | `2`（Play/安装升级单调整数；与 versionName 独立） |
 | 应用名 | 乐记 |
 
 ---
@@ -61,10 +62,23 @@
 :feature:widget       # V1.5
 ```
 
-目标依赖方向：`app → feature → domain → core`；feature 互不依赖。当前 `domain → sync`
-用于本地写后的同步触发 seam；后续可把端口接口下沉到更内层模块，避免 domain
-依赖具体同步模块。
+目标依赖方向：`app → feature → domain → core`；feature **互不**依赖。
+
+当前已存在的额外边（有意 seam，后续可下沉端口接口）：
+
+| 边 | 用途 |
+|----|------|
+| `domain → sync` | 本地写后的同步触发 |
+| `feature:log → sync` | Composer / 日志路径触发 sync |
+| `feature:family → sync` | 账户页 join/create/invite/leave |
+
 计时状态落 `core`/`domain`，避免 log ↔ timer 循环依赖。
+
+**运行环境 / 验收证据**：本机 Docker `lezi-sync` 与双模拟器前台交叉可见路径已有
+reviews 证据（见主 PRD 与
+[`docs/reviews/home-lan-sync-docker-acceptance-2026-07-25/`](../reviews/home-lan-sync-docker-acceptance-2026-07-25/)、
+[`docs/reviews/device-family-dual-emu-09/`](../reviews/device-family-dual-emu-09/)）。
+物理 NAS / 双真机 / 相机扫码仍 open。
 
 ---
 
@@ -110,6 +124,18 @@ UI 事件
 
 ---
 
+## 4.1 发布与数据保护
+
+| 项 | 实现 |
+|----|------|
+| release R8 | `isMinifyEnabled = true` + `isShrinkResources = true` |
+| 系统备份 | `android:allowBackup="false"`；`backup_rules` / `data_extraction_rules` 对齐排除 |
+| 明文 HTTP | 家网 PRD 默认：`usesCleartextTraffic=true`；可选反向代理 HTTPS（见 `sync-home-lan.md`） |
+| FileProvider | 仅 `cache/export`；不暴露 `files/` / database |
+| 日志 | 不打印 family token / Authorization；用户可见错误经 `productUiError` 过滤技术细节 |
+
+---
+
 ## 5. 功能 × 分期（工程）
 
 | 模块 | V1 | V1.5 | V2 |
@@ -117,13 +143,13 @@ UI 事件
 | onboarding / log / timer / settings | ✓ | | |
 | family UI；NoOpSync 实现保留（非默认 DI） | ✓ | | |
 | summary / growth / search / export TXT / widget | | ✓ | |
-| PDF / custom / food types / calendar | | | ✓ |
-| RealSync 家网实现 | | | 代码与自动化完成；双设备环境验收待补 |
-| `lezi-sync` NAS | | | API/镜像配置完成；Docker/NAS 运行验收待补 |
+| PDF / custom / food types / calendar | | | ✓ 本机已交付 |
+| RealSync 家网实现 | | | ✓ 默认 DI；本机 Docker + 双模拟器前台已验收 |
+| `lezi-sync` NAS | | | ✓ API/镜像/自动化；物理 NAS 生产部署待目标环境 |
 
 > **V2 同步策略（2026-07-25）**：中心化 NAS、硬家网、仅前台、无即时通知；
-> **不做**后台 60s 对齐。实现与自动化已完成；当前环境无 Docker/Podman、
-> ADB 双设备和 NAS 家网，故仍需镜像运行与双端设备验收后才能宣称可部署交付。
+> **不做**后台 60s 对齐。实现与自动化已完成；本机 Docker 与双模拟器前台
+> formula/pee 交叉可见已有 reviews 证据。物理 NAS / 双真机 / 相机扫码仍 open。
 
 ---
 

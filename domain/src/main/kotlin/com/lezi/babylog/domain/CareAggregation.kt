@@ -156,7 +156,11 @@ object CareAggregation {
                 val clippedEnd = minOf(intervalEnd, dayEnd)
                 if (clippedEnd > clippedStart) {
                     sleepMin += (clippedEnd - clippedStart) / MINUTE_MILLIS
-                    sleepSegments += 1
+                    // Count a physical sleep once: only on the day the interval
+                    // starts. Cross-day clips still add minutes to each day.
+                    if (clippedStart == record.timestamp) {
+                        sleepSegments += 1
+                    }
                 }
                 return@forEach
             }

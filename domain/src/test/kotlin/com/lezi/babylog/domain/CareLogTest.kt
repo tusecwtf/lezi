@@ -11,6 +11,8 @@ import com.lezi.babylog.core.database.FamilyDao
 import com.lezi.babylog.core.database.FamilyEntity
 import com.lezi.babylog.core.database.LocalUserDao
 import com.lezi.babylog.core.database.LocalUserEntity
+import com.lezi.babylog.core.database.MediaAssetDao
+import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.MembershipDao
 import com.lezi.babylog.core.database.MembershipEntity
 import com.lezi.babylog.core.database.RecordDao
@@ -18,6 +20,7 @@ import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SettingsLocal
+import com.lezi.babylog.core.model.visibleBusinessText
 import java.time.LocalDate
 import java.time.ZoneOffset
 import java.util.concurrent.atomic.AtomicLong
@@ -86,6 +89,38 @@ class CareLogTest {
         repeat(3) { care.getCurrentBaby() }
         assertThat(care.getCurrentBaby()!!.nickname).isEqualTo("豆豆")
         assertThat(fakes.babies.get(id)!!.nickname).isEqualTo("豆豆")
+    }
+
+    @Test
+    fun getCurrentBabyDoesNotImplicitlyWriteCurrentBabyId() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val first = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
+        val second = care.addBaby(CreateBabyInput(nickname = "果果", birthdayEpochDay = 2))
+        // Stale pointer that no longer matches an active selection intent.
+        fakes.settings.setCurrentBabyId(null)
+
+        val resolved = care.getCurrentBaby()
+        assertThat(resolved).isNotNull()
+        assertThat(resolved!!.id).isEqualTo(first)
+        // Read path must not self-heal the setting; only explicit mutators write.
+        assertThat(fakes.settings.currentBabyId.first()).isNull()
+
+        care.setCurrentBaby(second)
+        assertThat(fakes.settings.currentBabyId.first()).isEqualTo(second)
+        assertThat(care.getCurrentBaby()!!.id).isEqualTo(second)
+    }
+
+    @Test
+    fun addBabyAndAddCustomItemUseSharedDatabaseTransaction() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val before = fakes.transactions.runCount
+
+        care.addBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
+        care.addCustomItem("自定义项", iconSlot = 0)
+
+        assertThat(fakes.transactions.runCount - before).isAtLeast(2)
     }
 
     @Test
@@ -194,6 +229,34 @@ class CareLogTest {
         assertThat(remaining.single().nickname).isEqualTo("年年")
         val keeperId = remaining.single().id
         assertThat(fakes.records.listForBaby(keeperId)).hasSize(2)
+    }
+
+    @Test
+    fun mergeBabyProfilesMovesTombstonesAndAvatarMedia() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val target = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val source = care.addBaby(CreateBabyInput(nickname = "临时", birthdayEpochDay = 2))
+        val liveId = care.addRecord(source, RecordType.PEE, timestamp = 1_000)
+        val tombstoneId = care.addRecord(source, RecordType.FORMULA, timestamp = 2_000)
+        care.deleteRecord(tombstoneId)
+        fakes.media.seed(
+            MediaAssetEntity(
+                clientUuid = "avatar-source",
+                kind = "avatar",
+                babyId = source,
+                localUri = "avatars/source.jpg",
+                createdAt = 100,
+                updatedAt = 100,
+            ),
+        )
+
+        assertThat(care.mergeBabyProfiles(sourceBabyId = source, targetBabyId = target)).isTrue()
+
+        assertThat(fakes.records.listAllIncludingDeleted().map { it.id to it.babyId })
+            .containsExactly(liveId to target, tombstoneId to target)
+        assertThat(fakes.media.listAllIncludingDeleted().single().babyId).isEqualTo(target)
+        assertThat(fakes.media.listAllIncludingDeleted().single().syncDirty).isTrue()
     }
 
     @Test
@@ -431,6 +494,56 @@ class CareLogTest {
     }
 
     @Test
+    fun sleepUp_healsDuplicateOpenSleepsBeforeClosingLatest() = runTest {
+        val f = Fakes()
+        val care = f.careLog()
+        val babyId = care.createBaby(
+            CreateBabyInput(nickname = "豆豆", birthdayEpochDay = LocalDate.of(2026, 1, 1).toEpochDay()),
+        )
+        val t0 = 1_700_000_000_000L
+        // Simulate sync-introduced duplicate open sleeps bypassing CareLog mutex.
+        f.records.upsert(
+            RecordEntity(
+                clientUuid = "sleep-stale",
+                babyId = babyId,
+                type = RecordType.SLEEP.key,
+                timestamp = t0,
+                endTimestamp = null,
+                note = null,
+                createdByUserId = 1,
+                payloadJson = "{}",
+                updatedAt = t0,
+            ),
+        )
+        f.records.upsert(
+            RecordEntity(
+                clientUuid = "sleep-latest",
+                babyId = babyId,
+                type = RecordType.SLEEP.key,
+                timestamp = t0 + 60 * 60_000L,
+                endTimestamp = null,
+                note = null,
+                createdByUserId = 1,
+                payloadJson = "{}",
+                updatedAt = t0 + 60 * 60_000L,
+            ),
+        )
+
+        val closedId = care.sleepUp(babyId, t0 + 2 * 60 * 60_000L)
+
+        val all = f.records.listForBaby(babyId)
+        assertThat(all).hasSize(2)
+        assertThat(all.none { it.endTimestamp == null }).isTrue()
+        val stale = all.single { it.clientUuid == "sleep-stale" }
+        val latest = all.single { it.clientUuid == "sleep-latest" }
+        assertThat(stale.endTimestamp).isEqualTo(t0 + 60 * 60_000L)
+        assertThat(stale.payloadJson).contains("\"anomaly_flag\":true")
+        assertThat(latest.endTimestamp).isEqualTo(t0 + 2 * 60 * 60_000L)
+        assertThat(closedId).isEqualTo(latest.id)
+        assertThat(care.observeOpenSleep(babyId).first()).isNull()
+    }
+
+    @Test
     fun completeNursing_payload() = runTest {
         val care = Fakes().careLog()
         val babyId = care.createBaby(
@@ -600,6 +713,11 @@ class CareLogTest {
         assertThat(care.search(babyId, "secretvalue")).isEmpty()
         assertThat(care.search(babyId, "不存在的词xyz")).isEmpty()
         assertThat(care.search(babyId, "   ")).isEmpty()
+        // ISS-030: short Latin mid-alias hits must not return whole type classes.
+        assertThat(care.search(babyId, "e")).isEmpty()
+        assertThat(care.search(babyId, "a")).isEmpty()
+        assertThat(care.search(babyId, "pee").single().type).isEqualTo(RecordType.PEE)
+        assertThat(care.search(babyId, "formula").single().type).isEqualTo(RecordType.FORMULA)
         val id = care.addRecord(babyId, RecordType.MEMO, timestamp = ts + 3, note = "临时")
         care.deleteRecord(id)
         assertThat(care.search(babyId, "临时")).isEmpty()
@@ -612,6 +730,81 @@ class CareLogTest {
         val widget = care.recentCareSummary(babyId, zone)
         assertThat(widget.feedMl).isEqualTo(120)
         assertThat(widget.babyName).isEqualTo("豆豆")
+    }
+
+    @Test
+    fun searchUnitSuffixQueries_matchViaVisibleText() = runTest {
+        val care = Fakes().careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
+        val day = LocalDate.now(zone)
+        val ts = day.atStartOfDay(zone).toInstant().toEpochMilli() + 1000
+        care.addRecord(
+            babyId,
+            RecordType.FORMULA,
+            timestamp = ts,
+            payloadJson = """{"amount_ml":120}""",
+        )
+        care.addRecord(
+            babyId,
+            RecordType.WEIGHT,
+            timestamp = ts + 1,
+            payloadJson = """{"value":6350,"unit":"g"}""",
+        )
+        val formula = care.search(babyId, "120ml")
+        val weight = care.search(babyId, "6.35kg")
+        assertThat(formula.map { it.type }).containsExactly(RecordType.FORMULA)
+        assertThat(weight.map { it.type }).containsExactly(RecordType.WEIGHT)
+        assertThat(care.getRecord(formula.single().id)!!.visibleBusinessText()).isEqualTo("120ml")
+        // short latin mid-alias still empty on these records
+        assertThat(care.search(babyId, "e")).isEmpty()
+    }
+
+    @Test
+    fun searchTreatsSqlLikeMetacharactersAsLiterals() = runTest {
+        // F-F-01: user queries with %, _, \ must not expand as SQL wildcards.
+        val care = Fakes().careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
+        val day = LocalDate.now(zone)
+        val ts = day.atStartOfDay(zone).toInstant().toEpochMilli() + 1000
+        care.addRecord(
+            babyId,
+            RecordType.MEMO,
+            timestamp = ts,
+            note = "浓度 100% 达标",
+        )
+        care.addRecord(
+            babyId,
+            RecordType.MEMO,
+            timestamp = ts + 1,
+            note = "code a_b path",
+        )
+        care.addRecord(
+            babyId,
+            RecordType.MEMO,
+            timestamp = ts + 2,
+            note = "path\\file backup",
+        )
+        // Control: plain substring without metacharacters.
+        care.addRecord(
+            babyId,
+            RecordType.MEMO,
+            timestamp = ts + 3,
+            note = "100ml plain",
+        )
+
+        assertThat(care.search(babyId, "100%").single().note).isEqualTo("浓度 100% 达标")
+        // "%" as wildcard would have matched "100ml plain" too.
+        assertThat(care.search(babyId, "100%").map { it.note }).doesNotContain("100ml plain")
+
+        assertThat(care.search(babyId, "a_b").single().note).isEqualTo("code a_b path")
+        // "_" as single-char wildcard would match "100ml plain" notes with any mid char —
+        // ensure a note "axb" is not produced as a false hit via type/payload alone.
+        care.addRecord(babyId, RecordType.MEMO, timestamp = ts + 4, note = "axb only")
+        assertThat(care.search(babyId, "a_b").map { it.note }).containsExactly("code a_b path")
+
+        assertThat(care.search(babyId, "path\\file").single().note)
+            .isEqualTo("path\\file backup")
+        assertThat(care.search(babyId, "pathfile")).isEmpty()
     }
 
     @Test
@@ -686,13 +879,60 @@ class CareLogTest {
         val care = fakes.careLog()
         val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
         care.addRecord(babyId, RecordType.PEE, timestamp = 1_000)
+        care.addCalendarEvent(
+            babyId = babyId,
+            title = "疫苗",
+            note = null,
+            eventAt = 3_000,
+            remindAt = null,
+        )
         val requestsBeforeClear = sync.requests
 
         care.clearRecordsOnly()
 
         assertThat(fakes.records.listAllIncludingDeleted()).isEmpty()
+        assertThat(fakes.calendarEvents.listForBabyIncludingDeleted(babyId)).isEmpty()
+        assertThat(fakes.babies.listAll()).hasSize(1)
         assertThat(sync.requests).isEqualTo(requestsBeforeClear)
         assertThat(sync.localRecordReconciliations).isEqualTo(1)
+    }
+
+    @Test
+    fun clearAllLocalDataWipesBabiesCustomItemsCalendarAndUsesSyncBarrier() = runTest {
+        val sync = RecordingSyncPort()
+        val fakes = Fakes(sync)
+        val care = fakes.careLog()
+        val babyId = care.createBaby(
+            CreateBabyInput(
+                nickname = "豆豆",
+                birthdayEpochDay = 1,
+                avatarPath = "baby_avatars/doudou.jpg",
+            ),
+        )
+        care.addRecord(babyId, RecordType.PEE, timestamp = 1_000)
+        care.addCustomItem("自定义奶粉", iconSlot = 0)
+        care.addCalendarEvent(
+            babyId = babyId,
+            title = "体检",
+            note = null,
+            eventAt = 2_000,
+            remindAt = null,
+        )
+        val requestsBeforeClear = sync.requests
+
+        care.clearAllLocalData()
+
+        assertThat(fakes.records.listAllIncludingDeleted()).isEmpty()
+        assertThat(fakes.babies.listAllIncludingDeleted()).isEmpty()
+        assertThat(fakes.customItems.listAll()).isEmpty()
+        assertThat(fakes.calendarEvents.listForBaby(babyId)).isEmpty()
+        assertThat(fakes.families.listAll()).isEmpty()
+        assertThat(fakes.memberships.listForFamily(1)).isEmpty()
+        assertThat(fakes.users.get()).isNull()
+        assertThat(fakes.settings.currentBabyId.first()).isNull()
+        assertThat(sync.requests).isEqualTo(requestsBeforeClear)
+        assertThat(sync.fullLocalWipes).isEqualTo(1)
+        assertThat(fakes.transactions.runCount).isAtLeast(1)
     }
 
     @Test
@@ -714,6 +954,7 @@ private class Fakes(
     val records = FakeRecordDao()
     val calendarEvents = FakeCalendarEventDao()
     val customItems = FakeCustomItemDao()
+    val media = FakeMediaAssetDao()
     val settings = FakeSettingsStore()
     val transactions = RecordingTransactionRunner()
 
@@ -725,6 +966,7 @@ private class Fakes(
         users,
         families,
         memberships,
+        media,
         settings,
         syncPort,
         transactions,
@@ -746,6 +988,7 @@ private class RecordingSyncPort(
 ) : com.lezi.babylog.sync.SyncPort by delegate {
     var requests = 0
     var localRecordReconciliations = 0
+    var fullLocalWipes = 0
 
     override fun requestSync(trigger: com.lezi.babylog.sync.SyncTrigger) {
         requests++
@@ -755,6 +998,80 @@ private class RecordingSyncPort(
         localRecordReconciliations++
         clearLocal()
         return Result.success(Unit)
+    }
+
+    override suspend fun clearAllLocalData(clearLocal: suspend () -> Unit): Result<Unit> {
+        fullLocalWipes++
+        clearLocal()
+        return Result.success(Unit)
+    }
+}
+
+private class FakeMediaAssetDao : MediaAssetDao {
+    private val items = mutableListOf<MediaAssetEntity>()
+    private val seq = AtomicLong(1)
+
+    fun seed(entity: MediaAssetEntity): Long {
+        val id = entity.id.takeIf { it != 0L } ?: seq.getAndIncrement()
+        items.removeAll { it.id == id }
+        items += entity.copy(id = id)
+        return id
+    }
+
+    override suspend fun upsert(asset: MediaAssetEntity): Long = seed(asset)
+
+    override suspend fun listForRecord(recordId: Long): List<MediaAssetEntity> =
+        items.filter { it.recordId == recordId }
+
+    override suspend fun listActiveForRecord(recordId: Long): List<MediaAssetEntity> =
+        items.filter { it.recordId == recordId && it.deletedAt == null }.sortedBy { it.id }
+
+    override suspend fun activeAvatarForBaby(babyId: Long): MediaAssetEntity? =
+        items.filter { it.babyId == babyId && it.kind == "avatar" && it.deletedAt == null }
+            .maxWithOrNull(compareBy<MediaAssetEntity> { it.updatedAt }.thenBy { it.id })
+
+    override suspend fun listAllIncludingDeleted(): List<MediaAssetEntity> =
+        items.sortedBy { it.id }
+
+    override suspend fun listPendingSync(): List<MediaAssetEntity> =
+        items.filter { it.syncDirty }.sortedBy { it.id }
+
+    override suspend fun markSynced(clientUuid: String, updatedAt: Long) {
+        items.replaceAll {
+            if (it.clientUuid == clientUuid && it.updatedAt == updatedAt) {
+                it.copy(syncDirty = false)
+            } else {
+                it
+            }
+        }
+    }
+
+    override suspend fun listMissingLocalBytes(): List<MediaAssetEntity> =
+        items.filter {
+            it.deletedAt == null && it.remoteUri != null && it.localUri.isEmpty()
+        }.sortedBy { it.id }
+
+    override suspend fun getByClientUuid(uuid: String): MediaAssetEntity? =
+        items.find { it.clientUuid == uuid }
+
+    override suspend fun update(asset: MediaAssetEntity) {
+        items.replaceAll { if (it.id == asset.id) asset else it }
+    }
+
+    override suspend fun clearRemoteUris() {
+        items.replaceAll { it.copy(remoteUri = null, syncDirty = true) }
+    }
+
+    override suspend fun deleteLogMedia() {
+        items.removeAll { it.kind == "log" }
+    }
+
+    override suspend fun deleteForRecord(recordId: Long) {
+        items.removeAll { it.recordId == recordId }
+    }
+
+    override suspend fun deleteAll() {
+        items.clear()
     }
 }
 
@@ -806,6 +1123,11 @@ private class FakeCalendarEventDao : CalendarEventDao {
     override suspend fun listForBaby(babyId: Long): List<CalendarEventEntity> =
         items.value.filter { it.babyId == babyId && it.deletedAt == null }
             .sortedBy { it.eventAt }
+
+    override suspend fun listForBabyIncludingDeleted(babyId: Long): List<CalendarEventEntity> =
+        items.value.filter { it.babyId == babyId }.sortedWith(
+            compareBy<CalendarEventEntity> { it.eventAt }.thenBy { it.id },
+        )
 
     override suspend fun upsert(event: CalendarEventEntity): Long {
         val id = event.id.takeIf { it != 0L } ?: seq.getAndIncrement()
@@ -1195,6 +1517,9 @@ private class FakeRecordDao : RecordDao {
     }
 
     override suspend fun findOpenSleep(babyId: Long): RecordEntity? =
+        listOpenSleeps(babyId).firstOrNull()
+
+    override suspend fun listOpenSleeps(babyId: Long): List<RecordEntity> =
         items.value
             .filter {
                 it.babyId == babyId &&
@@ -1202,7 +1527,9 @@ private class FakeRecordDao : RecordDao {
                     it.deletedAt == null &&
                     it.endTimestamp == null
             }
-            .maxByOrNull { it.timestamp }
+            .sortedWith(
+                compareByDescending<RecordEntity> { it.timestamp }.thenByDescending { it.id },
+            )
 
     override fun observeOpenSleep(babyId: Long): Flow<RecordEntity?> =
         items.map { records ->
@@ -1213,7 +1540,9 @@ private class FakeRecordDao : RecordDao {
                         it.deletedAt == null &&
                         it.endTimestamp == null
                 }
-                .maxByOrNull { it.timestamp }
+                .maxWithOrNull(
+                    compareBy<RecordEntity> { it.timestamp }.thenBy { it.id },
+                )
         }
 
     override suspend fun listForBaby(babyId: Long): List<RecordEntity> =
@@ -1225,18 +1554,17 @@ private class FakeRecordDao : RecordDao {
         escapedPattern: String,
         matchingTypeKeys: List<String>,
     ): List<RecordEntity> {
-        val needle = escapedPattern
-            .removePrefix("%")
-            .removeSuffix("%")
-            .replace("\\%", "%")
-            .replace("\\_", "_")
-            .replace("\\\\", "\\")
+        // Mirror Room `LIKE :escapedPattern ESCAPE '\'` (see SqlLikeEscaped +
+        // RecordSearchTest) so CareLog.search unit tests do not green on a
+        // weaker contains() approximation of user metacharacters.
         return items.value.filter {
             it.babyId == babyId &&
                 it.deletedAt == null &&
                 (
-                    it.note?.lowercase()?.contains(needle) == true ||
-                        it.payloadJson.lowercase().contains(needle) ||
+                    it.note?.lowercase()?.let { note ->
+                        matchesSqlLike(note, escapedPattern)
+                    } == true ||
+                        matchesSqlLike(it.payloadJson.lowercase(), escapedPattern) ||
                         it.type in matchingTypeKeys
                 )
         }.sortedByDescending { it.timestamp }

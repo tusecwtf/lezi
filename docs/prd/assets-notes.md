@@ -4,7 +4,7 @@
 
 ## APK 实际实现
 
-Offline V2 Beta 的正式 APK 不打包 `design/assets/` 设计源。排泄分档由
+正式 APK（0.2.3）不打包 `design/assets/` 设计源。排泄分档由
 `designsystem/RecordVisuals.kt` 的 Compose Canvas 组件直接绘制：
 
 - `LeziPeeAmountMark`

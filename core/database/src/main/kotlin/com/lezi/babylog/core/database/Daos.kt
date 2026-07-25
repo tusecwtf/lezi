@@ -258,6 +258,18 @@ interface RecordDao {
           AND type = 'sleep'
           AND deletedAt IS NULL
           AND endTimestamp IS NULL
+        ORDER BY timestamp DESC, id DESC
+        """,
+    )
+    suspend fun listOpenSleeps(babyId: Long): List<RecordEntity>
+
+    @Query(
+        """
+        SELECT * FROM records
+        WHERE babyId = :babyId
+          AND type = 'sleep'
+          AND deletedAt IS NULL
+          AND endTimestamp IS NULL
         ORDER BY timestamp DESC
         LIMIT 1
         """,

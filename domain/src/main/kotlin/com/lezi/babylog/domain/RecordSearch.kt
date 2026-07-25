@@ -96,8 +96,42 @@ internal fun RecordType.candidateSearchTerms(): List<String> = searchTerms() + w
     -> emptyList()
 }
 
-internal fun Record.matchesVisibleSearchText(query: String): Boolean =
-    buildList {
-        addAll(type.searchTerms())
-        visibleBusinessText().takeIf(String::isNotBlank)?.let(::add)
-    }.any { it.lowercase().contains(query) }
+/**
+ * Type-alias match for search (ISS-030 / F-A-07).
+ *
+ * Latin-only aliases (`pee`, `sleep`, `formula`, …) match by prefix / whole
+ * term, multi-word token, or when the **query is longer than the term** and
+ * contains it (so `"120ml"`/`"6.35kg"` still hit unit tokens). Short queries
+ * never mid-hit longer aliases (`"e"` ⊄ `"pee"`). Chinese / mixed labels keep
+ * substring match so partials like `"尿布"` still hit `"换尿布"`.
+ */
+internal fun typeTermMatchesQuery(term: String, query: String): Boolean {
+    val t = term.lowercase()
+    val q = query.lowercase()
+    if (q.isEmpty() || t.isEmpty()) return false
+    val termIsLatinAlias = t.all { it.isLatinAliasChar() }
+    if (termIsLatinAlias) {
+        if (t == q || t.startsWith(q) || q.startsWith(t)) return true
+        // Multi-word English: "pumped feed", "both diaper", "baby food", "foot size"
+        if (
+            t.split(' ').any { word ->
+                word.isNotEmpty() && (word == q || word.startsWith(q) || q.startsWith(word))
+            }
+        ) {
+            return true
+        }
+        // Unit / token as substring of a longer query only ("120ml"⊃"ml").
+        // Blocks short mid-alias hits: "e" inside "pee", "a" inside "bath".
+        return q.length > t.length && q.contains(t)
+    }
+    return t.contains(q) || q.contains(t)
+}
+
+private fun Char.isLatinAliasChar(): Boolean =
+    this == ' ' || this in 'a'..'z' || this in '0'..'9'
+
+internal fun Record.matchesVisibleSearchText(query: String): Boolean {
+    if (type.searchTerms().any { typeTermMatchesQuery(it, query) }) return true
+    val visible = visibleBusinessText()
+    return visible.isNotBlank() && visible.lowercase().contains(query)
+}

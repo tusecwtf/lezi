@@ -1,4 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Full-backup rules for API levels that still consult this file.
+  allowBackup=false already disables cloud ADB backup; keep excludes aligned
+  with data_extraction_rules (ISS-019).
+-->
 <full-backup-content>
+    <exclude domain="root" path="." />
+    <exclude domain="database" path="." />
+    <exclude domain="sharedpref" path="." />
+    <exclude domain="file" path="." />
+    <exclude domain="file" path="record-media/" />
     <exclude domain="file" path="baby_avatars/" />
+    <exclude domain="database" path="lezi.db" />
 </full-backup-content>

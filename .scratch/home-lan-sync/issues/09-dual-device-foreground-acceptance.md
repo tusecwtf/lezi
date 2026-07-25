@@ -79,3 +79,20 @@
     partner system notifications；independent dual-device dark mode UI。
   - **Not claimed:** two physical phones; dual-device **camera** QR scan E2E; NAS production;
     background 60s sync.
+
+- 2026-07-25 **home-lan-live-emu-192.168.50.4** — **Status remains partial**:
+  - Live `http://192.168.50.4:8765`: health 200 (0.2.2); unauth pull 401; create **409** occupied (一家一栈).
+  - Dual-emu create/join/cross-sync ran on host empty `lezi-sync :18765` + `adb reverse` → app URL `http://127.0.0.1:18765` (documented deviation).
+  - A Owner create + invite-code; B Member join same family `75e3ea5c-…`.
+  - Bidirectional UI after 立即同步: both show `2 条记录` with `120ml · cross-sync-A-formula-ui` and `尿量中 · cross-sync-B-pee`.
+  - Avatar ACL protocol on same family: owner 200, member 403.
+  - Evidence: `docs/reviews/home-lan-live-emu-192.168.50.4-2026-07-25/` (`REPORT.md`, `summary.json`, `results.json`).
+  - **Still unchecked:** camera QR E2E; 日志图 UI cross; cellular; partner notif; dual dark UI.
+  - **Not claimed:** exclusive dual-emu create on live 192.168.50.4; physical phones; NAS production wipe.
+
+- 2026-07-25 **home-lan-live STRICT** after wipe:
+  - Live empty create OK; dual-emu apps URL **http://192.168.50.4:8765**.
+  - A Owner 新建家庭 → family `08d1ed76-…`; invite-code; B Member 已加入.
+  - Protocol bidirectional formula/pee True; avatar owner 200 / member 403 on live.
+  - Evidence refreshed: `docs/reviews/home-lan-live-emu-192.168.50.4-2026-07-25/`.
+  - Residual env-blocked unchanged (QR camera, cellular, partner notif, dual dark).
