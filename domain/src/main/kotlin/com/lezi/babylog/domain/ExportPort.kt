@@ -2,6 +2,8 @@ package com.lezi.babylog.domain
 
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.TextPayload
+import com.lezi.babylog.core.model.visibleBusinessText
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -11,16 +13,31 @@ import javax.inject.Singleton
 
 interface ExportPort {
     suspend fun exportTxt(babyId: Long, from: LocalDate, to: LocalDate): String
+    suspend fun exportDocument(babyId: Long, from: LocalDate, to: LocalDate): ExportDocument =
+        ExportDocument(exportTxt(babyId, from, to))
     /** Returns UTF-8 text content suitable for writing to a cache file before share. */
     suspend fun exportPdfText(babyId: Long, from: LocalDate, to: LocalDate): String = exportTxt(babyId, from, to)
 }
+
+data class ExportDocument(
+    val text: String,
+    val photoPaths: List<String> = emptyList(),
+)
 
 @Singleton
 class TxtExportPort @Inject constructor(
     private val recordDao: RecordDao,
     private val careLog: CareLog,
 ) : ExportPort {
-    override suspend fun exportTxt(babyId: Long, from: LocalDate, to: LocalDate): String {
+    override suspend fun exportTxt(babyId: Long, from: LocalDate, to: LocalDate): String =
+        exportDocument(babyId, from, to).text
+
+    override suspend fun exportDocument(
+        babyId: Long,
+        from: LocalDate,
+        to: LocalDate,
+    ): ExportDocument {
+        require(!to.isBefore(from)) { "结束日期不能早于开始日期" }
         val zone = ZoneId.systemDefault()
         val start = from.atStartOfDay(zone).toInstant().toEpochMilli()
         val end = to.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
@@ -32,13 +49,15 @@ class TxtExportPort @Inject constructor(
         sb.appendLine("宝宝：${baby?.nickname ?: babyId}")
         sb.appendLine("范围：$from ~ $to")
         sb.appendLine("---")
+        val photoPaths = mutableListOf<String>()
         for (r in rows) {
             val type = RecordType.fromKey(r.type)?.let { labelType(it) } ?: r.type
             val whenStr = dt.format(Instant.ofEpochMilli(r.timestamp))
-            val summary = summarize(r.type, r.payloadJson, r.note)
+            val summary = r.toModel().visibleBusinessText().ifBlank { "-" }
             sb.appendLine("$whenStr\t$type\t$summary")
+            photoPaths += (r.toModel().payload.payload as? TextPayload)?.photos.orEmpty()
         }
-        return sb.toString()
+        return ExportDocument(sb.toString(), photoPaths.distinct())
     }
 
     private fun labelType(t: RecordType): String = when (t) {
@@ -53,24 +72,5 @@ class TxtExportPort @Inject constructor(
         RecordType.HEIGHT -> "身高"
         RecordType.WEIGHT -> "体重"
         else -> t.key
-    }
-
-    private fun summarize(type: String, payload: String, note: String?): String {
-        val parts = mutableListOf<String>()
-        when (type) {
-            "formula", "pumped_feed", "pump_express" -> {
-                val ml = payloadInt(payload, "amount_ml")
-                if (ml > 0) parts += "${ml}ml"
-            }
-            "nursing" -> parts += "左${payloadInt(payload, "left_min")} 右${payloadInt(payload, "right_min")}"
-            "temperature" -> payloadDouble(payload, "celsius")?.let { parts += "${it}℃" }
-            "height", "weight" -> {
-                val v = payloadDouble(payload, "value")
-                val u = Regex(""""unit"\s*:\s*"([^"]+)"""").find(payload)?.groupValues?.getOrNull(1)
-                if (v != null) parts += "$v${u.orEmpty()}"
-            }
-        }
-        if (!note.isNullOrBlank()) parts += note
-        return parts.joinToString(" ").ifBlank { "-" }
     }
 }

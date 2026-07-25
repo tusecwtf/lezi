@@ -1,10 +1,10 @@
 # 乐记（lezi）
 
-家庭育儿日志 · Android · Kotlin + Jetpack Compose  
-包名：`com.lezi.babylog` · minSdk 26 · targetSdk 35 · 显示名「乐记」 · version `0.2.0-v2`
+家庭育儿日志 · Android · Kotlin + Jetpack Compose
+包名：`com.lezi.babylog` · minSdk 26 · targetSdk 35 · 显示名「乐记」 · version `0.2.0-offline-v2-beta`
 
-产品规格：[`docs/prd/`](docs/prd/)  
-设计同步：[`design/README.md`](design/README.md) · 原型快照 [`prototype/`](prototype/)  
+产品规格：[`docs/prd/`](docs/prd/)
+设计同步：[`design/README.md`](design/README.md) · 原型快照 [`prototype/`](prototype/)
 Open Design 项目：`leji-prd-prototype`（禁止 `nuanya-baby-tracker`）
 
 ## 环境
@@ -45,7 +45,7 @@ python3 tools/sync-server/server.py
 ## 已知限制
 
 - **同步**：本地 stdlib 服务；设置 / 深色模式**不同步**；双端 SLA 依赖前台 pull
-- **成长曲线**：示例 WHO 简化数据，**非医疗诊断**
+- **成长曲线**：离线内置 WHO 0–24 月、分性别参考数据，**非医疗诊断**
 - **Widget**：需手动添加到桌面
 - **厂商杀后台**：母乳计时依赖 FGS + DataStore
 - **无广告 / 无 IAP / 无强制登录**

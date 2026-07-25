@@ -243,4 +243,3 @@ input::placeholder, textarea::placeholder { color: color-mix(in oklch, var(--mut
   .field-row { grid-template-columns: 1fr; }
   .summary-detail { grid-template-columns: 78px minmax(0,1fr) auto; }
 }
-

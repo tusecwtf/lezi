@@ -1,0 +1,98 @@
+package com.lezi.babylog.core.model
+
+import com.google.common.truth.Truth.assertThat
+import java.time.Clock
+import java.time.Instant
+import java.time.LocalDate
+import java.time.LocalTime
+import java.time.ZoneId
+import java.time.ZoneOffset
+import java.time.ZonedDateTime
+import org.junit.Test
+
+class RecordTimeDecisionTest {
+    @Test
+    fun explicitDstGapRejectsAndOverlapPreservesPreferredOffset() {
+        val zone = ZoneId.of("America/New_York")
+        val gap = RecordTime.resolve(
+            date = LocalDate.of(2026, 3, 8),
+            time = LocalTime.of(2, 30),
+            zone = zone,
+        )
+        val overlap = RecordTime.resolve(
+            date = LocalDate.of(2026, 11, 1),
+            time = LocalTime.of(1, 30),
+            zone = zone,
+            preferredOffset = ZoneOffset.ofHours(-5),
+        )
+
+        assertThat(gap).isEqualTo(RecordTimeDecision.RejectedGap)
+        assertThat((overlap as RecordTimeDecision.Accepted).value.offset)
+            .isEqualTo(ZoneOffset.ofHours(-5))
+    }
+
+    @Test
+    fun fixedClockIsTheSingleNowSource() {
+        val instant = Instant.parse("2026-07-23T02:30:00Z")
+        assertThat(
+            RecordTime.currentTimeMillis(
+                Clock.fixed(instant, ZoneOffset.UTC),
+            ),
+        ).isEqualTo(instant.toEpochMilli())
+    }
+
+    @Test
+    fun newDraftClampsFutureDateAndIntervalShiftKeepsDuration() {
+        val zone = ZoneId.of("Asia/Shanghai")
+        val now = ZonedDateTime.of(
+            LocalDate.of(2026, 7, 23),
+            LocalTime.of(9, 5),
+            zone,
+        )
+
+        val timestamp = RecordTime.newDraftTimestamp(
+            selectedDate = LocalDate.of(2026, 7, 30),
+            zone = zone,
+            now = now,
+        )
+        val shiftedEnd = RecordTime.shiftStartPreservingDuration(
+            oldStartMillis = 1_000L,
+            oldEndMillis = 61_000L,
+            newStartMillis = 10_000L,
+        )
+
+        assertThat(timestamp).isEqualTo(now.toInstant().toEpochMilli())
+        assertThat(shiftedEnd).isEqualTo(70_000L)
+        assertThat(RecordTime.snap(23, 58, 5)).isEqualTo(RecordTimeTick(23, 55))
+    }
+
+    @Test
+    fun futureEventAndReminderUseTheSameOrderingDecision() {
+        val zone = ZoneId.of("Asia/Shanghai")
+        val now = ZonedDateTime.of(
+            LocalDate.of(2026, 7, 23),
+            LocalTime.of(10, 30),
+            zone,
+        )
+        val defaultEvent = RecordTime.defaultFutureEventTimestamp(
+            selectedDate = LocalDate.of(2026, 7, 1),
+            zone = zone,
+            now = now,
+        )
+        val event = now.plusHours(2).toInstant().toEpochMilli()
+
+        assertThat(defaultEvent)
+            .isEqualTo(now.plusDays(1).toInstant().toEpochMilli())
+        assertThat(RecordTime.futureEventError(now.toInstant().toEpochMilli(), null, now.toInstant().toEpochMilli()))
+            .isEqualTo(FutureEventError.EventNotFuture)
+        assertThat(RecordTime.futureEventError(event, event, now.toInstant().toEpochMilli()))
+            .isEqualTo(FutureEventError.ReminderNotBeforeEvent)
+        assertThat(
+            RecordTime.reminderAfterEventChange(
+                priorEventAt = event,
+                newEventAt = event + 24 * 60 * 60_000L,
+                priorReminderAt = event - 2 * 60 * 60_000L,
+            ),
+        ).isEqualTo(event + 22 * 60 * 60_000L)
+    }
+}

@@ -6,7 +6,6 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
     <application
         android:name=".LeziApp"
@@ -60,6 +59,9 @@
             </intent-filter>
         </receiver>
         <receiver
+            android:name="com.lezi.babylog.feature.settings.CalendarReminderReceiver"
+            android:exported="false" />
+        <receiver
             android:name="com.lezi.babylog.feature.widget.CareWidgetReceiver"
             android:exported="true"
             android:label="乐记今日">
@@ -68,7 +70,7 @@
             </intent-filter>
             <meta-data
                 android:name="android.appwidget.provider"
-                android:resource="@xml/care_widget_info" />
+                android:resource="@xml/care_widget_info_v2" />
         </receiver>
     </application>
 </manifest>

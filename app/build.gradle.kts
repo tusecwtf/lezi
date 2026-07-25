@@ -15,8 +15,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 1
-        versionName = "0.2.0-v2"
-        buildConfigField("String", "SYNC_BASE_URL", "\"http://10.0.2.2:8765\"")
+        versionName = "0.2.0-offline-v2-beta"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }

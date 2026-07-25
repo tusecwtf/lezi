@@ -37,7 +37,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -45,8 +44,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.datastore.SettingsStore
-import com.lezi.babylog.core.model.Record
+import com.lezi.babylog.core.model.GrowthMeasurementFacts
+import com.lezi.babylog.core.model.GrowthReferenceBand
+import com.lezi.babylog.core.model.RecordTime
+import com.lezi.babylog.core.model.RecordTimeDecision
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.Sex
 import com.lezi.babylog.designsystem.LeziCard
 import com.lezi.babylog.designsystem.LeziClockDialDialog
 import com.lezi.babylog.designsystem.LeziPrimaryButton
@@ -59,10 +62,11 @@ import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
-import com.lezi.babylog.designsystem.resolveLeziLocalDateTime
-import com.lezi.babylog.designsystem.timestampOnLeziDate
 import com.lezi.babylog.domain.CareLog
-import com.lezi.babylog.domain.payloadDouble
+import com.lezi.babylog.domain.GrowthMeasurementLifecycle
+import com.lezi.babylog.domain.GrowthMeasurementSaveResult
+import com.lezi.babylog.domain.ObserveGrowthMeasurements
+import com.lezi.babylog.domain.SaveGrowthMeasurement
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate
@@ -70,7 +74,6 @@ import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
-import java.time.temporal.ChronoUnit
 import javax.inject.Inject
 import kotlin.math.max
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -80,13 +83,18 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import org.json.JSONArray
-import org.json.JSONObject
 
 enum class GrowthMetric { WEIGHT, HEIGHT, HEAD }
 
-data class CurveBand(val month: Float, val p3: Float, val p50: Float, val p97: Float)
-data class MeasurePoint(val monthAge: Float, val value: Float, val record: Record)
+typealias CurveBand = GrowthReferenceBand
+
+data class MeasurePoint(
+    val monthAge: Float,
+    val value: Float,
+    val recordId: Long,
+    val measuredAt: Long,
+    val note: String?,
+)
 
 /** Draft for create or edit of a growth measurement. */
 private data class MeasurementDraft(
@@ -104,16 +112,20 @@ data class GrowthUi(
     val dueDateEpochDay: Long? = null,
     val babyName: String = "",
     val birthdayEpochDay: Long? = null,
+    val sex: Sex? = null,
 )
 
 @HiltViewModel
 class GrowthViewModel @Inject constructor(
     private val careLog: CareLog,
-    settingsStore: SettingsStore,
+    private val settingsStore: SettingsStore,
+    private val measurements: GrowthMeasurementLifecycle,
+    private val referenceCatalog: GrowthReferenceCatalog,
 ) : ViewModel() {
     private val metric = MutableStateFlow(GrowthMetric.WEIGHT)
-    private val corrected = MutableStateFlow(false)
-    private val refresh = MutableStateFlow(0)
+    private val corrected = settingsStore.settings
+        .map { it.correctedAgeEnabled }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     val timeStepMin = settingsStore.settings
         .map { it.timeStepMin }
@@ -132,57 +144,43 @@ class GrowthViewModel @Inject constructor(
         careLog.observeCurrentBaby(),
         metric,
         corrected,
-        refresh,
-    ) { values ->
-        @Suppress("UNCHECKED_CAST")
-        arrayOf(values[0], values[1], values[2], values[3])
-    }.flatMapLatest { values ->
-        val baby = values[0] as com.lezi.babylog.core.model.Baby?
-        val m = values[1] as GrowthMetric
-        val corr = values[2] as Boolean
+    ) { baby, selectedMetric, useCorrectedAge ->
+        Triple(baby, selectedMetric, useCorrectedAge)
+    }.flatMapLatest { (baby, m, corr) ->
         if (baby == null) {
             kotlinx.coroutines.flow.flowOf(GrowthUi())
         } else {
-            kotlinx.coroutines.flow.flow {
-                val type = when (m) {
-                    GrowthMetric.WEIGHT -> RecordType.WEIGHT
-                    GrowthMetric.HEIGHT -> RecordType.HEIGHT
-                    GrowthMetric.HEAD -> RecordType.HEAD
-                }
-                val records = careLog.listMeasurements(baby.id, type)
-                val zone = ZoneId.systemDefault()
-                val birth = LocalDate.ofEpochDay(baby.birthdayEpochDay)
-                val dueEpoch = baby.dueDateEpochDay
-                val due = if (dueEpoch != null) LocalDate.ofEpochDay(dueEpoch) else null
-                val points = records.mapNotNull { r ->
-                    val value: Float = when (m) {
-                        GrowthMetric.WEIGHT -> {
-                            val g = payloadDouble(r.payloadJson, "value") ?: return@mapNotNull null
-                            (g / 1000.0).toFloat()
-                        }
-                        GrowthMetric.HEIGHT, GrowthMetric.HEAD -> {
-                            val cm = payloadDouble(r.payloadJson, "value") ?: return@mapNotNull null
-                            cm.toFloat()
-                        }
-                    }
-                    val day = Instant.ofEpochMilli(r.timestamp).atZone(zone).toLocalDate()
-                    var months = ChronoUnit.DAYS.between(birth, day) / 30.4375f
-                    if (corr && due != null && due.isAfter(birth)) {
-                        val shift = ChronoUnit.DAYS.between(birth, due) / 30.4375f
-                        months = (months - shift).coerceAtLeast(0f)
-                    }
-                    MeasurePoint(months, value, r)
-                }.sortedBy { it.monthAge }
-                emit(
-                    GrowthUi(
-                        metric = m,
-                        points = points,
-                        bands = emptyList(),
-                        corrected = corr,
-                        dueDateEpochDay = baby.dueDateEpochDay,
-                        babyName = baby.nickname,
-                        birthdayEpochDay = baby.birthdayEpochDay,
-                    ),
+            val type = m.recordType
+            val zone = ZoneId.systemDefault()
+            val birth = LocalDate.ofEpochDay(baby.birthdayEpochDay)
+            val due = baby.dueDateEpochDay?.let(LocalDate::ofEpochDay)
+            measurements.observe(
+                ObserveGrowthMeasurements(
+                    babyId = baby.id,
+                    type = type,
+                    birthday = birth,
+                    dueDate = due,
+                    correctedAge = corr,
+                    zone = zone,
+                ),
+            ).map { facts ->
+                GrowthUi(
+                    metric = m,
+                    points = facts.map { fact ->
+                        MeasurePoint(
+                            monthAge = fact.monthAge,
+                            value = fact.displayValue.toFloat(),
+                            recordId = fact.recordId,
+                            measuredAt = fact.measuredAt,
+                            note = fact.note,
+                        )
+                    },
+                    bands = referenceCatalog.bands(type, baby.sex),
+                    corrected = corr,
+                    dueDateEpochDay = baby.dueDateEpochDay,
+                    babyName = baby.nickname,
+                    birthdayEpochDay = baby.birthdayEpochDay,
+                    sex = baby.sex,
                 )
             }
         }
@@ -193,23 +191,24 @@ class GrowthViewModel @Inject constructor(
     }
 
     fun setCorrected(v: Boolean) {
-        corrected.value = v
+        viewModelScope.launch {
+            settingsStore.setCorrectedAgeEnabled(v)
+        }
     }
 
     fun addMeasurement(value: Double, timestamp: Long, note: String, onDone: () -> Unit) {
         viewModelScope.launch {
             val baby = careLog.getCurrentBaby() ?: return@launch
-            if (timestamp > System.currentTimeMillis()) return@launch
-            val (type, payload) = measurementPayload(metric.value, value) ?: return@launch
-            careLog.addRecord(
-                babyId = baby.id,
-                type = type,
-                timestamp = timestamp,
-                note = note.ifBlank { null },
-                payloadJson = payload,
+            val result = measurements.save(
+                SaveGrowthMeasurement(
+                    babyId = baby.id,
+                    type = metric.value.recordType,
+                    displayValue = value,
+                    measuredAt = timestamp,
+                    note = note.ifBlank { null },
+                ),
             )
-            refresh.value = refresh.value + 1
-            onDone()
+            if (result is GrowthMeasurementSaveResult.Saved) onDone()
         }
     }
 
@@ -221,24 +220,24 @@ class GrowthViewModel @Inject constructor(
         onDone: () -> Unit,
     ) {
         viewModelScope.launch {
-            if (timestamp > System.currentTimeMillis()) return@launch
-            val payload = measurementPayload(metric.value, value)?.second ?: return@launch
-            careLog.updateRecord(
-                id = recordId,
-                timestamp = timestamp,
-                endTimestamp = null,
-                note = note.ifBlank { null },
-                payloadJson = payload,
+            val baby = careLog.getCurrentBaby() ?: return@launch
+            val result = measurements.save(
+                SaveGrowthMeasurement(
+                    babyId = baby.id,
+                    type = metric.value.recordType,
+                    displayValue = value,
+                    measuredAt = timestamp,
+                    note = note.ifBlank { null },
+                    existingRecordId = recordId,
+                ),
             )
-            refresh.value = refresh.value + 1
-            onDone()
+            if (result is GrowthMeasurementSaveResult.Saved) onDone()
         }
     }
 
     fun deleteMeasurement(recordId: Long, onDone: () -> Unit) {
         viewModelScope.launch {
-            careLog.deleteRecord(recordId)
-            refresh.value = refresh.value + 1
+            measurements.delete(recordId)
             onDone()
         }
     }
@@ -247,26 +246,16 @@ class GrowthViewModel @Inject constructor(
         viewModelScope.launch {
             val baby = careLog.getCurrentBaby() ?: return@launch
             careLog.updateBabyDueDate(baby.id, epochDay)
-            refresh.value = refresh.value + 1
-        }
-    }
-
-    private fun measurementPayload(
-        metric: GrowthMetric,
-        value: Double,
-    ): Pair<RecordType, String>? {
-        if (value <= 0.0) return null
-        return when (metric) {
-            GrowthMetric.WEIGHT -> {
-                val g = (value * 1000).toInt()
-                if (g <= 0) return null
-                RecordType.WEIGHT to """{"value":$g,"unit":"g"}"""
-            }
-            GrowthMetric.HEIGHT -> RecordType.HEIGHT to """{"value":$value,"unit":"cm"}"""
-            GrowthMetric.HEAD -> RecordType.HEAD to """{"value":$value,"unit":"cm"}"""
         }
     }
 }
+
+private val GrowthMetric.recordType: RecordType
+    get() = when (this) {
+        GrowthMetric.WEIGHT -> RecordType.WEIGHT
+        GrowthMetric.HEIGHT -> RecordType.HEIGHT
+        GrowthMetric.HEAD -> RecordType.HEAD
+    }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -278,23 +267,23 @@ fun GrowthRoute(
     val timeStepMin by vm.timeStepMin.collectAsStateWithLifecycle()
     val timePickerStyle by vm.timePickerStyle.collectAsStateWithLifecycle()
     val preferredHand by vm.preferredHand.collectAsStateWithLifecycle()
-    val context = LocalContext.current
-    val bands = remember(ui.metric) {
-        loadBands(context, ui.metric)
-    }
+    val bands = ui.bands
     var draft by remember { mutableStateOf<MeasurementDraft?>(null) }
     var showMeasureDate by remember { mutableStateOf(false) }
     var showMeasureClock by remember { mutableStateOf(false) }
+    var showDueDate by remember { mutableStateOf(false) }
     var measurementError by remember { mutableStateOf<String?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
     val journal = LeziThemeExt.isJournal
     val zone = ZoneId.systemDefault()
     val history = remember(ui.points) {
-        ui.points.sortedByDescending { it.record.timestamp }
+        ui.points.sortedByDescending(MeasurePoint::measuredAt)
     }
 
     fun openNewMeasurement() {
-        draft = MeasurementDraft(measuredAt = timestampOnGrowthDate(initialDate))
+        draft = MeasurementDraft(
+            measuredAt = RecordTime.newDraftTimestamp(initialDate, zone),
+        )
         measurementError = null
         showMeasureDate = false
         showMeasureClock = false
@@ -302,17 +291,16 @@ fun GrowthRoute(
     }
 
     fun openEditMeasurement(point: MeasurePoint) {
-        val record = point.record
         val valueText = if (ui.metric == GrowthMetric.WEIGHT) {
             "%.2f".format(point.value)
         } else {
             "%.1f".format(point.value)
         }
         draft = MeasurementDraft(
-            recordId = record.id,
+            recordId = point.recordId,
             valueText = valueText.trimEnd('0').trimEnd('.').ifEmpty { valueText },
-            note = record.note.orEmpty(),
-            measuredAt = record.timestamp,
+            note = point.note.orEmpty(),
+            measuredAt = point.measuredAt,
         )
         measurementError = null
         showMeasureDate = false
@@ -362,13 +350,44 @@ fun GrowthRoute(
                 )
             }
 
-            if (ui.dueDateEpochDay != null) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Column {
-                        Text("修正月龄", style = LeziTypography.BodyStrong)
-                        Text("适用于早产宝宝", style = LeziTypography.Meta, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            LeziCard(Modifier.fillMaxWidth()) {
+                Text("预产期与修正月龄", style = LeziTypography.BodyStrong)
+                Text(
+                    ui.dueDateEpochDay?.let {
+                        "预产期 ${LocalDate.ofEpochDay(it).format(DateTimeFormatter.ofPattern("yyyy年M月d日"))}"
+                    } ?: "尚未设置预产期",
+                    style = LeziTypography.Meta,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    OutlinedButton(onClick = { showDueDate = true }) {
+                        Text(if (ui.dueDateEpochDay == null) "设置预产期" else "修改预产期")
                     }
-                    Switch(checked = ui.corrected, onCheckedChange = vm::setCorrected)
+                    if (ui.dueDateEpochDay != null) {
+                        TextButton(onClick = { vm.setDueDate(null) }) { Text("清除") }
+                    }
+                }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column {
+                        Text("使用修正月龄", style = LeziTypography.BodyStrong)
+                        Text(
+                            if (ui.dueDateEpochDay == null) "设置预产期后可启用" else "适用于早产宝宝",
+                            style = LeziTypography.Meta,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = ui.corrected && ui.dueDateEpochDay != null,
+                        enabled = ui.dueDateEpochDay != null,
+                        onCheckedChange = vm::setCorrected,
+                    )
                 }
             }
 
@@ -448,7 +467,7 @@ fun GrowthRoute(
                 if (ui.metric == GrowthMetric.HEAD) {
                     "头围仅显示个人趋势 · 非医疗诊断"
                 } else {
-                    "WHO 示例 P3/P50/P97 · 仅供趋势参考，非医疗诊断"
+                    "WHO 儿童生长标准 0–24 月 P3/P50/P97（按性别）· 仅供趋势参考，非医疗诊断"
                 },
                 style = LeziTypography.Meta,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -540,7 +559,12 @@ fun GrowthRoute(
                             }
                             return@TextButton
                         }
-                        if (activeDraft.measuredAt > System.currentTimeMillis()) {
+                        if (
+                            RecordTime.pointError(
+                                activeDraft.measuredAt,
+                                RecordTime.currentTimeMillis(),
+                            ) != null
+                        ) {
                             measurementError = "测量时刻不能晚于现在"
                             return@TextButton
                         }
@@ -563,6 +587,40 @@ fun GrowthRoute(
                 TextButton(onClick = { closeMeasurementDraft() }) { Text("取消") }
             },
         )
+    }
+
+    if (showDueDate) {
+        val initialEpochDay = ui.dueDateEpochDay
+            ?: ui.birthdayEpochDay
+            ?: LocalDate.now(zone).toEpochDay()
+        val initialUtc = LocalDate.ofEpochDay(initialEpochDay)
+            .atStartOfDay(ZoneOffset.UTC)
+            .toInstant()
+            .toEpochMilli()
+        val dueDateState = rememberDatePickerState(initialSelectedDateMillis = initialUtc)
+        DatePickerDialog(
+            onDismissRequest = { showDueDate = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        dueDateState.selectedDateMillis?.let { millis ->
+                            vm.setDueDate(
+                                Instant.ofEpochMilli(millis)
+                                    .atZone(ZoneOffset.UTC)
+                                    .toLocalDate()
+                                    .toEpochDay(),
+                            )
+                        }
+                        showDueDate = false
+                    },
+                ) { Text("确定") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDueDate = false }) { Text("取消") }
+            },
+        ) {
+            DatePicker(state = dueDateState)
+        }
     }
 
     if (confirmDelete) {
@@ -618,22 +676,27 @@ fun GrowthRoute(
                                 .atZone(ZoneOffset.UTC)
                                 .toLocalDate()
                             val safeDate = minOf(selectedDate, LocalDate.now(zone))
-                            val resolved = resolveLeziLocalDateTime(
+                            val decision = RecordTime.merge(
+                                value = current,
                                 date = safeDate,
-                                time = current.toLocalTime(),
-                                zone = zone,
-                                preferredOffset = current.offset,
+                                hour = current.hour,
+                                minute = current.minute,
+                                step = 1,
                             )
-                            if (resolved == null) {
-                                measurementError = "所选日期不存在当前时刻，请改用其他时刻"
-                            } else {
-                                draft = draftForPickers.copy(
-                                    measuredAt = resolved.toInstant().toEpochMilli(),
-                                )
-                                measurementError = if (selectedDate != safeDate) {
-                                    "测量日期不能晚于今天，已保留为今天"
-                                } else {
-                                    null
+                            when (decision) {
+                                RecordTimeDecision.RejectedGap -> {
+                                    measurementError =
+                                        "所选日期不存在当前时刻，请改用其他时刻"
+                                }
+                                is RecordTimeDecision.Accepted -> {
+                                    draft = draftForPickers.copy(
+                                        measuredAt = decision.value.toInstant().toEpochMilli(),
+                                    )
+                                    measurementError = if (selectedDate != safeDate) {
+                                        "测量日期不能晚于今天，已保留为今天"
+                                    } else {
+                                        null
+                                    }
                                 }
                             }
                         }
@@ -677,7 +740,7 @@ private fun MeasurementHistoryRow(
     zone: ZoneId,
     onClick: () -> Unit,
 ) {
-    val whenText = Instant.ofEpochMilli(point.record.timestamp)
+    val whenText = Instant.ofEpochMilli(point.measuredAt)
         .atZone(zone)
         .format(DateTimeFormatter.ofPattern("yyyy年M月d日 HH:mm"))
     Column(
@@ -700,7 +763,7 @@ private fun MeasurementHistoryRow(
             style = LeziTypography.Meta,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        point.record.note?.takeIf { it.isNotBlank() }?.let { note ->
+        point.note?.takeIf { it.isNotBlank() }?.let { note ->
             Text(
                 note,
                 style = LeziTypography.Meta,
@@ -718,51 +781,12 @@ private fun formatMeasurementValue(metric: GrowthMetric, value: Float): String {
     }
 }
 
-internal fun timestampOnGrowthDate(
-    date: LocalDate,
-    zone: ZoneId = ZoneId.systemDefault(),
-    now: ZonedDateTime = ZonedDateTime.now(zone),
-): Long {
-    return timestampOnLeziDate(date, zone, now)
-}
-
 internal fun growthRangeWarning(
     monthAge: Float,
     value: Float,
     bands: List<CurveBand>,
 ): String? {
-    if (bands.isEmpty()) return null
-    val sorted = bands.sortedBy { it.month }
-    val upperIndex = sorted.indexOfFirst { it.month >= monthAge }
-    val lower: CurveBand
-    val upper: CurveBand
-    when {
-        upperIndex < 0 -> {
-            lower = sorted.last()
-            upper = lower
-        }
-        upperIndex == 0 -> {
-            lower = sorted.first()
-            upper = lower
-        }
-        else -> {
-            lower = sorted[upperIndex - 1]
-            upper = sorted[upperIndex]
-        }
-    }
-    val progress = if (upper.month == lower.month) {
-        0f
-    } else {
-        ((monthAge - lower.month) / (upper.month - lower.month)).coerceIn(0f, 1f)
-    }
-    fun interpolate(start: Float, end: Float): Float = start + (end - start) * progress
-    val p3 = interpolate(lower.p3, upper.p3)
-    val p97 = interpolate(lower.p97, upper.p97)
-    return when {
-        value > p97 -> "该数值高于同月龄参考范围，请确认单位和录入值。"
-        value < p3 -> "该数值低于同月龄参考范围，请确认单位和录入值。"
-        else -> null
-    }
+    return GrowthMeasurementFacts.referenceAt(monthAge, bands)?.warningFor(value)
 }
 
 @Composable
@@ -836,27 +860,4 @@ private fun GrowthChart(points: List<MeasurePoint>, bands: List<CurveBand>, metr
         }
         if (points.size >= 2) drawPath(line, accent, style = Stroke(width = if (journal) 3f else 4f))
     }
-}
-
-private fun loadBands(context: android.content.Context, metric: GrowthMetric): List<CurveBand> {
-    if (metric == GrowthMetric.HEAD) return emptyList()
-    return runCatching {
-        val json = context.assets.open("curves/who_simple.json").bufferedReader().use { it.readText() }
-        val root = JSONObject(json)
-        val key = if (metric == GrowthMetric.WEIGHT) "weight_kg" else "height_cm"
-        val arr: JSONArray = root.getJSONArray(key)
-        buildList {
-            for (i in 0 until arr.length()) {
-                val o = arr.getJSONObject(i)
-                add(
-                    CurveBand(
-                        month = o.getDouble("m").toFloat(),
-                        p3 = o.getDouble("p3").toFloat(),
-                        p50 = o.getDouble("p50").toFloat(),
-                        p97 = o.getDouble("p97").toFloat(),
-                    ),
-                )
-            }
-        }
-    }.getOrDefault(emptyList())
 }

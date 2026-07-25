@@ -1,5 +1,6 @@
 package com.lezi.babylog
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -81,6 +82,9 @@ import com.lezi.babylog.feature.settings.CalendarRoute
 import com.lezi.babylog.feature.settings.SettingsRoute
 import com.lezi.babylog.feature.summary.SummaryRoute
 import com.lezi.babylog.feature.timer.TimerRoute
+import com.lezi.babylog.feature.widget.CareWidgetRefreshController
+import com.lezi.babylog.feature.widget.WidgetComposerContract
+import com.lezi.babylog.feature.widget.WidgetComposerTarget
 import dagger.hilt.android.AndroidEntryPoint
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Duration
@@ -103,8 +107,11 @@ import kotlinx.coroutines.launch
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
+    private val pendingWidgetComposer = mutableStateOf<WidgetComposerTarget?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingWidgetComposer.value = WidgetComposerContract.parse(intent)
         enableEdgeToEdge()
         setContent {
             val vm: RootViewModel = hiltViewModel()
@@ -136,9 +143,21 @@ class MainActivity : ComponentActivity() {
                         },
                     )
                 }
-                LeziRoot(vm = vm, dark = dark)
+                LeziRoot(
+                    vm = vm,
+                    dark = dark,
+                    widgetComposerTarget = pendingWidgetComposer.value,
+                    onWidgetComposerConsumed = { pendingWidgetComposer.value = null },
+                )
             }
         }
+    }
+
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        pendingWidgetComposer.value = WidgetComposerContract.parse(intent)
     }
 }
 
@@ -159,6 +178,7 @@ class RootViewModel @Inject constructor(
     private val careLog: CareLog,
     private val settings: SettingsStore,
     private val savedStateHandle: SavedStateHandle,
+    private val widgetRefreshController: CareWidgetRefreshController,
 ) : ViewModel() {
     private val dayFlow = MutableStateFlow(
         clampSelectedDate(
@@ -172,9 +192,6 @@ class RootViewModel @Inject constructor(
 
     init {
         savedStateHandle[SELECTED_DATE_KEY] = dayFlow.value.toEpochDay()
-        viewModelScope.launch {
-            careLog.ensureCurrentBabyHealed()
-        }
     }
 
     private val baseUi = combine(
@@ -288,6 +305,14 @@ class RootViewModel @Inject constructor(
         }
     }
 
+    fun openWidgetBaby(babyId: Long) {
+        viewModelScope.launch { careLog.setCurrentBaby(babyId) }
+    }
+
+    fun refreshWidgets() {
+        viewModelScope.launch { widgetRefreshController.refreshAll() }
+    }
+
     private fun updateSelectedDate(day: LocalDate) {
         val selected = clampSelectedDate(day, todayFlow.value)
         dayFlow.value = selected
@@ -326,6 +351,8 @@ private enum class TopDest(
 fun LeziRoot(
     vm: RootViewModel = hiltViewModel(),
     dark: Boolean = false,
+    widgetComposerTarget: WidgetComposerTarget? = null,
+    onWidgetComposerConsumed: () -> Unit = {},
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
     if (!ui.hasBaby) {
@@ -341,6 +368,22 @@ fun LeziRoot(
     var composerRequest by remember { mutableStateOf<RecordComposerRequest?>(null) }
     var showHeaderCalendar by remember { mutableStateOf(false) }
     var displayedMonth by remember { mutableStateOf(YearMonth.from(ui.selectedDate)) }
+
+    LaunchedEffect(widgetComposerTarget) {
+        val target = widgetComposerTarget ?: return@LaunchedEffect
+        if (ui.babies.none { it.id == target.babyId }) {
+            onWidgetComposerConsumed()
+            return@LaunchedEffect
+        }
+        vm.openWidgetBaby(target.babyId)
+        composerRequest = RecordComposerRequest.New(
+            babyId = target.babyId,
+            type = target.type,
+            timestamp = System.currentTimeMillis(),
+            historical = false,
+        )
+        onWidgetComposerConsumed()
+    }
     val hideChrome = current?.startsWith("timer") == true ||
         current == "search" ||
         current == "export" ||
@@ -552,6 +595,7 @@ fun LeziRoot(
         onDismiss = { composerRequest = null },
         onSaved = { message ->
             composerRequest = null
+            vm.refreshWidgets()
             scope.launch { snackbar.showSnackbar(message) }
         },
         onStartNursingTimer = { note, amountMl ->

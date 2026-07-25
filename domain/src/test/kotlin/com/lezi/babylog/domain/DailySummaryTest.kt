@@ -3,9 +3,14 @@ package com.lezi.babylog.domain
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneOffset
 import org.junit.Test
 
 class DailySummaryTest {
+    private val zone = ZoneOffset.UTC
+
     @Test
     fun aggregatesFeedSleepDiaper() {
         val base = 1_700_000_000_000L
@@ -19,7 +24,8 @@ class DailySummaryTest {
             rec(7, "pumped_feed", base + 6, """{"amount_ml":50}"""),
             rec(8, "pump_express", base + 7, """{"amount_ml":80}"""),
         )
-        val s = aggregateDaily(records)
+        val day = Instant.ofEpochMilli(base).atZone(zone).toLocalDate()
+        val s = CareAggregation.day(records, day, zone).toDailySummary()
         assertThat(s.formulaMl).isEqualTo(120)
         assertThat(s.pumpedFeedMl).isEqualTo(50)
         assertThat(s.feedMl).isEqualTo(120 + 50 + 30)
@@ -36,13 +42,14 @@ class DailySummaryTest {
             rec(1, "formula", base, """{"amount_ml":100}""", deleted = base),
             rec(2, "formula", base + 1, """{"amount_ml":40}"""),
         )
-        assertThat(aggregateDaily(records).feedMl).isEqualTo(40)
+        val day = Instant.ofEpochMilli(base).atZone(zone).toLocalDate()
+        assertThat(CareAggregation.day(records, day, zone).bucket.feedMl).isEqualTo(40)
     }
 
     @Test
     fun clipsCrossMidnightSleepAndCountsOpenSleepUntilNow() {
-        val dayStart = 1_700_006_400_000L
-        val dayEnd = dayStart + 24 * 60 * 60_000L
+        val day = LocalDate.of(2023, 11, 15)
+        val dayStart = day.atStartOfDay(zone).toInstant().toEpochMilli()
         val records = listOf(
             rec(
                 id = 1,
@@ -57,12 +64,12 @@ class DailySummaryTest {
             ),
         )
 
-        val summary = aggregateDaily(
+        val summary = CareAggregation.day(
             records = records,
-            windowStartInclusive = dayStart,
-            windowEndExclusive = dayEnd,
+            date = day,
+            zone = zone,
             now = dayStart + 3 * 60 * 60_000L,
-        )
+        ).toDailySummary()
 
         assertThat(summary.sleepMinutes).isEqualTo(45 + 60)
     }

@@ -112,4 +112,29 @@ class TimerStateRestorationTest {
         assertTrue(TimerState(rightAccumMs = 1L).hasTimerData())
         assertTrue(TimerState(sessionStartedAt = 1_700_000_000_000L).hasTimerData())
     }
+
+    @Test
+    fun snapshotRoundTripPreservesBoundBaby() {
+        val original = TimerState(
+            babyId = 42L,
+            leftAccumMs = 60_000L,
+            sessionStartedAt = 1_700_000_000_000L,
+            order = "L",
+        )
+
+        val restored = TimerState.fromJson(
+            raw = original.toJson(
+                savedElapsed = 120_000L,
+                savedWall = 1_700_000_010_000L,
+                savedBootCount = 12L,
+            ),
+            nowElapsed = 120_000L,
+            nowWall = 1_700_000_010_000L,
+            nowBootCount = 12L,
+        )
+
+        assertEquals(42L, restored.babyId)
+        assertEquals(60_000L, restored.leftAccumMs)
+        assertEquals("L", restored.order)
+    }
 }

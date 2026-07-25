@@ -5,6 +5,8 @@ import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.BabyEntity
 import com.lezi.babylog.core.database.CalendarEventDao
 import com.lezi.babylog.core.database.CalendarEventEntity
+import com.lezi.babylog.core.database.CustomItemDao
+import com.lezi.babylog.core.database.CustomItemEntity
 import com.lezi.babylog.core.database.FamilyDao
 import com.lezi.babylog.core.database.FamilyEntity
 import com.lezi.babylog.core.database.LocalUserDao
@@ -73,7 +75,7 @@ class CareLogTest {
     }
 
     @Test
-    fun getCurrentBabyIsReadOnlyAndStartupMigrationRemainsExplicit() = runTest {
+    fun startupReadsNeverRenameBaby() = runTest {
         val fakes = Fakes()
         val care = fakes.careLog()
         val id = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
@@ -81,10 +83,9 @@ class CareLogTest {
         assertThat(care.getCurrentBaby()!!.nickname).isEqualTo("豆豆")
         assertThat(fakes.babies.get(id)!!.nickname).isEqualTo("豆豆")
 
-        care.ensureCurrentBabyHealed()
-
-        assertThat(care.getCurrentBaby()!!.nickname).isEqualTo("年年")
-        assertThat(fakes.babies.get(id)!!.nickname).isEqualTo("年年")
+        repeat(3) { care.getCurrentBaby() }
+        assertThat(care.getCurrentBaby()!!.nickname).isEqualTo("豆豆")
+        assertThat(fakes.babies.get(id)!!.nickname).isEqualTo("豆豆")
     }
 
     @Test
@@ -147,7 +148,7 @@ class CareLogTest {
     }
 
     @Test
-    fun dedupeBabiesByNickname_mergesRecordsOntoKeeper() = runTest {
+    fun explicitBabyMergeRequiresIdsAndProvidesPreview() = runTest {
         val fakes = Fakes()
         val care = fakes.careLog()
         val a = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
@@ -163,7 +164,12 @@ class CareLogTest {
         )
         care.addRecord(babyId = a, type = RecordType.PEE, timestamp = 1_000L, payloadJson = """{"pee_amount":2}""")
         care.addRecord(babyId = b, type = RecordType.FORMULA, timestamp = 2_000L, payloadJson = """{"amount_ml":90}""")
-        care.dedupeBabiesByNickname()
+        val preview = care.previewBabyMerge(sourceBabyId = b, targetBabyId = a)
+        assertThat(preview!!.sourceBabyId).isEqualTo(b)
+        assertThat(preview.targetBabyId).isEqualTo(a)
+        assertThat(preview.recordCount).isEqualTo(1)
+
+        assertThat(care.mergeBabyProfiles(sourceBabyId = b, targetBabyId = a)).isTrue()
         val remaining = care.listBabies()
         assertThat(remaining).hasSize(1)
         assertThat(remaining.single().nickname).isEqualTo("年年")
@@ -432,6 +438,44 @@ class CareLogTest {
     }
 
     @Test
+    fun completeNursing_recordModeControlsStoredTimestamp() = runTest {
+        val care = Fakes().careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
+        val start = 1_700_000_100_000L
+        val end = start + 20 * 60_000L
+
+        val startRecord = care.getRecord(
+            care.completeNursing(
+                babyId = babyId,
+                leftMin = 12,
+                rightMin = 8,
+                order = "LR",
+                startedAt = start,
+                endedAt = end,
+                recordMode = "start",
+            ),
+        )!!
+        val endRecord = care.getRecord(
+            care.completeNursing(
+                babyId = babyId,
+                leftMin = 12,
+                rightMin = 8,
+                order = "LR",
+                startedAt = start,
+                endedAt = end,
+                recordMode = "end",
+            ),
+        )!!
+
+        assertThat(startRecord.timestamp).isEqualTo(start)
+        assertThat(startRecord.endTimestamp).isEqualTo(end)
+        assertThat(startRecord.payloadJson).contains("\"record_mode\":\"start\"")
+        assertThat(endRecord.timestamp).isEqualTo(end)
+        assertThat(endRecord.endTimestamp).isNull()
+        assertThat(endRecord.payloadJson).contains("\"record_mode\":\"end\"")
+    }
+
+    @Test
     fun completeNursing_rejectsUntrustedOrderBeforePersistence() = runTest {
         val fakes = Fakes()
         val care = fakes.careLog()
@@ -530,6 +574,30 @@ class CareLogTest {
     }
 
     @Test
+    fun recentSummaryKeepsLatestFactAcrossDayBoundary() = runTest {
+        val care = Fakes().careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
+        val today = LocalDate.now(zone)
+        val yesterdayAt = today.minusDays(1)
+            .atTime(23, 45)
+            .toInstant(zone)
+            .toEpochMilli()
+        care.addRecord(
+            babyId = babyId,
+            type = RecordType.FORMULA,
+            timestamp = yesterdayAt,
+            payloadJson = """{"amount_ml":90}""",
+        )
+
+        val widget = care.recentCareSummary(babyId, zone)
+
+        assertThat(widget.feedMl).isEqualTo(0)
+        assertThat(widget.lastLabel).contains("配方奶")
+        assertThat(widget.lastLabel).contains("90ml")
+        assertThat(widget.lastLabel).contains("23:45")
+    }
+
+    @Test
     fun calendarEventsStayBehindDomainSeam() = runTest {
         val care = Fakes().careLog()
         val babyId = care.createBaby(
@@ -554,6 +622,22 @@ class CareLogTest {
         assertThat(events.single().title).isEqualTo("体检")
     }
 
+    @Test
+    fun customItemsRejectEleventhAndKeepStableSnapshots() = runTest {
+        val care = Fakes().careLog()
+        care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        repeat(10) { index ->
+            care.addCustomItem("项目$index", index % 8)
+        }
+
+        val failure = runCatching {
+            care.addCustomItem("第十一个", 0)
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(CustomItemLimitException::class.java)
+        assertThat(care.observeCustomItems().first()).hasSize(10)
+    }
+
 }
 private class Fakes {
     val users = FakeLocalUserDao()
@@ -562,12 +646,14 @@ private class Fakes {
     val babies = FakeBabyDao()
     val records = FakeRecordDao()
     val calendarEvents = FakeCalendarEventDao()
+    val customItems = FakeCustomItemDao()
     val settings = FakeSettingsStore()
 
     fun careLog() = CareLog(
         babies,
         records,
         calendarEvents,
+        customItems,
         users,
         families,
         memberships,
@@ -578,6 +664,34 @@ private class Fakes {
             override suspend fun <T> run(block: suspend () -> T): T = block()
         },
     )
+}
+
+private class FakeCustomItemDao : CustomItemDao {
+    private val items = MutableStateFlow<List<CustomItemEntity>>(emptyList())
+    private val seq = AtomicLong(1)
+
+    override fun observeAll(): Flow<List<CustomItemEntity>> = items
+    override suspend fun listAll(): List<CustomItemEntity> = items.value
+
+    override suspend fun upsert(item: CustomItemEntity): Long {
+        val id = item.id.takeIf { it > 0 } ?: seq.getAndIncrement()
+        items.value = items.value.filterNot { it.id == id } + item.copy(id = id)
+        return id
+    }
+
+    override suspend fun update(item: CustomItemEntity) {
+        items.value = items.value.map { if (it.id == item.id) item else it }
+    }
+
+    override suspend fun softDelete(id: Long, deletedAt: Long) {
+        items.value = items.value.map {
+            if (it.id == id) it.copy(deletedAt = deletedAt, updatedAt = deletedAt) else it
+        }.filter { it.deletedAt == null }
+    }
+
+    override suspend fun deleteAll() {
+        items.value = emptyList()
+    }
 }
 
 private class FakeCalendarEventDao : CalendarEventDao {
@@ -691,6 +805,8 @@ private class FakeSettingsStore : SettingsStore {
     override suspend fun setTimeStepMin(step: Int) = Unit
 
     override suspend fun setTimePickerStyle(style: String) = Unit
+    override suspend fun setInfantFeverAdviceEnabled(enabled: Boolean) = Unit
+    override suspend fun setCorrectedAgeEnabled(enabled: Boolean) = Unit
 
     override suspend fun setNursingIntervalMin(min: Int) {
         interval.value = min
@@ -715,6 +831,8 @@ private class FakeSettingsStore : SettingsStore {
     override suspend fun setHiddenItems(items: Set<String>) {
         hidden.value = items
     }
+
+    override suspend fun setTimelineOrder(order: String) = Unit
 
     override suspend fun setNursingTimerJson(json: String?) {
         timer.value = json

@@ -3,6 +3,7 @@ package com.lezi.babylog.feature.summary
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.domain.CareAggregation
 import java.time.LocalDate
 import java.time.ZoneOffset
 import org.junit.Test
@@ -12,10 +13,11 @@ class SummaryAggregationTest {
     private val anchor = LocalDate.of(2026, 7, 23)
 
     @Test
-    fun ranges_areRollingWindowsAnchoredAtSelectedDate() {
-        assertThat(SummaryRange.Day.startDate(anchor)).isEqualTo(LocalDate.of(2026, 7, 23))
-        assertThat(SummaryRange.Week.startDate(anchor)).isEqualTo(LocalDate.of(2026, 7, 17))
-        assertThat(SummaryRange.Month.startDate(anchor)).isEqualTo(LocalDate.of(2026, 6, 24))
+    fun ranges_useConfiguredNaturalWeekAndRollingMonth() {
+        assertThat(SummaryRange.Day.startDate(anchor, 1)).isEqualTo(LocalDate.of(2026, 7, 23))
+        assertThat(SummaryRange.Week.startDate(anchor, 1)).isEqualTo(LocalDate.of(2026, 7, 20))
+        assertThat(SummaryRange.Week.startDate(anchor, 7)).isEqualTo(LocalDate.of(2026, 7, 19))
+        assertThat(SummaryRange.Month.startDate(anchor, 1)).isEqualTo(LocalDate.of(2026, 6, 24))
     }
 
     @Test
@@ -44,12 +46,14 @@ class SummaryAggregationTest {
             range = SummaryRange.Week,
             anchorDate = anchor,
             showAvgSleep = false,
+            comparePrevWeek = true,
             babyName = "年年",
             zone = zone,
         )
-        assertThat(week.totals.feedMl).isEqualTo(170)
-        assertThat(week.totals.feedCount).isEqualTo(3)
-        assertThat(week.totals.nursingMin).isEqualTo(15)
+        assertThat(week.rangeStartDate).isEqualTo(LocalDate.of(2026, 7, 20))
+        assertThat(week.totals.feedMl).isEqualTo(150)
+        assertThat(week.totals.feedCount).isEqualTo(2)
+        assertThat(week.totals.nursingMin).isEqualTo(0)
         assertThat(week.totals.sleepMin).isEqualTo(90)
         assertThat(week.totals.sleepSegments).isEqualTo(1)
         assertThat(week.totals.pee).isEqualTo(2)
@@ -57,12 +61,12 @@ class SummaryAggregationTest {
         assertThat(week.totals.tempAvg!!).isWithin(0.001).of(37.0)
         assertThat(week.totals.tempDays).isEqualTo(2)
         assertThat(week.totals.dayValuesFeed).hasSize(7)
-        // Anchor day 7/23 has pee + both_diaper → pee=2, poop=1 on that day index 6
+        // Anchor day 7/23 has pee + both_diaper → pee=2, poop=1 on Thursday index 3.
         assertThat(week.totals.dayValuesPee).hasSize(7)
         assertThat(week.totals.dayValuesPoop).hasSize(7)
-        assertThat(week.totals.dayValuesPee[6]).isEqualTo(2f)
-        assertThat(week.totals.dayValuesPoop[6]).isEqualTo(1f)
-        assertThat(week.totals.dayValuesDiaper[6]).isEqualTo(3f)
+        assertThat(week.totals.dayValuesPee[3]).isEqualTo(2f)
+        assertThat(week.totals.dayValuesPoop[3]).isEqualTo(1f)
+        assertThat(week.totals.dayValuesDiaper[3]).isEqualTo(3f)
         // Anchor day 7/23: formula 100 + pumped 50; sleep 90; pee+both → pee 2, poop 1
         assertThat(week.totals.chartWindows.dayFeedMl).isEqualTo(150)
         assertThat(week.totals.chartWindows.dayFeedCount).isEqualTo(2)
@@ -73,9 +77,11 @@ class SummaryAggregationTest {
         assertThat(week.totals.chartWindows.dayDiaper).isEqualTo(3)
         assertThat(week.week!!.days.map { it.date })
             .containsExactlyElementsIn(
-                (0L..6L).map { LocalDate.of(2026, 7, 17).plusDays(it) },
+                (0L..6L).map { LocalDate.of(2026, 7, 20).plusDays(it) },
             )
             .inOrder()
+        assertThat(week.previousWeekTotals!!.feedMl).isEqualTo(70)
+        assertThat(week.previousWeekTotals!!.nursingMin).isEqualTo(15)
 
         val day = buildSummaryUi(
             records = records,
@@ -88,8 +94,7 @@ class SummaryAggregationTest {
         assertThat(day.totals.feedMl).isEqualTo(150)
         assertThat(day.totals.dayValuesFeed).containsExactly(150f)
         assertThat(day.totals.feedTimeBuckets).containsExactly(0f, 2f, 0f, 0f).inOrder()
-        assertThat(day.week!!.days.first().date).isEqualTo(LocalDate.of(2026, 7, 17))
-        assertThat(day.week!!.days.first().nursingMin).isEqualTo(15)
+        assertThat(day.week!!.days.first().date).isEqualTo(LocalDate.of(2026, 7, 20))
 
         val month = buildSummaryUi(
             records = records,
@@ -101,7 +106,7 @@ class SummaryAggregationTest {
         )
         assertThat(month.totals.feedMl).isEqualTo(250)
         assertThat(month.totals.dayValuesFeed).hasSize(30)
-        assertThat(month.week!!.days.first().date).isEqualTo(LocalDate.of(2026, 7, 17))
+        assertThat(month.week!!.days.first().date).isEqualTo(LocalDate.of(2026, 7, 20))
     }
 
     @Test
@@ -126,6 +131,38 @@ class SummaryAggregationTest {
         assertThat(ui.totals.feedCount).isEqualTo(1)
         assertThat(ui.totals.nursingMin).isEqualTo(15)
         assertThat(ui.showAvgSleep).isTrue()
+    }
+
+    @Test
+    fun logSummaryAndWidgetProjectTheSameCareFacts() {
+        val records = listOf(
+            record(1, RecordType.FORMULA, anchor, """{"amount_ml":120}"""),
+            record(2, RecordType.PEE, anchor),
+            record(3, RecordType.SLEEP, anchor, endOffsetMinutes = 45),
+        )
+        val day = CareAggregation.day(records, anchor, zone)
+        val summary = buildSummaryUi(
+            records = records,
+            range = SummaryRange.Day,
+            anchorDate = anchor,
+            showAvgSleep = false,
+            babyName = "年年",
+            zone = zone,
+        )
+        val widget = CareAggregation.widget(
+            records = records,
+            babyName = "年年",
+            date = anchor,
+            zone = zone,
+            now = anchor.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli(),
+        )
+
+        assertThat(summary.totals.feedMl).isEqualTo(day.bucket.feedMl)
+        assertThat(summary.totals.sleepMin).isEqualTo(day.bucket.sleepMin)
+        assertThat(summary.totals.pee).isEqualTo(day.bucket.pee)
+        assertThat(widget.feedMl).isEqualTo(day.bucket.feedMl)
+        assertThat(widget.sleepMin).isEqualTo(day.bucket.sleepMin)
+        assertThat(widget.pee).isEqualTo(day.bucket.pee)
     }
 
     private fun record(

@@ -1,5 +1,6 @@
 package com.lezi.babylog.feature.timer
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -8,10 +9,13 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
 import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -50,6 +54,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -75,9 +80,19 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import org.json.JSONObject
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.put
 
 data class TimerState(
+    val babyId: Long? = null,
     val leftRunning: Boolean = false,
     val rightRunning: Boolean = false,
     val leftAccumMs: Long = 0L,
@@ -98,15 +113,16 @@ data class TimerState(
         savedElapsed: Long = SystemClock.elapsedRealtime(),
         savedWall: Long = System.currentTimeMillis(),
         savedBootCount: Long? = null,
-    ): String = JSONObject().apply {
+    ): String = buildJsonObject {
+        putNullableLong("babyId", babyId)
         put("leftRunning", leftRunning)
         put("rightRunning", rightRunning)
         put("leftAccumMs", leftAccumMs)
         put("rightAccumMs", rightAccumMs)
-        put("leftStartedElapsed", leftStartedElapsed ?: JSONObject.NULL)
-        put("rightStartedElapsed", rightStartedElapsed ?: JSONObject.NULL)
-        put("sessionStartedAt", sessionStartedAt ?: JSONObject.NULL)
-        put("lastSide", lastSide ?: JSONObject.NULL)
+        putNullableLong("leftStartedElapsed", leftStartedElapsed)
+        putNullableLong("rightStartedElapsed", rightStartedElapsed)
+        putNullableLong("sessionStartedAt", sessionStartedAt)
+        if (lastSide == null) put("lastSide", JsonNull) else put("lastSide", lastSide)
         put("order", order)
         put("savedElapsed", savedElapsed)
         put("savedWall", savedWall)
@@ -122,17 +138,10 @@ data class TimerState(
         ): TimerState {
             if (raw.isNullOrBlank()) return TimerState()
             return runCatching {
-                val o = JSONObject(raw)
-                val savedElapsed = o.optLong("savedElapsed")
-                    .takeIf { o.has("savedElapsed") && !o.isNull("savedElapsed") }
-                val savedWall = o.optLong("savedWall")
-                    .takeIf { o.has("savedWall") && !o.isNull("savedWall") }
-                val savedBootCount = o.optLong("savedBootCount")
-                    .takeIf {
-                        o.has("savedBootCount") &&
-                            !o.isNull("savedBootCount") &&
-                            it >= 0L
-                    }
+                val o = Json.parseToJsonElement(raw).jsonObject
+                val savedElapsed = o.optionalLong("savedElapsed")
+                val savedWall = o.optionalLong("savedWall")
+                val savedBootCount = o.optionalLong("savedBootCount")?.takeIf { it >= 0L }
                 val drift = restoredRunningDelta(
                     savedElapsed = savedElapsed,
                     savedWall = savedWall,
@@ -141,31 +150,45 @@ data class TimerState(
                     savedBootCount = savedBootCount,
                     nowBootCount = nowBootCount,
                 )
-                var leftAccum = o.optLong("leftAccumMs")
-                var rightAccum = o.optLong("rightAccumMs")
-                val leftRunning = o.optBoolean("leftRunning")
-                val rightRunning = o.optBoolean("rightRunning")
+                var leftAccum = o.optionalLong("leftAccumMs") ?: 0L
+                var rightAccum = o.optionalLong("rightAccumMs") ?: 0L
+                val leftRunning = o.optionalBoolean("leftRunning")
+                val rightRunning = o.optionalBoolean("rightRunning")
                 // Freeze restored running sides into accumulated time.
                 if (leftRunning) leftAccum += drift
                 if (rightRunning) rightAccum += drift
                 TimerState(
+                    babyId = o.optionalLong("babyId"),
                     leftRunning = false,
                     rightRunning = false,
                     leftAccumMs = leftAccum,
                     rightAccumMs = rightAccum,
                     leftStartedElapsed = null,
                     rightStartedElapsed = null,
-                    sessionStartedAt = o.optLong("sessionStartedAt")
-                        .takeIf {
-                            o.has("sessionStartedAt") && !o.isNull("sessionStartedAt")
-                        },
-                    lastSide = o.optString("lastSide").takeIf { it.isNotBlank() && it != "null" },
-                    order = o.optString("order"),
+                    sessionStartedAt = o.optionalLong("sessionStartedAt"),
+                    lastSide = o.optionalString("lastSide")?.takeIf { it.isNotBlank() },
+                    order = o.optionalString("order").orEmpty(),
                 )
             }.getOrDefault(TimerState())
         }
     }
 }
+
+private fun kotlinx.serialization.json.JsonObjectBuilder.putNullableLong(
+    key: String,
+    value: Long?,
+) {
+    if (value == null) put(key, JsonNull) else put(key, value)
+}
+
+private fun JsonObject.optionalLong(key: String): Long? =
+    get(key)?.jsonPrimitive?.longOrNull
+
+private fun JsonObject.optionalBoolean(key: String): Boolean =
+    get(key)?.jsonPrimitive?.booleanOrNull ?: false
+
+private fun JsonObject.optionalString(key: String): String? =
+    get(key)?.jsonPrimitive?.contentOrNull
 
 /**
  * Calculates time accrued after the last persisted timer snapshot.
@@ -279,76 +302,83 @@ class TimerViewModel @Inject constructor(
     }
 
     fun toggleLeft() {
-        val now = SystemClock.elapsedRealtime()
-        val cur = _state.value
-        val next = if (cur.leftRunning) {
-            cur.copy(
-                leftRunning = false,
-                leftAccumMs = cur.leftMs(now),
-                leftStartedElapsed = null,
-                lastSide = "L",
-            )
-        } else {
-            val pausedRight = if (cur.rightRunning) {
-                cur.copy(
-                    rightRunning = false,
-                    rightAccumMs = cur.rightMs(now),
-                    rightStartedElapsed = null,
-                    lastSide = "R",
-                )
-            } else cur
-            pausedRight.copy(
-                leftRunning = true,
-                leftStartedElapsed = now,
-                sessionStartedAt = pausedRight.sessionStartedAt ?: System.currentTimeMillis(),
-                order = pausedRight.order.ifEmpty { "L" } + if (pausedRight.order.contains("L")) "" else "",
-                lastSide = "L",
-            ).let {
-                val order = when {
-                    it.order.isEmpty() -> "L"
-                    it.order == "R" -> "RL"
-                    it.order == "L" -> "L"
-                    else -> it.order
-                }
-                it.copy(order = order)
+        viewModelScope.launch {
+            val now = SystemClock.elapsedRealtime()
+            var cur = _state.value
+            if (!cur.leftRunning && cur.babyId == null) {
+                val baby = careLog.getCurrentBaby() ?: return@launch
+                cur = cur.copy(babyId = baby.id)
             }
-        }
-        persist(next)
-    }
-
-    fun toggleRight() {
-        val now = SystemClock.elapsedRealtime()
-        val cur = _state.value
-        val next = if (cur.rightRunning) {
-            cur.copy(
-                rightRunning = false,
-                rightAccumMs = cur.rightMs(now),
-                rightStartedElapsed = null,
-                lastSide = "R",
-            )
-        } else {
-            val pausedLeft = if (cur.leftRunning) {
+            val next = if (cur.leftRunning) {
                 cur.copy(
                     leftRunning = false,
                     leftAccumMs = cur.leftMs(now),
                     leftStartedElapsed = null,
                     lastSide = "L",
                 )
-            } else cur
-            pausedLeft.copy(
-                rightRunning = true,
-                rightStartedElapsed = now,
-                sessionStartedAt = pausedLeft.sessionStartedAt ?: System.currentTimeMillis(),
-                lastSide = "R",
-                order = when {
-                    pausedLeft.order.isEmpty() -> "R"
-                    pausedLeft.order == "L" -> "LR"
-                    pausedLeft.order == "R" -> "R"
-                    else -> pausedLeft.order
-                },
-            )
+            } else {
+                val pausedRight = if (cur.rightRunning) {
+                    cur.copy(
+                        rightRunning = false,
+                        rightAccumMs = cur.rightMs(now),
+                        rightStartedElapsed = null,
+                        lastSide = "R",
+                    )
+                } else cur
+                pausedRight.copy(
+                    leftRunning = true,
+                    leftStartedElapsed = now,
+                    sessionStartedAt = pausedRight.sessionStartedAt ?: System.currentTimeMillis(),
+                    order = when {
+                        pausedRight.order.isEmpty() -> "L"
+                        pausedRight.order == "R" -> "RL"
+                        else -> pausedRight.order
+                    },
+                    lastSide = "L",
+                )
+            }
+            persist(next)
         }
-        persist(next)
+    }
+
+    fun toggleRight() {
+        viewModelScope.launch {
+            val now = SystemClock.elapsedRealtime()
+            var cur = _state.value
+            if (!cur.rightRunning && cur.babyId == null) {
+                val baby = careLog.getCurrentBaby() ?: return@launch
+                cur = cur.copy(babyId = baby.id)
+            }
+            val next = if (cur.rightRunning) {
+                cur.copy(
+                    rightRunning = false,
+                    rightAccumMs = cur.rightMs(now),
+                    rightStartedElapsed = null,
+                    lastSide = "R",
+                )
+            } else {
+                val pausedLeft = if (cur.leftRunning) {
+                    cur.copy(
+                        leftRunning = false,
+                        leftAccumMs = cur.leftMs(now),
+                        leftStartedElapsed = null,
+                        lastSide = "L",
+                    )
+                } else cur
+                pausedLeft.copy(
+                    rightRunning = true,
+                    rightStartedElapsed = now,
+                    sessionStartedAt = pausedLeft.sessionStartedAt ?: System.currentTimeMillis(),
+                    lastSide = "R",
+                    order = when {
+                        pausedLeft.order.isEmpty() -> "R"
+                        pausedLeft.order == "L" -> "LR"
+                        else -> pausedLeft.order
+                    },
+                )
+            }
+            persist(next)
+        }
     }
 
     internal fun freezeCompletion(
@@ -374,14 +404,15 @@ class TimerViewModel @Inject constructor(
                     onError(it)
                     return@launch
                 }
-                val baby = careLog.getCurrentBaby()
-                if (baby == null) {
+                val babyId = _state.value.babyId ?: careLog.getCurrentBaby()?.id
+                if (babyId == null) {
                     onError("请先添加宝宝")
                     return@launch
                 }
                 val command = draft.toCommand()
+                val recordMode = settings.settings.first().recordAtStartOrEnd
                 careLog.completeNursing(
-                    babyId = baby.id,
+                    babyId = babyId,
                     leftMin = command.leftMin,
                     rightMin = command.rightMin,
                     order = command.order,
@@ -389,8 +420,8 @@ class TimerViewModel @Inject constructor(
                     note = command.note,
                     startedAt = command.startedAt,
                     endedAt = command.endedAt,
+                    recordMode = recordMode,
                 )
-                runCatching { nextFeed.scheduleAfterFeed() }
                 clear()
                 onDone()
             } catch (throwable: Throwable) {
@@ -398,6 +429,12 @@ class TimerViewModel @Inject constructor(
             } finally {
                 completionInFlight.set(false)
             }
+        }
+    }
+
+    internal fun scheduleReminder(atMillis: Long?, onResult: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            onResult(runCatching { nextFeed.scheduleAfterFeed(atMillis) }.isSuccess)
         }
     }
 
@@ -476,6 +513,7 @@ fun TimerRoute(
     initialAmountMl: String = "",
     vm: TimerViewModel = hiltViewModel(),
 ) {
+    val context = LocalContext.current
     val state by vm.state.collectAsStateWithLifecycle()
     val timeStepMin by vm.timeStepMin.collectAsStateWithLifecycle()
     val timePickerStyle by vm.timePickerStyle.collectAsStateWithLifecycle()
@@ -493,6 +531,37 @@ fun TimerRoute(
     var completionSaving by remember { mutableStateOf(false) }
     var completionSaveError by remember { mutableStateOf<String?>(null) }
     var showDiscardConfirmation by remember { mutableStateOf(false) }
+    var savedAwaitingReminder by remember { mutableStateOf(false) }
+    var pendingReminderAt by remember { mutableStateOf<Long?>(null) }
+    val notificationPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (!granted) {
+            savedAwaitingReminder = false
+            onDone()
+        } else {
+            vm.scheduleReminder(pendingReminderAt) {
+                savedAwaitingReminder = false
+                onDone()
+            }
+        }
+    }
+    fun requestOrSchedule(atMillis: Long?) {
+        pendingReminderAt = atMillis
+        val granted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) == PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            vm.scheduleReminder(atMillis) {
+                savedAwaitingReminder = false
+                onDone()
+            }
+        } else {
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
     val completionSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     Scaffold(
@@ -643,7 +712,7 @@ fun TimerRoute(
                         onDone = {
                             completionSaving = false
                             completionDraft = null
-                            onDone()
+                            savedAwaitingReminder = true
                         },
                         onError = {
                             completionSaving = false
@@ -653,6 +722,34 @@ fun TimerRoute(
                 },
             )
         }
+    }
+
+    if (savedAwaitingReminder) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("设置下次喂养提醒？") },
+            text = { Text("计时记录已经安全保存。可按设置间隔提醒、调整为 60 分钟，或不提醒。") },
+            confirmButton = {
+                TextButton(onClick = { requestOrSchedule(null) }) {
+                    Text("确认提醒")
+                }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(
+                        onClick = {
+                            requestOrSchedule(System.currentTimeMillis() + 60 * 60_000L)
+                        },
+                    ) { Text("60 分钟") }
+                    TextButton(
+                        onClick = {
+                            savedAwaitingReminder = false
+                            onDone()
+                        },
+                    ) { Text("不提醒") }
+                }
+            },
+        )
     }
 }
 

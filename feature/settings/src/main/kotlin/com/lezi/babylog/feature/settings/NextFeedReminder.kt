@@ -1,5 +1,7 @@
 package com.lezi.babylog.feature.settings
 
+import android.annotation.SuppressLint
+import android.Manifest
 import android.app.AlarmManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -8,8 +10,10 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.content.pm.PackageManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.domain.FeedReminderPort
 import dagger.Binds
@@ -37,15 +41,7 @@ class NextFeedScheduler @Inject constructor(
         ensureChannel(context)
         val am = context.getSystemService(AlarmManager::class.java)
         val pi = pending(context)
-        try {
-            if (Build.VERSION.SDK_INT >= 31 && !am.canScheduleExactAlarms()) {
-                am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, whenMs, pi)
-            } else {
-                am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, whenMs, pi)
-            }
-        } catch (_: SecurityException) {
-            am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, whenMs, pi)
-        }
+        am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, whenMs, pi)
     }
 
     suspend fun cancel() {
@@ -59,11 +55,7 @@ class NextFeedScheduler @Inject constructor(
         if (at <= System.currentTimeMillis()) return
         ensureChannel(context)
         val am = context.getSystemService(AlarmManager::class.java)
-        try {
-            am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pending(context))
-        } catch (_: SecurityException) {
-            am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pending(context))
-        }
+        am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pending(context))
     }
 
     private fun pending(context: Context): PendingIntent {
@@ -118,8 +110,14 @@ class NextFeedReceiver : BroadcastReceiver() {
             .setContentIntent(pi)
             .setAutoCancel(true)
             .build()
-        runCatching {
-            NotificationManagerCompat.from(context).notify(NextFeedScheduler.NOTIF_ID, notif)
+        if (
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            notifyWithGrantedPermission(context, notif)
         }
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
@@ -130,11 +128,20 @@ class NextFeedReceiver : BroadcastReceiver() {
             }
         }
     }
+
+    @SuppressLint("MissingPermission")
+    private fun notifyWithGrantedPermission(context: Context, notification: android.app.Notification) {
+        runCatching {
+            NotificationManagerCompat.from(context)
+                .notify(NextFeedScheduler.NOTIF_ID, notification)
+        }
+    }
 }
 
 @AndroidEntryPoint
 class BootReceiver : BroadcastReceiver() {
     @Inject lateinit var scheduler: NextFeedScheduler
+    @Inject lateinit var calendarScheduler: CalendarReminderScheduler
 
     override fun onReceive(context: Context, intent: Intent?) {
         if (intent?.action != Intent.ACTION_BOOT_COMPLETED) return
@@ -142,6 +149,7 @@ class BootReceiver : BroadcastReceiver() {
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 scheduler.rescheduleFromStore()
+                calendarScheduler.rescheduleAll()
             } finally {
                 pending.finish()
             }

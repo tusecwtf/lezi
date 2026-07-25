@@ -101,16 +101,26 @@ V1 最小路径：创建默认 `Family` + 当前 `LocalUser`（匿名）+ `Baby`
 | `note` | |
 | `created_by_user_id` | |
 | `payload_json` | 类型扩展 |
-| `schema_version` | |
+| `schema_version` | v1 兼容读取；新增/编辑写 v2 |
 | `updated_at` / `deleted_at` | 软删 / LWW |
 
 **索引**：`(baby_id, timestamp)`、`(client_uuid)`、`(baby_id, type, timestamp)`。
 
-### 3.6 payload_json 约定
+### 3.6 typed payload 与兼容约定
+
+业务代码只通过 `RecordPayloadDocument` / `RecordPayloadCodec` 读取或写入
+`payload_json`。每个 `RecordType` 只接受匹配的 `RecordPayload`：
+
+- v1 JSON 兼容读取，不做批量破坏性迁移；旧记录仅在用户编辑确认后写成 v2。
+- 未识别字段进入 `extensions`，v2 再写时原样合并。
+- 畸形 JSON 或未来 `schema_version` 解码为 `UnknownPayload`，保留原始字节，
+  不允许静默清空或覆盖。
+- 搜索、时间轴、汇总、导出和 Widget 复用 typed payload 与同一中文摘要模块，
+  不各自用正则或手写 JSON 解释业务字段。
 
 | type | JSON 字段 |
 |------|-----------|
-| `nursing` | `left_min`, `right_min`, `order`, `amount_ml?`, `record_at_mode` |
+| `nursing` | `left_min`, `right_min`, `order`, `amount_ml?`, `record_mode=start|end` |
 | `formula` | `amount_ml`, `prepared_ml?`, `duration_min?` |
 | `pumped_feed` / `pump_express` | `amount_ml` |
 | `pee` | `pee_amount` 1=小 · 2=中 · 3=大（默认 2） |
@@ -120,12 +130,13 @@ V1 最小路径：创建默认 `Family` + 当前 `LocalUser`（匿名）+ `Baby`
 | `temperature` | `celsius` |
 | `height` / `weight` / … | `value`, `unit` |
 | `medicine` | `name`, `dose?` |
-| `diary` / `memo` | `body`；媒体走 MediaAsset |
+| `diary` / `memo` | `body`, `photos[]`（应用私有文件绝对路径；最多 9 张） |
 | `cough` / `rash` / `vomit` / `injury` | `severity` 1–3, `description?` |
 | `hospital` | `reason`, `advice?` |
 | `baby_food` / `snack` / `drink` | `content`, `amount?` |
 | `vaccine` | `name`, `batch?` |
-| `other` / `custom` | `title`, `detail?`；后续自定义目录可追加 `custom_item_id` |
+| `other` | `title`, `detail?` |
+| `custom` | `title`, `detail?`, `custom_item_id?`, `icon_slot?`；标题/图标为历史快照 |
 
 **不做**：挤奶库存余额表。
 
@@ -160,6 +171,9 @@ V1 最小路径：创建默认 `Family` + 当前 `LocalUser`（匿名）+ `Baby`
 | `amount_step_ml` | 配方奶/挤出乳步进 ml；**默认 5**；可选 5/10/15；改后 UI 立即按新步进渲染 |
 | `time_step_min` | |
 | `curve_dataset` | 曲线包 id |
+| `corrected_age_enabled` | 成长页修正月龄开关 |
+| `infant_fever_advice_enabled` | 低月龄发热提示开关 |
+| `visual_style` / `preferred_hand` | 模板与惯用手 |
 | `timeline_order` | `newest_first` / `oldest_first` |
 
 主题色存在 Baby 上，但 **同步策略默认：主题与排序属本机**（与参考产品一致）。若 V2 要共享主题，再单开开关。
@@ -176,8 +190,9 @@ V1 最小路径：创建默认 `Family` + 当前 `LocalUser`（匿名）+ `Baby`
 
 ### 3.10 CustomItemDef（V2）
 
-最多 10：`id`, `family_id`, `name`, `sort_order`, `client_uuid`。  
-图标固定模板，不支持自定义图标资源。
+最多 10：`id`, `family_id`, `name`, `icon_slot` (0–7), `sort_order`,
+`client_uuid`, `updated_at`, `deleted_at`。图标固定模板，不支持自定义图标资源。
+删除目录项不级联删除或改写历史 `custom` 记录。
 
 ### 3.11 CalendarEvent（V2）
 

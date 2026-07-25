@@ -16,6 +16,8 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -34,6 +36,7 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.ExportPort
+import com.lezi.babylog.domain.ExportDocument
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.LocalDate
 import java.time.YearMonth
@@ -45,19 +48,13 @@ class ExportViewModel @Inject constructor(
     private val exportPort: ExportPort,
     private val careLog: CareLog,
 ) : ViewModel() {
-    fun exportThisMonth(onResult: (String) -> Unit) {
+    fun exportRange(from: LocalDate, to: LocalDate, onResult: (Result<ExportDocument>) -> Unit) {
         viewModelScope.launch {
-            val baby = careLog.getCurrentBaby() ?: return@launch
-            val ym = YearMonth.now()
-            val text = exportPort.exportTxt(baby.id, ym.atDay(1), ym.atEndOfMonth())
-            onResult(text)
-        }
-    }
-
-    fun exportRange(from: LocalDate, to: LocalDate, onResult: (String) -> Unit) {
-        viewModelScope.launch {
-            val baby = careLog.getCurrentBaby() ?: return@launch
-            onResult(exportPort.exportTxt(baby.id, from, to))
+            val result = runCatching {
+                val baby = careLog.getCurrentBaby() ?: error("请先添加宝宝")
+                exportPort.exportDocument(baby.id, from, to)
+            }
+            onResult(result)
         }
     }
 }
@@ -70,10 +67,15 @@ fun ExportRoute(
 ) {
     val context = LocalContext.current
     var preview by remember { mutableStateOf<String?>(null) }
+    val defaultMonth = remember { YearMonth.now() }
+    var fromText by remember { mutableStateOf(defaultMonth.atDay(1).toString()) }
+    var toText by remember { mutableStateOf(defaultMonth.atEndOfMonth().toString()) }
+    var includePhotos by remember { mutableStateOf(true) }
+    var error by remember { mutableStateOf<String?>(null) }
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("导出 TXT") },
+                title = { Text("导出记录") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
@@ -90,32 +92,77 @@ fun ExportRoute(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
         ) {
-            Text("导出当前宝宝的记录为纯文本，可分享到文件/邮件。无水印。", style = LeziTypography.Body)
+            Text("选择任意日期范围，可导出至少一个完整自然月。正文、备注与业务摘要使用时间轴同一语义。", style = LeziTypography.Body)
+            OutlinedTextField(
+                value = fromText,
+                onValueChange = { fromText = it; error = null },
+                label = { Text("开始日期 YYYY-MM-DD") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = toText,
+                onValueChange = { toText = it; error = null },
+                label = { Text("结束日期 YYYY-MM-DD") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            androidx.compose.foundation.layout.Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text("PDF 包含记录图片", style = LeziTypography.Body)
+                Switch(checked = includePhotos, onCheckedChange = { includePhotos = it })
+            }
             LeziPrimaryButton(
-                "导出本月并分享",
+                "导出 TXT 并分享",
                 onClick = {
-                    vm.exportThisMonth { text ->
-                        preview = text
-                        val send = Intent(Intent.ACTION_SEND).apply {
-                            type = "text/plain"
-                            putExtra(Intent.EXTRA_SUBJECT, "乐记导出")
-                            putExtra(Intent.EXTRA_TEXT, text)
+                    val from = runCatching { LocalDate.parse(fromText) }.getOrNull()
+                    val to = runCatching { LocalDate.parse(toText) }.getOrNull()
+                    if (from == null || to == null || to.isBefore(from)) {
+                        error = "请输入有效日期范围"
+                    } else {
+                        vm.exportRange(from, to) { result ->
+                            result.onSuccess { document ->
+                                preview = document.text
+                                val send = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_SUBJECT, "乐记导出")
+                                    putExtra(Intent.EXTRA_TEXT, document.text)
+                                }
+                                context.startActivity(Intent.createChooser(send, "分享导出"))
+                            }.onFailure { error = it.message ?: "导出失败" }
                         }
-                        context.startActivity(Intent.createChooser(send, "分享导出"))
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),
             )
             LeziPrimaryButton(
-                "导出本月 PDF 并分享",
+                "导出 PDF 并分享",
                 onClick = {
-                    vm.exportThisMonth { text ->
-                        preview = text
-                        PdfExport.writeAndShare(context, "乐记导出", text)
+                    val from = runCatching { LocalDate.parse(fromText) }.getOrNull()
+                    val to = runCatching { LocalDate.parse(toText) }.getOrNull()
+                    if (from == null || to == null || to.isBefore(from)) {
+                        error = "请输入有效日期范围"
+                    } else {
+                        vm.exportRange(from, to) { result ->
+                            result.onSuccess { document ->
+                                preview = document.text
+                                PdfExport.writeAndShare(
+                                    context,
+                                    "乐记导出",
+                                    document.text,
+                                    if (includePhotos) document.photoPaths else emptyList(),
+                                )
+                            }.onFailure { error = it.message ?: "导出失败" }
+                        }
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),
             )
+            error?.let {
+                Text(it, color = androidx.compose.material3.MaterialTheme.colorScheme.error)
+            }
             preview?.let { text ->
                 LeziCard(Modifier.fillMaxWidth()) {
                     Text("预览", style = LeziTypography.TitleSm)

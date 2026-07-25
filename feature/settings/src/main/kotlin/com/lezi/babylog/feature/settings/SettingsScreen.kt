@@ -47,6 +47,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.Baby
+import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SettingsLocal
 import com.lezi.babylog.core.ui.BabyAvatar
 import com.lezi.babylog.designsystem.LeziCard
@@ -57,6 +58,7 @@ import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
+import com.lezi.babylog.domain.CustomRecordItem
 import com.lezi.babylog.domain.DuplicateBabyNicknameException
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
@@ -69,10 +71,30 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
+private val BabyThemePalette = listOf(
+    0xFF007BAE.toInt(),
+    0xFFAA442B.toInt(),
+    0xFF2F8F6B.toInt(),
+    0xFF7A5CFF.toInt(),
+    0xFFE09F3E.toInt(),
+    0xFFD4578C.toInt(),
+    0xFF4C6A92.toInt(),
+    0xFF5B8C5A.toInt(),
+)
+
 data class SettingsUi(
     val settings: SettingsLocal = SettingsLocal(),
+    val showAvgSleep: Boolean = false,
+    val comparePrevWeek: Boolean = false,
     val babies: List<Baby> = emptyList(),
     val current: Baby? = null,
+    val customItems: List<CustomRecordItem> = emptyList(),
+)
+
+private data class LocalSettingsUi(
+    val settings: SettingsLocal,
+    val showAvgSleep: Boolean,
+    val comparePrevWeek: Boolean,
 )
 
 @HiltViewModel
@@ -80,12 +102,28 @@ class SettingsViewModel @Inject constructor(
     private val settingsStore: SettingsStore,
     private val careLog: CareLog,
 ) : ViewModel() {
-    val ui = combine(
+    private val localSettings = combine(
         settingsStore.settings,
+        settingsStore.showAvgSleep,
+        settingsStore.comparePrevWeek,
+    ) { settings, showAvgSleep, comparePrevWeek ->
+        LocalSettingsUi(settings, showAvgSleep, comparePrevWeek)
+    }
+
+    val ui = combine(
+        localSettings,
         careLog.observeBabies(),
         careLog.observeCurrentBaby(),
-    ) { s, babies, cur ->
-        SettingsUi(s, babies, cur)
+        careLog.observeCustomItems(),
+    ) { local, babies, cur, customItems ->
+        SettingsUi(
+            settings = local.settings,
+            showAvgSleep = local.showAvgSleep,
+            comparePrevWeek = local.comparePrevWeek,
+            babies = babies,
+            current = cur,
+            customItems = customItems,
+        )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsUi())
 
     fun setDark(mode: String) = viewModelScope.launch { settingsStore.setDarkMode(mode) }
@@ -94,16 +132,49 @@ class SettingsViewModel @Inject constructor(
     fun setTimeStep(step: Int) = viewModelScope.launch { settingsStore.setTimeStepMin(step) }
     fun setTimePickerStyle(style: String) =
         viewModelScope.launch { settingsStore.setTimePickerStyle(style) }
+    fun setInfantFeverAdvice(enabled: Boolean) =
+        viewModelScope.launch { settingsStore.setInfantFeverAdviceEnabled(enabled) }
     fun setInterval(min: Int) = viewModelScope.launch { settingsStore.setNursingIntervalMin(min) }
     fun setRecordAt(v: String) = viewModelScope.launch { settingsStore.setRecordAt(v) }
     fun setCurrent(id: Long) = viewModelScope.launch { careLog.setCurrentBaby(id) }
     fun setVisualStyle(key: String) = viewModelScope.launch { settingsStore.setVisualStyle(key) }
     fun setPreferredHand(hand: String) = viewModelScope.launch { settingsStore.setPreferredHand(hand) }
+    fun setTimelineOrder(order: String) =
+        viewModelScope.launch { settingsStore.setTimelineOrder(order) }
+    fun setWeekStart(day: Int) = viewModelScope.launch { settingsStore.setWeekStart(day) }
+    fun setShowAvgSleep(enabled: Boolean) =
+        viewModelScope.launch { settingsStore.setShowAvgSleep(enabled) }
+    fun setComparePrevWeek(enabled: Boolean) =
+        viewModelScope.launch { settingsStore.setComparePrevWeek(enabled) }
+    fun moveRecordType(typeKey: String, delta: Int) = viewModelScope.launch {
+        val configured = runCatching {
+            org.json.JSONArray(ui.value.settings.itemOrderJson).let { array ->
+                List(array.length()) { index -> array.optString(index) }
+            }
+        }.getOrDefault(emptyList())
+        val order = (configured + RecordType.entries.map(RecordType::key)).distinct().toMutableList()
+        val from = order.indexOf(typeKey)
+        val to = (from + delta).coerceIn(0, order.lastIndex)
+        if (from >= 0 && from != to) {
+            val moved = order.removeAt(from)
+            order.add(to, moved)
+            settingsStore.setItemOrderJson(org.json.JSONArray(order).toString())
+        }
+    }
+    fun toggleHiddenItem(typeKey: String) = viewModelScope.launch {
+        val current = ui.value.settings.hiddenItems
+        settingsStore.setHiddenItems(
+            if (typeKey in current) current - typeKey else current + typeKey,
+        )
+    }
 
     fun addBaby(
         nickname: String,
+        sex: String?,
         birthdayEpochDay: Long,
+        dueDateEpochDay: Long?,
         birthWeightGrams: Int?,
+        themeColorArgb: Int,
         onDone: (String?) -> Unit,
     ) {
         viewModelScope.launch {
@@ -111,8 +182,11 @@ class SettingsViewModel @Inject constructor(
                 careLog.addBaby(
                     CreateBabyInput(
                         nickname = nickname,
+                        sex = sex,
                         birthdayEpochDay = birthdayEpochDay,
+                        dueDateEpochDay = dueDateEpochDay,
                         birthWeightGrams = birthWeightGrams,
+                        themeColorArgb = themeColorArgb,
                     ),
                 )
             }
@@ -124,6 +198,26 @@ class SettingsViewModel @Inject constructor(
             )
         }
     }
+
+    fun addCustomItem(name: String, iconSlot: Int, onDone: (String?) -> Unit) {
+        viewModelScope.launch {
+            val result = runCatching { careLog.addCustomItem(name, iconSlot) }
+            onDone(result.exceptionOrNull()?.message)
+        }
+    }
+
+    fun updateCustomItem(item: CustomRecordItem, onDone: (String?) -> Unit) {
+        viewModelScope.launch {
+            val result = runCatching { careLog.updateCustomItem(item) }
+            onDone(result.exceptionOrNull()?.message)
+        }
+    }
+
+    fun moveCustomItem(id: Long, delta: Int) =
+        viewModelScope.launch { careLog.moveCustomItem(id, delta) }
+
+    fun deleteCustomItem(id: Long) =
+        viewModelScope.launch { careLog.deleteCustomItem(id) }
 
     /** Clears records only — babies are never deleted from settings. */
     fun clearRecords(onDone: () -> Unit) {
@@ -146,12 +240,18 @@ fun SettingsRoute(
     var showAdd by remember { mutableStateOf(false) }
     var clearStep by remember { mutableIntStateOf(0) }
     var newName by remember { mutableStateOf("") }
+    var newSex by remember { mutableStateOf<String?>(null) }
     var newBirthday by remember { mutableLongStateOf(LocalDate.now().toEpochDay()) }
+    var newDueDate by remember { mutableStateOf<Long?>(null) }
     var newWeight by remember { mutableStateOf("") }
+    var newThemeIndex by remember { mutableIntStateOf(0) }
     var addError by remember { mutableStateOf<String?>(null) }
     var showAddDate by remember { mutableStateOf(false) }
+    var showAddDueDate by remember { mutableStateOf(false) }
     var showFeed by remember { mutableStateOf(false) }
     var showDisplay by remember { mutableStateOf(false) }
+    var showRecordItems by remember { mutableStateOf(false) }
+    var showCustomItems by remember { mutableStateOf(false) }
 
     PageScaffoldBackground {
         Column(
@@ -188,6 +288,18 @@ fun SettingsRoute(
                 },
             )
             MenuRow("记录设置", "计时、步进、喂奶间隔", icon = "☰", onClick = { showFeed = true })
+            MenuRow(
+                "自定义项目",
+                "${ui.customItems.size}/10 · 改名、图标、排序与删除",
+                icon = "◇",
+                onClick = { showCustomItems = true },
+            )
+            MenuRow(
+                "记录项目",
+                "排序、隐藏与快捷坞顺序",
+                icon = "↕",
+                onClick = { showRecordItems = true },
+            )
             MenuRow("显示设置", "界面模板与主题", icon = "◐", onClick = { showDisplay = true })
 
             Text("宝宝", style = LeziTypography.Eyebrow, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -258,6 +370,24 @@ fun SettingsRoute(
                         Text("喂奶计时入口")
                         Switch(checked = ui.settings.timerEnabled, onCheckedChange = vm::setTimer)
                     }
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("低月龄发热提示")
+                            Text(
+                                "仅记录时不足 3 个月且体温 ≥38℃",
+                                style = LeziTypography.Meta,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = ui.settings.infantFeverAdviceEnabled,
+                            onCheckedChange = vm::setInfantFeverAdvice,
+                        )
+                    }
                     Text("记录时刻", style = LeziTypography.Label)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         FilterChip(
@@ -297,6 +427,34 @@ fun SettingsRoute(
                             FilterChip(
                                 selected = ui.settings.timeStepMin == step,
                                 onClick = { vm.setTimeStep(step) },
+                                label = { Text(label) },
+                            )
+                        }
+                    }
+                    Text("时间轴顺序", style = LeziTypography.Label)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(
+                            "newest_first" to "新→旧",
+                            "oldest_first" to "旧→新",
+                        ).forEach { (key, label) ->
+                            FilterChip(
+                                selected = ui.settings.timelineOrder == key,
+                                onClick = { vm.setTimelineOrder(key) },
+                                label = { Text(label) },
+                            )
+                        }
+                    }
+                    Text("快捷记录显隐", style = LeziTypography.Label)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf(
+                            "nursing" to "母乳",
+                            "formula" to "配方奶",
+                            "pee" to "尿尿",
+                            "sleep" to "睡眠",
+                        ).forEach { (key, label) ->
+                            FilterChip(
+                                selected = key !in ui.settings.hiddenItems,
+                                onClick = { vm.toggleHiddenItem(key) },
                                 label = { Text(label) },
                             )
                         }
@@ -366,6 +524,38 @@ fun SettingsRoute(
                         style = LeziTypography.Meta,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    Text("汇总周起始日", style = LeziTypography.Label)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(1 to "周一", 7 to "周日").forEach { (day, label) ->
+                            FilterChip(
+                                selected = ui.settings.weekStart == day,
+                                onClick = { vm.setWeekStart(day) },
+                                label = { Text(label) },
+                            )
+                        }
+                    }
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("显示日均睡眠")
+                        Switch(
+                            checked = ui.showAvgSleep,
+                            onCheckedChange = vm::setShowAvgSleep,
+                        )
+                    }
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("周汇总对比上周")
+                        Switch(
+                            checked = ui.comparePrevWeek,
+                            onCheckedChange = vm::setComparePrevWeek,
+                        )
+                    }
                 }
             },
             confirmButton = { TextButton(onClick = { showDisplay = false }) { Text("完成") } },
@@ -375,6 +565,9 @@ fun SettingsRoute(
     if (showAdd) {
         val dateLabel = LocalDate.ofEpochDay(newBirthday)
             .format(DateTimeFormatter.ofPattern("yyyy年M月d日"))
+        val dueDateLabel = newDueDate?.let {
+            LocalDate.ofEpochDay(it).format(DateTimeFormatter.ofPattern("yyyy年M月d日"))
+        } ?: "未设置"
         AlertDialog(
             onDismissRequest = {
                 showAdd = false
@@ -398,11 +591,37 @@ fun SettingsRoute(
                         supportingText = addError?.let { { Text(it) } },
                         modifier = Modifier.fillMaxWidth(),
                     )
+                    Text("性别", style = LeziTypography.Label)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(
+                            "FEMALE" to "女宝",
+                            "MALE" to "男宝",
+                            "UNKNOWN" to "未设置",
+                        ).forEach { (key, label) ->
+                            FilterChip(
+                                selected = newSex == key,
+                                onClick = { newSex = key },
+                                label = { Text(label) },
+                            )
+                        }
+                    }
                     Text("出生日期", style = LeziTypography.Label)
                     OutlinedButton(
                         onClick = { showAddDate = true },
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text(dateLabel) }
+                    Text("预产期（可选）", style = LeziTypography.Label)
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        OutlinedButton(onClick = { showAddDueDate = true }) {
+                            Text(dueDateLabel)
+                        }
+                        if (newDueDate != null) {
+                            TextButton(onClick = { newDueDate = null }) { Text("清除") }
+                        }
+                    }
                     OutlinedTextField(
                         value = newWeight,
                         onValueChange = { newWeight = it.filter { ch -> ch.isDigit() || ch == '.' } },
@@ -411,6 +630,26 @@ fun SettingsRoute(
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         modifier = Modifier.fillMaxWidth(),
                     )
+                    Text("主题色", style = LeziTypography.Label)
+                    BabyThemePalette.chunked(4).forEachIndexed { rowIndex, colors ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            colors.forEachIndexed { columnIndex, argb ->
+                                val index = rowIndex * 4 + columnIndex
+                                FilterChip(
+                                    selected = newThemeIndex == index,
+                                    onClick = { newThemeIndex = index },
+                                    label = {
+                                        Box(
+                                            Modifier
+                                                .size(18.dp)
+                                                .clip(CircleShape)
+                                                .background(Color(argb)),
+                                        )
+                                    },
+                                )
+                            }
+                        }
+                    }
                 }
             },
             confirmButton = {
@@ -426,11 +665,21 @@ fun SettingsRoute(
                             addError = "出生体重格式不正确"
                             return@TextButton
                         }
-                        vm.addBaby(newName.trim(), newBirthday, grams) { err ->
+                        vm.addBaby(
+                            nickname = newName.trim(),
+                            sex = newSex,
+                            birthdayEpochDay = newBirthday,
+                            dueDateEpochDay = newDueDate,
+                            birthWeightGrams = grams,
+                            themeColorArgb = BabyThemePalette[newThemeIndex],
+                        ) { err ->
                             if (err == null) {
                                 newName = ""
+                                newSex = null
                                 newWeight = ""
                                 newBirthday = LocalDate.now().toEpochDay()
+                                newDueDate = null
+                                newThemeIndex = 0
                                 addError = null
                                 showAdd = false
                             } else {
@@ -476,6 +725,55 @@ fun SettingsRoute(
         ) {
             DatePicker(state = dateState)
         }
+    }
+
+    if (showAddDueDate) {
+        val initialUtc = LocalDate.ofEpochDay(newDueDate ?: newBirthday)
+            .atStartOfDay(ZoneOffset.UTC)
+            .toInstant()
+            .toEpochMilli()
+        val dateState = rememberDatePickerState(initialSelectedDateMillis = initialUtc)
+        DatePickerDialog(
+            onDismissRequest = { showAddDueDate = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        dateState.selectedDateMillis?.let { ms ->
+                            newDueDate = Instant.ofEpochMilli(ms)
+                                .atZone(ZoneOffset.UTC)
+                                .toLocalDate()
+                                .toEpochDay()
+                        }
+                        showAddDueDate = false
+                    },
+                ) { Text("确定") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddDueDate = false }) { Text("取消") }
+            },
+        ) {
+            DatePicker(state = dateState)
+        }
+    }
+
+    if (showCustomItems) {
+        CustomItemSettingsDialog(
+            items = ui.customItems,
+            onDismiss = { showCustomItems = false },
+            onAdd = vm::addCustomItem,
+            onUpdate = vm::updateCustomItem,
+            onMove = vm::moveCustomItem,
+            onDelete = vm::deleteCustomItem,
+        )
+    }
+
+    if (showRecordItems) {
+        RecordItemSettingsDialog(
+            settings = ui.settings,
+            onDismiss = { showRecordItems = false },
+            onMove = vm::moveRecordType,
+            onToggleVisible = vm::toggleHiddenItem,
+        )
     }
 
     if (clearStep == 1) {

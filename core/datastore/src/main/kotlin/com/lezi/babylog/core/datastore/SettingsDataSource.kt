@@ -25,7 +25,6 @@ class SettingsDataSource @Inject constructor(
                 ?.filter { it.isNotBlank() }
                 ?.toSet()
                 ?: emptySet(),
-            actionButtonsJson = prefs[Keys.ACTION_BUTTONS] ?: "{}",
             timerEnabled = prefs[Keys.TIMER_ENABLED] ?: true,
             recordAtStartOrEnd = prefs[Keys.RECORD_AT] ?: "end",
             nursingIntervalMin = prefs[Keys.NURSING_INTERVAL] ?: 180,
@@ -41,7 +40,9 @@ class SettingsDataSource @Inject constructor(
             timePickerStyle = (prefs[Keys.TIME_PICKER_STYLE] ?: "dropdown")
                 .takeIf { it == "dropdown" || it == "dial" }
                 ?: "dropdown",
+            infantFeverAdviceEnabled = prefs[Keys.INFANT_FEVER_ADVICE] ?: true,
             curveDataset = prefs[Keys.CURVE_DATASET] ?: "default",
+            correctedAgeEnabled = prefs[Keys.CORRECTED_AGE] ?: false,
             timelineOrder = prefs[Keys.TIMELINE_ORDER] ?: "newest_first",
         )
     }
@@ -95,6 +96,14 @@ class SettingsDataSource @Inject constructor(
         dataStore.edit { it[Keys.TIME_PICKER_STYLE] = style }
     }
 
+    override suspend fun setInfantFeverAdviceEnabled(enabled: Boolean) {
+        dataStore.edit { it[Keys.INFANT_FEVER_ADVICE] = enabled }
+    }
+
+    override suspend fun setCorrectedAgeEnabled(enabled: Boolean) {
+        dataStore.edit { it[Keys.CORRECTED_AGE] = enabled }
+    }
+
     override suspend fun setNursingIntervalMin(min: Int) {
         dataStore.edit { it[Keys.NURSING_INTERVAL] = min }
     }
@@ -118,6 +127,11 @@ class SettingsDataSource @Inject constructor(
 
     override suspend fun setHiddenItems(items: Set<String>) {
         dataStore.edit { it[Keys.HIDDEN_ITEMS] = items.joinToString(",") }
+    }
+
+    override suspend fun setTimelineOrder(order: String) {
+        require(order == "newest_first" || order == "oldest_first")
+        dataStore.edit { it[Keys.TIMELINE_ORDER] = order }
     }
 
     override suspend fun setNursingTimerJson(json: String?) {
@@ -150,7 +164,6 @@ class SettingsDataSource @Inject constructor(
     private object Keys {
         val ITEM_ORDER = stringPreferencesKey("item_order_json")
         val HIDDEN_ITEMS = stringPreferencesKey("hidden_items")
-        val ACTION_BUTTONS = stringPreferencesKey("action_buttons")
         val TIMER_ENABLED = booleanPreferencesKey("timer_enabled")
         val RECORD_AT = stringPreferencesKey("record_at")
         val NURSING_INTERVAL = intPreferencesKey("nursing_interval_min")
@@ -164,7 +177,9 @@ class SettingsDataSource @Inject constructor(
         val AMOUNT_STEP = intPreferencesKey("amount_step_ml")
         val TIME_STEP = intPreferencesKey("time_step_min")
         val TIME_PICKER_STYLE = stringPreferencesKey("time_picker_style")
+        val INFANT_FEVER_ADVICE = booleanPreferencesKey("infant_fever_advice")
         val CURVE_DATASET = stringPreferencesKey("curve_dataset")
+        val CORRECTED_AGE = booleanPreferencesKey("corrected_age_enabled")
         val TIMELINE_ORDER = stringPreferencesKey("timeline_order")
         val CURRENT_BABY_ID = longPreferencesKey("current_baby_id")
         val NURSING_TIMER_JSON = stringPreferencesKey("nursing_timer_json")

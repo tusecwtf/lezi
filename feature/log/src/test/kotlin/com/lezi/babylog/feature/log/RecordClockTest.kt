@@ -1,5 +1,6 @@
 package com.lezi.babylog.feature.log
 
+import com.lezi.babylog.core.model.RecordTime
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
@@ -19,7 +20,7 @@ class RecordClockTest {
             zone,
         )
 
-        val timestamp = timestampOnDate(LocalDate.of(2026, 7, 17), zone, now)
+        val timestamp = RecordTime.newDraftTimestamp(LocalDate.of(2026, 7, 17), zone, now)
         val result = java.time.Instant.ofEpochMilli(timestamp).atZone(zone)
 
         assertEquals(LocalDate.of(2026, 7, 17), result.toLocalDate())
@@ -34,7 +35,7 @@ class RecordClockTest {
             zone,
         )
 
-        val timestamp = timestampOnDate(LocalDate.of(2026, 7, 30), zone, now)
+        val timestamp = RecordTime.newDraftTimestamp(LocalDate.of(2026, 7, 30), zone, now)
 
         assertEquals(now.withSecond(0).withNano(0).toInstant().toEpochMilli(), timestamp)
     }
@@ -47,8 +48,8 @@ class RecordClockTest {
 
         assertEquals(
             newStart + 45 * 60_000L,
-            shiftStartPreservingDuration(oldStart, oldEnd, newStart),
+            RecordTime.shiftStartPreservingDuration(oldStart, oldEnd, newStart),
         )
-        assertNull(shiftStartPreservingDuration(oldStart, null, newStart))
+        assertNull(RecordTime.shiftStartPreservingDuration(oldStart, null, newStart))
     }
 }

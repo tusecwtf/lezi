@@ -1,5 +1,11 @@
 package com.lezi.babylog.feature.log
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -19,7 +25,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -31,11 +39,9 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
 import com.lezi.babylog.domain.CareLog
+import com.lezi.babylog.domain.CustomRecordItem
 import com.lezi.babylog.domain.FeedReminderPort
 import dagger.hilt.android.lifecycle.HiltViewModel
-import java.time.Instant
-import java.time.LocalDate
-import java.time.ZoneId
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -71,6 +77,8 @@ internal data class RecordComposerUiState(
     val timeStepMin: Int = 1,
     val timePickerStyle: String = "dropdown",
     val preferredHand: String = "right",
+    val infantFeverAdviceEnabled: Boolean = true,
+    val customItems: List<CustomRecordItem> = emptyList(),
     val canStartNursingTimer: Boolean = false,
     val saving: Boolean = false,
     val deleting: Boolean = false,
@@ -82,6 +90,7 @@ class RecordComposerViewModel @Inject constructor(
     private val careLog: CareLog,
     private val settingsStore: SettingsStore,
     private val feedReminder: FeedReminderPort,
+    private val photoStore: RecordPhotoStore,
 ) : ViewModel() {
     private val _state = MutableStateFlow(RecordComposerUiState())
     internal val state = _state.asStateFlow()
@@ -90,6 +99,7 @@ class RecordComposerViewModel @Inject constructor(
     private var actionJob: Job? = null
 
     internal fun open(request: RecordComposerRequest) {
+        cleanupUnpersistedPhotos(_state.value.draft)
         val session = sessionGate.open()
         loadJob?.cancel()
         actionJob?.cancel()
@@ -109,6 +119,13 @@ class RecordComposerViewModel @Inject constructor(
                 }
                 return@launch
             }
+            val customItems = try {
+                careLog.observeCustomItems().first()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                emptyList()
+            }
             val loaded = try {
                 when (request) {
                     is RecordComposerRequest.New -> {
@@ -126,12 +143,40 @@ class RecordComposerViewModel @Inject constructor(
                             }
                             QuickRecordDraft.wakeSleep(openSleep, request.timestamp)
                         } else {
+                            val recentAmounts = if (
+                                request.type in setOf(
+                                    RecordType.FORMULA,
+                                    RecordType.PUMPED_FEED,
+                                    RecordType.PUMP_EXPRESS,
+                                )
+                            ) {
+                                careLog.recentMilkAmounts(request.babyId, request.type)
+                            } else {
+                                emptyList()
+                            }
                             QuickRecordDraft.create(
                                 type = request.type,
                                 timestamp = request.timestamp,
                                 lastAmountMl = request.lastAmountMl,
+                                recentAmountMl = recentAmounts,
+                                recentNotes = careLog.recentNotes(
+                                    request.babyId,
+                                    request.type,
+                                ),
                                 historical = request.historical,
-                            )
+                            ).let { created ->
+                                if (request.type == RecordType.CUSTOM) {
+                                    customItems.firstOrNull()?.let { item ->
+                                        created.copy(
+                                            customTitle = item.name,
+                                            customItemId = item.id,
+                                            customIconSlot = item.iconSlot,
+                                        )
+                                    } ?: created
+                                } else {
+                                    created
+                                }
+                            }
                         }
                         Triple(request.babyId, baby.birthdayEpochDay, draft)
                     }
@@ -155,6 +200,7 @@ class RecordComposerViewModel @Inject constructor(
                         timeStepMin = settings.timeStepMin,
                         timePickerStyle = settings.timePickerStyle,
                         preferredHand = settings.preferredHand,
+                        infantFeverAdviceEnabled = settings.infantFeverAdviceEnabled,
                         error = error.message ?: "记录加载失败",
                     )
                 }
@@ -172,6 +218,8 @@ class RecordComposerViewModel @Inject constructor(
                     timeStepMin = settings.timeStepMin,
                     timePickerStyle = settings.timePickerStyle,
                     preferredHand = settings.preferredHand,
+                    infantFeverAdviceEnabled = settings.infantFeverAdviceEnabled,
+                    customItems = customItems,
                     canStartNursingTimer = request is RecordComposerRequest.New &&
                         !request.historical &&
                         request.type == RecordType.NURSING &&
@@ -182,6 +230,7 @@ class RecordComposerViewModel @Inject constructor(
     }
 
     internal fun close() {
+        cleanupUnpersistedPhotos(_state.value.draft)
         sessionGate.close()
         loadJob?.cancel()
         actionJob?.cancel()
@@ -194,7 +243,38 @@ class RecordComposerViewModel @Inject constructor(
         _state.update { it.copy(draft = draft, error = null) }
     }
 
-    internal fun save(onSaved: (String) -> Unit) {
+    internal fun importPhotos(uris: List<Uri>) {
+        val draft = _state.value.draft ?: return
+        if (draft.mode != QuickRecordMode.Text || uris.isEmpty()) return
+        actionJob = viewModelScope.launch {
+            val imported = runCatching {
+                photoStore.import(uris.take((MAX_RECORD_PHOTOS - draft.photos.size).coerceAtLeast(0)))
+            }
+                .getOrElse { error ->
+                    _state.update { it.copy(error = error.message ?: "图片导入失败") }
+                    return@launch
+                }
+            _state.update { state ->
+                val current = state.draft ?: return@update state
+                state.copy(
+                    draft = current.copy(
+                        photos = (current.photos + imported).distinct().take(MAX_RECORD_PHOTOS),
+                    ),
+                    error = null,
+                )
+            }
+        }
+    }
+
+    internal fun removePhoto(path: String) {
+        val draft = _state.value.draft ?: return
+        _state.update { it.copy(draft = draft.copy(photos = draft.photos - path)) }
+        if (path !in draft.sourcePhotos) {
+            viewModelScope.launch { photoStore.delete(listOf(path)) }
+        }
+    }
+
+    internal fun save(onSaved: (message: String, offerReminder: Boolean) -> Unit) {
         val snapshot = _state.value
         val draft = snapshot.draft ?: return
         val babyId = snapshot.babyId ?: return
@@ -222,6 +302,7 @@ class RecordComposerViewModel @Inject constructor(
                         endTimestamp = command.endTimestamp,
                         note = command.note,
                         payloadJson = command.payloadJson,
+                        schemaVersion = command.schemaVersion,
                     )
                     command.existingRecordId != null -> careLog.updateRecord(
                         id = command.existingRecordId,
@@ -229,6 +310,7 @@ class RecordComposerViewModel @Inject constructor(
                         endTimestamp = command.endTimestamp,
                         note = command.note,
                         payloadJson = command.payloadJson,
+                        schemaVersion = command.schemaVersion,
                     )
                     else -> careLog.addRecord(
                         babyId = babyId,
@@ -237,24 +319,14 @@ class RecordComposerViewModel @Inject constructor(
                         endTimestamp = command.endTimestamp,
                         note = command.note,
                         payloadJson = command.payloadJson,
+                        schemaVersion = command.schemaVersion,
                     )
                 }
-                if (
-                    command.existingRecordId == null &&
-                    command.type in FEED_TYPES &&
-                    Instant.ofEpochMilli(command.timestamp)
-                        .atZone(ZoneId.systemDefault())
-                        .toLocalDate() == LocalDate.now()
-                ) {
-                    try {
-                        feedReminder.scheduleAfterFeed()
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (_: Throwable) {
-                        // The record is already durable; reminder failure is non-fatal.
-                    }
+                photoStore.delete(draft.sourcePhotos - draft.photos.toSet())
+                _state.update {
+                    it.copy(draft = it.draft?.copy(sourcePhotos = draft.photos))
                 }
-                when {
+                val message = when {
                     draft.sleepAction == SleepDraftAction.SleepDown &&
                         draft.endTimestamp == null -> "已开始睡眠"
                     draft.sleepAction == SleepDraftAction.SleepDown -> "已记录睡眠"
@@ -262,6 +334,10 @@ class RecordComposerViewModel @Inject constructor(
                     draft.isEditing -> "已保存修改"
                     else -> "已记录${command.type.presentation.label}"
                 }
+                message to (
+                    command.existingRecordId == null &&
+                        command.type in FEED_TYPES
+                    )
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
@@ -278,20 +354,31 @@ class RecordComposerViewModel @Inject constructor(
             }
             currentCoroutineContext().ensureActive()
             sessionGate.deliver(session) {
-                onSaved(message)
+                onSaved(message.first, message.second)
             }
+        }
+    }
+
+    internal fun scheduleReminder(atMillis: Long?, onResult: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            val success = runCatching {
+                feedReminder.scheduleAfterFeed(atMillis)
+            }.isSuccess
+            onResult(success)
         }
     }
 
     internal fun delete(onDeleted: (String) -> Unit) {
         val snapshot = _state.value
-        val recordId = snapshot.draft?.existingRecordId ?: return
+        val draft = snapshot.draft ?: return
+        val recordId = draft.existingRecordId ?: return
         if (snapshot.saving || snapshot.deleting) return
         val session = sessionGate.current() ?: return
         _state.update { it.copy(deleting = true, error = null) }
         actionJob = viewModelScope.launch {
             try {
                 careLog.deleteRecord(recordId)
+                photoStore.delete(draft.photos)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
@@ -313,12 +400,20 @@ class RecordComposerViewModel @Inject constructor(
         }
     }
 
+    private fun cleanupUnpersistedPhotos(draft: QuickRecordDraft?) {
+        val paths = draft?.photos.orEmpty() - draft?.sourcePhotos.orEmpty().toSet()
+        if (paths.isNotEmpty()) {
+            viewModelScope.launch { photoStore.delete(paths) }
+        }
+    }
+
     private companion object {
         val FEED_TYPES = setOf(
             RecordType.NURSING,
             RecordType.FORMULA,
             RecordType.PUMPED_FEED,
         )
+        const val MAX_RECORD_PHOTOS = 9
     }
 }
 
@@ -333,6 +428,50 @@ fun RecordComposerHost(
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
     var confirmDelete by remember(request) { mutableStateOf(false) }
+    var pendingSavedMessage by remember(request) { mutableStateOf<String?>(null) }
+    var adjustReminder by remember(request) { mutableStateOf(false) }
+    var pendingReminderAt by remember(request) { mutableStateOf<Long?>(null) }
+    val context = LocalContext.current
+    fun finishSaved(message: String) {
+        pendingSavedMessage = null
+        adjustReminder = false
+        pendingReminderAt = null
+        onSaved(message)
+    }
+    val notificationPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        val message = pendingSavedMessage ?: return@rememberLauncherForActivityResult
+        if (!granted) {
+            finishSaved("$message；通知权限未开启，未设置提醒")
+        } else {
+            vm.scheduleReminder(pendingReminderAt) { scheduled ->
+                finishSaved(
+                    if (scheduled) "$message；提醒已设置"
+                    else "$message；提醒设置失败，可在设置中重试",
+                )
+            }
+        }
+    }
+    fun requestOrScheduleReminder(atMillis: Long?) {
+        pendingReminderAt = atMillis
+        val hasPermission = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) == PackageManager.PERMISSION_GRANTED
+        if (hasPermission) {
+            val message = pendingSavedMessage ?: return
+            vm.scheduleReminder(atMillis) { scheduled ->
+                finishSaved(
+                    if (scheduled) "$message；提醒已设置"
+                    else "$message；提醒设置失败，可在设置中重试",
+                )
+            }
+        } else {
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
 
     LaunchedEffect(request) {
@@ -379,6 +518,8 @@ fun RecordComposerHost(
                     timePickerStyle = state.timePickerStyle,
                     preferredHand = state.preferredHand,
                     birthdayEpochDay = state.birthdayEpochDay,
+                    infantFeverAdviceEnabled = state.infantFeverAdviceEnabled,
+                    customItems = state.customItems,
                     saving = state.saving,
                     deleting = state.deleting,
                     saveError = state.error,
@@ -394,10 +535,20 @@ fun RecordComposerHost(
                     } else {
                         null
                     },
-                    onConfirm = { vm.save(onSaved) },
+                    onConfirm = {
+                        vm.save { message, offerReminder ->
+                            if (offerReminder) {
+                                pendingSavedMessage = message
+                            } else {
+                                onSaved(message)
+                            }
+                        }
+                    },
                     onStartNursingTimer = {
                         onStartNursingTimer(draft.note, draft.nursingAmountMl)
                     },
+                    onImportPhotos = vm::importPhotos,
+                    onRemovePhoto = vm::removePhoto,
                 )
             }
         }
@@ -432,6 +583,51 @@ fun RecordComposerHost(
                     onClick = { confirmDelete = false },
                 ) {
                     Text("取消")
+                }
+            },
+        )
+    }
+
+    pendingSavedMessage?.let { message ->
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text(if (adjustReminder) "调整提醒时间" else "设置下次喂养提醒？") },
+            text = {
+                Text(
+                    if (adjustReminder) {
+                        "选择从现在起的提醒间隔。记录已经安全保存。"
+                    } else {
+                        "记录已经安全保存。你可以按设置间隔提醒、调整时间，或不提醒。"
+                    },
+                )
+            },
+            confirmButton = {
+                if (adjustReminder) {
+                    TextButton(
+                        onClick = {
+                            requestOrScheduleReminder(System.currentTimeMillis() + 60 * 60_000L)
+                        },
+                    ) { Text("60 分钟") }
+                } else {
+                    TextButton(onClick = { requestOrScheduleReminder(null) }) {
+                        Text("确认提醒")
+                    }
+                }
+            },
+            dismissButton = {
+                if (adjustReminder) {
+                    TextButton(
+                        onClick = {
+                            requestOrScheduleReminder(System.currentTimeMillis() + 120 * 60_000L)
+                        },
+                    ) { Text("120 分钟") }
+                } else {
+                    TextButton(onClick = { adjustReminder = true }) {
+                        Text("调整时间")
+                    }
+                    TextButton(onClick = { finishSaved("$message；未设置提醒") }) {
+                        Text("不提醒")
+                    }
                 }
             },
         )

@@ -51,6 +51,23 @@ class QuickRecordDraftTest {
     }
 
     @Test
+    fun composerEditPreservesUnknownPayloadFields() {
+        val source = record(
+            type = RecordType.FORMULA,
+            payload = """{"amount_ml":120,"scalar":"keep","object":{"v":2},"array":[1,2]}""",
+        )
+
+        val command = QuickRecordDraft.fromRecord(source)
+            .copy(amountMl = 135)
+            .toSaveCommand()
+
+        assertTrue(command.payloadJson.contains("\"amount_ml\":135"))
+        assertTrue(command.payloadJson.contains("\"scalar\":\"keep\""))
+        assertTrue(command.payloadJson.contains("\"object\":{\"v\":2}"))
+        assertTrue(command.payloadJson.contains("\"array\":[1,2]"))
+    }
+
+    @Test
     fun allPurposeFamiliesSerializeTheirBasicInformation() {
         val cases = listOf(
             QuickRecordDraft.create(RecordType.NURSING, tappedAt)
@@ -238,41 +255,14 @@ class QuickRecordDraftTest {
     }
 
     @Test
-    fun intervalPreviewUsesIntervalWordingAndSupportsSubMinuteDurations() {
-        val interval = QuickRecordDraft.create(RecordType.WALK, tappedAt)
+    fun walkIsAPointRecordWithOptionalNote() {
+        val walk = QuickRecordDraft.create(RecordType.WALK, tappedAt)
         val now = tappedAt + 90 * 60_000L
 
-        assertEquals(
-            IntervalDurationPreview.Warning("请选择结束时刻"),
-            interval.intervalDurationPreview(nowMillis = now),
-        )
-        assertEquals("请选择结束时刻", interval.validationError(nowMillis = now))
-        assertFalse(interval.canConfirm(nowMillis = now))
-        assertEquals(
-            IntervalDurationPreview.Warning("结束须晚于开始"),
-            interval.copy(endTimestamp = tappedAt)
-                .intervalDurationPreview(nowMillis = now),
-        )
-        assertEquals(
-            "结束须晚于开始",
-            interval.copy(endTimestamp = tappedAt).validationError(nowMillis = now),
-        )
-        assertEquals(
-            IntervalDurationPreview.Warning("不能选未来时刻"),
-            interval.copy(endTimestamp = now + 1L)
-                .intervalDurationPreview(nowMillis = now),
-        )
-        assertEquals(
-            IntervalDurationPreview.Duration("时长 不足1分"),
-            interval.copy(endTimestamp = tappedAt + 30_000L)
-                .intervalDurationPreview(nowMillis = now),
-        )
-        val repaired = interval.copy(endTimestamp = tappedAt + 65 * 60_000L)
-        assertEquals(
-            IntervalDurationPreview.Duration("时长 1小时5分"),
-            repaired.intervalDurationPreview(nowMillis = now),
-        )
-        assertTrue(repaired.canConfirm(nowMillis = now))
+        assertNull(walk.intervalDurationPreview(nowMillis = now))
+        assertNull(walk.validationError(nowMillis = now))
+        assertTrue(walk.canConfirm(nowMillis = now))
+        assertNull(walk.toSaveCommand().endTimestamp)
     }
 
     @Test
@@ -283,15 +273,10 @@ class QuickRecordDraftTest {
             timestamp = tappedAt,
             historical = true,
         )
-        val walk = QuickRecordDraft.create(RecordType.WALK, tappedAt)
 
         assertEquals(
             "醒来须晚于睡下。跨天请先把日期改为次日",
             sleep.endTimeRejectionMessage(tappedAt, nowMillis = now),
-        )
-        assertEquals(
-            "结束须晚于开始",
-            walk.endTimeRejectionMessage(tappedAt, nowMillis = now),
         )
         assertEquals(
             "不能选未来时刻",
@@ -329,7 +314,7 @@ class QuickRecordDraftTest {
     }
 
     @Test
-    fun wakeConfirmationUpdatesTheExistingOpenSleepAndPreservesPayload() {
+    fun wakeConfirmationUpdatesTheExistingOpenSleepAndNormalizesVersionTwoPayload() {
         val open = Record(
             id = 42L,
             clientUuid = "sleep-42",
@@ -351,7 +336,8 @@ class QuickRecordDraftTest {
         assertEquals(42L, command.existingRecordId)
         assertEquals(open.timestamp, command.timestamp)
         assertEquals(tappedAt, command.endTimestamp)
-        assertEquals(open.payloadJson, command.payloadJson)
+        assertEquals("""{"is_nap":true}""", command.payloadJson)
+        assertEquals(2, command.schemaVersion)
         assertEquals("午睡", command.note)
     }
 
@@ -595,7 +581,7 @@ class QuickRecordDraftTest {
     }
 
     @Test
-    fun distinctNonIntervalErrorStillAppearsBelowAValidDuration() {
+    fun pointRecordErrorAppearsWithoutInventingDuration() {
         val now = tappedAt + 60 * 60_000L
         val draft = QuickRecordDraft.create(RecordType.WALK, tappedAt)
             .copy(
@@ -603,10 +589,7 @@ class QuickRecordDraftTest {
                 note = "长".repeat(201),
             )
 
-        assertEquals(
-            IntervalDurationPreview.Duration("时长 30分"),
-            draft.intervalDurationPreview(nowMillis = now),
-        )
+        assertNull(draft.intervalDurationPreview(nowMillis = now))
         assertEquals(
             "备注最多 200 字",
             draft.footerValidationError(
@@ -648,4 +631,19 @@ class QuickRecordDraftTest {
                 .validationError(nowMillis = tappedAt + 1L),
         )
     }
+
+    private fun record(
+        type: RecordType,
+        payload: String,
+    ) = Record(
+        id = 7,
+        clientUuid = "record-7",
+        babyId = 1,
+        type = type,
+        timestamp = tappedAt,
+        createdByUserId = 1,
+        payloadJson = payload,
+        schemaVersion = 1,
+        updatedAt = tappedAt,
+    )
 }

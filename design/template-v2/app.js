@@ -423,4 +423,3 @@
   renderRecordSheet(); renderAll(); setView(activeView);
   timerInterval=setInterval(()=>{if(session.nursing?.runningSide||session.sleep){renderSession();if($("#timer-dialog").open)updateTimerUI();renderQuick();}},1000);
 })();
-

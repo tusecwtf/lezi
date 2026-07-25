@@ -1,7 +1,12 @@
 package com.lezi.babylog.feature.log
 
+import android.graphics.BitmapFactory
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,12 +33,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import com.lezi.babylog.core.ui.RecordTypeIcon
 import com.lezi.babylog.core.ui.presentation
+import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.designsystem.LeziClockDialDialog
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSecondaryButton
@@ -42,6 +51,7 @@ import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.designsystem.leziRecordColor
 import com.lezi.babylog.designsystem.rememberDismissKeyboard
+import com.lezi.babylog.domain.CustomRecordItem
 import java.time.Instant
 import java.time.ZoneId
 
@@ -59,6 +69,8 @@ internal fun QuickRecordSheet(
     timePickerStyle: String = "dropdown",
     preferredHand: String = "right",
     birthdayEpochDay: Long? = null,
+    infantFeverAdviceEnabled: Boolean = true,
+    customItems: List<CustomRecordItem> = emptyList(),
     saving: Boolean,
     deleting: Boolean,
     saveError: String?,
@@ -68,11 +80,13 @@ internal fun QuickRecordSheet(
     onDelete: (() -> Unit)?,
     onConfirm: (QuickRecordDraft) -> Unit,
     onStartNursingTimer: () -> Unit,
+    onImportPhotos: (List<android.net.Uri>) -> Unit,
+    onRemovePhoto: (String) -> Unit,
 ) {
     val zone = ZoneId.systemDefault()
     val typeColor = leziRecordColor(draft.type.presentation.colorRole)
     val actionsEnabled = !saving && !deleting
-    val nowMillis = System.currentTimeMillis()
+    val nowMillis = RecordTime.currentTimeMillis()
     val intervalPreview = draft.intervalDurationPreview(nowMillis)
     val confirmEnabled = actionsEnabled && draft.canConfirm(nowMillis)
     val dismissKeyboard = rememberDismissKeyboard()
@@ -86,7 +100,11 @@ internal fun QuickRecordSheet(
     var attemptedConfirm by remember(interactionKey) {
         mutableStateOf(false)
     }
-    val isIntervalMode = draft.mode in setOf(QuickRecordMode.Sleep, QuickRecordMode.Interval)
+    val photoPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(9),
+        onImportPhotos,
+    )
+    val isIntervalMode = draft.mode == QuickRecordMode.Sleep
     val visibleIntervalPreview = draft.visibleIntervalDurationPreview(
         nowMillis = nowMillis,
         isDirty = isDirty,
@@ -176,6 +194,8 @@ internal fun QuickRecordSheet(
                 draft = draft,
                 amountStepMl = amountStepMl,
                 birthdayEpochDay = birthdayEpochDay,
+                infantFeverAdviceEnabled = infantFeverAdviceEnabled,
+                customItems = customItems,
                 canStartNursingTimer = canStartNursingTimer,
                 actionsEnabled = actionsEnabled,
                 onDraftChange = ::update,
@@ -201,7 +221,7 @@ internal fun QuickRecordSheet(
                         update(
                             draft.copy(
                                 endTimestamp = if (enabled) {
-                                    System.currentTimeMillis()
+                                    RecordTime.currentTimeMillis()
                                 } else {
                                     null
                                 },
@@ -226,6 +246,58 @@ internal fun QuickRecordSheet(
                 maxLines = 4,
                 supportingText = { Text("${draft.note.length}/200") },
             )
+            if (draft.recentNotes.isNotEmpty()) {
+                Text("最近备注", style = LeziTypography.Label)
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                ) {
+                    draft.recentNotes.forEach { candidate ->
+                        TextButton(onClick = { update(draft.copy(note = candidate)) }) {
+                            Text(candidate, maxLines = 1)
+                        }
+                    }
+                }
+            }
+            if (draft.mode == QuickRecordMode.Text) {
+                Text("记录图片（最多 9 张）", style = LeziTypography.Label)
+                if (draft.photos.isNotEmpty()) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                    ) {
+                        draft.photos.forEach { path ->
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                remember(path) {
+                                    BitmapFactory.decodeFile(path)?.asImageBitmap()
+                                }?.let { bitmap ->
+                                    Image(
+                                        bitmap = bitmap,
+                                        contentDescription = "记录图片",
+                                        modifier = Modifier
+                                            .size(72.dp)
+                                            .clip(MaterialTheme.shapes.small),
+                                        contentScale = ContentScale.Crop,
+                                    )
+                                }
+                                TextButton(
+                                    onClick = { onRemovePhoto(path) },
+                                ) { Text("移除") }
+                            }
+                        }
+                    }
+                }
+                TextButton(
+                    enabled = draft.photos.size < 9,
+                    onClick = {
+                        photoPicker.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                        )
+                    },
+                ) { Text("选择图片") }
+            }
 
             footerError?.let {
                 Text(
@@ -317,10 +389,10 @@ internal fun QuickRecordSheet(
             preferredHand = preferredHand,
             onConfirm = { picked ->
                 val pickedMillis = picked.toInstant().toEpochMilli()
-                val nowMillis = System.currentTimeMillis()
+                val nowMillis = RecordTime.currentTimeMillis()
                 when (target) {
                     QuickClockTarget.Start -> {
-                        val shiftedEnd = shiftStartPreservingDuration(
+                        val shiftedEnd = RecordTime.shiftStartPreservingDuration(
                             oldStartMillis = draft.timestamp,
                             oldEndMillis = draft.endTimestamp,
                             newStartMillis = pickedMillis,

@@ -44,4 +44,22 @@ class OneHandQuickActionOrderTest {
             oneHandQuickActionOrder(preferredHand = "left", timerEnabled = false),
         )
     }
+
+    @Test
+    fun configuredRecordOrder_controlsDockRelativeOrder() {
+        assertEquals(
+            listOf(
+                OneHandQuickAction.Formula,
+                OneHandQuickAction.Nursing,
+                OneHandQuickAction.Sleep,
+                OneHandQuickAction.Pee,
+                OneHandQuickAction.More,
+            ),
+            oneHandQuickActionOrder(
+                preferredHand = "left",
+                timerEnabled = true,
+                configuredTypeKeys = listOf("formula", "nursing", "sleep", "pee"),
+            ),
+        )
+    }
 }

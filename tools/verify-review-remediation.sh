@@ -65,7 +65,7 @@ require_text '家庭同步服务暂未连接，请稍后重试' \
 require_text '类型 / 详情 / 备注' \
   feature/search/src/main/kotlin/com/lezi/babylog/feature/search/SearchScreen.kt
 require_text '高于同月龄参考范围' \
-  feature/growth/src/main/kotlin/com/lezi/babylog/feature/growth/GrowthScreen.kt
+  core/model/src/main/kotlin/com/lezi/babylog/core/model/GrowthMeasurementFacts.kt
 require_text '不足1分' core/ui/src/main/kotlin/com/lezi/babylog/core/ui/RecordPresentation.kt
 require_text '丢弃本次计时？' \
   feature/timer/src/main/kotlin/com/lezi/babylog/feature/timer/TimerScreen.kt
@@ -75,7 +75,9 @@ require_text 'if (savedBootCount != nowBootCount)' \
   feature/timer/src/main/kotlin/com/lezi/babylog/feature/timer/TimerScreen.kt
 require_text 'if (savedBootCount == null && nowBootCount != null)' \
   feature/timer/src/main/kotlin/com/lezi/babylog/feature/timer/TimerScreen.kt
-require_text '为保护隐私，请打开应用查看记录' \
+require_text 'Widget rendering only reads the persisted snapshot' \
+  feature/widget/src/main/kotlin/com/lezi/babylog/feature/widget/CareWidget.kt
+require_text 'WidgetComposerContract.createIntent' \
   feature/widget/src/main/kotlin/com/lezi/babylog/feature/widget/CareWidget.kt
 
 for source in \

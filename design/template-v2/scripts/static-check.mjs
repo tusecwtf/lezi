@@ -78,4 +78,3 @@ if (failures.length) {
   process.exit(1);
 }
 console.log("\n静态检查通过：关键页面、入口、状态、记录类型、字段、离线约束与品牌禁用项均已覆盖。");
-

@@ -5,6 +5,8 @@ import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.BabyEntity
 import com.lezi.babylog.core.database.CalendarEventDao
 import com.lezi.babylog.core.database.CalendarEventEntity
+import com.lezi.babylog.core.database.CustomItemDao
+import com.lezi.babylog.core.database.CustomItemEntity
 import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.FamilyDao
 import com.lezi.babylog.core.database.FamilyEntity
@@ -20,9 +22,15 @@ import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.sync.SyncPort
 import org.json.JSONObject
 import com.lezi.babylog.core.model.Baby
+import com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
+import com.lezi.babylog.core.model.NursingPayload
+import com.lezi.babylog.core.model.MilkPayload
 import com.lezi.babylog.core.model.Record
+import com.lezi.babylog.core.model.RecordPayloadCodec
+import com.lezi.babylog.core.model.RecordPayloadDocument
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.Sex
+import com.lezi.babylog.core.model.SleepPayload
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -44,6 +52,7 @@ data class CreateBabyInput(
     /** Birth weight in grams; null when not set. */
     val birthWeightGrams: Int? = null,
     val avatarPath: String? = null,
+    val dueDateEpochDay: Long? = null,
     val themeColorArgb: Int = DEFAULT_THEME_COLOR,
 ) {
     companion object {
@@ -57,6 +66,8 @@ data class UpdateBabyInput(
     val birthdayEpochDay: Long,
     val birthWeightGrams: Int? = null,
     val avatarPath: String? = null,
+    val dueDateEpochDay: Long? = null,
+    val themeColorArgb: Int? = null,
 )
 
 /** Thrown when another active baby already uses the nickname. */
@@ -84,10 +95,29 @@ data class CalendarEvent(
     val remindAt: Long?,
 )
 
+data class CustomRecordItem(
+    val id: Long,
+    val name: String,
+    val iconSlot: Int,
+    val sortOrder: Int,
+)
+
+class CustomItemLimitException :
+    IllegalStateException("自定义项目最多 10 个")
+
 data class LocalFamilyIdentity(
     val deviceId: String,
     val displayName: String,
     val familyId: Long,
+)
+
+data class BabyMergePreview(
+    val sourceBabyId: Long,
+    val sourceNickname: String,
+    val targetBabyId: Long,
+    val targetNickname: String,
+    val recordCount: Int,
+    val calendarEventCount: Int,
 )
 
 @Singleton
@@ -95,6 +125,7 @@ class CareLog @Inject constructor(
     private val babyDao: BabyDao,
     private val recordDao: RecordDao,
     private val calendarEventDao: CalendarEventDao,
+    private val customItemDao: CustomItemDao,
     private val localUserDao: LocalUserDao,
     private val familyDao: FamilyDao,
     private val membershipDao: MembershipDao,
@@ -140,6 +171,7 @@ class CareLog @Inject constructor(
                 birthdayEpochDay = input.birthdayEpochDay,
                 birthWeightGrams = weight,
                 avatarPath = input.avatarPath,
+                dueDateEpochDay = input.dueDateEpochDay,
                 themeColorArgb = input.themeColorArgb,
                 clientUuid = newClientUuid(),
                 updatedAt = now,
@@ -164,6 +196,8 @@ class CareLog @Inject constructor(
                 birthdayEpochDay = input.birthdayEpochDay,
                 birthWeightGrams = normalizeBirthWeightGrams(input.birthWeightGrams),
                 avatarPath = input.avatarPath,
+                dueDateEpochDay = input.dueDateEpochDay,
+                themeColorArgb = input.themeColorArgb ?: existing.themeColorArgb,
                 updatedAt = System.currentTimeMillis(),
             ),
         )
@@ -273,6 +307,93 @@ class CareLog @Inject constructor(
         )
     }
 
+    suspend fun updateCalendarEvent(event: CalendarEvent) {
+        calendarEventDao.update(
+            CalendarEventEntity(
+                id = event.id,
+                clientUuid = event.clientUuid,
+                babyId = event.babyId,
+                title = event.title.trim(),
+                note = event.note,
+                eventAt = event.eventAt,
+                remindAt = event.remindAt,
+                updatedAt = System.currentTimeMillis(),
+            ),
+        )
+    }
+
+    suspend fun deleteCalendarEvent(id: Long) {
+        calendarEventDao.softDelete(id, System.currentTimeMillis())
+    }
+
+    suspend fun listCalendarEvents(babyId: Long): List<CalendarEvent> =
+        calendarEventDao.listForBaby(babyId).map { it.toModel() }
+
+    fun observeCustomItems(): Flow<List<CustomRecordItem>> =
+        customItemDao.observeAll().map { items -> items.map { it.toModel() } }
+
+    suspend fun addCustomItem(name: String, iconSlot: Int): Long {
+        val normalized = name.trim()
+        require(normalized.isNotEmpty()) { "自定义项目名称不能为空" }
+        require(iconSlot in 0..7) { "图标槽必须在 0..7" }
+        val items = customItemDao.listAll()
+        if (items.size >= 10) throw CustomItemLimitException()
+        require(items.none { it.name == normalized }) { "自定义项目名称不可重复" }
+        val familyId = getCurrentBaby()?.familyId
+            ?: listBabies().firstOrNull()?.familyId
+            ?: error("请先添加宝宝")
+        val now = System.currentTimeMillis()
+        return customItemDao.upsert(
+            CustomItemEntity(
+                clientUuid = newClientUuid(),
+                familyId = familyId,
+                name = normalized,
+                iconSlot = iconSlot,
+                sortOrder = items.size,
+                updatedAt = now,
+            ),
+        )
+    }
+
+    suspend fun updateCustomItem(item: CustomRecordItem) {
+        val existing = customItemDao.listAll().firstOrNull { it.id == item.id } ?: return
+        val normalized = item.name.trim()
+        require(normalized.isNotEmpty()) { "自定义项目名称不能为空" }
+        require(item.iconSlot in 0..7) { "图标槽必须在 0..7" }
+        require(
+            customItemDao.listAll().none { it.id != item.id && it.name == normalized },
+        ) { "自定义项目名称不可重复" }
+        customItemDao.update(
+            existing.copy(
+                name = normalized,
+                iconSlot = item.iconSlot,
+                sortOrder = item.sortOrder.coerceAtLeast(0),
+                updatedAt = System.currentTimeMillis(),
+            ),
+        )
+    }
+
+    suspend fun moveCustomItem(id: Long, delta: Int) {
+        val items = customItemDao.listAll()
+        val from = items.indexOfFirst { it.id == id }
+        if (from < 0) return
+        val to = (from + delta).coerceIn(0, items.lastIndex)
+        if (to == from) return
+        val reordered = items.toMutableList().apply {
+            add(to, removeAt(from))
+        }
+        val now = System.currentTimeMillis()
+        reordered.forEachIndexed { index, item ->
+            if (item.sortOrder != index) {
+                customItemDao.update(item.copy(sortOrder = index, updatedAt = now))
+            }
+        }
+    }
+
+    suspend fun deleteCustomItem(id: Long) {
+        customItemDao.softDelete(id, System.currentTimeMillis())
+    }
+
     suspend fun dayRecords(
         babyId: Long,
         day: LocalDate,
@@ -292,7 +413,7 @@ class CareLog @Inject constructor(
         val start = day.atStartOfDay(zone).toInstant().toEpochMilli()
         val end = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
         val records = recordDao.listDay(babyId, start, end).map { it.toModel() }
-        return aggregateDaily(records, start, end, now)
+        return CareAggregation.day(records, day, zone, now).toDailySummary()
     }
 
     suspend fun dayTimeBar(
@@ -301,29 +422,7 @@ class CareLog @Inject constructor(
         zone: ZoneId = ZoneId.systemDefault(),
     ): List<TimeBarSegment> {
         val records = dayRecords(babyId, day, zone)
-        val dayStart = day.atStartOfDay(zone).toInstant().toEpochMilli()
-        val dayEnd = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-        val segments = mutableListOf<TimeBarSegment>()
-        for (r in records) {
-            val kind = when (r.type) {
-                RecordType.SLEEP -> TimeBarKind.SLEEP
-                RecordType.FORMULA, RecordType.NURSING, RecordType.PUMPED_FEED -> TimeBarKind.FEED
-                else -> continue
-            }
-            val startMs = r.timestamp.coerceIn(dayStart, dayEnd - 1)
-            val endMs = when {
-                r.endTimestamp != null -> r.endTimestamp!!.coerceIn(dayStart + 1, dayEnd)
-                kind == TimeBarKind.FEED -> (r.timestamp + 15 * 60_000L).coerceAtMost(dayEnd)
-                else -> continue
-            }
-            if (endMs <= startMs) continue
-            segments += TimeBarSegment(
-                startMinOfDay = ((startMs - dayStart) / 60_000L).toInt().coerceIn(0, 24 * 60 - 1),
-                endMinOfDay = ((endMs - dayStart) / 60_000L).toInt().coerceIn(1, 24 * 60),
-                kind = kind,
-            )
-        }
-        return segments.sortedBy { it.startMinOfDay }
+        return CareAggregation.timeBar(records, day, zone)
     }
 
     suspend fun addRecord(
@@ -333,6 +432,7 @@ class CareLog @Inject constructor(
         endTimestamp: Long? = null,
         note: String? = null,
         payloadJson: String = "{}",
+        schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
     ): Long {
         validateSleepInterval(type, timestamp, endTimestamp)
         val userId = ensureLocalUser(System.currentTimeMillis())
@@ -347,6 +447,7 @@ class CareLog @Inject constructor(
             note = note,
             createdByUserId = userId,
             payloadJson = payloadJson,
+            schemaVersion = schemaVersion,
             updatedAt = now,
         )
         return if (type == RecordType.SLEEP && endTimestamp == null) {
@@ -371,6 +472,7 @@ class CareLog @Inject constructor(
         endTimestamp: Long?,
         note: String?,
         payloadJson: String,
+        schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
     ) {
         val now = System.currentTimeMillis()
         sleepMutationMutex.withLock {
@@ -391,6 +493,7 @@ class CareLog @Inject constructor(
                         endTimestamp = endTimestamp,
                         note = note,
                         payloadJson = payloadJson,
+                        schemaVersion = schemaVersion,
                         updatedAt = now,
                     ),
                 )
@@ -430,20 +533,35 @@ class CareLog @Inject constructor(
         note: String? = null,
         startedAt: Long,
         endedAt: Long,
+        recordMode: String = "end",
     ): Long {
         require(order in NURSING_ORDER_ALLOWLIST) {
             "不支持的哺乳顺序"
         }
-        val amountPart = amountMl?.let { ""","amount_ml":$it""" } ?: ""
-        val payload =
-            """{"left_min":$leftMin,"right_min":$rightMin,"order":"$order"$amountPart}"""
+        require(recordMode in setOf("start", "end")) {
+            "不支持的记录时刻模式"
+        }
+        val payload = RecordPayloadCodec.encode(
+            RecordPayloadDocument(
+                type = RecordType.NURSING,
+                payload = NursingPayload(
+                    leftMinutes = leftMin,
+                    rightMinutes = rightMin,
+                    order = order,
+                    amountMl = amountMl,
+                    recordMode = recordMode,
+                ),
+                schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+            ),
+        )
         return addRecord(
             babyId = babyId,
             type = RecordType.NURSING,
-            timestamp = startedAt,
-            endTimestamp = endedAt,
+            timestamp = if (recordMode == "start") startedAt else endedAt,
+            endTimestamp = endedAt.takeIf { recordMode == "start" },
             note = note,
             payloadJson = payload,
+            schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
         )
     }
 
@@ -460,6 +578,7 @@ class CareLog @Inject constructor(
         endTimestamp: Long?,
         note: String?,
         payloadJson: String,
+        schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
     ): Long = sleepMutationMutex.withLock {
         validateSleepInterval(RecordType.SLEEP, timestamp, endTimestamp)
         transactionRunner.run {
@@ -477,6 +596,7 @@ class CareLog @Inject constructor(
                         note = note,
                         createdByUserId = ensureLocalUser(now),
                         payloadJson = payloadJson,
+                        schemaVersion = schemaVersion,
                         updatedAt = now,
                     ),
                 )
@@ -490,6 +610,7 @@ class CareLog @Inject constructor(
                         endTimestamp = endTimestamp,
                         note = note,
                         payloadJson = payloadJson,
+                        schemaVersion = schemaVersion,
                         updatedAt = System.currentTimeMillis(),
                     ),
                 )
@@ -505,11 +626,12 @@ class CareLog @Inject constructor(
         transactionRunner.run {
             val open = recordDao.findOpenSleep(babyId)
             if (open != null) {
-                val flagged = withAnomaly(open.payloadJson)
-                if (flagged != open.payloadJson) {
+                val flagged = withAnomaly(open.payloadJson, open.schemaVersion)
+                if (flagged.first != open.payloadJson) {
                     updateRecordAndOutbox(
                         open.copy(
-                            payloadJson = flagged,
+                            payloadJson = flagged.first,
+                            schemaVersion = flagged.second,
                             updatedAt = System.currentTimeMillis(),
                         ),
                     )
@@ -562,7 +684,14 @@ class CareLog @Inject constructor(
                     endTimestamp = at,
                     note = null,
                     createdByUserId = ensureLocalUser(now),
-                    payloadJson = """{"anomaly_flag":true}""",
+                    payloadJson = RecordPayloadCodec.encode(
+                        RecordPayloadDocument(
+                            type = RecordType.SLEEP,
+                            payload = SleepPayload(anomaly = true),
+                            schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+                        ),
+                    ),
+                    schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
                     updatedAt = now,
                 ),
             )
@@ -580,7 +709,7 @@ class CareLog @Inject constructor(
         val start = weekStart.atStartOfDay(zone).toInstant().toEpochMilli()
         val end = weekStart.plusDays(7).atStartOfDay(zone).toInstant().toEpochMilli()
         val rows = recordDao.listRange(babyId, start, end).map { it.toModel() }
-        return aggregateWeek(rows, weekStart, zone, now)
+        return CareAggregation.week(rows, weekStart, zone, now)
     }
 
     suspend fun search(babyId: Long, query: String): List<Record> {
@@ -605,20 +734,60 @@ class CareLog @Inject constructor(
     suspend fun recentCareSummary(babyId: Long, zone: ZoneId = ZoneId.systemDefault()): WidgetSummaryDto {
         val baby = babyDao.get(babyId)?.toModel()
         val day = LocalDate.now(zone)
-        val summary = daySummary(babyId, day, zone)
-        val latest = dayRecords(babyId, day, zone).firstOrNull()
-        return WidgetSummaryDto(
+        // The daily totals are windowed inside CareAggregation, while "last"
+        // intentionally spans prior days. Supplying the complete baby-scoped
+        // set keeps both facts behind the same interface.
+        val records = recordDao.listForBaby(babyId).map { it.toModel() }
+        return CareAggregation.widget(
+            records = records,
             babyName = baby?.nickname ?: "乐记",
-            feedMl = summary.feedMl,
-            sleepMin = summary.sleepMinutes,
-            pee = summary.peeCount,
-            poop = summary.poopCount,
-            lastLabel = latest?.let { "${it.type.key} · ${formatClock(it.timestamp, zone)}" },
+            date = day,
+            zone = zone,
         )
     }
 
     suspend fun listMeasurements(babyId: Long, type: RecordType): List<Record> =
         recordDao.listByType(babyId, type.key).map { it.toModel() }
+
+    fun observeMeasurements(babyId: Long, type: RecordType): Flow<List<Record>> =
+        recordDao.observeRange(
+            babyId = babyId,
+            startInclusive = Long.MIN_VALUE,
+            endExclusive = Long.MAX_VALUE,
+        ).map { records ->
+            records.asSequence()
+                .filter { it.type == type.key }
+                .map { it.toModel() }
+                .toList()
+        }
+
+    suspend fun recentMilkAmounts(
+        babyId: Long,
+        type: RecordType,
+        limit: Int = 3,
+    ): List<Int> {
+        require(type in setOf(RecordType.FORMULA, RecordType.PUMPED_FEED, RecordType.PUMP_EXPRESS))
+        return recordDao.listByType(babyId, type.key)
+            .asReversed()
+            .asSequence()
+            .mapNotNull { (it.toModel().payload.payload as? MilkPayload)?.amountMl }
+            .filter { it in 1..999 }
+            .distinct()
+            .take(limit)
+            .toList()
+    }
+
+    suspend fun recentNotes(
+        babyId: Long,
+        type: RecordType,
+        limit: Int = 5,
+    ): List<String> = recordDao.listByType(babyId, type.key)
+        .asReversed()
+        .asSequence()
+        .mapNotNull { it.note?.trim()?.takeIf(String::isNotBlank) }
+        .distinct()
+        .take(limit)
+        .toList()
 
     suspend fun updateBabyDueDate(babyId: Long, dueDateEpochDay: Long?) {
         val b = babyDao.get(babyId) ?: return
@@ -652,6 +821,50 @@ class CareLog @Inject constructor(
         if (b.nickname == name) return
         ensureNicknameAvailable(name, excludeId = babyId)
         babyDao.update(b.copy(nickname = name, updatedAt = System.currentTimeMillis()))
+    }
+
+    /**
+     * Build an explicit merge preview. Nicknames are display-only and never
+     * participate in deciding which profiles or records are moved.
+     */
+    suspend fun previewBabyMerge(sourceBabyId: Long, targetBabyId: Long): BabyMergePreview? {
+        if (sourceBabyId == targetBabyId) return null
+        val source = babyDao.get(sourceBabyId) ?: return null
+        val target = babyDao.get(targetBabyId) ?: return null
+        if (source.familyId != target.familyId) return null
+        return BabyMergePreview(
+            sourceBabyId = source.id,
+            sourceNickname = source.nickname,
+            targetBabyId = target.id,
+            targetNickname = target.nickname,
+            recordCount = recordDao.listForBaby(source.id).size,
+            calendarEventCount = calendarEventDao.listForBaby(source.id).size,
+        )
+    }
+
+    /**
+     * Apply a merge only after the UI has shown [previewBabyMerge].
+     * The target profile stays intact; source records/events move by explicit id.
+     */
+    suspend fun mergeBabyProfiles(sourceBabyId: Long, targetBabyId: Long): Boolean {
+        val preview = previewBabyMerge(sourceBabyId, targetBabyId) ?: return false
+        val now = System.currentTimeMillis()
+        transactionRunner.run {
+            val source = babyDao.get(preview.sourceBabyId) ?: return@run
+            val target = babyDao.get(preview.targetBabyId) ?: return@run
+            if (source.familyId != target.familyId) return@run
+            recordDao.listForBaby(source.id).forEach { record ->
+                recordDao.update(record.copy(babyId = target.id, updatedAt = now))
+            }
+            calendarEventDao.listForBaby(source.id).forEach { event ->
+                calendarEventDao.update(event.copy(babyId = target.id, updatedAt = now))
+            }
+            babyDao.update(source.copy(deletedAt = now, updatedAt = now))
+        }
+        if (settings.currentBabyId.first() == sourceBabyId) {
+            settings.setCurrentBabyId(targetBabyId)
+        }
+        return babyDao.get(sourceBabyId) == null && babyDao.get(targetBabyId) != null
     }
 
     private fun normalizeNickname(raw: String): String =
@@ -764,81 +977,6 @@ class CareLog @Inject constructor(
         return storedId?.let { id -> babies.find { it.id == id } } ?: babies.first()
     }
 
-    /**
-     * One-shot migrate debug defaults DouDou/豆豆/niannian → 年年,
-     * only when no other active baby already uses 年年 (avoids manufacturing duplicates).
-     */
-    private suspend fun healLegacyNickname(entity: BabyEntity): BabyEntity {
-        val raw = entity.nickname.trim()
-        val key = raw.lowercase().replace(" ", "")
-        val legacy = key in setOf(
-            "doudou", "dou", "mumu", "niannian", "niennie", "bean",
-        ) || raw == "豆豆" || raw == "木木"
-        if (!legacy) return entity
-        val target = "年年"
-        if (raw == target) return entity
-        val clash = babyDao.countByNickname(target, excludeId = entity.id) > 0
-        if (clash) return entity
-        val updated = entity.copy(nickname = target, updatedAt = System.currentTimeMillis())
-        babyDao.update(updated)
-        return updated
-    }
-
-    /**
-     * Merge active babies that share the same trimmed nickname: keep one, reassign records,
-     * soft-delete the rest. Call from app start.
-     */
-    suspend fun dedupeBabiesByNickname() {
-        val currentId = settings.currentBabyId.first()
-        val replacementId = transactionRunner.run {
-            dedupeBabiesByNicknameInTransaction(currentId)
-        }
-        replacementId?.let { settings.setCurrentBabyId(it) }
-    }
-
-    private suspend fun dedupeBabiesByNicknameInTransaction(currentId: Long?): Long? {
-        val babies = babyDao.listAll()
-        if (babies.size <= 1) return null
-        val groups = babies.groupBy { it.nickname.trim() }.filter { it.value.size > 1 }
-        if (groups.isEmpty()) return null
-        val now = System.currentTimeMillis()
-        var replacementId: Long? = null
-        for ((_, list) in groups) {
-            val keeper = list.firstOrNull { it.id == currentId }
-                ?: list.maxByOrNull { recordDao.listForBaby(it.id).size }
-                ?: list.minByOrNull { it.id }!!
-            for (extra in list) {
-                if (extra.id == keeper.id) continue
-                // Move records onto the kept profile so history is not lost.
-                for (rec in recordDao.listForBaby(extra.id)) {
-                    recordDao.update(
-                        rec.copy(babyId = keeper.id, updatedAt = now),
-                    )
-                }
-                for (event in calendarEventDao.listForBaby(extra.id)) {
-                    calendarEventDao.update(
-                        event.copy(babyId = keeper.id, updatedAt = now),
-                    )
-                }
-                babyDao.update(extra.copy(deletedAt = now, updatedAt = now))
-            }
-            if (currentId == null || list.any { it.id == currentId && it.id != keeper.id }) {
-                replacementId = replacementId ?: keeper.id
-            }
-        }
-        return replacementId
-    }
-
-    /** Call from app start / root to rename legacy demo nicknames and collapse duplicates. */
-    suspend fun ensureCurrentBabyHealed() {
-        val currentId = settings.currentBabyId.first()
-        val replacementId = transactionRunner.run {
-            babyDao.listAll().forEach { healLegacyNickname(it) }
-            dedupeBabiesByNicknameInTransaction(currentId)
-        }
-        replacementId?.let { settings.setCurrentBabyId(it) }
-        getCurrentBaby()
-    }
 }
 
 private val NURSING_ORDER_ALLOWLIST = setOf("L", "R", "LR", "RL")
@@ -899,6 +1037,14 @@ private fun CalendarEventEntity.toModel(): CalendarEvent =
         remindAt = remindAt,
     )
 
+private fun CustomItemEntity.toModel(): CustomRecordItem =
+    CustomRecordItem(
+        id = id,
+        name = name,
+        iconSlot = iconSlot,
+        sortOrder = sortOrder,
+    )
+
 private fun parseSex(raw: String): Sex =
     runCatching { Sex.valueOf(raw) }.getOrNull()
         ?: when (raw.lowercase()) {
@@ -907,19 +1053,14 @@ private fun parseSex(raw: String): Sex =
             else -> Sex.UNKNOWN
         }
 
-private fun withAnomaly(payloadJson: String): String {
-    if (payloadJson.contains("\"anomaly_flag\"")) {
-        return payloadJson.replace(
-            Regex(""""anomaly_flag"\s*:\s*false"""),
-            """"anomaly_flag":true""",
-        )
-    }
-    val trimmed = payloadJson.trim()
-    return if (trimmed == "{}" || trimmed.isEmpty()) {
-        """{"anomaly_flag":true}"""
-    } else {
-        trimmed.removeSuffix("}") + ""","anomaly_flag":true}"""
-    }
+private fun withAnomaly(payloadJson: String, schemaVersion: Int): Pair<String, Int> {
+    val document = RecordPayloadCodec.decode(RecordType.SLEEP, payloadJson, schemaVersion)
+    val sleep = document.payload as? SleepPayload ?: return payloadJson to schemaVersion
+    val normalized = document.copy(
+        payload = sleep.copy(anomaly = true),
+        schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+    )
+    return RecordPayloadCodec.encode(normalized) to CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
 }
 
 fun babyAgeLabel(birthdayEpochDay: Long, today: LocalDate = LocalDate.now()): String {

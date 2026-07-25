@@ -53,6 +53,7 @@ import com.lezi.babylog.designsystem.PageHero
 import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.WeekSummary
+import com.lezi.babylog.domain.weekStartFor
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.LocalDate
 import java.time.ZoneId
@@ -113,17 +114,26 @@ data class SummaryTotals(
 data class SummaryUi(
     val range: SummaryRange = SummaryRange.Day,
     val anchorDate: LocalDate = LocalDate.now(),
+    val rangeStartDate: LocalDate = anchorDate,
     val totals: SummaryTotals = SummaryTotals(),
+    val previousWeekTotals: SummaryTotals? = null,
     val week: WeekSummary? = null,
     val showAvgSleep: Boolean = false,
+    val comparePrevWeek: Boolean = false,
     val empty: Boolean = true,
     val babyName: String = "",
+)
+
+private data class SummaryPreferences(
+    val weekStart: Int,
+    val showAvgSleep: Boolean,
+    val comparePrevWeek: Boolean,
 )
 
 private data class SummaryRequest(
     val range: SummaryRange,
     val anchorDate: LocalDate,
-    val showAvgSleep: Boolean,
+    val preferences: SummaryPreferences,
     val baby: Baby?,
 )
 
@@ -135,42 +145,70 @@ class SummaryViewModel @Inject constructor(
     private val zone = ZoneId.systemDefault()
     private val range = MutableStateFlow(SummaryRange.Day)
     private val anchorDate = MutableStateFlow(LocalDate.now(zone))
+    private val preferences = combine(
+        settings.settings,
+        settings.showAvgSleep,
+        settings.comparePrevWeek,
+    ) { local, showAvgSleep, comparePrevWeek ->
+        SummaryPreferences(
+            weekStart = local.weekStart,
+            showAvgSleep = showAvgSleep,
+            comparePrevWeek = comparePrevWeek,
+        )
+    }
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val ui = combine(
         range,
         anchorDate,
-        settings.showAvgSleep,
+        preferences,
         careLog.observeCurrentBaby(),
-    ) { selectedRange, anchor, showAvgSleep, baby ->
-        SummaryRequest(selectedRange, anchor, showAvgSleep, baby)
+    ) { selectedRange, anchor, preferences, baby ->
+        SummaryRequest(selectedRange, anchor, preferences, baby)
     }.flatMapLatest { request ->
         val selectedRange = request.range
         val anchor = request.anchorDate
         val baby = request.baby
+        val preferences = request.preferences
         if (baby == null) {
             flowOf(
                 SummaryUi(
                     range = selectedRange,
                     anchorDate = anchor,
-                    showAvgSleep = request.showAvgSleep,
+                    rangeStartDate = selectedRange.startDate(anchor, preferences.weekStart),
+                    showAvgSleep = preferences.showAvgSleep,
+                    comparePrevWeek = preferences.comparePrevWeek,
                     empty = true,
                 ),
             )
         } else {
-            val detailStart = anchor.minusDays(6)
-            val queryStart = minOf(selectedRange.startDate(anchor), detailStart)
+            val rangeStart = selectedRange.startDate(anchor, preferences.weekStart)
+            val detailStart = weekStartFor(anchor, preferences.weekStart)
+            val compareStart = if (
+                selectedRange == SummaryRange.Week && preferences.comparePrevWeek
+            ) {
+                rangeStart.minusDays(7)
+            } else {
+                rangeStart
+            }
+            val queryStart = minOf(rangeStart, detailStart, compareStart)
+            val queryEnd = maxOf(
+                rangeStart.plusDays(selectedRange.dayCount.toLong()),
+                detailStart.plusDays(7),
+            )
             careLog.observeRecords(
                 babyId = baby.id,
                 startDayInclusive = queryStart,
-                endDayExclusive = anchor.plusDays(1),
+                endDayExclusive = queryEnd,
                 zone = zone,
             ).map { records ->
                 buildSummaryUi(
                     records = records,
                     range = selectedRange,
                     anchorDate = anchor,
-                    showAvgSleep = request.showAvgSleep,
+                    weekStartDay = preferences.weekStart,
+                    showAvgSleep = preferences.showAvgSleep,
+                    comparePrevWeek = preferences.comparePrevWeek,
                     babyName = baby.nickname,
                     zone = zone,
                 )
@@ -200,7 +238,7 @@ fun SummaryRoute(
     val journal = LeziThemeExt.isJournal
     val t = ui.totals
     val chartDates = List(ui.range.dayCount) { offset ->
-        ui.range.startDate(ui.anchorDate).plusDays(offset.toLong())
+        ui.rangeStartDate.plusDays(offset.toLong())
     }
 
     PageScaffoldBackground {
@@ -257,6 +295,41 @@ fun SummaryRoute(
                     detail = "当日 尿 ${windows.dayPee} · 便 ${windows.dayPoop}",
                     modifier = Modifier.weight(1f),
                 )
+            }
+
+            if (ui.range != SummaryRange.Day && ui.showAvgSleep) {
+                val averageSleep = t.sleepMin / ui.range.dayCount.coerceAtLeast(1)
+                Text(
+                    "日均睡眠 ${formatMin(averageSleep)}",
+                    style = LeziTypography.Meta,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            if (ui.range == SummaryRange.Week && ui.comparePrevWeek) {
+                val previous = ui.previousWeekTotals
+                LeziCard(Modifier.fillMaxWidth()) {
+                    Text("对比上周", style = LeziTypography.TitleSm)
+                    if (previous == null) {
+                        Text(
+                            "上周暂无记录",
+                            style = LeziTypography.Meta,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        Text(
+                            "喂养 ${formatSigned(t.feedMl - previous.feedMl, "ml")} · " +
+                                "睡眠 ${formatSigned(t.sleepMin - previous.sleepMin, "分钟")}",
+                            style = LeziTypography.Body,
+                        )
+                        Text(
+                            "尿尿 ${formatSigned(t.pee - previous.pee, "次")} · " +
+                                "便便 ${formatSigned(t.poop - previous.poop, "次")}",
+                            style = LeziTypography.Meta,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
             }
 
             if (journal && ui.week != null) {
@@ -981,6 +1054,12 @@ private fun formatMin(min: Long): String {
     val m = min % 60
     return if (h == 0L) "${m}m" else if (m == 0L) "${h}h" else "${h}h${m}m"
 }
+
+private fun formatSigned(value: Long, unit: String): String =
+    "${if (value >= 0) "+" else ""}$value$unit"
+
+private fun formatSigned(value: Int, unit: String): String =
+    formatSigned(value.toLong(), unit)
 
 private fun formatFeedWindowTotal(feedMl: Int, nursingMin: Long): String {
     return buildString {

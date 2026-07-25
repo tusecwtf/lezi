@@ -43,7 +43,6 @@ import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -62,9 +61,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.lezi.babylog.core.model.RecordTime
+import com.lezi.babylog.core.model.RecordTimeDecision
 import java.time.Instant
 import java.time.LocalDate
-import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
 import java.time.ZoneOffset
@@ -102,8 +102,8 @@ fun LeziClockDialDialog(
     onConfirm: (ZonedDateTime) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val step = normalizedMinuteStep(minuteStep)
-    val initialTick = snapClock(value.hour, value.minute, step)
+    val step = RecordTime.normalizedMinuteStep(minuteStep)
+    val initialTick = RecordTime.snap(value.hour, value.minute, step)
     var clockError by remember(value) { mutableStateOf<String?>(null) }
     var selectedDate by remember(value) { mutableStateOf(value.toLocalDate()) }
     var showDatePicker by remember(value) { mutableStateOf(false) }
@@ -111,10 +111,11 @@ fun LeziClockDialDialog(
     // Thumb side: left-handed → chips left of hour/minute; right-handed → chips right.
     val periodOnStart = preferredHand != "right"
 
-    // Single source of truth for both styles: wall-clock hour 0–23 (never 24).
-    // Midnight is 0:00; noon is 12:00. 上午/下午 only ±12 within that range.
-    var selectedHour by remember(value) { mutableIntStateOf(initialTick.hour) }
-    var selectedMinute by remember(value) { mutableIntStateOf(initialTick.minute) }
+    // Dropdown keeps one local wall-clock state. Dial uses TimePickerState itself
+    // as the only source of truth so an immediate confirm cannot observe a stale
+    // asynchronous mirror of the hand position.
+    var dropdownHour by remember(value) { mutableIntStateOf(initialTick.hour) }
+    var dropdownMinute by remember(value) { mutableIntStateOf(initialTick.minute) }
 
     // Dial face: Material 24h picker (no built-in AM/PM). Custom chips only do ±12.
     val pickerState = rememberTimePickerState(
@@ -122,17 +123,7 @@ fun LeziClockDialDialog(
         initialMinute = initialTick.minute,
         is24Hour = true,
     )
-    // Dial drag/tap → snap → selectedHour/Minute (confirm always reads selected*).
-    LaunchedEffect(useDial, pickerState.hour, pickerState.minute, step) {
-        if (!useDial) return@LaunchedEffect
-        val snapped = snapClock(pickerState.hour, pickerState.minute, step)
-        if (pickerState.hour != snapped.hour || pickerState.minute != snapped.minute) {
-            pickerState.hour = snapped.hour
-            pickerState.minute = snapped.minute
-        }
-        if (selectedHour != snapped.hour) selectedHour = snapped.hour
-        if (selectedMinute != snapped.minute) selectedMinute = snapped.minute
-    }
+    val dialTick = RecordTime.snap(pickerState.hour, pickerState.minute, step)
 
     val hourOptions = remember { (0..23).toList() }
     val minuteOptions = remember(step) {
@@ -142,15 +133,21 @@ fun LeziClockDialDialog(
     }
 
     fun setPeriodAm(wantAm: Boolean) {
-        val newHour = applyClockPeriod(selectedHour, wantAm)
-        selectedHour = newHour
         if (useDial) {
-            pickerState.hour = newHour
+            pickerState.hour = applyClockPeriod(pickerState.hour, wantAm)
+        } else {
+            dropdownHour = applyClockPeriod(dropdownHour, wantAm)
         }
         clockError = null
     }
 
-    fun resolvedHourMinute(): Pair<Int, Int> = selectedHour to selectedMinute
+    fun resolvedHourMinute(): Pair<Int, Int> =
+        if (useDial) {
+            val selected = RecordTime.snap(pickerState.hour, pickerState.minute, step)
+            selected.hour to selected.minute
+        } else {
+            dropdownHour to dropdownMinute
+        }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -197,9 +194,9 @@ fun LeziClockDialDialog(
                     // TimePicker's built-in display is clipped away; we draw our own with 上午/下午.
                     DialTimePickerBody(
                         pickerState = pickerState,
-                        hour24 = selectedHour,
-                        minute = selectedMinute,
-                        isAm = isClockAm(selectedHour),
+                        hour24 = dialTick.hour,
+                        minute = dialTick.minute,
+                        isAm = isClockAm(dialTick.hour),
                         periodOnStart = periodOnStart,
                         onSelectAm = { setPeriodAm(true) },
                         onSelectPm = { setPeriodAm(false) },
@@ -218,7 +215,7 @@ fun LeziClockDialDialog(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Text(
-                        formatClockTime(selectedHour, selectedMinute),
+                        formatClockTime(dropdownHour, dropdownMinute),
                         style = LeziTypography.TitleSm,
                         color = MaterialTheme.colorScheme.onSurface,
                     )
@@ -228,11 +225,11 @@ fun LeziClockDialDialog(
                     ) {
                         TimeDropdownField(
                             label = "时",
-                            value = selectedHour,
+                            value = dropdownHour,
                             options = hourOptions,
                             format = { hour -> "%02d".format(hour) },
                             onSelect = {
-                                selectedHour = it
+                                dropdownHour = it
                                 clockError = null
                             },
                             modifier = Modifier.weight(1f),
@@ -240,11 +237,11 @@ fun LeziClockDialDialog(
                         )
                         TimeDropdownField(
                             label = "分",
-                            value = selectedMinute,
+                            value = dropdownMinute,
                             options = minuteOptions,
                             format = { minute -> "%02d".format(minute) },
                             onSelect = {
-                                selectedMinute = it
+                                dropdownMinute = it
                                 clockError = null
                             },
                             modifier = Modifier.weight(1f),
@@ -276,18 +273,21 @@ fun LeziClockDialDialog(
             TextButton(
                 onClick = {
                     val (hour, minute) = resolvedHourMinute()
-                    val merged = mergeDateAndClock(
+                    val decision = RecordTime.merge(
                         value = value,
                         date = selectedDate,
                         hour = hour,
                         minute = minute,
                         step = step,
                     )
-                    if (merged == null) {
-                        clockError = "该时刻因夏令时切换不存在，请选择其他时刻"
-                    } else {
-                        clockError = null
-                        onConfirm(merged)
+                    when (decision) {
+                        RecordTimeDecision.RejectedGap -> {
+                            clockError = "该时刻因夏令时切换不存在，请选择其他时刻"
+                        }
+                        is RecordTimeDecision.Accepted -> {
+                            clockError = null
+                            onConfirm(decision.value)
+                        }
                     }
                 },
             ) {
@@ -670,48 +670,6 @@ private fun TimeDropdownField(
     }
 }
 
-internal fun normalizedMinuteStep(step: Int): Int = if (step == 5) 5 else 1
-
-internal data class ClockTick(val hour: Int, val minute: Int)
-
-/** Round to the nearest tick while keeping the result on the supplied local date. */
-internal fun snapClock(hour: Int, minute: Int, step: Int): ClockTick {
-    val normalized = normalizedMinuteStep(step)
-    val total = hour.coerceIn(0, 23) * 60 + minute.coerceIn(0, 59)
-    val rounded = (((total + normalized / 2) / normalized) * normalized)
-        .coerceAtMost(24 * 60 - normalized)
-    return ClockTick(hour = rounded / 60, minute = rounded % 60)
-}
-
-internal fun mergeClock(
-    value: ZonedDateTime,
-    hour: Int,
-    minute: Int,
-    step: Int,
-): ZonedDateTime? = mergeDateAndClock(
-    value = value,
-    date = value.toLocalDate(),
-    hour = hour,
-    minute = minute,
-    step = step,
-)
-
-internal fun mergeDateAndClock(
-    value: ZonedDateTime,
-    date: LocalDate,
-    hour: Int,
-    minute: Int,
-    step: Int,
-): ZonedDateTime? {
-    val snapped = snapClock(hour, minute, step)
-    return resolveLeziLocalDateTime(
-        date = date,
-        time = LocalTime.of(snapped.hour, snapped.minute),
-        zone = value.zone,
-        preferredOffset = value.offset,
-    )
-}
-
 private fun formatClockDate(date: LocalDate): String =
     date.format(DateTimeFormatter.ofPattern("yyyy年M月d日 EEE", Locale.SIMPLIFIED_CHINESE))
 
@@ -728,44 +686,6 @@ internal fun formatClockTime12h(hour: Int, minute: Int): String {
         else -> h24
     }
     return "$period %d:%02d".format(h12, minute.coerceIn(0, 59))
-}
-
-/**
- * Resolve a local wall-clock value without silently normalizing a DST gap.
- * During an overlap, the caller's existing offset wins when it is still valid.
- */
-fun resolveLeziLocalDateTime(
-    date: LocalDate,
-    time: LocalTime,
-    zone: ZoneId,
-    preferredOffset: ZoneOffset? = null,
-): ZonedDateTime? {
-    val local = LocalDateTime.of(date, time)
-    val validOffsets = zone.rules.getValidOffsets(local)
-    if (validOffsets.isEmpty()) return null
-    val offset = preferredOffset?.takeIf(validOffsets::contains) ?: validOffsets.first()
-    return ZonedDateTime.ofLocal(local, zone, offset)
-}
-
-/**
- * Combine an externally selected date with the current local clock.
- *
- * Future dates are clamped to today. A rare DST gap is normalized by the
- * platform to the next valid wall-clock instant so a new draft always has a
- * usable timestamp; explicit clock edits still use [resolveLeziLocalDateTime]
- * and surface an error instead.
- */
-fun timestampOnLeziDate(
-    date: LocalDate,
-    zone: ZoneId = ZoneId.systemDefault(),
-    now: ZonedDateTime = ZonedDateTime.now(zone),
-): Long {
-    val safeDate = minOf(date, now.toLocalDate())
-    val time = now.toLocalTime().withSecond(0).withNano(0)
-    return (resolveLeziLocalDateTime(safeDate, time, zone, now.offset)
-        ?: LocalDateTime.of(safeDate, time).atZone(zone))
-        .toInstant()
-        .toEpochMilli()
 }
 
 @Preview(name = "Time dial right hand", widthDp = 390, heightDp = 844, showBackground = true)

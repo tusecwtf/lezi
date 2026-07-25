@@ -49,7 +49,7 @@ internal fun TimeFields(
             SleepDraftAction.SleepDown -> "睡下时间"
             SleepDraftAction.WakeUp -> "睡眠时间"
             SleepDraftAction.Manual -> "起止时间"
-            null -> if (draft.mode == QuickRecordMode.Interval) "起止时间" else "记录时间"
+            null -> "记录时间"
         },
     )
     when {
@@ -109,8 +109,7 @@ internal fun TimeFields(
                 )
             }
         }
-        draft.sleepAction == SleepDraftAction.Manual ||
-            draft.mode == QuickRecordMode.Interval -> {
+        draft.sleepAction == SleepDraftAction.Manual -> {
             TimeButton(
                 label = "开始",
                 millis = draft.timestamp,

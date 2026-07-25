@@ -40,7 +40,8 @@ require_text 'RecordSummaryStrip(' feature/log/src/main/kotlin/com/lezi/babylog/
 require_text 'JournalTimelineRail' designsystem/src/main/kotlin/com/lezi/babylog/designsystem/TimelineComponents.kt
 require_text 'JournalWeekGrid' feature/summary/src/main/kotlin/com/lezi/babylog/feature/summary/SummaryScreen.kt
 require_text 'GrowthMetric.HEAD' feature/growth/src/main/kotlin/com/lezi/babylog/feature/growth/GrowthScreen.kt
-require_text 'WHO 示例 P3/P50/P97' feature/growth/src/main/kotlin/com/lezi/babylog/feature/growth/GrowthScreen.kt
+require_text 'WHO 儿童生长标准 0–24 月 P3/P50/P97（按性别）' \
+  feature/growth/src/main/kotlin/com/lezi/babylog/feature/growth/GrowthScreen.kt
 
 # Product code must not ship reference-product branding.
 if rg -n -i 'piyolog|ぴよログ' app core designsystem domain feature sync --glob '*.kt'; then

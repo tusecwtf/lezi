@@ -56,6 +56,7 @@ import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.domain.CareLog
+import com.lezi.babylog.domain.BabyMergePreview
 import com.lezi.babylog.domain.DuplicateBabyNicknameException
 import com.lezi.babylog.domain.UpdateBabyInput
 import com.lezi.babylog.domain.babyAgeLabel
@@ -172,6 +173,8 @@ class FamilyViewModel @Inject constructor(
                                 birthdayEpochDay = birthdayEpochDay,
                                 birthWeightGrams = birthWeightGrams,
                                 avatarPath = avatarPath,
+                                dueDateEpochDay = existing.dueDateEpochDay,
+                                themeColorArgb = existing.themeColorArgb,
                             ),
                         )
                         profileCommitted = true
@@ -222,15 +225,23 @@ class FamilyViewModel @Inject constructor(
         }
     }
 
-    fun dedupeNow(onDone: (String) -> Unit) {
+    fun previewMerge(
+        sourceBabyId: Long,
+        targetBabyId: Long,
+        onDone: (BabyMergePreview?) -> Unit,
+    ) {
         viewModelScope.launch {
-            val before = careLog.listBabies().size
-            careLog.dedupeBabiesByNickname()
-            val after = careLog.listBabies().size
-            onDone(
-                if (before > after) "已合并 ${before - after} 个重复档案"
-                else "没有发现重复昵称",
+            onDone(careLog.previewBabyMerge(sourceBabyId, targetBabyId))
+        }
+    }
+
+    fun merge(preview: BabyMergePreview, onDone: (String) -> Unit) {
+        viewModelScope.launch {
+            val merged = careLog.mergeBabyProfiles(
+                sourceBabyId = preview.sourceBabyId,
+                targetBabyId = preview.targetBabyId,
             )
+            onDone(if (merged) "宝宝档案已合并" else "档案状态已变化，请重新预览")
         }
     }
 
@@ -340,6 +351,8 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
     var confirmClearJoin by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<Baby?>(null) }
     var confirmDelete by remember { mutableStateOf<Baby?>(null) }
+    var mergeSource by remember { mutableStateOf<Baby?>(null) }
+    var mergePreview by remember { mutableStateOf<BabyMergePreview?>(null) }
     val current = ui.current
     val nickCounts = remember(ui.babies) {
         ui.babies.groupingBy { it.nickname.trim() }.eachCount()
@@ -480,20 +493,14 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                         }
                         LeziSecondaryButton("编辑", onClick = { editing = b })
                         if (ui.babies.size > 1) {
+                            LeziSecondaryButton("合并", onClick = { mergeSource = b })
                             LeziSecondaryButton("删除", onClick = { confirmDelete = b })
                         }
                     }
                 }
             }
-            if (nickCounts.any { it.value > 1 }) {
-                LeziPrimaryButton(
-                    "合并重复昵称档案",
-                    onClick = { vm.dedupeNow { message = it } },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
             Text(
-                "昵称不可重复。可设置出生日期与出生体重；多余档案可删除（至少保留一位）。",
+                "昵称不可重复。合并前会明确显示来源、目标和迁移数量；不会按昵称自动迁移。",
                 style = LeziTypography.Meta,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -603,11 +610,7 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
             title = { Text("删除「${baby.nickname}」？") },
             text = {
                 Text(
-                    if ((nickCounts[baby.nickname.trim()] ?: 0) > 1) {
-                        "检测到重复昵称。删除后记录不会自动迁移；若要合并记录请用「合并重复昵称档案」。"
-                    } else {
-                        "删除后该档案不可恢复。记录仍会留在本机但不再出现在当前宝宝视图中。"
-                    },
+                    "删除后该档案不可恢复。记录仍会留在本机但不再出现在当前宝宝视图中。",
                 )
             },
             confirmButton = {
@@ -623,6 +626,67 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
             },
             dismissButton = {
                 TextButton(onClick = { confirmDelete = null }) { Text("取消") }
+            },
+        )
+    }
+
+    mergeSource?.let { source ->
+        AlertDialog(
+            onDismissRequest = { mergeSource = null },
+            title = { Text("把「${source.nickname}」合并到…") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("请选择保留的目标档案。来源档案的记录和日程会迁移，目标昵称与资料不变。")
+                    ui.babies.filter { it.id != source.id }.forEach { target ->
+                        OutlinedButton(
+                            onClick = {
+                                vm.previewMerge(source.id, target.id) { preview ->
+                                    mergeSource = null
+                                    if (preview == null) {
+                                        message = "无法生成合并预览，请刷新后重试"
+                                    } else {
+                                        mergePreview = preview
+                                    }
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("保留「${target.nickname}」")
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { mergeSource = null }) { Text("取消") }
+            },
+        )
+    }
+
+    mergePreview?.let { preview ->
+        AlertDialog(
+            onDismissRequest = { mergePreview = null },
+            title = { Text("确认合并宝宝档案？") },
+            text = {
+                Text(
+                    "来源：${preview.sourceNickname}\n" +
+                        "保留：${preview.targetNickname}\n" +
+                        "将迁移 ${preview.recordCount} 条记录、" +
+                        "${preview.calendarEventCount} 条日程。此操作不可撤销。",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        mergePreview = null
+                        vm.merge(preview) { message = it }
+                    },
+                ) {
+                    Text("确认合并", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { mergePreview = null }) { Text("取消") }
             },
         )
     }

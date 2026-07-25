@@ -1,18 +1,36 @@
 package com.lezi.babylog.feature.log
 
+import com.lezi.babylog.core.model.BothDiaperPayload
+import com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
+import com.lezi.babylog.core.model.CustomPayload
+import com.lezi.babylog.core.model.EmptyPayload
+import com.lezi.babylog.core.model.FoodPayload
+import com.lezi.babylog.core.model.GrowthMeasurementFacts
+import com.lezi.babylog.core.model.HospitalPayload
+import com.lezi.babylog.core.model.MeasurementPayload
+import com.lezi.babylog.core.model.MedicinePayload
+import com.lezi.babylog.core.model.MilkPayload
+import com.lezi.babylog.core.model.NursingPayload
+import com.lezi.babylog.core.model.OtherPayload
+import com.lezi.babylog.core.model.PeePayload
 import com.lezi.babylog.core.model.Record
+import com.lezi.babylog.core.model.RecordPayload
+import com.lezi.babylog.core.model.RecordPayloadCodec
+import com.lezi.babylog.core.model.RecordPayloadDocument
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.RecordTime
+import com.lezi.babylog.core.model.SleepPayload
+import com.lezi.babylog.core.model.StoolPayload
+import com.lezi.babylog.core.model.SymptomPayload
+import com.lezi.babylog.core.model.TemperaturePayload
+import com.lezi.babylog.core.model.TextPayload
+import com.lezi.babylog.core.model.UnknownPayload
+import com.lezi.babylog.core.model.VaccinePayload
 import com.lezi.babylog.core.ui.formatRecordDuration
-import com.lezi.babylog.domain.payloadBool
-import com.lezi.babylog.domain.payloadDouble
-import com.lezi.babylog.domain.payloadInt
-import kotlin.math.roundToInt
 
 internal const val FUTURE_TIME_WARNING = "不能选未来时刻"
 private const val SLEEP_END_MISSING_WARNING = "请选择醒来时刻"
-private const val INTERVAL_END_MISSING_WARNING = "请选择结束时刻"
 private const val SLEEP_END_ORDER_WARNING = "醒来须晚于睡下"
-private const val INTERVAL_END_ORDER_WARNING = "结束须晚于开始"
 
 internal enum class QuickRecordMode {
     Nursing,
@@ -24,7 +42,6 @@ internal enum class QuickRecordMode {
     Temperature,
     Text,
     Simple,
-    Interval,
     Symptom,
     Medicine,
     Hospital,
@@ -71,7 +88,7 @@ internal val RecordType.quickRecordMode: QuickRecordMode
         RecordType.TEMPERATURE -> QuickRecordMode.Temperature
         RecordType.MEMO, RecordType.DIARY -> QuickRecordMode.Text
         RecordType.BATH -> QuickRecordMode.Simple
-        RecordType.WALK -> QuickRecordMode.Interval
+        RecordType.WALK -> QuickRecordMode.Simple
         RecordType.COUGH, RecordType.RASH, RecordType.VOMIT, RecordType.INJURY ->
             QuickRecordMode.Symptom
         RecordType.MEDICINE -> QuickRecordMode.Medicine
@@ -91,6 +108,7 @@ internal data class QuickRecordSaveCommand(
     val endTimestamp: Long?,
     val note: String?,
     val payloadJson: String,
+    val schemaVersion: Int,
 )
 
 /**
@@ -105,8 +123,11 @@ internal data class QuickRecordDraft(
     val endTimestamp: Long? = null,
     val existingRecordId: Long? = null,
     val sourcePayloadJson: String = "{}",
+    val sourceSchemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
     val note: String = "",
+    val recentNotes: List<String> = emptyList(),
     val amountMl: Int = 120,
+    val recentAmountMl: List<Int> = emptyList(),
     val preparedMl: String = "",
     val durationMin: String = "",
     val leftMin: String = "0",
@@ -122,6 +143,8 @@ internal data class QuickRecordDraft(
     val temperature: String = "36.5",
     val temperatureUnit: TemperatureUnit = TemperatureUnit.Celsius,
     val body: String = "",
+    val photos: List<String> = emptyList(),
+    val sourcePhotos: List<String> = emptyList(),
     val severity: Int = 2,
     val description: String = "",
     val medicineName: String = "",
@@ -130,6 +153,8 @@ internal data class QuickRecordDraft(
     val hospitalAdvice: String = "",
     val customTitle: String = "",
     val customDetail: String = "",
+    val customItemId: Long? = null,
+    val customIconSlot: Int? = null,
     val measurementValue: String = "",
     val foodContent: String = "",
     val foodAmount: String = "",
@@ -147,37 +172,24 @@ internal data class QuickRecordDraft(
      * a valid end before confirmation.
      */
     fun intervalDurationPreview(
-        nowMillis: Long = System.currentTimeMillis(),
+        nowMillis: Long = RecordTime.currentTimeMillis(),
     ): IntervalDurationPreview? {
-        if (mode !in setOf(QuickRecordMode.Sleep, QuickRecordMode.Interval)) return null
-        if (timestamp > nowMillis) {
-            return IntervalDurationPreview.Warning(FUTURE_TIME_WARNING)
+        if (mode != QuickRecordMode.Sleep) return null
+        RecordTime.pointError(timestamp, nowMillis)?.let {
+            return IntervalDurationPreview.Warning(it)
         }
-
         val end = endTimestamp
         if (end == null) {
             if (mode == QuickRecordMode.Sleep && sleepAction == SleepDraftAction.SleepDown) {
                 return null
             }
             return IntervalDurationPreview.Warning(
-                if (mode == QuickRecordMode.Sleep) {
-                    SLEEP_END_MISSING_WARNING
-                } else {
-                    INTERVAL_END_MISSING_WARNING
-                },
+                SLEEP_END_MISSING_WARNING,
             )
         }
-        if (end <= timestamp) {
-            return IntervalDurationPreview.Warning(
-                if (mode == QuickRecordMode.Sleep) {
-                    SLEEP_END_ORDER_WARNING
-                } else {
-                    INTERVAL_END_ORDER_WARNING
-                },
-            )
-        }
-        if (end > nowMillis) {
-            return IntervalDurationPreview.Warning(FUTURE_TIME_WARNING)
+        val decisionError = RecordTime.intervalError(timestamp, end, nowMillis)
+        if (decisionError != null) {
+            return IntervalDurationPreview.Warning(decisionError)
         }
 
         return IntervalDurationPreview.Duration(
@@ -186,7 +198,7 @@ internal data class QuickRecordDraft(
     }
 
     fun visibleIntervalDurationPreview(
-        nowMillis: Long = System.currentTimeMillis(),
+        nowMillis: Long = RecordTime.currentTimeMillis(),
         isDirty: Boolean,
         attemptedConfirm: Boolean,
     ): IntervalDurationPreview? {
@@ -194,14 +206,13 @@ internal data class QuickRecordDraft(
         if (preview !is IntervalDurationPreview.Warning) return preview
         val isMissingRequiredEnd = preview.text in setOf(
             SLEEP_END_MISSING_WARNING,
-            INTERVAL_END_MISSING_WARNING,
         )
         return preview.takeIf {
             isMissingRequiredEnd || shouldShowValidation(isDirty, attemptedConfirm)
         }
     }
 
-    fun canConfirm(nowMillis: Long = System.currentTimeMillis()): Boolean =
+    fun canConfirm(nowMillis: Long = RecordTime.currentTimeMillis()): Boolean =
         validationError(nowMillis) == null
 
     /**
@@ -210,7 +221,7 @@ internal data class QuickRecordDraft(
      */
     fun endTimeRejectionMessage(
         candidateEndTimestamp: Long,
-        nowMillis: Long = System.currentTimeMillis(),
+        nowMillis: Long = RecordTime.currentTimeMillis(),
     ): String? {
         val warning = copy(endTimestamp = candidateEndTimestamp)
             .intervalDurationPreview(nowMillis) as? IntervalDurationPreview.Warning
@@ -230,7 +241,7 @@ internal data class QuickRecordDraft(
      * stay at the time controls instead of being repeated at the bottom.
      */
     fun footerValidationError(
-        nowMillis: Long = System.currentTimeMillis(),
+        nowMillis: Long = RecordTime.currentTimeMillis(),
         isDirty: Boolean,
         attemptedConfirm: Boolean,
     ): String? {
@@ -241,9 +252,12 @@ internal data class QuickRecordDraft(
         return validation.takeUnless { it == intervalWarning?.text }
     }
 
-    fun validationError(nowMillis: Long = System.currentTimeMillis()): String? {
-        if (timestamp > nowMillis) return FUTURE_TIME_WARNING
+    fun validationError(nowMillis: Long = RecordTime.currentTimeMillis()): String? {
+        RecordTime.pointError(timestamp, nowMillis)?.let { return it }
         if (note.length > 200) return "备注最多 200 字"
+        if (existingRecordId != null && sourcePayloadDocument().isUnknown) {
+            return "此记录格式暂不支持安全编辑，原始数据已保留"
+        }
         return when (mode) {
             QuickRecordMode.Nursing -> {
                 val left = leftMin.toIntOrNull() ?: -1
@@ -293,7 +307,6 @@ internal data class QuickRecordDraft(
                 }
             }
             QuickRecordMode.Simple -> null
-            QuickRecordMode.Interval -> intervalValidationError(nowMillis)
             QuickRecordMode.Symptom -> {
                 if (severity in 1..3) null else "请选择程度"
             }
@@ -307,13 +320,7 @@ internal data class QuickRecordDraft(
                 if (customTitle.isBlank()) "请填写标题" else null
             }
             QuickRecordMode.Measurement -> {
-                val value = measurementValue.toDoubleOrNull()
-                when {
-                    value == null || value <= 0.0 -> "请填写有效数值"
-                    type == RecordType.WEIGHT && value > 100.0 -> "体重需在 0–100 kg 之间"
-                    type != RecordType.WEIGHT && value > 250.0 -> "测量值需在 0–250 cm 之间"
-                    else -> null
-                }
+                GrowthMeasurementFacts.validationError(type, measurementValue.toDoubleOrNull())
             }
             QuickRecordMode.Food -> {
                 if (foodContent.isBlank()) "请填写内容" else null
@@ -328,9 +335,10 @@ internal data class QuickRecordDraft(
         existingRecordId = existingRecordId,
         type = type,
         timestamp = timestamp,
-        endTimestamp = endTimestamp,
+        endTimestamp = endTimestamp.takeUnless { type == RecordType.WALK },
         note = note.trim().ifBlank { null },
-        payloadJson = payloadJson(),
+        payloadJson = payloadDocument().let(RecordPayloadCodec::encode),
+        schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
     )
 
     fun confirmLabel(): String = when {
@@ -357,29 +365,38 @@ internal data class QuickRecordDraft(
     private fun shouldShowValidation(isDirty: Boolean, attemptedConfirm: Boolean): Boolean =
         isDirty || attemptedConfirm
 
-    private fun payloadJson(): String = when (mode) {
-        QuickRecordMode.Nursing -> sourcePayloadJson.patchJson(
-            "left_min" to jsonNumber(leftMin.toIntOrNull() ?: 0),
-            "right_min" to jsonNumber(rightMin.toIntOrNull() ?: 0),
-            "order" to jsonString(order),
-            "amount_ml" to nursingAmountMl.toIntOrNull()?.let(::jsonNumber),
+    private fun payloadDocument(): RecordPayloadDocument {
+        val source = sourcePayloadDocument()
+        val payload: RecordPayload = when (mode) {
+        QuickRecordMode.Nursing -> NursingPayload(
+            leftMinutes = leftMin.toIntOrNull() ?: 0,
+            rightMinutes = rightMin.toIntOrNull() ?: 0,
+            order = order,
+            amountMl = nursingAmountMl.toIntOrNull(),
+            recordMode = (source.payload as? NursingPayload)?.recordMode ?: "end",
         )
-        QuickRecordMode.Milk -> sourcePayloadJson.patchJson(
-            "amount_ml" to jsonNumber(amountMl),
-            "prepared_ml" to preparedMl.toIntOrNull()?.let(::jsonNumber),
-            "duration_min" to durationMin.toIntOrNull()?.let(::jsonNumber),
+        QuickRecordMode.Milk -> MilkPayload(
+            type = type,
+            amountMl = amountMl,
+            preparedMl = preparedMl.toIntOrNull(),
+            durationMinutes = durationMin.toIntOrNull(),
         )
-        QuickRecordMode.Pee -> sourcePayloadJson.patchJson(
-            "pee_amount" to jsonNumber(peeAmount),
+        QuickRecordMode.Pee -> PeePayload(amount = peeAmount)
+        QuickRecordMode.Poop -> StoolPayload(
+            amount = stoolAmount,
+            consistency = stoolConsistency,
+            color = stoolColor,
         )
-        QuickRecordMode.Poop -> stoolPayload()
-        QuickRecordMode.BothDiaper -> sourcePayloadJson.patchJson(
-            "pee_amount" to jsonNumber(peeAmount),
-            "stool_amount" to jsonNumber(stoolAmount),
-            "stool_consistency" to jsonNumber(stoolConsistency),
-            "stool_color" to jsonNumber(stoolColor),
+        QuickRecordMode.BothDiaper -> BothDiaperPayload(
+            peeAmount = peeAmount,
+            stoolAmount = stoolAmount,
+            stoolConsistency = stoolConsistency,
+            stoolColor = stoolColor,
         )
-        QuickRecordMode.Sleep -> sourcePayloadJson.patchJson("is_nap" to isNap.toString())
+        QuickRecordMode.Sleep -> SleepPayload(
+            isNap = isNap,
+            anomaly = (source.payload as? SleepPayload)?.anomaly ?: false,
+        )
         QuickRecordMode.Temperature -> {
             val raw = temperature.toDoubleOrNull() ?: 36.5
             val celsius = if (temperatureUnit == TemperatureUnit.Fahrenheit) {
@@ -387,72 +404,81 @@ internal data class QuickRecordDraft(
             } else {
                 raw
             }
-            sourcePayloadJson.patchJson("celsius" to jsonNumber(trimNumber(celsius)))
+            TemperaturePayload(celsius)
         }
-        QuickRecordMode.Text -> sourcePayloadJson.patchJson("body" to jsonString(body.trim()))
-        QuickRecordMode.Simple -> sourcePayloadJson.normalizedJsonObject()
-        QuickRecordMode.Interval -> sourcePayloadJson.patchJson(
-            "duration_min" to endTimestamp?.let {
-                jsonNumber(((it - timestamp).coerceAtLeast(0L) / 60_000L).toInt())
-            },
+        QuickRecordMode.Text -> TextPayload(
+            type = type,
+            body = body.trim(),
+            photos = photos,
         )
-        QuickRecordMode.Symptom -> sourcePayloadJson.patchJson(
-            "severity" to jsonNumber(severity),
-            "description" to description.trim().takeIf(String::isNotBlank)?.let(::jsonString),
+        QuickRecordMode.Simple -> EmptyPayload(type)
+        QuickRecordMode.Symptom -> SymptomPayload(
+            type = type,
+            severity = severity,
+            description = description.trim().ifBlank { null },
         )
-        QuickRecordMode.Medicine -> sourcePayloadJson.patchJson(
-            "name" to jsonString(medicineName.trim()),
-            "dose" to medicineDose.trim().takeIf(String::isNotBlank)?.let(::jsonString),
+        QuickRecordMode.Medicine -> MedicinePayload(
+            name = medicineName.trim(),
+            dose = medicineDose.trim().ifBlank { null },
         )
-        QuickRecordMode.Hospital -> sourcePayloadJson.patchJson(
-            "reason" to jsonString(hospitalReason.trim()),
-            "advice" to hospitalAdvice.trim().takeIf(String::isNotBlank)?.let(::jsonString),
+        QuickRecordMode.Hospital -> HospitalPayload(
+            reason = hospitalReason.trim(),
+            advice = hospitalAdvice.trim().ifBlank { null },
         )
-        QuickRecordMode.CustomText -> sourcePayloadJson.patchJson(
-            "title" to jsonString(customTitle.trim()),
-            "detail" to customDetail.trim().takeIf(String::isNotBlank)?.let(::jsonString),
-        )
+        QuickRecordMode.CustomText -> if (type == RecordType.CUSTOM) {
+            CustomPayload(
+                titleSnapshot = customTitle.trim(),
+                detail = customDetail.trim().ifBlank { null },
+                customItemId = customItemId,
+                iconSlot = customIconSlot,
+            )
+        } else {
+            OtherPayload(
+                title = customTitle.trim(),
+                detail = customDetail.trim().ifBlank { null },
+            )
+        }
         QuickRecordMode.Measurement -> {
             val input = measurementValue.toDoubleOrNull() ?: 0.0
-            if (type == RecordType.WEIGHT) {
-                sourcePayloadJson.patchJson(
-                    "value" to jsonNumber((input * 1_000.0).roundToInt()),
-                    "unit" to jsonString("g"),
-                )
-            } else {
-                sourcePayloadJson.patchJson(
-                    "value" to jsonNumber(trimNumber(input)),
-                    "unit" to jsonString("cm"),
-                )
-            }
+            GrowthMeasurementFacts.payload(type, input) ?: MeasurementPayload(type)
         }
-        QuickRecordMode.Food -> sourcePayloadJson.patchJson(
-            "content" to jsonString(foodContent.trim()),
-            "amount" to foodAmount.trim().takeIf(String::isNotBlank)?.let(::jsonString),
+        QuickRecordMode.Food -> FoodPayload(
+            type = type,
+            content = foodContent.trim(),
+            amount = foodAmount.trim().ifBlank { null },
         )
-        QuickRecordMode.Vaccine -> sourcePayloadJson.patchJson(
-            "name" to jsonString(vaccineName.trim()),
-            "batch" to vaccineBatch.trim().takeIf(String::isNotBlank)?.let(::jsonString),
+        QuickRecordMode.Vaccine -> VaccinePayload(
+            name = vaccineName.trim(),
+            batch = vaccineBatch.trim().ifBlank { null },
+        )
+        }
+        return RecordPayloadDocument(
+            type = type,
+            payload = payload,
+            schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+            extensions = source.extensions,
         )
     }
 
-    private fun stoolPayload(): String = sourcePayloadJson.patchJson(
-        "stool_amount" to jsonNumber(stoolAmount),
-        "stool_consistency" to jsonNumber(stoolConsistency),
-        "stool_color" to jsonNumber(stoolColor),
-    )
+    private fun sourcePayloadDocument(): RecordPayloadDocument =
+        RecordPayloadCodec.decode(type, sourcePayloadJson, sourceSchemaVersion)
 
     companion object {
         fun create(
             type: RecordType,
             timestamp: Long,
             lastAmountMl: Int? = null,
+            recentAmountMl: List<Int> = emptyList(),
+            recentNotes: List<String> = emptyList(),
             historical: Boolean = false,
         ): QuickRecordDraft = QuickRecordDraft(
             type = type,
             timestamp = timestamp,
             amountMl = lastAmountMl?.takeIf { it in 1..999 }
+                ?: recentAmountMl.firstOrNull { it in 1..999 }
                 ?: if (type == RecordType.PUMP_EXPRESS) 60 else 120,
+            recentAmountMl = recentAmountMl.filter { it in 1..999 }.distinct().take(3),
+            recentNotes = recentNotes.map(String::trim).filter(String::isNotBlank).distinct().take(5),
             sleepAction = if (type == RecordType.SLEEP) {
                 if (historical) SleepDraftAction.Manual else SleepDraftAction.SleepDown
             } else {
@@ -467,43 +493,64 @@ internal data class QuickRecordDraft(
             endTimestamp = clickedAt,
             existingRecordId = openSleep.id,
             sourcePayloadJson = openSleep.payloadJson,
+            sourceSchemaVersion = openSleep.schemaVersion,
             note = openSleep.note.orEmpty(),
             sleepAction = SleepDraftAction.WakeUp,
-            isNap = payloadBool(openSleep.payloadJson, "is_nap"),
+            isNap = (openSleep.payload.payload as? SleepPayload)?.isNap ?: false,
         )
 
         fun fromRecord(record: Record): QuickRecordDraft {
-            val payload = record.payloadJson
-            val rawMeasurement = payloadDouble(payload, "value")
+            val document = record.payload
+            val payload = document.payload
+            val measurement = payload as? MeasurementPayload
+            val rawMeasurement = measurement?.value
             val measurementValue = when {
                 rawMeasurement == null -> ""
                 record.type == RecordType.WEIGHT &&
-                    payload.jsonStringField("unit") == "g" ->
-                    trimNumber(rawMeasurement / 1_000.0).toString()
+                    measurement.unit == "g" ->
+                    trimNumber(GrowthMeasurementFacts.displayValue(measurement)).toString()
                 else -> trimNumber(rawMeasurement).toString()
             }
+            val milk = payload as? MilkPayload
+            val nursing = payload as? NursingPayload
+            val stool = payload as? StoolPayload
+            val both = payload as? BothDiaperPayload
+            val text = payload as? TextPayload
+            val symptom = payload as? SymptomPayload
+            val medicine = payload as? MedicinePayload
+            val hospital = payload as? HospitalPayload
+            val other = payload as? OtherPayload
+            val custom = payload as? CustomPayload
+            val food = payload as? FoodPayload
+            val vaccine = payload as? VaccinePayload
             return QuickRecordDraft(
                 type = record.type,
                 timestamp = record.timestamp,
-                endTimestamp = record.endTimestamp,
+                endTimestamp = record.endTimestamp.takeUnless { record.type == RecordType.WALK },
                 existingRecordId = record.id,
-                sourcePayloadJson = payload,
+                sourcePayloadJson = record.payloadJson,
+                sourceSchemaVersion = record.schemaVersion,
                 note = record.note.orEmpty(),
-                amountMl = payloadInt(payload, "amount_ml").takeIf { it in 1..999 }
+                amountMl = milk?.amountMl?.takeIf { it in 1..999 }
                     ?: if (record.type == RecordType.PUMP_EXPRESS) 60 else 120,
-                preparedMl = payload.optionalIntText("prepared_ml"),
-                durationMin = payload.optionalIntText("duration_min"),
-                leftMin = payloadInt(payload, "left_min").coerceAtLeast(0).toString(),
-                rightMin = payloadInt(payload, "right_min").coerceAtLeast(0).toString(),
-                order = payload.jsonStringField("order").takeIf {
+                preparedMl = milk?.preparedMl?.toString().orEmpty(),
+                durationMin = milk?.durationMinutes?.toString().orEmpty(),
+                leftMin = nursing?.leftMinutes?.coerceAtLeast(0)?.toString() ?: "0",
+                rightMin = nursing?.rightMinutes?.coerceAtLeast(0)?.toString() ?: "0",
+                order = nursing?.order?.takeIf {
                     it in setOf("L", "R", "LR", "RL")
                 } ?: "LR",
-                nursingAmountMl = payload.optionalIntText("amount_ml"),
-                peeAmount = payloadInt(payload, "pee_amount").takeIf { it in 1..3 } ?: 2,
-                stoolAmount = payloadInt(payload, "stool_amount").takeIf { it in 1..4 } ?: 3,
-                stoolConsistency = payloadInt(payload, "stool_consistency")
-                    .takeIf { it in 1..4 } ?: 3,
-                stoolColor = payloadInt(payload, "stool_color").coerceIn(0, 7),
+                nursingAmountMl = nursing?.amountMl?.toString().orEmpty(),
+                peeAmount = when (payload) {
+                    is PeePayload -> payload.amount
+                    is BothDiaperPayload -> payload.peeAmount
+                    else -> 2
+                }.takeIf { it in 1..3 } ?: 2,
+                stoolAmount = (stool?.amount ?: both?.stoolAmount)
+                    ?.takeIf { it in 1..4 } ?: 3,
+                stoolConsistency = (stool?.consistency ?: both?.stoolConsistency)
+                    ?.takeIf { it in 1..4 } ?: 3,
+                stoolColor = (stool?.color ?: both?.stoolColor ?: 0).coerceIn(0, 7),
                 sleepAction = if (record.type == RecordType.SLEEP) {
                     if (record.endTimestamp == null) {
                         SleepDraftAction.SleepDown
@@ -513,161 +560,32 @@ internal data class QuickRecordDraft(
                 } else {
                     null
                 },
-                isNap = payloadBool(payload, "is_nap"),
-                temperature = payloadDouble(payload, "celsius")?.let(::trimNumber)?.toString()
+                isNap = (payload as? SleepPayload)?.isNap ?: false,
+                temperature = (payload as? TemperaturePayload)?.celsius
+                    ?.let(::trimNumber)?.toString()
                     ?: "36.5",
-                body = payload.jsonStringField("body"),
-                severity = payloadInt(payload, "severity").takeIf { it in 1..3 } ?: 2,
-                description = payload.jsonStringField("description"),
-                medicineName = payload.jsonStringField("name"),
-                medicineDose = payload.jsonStringField("dose"),
-                hospitalReason = payload.jsonStringField("reason"),
-                hospitalAdvice = payload.jsonStringField("advice"),
-                customTitle = payload.jsonStringField("title"),
-                customDetail = payload.jsonStringField("detail"),
+                body = text?.body.orEmpty(),
+                photos = text?.photos.orEmpty(),
+                sourcePhotos = text?.photos.orEmpty(),
+                severity = symptom?.severity?.takeIf { it in 1..3 } ?: 2,
+                description = symptom?.description.orEmpty(),
+                medicineName = medicine?.name.orEmpty(),
+                medicineDose = medicine?.dose.orEmpty(),
+                hospitalReason = hospital?.reason.orEmpty(),
+                hospitalAdvice = hospital?.advice.orEmpty(),
+                customTitle = custom?.titleSnapshot ?: other?.title.orEmpty(),
+                customDetail = custom?.detail ?: other?.detail.orEmpty(),
+                customItemId = custom?.customItemId,
+                customIconSlot = custom?.iconSlot,
                 measurementValue = measurementValue,
-                foodContent = payload.jsonStringField("content"),
-                foodAmount = payload.jsonStringField("amount"),
-                vaccineName = payload.jsonStringField("name"),
-                vaccineBatch = payload.jsonStringField("batch"),
+                foodContent = food?.content.orEmpty(),
+                foodAmount = food?.amount.orEmpty(),
+                vaccineName = vaccine?.name.orEmpty(),
+                vaccineBatch = vaccine?.batch.orEmpty(),
             )
         }
     }
 }
-
-private fun String.patchJson(vararg updates: Pair<String, String?>): String {
-    val fields = parseTopLevelJsonObject(this)
-    updates.forEach { (key, value) ->
-        if (value == null) {
-            fields.remove(key)
-        } else {
-            fields[key] = value
-        }
-    }
-    return fields.entries.joinToString(separator = ",", prefix = "{", postfix = "}") {
-        "${jsonString(it.key)}:${it.value}"
-    }
-}
-
-private fun String.normalizedJsonObject(): String =
-    patchJson()
-
-private fun parseTopLevelJsonObject(source: String): LinkedHashMap<String, String> {
-    val result = linkedMapOf<String, String>()
-    val text = source.trim()
-    if (!text.startsWith("{") || !text.endsWith("}")) return result
-    var index = 1
-
-    fun skipWhitespaceAndCommas() {
-        while (index < text.lastIndex && (text[index].isWhitespace() || text[index] == ',')) {
-            index += 1
-        }
-    }
-
-    while (index < text.lastIndex) {
-        skipWhitespaceAndCommas()
-        if (index >= text.lastIndex || text[index] != '"') break
-        val keyStart = ++index
-        var escaped = false
-        while (index < text.lastIndex) {
-            val char = text[index]
-            if (!escaped && char == '"') break
-            escaped = !escaped && char == '\\'
-            if (char != '\\') escaped = false
-            index += 1
-        }
-        if (index >= text.lastIndex) break
-        val key = text.substring(keyStart, index).decodeJsonStringBody()
-        index += 1
-        while (index < text.lastIndex && text[index].isWhitespace()) index += 1
-        if (index >= text.lastIndex || text[index] != ':') break
-        index += 1
-        while (index < text.lastIndex && text[index].isWhitespace()) index += 1
-        val valueStart = index
-        var inString = false
-        var valueEscaped = false
-        var objectDepth = 0
-        var arrayDepth = 0
-        while (index < text.lastIndex) {
-            val char = text[index]
-            if (inString) {
-                if (!valueEscaped && char == '"') inString = false
-                valueEscaped = !valueEscaped && char == '\\'
-                if (char != '\\') valueEscaped = false
-            } else {
-                when (char) {
-                    '"' -> inString = true
-                    '{' -> objectDepth += 1
-                    '}' -> if (objectDepth > 0) objectDepth -= 1 else break
-                    '[' -> arrayDepth += 1
-                    ']' -> if (arrayDepth > 0) arrayDepth -= 1
-                    ',' -> if (objectDepth == 0 && arrayDepth == 0) break
-                }
-            }
-            index += 1
-        }
-        val rawValue = text.substring(valueStart, index).trim()
-        if (rawValue.isNotEmpty()) result[key] = rawValue
-        if (index < text.lastIndex && text[index] == ',') index += 1
-    }
-    return result
-}
-
-private fun String.optionalIntText(key: String): String =
-    Regex("\"${Regex.escape(key)}\"\\s*:\\s*(-?\\d+)")
-        .find(this)
-        ?.groupValues
-        ?.getOrNull(1)
-        .orEmpty()
-
-private fun String.jsonStringField(key: String): String =
-    Regex("\"${Regex.escape(key)}\"\\s*:\\s*\"((?:\\\\.|[^\"])*)\"")
-        .find(this)
-        ?.groupValues
-        ?.getOrNull(1)
-        ?.decodeJsonStringBody()
-        .orEmpty()
-
-private fun String.decodeJsonStringBody(): String = buildString {
-    var index = 0
-    while (index < this@decodeJsonStringBody.length) {
-        val char = this@decodeJsonStringBody[index]
-        if (char != '\\' || index == this@decodeJsonStringBody.lastIndex) {
-            append(char)
-            index += 1
-            continue
-        }
-        val escaped = this@decodeJsonStringBody[index + 1]
-        append(
-            when (escaped) {
-                'n' -> '\n'
-                'r' -> '\r'
-                't' -> '\t'
-                '\\' -> '\\'
-                '"' -> '"'
-                else -> escaped
-            },
-        )
-        index += 2
-    }
-}
-
-private fun jsonString(value: String): String = buildString {
-    append('"')
-    value.forEach { char ->
-        when (char) {
-            '\\' -> append("\\\\")
-            '"' -> append("\\\"")
-            '\n' -> append("\\n")
-            '\r' -> append("\\r")
-            '\t' -> append("\\t")
-            else -> append(char)
-        }
-    }
-    append('"')
-}
-
-private fun jsonNumber(value: Number): String = value.toString()
 
 private fun trimNumber(value: Double): Number =
     if (value % 1.0 == 0.0) value.toLong() else "%.2f".format(java.util.Locale.US, value).toDouble()

@@ -46,9 +46,13 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.Baby
+import com.lezi.babylog.core.model.MilkPayload
+import com.lezi.babylog.core.model.NursingPayload
 import com.lezi.babylog.core.model.Record
+import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SettingsLocal
+import com.lezi.babylog.core.model.SleepPayload
 import com.lezi.babylog.core.ui.RecordSection
 import com.lezi.babylog.core.ui.RecordSummaryStrip
 import com.lezi.babylog.core.ui.RecordSummaryValue
@@ -76,11 +80,9 @@ import com.lezi.babylog.designsystem.TimelineLaneSegment
 import com.lezi.babylog.designsystem.TimelineRailCard
 import com.lezi.babylog.designsystem.leziRecordColor
 import com.lezi.babylog.domain.CareLog
+import com.lezi.babylog.domain.CareAggregation
 import com.lezi.babylog.domain.DailySummary
-import com.lezi.babylog.domain.aggregateDaily
 import com.lezi.babylog.domain.formatClock
-import com.lezi.babylog.domain.payloadBool
-import com.lezi.babylog.domain.payloadInt
 import com.lezi.babylog.domain.relativeTimeLabel
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.LocalDate
@@ -144,7 +146,7 @@ class LogViewModel @Inject constructor(
             ) { records, openSleep ->
                 val start = day.atStartOfDay(zone).toInstant().toEpochMilli()
                 val end = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-                val summary = aggregateDaily(records, start, end)
+                val summary = CareAggregation.day(records, day, zone).toDailySummary()
                 val lanes = buildLanes(records, start, end)
                 LogUiState(
                     loading = false,
@@ -193,7 +195,7 @@ private fun buildLanes(records: List<Record>, dayStart: Long, dayEnd: Long): Lan
                     val startMin = mins(startMs)
                     val endMin = mins(endMs).coerceAtLeast(startMin + 1)
                     val durationMin = ((endMs - startMs) / 60_000L).coerceAtLeast(1)
-                    val nap = payloadBool(r.payloadJson, "is_nap") == true
+                    val nap = (r.payload.payload as? SleepPayload)?.isNap == true
                     val title = if (nap) "午睡" else "睡眠"
                     val detail = buildString {
                         append(clock(startMs))
@@ -213,20 +215,23 @@ private fun buildLanes(records: List<Record>, dayStart: Long, dayEnd: Long): Lan
                     )
                 }
             }
-            RecordType.FORMULA, RecordType.NURSING, RecordType.PUMPED_FEED -> {
+            RecordType.FORMULA, RecordType.NURSING, RecordType.PUMPED_FEED,
+            RecordType.PUMP_EXPRESS,
+            -> {
                 // Point-in-time mark: keep start==end so UI draws a pin, not a fake duration bar.
                 val startMin = mins(startMs)
                 val title = r.type.presentation.label
                 val detail = buildString {
                     append(clock(startMs))
                     when (r.type) {
-                        RecordType.FORMULA, RecordType.PUMPED_FEED -> {
-                            val ml = payloadInt(r.payloadJson, "amount_ml")
+                        RecordType.FORMULA, RecordType.PUMPED_FEED, RecordType.PUMP_EXPRESS -> {
+                            val ml = (r.payload.payload as? MilkPayload)?.amountMl ?: 0
                             if (ml > 0) append(" · ${ml}ml")
                         }
                         RecordType.NURSING -> {
-                            val left = payloadInt(r.payloadJson, "left_min")
-                            val right = payloadInt(r.payloadJson, "right_min")
+                            val payload = r.payload.payload as? NursingPayload
+                            val left = payload?.leftMinutes ?: 0
+                            val right = payload?.rightMinutes ?: 0
                             if (left + right > 0) append(" · 左${left}分/右${right}分")
                         }
                         else -> Unit
@@ -325,18 +330,23 @@ fun LogRoute(
     val zone = ZoneId.systemDefault()
     val ext = LeziThemeExt.colors
     val journal = LeziThemeExt.isJournal
+    val timelineRecords = if (state.settings.timelineOrder == "oldest_first") {
+        state.records.sortedBy(Record::timestamp)
+    } else {
+        state.records.sortedByDescending(Record::timestamp)
+    }
 
     fun openComposer(type: RecordType) {
         val babyId = state.baby?.id ?: return
         val openSleep = state.openSleep
         val wakingCurrentSleep = type == RecordType.SLEEP && openSleep != null
-        val clickedAt = timestampOnDate(
-            date = if (wakingCurrentSleep) today else state.day,
+        val clickedAt = RecordTime.newDraftTimestamp(
+            selectedDate = if (wakingCurrentSleep) today else state.day,
             zone = zone,
         )
         val lastAmount = state.records
             .firstOrNull { it.type == type }
-            ?.let { payloadInt(it.payloadJson, "amount_ml") }
+            ?.let { (it.payload.payload as? MilkPayload)?.amountMl }
             ?.takeIf { it > 0 }
         onOpenComposer(
             RecordComposerRequest.New(
@@ -501,14 +511,14 @@ fun LogRoute(
                                 modifier = Modifier.padding(horizontal = LeziSpacing.Page),
                             )
                         }
-                        else -> items(state.records, key = { it.id }) { r ->
+                        else -> items(timelineRecords, key = { it.id }) { r ->
                             RecordRow(
                                 time = formatClock(r.timestamp),
                                 title = typeLabel(r.type),
                                 summary = recordSummaryLine(r),
                                 relative = relativeTimeLabel(r.timestamp),
                                 tone = toneOf(r.type),
-                                anomaly = payloadBool(r.payloadJson, "anomaly_flag") ||
+                                anomaly = (r.payload.payload as? SleepPayload)?.anomaly == true ||
                                     (r.type == RecordType.SLEEP && r.endTimestamp == null),
                                 leading = {
                                     RecordTypeIcon(r.type)
@@ -529,6 +539,8 @@ fun LogRoute(
             OneHandQuickDock(
                 preferredHand = state.settings.preferredHand,
                 timerEnabled = state.settings.timerEnabled,
+                hiddenTypeKeys = state.settings.hiddenItems,
+                configuredTypeKeys = parseConfiguredTypeKeys(state.settings.itemOrderJson),
                 sleepRunning = state.openSleep != null,
                 onNursing = { openComposer(RecordType.NURSING) },
                 onPee = { openComposer(RecordType.PEE) },
@@ -545,6 +557,7 @@ fun LogRoute(
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false),
         ) {
             MoreSheet(
+                settings = state.settings,
                 onPick = { type ->
                     showMore = false
                     openComposer(type)
@@ -569,21 +582,47 @@ internal enum class OneHandQuickAction {
 internal fun oneHandQuickActionOrder(
     preferredHand: String,
     timerEnabled: Boolean,
+    configuredTypeKeys: List<String> = emptyList(),
 ): List<OneHandQuickAction> {
-    val thumbFirst = buildList {
+    val recordActions = buildList {
         add(OneHandQuickAction.Pee)
         add(OneHandQuickAction.Sleep)
         if (timerEnabled) add(OneHandQuickAction.Nursing)
         add(OneHandQuickAction.Formula)
+    }.sortedWith(
+        compareBy<OneHandQuickAction> { action ->
+            val typeKey = action.recordTypeKey()
+            configuredTypeKeys.indexOf(typeKey).takeIf { it >= 0 } ?: Int.MAX_VALUE
+        }.thenBy { it.ordinal },
+    )
+    val thumbFirst = buildList {
+        addAll(recordActions)
         add(OneHandQuickAction.More)
     }
     return if (preferredHand == "left") thumbFirst else thumbFirst.reversed()
 }
 
+private fun OneHandQuickAction.recordTypeKey(): String? = when (this) {
+    OneHandQuickAction.Pee -> RecordType.PEE.key
+    OneHandQuickAction.Sleep -> RecordType.SLEEP.key
+    OneHandQuickAction.Nursing -> RecordType.NURSING.key
+    OneHandQuickAction.Formula -> RecordType.FORMULA.key
+    OneHandQuickAction.More -> null
+}
+
+private fun parseConfiguredTypeKeys(json: String): List<String> =
+    runCatching {
+        org.json.JSONArray(json).let { array ->
+            List(array.length()) { index -> array.optString(index) }
+        }
+    }.getOrDefault(emptyList())
+
 @Composable
 private fun OneHandQuickDock(
     preferredHand: String,
     timerEnabled: Boolean,
+    hiddenTypeKeys: Set<String>,
+    configuredTypeKeys: List<String>,
     sleepRunning: Boolean,
     onNursing: () -> Unit,
     onPee: () -> Unit,
@@ -593,7 +632,14 @@ private fun OneHandQuickDock(
     modifier: Modifier = Modifier,
 ) {
     val journal = LeziThemeExt.isJournal
-    val actions = oneHandQuickActionOrder(preferredHand, timerEnabled)
+    val actions = oneHandQuickActionOrder(
+        preferredHand = preferredHand,
+        timerEnabled = timerEnabled,
+        configuredTypeKeys = configuredTypeKeys,
+    ).filter { action ->
+        val typeKey = action.recordTypeKey()
+        typeKey == null || typeKey !in hiddenTypeKeys
+    }
     Surface(
         modifier = modifier
             .fillMaxWidth()
@@ -684,11 +730,25 @@ private fun OneHandQuickDock(
 }
 
 @Composable
-private fun MoreSheet(onPick: (RecordType) -> Unit) {
+private fun MoreSheet(
+    settings: SettingsLocal,
+    onPick: (RecordType) -> Unit,
+) {
+    val configuredOrder = remember(settings.itemOrderJson) {
+        runCatching {
+            org.json.JSONArray(settings.itemOrderJson).let { array ->
+                List(array.length()) { index -> array.optString(index) }
+            }
+        }.getOrDefault(emptyList())
+    }
     val groups = RecordSection.entries.map { section ->
         section to RecordType.entries.filter {
-            it.presentation.section == section && it != RecordType.PUMP_EXPRESS
-        }
+            it.presentation.section == section && it.key !in settings.hiddenItems
+        }.sortedWith(
+            compareBy<RecordType> {
+                configuredOrder.indexOf(it.key).takeIf { index -> index >= 0 } ?: Int.MAX_VALUE
+            }.thenBy { it.ordinal },
+        )
     }
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),

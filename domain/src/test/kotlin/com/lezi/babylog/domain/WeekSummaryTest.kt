@@ -33,7 +33,7 @@ class WeekSummaryTest {
             rec(7, "both_diaper", base + 30 * 3600_000L),
             rec(8, "formula", base + 8 * 3600_000L, """{"amount_ml":40}""", deleted = base),
         )
-        val w = aggregateWeek(records, weekStart, zone)
+        val w = CareAggregation.week(records, weekStart, zone)
         assertThat(w.days).hasSize(7)
         assertThat(w.days[0].feedMl).isEqualTo(120)
         assertThat(w.days[0].nursingMin).isEqualTo(15)
@@ -70,7 +70,7 @@ class WeekSummaryTest {
             ),
         )
 
-        val summary = aggregateWeek(
+        val summary = CareAggregation.week(
             records = records,
             weekStart = weekStart,
             zone = zone,

@@ -59,7 +59,10 @@ data class Record(
     val schemaVersion: Int = 1,
     val updatedAt: Long,
     val deletedAt: Long? = null,
-)
+) {
+    val payload: RecordPayloadDocument
+        get() = RecordPayloadCodec.decode(type, payloadJson, schemaVersion)
+}
 
 data class MediaAsset(
     val id: Long = 0,
@@ -75,7 +78,6 @@ data class MediaAsset(
 data class SettingsLocal(
     val itemOrderJson: String = "[]",
     val hiddenItems: Set<String> = emptySet(),
-    val actionButtonsJson: String = "{}",
     val timerEnabled: Boolean = true,
     val recordAtStartOrEnd: String = "end",
     val nursingIntervalMin: Int = 180,
@@ -96,7 +98,10 @@ data class SettingsLocal(
      * - "dial": Material clock dial with 上午/下午 selection
      */
     val timePickerStyle: String = "dropdown",
+    val infantFeverAdviceEnabled: Boolean = true,
     val curveDataset: String = "default",
+    /** Persisted per-device preference for applying corrected age in growth charts. */
+    val correctedAgeEnabled: Boolean = false,
     val timelineOrder: String = "newest_first",
 )
 

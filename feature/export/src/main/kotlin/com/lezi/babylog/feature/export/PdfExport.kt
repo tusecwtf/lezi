@@ -3,6 +3,8 @@ package com.lezi.babylog.feature.export
 import android.content.Context
 import android.content.Intent
 import android.graphics.Paint
+import android.graphics.BitmapFactory
+import android.graphics.RectF
 import android.graphics.pdf.PdfDocument
 import androidx.core.content.FileProvider
 import java.io.File
@@ -10,7 +12,12 @@ import java.io.FileOutputStream
 import java.time.LocalDate
 
 object PdfExport {
-    fun writeAndShare(context: Context, title: String, body: String) {
+    fun writeAndShare(
+        context: Context,
+        title: String,
+        body: String,
+        photoPaths: List<String> = emptyList(),
+    ) {
         val doc = PdfDocument()
         val paint = Paint().apply {
             textSize = 11f
@@ -58,7 +65,32 @@ object PdfExport {
             }
         }
         doc.finishPage(page)
+        photoPaths.forEach { path ->
+            val bitmap = BitmapFactory.decodeFile(path) ?: return@forEach
+            pageNumber++
+            pageInfo = PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNumber).create()
+            page = doc.startPage(pageInfo)
+            canvas = page.canvas
+            canvas.drawText("记录图片", 40f, 42f, titlePaint)
+            val availableWidth = pageWidth - 80f
+            val availableHeight = pageHeight - 100f
+            val scale = minOf(
+                availableWidth / bitmap.width,
+                availableHeight / bitmap.height,
+            )
+            val width = bitmap.width * scale
+            val height = bitmap.height * scale
+            canvas.drawBitmap(
+                bitmap,
+                null,
+                RectF(40f, 60f, 40f + width, 60f + height),
+                paint,
+            )
+            doc.finishPage(page)
+            bitmap.recycle()
+        }
         val dir = File(context.cacheDir, "export").apply { mkdirs() }
+        dir.listFiles()?.forEach { old -> runCatching { old.delete() } }
         val file = File(dir, "lezi-${LocalDate.now()}.pdf")
         FileOutputStream(file).use { doc.writeTo(it) }
         doc.close()

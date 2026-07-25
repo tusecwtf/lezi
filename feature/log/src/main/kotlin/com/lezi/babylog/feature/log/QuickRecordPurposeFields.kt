@@ -8,7 +8,6 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -18,7 +17,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.material3.FilterChip
@@ -29,9 +27,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -56,6 +52,10 @@ import com.lezi.babylog.designsystem.LeziStoolAmountMark
 import com.lezi.babylog.designsystem.LeziStoolColorMark
 import com.lezi.babylog.designsystem.LeziStoolConsistencyMark
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.domain.CustomRecordItem
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -64,6 +64,8 @@ internal fun PurposeFields(
     draft: QuickRecordDraft,
     amountStepMl: Int,
     birthdayEpochDay: Long? = null,
+    infantFeverAdviceEnabled: Boolean = true,
+    customItems: List<CustomRecordItem> = emptyList(),
     canStartNursingTimer: Boolean,
     actionsEnabled: Boolean,
     onDraftChange: (QuickRecordDraft) -> Unit,
@@ -85,20 +87,18 @@ internal fun PurposeFields(
             StoolFields(draft, onDraftChange)
         }
         QuickRecordMode.Sleep -> SleepFields(draft)
-        QuickRecordMode.Temperature -> TemperatureFields(draft, onDraftChange)
+        QuickRecordMode.Temperature -> TemperatureFields(
+            draft = draft,
+            birthdayEpochDay = birthdayEpochDay,
+            adviceEnabled = infantFeverAdviceEnabled,
+            onDraftChange = onDraftChange,
+        )
         QuickRecordMode.Text -> TextFields(draft, onDraftChange)
         QuickRecordMode.Simple -> SimpleFields(draft.type)
-        QuickRecordMode.Interval -> {
-            Text(
-                "分别设置开始与结束时刻（24 小时制）。",
-                style = LeziTypography.Body,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
         QuickRecordMode.Symptom -> SymptomFields(draft, onDraftChange)
         QuickRecordMode.Medicine -> MedicineFields(draft, onDraftChange)
         QuickRecordMode.Hospital -> HospitalFields(draft, onDraftChange)
-        QuickRecordMode.CustomText -> CustomTextFields(draft, onDraftChange)
+        QuickRecordMode.CustomText -> CustomTextFields(draft, customItems, onDraftChange)
         QuickRecordMode.Measurement -> MeasurementFields(draft, onDraftChange)
         QuickRecordMode.Food -> FoodFields(draft, birthdayEpochDay, onDraftChange)
         QuickRecordMode.Vaccine -> VaccineFields(draft, onDraftChange)
@@ -192,19 +192,28 @@ private fun MilkFields(
             Text("+$step", style = LeziTypography.Title)
         }
     }
-    val quickAmounts = remember(draft.amountMl, step) {
-        listOf(
+    val quickAmounts = remember(draft.amountMl, draft.recentAmountMl, step) {
+        (draft.recentAmountMl + listOf(
             draft.amountMl - step,
             draft.amountMl,
             draft.amountMl + step,
             draft.amountMl + step * 2,
-        ).map { it.coerceIn(1, 999) }.distinct()
+        )).map { it.coerceIn(1, 999) }.distinct()
     }
     ChoiceStrip(
         label = "快捷奶量",
         choices = quickAmounts.map { it to "${it}ml" },
         selected = draft.amountMl,
     ) { onDraftChange(draft.copy(amountMl = it)) }
+    IntegerField(
+        value = draft.amountMl.toString(),
+        label = "任意奶量 ml（1–999）",
+        modifier = Modifier.fillMaxWidth(),
+    ) { raw ->
+        raw.toIntOrNull()?.takeIf { it in 1..999 }?.let {
+            onDraftChange(draft.copy(amountMl = it))
+        }
+    }
     if (draft.type == RecordType.FORMULA) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             IntegerField(
@@ -463,6 +472,8 @@ private fun SleepActionAnimation(action: SleepDraftAction) {
 @Composable
 private fun TemperatureFields(
     draft: QuickRecordDraft,
+    birthdayEpochDay: Long?,
+    adviceEnabled: Boolean,
     onDraftChange: (QuickRecordDraft) -> Unit,
 ) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -503,7 +514,15 @@ private fun TemperatureFields(
             it
         }
     }
-    if (celsius != null && celsius >= 38.0) {
+    if (
+        celsius != null &&
+        shouldShowInfantFeverAdvice(
+            birthdayEpochDay = birthdayEpochDay,
+            recordTimestamp = draft.timestamp,
+            celsius = celsius,
+            enabled = adviceEnabled,
+        )
+    ) {
         Surface(
             shape = LeziShapes.Sm,
             color = MaterialTheme.colorScheme.errorContainer,
@@ -516,6 +535,19 @@ private fun TemperatureFields(
             )
         }
     }
+}
+
+internal fun shouldShowInfantFeverAdvice(
+    birthdayEpochDay: Long?,
+    recordTimestamp: Long,
+    celsius: Double,
+    enabled: Boolean,
+    zone: ZoneId = ZoneId.systemDefault(),
+): Boolean {
+    if (!enabled || birthdayEpochDay == null || celsius < 38.0) return false
+    val birthday = LocalDate.ofEpochDay(birthdayEpochDay)
+    val recordDate = Instant.ofEpochMilli(recordTimestamp).atZone(zone).toLocalDate()
+    return !recordDate.isBefore(birthday) && recordDate.isBefore(birthday.plusMonths(3))
 }
 
 @Composable
@@ -605,168 +637,5 @@ private fun HospitalFields(
         modifier = Modifier.fillMaxWidth(),
         label = { Text("医嘱（可选）") },
         minLines = 2,
-    )
-}
-
-@Composable
-private fun CustomTextFields(
-    draft: QuickRecordDraft,
-    onDraftChange: (QuickRecordDraft) -> Unit,
-) {
-    OutlinedTextField(
-        value = draft.customTitle,
-        onValueChange = { onDraftChange(draft.copy(customTitle = it.take(30))) },
-        modifier = Modifier.fillMaxWidth(),
-        label = { Text(if (draft.type == RecordType.CUSTOM) "自定义项目名称" else "标题") },
-        singleLine = true,
-    )
-    OutlinedTextField(
-        value = draft.customDetail,
-        onValueChange = { onDraftChange(draft.copy(customDetail = it.take(200))) },
-        modifier = Modifier.fillMaxWidth(),
-        label = { Text("详情（可选）") },
-        minLines = 2,
-    )
-}
-
-@Composable
-private fun MeasurementFields(
-    draft: QuickRecordDraft,
-    onDraftChange: (QuickRecordDraft) -> Unit,
-) {
-    val unit = if (draft.type == RecordType.WEIGHT) "kg" else "cm"
-    DecimalField(
-        value = draft.measurementValue,
-        label = "${draft.type.presentation.label}（$unit）",
-        modifier = Modifier.fillMaxWidth(),
-    ) { onDraftChange(draft.copy(measurementValue = it)) }
-}
-
-@Composable
-private fun FoodFields(
-    draft: QuickRecordDraft,
-    birthdayEpochDay: Long?,
-    onDraftChange: (QuickRecordDraft) -> Unit,
-) {
-    if (draft.type == RecordType.BABY_FOOD && birthdayEpochDay != null) {
-        BabyFoodGuidancePanel(
-            birthdayEpochDay = birthdayEpochDay,
-            atMillis = draft.timestamp,
-            selectedContent = draft.foodContent,
-            onSuggestionClick = { suggestion ->
-                onDraftChange(draft.copy(foodContent = suggestion.take(80)))
-            },
-        )
-    }
-    OutlinedTextField(
-        value = draft.foodContent,
-        onValueChange = { onDraftChange(draft.copy(foodContent = it.take(80))) },
-        modifier = Modifier.fillMaxWidth(),
-        label = { Text("内容") },
-        placeholder = { Text(if (draft.type == RecordType.DRINK) "例如 温水" else "例如 南瓜米糊") },
-        singleLine = true,
-    )
-    OutlinedTextField(
-        value = draft.foodAmount,
-        onValueChange = { onDraftChange(draft.copy(foodAmount = it.take(30))) },
-        modifier = Modifier.fillMaxWidth(),
-        label = { Text("量（可选）") },
-        placeholder = { Text(if (draft.type == RecordType.DRINK) "例如 80 ml" else "例如 半碗") },
-        singleLine = true,
-    )
-}
-
-@Composable
-private fun BabyFoodGuidancePanel(
-    birthdayEpochDay: Long,
-    atMillis: Long,
-    selectedContent: String,
-    onSuggestionClick: (String) -> Unit,
-) {
-    val guidance = remember(birthdayEpochDay, atMillis) {
-        babyFoodGuidanceAt(birthdayEpochDay, atMillis)
-    }
-    var expanded by remember(guidance.stage.id) { mutableStateOf(false) }
-
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = LeziShapes.Sm,
-        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f),
-    ) {
-        Column(
-            Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text(
-                "${guidance.ageLabel} · ${guidance.stage.title}",
-                style = LeziTypography.BodyStrong,
-            )
-            if (guidance.stage.suggestions.isEmpty()) {
-                Text(
-                    "此阶段一般仍以母乳或配方奶为主；满约 6 月龄再考虑泥糊起步。",
-                    style = LeziTypography.Meta,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else {
-                Text(
-                    "本阶段可尝试（点选填入内容）",
-                    style = LeziTypography.Meta,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    guidance.stage.suggestions.forEach { item ->
-                        FilterChip(
-                            selected = selectedContent == item,
-                            onClick = { onSuggestionClick(item) },
-                            label = { Text(item) },
-                        )
-                    }
-                }
-            }
-            TextButton(
-                onClick = { expanded = !expanded },
-                modifier = Modifier.padding(start = 0.dp),
-            ) {
-                Text(if (expanded) "收起阶段说明" else "为什么这样建议")
-            }
-            if (expanded) {
-                Text(
-                    guidance.stage.explanation,
-                    style = LeziTypography.Meta,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Text(
-                BABY_FOOD_DISCLAIMER,
-                style = LeziTypography.Meta,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-@Composable
-private fun VaccineFields(
-    draft: QuickRecordDraft,
-    onDraftChange: (QuickRecordDraft) -> Unit,
-) {
-    OutlinedTextField(
-        value = draft.vaccineName,
-        onValueChange = { onDraftChange(draft.copy(vaccineName = it.take(80))) },
-        modifier = Modifier.fillMaxWidth(),
-        label = { Text("疫苗名称") },
-        singleLine = true,
-    )
-    OutlinedTextField(
-        value = draft.vaccineBatch,
-        onValueChange = { onDraftChange(draft.copy(vaccineBatch = it.take(50))) },
-        modifier = Modifier.fillMaxWidth(),
-        label = { Text("批次 / 针次（可选）") },
-        singleLine = true,
     )
 }

@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.payloadSummary
 import com.lezi.babylog.designsystem.LeziCard
 import com.lezi.babylog.designsystem.LeziRecordColorRole
 import com.lezi.babylog.designsystem.LeziRecordGlyph
@@ -75,9 +76,8 @@ val RecordType.presentation: RecordTypePresentation
             "母乳瓶喂", "奶量", LeziRecordGlyph.Bottle,
             LeziRecordColorRole.Nursing, RecordSection.Feeding, RecordChartMark.Circle,
         )
-        // Still present for historical records; hidden from the add-record picker.
         RecordType.PUMP_EXPRESS -> RecordTypePresentation(
-            "挤奶", "历史记录", LeziRecordGlyph.Pump,
+            "挤奶", "奶量", LeziRecordGlyph.Pump,
             LeziRecordColorRole.Nursing, RecordSection.Feeding, RecordChartMark.Circle,
         )
         RecordType.PEE -> RecordTypePresentation(
@@ -113,7 +113,7 @@ val RecordType.presentation: RecordTypePresentation
             LeziRecordColorRole.Wake, RecordSection.Routine, RecordChartMark.Circle,
         )
         RecordType.WALK -> RecordTypePresentation(
-            "散步", "起止时间", LeziRecordGlyph.Walk,
+            "散步", "时刻/备注", LeziRecordGlyph.Walk,
             LeziRecordColorRole.Growth, RecordSection.Routine, RecordChartMark.Circle,
         )
         RecordType.COUGH -> RecordTypePresentation(
@@ -297,113 +297,12 @@ fun stoolColorLabel(index: Int): String = when (index.coerceIn(0, 7)) {
 
 /** Readable record copy shared by the timeline and search results; raw JSON never escapes this seam. */
 fun Record.presentationSummary(): String {
-    val payloadCopy = when (type) {
-        RecordType.FORMULA, RecordType.PUMPED_FEED, RecordType.PUMP_EXPRESS -> {
-            payloadInt("amount_ml").takeIf { it > 0 }?.let { "${it}ml" }.orEmpty()
-        }
-        RecordType.NURSING -> {
-            val left = payloadInt("left_min")
-            val right = payloadInt("right_min")
-            "左${left}分 · 右${right}分"
-        }
-        RecordType.PEE -> "尿量${peeAmountLabel(payloadInt("pee_amount").takeIf { it in 1..3 } ?: 2)}"
-        RecordType.POOP -> stoolSummary()
-        RecordType.BOTH_DIAPER -> {
-            val pee = peeAmountLabel(payloadInt("pee_amount").takeIf { it in 1..3 } ?: 2)
-            "尿量$pee · ${stoolSummary()}"
-        }
-        RecordType.SLEEP -> endTimestamp?.takeIf { it >= timestamp }?.let {
-            listOf(
-                if (payloadBoolean("is_nap")) "午睡" else null,
-                "时长 ${formatRecordDuration((it - timestamp) / 60_000L)}",
-            ).filterNotNull().joinToString(" · ")
-        } ?: if (payloadBoolean("is_nap")) "午睡 · 进行中" else "进行中"
-        RecordType.TEMPERATURE ->
-            (payloadNumber("celsius") ?: payloadNumber("value"))?.let { "${it}℃" }.orEmpty()
-        RecordType.MEDICINE -> listOf(
-            payloadString("name"),
-            payloadString("dose"),
-        ).filter { it.isNotBlank() }.joinToString(" · ")
-        RecordType.COUGH, RecordType.RASH, RecordType.VOMIT, RecordType.INJURY -> listOf(
-            when (payloadInt("severity")) {
-                1 -> "轻微"
-                2 -> "一般"
-                3 -> "明显"
-                else -> ""
-            },
-            payloadString("description"),
-        ).filter { it.isNotBlank() }.joinToString(" · ")
-        RecordType.HOSPITAL -> listOf(
-            payloadString("reason"),
-            payloadString("advice"),
-        ).filter { it.isNotBlank() }.joinToString(" · ")
-        RecordType.OTHER, RecordType.CUSTOM -> listOf(
-            payloadString("title"),
-            payloadString("detail"),
-        ).filter { it.isNotBlank() }.joinToString(" · ")
-        RecordType.HEIGHT, RecordType.HEAD, RecordType.CHEST, RecordType.FOOT_SIZE ->
-            payloadNumber("value")?.let { "${it}cm" }.orEmpty()
-        RecordType.WEIGHT -> payloadNumber("value")?.toDoubleOrNull()?.let { raw ->
-            val kilograms = if (payloadString("unit") == "g") raw / 1_000.0 else raw
-            val formatted = if (kilograms % 1.0 == 0.0) {
-                kilograms.toInt().toString()
-            } else {
-                "%.2f".format(java.util.Locale.US, kilograms).trimEnd('0').trimEnd('.')
-            }
-            "${formatted}kg"
-        }.orEmpty()
-        RecordType.BABY_FOOD, RecordType.SNACK, RecordType.DRINK ->
-            listOf(payloadString("content"), payloadString("amount"))
-                .filter { it.isNotBlank() }
-                .joinToString(" · ")
-        RecordType.VACCINE -> listOf(
-            payloadString("name"),
-            payloadString("batch"),
-        ).filter { it.isNotBlank() }.joinToString(" · ")
-        RecordType.MEMO, RecordType.DIARY -> payloadString("body")
-        else -> ""
-    }
+    val payloadCopy = payloadSummary()
     return listOfNotNull(
         payloadCopy.takeIf { it.isNotBlank() },
         note?.trim()?.takeIf { it.isNotBlank() },
     ).joinToString(" · ").ifBlank { type.presentation.tip }
 }
-
-private fun Record.stoolSummary(): String {
-    val amount = stoolAmountLabel(payloadInt("stool_amount").takeIf { it in 1..4 } ?: 3)
-    val consistency = stoolConsistencyLabel(payloadInt("stool_consistency").takeIf { it in 1..4 } ?: 3)
-    val color = stoolColorLabel(payloadInt("stool_color").coerceIn(0, 7))
-    return "便量$amount · $consistency · $color"
-}
-
-private fun Record.payloadInt(key: String): Int =
-    Regex("\"${Regex.escape(key)}\"\\s*:\\s*(-?\\d+)")
-        .find(payloadJson)
-        ?.groupValues
-        ?.getOrNull(1)
-        ?.toIntOrNull()
-        ?: 0
-
-private fun Record.payloadNumber(key: String): String? =
-    Regex("\"${Regex.escape(key)}\"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)")
-        .find(payloadJson)
-        ?.groupValues
-        ?.getOrNull(1)
-
-private fun Record.payloadString(key: String): String =
-    Regex("\"${Regex.escape(key)}\"\\s*:\\s*\"([^\"]*)\"")
-        .find(payloadJson)
-        ?.groupValues
-        ?.getOrNull(1)
-        .orEmpty()
-
-private fun Record.payloadBoolean(key: String): Boolean =
-    Regex("\"${Regex.escape(key)}\"\\s*:\\s*(true|false)")
-        .find(payloadJson)
-        ?.groupValues
-        ?.getOrNull(1)
-        ?.toBooleanStrictOrNull()
-        ?: false
 
 /** Compact duration copy shared by saved-record summaries and draft previews. */
 fun formatRecordDuration(minutes: Long): String {

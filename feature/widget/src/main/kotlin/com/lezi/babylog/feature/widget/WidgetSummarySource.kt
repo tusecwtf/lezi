@@ -1,0 +1,39 @@
+package com.lezi.babylog.feature.widget
+
+import com.lezi.babylog.domain.CareLog
+import dagger.Binds
+import dagger.Module
+import dagger.hilt.InstallIn
+import dagger.hilt.components.SingletonComponent
+import javax.inject.Inject
+import javax.inject.Singleton
+
+fun interface WidgetSummarySource {
+    suspend fun load(babyId: Long): WidgetSummaryData
+}
+
+@Singleton
+class CareLogWidgetSummarySource @Inject constructor(
+    private val careLog: CareLog,
+) : WidgetSummarySource {
+    override suspend fun load(babyId: Long): WidgetSummaryData {
+        val summary = careLog.recentCareSummary(babyId)
+        return WidgetSummaryData(
+            babyName = summary.babyName,
+            feedMl = summary.feedMl,
+            sleepMinutes = summary.sleepMin,
+            peeCount = summary.pee,
+            poopCount = summary.poop,
+            lastLabel = summary.lastLabel,
+        )
+    }
+}
+
+@Module
+@InstallIn(SingletonComponent::class)
+internal abstract class WidgetSummaryModule {
+    @Binds
+    abstract fun bindWidgetSummarySource(
+        implementation: CareLogWidgetSummarySource,
+    ): WidgetSummarySource
+}

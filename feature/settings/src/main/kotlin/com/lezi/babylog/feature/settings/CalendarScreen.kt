@@ -1,5 +1,10 @@
 package com.lezi.babylog.feature.settings
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -34,20 +39,25 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.datastore.SettingsStore
+import com.lezi.babylog.core.model.RecordTime
+import com.lezi.babylog.core.model.RecordTimeDecision
+import com.lezi.babylog.core.model.FutureEventError
 import com.lezi.babylog.designsystem.LeziClockDialDialog
 import com.lezi.babylog.designsystem.LeziCard
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
-import com.lezi.babylog.designsystem.resolveLeziLocalDateTime
 import com.lezi.babylog.domain.CareLog
+import com.lezi.babylog.domain.CalendarEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate
@@ -59,6 +69,7 @@ import java.time.format.DateTimeFormatter
 import javax.inject.Inject
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -69,8 +80,11 @@ import kotlinx.coroutines.launch
 class CalendarViewModel @Inject constructor(
     private val careLog: CareLog,
     settingsStore: SettingsStore,
+    private val reminderScheduler: CalendarReminderScheduler,
 ) : ViewModel() {
     private val zone = ZoneId.systemDefault()
+    private val _status = MutableStateFlow<String?>(null)
+    val status = _status
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val events = careLog.observeCurrentBaby().flatMapLatest { baby ->
@@ -106,19 +120,68 @@ class CalendarViewModel @Inject constructor(
                 onResult("请先添加宝宝")
                 return@launch
             }
-            val now = System.currentTimeMillis()
+            val now = RecordTime.currentTimeMillis()
             calendarEventError(title, eventAt, remindAt, now)?.let {
                 onResult(it)
                 return@launch
             }
-            careLog.addCalendarEvent(
+            val id = careLog.addCalendarEvent(
                 babyId = baby.id,
                 title = title,
                 eventAt = eventAt,
                 remindAt = remindAt,
             )
+            val event = careLog.listCalendarEvents(baby.id).firstOrNull { it.id == id }
+            val scheduled = event?.let(reminderScheduler::schedule) == true
+            _status.value = scheduleStatus(scheduled, remindAt != null)
             onResult(null)
         }
+    }
+
+    fun update(
+        event: CalendarEvent,
+        title: String,
+        eventAt: Long,
+        remindAt: Long?,
+        onResult: (String?) -> Unit,
+    ) {
+        viewModelScope.launch {
+            calendarEventError(title, eventAt, remindAt)?.let {
+                onResult(it)
+                return@launch
+            }
+            reminderScheduler.cancel(event.id)
+            val updated = event.copy(
+                title = title.trim(),
+                eventAt = eventAt,
+                remindAt = remindAt,
+            )
+            careLog.updateCalendarEvent(updated)
+            val scheduled = reminderScheduler.schedule(updated)
+            _status.value = scheduleStatus(scheduled, remindAt != null)
+            onResult(null)
+        }
+    }
+
+    fun delete(event: CalendarEvent, onDone: () -> Unit) {
+        viewModelScope.launch {
+            reminderScheduler.cancel(event.id)
+            careLog.deleteCalendarEvent(event.id)
+            onDone()
+        }
+    }
+
+    fun setPermissionDegraded() {
+        _status.value = "通知权限未开启；日程已保存，但本机不会显示通知"
+    }
+
+    private fun scheduleStatus(
+        scheduled: Boolean,
+        reminderEnabled: Boolean,
+    ): String? = when {
+        !reminderEnabled -> "日程已保存，未设置提醒"
+        scheduled -> "日程与普通本地提醒已保存；系统可能因省电策略延后通知"
+        else -> "日程已保存；提醒时刻已过，未安排通知"
     }
 }
 
@@ -133,19 +196,30 @@ fun CalendarRoute(
     val timeStepMin by vm.timeStepMin.collectAsStateWithLifecycle()
     val timePickerStyle by vm.timePickerStyle.collectAsStateWithLifecycle()
     val preferredHand by vm.preferredHand.collectAsStateWithLifecycle()
+    val reminderStatus by vm.status.collectAsStateWithLifecycle()
     val zone = ZoneId.systemDefault()
+    val context = LocalContext.current
     var showAdd by remember { mutableStateOf(false) }
+    var editingEvent by remember { mutableStateOf<CalendarEvent?>(null) }
     var title by remember { mutableStateOf("") }
     var eventAt by remember(initialDate) {
-        mutableStateOf(defaultCalendarEventAt(initialDate, zone = zone))
+        mutableStateOf(RecordTime.defaultFutureEventTimestamp(initialDate, zone))
     }
     var reminderEnabled by remember { mutableStateOf(true) }
     var remindAt by remember(initialDate) { mutableStateOf(eventAt - 60 * 60_000L) }
     var dateTarget by remember { mutableStateOf<CalendarClockTarget?>(null) }
     var clockTarget by remember { mutableStateOf<CalendarClockTarget?>(null) }
     var addError by remember { mutableStateOf<String?>(null) }
+    var saveAfterPermission by remember { mutableStateOf<((Boolean) -> Unit)?>(null) }
+    val notificationPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        saveAfterPermission?.invoke(granted)
+        saveAfterPermission = null
+    }
     val openCalendarDraft = {
-        eventAt = defaultCalendarEventAt(initialDate, zone = zone)
+        editingEvent = null
+        eventAt = RecordTime.defaultFutureEventTimestamp(initialDate, zone)
         remindAt = eventAt - 60 * 60_000L
         title = ""
         reminderEnabled = true
@@ -159,6 +233,7 @@ fun CalendarRoute(
         dateTarget = null
         clockTarget = null
         title = ""
+        editingEvent = null
         addError = null
     }
     Scaffold(
@@ -185,9 +260,28 @@ fun CalendarRoute(
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(LeziSpacing.Sm))
+            reminderStatus?.let {
+                Text(
+                    it,
+                    style = LeziTypography.Meta,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(LeziSpacing.Xs))
+            }
             LazyColumn(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs)) {
                 items(events, key = { it.id }) { e ->
-                    LeziCard(Modifier.fillMaxWidth()) {
+                    LeziCard(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = {
+                            editingEvent = e
+                            title = e.title
+                            eventAt = e.eventAt
+                            reminderEnabled = e.remindAt != null
+                            remindAt = e.remindAt ?: (e.eventAt - 60 * 60_000L)
+                            addError = null
+                            showAdd = true
+                        },
+                    ) {
                         Text(e.title, style = LeziTypography.BodyStrong)
                         Text(formatCalendarDateTime(e.eventAt, zone), style = LeziTypography.Meta)
                         e.remindAt?.let {
@@ -201,7 +295,7 @@ fun CalendarRoute(
     if (showAdd) {
         AlertDialog(
             onDismissRequest = closeCalendarDraft,
-            title = { Text("新日程") },
+            title = { Text(if (editingEvent == null) "新日程" else "编辑日程") },
             text = {
                 Column(
                     Modifier.dismissKeyboardOnTap(),
@@ -280,17 +374,59 @@ fun CalendarRoute(
                     if (error != null) {
                         addError = error
                     } else {
-                        vm.add(title.trim(), eventAt, selectedReminder) { saveError ->
-                            if (saveError == null) {
-                                closeCalendarDraft()
-                            } else {
-                                addError = saveError
+                        val persist: (Boolean) -> Unit = { permissionGranted ->
+                            val onSaved: (String?) -> Unit = { saveError ->
+                                if (saveError == null) {
+                                    if (!permissionGranted && selectedReminder != null) {
+                                        vm.setPermissionDegraded()
+                                    }
+                                    closeCalendarDraft()
+                                } else {
+                                    addError = saveError
+                                }
                             }
+                            val existing = editingEvent
+                            if (existing == null) {
+                                vm.add(title.trim(), eventAt, selectedReminder, onSaved)
+                            } else {
+                                vm.update(
+                                    existing,
+                                    title.trim(),
+                                    eventAt,
+                                    selectedReminder,
+                                    onSaved,
+                                )
+                            }
+                        }
+                        val needsPermission = selectedReminder != null &&
+                            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                            ContextCompat.checkSelfPermission(
+                                context,
+                                Manifest.permission.POST_NOTIFICATIONS,
+                            ) != PackageManager.PERMISSION_GRANTED
+                        if (needsPermission) {
+                            saveAfterPermission = persist
+                            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        } else {
+                            persist(true)
                         }
                     }
                 }) { Text("保存") }
             },
-            dismissButton = { TextButton(onClick = closeCalendarDraft) { Text("取消") } },
+            dismissButton = {
+                Row {
+                    editingEvent?.let { event ->
+                        TextButton(
+                            onClick = {
+                                vm.delete(event) { closeCalendarDraft() }
+                            },
+                        ) {
+                            Text("删除", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                    TextButton(onClick = closeCalendarDraft) { Text("取消") }
+                }
+            },
         )
     }
 
@@ -311,30 +447,33 @@ fun CalendarRoute(
                             val date = Instant.ofEpochMilli(millis)
                                 .atZone(ZoneOffset.UTC)
                                 .toLocalDate()
-                            val resolved = resolveLeziLocalDateTime(
+                            val decision = RecordTime.resolve(
                                 date = date,
                                 time = current.toLocalTime(),
                                 zone = zone,
                                 preferredOffset = current.offset,
                             )
-                            if (resolved == null) {
-                                addError = "所选日期不存在当前时刻，请改用其他时刻"
-                            } else {
-                                val changed = resolved.toInstant().toEpochMilli()
-                                if (target == CalendarClockTarget.Event) {
-                                    val priorEvent = eventAt
-                                    eventAt = changed
-                                    if (reminderEnabled) {
-                                        remindAt = reminderAfterEventChange(
-                                            priorEventAt = priorEvent,
-                                            newEventAt = eventAt,
-                                            priorReminderAt = remindAt,
-                                        )
-                                    }
-                                } else {
-                                    remindAt = changed
+                            when (decision) {
+                                RecordTimeDecision.RejectedGap -> {
+                                    addError = "所选日期不存在当前时刻，请改用其他时刻"
                                 }
-                                addError = null
+                                is RecordTimeDecision.Accepted -> {
+                                    val changed = decision.value.toInstant().toEpochMilli()
+                                    if (target == CalendarClockTarget.Event) {
+                                        val priorEvent = eventAt
+                                        eventAt = changed
+                                        if (reminderEnabled) {
+                                            remindAt = RecordTime.reminderAfterEventChange(
+                                                priorEventAt = priorEvent,
+                                                newEventAt = eventAt,
+                                                priorReminderAt = remindAt,
+                                            )
+                                        }
+                                    } else {
+                                        remindAt = changed
+                                    }
+                                    addError = null
+                                }
                             }
                         }
                         dateTarget = null
@@ -363,7 +502,7 @@ fun CalendarRoute(
                     val priorEvent = eventAt
                     eventAt = changed
                     if (reminderEnabled) {
-                        remindAt = reminderAfterEventChange(
+                        remindAt = RecordTime.reminderAfterEventChange(
                             priorEventAt = priorEvent,
                             newEventAt = eventAt,
                             priorReminderAt = remindAt,
@@ -382,46 +521,19 @@ fun CalendarRoute(
 
 private enum class CalendarClockTarget { Event, Reminder }
 
-internal fun defaultCalendarEventAt(
-    initialDate: LocalDate,
-    zone: ZoneId = ZoneId.systemDefault(),
-    now: ZonedDateTime = ZonedDateTime.now(zone),
-): Long {
-    val preferred = resolveLeziLocalDateTime(
-        date = initialDate,
-        time = LocalTime.of(now.hour, now.minute),
-        zone = zone,
-        preferredOffset = now.offset,
-    ) ?: initialDate.atTime(LocalTime.of(now.hour, now.minute)).atZone(zone)
-    val future = if (preferred.isAfter(now)) {
-        preferred
-    } else {
-        now.plusDays(1).withSecond(0).withNano(0)
-    }
-    return future.withSecond(0).withNano(0).toInstant().toEpochMilli()
-}
-
 internal fun calendarEventError(
     title: String,
     eventAt: Long,
     remindAt: Long?,
-    now: Long = System.currentTimeMillis(),
-): String? = when {
-    title.isBlank() -> "请填写日程标题"
-    eventAt <= now -> "日程时间必须晚于现在"
-    remindAt != null && remindAt <= now -> "提醒时间必须晚于现在"
-    remindAt != null && remindAt >= eventAt -> "提醒时间必须早于日程时间"
-    else -> null
-}
-
-internal fun reminderAfterEventChange(
-    priorEventAt: Long,
-    newEventAt: Long,
-    priorReminderAt: Long,
-): Long {
-    if (priorReminderAt >= newEventAt) return newEventAt - 60 * 60_000L
-    val priorLeadTime = (priorEventAt - priorReminderAt).coerceAtLeast(60_000L)
-    return newEventAt - priorLeadTime
+    now: Long = RecordTime.currentTimeMillis(),
+): String? {
+    if (title.isBlank()) return "请填写日程标题"
+    return when (RecordTime.futureEventError(eventAt, remindAt, now)) {
+        FutureEventError.EventNotFuture -> "日程时间必须晚于现在"
+        FutureEventError.ReminderNotFuture -> "提醒时间必须晚于现在"
+        FutureEventError.ReminderNotBeforeEvent -> "提醒时间必须早于日程时间"
+        null -> null
+    }
 }
 
 private fun formatCalendarDateTime(timestamp: Long, zone: ZoneId): String =
