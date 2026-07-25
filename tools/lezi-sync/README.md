@@ -23,14 +23,14 @@ $LEZI_DATA_DIR/
 
 ## NAS / Docker Compose
 
-默认镜像为 `lezi-sync:0.2.0`，容器内 uid/gid 为 `10001:10001`：
+默认镜像为 `lezi-sync:0.2.2`。为兼容无法管理 Unix uid/gid 的 NAS 绑定目录，
+容器内服务以 root 运行：
 
 ```bash
 cd tools/lezi-sync
 ./build-image.sh
 
-install -d -m 700 /volume1/docker/lezi
-chown 10001:10001 /volume1/docker/lezi
+mkdir -p /volume1/docker/lezi
 
 LEZI_DATA_HOST_PATH=/volume1/docker/lezi \
   docker compose up -d
@@ -41,7 +41,15 @@ curl -fsS http://127.0.0.1:8765/health
 
 Synology、QNAP 或其它 NAS 的数据路径不同，只需把
 `LEZI_DATA_HOST_PATH` 换成实际目录。Compose 只挂载该目录到 `/data`，
-并启用非 root、drop capabilities 和 `no-new-privileges`。
+删除全部默认 capabilities 后仅补回 `DAC_OVERRIDE`、`FOWNER`，同时启用
+`no-new-privileges`。不要开启特权模式，也不要挂载 Docker socket 或其它
+宿主目录。
+
+服务会尽力把私有目录和文件收紧为 `0700`/`0600`。部分 NAS 的 ACL 或共享
+文件系统允许容器读写，却禁止调用 `chmod`；从 `0.2.1` 起，这类
+`EPERM`、`EACCES`、`EOPNOTSUPP` 会记录一次警告后继续运行。只读挂载以及
+实际创建、读取或写入失败仍会阻止启动。`0.2.2` 的 root 运行模式仅用于
+跨 NAS 文件所有者写入兼容；仍应使用 NAS 的共享目录 ACL 限制其他用户访问。
 
 升级既有部署：
 
@@ -56,9 +64,9 @@ docker compose ps
 如果 NAS 不适合本机编译，可在开发机导出镜像：
 
 ```bash
-docker save lezi-sync:0.2.0 | gzip > lezi-sync-0.2.0.tar.gz
+docker save lezi-sync:0.2.2 | gzip > lezi-sync-0.2.2.tar.gz
 # 把 tar.gz 复制到 NAS 后：
-gzip -dc lezi-sync-0.2.0.tar.gz | docker load
+gzip -dc lezi-sync-0.2.2.tar.gz | docker load
 ```
 
 构建脚本只把 Cargo 清单、锁文件、Dockerfile 与 `src/` 放进临时构建上下文，
@@ -71,8 +79,8 @@ gzip -dc lezi-sync-0.2.0.tar.gz | docker load
 ```bash
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  --build-arg LEZI_SYNC_VERSION=0.2.0 \
-  -t your-registry/lezi-sync:0.2.0 \
+  --build-arg LEZI_SYNC_VERSION=0.2.2 \
+  -t your-registry/lezi-sync:0.2.2 \
   --push .
 ```
 
@@ -86,7 +94,7 @@ docker buildx build \
 | `LEZI_DATA_DIR` | `/data` | SQLite、密钥和媒体的唯一数据根 |
 | `LEZI_HOST` | `0.0.0.0` | 监听地址 |
 | `LEZI_PORT` | `8765` | 监听端口 |
-| `LEZI_SYNC_VERSION` | `0.2.0` | `/health` 返回的版本 |
+| `LEZI_SYNC_VERSION` | `0.2.2` | `/health` 返回的版本 |
 | `LEZI_INVITE_TTL_HOURS` | `24` | 邀请有效期，范围 1–168 |
 | `LEZI_MAX_MEDIA_BYTES` | `10485760` | 单个媒体最大字节数 |
 

@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -35,6 +37,9 @@ use uuid::Uuid;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const DEFAULT_INVITE_TTL_HOURS: u16 = 24;
 pub const DEFAULT_MAX_MEDIA_BYTES: usize = 10 * 1024 * 1024;
+
+#[cfg(unix)]
+static PERMISSION_HARDENING_DISABLED: AtomicBool = AtomicBool::new(false);
 
 type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 type InviteCodeFactory = Arc<dyn Fn() -> String + Send + Sync>;
@@ -625,7 +630,37 @@ pub(crate) fn secure_file(path: &Path) -> Result<(), std::io::Error> {
 #[cfg(unix)]
 fn set_mode(path: &Path, mode: u32) -> Result<(), std::io::Error> {
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+
+    if PERMISSION_HARDENING_DISABLED.load(Ordering::Acquire) {
+        return Ok(());
+    }
+
+    match fs::set_permissions(path, fs::Permissions::from_mode(mode)) {
+        Ok(()) => Ok(()),
+        Err(error) if is_compatible_permission_hardening_error(&error) => {
+            if !PERMISSION_HARDENING_DISABLED.swap(true, Ordering::AcqRel) {
+                tracing::warn!(
+                    path = %path.display(),
+                    requested_mode = format_args!("{mode:o}"),
+                    %error,
+                    "filesystem does not allow chmod; continuing with NAS-managed permissions"
+                );
+            }
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn is_compatible_permission_hardening_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(code)
+            if code == libc::EPERM
+                || code == libc::EACCES
+                || code == libc::EOPNOTSUPP
+    )
 }
 
 #[cfg(not(unix))]
@@ -766,5 +801,17 @@ mod tests {
         config.invite_ttl_hours = 24;
         config.max_media_bytes = 0;
         assert!(config.validate().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nas_permission_hardening_errors_are_compatible_but_read_only_is_fatal() {
+        for raw_os_error in [libc::EPERM, libc::EACCES, libc::EOPNOTSUPP] {
+            let error = std::io::Error::from_raw_os_error(raw_os_error);
+            assert!(is_compatible_permission_hardening_error(&error));
+        }
+
+        let read_only = std::io::Error::from_raw_os_error(libc::EROFS);
+        assert!(!is_compatible_permission_hardening_error(&read_only));
     }
 }

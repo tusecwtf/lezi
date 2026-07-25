@@ -7,7 +7,7 @@ RUN cargo build --locked --release
 
 FROM debian:bookworm-slim
 
-ARG LEZI_SYNC_VERSION=0.2.0
+ARG LEZI_SYNC_VERSION=0.2.2
 
 LABEL org.opencontainers.image.title="lezi-sync" \
       org.opencontainers.image.description="Rust home-LAN sync server for Lezi" \
@@ -20,13 +20,11 @@ ENV LEZI_SYNC_VERSION=${LEZI_SYNC_VERSION} \
     LEZI_INVITE_TTL_HOURS=24 \
     LEZI_MAX_MEDIA_BYTES=10485760
 
-RUN groupadd --gid 10001 lezi \
-    && useradd --uid 10001 --gid 10001 --create-home lezi \
-    && install -d -m 0700 -o lezi -g lezi /data /data/media
+RUN install -d -m 0700 /data /data/media
 
 COPY --from=builder /build/target/release/lezi-sync /usr/local/bin/lezi-sync
 
-USER 10001:10001
+USER 0:0
 
 EXPOSE 8765
 VOLUME ["/data"]

@@ -1,11 +1,11 @@
 services:
   lezi-sync:
-    image: ${LEZI_SYNC_IMAGE:-lezi-sync:0.2.0}
+    image: ${LEZI_SYNC_IMAGE:-lezi-sync:0.2.2}
     build:
       context: .
       dockerfile: Dockerfile
       args:
-        LEZI_SYNC_VERSION: ${LEZI_SYNC_VERSION:-0.2.0}
+        LEZI_SYNC_VERSION: ${LEZI_SYNC_VERSION:-0.2.2}
     restart: unless-stopped
     stop_grace_period: 30s
     init: true
@@ -21,6 +21,9 @@ services:
       - ${LEZI_DATA_HOST_PATH:-./data}:/data
     cap_drop:
       - ALL
+    cap_add:
+      - DAC_OVERRIDE
+      - FOWNER
     security_opt:
       - no-new-privileges:true
     logging:
