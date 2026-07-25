@@ -3,6 +3,7 @@ package com.lezi.babylog.sync
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import java.util.UUID
@@ -27,21 +28,38 @@ data class SyncSession(
     val pullCursor: Long = 0,
     val pullGeneration: String = "",
     val lastSuccessAt: Long? = null,
+    val serverHost: String = "",
+    val serverPort: Int = DEFAULT_SERVER_PORT,
+    val allowedSsids: List<String> = emptyList(),
 ) {
     val isJoined: Boolean
         get() = baseUrl.isNotBlank() && familyId.isNotBlank() && familyToken.isNotBlank()
+
+    val homeLanConfig: HomeLanServerConfig
+        get() = HomeLanServerConfig(
+            host = serverHost.ifBlank {
+                HomeLanServerConfig.fromBaseUrl(baseUrl).host
+            },
+            port = serverPort.takeIf { it in 1..65535 }
+                ?: HomeLanServerConfig.fromBaseUrl(baseUrl).port,
+            allowedSsids = allowedSsids,
+        )
 }
 
 interface SyncPreferences {
     val session: Flow<SyncSession>
     suspend fun saveServer(baseUrl: String)
+    suspend fun saveHomeLanConfig(config: HomeLanServerConfig, clearSessionIfServerChanged: Boolean = true)
     suspend fun saveSession(session: SyncSession)
     suspend fun updateCursor(cursor: Long, generation: String = "")
     suspend fun markSuccess(atMillis: Long)
     suspend fun ensureDeviceId(): String
     suspend fun ensureCreateRequestId(): String
     suspend fun clearCreateRequestId()
+    /** Clears family session only (legacy); prefer [clearAllLocalSyncConfig] for leave/delete. */
     suspend fun clearFamilySession()
+    /** G12/G13: wipe host/port/SSID allowlist + session. */
+    suspend fun clearAllLocalSyncConfig()
     /** Move legacy plaintext secrets into the secure store when present. */
     suspend fun migrateSecretsIfNeeded() {}
 }
@@ -52,8 +70,24 @@ class DataStoreSyncPreferences @Inject constructor(
     private val secureTokenStore: SecureFamilyTokenStore,
 ) : SyncPreferences {
     override val session: Flow<SyncSession> = dataStore.data.map { prefs ->
-        SyncSession(
-            baseUrl = prefs[Keys.BASE_URL].orEmpty(),
+        mapSession(prefs)
+    }
+
+    private fun mapSession(prefs: Preferences): SyncSession {
+        val legacyUrl = prefs[Keys.BASE_URL].orEmpty()
+        val host = prefs[Keys.SERVER_HOST].orEmpty().ifBlank {
+            HomeLanServerConfig.fromBaseUrl(legacyUrl).host
+        }
+        val port = prefs[Keys.SERVER_PORT]
+            ?: HomeLanServerConfig.fromBaseUrl(legacyUrl).port.takeIf { legacyUrl.isNotBlank() }
+            ?: DEFAULT_SERVER_PORT
+        val ssids = decodeSsids(prefs[Keys.ALLOWED_SSIDS])
+        val derivedBase = when {
+            host.isNotBlank() -> HomeLanServerConfig(host, port, ssids).baseUrl
+            else -> legacyUrl.trim().trimEnd('/')
+        }
+        return SyncSession(
+            baseUrl = derivedBase,
             familyId = prefs[Keys.FAMILY_ID].orEmpty(),
             familyToken = resolveFamilyToken(prefs),
             deviceId = prefs[Keys.DEVICE_ID].orEmpty(),
@@ -62,25 +96,82 @@ class DataStoreSyncPreferences @Inject constructor(
             pullCursor = prefs[Keys.PULL_CURSOR] ?: 0,
             pullGeneration = prefs[Keys.PULL_GENERATION].orEmpty(),
             lastSuccessAt = prefs[Keys.LAST_SUCCESS_AT],
+            serverHost = host,
+            serverPort = port,
+            allowedSsids = ssids,
         )
     }
 
     override suspend fun saveServer(baseUrl: String) {
-        val normalized = normalizeBaseUrl(baseUrl)
+        val config = HomeLanServerConfig.fromBaseUrl(baseUrl).withNormalized()
+        val previous = session.first()
+        saveHomeLanConfig(
+            config.copy(allowedSsids = previous.allowedSsids),
+            clearSessionIfServerChanged = true,
+        )
+    }
+
+    override suspend fun saveHomeLanConfig(
+        config: HomeLanServerConfig,
+        clearSessionIfServerChanged: Boolean,
+    ) {
+        val normalized = config.withNormalized()
+        val previous = session.first()
+        val newBase = normalized.baseUrl
         dataStore.edit { prefs ->
-            if (prefs[Keys.BASE_URL].orEmpty() != normalized) {
+            val serverChanged = previous.baseUrl.isNotBlank() &&
+                previous.baseUrl != newBase &&
+                newBase.isNotBlank()
+            if (clearSessionIfServerChanged && serverChanged && !previous.isJoined) {
                 clearFamilyValues(prefs)
             }
-            prefs[Keys.BASE_URL] = normalized
+            if (normalized.host.isBlank()) {
+                prefs.remove(Keys.SERVER_HOST)
+                prefs.remove(Keys.BASE_URL)
+            } else {
+                prefs[Keys.SERVER_HOST] = normalized.host
+                prefs[Keys.SERVER_PORT] = normalized.port
+                prefs[Keys.BASE_URL] = newBase
+            }
+            val ssidEncoded = encodeSsids(normalized.allowedSsids)
+            if (ssidEncoded.isBlank()) {
+                prefs.remove(Keys.ALLOWED_SSIDS)
+            } else {
+                prefs[Keys.ALLOWED_SSIDS] = ssidEncoded
+            }
+        }
+        // G10: joined + host/port change → keep token, full_resync cursor
+        if (previous.isJoined && previous.baseUrl != newBase && newBase.isNotBlank()) {
+            dataStore.edit {
+                it[Keys.PULL_CURSOR] = 0
+                it.remove(Keys.PULL_GENERATION)
+            }
         }
     }
 
     override suspend fun saveSession(session: SyncSession) {
         secureTokenStore.setToken(session.familyToken)
+        val config = session.homeLanConfig.withNormalized().let { c ->
+            if (c.host.isBlank() && session.baseUrl.isNotBlank()) {
+                HomeLanServerConfig.fromBaseUrl(session.baseUrl)
+                    .copy(allowedSsids = session.allowedSsids)
+                    .withNormalized()
+            } else {
+                c
+            }
+        }
         dataStore.edit { prefs ->
-            prefs[Keys.BASE_URL] = normalizeBaseUrl(session.baseUrl)
+            if (config.host.isNotBlank()) {
+                prefs[Keys.SERVER_HOST] = config.host
+                prefs[Keys.SERVER_PORT] = config.port
+                prefs[Keys.BASE_URL] = config.baseUrl
+            } else {
+                prefs[Keys.BASE_URL] = normalizeBaseUrl(session.baseUrl)
+            }
+            val ssidEncoded = encodeSsids(config.allowedSsids.ifEmpty { session.allowedSsids })
+            if (ssidEncoded.isBlank()) prefs.remove(Keys.ALLOWED_SSIDS)
+            else prefs[Keys.ALLOWED_SSIDS] = ssidEncoded
             prefs[Keys.FAMILY_ID] = session.familyId
-            // Token lives only in the Keystore-wrapped store after this write.
             prefs.remove(Keys.FAMILY_TOKEN)
             prefs[Keys.DEVICE_ID] = session.deviceId
             prefs[Keys.ROLE] = session.role.name
@@ -147,12 +238,18 @@ class DataStoreSyncPreferences @Inject constructor(
         dataStore.edit(::clearFamilyValues)
     }
 
+    override suspend fun clearAllLocalSyncConfig() {
+        dataStore.edit { prefs ->
+            clearFamilyValues(prefs)
+            prefs.remove(Keys.BASE_URL)
+            prefs.remove(Keys.SERVER_HOST)
+            prefs.remove(Keys.SERVER_PORT)
+            prefs.remove(Keys.ALLOWED_SSIDS)
+        }
+    }
+
     override suspend fun migrateSecretsIfNeeded() = migratePlaintextTokenIfPresent()
 
-    /**
-     * One-shot migration for upgrades that still hold `sync_family_token` in
-     * plaintext DataStore preferences.
-     */
     suspend fun migratePlaintextTokenIfPresent() {
         dataStore.edit { prefs ->
             val legacy = prefs[Keys.FAMILY_TOKEN]
@@ -161,6 +258,15 @@ class DataStoreSyncPreferences @Inject constructor(
                     secureTokenStore.setToken(legacy)
                 }
                 prefs.remove(Keys.FAMILY_TOKEN)
+            }
+            // Migrate legacy baseUrl → host/port once
+            val base = prefs[Keys.BASE_URL].orEmpty()
+            if (base.isNotBlank() && prefs[Keys.SERVER_HOST].isNullOrBlank()) {
+                val parsed = HomeLanServerConfig.fromBaseUrl(base)
+                if (parsed.host.isNotBlank()) {
+                    prefs[Keys.SERVER_HOST] = parsed.host
+                    prefs[Keys.SERVER_PORT] = parsed.port
+                }
             }
         }
     }
@@ -189,10 +295,20 @@ class DataStoreSyncPreferences @Inject constructor(
         secureTokenStore.clearToken()
     }
 
+    private fun encodeSsids(ssids: List<String>): String =
+        HomeLanServerConfig.normalizeSsids(ssids).joinToString("\u001e")
+
+    private fun decodeSsids(raw: String?): List<String> {
+        if (raw.isNullOrBlank()) return emptyList()
+        return HomeLanServerConfig.normalizeSsids(raw.split('\u001e', '\n', ','))
+    }
+
     private object Keys {
         val BASE_URL = stringPreferencesKey("sync_base_url")
+        val SERVER_HOST = stringPreferencesKey("sync_server_host")
+        val SERVER_PORT = intPreferencesKey("sync_server_port")
+        val ALLOWED_SSIDS = stringPreferencesKey("sync_allowed_ssids")
         val FAMILY_ID = stringPreferencesKey("sync_family_id")
-        /** Legacy plaintext key — migrated out on first secure write/read path. */
         val FAMILY_TOKEN = stringPreferencesKey("sync_family_token")
         val DEVICE_ID = stringPreferencesKey("sync_device_id")
         val ROLE = stringPreferencesKey("sync_family_role")

@@ -110,6 +110,9 @@ data class FamilyUi(
     val current: Baby? = null,
     val babies: List<Baby> = emptyList(),
     val baseUrl: String = "",
+    val serverHost: String = "",
+    val serverPort: Int = com.lezi.babylog.sync.DEFAULT_SERVER_PORT,
+    val allowedSsids: List<String> = emptyList(),
     val role: FamilyRole = FamilyRole.None,
     val lastSuccessAt: Long? = null,
 )
@@ -125,8 +128,11 @@ class FamilyViewModel @Inject constructor(
     private val sync: SyncPort,
     private val careLog: CareLog,
     private val avatarFileStore: BabyAvatarFileStore,
+    private val networkState: com.lezi.babylog.sync.NetworkState,
 ) : ViewModel() {
     private val profileSaveMutex = Mutex()
+
+    fun currentWifiSsid(): String? = networkState.currentWifiSsid()
 
     val ui = combine(
         sync.status(),
@@ -149,6 +155,9 @@ class FamilyViewModel @Inject constructor(
             current = current,
             babies = babies,
             baseUrl = session.baseUrl,
+            serverHost = session.serverHost,
+            serverPort = session.serverPort,
+            allowedSsids = session.allowedSsids,
             role = session.role,
             lastSuccessAt = session.lastSuccessAt,
         )
@@ -356,6 +365,30 @@ class FamilyViewModel @Inject constructor(
         }
     }
 
+    fun saveHomeLanConfig(
+        host: String,
+        portText: String,
+        ssid1: String,
+        ssid2: String,
+        onMessage: (String) -> Unit,
+    ) {
+        viewModelScope.launch {
+            val (h, p) = com.lezi.babylog.sync.HomeLanServerConfig.parseHostPort(
+                host,
+                portText.toIntOrNull() ?: com.lezi.babylog.sync.DEFAULT_SERVER_PORT,
+            )
+            val port = portText.toIntOrNull() ?: p
+            val config = com.lezi.babylog.sync.HomeLanServerConfig(
+                host = h,
+                port = port,
+                allowedSsids = listOf(ssid1, ssid2),
+            )
+            onMessage(sync.saveHomeLanConfig(config).fold({ "家庭网络与服务器已保存" }) {
+                familySyncError(it, "保存失败")
+            })
+        }
+    }
+
     fun createFamily(onMessage: (String) -> Unit) {
         viewModelScope.launch {
             onMessage(sync.createFamily(ui.value.displayName).fold(
@@ -377,7 +410,7 @@ class FamilyViewModel @Inject constructor(
 
 internal fun familySyncError(error: Throwable, fallback: String): String {
     if (error is SyncNotEnabledException) {
-        return "请先填写家庭服务器地址并加入家庭"
+        return "请先填写家庭服务器地址并绑定 Wi‑Fi 名称后加入家庭"
     }
     val message = error.message.orEmpty()
     // Network/host/path leaks always collapse to a fixed product line.
@@ -407,8 +440,8 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
 }
 
 internal fun syncStatusLabel(status: SyncStatus): String = when (status) {
-    SyncStatus.Disabled -> "未启用"
-    SyncStatus.BlockedOfflineHome -> "等待家庭 Wi‑Fi"
+    SyncStatus.Disabled -> "未启用（需服务器与 Wi‑Fi 名称）"
+    SyncStatus.BlockedOfflineHome -> "等待家庭 Wi‑Fi 或服务器可达"
     SyncStatus.Idle -> "空闲"
     SyncStatus.Syncing -> "同步中"
     SyncStatus.Error -> "同步错误"
@@ -454,7 +487,43 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
     var message by remember { mutableStateOf<String?>(null) }
     var showJoin by remember { mutableStateOf(false) }
     var joinCode by remember { mutableStateOf("") }
-    var serverAddress by remember(ui.baseUrl) { mutableStateOf(ui.baseUrl) }
+    val novice = remember {
+        com.lezi.babylog.sync.HomeLanServerConfig.noviceUiDefaults(vm.currentWifiSsid())
+    }
+    // Empty persisted config → show novice defaults; otherwise show saved values.
+    val persistedEmpty = ui.serverHost.isBlank() && ui.baseUrl.isBlank()
+    var serverHost by remember(ui.serverHost, ui.baseUrl) {
+        mutableStateOf(
+            when {
+                ui.serverHost.isNotBlank() -> ui.serverHost
+                ui.baseUrl.isNotBlank() -> com.lezi.babylog.sync.HomeLanServerConfig.fromBaseUrl(ui.baseUrl).host
+                else -> novice.host
+            },
+        )
+    }
+    var serverPort by remember(ui.serverPort, ui.baseUrl) {
+        mutableStateOf(
+            when {
+                ui.serverHost.isNotBlank() || ui.serverPort != com.lezi.babylog.sync.DEFAULT_SERVER_PORT ->
+                    ui.serverPort.toString()
+                ui.baseUrl.isNotBlank() ->
+                    com.lezi.babylog.sync.HomeLanServerConfig.fromBaseUrl(ui.baseUrl).port.toString()
+                else -> novice.port.toString()
+            },
+        )
+    }
+    var ssid1 by remember(ui.allowedSsids) {
+        mutableStateOf(ui.allowedSsids.getOrNull(0) ?: novice.allowedSsids.getOrNull(0).orEmpty())
+    }
+    var ssid2 by remember(ui.allowedSsids) {
+        mutableStateOf(ui.allowedSsids.getOrNull(1).orEmpty())
+    }
+    val previewBaseUrl = remember(serverHost, serverPort) {
+        com.lezi.babylog.sync.HomeLanServerConfig(
+            host = serverHost,
+            port = serverPort.toIntOrNull() ?: com.lezi.babylog.sync.DEFAULT_SERVER_PORT,
+        ).baseUrl
+    }
     var confirmDeleteFamily by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<Baby?>(null) }
     var confirmDelete by remember { mutableStateOf<Baby?>(null) }
@@ -624,25 +693,77 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
             )
 
             SectionHeading(title = "家人一起记")
-            if (controls.showServerSetup) {
+            if (controls.showServerSetup || true) {
+                // Always show network config (host/SSID) even when joined so user can rebind SSID / repoint host.
                 OutlinedTextField(
-                    value = serverAddress,
-                    onValueChange = { serverAddress = it },
-                    label = { Text("家庭服务器地址（必填）") },
-                    placeholder = { Text("http://192.168.50.4:8765") },
+                    value = serverHost,
+                    onValueChange = { serverHost = it },
+                    label = { Text("家庭服务器主机（IP 或域名）") },
+                    placeholder = { Text("192.168.50.4") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                if (isPublicCleartextBaseUrl(serverAddress)) {
+                OutlinedTextField(
+                    value = serverPort,
+                    onValueChange = { serverPort = it.filter { ch -> ch.isDigit() }.take(5) },
+                    label = { Text("端口") },
+                    placeholder = { Text("8765") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = ssid1,
+                    onValueChange = { ssid1 = it },
+                    label = { Text("家庭 Wi‑Fi 名称 1（如 2.4G）") },
+                    placeholder = { Text("当前连接的 Wi‑Fi 名") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = ssid2,
+                    onValueChange = { ssid2 = it },
+                    label = { Text("家庭 Wi‑Fi 名称 2（可选，如 5G）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                LeziSecondaryButton(
+                    "填入当前 Wi‑Fi 名称",
+                    onClick = {
+                        val cur = vm.currentWifiSsid()?.trim().orEmpty()
+                        if (cur.isEmpty()) {
+                            message = "无法读取 Wi‑Fi 名称，请开启定位权限后重试"
+                        } else if (ssid1.isBlank()) {
+                            ssid1 = cur
+                        } else if (ssid2.isBlank() && ssid1 != cur) {
+                            ssid2 = cur
+                        } else if (ssid1 != cur && ssid2 != cur) {
+                            message = "Wi‑Fi 名称已满 2 个，请先清空一格"
+                        } else {
+                            message = "当前 Wi‑Fi 已在列表中"
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (isPublicCleartextBaseUrl(previewBaseUrl)) {
                     Text(
                         PUBLIC_CLEARTEXT_WARNING,
                         style = LeziTypography.Meta,
                         color = MaterialTheme.colorScheme.error,
                     )
                 }
+                if (persistedEmpty) {
+                    Text(
+                        "已预填常见示例地址与当前 Wi‑Fi，请确认后保存（未保存不会生效）。",
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 LeziSecondaryButton(
-                    "保存服务器地址",
-                    onClick = { vm.saveServer(serverAddress) { message = it } },
+                    "保存家庭网络与服务器",
+                    onClick = {
+                        vm.saveHomeLanConfig(serverHost, serverPort, ssid1, ssid2) { message = it }
+                    },
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
@@ -708,7 +829,7 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                 }
             }
             Text(
-                "仅在家庭 Wi‑Fi 且服务器可达时前台同步；不会推送伴侣的新记录。\n" +
+                "仅在已绑定的家庭 Wi‑Fi（最多 2 个名称，如 2.4G/5G）且服务器可达时前台同步；不会推送伴侣的新记录。\n" +
                     "状态：${syncStatusLabel(ui.status)}" +
                     (ui.lastSuccessAt?.let { " · 上次成功：${java.text.DateFormat.getDateTimeInstance().format(it)}" }
                         ?: ""),

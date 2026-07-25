@@ -231,7 +231,12 @@ class RealSyncPortTest {
     @Test
     fun savingServerBeforeJoinClearsMediaUploadMarkers() = runTest {
         val rig = SyncRig(
-            session = SyncSession(baseUrl = "http://192.168.1.20:8787"),
+            session = SyncSession(
+                baseUrl = "http://192.168.1.20:8787",
+                serverHost = "192.168.1.20",
+                serverPort = 8787,
+                allowedSsids = listOf("Home"),
+            ),
         )
         val mediaUuid = "44444444-4444-4444-4444-444444444444"
         rig.media.seed(
@@ -252,14 +257,20 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun joinedSessionCannotBeRepointedAndLoseItsOnlyCredential() = runTest {
-        val initial = joinedSession("family-a")
+    fun joinedSessionCanRepointHostAndKeepsTokenWithCursorReset() = runTest {
+        val initial = joinedSession("family-a").copy(pullCursor = 9, pullGeneration = "gen-a")
         val rig = SyncRig(session = initial)
 
         val result = rig.port.saveServer("http://192.168.1.99:8765")
 
-        assertThat(result.isFailure).isTrue()
-        assertThat(rig.preferences.current()).isEqualTo(initial)
+        assertThat(result.isSuccess).isTrue()
+        val after = rig.preferences.current()
+        assertThat(after.familyToken).isEqualTo("token")
+        assertThat(after.familyId).isEqualTo("family-a")
+        assertThat(after.baseUrl).isEqualTo("http://192.168.1.99:8765")
+        assertThat(after.pullCursor).isEqualTo(0)
+        assertThat(after.pullGeneration).isEmpty()
+        assertThat(after.allowedSsids).containsExactly("Home")
     }
 
     @Test
@@ -276,7 +287,12 @@ class RealSyncPortTest {
     @Test
     fun createRetriesReuseThePersistedRecoveryIdUntilSessionSave() = runTest {
         val rig = SyncRig(
-            session = SyncSession(baseUrl = "http://192.168.1.20:8787"),
+            session = SyncSession(
+                baseUrl = "http://192.168.1.20:8787",
+                serverHost = "192.168.1.20",
+                serverPort = 8787,
+                allowedSsids = listOf("Home"),
+            ),
         )
         rig.backend.createFailure = IllegalStateException("response lost")
 
@@ -292,7 +308,12 @@ class RealSyncPortTest {
     @Test
     fun concurrentCreateAndJoinCannotOverwriteTheFirstCredential() = runTest {
         val rig = SyncRig(
-            session = SyncSession(baseUrl = "http://192.168.1.20:8787"),
+            session = SyncSession(
+                baseUrl = "http://192.168.1.20:8787",
+                serverHost = "192.168.1.20",
+                serverPort = 8787,
+                allowedSsids = listOf("Home"),
+            ),
         )
         rig.backend.createStarted = CompletableDeferred()
         rig.backend.releaseCreate = CompletableDeferred()
@@ -1824,18 +1845,47 @@ private class RecordingSyncBackend : SyncBackend {
 }
 
 private class MemorySyncPreferences(initial: SyncSession) : SyncPreferences {
-    private val state = MutableStateFlow(initial)
+    private val state = MutableStateFlow(initial.withHomeLanDerived())
     private var createRequestId: String? = null
     override val session: Flow<SyncSession> = state
 
     fun current(): SyncSession = state.value
 
     override suspend fun saveServer(baseUrl: String) {
-        state.value = state.value.copy(baseUrl = baseUrl)
+        val parsed = HomeLanServerConfig.fromBaseUrl(baseUrl).withNormalized()
+        saveHomeLanConfig(parsed.copy(allowedSsids = state.value.allowedSsids))
+    }
+
+    override suspend fun saveHomeLanConfig(
+        config: HomeLanServerConfig,
+        clearSessionIfServerChanged: Boolean,
+    ) {
+        val n = config.withNormalized()
+        val prev = state.value
+        var next = prev.copy(
+            baseUrl = n.baseUrl,
+            serverHost = n.host,
+            serverPort = n.port,
+            allowedSsids = n.allowedSsids,
+        )
+        if (prev.isJoined && prev.baseUrl != n.baseUrl && n.baseUrl.isNotBlank()) {
+            next = next.copy(pullCursor = 0, pullGeneration = "")
+        }
+        if (clearSessionIfServerChanged && !prev.isJoined && prev.baseUrl != n.baseUrl) {
+            next = next.copy(
+                familyId = "",
+                familyToken = "",
+                role = FamilyRole.None,
+                pullCursor = 0,
+                pullGeneration = "",
+                lastSuccessAt = null,
+            )
+        }
+        state.value = next
     }
 
     override suspend fun saveSession(session: SyncSession) {
-        state.value = session
+        state.value = session.withHomeLanDerived()
     }
 
     override suspend fun updateCursor(cursor: Long, generation: String) {
@@ -1875,6 +1925,23 @@ private class MemorySyncPreferences(initial: SyncSession) : SyncPreferences {
             lastSuccessAt = null,
         )
     }
+
+    override suspend fun clearAllLocalSyncConfig() {
+        state.value = SyncSession()
+    }
+}
+
+private fun SyncSession.withHomeLanDerived(): SyncSession {
+    if (serverHost.isNotBlank()) {
+        return copy(baseUrl = HomeLanServerConfig(serverHost, serverPort, allowedSsids).baseUrl)
+    }
+    if (baseUrl.isBlank()) return this
+    val parsed = HomeLanServerConfig.fromBaseUrl(baseUrl)
+    return copy(
+        serverHost = parsed.host,
+        serverPort = parsed.port,
+        baseUrl = parsed.baseUrl,
+    )
 }
 
 private class MutablePolicyClock(var now: Long = 1_000) : PolicyClock {
@@ -1921,6 +1988,7 @@ private class TestMediaFileStore : SyncMediaFileStore {
 private class SyncRig(
     session: SyncSession,
     wifi: Boolean = true,
+    ssid: String? = "Home",
 ) {
     val backend = RecordingSyncBackend()
     val preferences = MemorySyncPreferences(session)
@@ -1935,8 +2003,12 @@ private class SyncRig(
     }
     val clock = MutablePolicyClock()
     val foreground = TestForegroundState()
+    private val networkState = object : NetworkState {
+        override fun isWifiConnected(): Boolean = wifi
+        override fun currentWifiSsid(): String? = ssid
+    }
     private val policy = HomeNetworkPolicy(
-        networkState = NetworkState { wifi },
+        networkState = networkState,
         healthProbe = HealthProbe { true },
         clock = clock,
     )
@@ -1944,6 +2016,7 @@ private class SyncRig(
         backend = backend,
         preferences = preferences,
         policy = policy,
+        networkState = networkState,
         outboxDao = outbox,
         recordDao = records,
         babyDao = babies,
@@ -1971,6 +2044,9 @@ private fun joinedSession(familyId: String) = SyncSession(
     familyToken = "token",
     deviceId = "device-a",
     role = FamilyRole.Owner,
+    serverHost = "192.168.1.20",
+    serverPort = 8787,
+    allowedSsids = listOf("Home"),
 )
 
 private class MemoryOutboxDao : OutboxDao {

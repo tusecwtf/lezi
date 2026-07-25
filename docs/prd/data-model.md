@@ -244,13 +244,21 @@ V1 最小路径：创建默认 `Family` + 当前 `LocalUser`（匿名）+ `Baby`
 
 ```kotlin
 enum class SyncStatus {
-  Disabled,            // 未配置服务器或未加入家庭
-  BlockedOfflineHome,  // 非 Wi-Fi、health 失败、退避或不在前台
+  Disabled,            // 未配置服务器/SSID 白名单或未加入家庭
+  BlockedOfflineHome,  // 非 Wi-Fi、SSID 未命中/读不到、health 失败、退避或不在前台
   Idle,
   Syncing,
   Error,
 }
 ```
+
+本机家网配置（`SyncPreferences`，**不同步到 NAS**）：
+
+| 字段 | 说明 |
+|------|------|
+| `serverHost` / `serverPort` | 单一 NAS；port 默认 8765；派生 `baseUrl=http://host:port` |
+| `allowedSsids` | 最多 2 个；trim 后精确匹配当前 Wi‑Fi 名 |
+| 会话字段 | `familyId` / token / role / cursor / generation（同前） |
 
 ### 6.2 接口（契约级，语言示意）
 

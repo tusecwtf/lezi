@@ -425,6 +425,7 @@ class RealSyncPort @Inject constructor(
     private val backend: SyncBackend,
     private val preferences: SyncPreferences,
     private val policy: HomeNetworkPolicy,
+    private val networkState: NetworkState,
     private val outboxDao: OutboxDao,
     private val recordDao: RecordDao,
     private val babyDao: BabyDao,
@@ -483,14 +484,36 @@ class RealSyncPort @Inject constructor(
     override suspend fun saveServer(baseUrl: String) = runCatching {
         syncMutex.withLock {
             val previous = preferences.session.first()
-            val normalized = baseUrl.trim().trimEnd('/')
-            require(!previous.isJoined || previous.baseUrl == normalized) {
-                "请先退出当前家庭，再修改服务器地址"
-            }
-            if (previous.baseUrl != normalized) {
+            val parsed = HomeLanServerConfig.fromBaseUrl(baseUrl).withNormalized()
+            require(parsed.isServerConfigured) { "请先填写家庭服务器地址" }
+            val merged = parsed.copy(allowedSsids = previous.allowedSsids)
+            // Before join: clear stale upload receipts for the old host.
+            // After join (G10): keep token; receipts reset + cursor zeroed in prefs.
+            if (previous.baseUrl.isNotBlank() && previous.baseUrl != merged.baseUrl) {
                 resetLocalSyncReceipts(previous)
             }
-            preferences.saveServer(baseUrl)
+            preferences.saveHomeLanConfig(merged, clearSessionIfServerChanged = !previous.isJoined)
+            cachedSession = preferences.session.first()
+            currentStatus.value = if (cachedSession.isJoined) SyncStatus.Idle else SyncStatus.Disabled
+        }
+    }.onFailure(::updateFailureStatus)
+
+    override suspend fun saveHomeLanConfig(config: HomeLanServerConfig) = runCatching {
+        syncMutex.withLock {
+            val previous = preferences.session.first()
+            val merged = config.withNormalized().let { c ->
+                // Keep existing SSIDs if caller only updated host/port with empty list by mistake
+                if (c.allowedSsids.isEmpty() && previous.allowedSsids.isNotEmpty() && c.host == previous.serverHost) {
+                    c.copy(allowedSsids = previous.allowedSsids)
+                } else {
+                    c
+                }
+            }
+            require(merged.isServerConfigured) { "请先填写家庭服务器地址" }
+            if (previous.baseUrl.isNotBlank() && previous.baseUrl != merged.baseUrl) {
+                resetLocalSyncReceipts(previous)
+            }
+            preferences.saveHomeLanConfig(merged, clearSessionIfServerChanged = !previous.isJoined)
             cachedSession = preferences.session.first()
             currentStatus.value = if (cachedSession.isJoined) SyncStatus.Idle else SyncStatus.Disabled
         }
@@ -513,13 +536,33 @@ class RealSyncPort @Inject constructor(
                 "请先退出当前家庭，再加入新的家庭"
             }
             val decoded = InvitePayloadCodec.decode(payload)
-            val baseUrl = decoded.baseUrl.ifBlank { preferences.session.first().baseUrl }
-            if (baseUrl.isBlank()) requireAllowed(HomeNetworkDecision.MissingServer)
-            val decision = policy.evaluate(baseUrl, foregroundState.isForeground())
+            val previous = preferences.session.first()
+            val fromQr = decoded.baseUrl.takeIf { it.isNotBlank() }?.let { HomeLanServerConfig.fromBaseUrl(it) }
+            val baseConfig = (fromQr ?: previous.homeLanConfig).withNormalized()
+            val currentSsid = networkState.currentWifiSsid()?.trim().orEmpty()
+            val ssids = previous.allowedSsids.toMutableList()
+            if (currentSsid.isNotEmpty() && !HomeNetworkPolicy.isUnknownSsid(currentSsid)) {
+                if (ssids.none { it == currentSsid }) {
+                    if (ssids.size >= MAX_ALLOWED_SSIDS) {
+                        error("Wi‑Fi 名称已满 2 个，请先删除一个再绑定当前网络")
+                    }
+                    ssids += currentSsid
+                }
+            }
+            val config = baseConfig.copy(allowedSsids = HomeLanServerConfig.normalizeSsids(ssids))
+            preferences.saveHomeLanConfig(config, clearSessionIfServerChanged = false)
+            val decision = policy.evaluate(config, foregroundState.isForeground())
             requireAllowed(decision)
+            val baseUrl = config.baseUrl
             val deviceId = preferences.ensureDeviceId()
             val joined = backend.join(baseUrl, decoded.code, deviceId)
             persistJoin(baseUrl, deviceId, joined).also {
+                // re-persist SSIDs after join session write
+                val after = preferences.session.first()
+                preferences.saveHomeLanConfig(
+                    after.homeLanConfig.copy(allowedSsids = config.allowedSsids),
+                    clearSessionIfServerChanged = false,
+                )
                 requestSync(SyncTrigger.PullToRefresh)
             }
         }
@@ -547,7 +590,7 @@ class RealSyncPort @Inject constructor(
             val mediaEditGuard = captureLocalMediaEditGuard()
             // Snapshot first: a non-Wi-Fi write still leaves a durable outbox.
             captureLocalChanges(session)
-            val decision = policy.evaluate(session.baseUrl, foregroundState.isForeground())
+            val decision = policy.evaluate(session.homeLanConfig, foregroundState.isForeground())
             requireAllowed(decision)
             currentStatus.value = SyncStatus.Syncing
             val plan = SyncPlan.forTrigger(trigger)
@@ -568,7 +611,7 @@ class RealSyncPort @Inject constructor(
             }
             if (plan.pull && !recovered) {
                 requireAllowed(
-                    policy.evaluate(current.baseUrl, foregroundState.isForeground()),
+                    policy.evaluate(current.homeLanConfig, foregroundState.isForeground()),
                 )
                 val pulled = try {
                     backend.pull(current)
@@ -603,7 +646,7 @@ class RealSyncPort @Inject constructor(
         }
         outboxDao.deleteFamily(it.familyId)
         resetLocalSyncReceipts(it)
-        preferences.clearFamilySession()
+        preferences.clearAllLocalSyncConfig()
         cachedSession = preferences.session.first()
         currentStatus.value = SyncStatus.Disabled
     }
@@ -617,7 +660,7 @@ class RealSyncPort @Inject constructor(
         }
         outboxDao.deleteFamily(it.familyId)
         resetLocalSyncReceipts(it)
-        preferences.clearFamilySession()
+        preferences.clearAllLocalSyncConfig()
         cachedSession = preferences.session.first()
         currentStatus.value = SyncStatus.Disabled
     }
@@ -748,10 +791,10 @@ class RealSyncPort @Inject constructor(
                 )
             }
             .sortedBy { ENTITY_ORDER.indexOf(it.type).takeIf { index -> index >= 0 } ?: Int.MAX_VALUE }
-        requireAllowed(policy.evaluate(session.baseUrl, foregroundState.isForeground()))
+        requireAllowed(policy.evaluate(session.homeLanConfig, foregroundState.isForeground()))
         backend.push(session, entities)
         uploads.forEach { media ->
-            requireAllowed(policy.evaluate(session.baseUrl, foregroundState.isForeground()))
+            requireAllowed(policy.evaluate(session.homeLanConfig, foregroundState.isForeground()))
             // Metadata needs the compressed byte size, so preparation happens
             // once before the metadata push and again here. Re-preparing one
             // file at a time bounds resident JPEG bytes to a single upload.
@@ -1064,14 +1107,19 @@ class RealSyncPort @Inject constructor(
     }
 
     private suspend fun persistJoin(baseUrl: String, deviceId: String, joined: JoinResult): SyncSession {
+        val previous = preferences.session.first()
+        val parsed = HomeLanServerConfig.fromBaseUrl(baseUrl).withNormalized()
         val session = SyncSession(
-            baseUrl = baseUrl,
+            baseUrl = parsed.baseUrl.ifBlank { baseUrl },
             familyId = joined.familyId,
             familyToken = joined.token,
             deviceId = deviceId,
             role = joined.role,
             pullCursor = joined.cursor,
             pullGeneration = joined.generation,
+            serverHost = parsed.host.ifBlank { previous.serverHost },
+            serverPort = if (parsed.host.isNotBlank()) parsed.port else previous.serverPort,
+            allowedSsids = previous.allowedSsids,
         )
         // Upload receipts only prove that bytes exist in the previous
         // server/family namespace. A new family must reconcile them again.
@@ -1123,7 +1171,7 @@ class RealSyncPort @Inject constructor(
         )
         preferences.updateCursor(0, generation = "")
         var current = preferences.session.first()
-        requireAllowed(policy.evaluate(current.baseUrl, foregroundState.isForeground()))
+        requireAllowed(policy.evaluate(current.homeLanConfig, foregroundState.isForeground()))
         val authoritative = backend.pull(current)
         applyRemote(
             current,
@@ -1140,7 +1188,7 @@ class RealSyncPort @Inject constructor(
         captureLocalChanges(current)
         pushPending(current)
         current = preferences.session.first()
-        requireAllowed(policy.evaluate(current.baseUrl, foregroundState.isForeground()))
+        requireAllowed(policy.evaluate(current.homeLanConfig, foregroundState.isForeground()))
         val finalPull = backend.pull(current)
         applyRemote(current, finalPull.entities, mediaEditGuard = mediaEditGuard)
         downloadMissingMedia(current, mediaEditGuard)
@@ -1177,11 +1225,9 @@ class RealSyncPort @Inject constructor(
             require(!current.isJoined) {
                 "请先退出当前家庭，再创建新的家庭"
             }
-            val baseUrl = current.baseUrl
-            if (baseUrl.isBlank()) requireAllowed(HomeNetworkDecision.MissingServer)
-            val decision = policy.evaluate(baseUrl, foregroundState.isForeground())
+            val decision = policy.evaluate(current.homeLanConfig, foregroundState.isForeground())
             requireAllowed(decision)
-            block(baseUrl)
+            block(current.homeLanConfig.baseUrl)
         }
     }.onFailure(::updateFailureStatus)
 
@@ -1190,7 +1236,7 @@ class RealSyncPort @Inject constructor(
             val session = preferences.session.first()
             cachedSession = session
             if (!session.isJoined) throw SyncNotEnabledException()
-            val decision = policy.evaluate(session.baseUrl, foregroundState.isForeground())
+            val decision = policy.evaluate(session.homeLanConfig, foregroundState.isForeground())
             requireAllowed(decision)
             block(session)
         }
@@ -1479,7 +1525,7 @@ class RealSyncPort @Inject constructor(
         mediaDao.listMissingLocalBytes()
             .filter { it.hasReceiptFor(session) }
             .forEach { media ->
-                requireAllowed(policy.evaluate(session.baseUrl, foregroundState.isForeground()))
+                requireAllowed(policy.evaluate(session.homeLanConfig, foregroundState.isForeground()))
                 // Soft-fail missing remote bytes (half-upload / 404) and other
                 // media GET failures so the pull cursor can still advance.
                 // Empty localUri keeps the asset queued for a later retry.
@@ -1625,6 +1671,9 @@ private fun JsonObject.toJoinResult(): JoinResult = JoinResult(
 
 private fun HomeNetworkDecision.userMessage(): String = when (this) {
     HomeNetworkDecision.MissingServer -> "请先填写家庭服务器地址"
+    HomeNetworkDecision.MissingSsidAllowlist -> "请先绑定家庭 Wi‑Fi 名称（最多 2 个，如 2.4G/5G）"
+    HomeNetworkDecision.SsidUnavailable -> "无法读取 Wi‑Fi 名称，请开启定位权限后重试"
+    HomeNetworkDecision.SsidNotMatched -> "当前 Wi‑Fi 未绑定，请在账户中添加此网络名称"
     HomeNetworkDecision.NotOnWifi, HomeNetworkDecision.ServerUnavailable,
     HomeNetworkDecision.BackingOff -> "无法连接家庭服务器，请确认在家中 Wi‑Fi"
     HomeNetworkDecision.Background -> "家庭同步仅在前台运行"
@@ -1632,8 +1681,12 @@ private fun HomeNetworkDecision.userMessage(): String = when (this) {
 }
 
 private fun HomeNetworkDecision.toSyncStatus(): SyncStatus = when (this) {
-    HomeNetworkDecision.MissingServer -> SyncStatus.Disabled
+    HomeNetworkDecision.MissingServer,
+    HomeNetworkDecision.MissingSsidAllowlist,
+    -> SyncStatus.Disabled
     HomeNetworkDecision.NotOnWifi,
+    HomeNetworkDecision.SsidUnavailable,
+    HomeNetworkDecision.SsidNotMatched,
     HomeNetworkDecision.ServerUnavailable,
     HomeNetworkDecision.BackingOff,
     HomeNetworkDecision.Background,

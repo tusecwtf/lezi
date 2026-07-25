@@ -3,6 +3,8 @@ package com.lezi.babylog.sync
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.net.wifi.WifiManager
+import android.os.Build
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.net.HttpURLConnection
 import java.net.URL
@@ -15,14 +17,18 @@ import kotlinx.coroutines.withContext
 enum class HomeNetworkDecision {
     Allowed,
     MissingServer,
+    MissingSsidAllowlist,
     NotOnWifi,
+    SsidUnavailable,
+    SsidNotMatched,
     ServerUnavailable,
     BackingOff,
     Background,
 }
 
-fun interface NetworkState {
+interface NetworkState {
     fun isWifiConnected(): Boolean
+    fun currentWifiSsid(): String?
 }
 
 fun interface HealthProbe {
@@ -59,18 +65,34 @@ class HomeNetworkPolicy @Inject constructor(
     private var retryAfterMillis = 0L
     private var backoffBaseUrl = ""
 
-    suspend fun evaluate(baseUrl: String, isForeground: Boolean): HomeNetworkDecision {
-        if (baseUrl.isBlank()) return HomeNetworkDecision.MissingServer
+    /**
+     * Gate for create / invite / join / push / pull.
+     * @param config local home-LAN server + SSID allowlist
+     */
+    suspend fun evaluate(
+        config: HomeLanServerConfig,
+        isForeground: Boolean,
+    ): HomeNetworkDecision {
+        val normalized = config.withNormalized()
+        if (!normalized.isServerConfigured) return HomeNetworkDecision.MissingServer
+        if (!normalized.hasSsidAllowlist) return HomeNetworkDecision.MissingSsidAllowlist
         if (!isForeground) return HomeNetworkDecision.Background
         if (!networkState.isWifiConnected()) return HomeNetworkDecision.NotOnWifi
-        val normalizedBaseUrl = baseUrl.trimEnd('/')
-        if (normalizedBaseUrl != backoffBaseUrl) {
-            backoffBaseUrl = normalizedBaseUrl
+        val currentSsid = networkState.currentWifiSsid()?.trim().orEmpty()
+        if (currentSsid.isEmpty() || isUnknownSsid(currentSsid)) {
+            return HomeNetworkDecision.SsidUnavailable
+        }
+        if (!HomeLanServerConfig.ssidMatches(currentSsid, normalized.allowedSsids)) {
+            return HomeNetworkDecision.SsidNotMatched
+        }
+        val baseUrl = normalized.baseUrl
+        if (baseUrl != backoffBaseUrl) {
+            backoffBaseUrl = baseUrl
             consecutiveFailures = 0
             retryAfterMillis = 0
         }
         if (clock.nowMillis() < retryAfterMillis) return HomeNetworkDecision.BackingOff
-        return if (healthProbe.isHealthy(normalizedBaseUrl)) {
+        return if (healthProbe.isHealthy(baseUrl)) {
             consecutiveFailures = 0
             retryAfterMillis = 0
             HomeNetworkDecision.Allowed
@@ -80,6 +102,21 @@ class HomeNetworkPolicy @Inject constructor(
             consecutiveFailures++
             retryAfterMillis = clock.nowMillis() + delay
             HomeNetworkDecision.ServerUnavailable
+        }
+    }
+
+    /** Legacy helper: evaluate with baseUrl only (empty SSID list → MissingSsidAllowlist). */
+    suspend fun evaluate(baseUrl: String, isForeground: Boolean): HomeNetworkDecision {
+        val config = HomeLanServerConfig.fromBaseUrl(baseUrl)
+        return evaluate(config, isForeground)
+    }
+
+    companion object {
+        fun isUnknownSsid(ssid: String): Boolean {
+            val s = ssid.trim().removePrefix("\"").removeSuffix("\"")
+            return s.isEmpty() ||
+                s.equals("<unknown ssid>", ignoreCase = true) ||
+                s.equals("unknown ssid", ignoreCase = true)
         }
     }
 }
@@ -92,6 +129,20 @@ class AndroidNetworkState @Inject constructor(
         val network = manager.activeNetwork ?: return false
         val capabilities = manager.getNetworkCapabilities(network) ?: return false
         return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+    }
+
+    override fun currentWifiSsid(): String? {
+        if (!isWifiConnected()) return null
+        return runCatching {
+            @Suppress("DEPRECATION")
+            val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                ?: return null
+            @Suppress("DEPRECATION")
+            val info = wifi.connectionInfo ?: return null
+            val raw = info.ssid ?: return null
+            val cleaned = raw.trim().removePrefix("\"").removeSuffix("\"")
+            if (HomeNetworkPolicy.isUnknownSsid(cleaned)) null else cleaned
+        }.getOrNull()
     }
 }
 

@@ -27,6 +27,8 @@ interface SyncPort {
     fun isEnabled(): Boolean
     fun requestSync(trigger: SyncTrigger)
     suspend fun saveServer(baseUrl: String): Result<Unit>
+    /** Persist host/port + SSID allowlist (max 2). Novice defaults applied in UI, not here. */
+    suspend fun saveHomeLanConfig(config: HomeLanServerConfig): Result<Unit>
     suspend fun createFamily(displayName: String? = null): Result<SyncSession>
     suspend fun sync(trigger: SyncTrigger): Result<Unit>
     suspend fun pull(familyId: String): Result<Unit>
@@ -60,6 +62,7 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
     override fun isEnabled() = false
     override fun requestSync(trigger: SyncTrigger) = Unit
     override suspend fun saveServer(baseUrl: String) = Result.success(Unit)
+    override suspend fun saveHomeLanConfig(config: HomeLanServerConfig) = Result.success(Unit)
     override suspend fun createFamily(displayName: String?) = Result.failure<SyncSession>(SyncNotEnabledException())
     override suspend fun sync(trigger: SyncTrigger) = Result.success(Unit)
     override suspend fun pull(familyId: String) = Result.success(Unit)

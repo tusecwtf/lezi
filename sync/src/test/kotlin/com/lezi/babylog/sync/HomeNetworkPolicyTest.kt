@@ -5,20 +5,71 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Test
 
 class HomeNetworkPolicyTest {
+    private fun config(
+        host: String = "nas",
+        port: Int = 8765,
+        ssids: List<String> = listOf("Home"),
+    ) = HomeLanServerConfig(host, port, ssids)
+
     @Test
     fun emptyAddressAndNonWifiNeverProbeServer() = runTest {
         val probe = RecordingHealthProbe(result = true)
         val policy = HomeNetworkPolicy(
-            networkState = FakeNetworkState(isWifi = false),
+            networkState = FakeNetworkState(isWifi = false, ssid = null),
             healthProbe = probe,
             clock = FakePolicyClock(),
         )
 
-        assertThat(policy.evaluate(baseUrl = "", isForeground = true))
+        assertThat(policy.evaluate(config(host = ""), isForeground = true))
             .isEqualTo(HomeNetworkDecision.MissingServer)
-        assertThat(policy.evaluate(baseUrl = "http://nas:8765", isForeground = true))
+        assertThat(policy.evaluate(config(ssids = emptyList()), isForeground = true))
+            .isEqualTo(HomeNetworkDecision.MissingSsidAllowlist)
+        assertThat(policy.evaluate(config(), isForeground = true))
             .isEqualTo(HomeNetworkDecision.NotOnWifi)
         assertThat(probe.calls).isEmpty()
+    }
+
+    @Test
+    fun ssidNotMatchedBlocksWithoutProbe() = runTest {
+        val probe = RecordingHealthProbe(result = true)
+        val policy = HomeNetworkPolicy(
+            networkState = FakeNetworkState(isWifi = true, ssid = "Cafe"),
+            healthProbe = probe,
+            clock = FakePolicyClock(),
+        )
+        assertThat(policy.evaluate(config(ssids = listOf("Home", "Home-5G")), isForeground = true))
+            .isEqualTo(HomeNetworkDecision.SsidNotMatched)
+        assertThat(probe.calls).isEmpty()
+    }
+
+    @Test
+    fun unknownSsidBlocksWithoutProbe() = runTest {
+        val probe = RecordingHealthProbe(result = true)
+        val policy = HomeNetworkPolicy(
+            networkState = FakeNetworkState(isWifi = true, ssid = "<unknown ssid>"),
+            healthProbe = probe,
+            clock = FakePolicyClock(),
+        )
+        assertThat(policy.evaluate(config(), isForeground = true))
+            .isEqualTo(HomeNetworkDecision.SsidUnavailable)
+        assertThat(probe.calls).isEmpty()
+    }
+
+    @Test
+    fun matchedSsidUsesSingleHostPort() = runTest {
+        val probe = RecordingHealthProbe(result = true)
+        val policy = HomeNetworkPolicy(
+            networkState = FakeNetworkState(isWifi = true, ssid = "Home-5G"),
+            healthProbe = probe,
+            clock = FakePolicyClock(),
+        )
+        assertThat(
+            policy.evaluate(
+                config(host = "192.168.50.4", ssids = listOf("Home", "Home-5G")),
+                isForeground = true,
+            ),
+        ).isEqualTo(HomeNetworkDecision.Allowed)
+        assertThat(probe.calls).containsExactly("http://192.168.50.4:8765")
     }
 
     @Test
@@ -26,20 +77,20 @@ class HomeNetworkPolicyTest {
         val clock = FakePolicyClock(now = 1_000)
         val probe = RecordingHealthProbe(result = false)
         val policy = HomeNetworkPolicy(
-            networkState = FakeNetworkState(isWifi = true),
+            networkState = FakeNetworkState(isWifi = true, ssid = "Home"),
             healthProbe = probe,
             clock = clock,
         )
 
-        assertThat(policy.evaluate("http://nas:8765", isForeground = true))
+        assertThat(policy.evaluate(config(host = "nas"), isForeground = true))
             .isEqualTo(HomeNetworkDecision.ServerUnavailable)
-        assertThat(policy.evaluate("http://nas:8765", isForeground = true))
+        assertThat(policy.evaluate(config(host = "nas"), isForeground = true))
             .isEqualTo(HomeNetworkDecision.BackingOff)
         assertThat(probe.calls).containsExactly("http://nas:8765")
 
         clock.now += 30_000
         probe.result = true
-        assertThat(policy.evaluate("http://nas:8765", isForeground = true))
+        assertThat(policy.evaluate(config(host = "nas"), isForeground = true))
             .isEqualTo(HomeNetworkDecision.Allowed)
     }
 
@@ -47,12 +98,12 @@ class HomeNetworkPolicyTest {
     fun backgroundAutomaticTriggerIsBlocked() = runTest {
         val probe = RecordingHealthProbe(result = true)
         val policy = HomeNetworkPolicy(
-            networkState = FakeNetworkState(isWifi = true),
+            networkState = FakeNetworkState(isWifi = true, ssid = "Home"),
             healthProbe = probe,
             clock = FakePolicyClock(),
         )
 
-        assertThat(policy.evaluate("http://nas:8765", isForeground = false))
+        assertThat(policy.evaluate(config(), isForeground = false))
             .isEqualTo(HomeNetworkDecision.Background)
         assertThat(probe.calls).isEmpty()
     }
@@ -61,26 +112,51 @@ class HomeNetworkPolicyTest {
     fun changingServerDoesNotReusePreviousServersBackoff() = runTest {
         val probe = RecordingHealthProbe(result = false)
         val policy = HomeNetworkPolicy(
-            networkState = FakeNetworkState(isWifi = true),
+            networkState = FakeNetworkState(isWifi = true, ssid = "Home"),
             healthProbe = probe,
             clock = FakePolicyClock(now = 1_000),
         )
 
-        assertThat(policy.evaluate("http://old-nas:8765", isForeground = true))
+        assertThat(policy.evaluate(config(host = "old-nas"), isForeground = true))
             .isEqualTo(HomeNetworkDecision.ServerUnavailable)
         probe.result = true
 
-        assertThat(policy.evaluate("http://new-nas:8765", isForeground = true))
+        assertThat(policy.evaluate(config(host = "new-nas"), isForeground = true))
             .isEqualTo(HomeNetworkDecision.Allowed)
         assertThat(probe.calls).containsExactly(
             "http://old-nas:8765",
             "http://new-nas:8765",
         ).inOrder()
     }
+
+    @Test
+    fun parseHostPortAcceptsFullUrl() {
+        val (h, p) = HomeLanServerConfig.parseHostPort("http://192.168.50.4:8765")
+        assertThat(h).isEqualTo("192.168.50.4")
+        assertThat(p).isEqualTo(8765)
+    }
+
+    @Test
+    fun noviceUiDefaultsPrefillHostAndCurrentSsid() {
+        val withSsid = HomeLanServerConfig.noviceUiDefaults("Home-2.4G")
+        assertThat(withSsid.host).isEqualTo(DEFAULT_SERVER_HOST)
+        assertThat(withSsid.host).isEqualTo("192.168.50.4")
+        assertThat(withSsid.port).isEqualTo(DEFAULT_SERVER_PORT)
+        assertThat(withSsid.allowedSsids).containsExactly("Home-2.4G")
+
+        val noSsid = HomeLanServerConfig.noviceUiDefaults(null)
+        assertThat(noSsid.host).isEqualTo("192.168.50.4")
+        assertThat(noSsid.port).isEqualTo(8765)
+        assertThat(noSsid.allowedSsids).isEmpty()
+    }
 }
 
-private class FakeNetworkState(private val isWifi: Boolean) : NetworkState {
+private class FakeNetworkState(
+    private val isWifi: Boolean,
+    private val ssid: String?,
+) : NetworkState {
     override fun isWifiConnected(): Boolean = isWifi
+    override fun currentWifiSsid(): String? = ssid
 }
 
 private class RecordingHealthProbe(var result: Boolean) : HealthProbe {

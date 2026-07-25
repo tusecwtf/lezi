@@ -21,9 +21,9 @@
 
 | # | 主题 | 结论 |
 |---|------|------|
-| 1 | 网络门闩 | **硬家庭局域网**：当前为 Wi‑Fi，且配置的 NAS `/health` 可达，才允许一切 NAS API |
+| 1 | 网络门闩 | **硬家庭局域网**：**本机 SSID 白名单（1～2 个名字，典型 2.4G/5G）** + 当前为 Wi‑Fi + 当前 SSID **精确命中** 白名单 + 配置的 NAS `/health` 可达，才允许一切 NAS API |
 | 2 | 鉴权 | **邀请码进门** + 长期 **family token**；无 token → 401/403 |
-| 3 | 建家 / 发码 / 加码 / 同步 | **全部** 受门闩约束（仅在家） |
+| 3 | 建家 / 发码 / 加码 / 同步 | **全部** 受同一门闩约束（含 SSID；仅在家） |
 | 4 | 传输 | 默认 **HTTP + token**；镜像预留可选 HTTPS（环境变量证书） |
 | 5 | 同步实体（首版） | **Baby + Record + 日志 MediaAsset** |
 | 5b | 写权限 | **宝宝头像：仅管理员（owner）**；**日志媒体：家庭内可同步** |
@@ -31,8 +31,9 @@
 | 6b | 落盘布局 | **data 与 media 同一数据根路径**（单 volume） |
 | 7 | 多家庭 | **一家一栈** 交付；schema 保留 `family_id`，不多租户产品化 |
 | 8 | 触发 | **回前台 + 下拉 + 前台写成功后 push**；无后台、无 60s 定时、无推送拉同步 |
-| 9 | 服务器地址 | **客户端无内置默认 baseUrl**；须配置；**邀请 QR 含 baseUrl + code**；可手改 |
-| 10 | 退出 / 删除 | member 可退出且不删 NAS；首版无管理员转移，owner 不能 leave，只能二次确认后**删除家庭数据**；本机清除默认仅本地 |
+| 9 | 服务器地址 | **单一** host（IP/域名）+ **端口**（默认 8765）→ `baseUrl=http://{host}:{port}`；**SSID 白名单最多 2**（共用该 host:port，不为每个 SSID 记不同 IP）；**邀请 QR 仍含 baseUrl + code**；可手改 |
+| 9b | 小白默认（空态预填） | host 预填 **`192.168.50.4`**，端口 **8765**，SSID 第一格预填 **当前连接 Wi‑Fi 名**（可读时）；预填 ≠ 已保存，保存/加入成功后才持久化 |
+| 10 | 退出 / 删除 | member 可 leave；owner 二次确认后**删除家庭数据**；**leave 与 delete 成功后本机均清空** host/port、SSID 白名单与会话 token |
 | 11 | 持久化引擎 | 首版 **SQLite**；API 不绑死引擎，可替换 |
 | 12 | 拓扑 | **仅中心化 NAS**；P2P 不在范围内 |
 
@@ -72,10 +73,10 @@
 
 | 组件 | 职责 |
 |------|------|
-| `HomeNetworkPolicy` | `TRANSPORT_WIFI` + `GET {baseUrl}/health` 成功 → `allowSync` |
+| `HomeNetworkPolicy` | 前台 + host/port 已配 + **SSID 白名单非空** + `TRANSPORT_WIFI` + **当前 SSID 精确命中白名单** + `GET {baseUrl}/health` → `allowSync` |
 | `SyncPort` | push / pull / invite / join / leave / media 协调 |
 | `Outbox` | 待上行实体队列（baby / record / media 元数据） |
-| `SyncPreferences` | `baseUrl`、`familyId`、`familyToken`、`deviceId`、`pullCursor`、`pullGeneration`（**持久化**） |
+| `SyncPreferences` | `serverHost`、`serverPort`、`allowedSsids`（≤2，**仅本机**）、会话 `baseUrl`（派生）、`familyId`、`familyToken`、`deviceId`、`pullCursor`、`pullGeneration` |
 | 触发器 | `ProcessLifecycle` ON_START、下拉、前台写成功 |
 
 ### 2.3 写与同步路径
@@ -106,19 +107,40 @@
 
 ## 3. 网络门闩（硬家庭局域网）
 
-**允许调用 NAS** 当且仅当同时满足：
+### 3.1 配置模型
 
-1. 用户已保存 **非空 `baseUrl`**，且已持有有效会话（加入后的 token；创建家庭后的 token）。
-2. 活跃网络具备 **`NetworkCapabilities.TRANSPORT_WIFI`**（不要用蜂窝兜底）。
-3. `GET {baseUrl}/health` 在短超时内（建议 ≤3s）返回成功。
-4. App 处于 **前台**（对自动触发而言）；用户下拉可视为前台手势。
+| 字段 | 规则 |
+|------|------|
+| `serverHost` | 非空；IPv4 / IPv6 / 域名；保存时若用户粘贴完整 URL 则解析出 host/port |
+| `serverPort` | 1–65535，默认 **8765** |
+| `allowedSsids` | **0～2** 个非空字符串（trim、去重）；**精确匹配**（大小写敏感）；典型登记家里 2.4G 与 5G 两个名字 |
+| 派生 `baseUrl` | `http://{serverHost}:{serverPort}`（无尾 `/`） |
 
-**失败策略**
+SSID 白名单 **仅存本机**，不随家庭同步到 NAS。两台手机可登记不同 SSID 名。
 
-- health 失败：指数退避（例如 30s → 2min → 10min），**禁止**固定高频 ping。
+**小白空态预填（未持久化前）**：host=`192.168.50.4`，port=`8765`，SSID 第一格=当前连接 Wi‑Fi 名（系统可读时）；第二格留给 5G 名。
+
+### 3.2 允许调用 NAS 的条件
+
+以下 **create / invite / join / push / pull / media** 全部同一套：
+
+1. App **前台**（自动触发）；用户下拉视为前台手势。
+2. 已保存完整 **host + port**。
+3. **`allowedSsids` 至少 1 个**（空名单 **禁止**，即使 health 通）。
+4. 活跃网络 **`TRANSPORT_WIFI`**（蜂窝不兜底）。
+5. 能读到当前 SSID，且 **trim 后精确等于** 白名单之一；读不到（无权限 / `<unknown ssid>`）→ **禁止** 并引导开定位/附近设备权限（**不**降级为「仅 Wi‑Fi」）。
+6. `GET {baseUrl}/health` 在短超时内（建议 ≤3s）成功。
+7. 需会话的 API 另需有效 family token（join/create 前无 token）。
+
+### 3.3 失败与其它
+
+- health 失败：指数退避（30s → 2min → 10min），禁止固定高频 ping。
+- 白名单已满 2 个时自动绑定新 SSID：**不覆盖**，提示用户手动改。
+- 已加入后改 host/port：**允许**；保留 token/family 与 SSID 名单；**cursor/generation 按 full_resync 语义重置**。
+- leave / owner 删除家庭成功：本机 **清空** host/port、SSID 白名单与会话。
+- 旧版仅 `sync_base_url` 迁移：解析 host/port；SSID 空 → 禁止同步直至用户绑定。
 - 不因同步失败回滚 Room 写入。
-
-**不采用** SSID 作为主判定（可选高级「绑定 BSSID」，非必须）。
+- **不做** BSSID 绑定、多于 2 个 SSID、每 SSID 独立 IP。
 
 ---
 
@@ -481,7 +503,7 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health` 外均需 Bearer（`create`/`joi
 
 | 项 | 要求 |
 |----|------|
-| 服务器 | 首次无默认；表单填写 baseUrl；扫码可填入 baseUrl+code |
+| 服务器 | host+端口（空态预填 192.168.50.4:8765）+ SSID 白名单≤2（预填当前 SSID）；扫码可填入 baseUrl+code |
 | 文案 | 「仅在连接家庭 Wi‑Fi 且能访问家庭服务器时同步」 |
 | 文案 | 「不会在对方记录时推送通知；打开乐记后更新」 |
 | 下拉 | 记录页下拉 → 若 allowSync 则 pull+push |
