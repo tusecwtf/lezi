@@ -2,10 +2,17 @@ package com.lezi.babylog.feature.log
 
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.ui.formatRecordDuration
 import com.lezi.babylog.domain.payloadBool
 import com.lezi.babylog.domain.payloadDouble
 import com.lezi.babylog.domain.payloadInt
 import kotlin.math.roundToInt
+
+internal const val FUTURE_TIME_WARNING = "不能选未来时刻"
+private const val SLEEP_END_MISSING_WARNING = "请选择醒来时刻"
+private const val INTERVAL_END_MISSING_WARNING = "请选择结束时刻"
+private const val SLEEP_END_ORDER_WARNING = "醒来须晚于睡下"
+private const val INTERVAL_END_ORDER_WARNING = "结束须晚于开始"
 
 internal enum class QuickRecordMode {
     Nursing,
@@ -36,6 +43,14 @@ internal enum class SleepDraftAction {
 internal enum class TemperatureUnit {
     Celsius,
     Fahrenheit,
+}
+
+internal sealed interface IntervalDurationPreview {
+    val text: String
+
+    data class Duration(override val text: String) : IntervalDurationPreview
+
+    data class Warning(override val text: String) : IntervalDurationPreview
 }
 
 /**
@@ -124,8 +139,110 @@ internal data class QuickRecordDraft(
     val mode: QuickRecordMode
         get() = type.quickRecordMode
 
+    /**
+     * User-facing state rendered directly below start/end controls.
+     *
+     * A sleep-down draft with no end is an intentionally open interval, so it
+     * has neither a duration nor a warning. Every other interval mode requires
+     * a valid end before confirmation.
+     */
+    fun intervalDurationPreview(
+        nowMillis: Long = System.currentTimeMillis(),
+    ): IntervalDurationPreview? {
+        if (mode !in setOf(QuickRecordMode.Sleep, QuickRecordMode.Interval)) return null
+        if (timestamp > nowMillis) {
+            return IntervalDurationPreview.Warning(FUTURE_TIME_WARNING)
+        }
+
+        val end = endTimestamp
+        if (end == null) {
+            if (mode == QuickRecordMode.Sleep && sleepAction == SleepDraftAction.SleepDown) {
+                return null
+            }
+            return IntervalDurationPreview.Warning(
+                if (mode == QuickRecordMode.Sleep) {
+                    SLEEP_END_MISSING_WARNING
+                } else {
+                    INTERVAL_END_MISSING_WARNING
+                },
+            )
+        }
+        if (end <= timestamp) {
+            return IntervalDurationPreview.Warning(
+                if (mode == QuickRecordMode.Sleep) {
+                    SLEEP_END_ORDER_WARNING
+                } else {
+                    INTERVAL_END_ORDER_WARNING
+                },
+            )
+        }
+        if (end > nowMillis) {
+            return IntervalDurationPreview.Warning(FUTURE_TIME_WARNING)
+        }
+
+        return IntervalDurationPreview.Duration(
+            "时长 ${formatRecordDuration((end - timestamp) / 60_000L)}",
+        )
+    }
+
+    fun visibleIntervalDurationPreview(
+        nowMillis: Long = System.currentTimeMillis(),
+        isDirty: Boolean,
+        attemptedConfirm: Boolean,
+    ): IntervalDurationPreview? {
+        val preview = intervalDurationPreview(nowMillis)
+        if (preview !is IntervalDurationPreview.Warning) return preview
+        val isMissingRequiredEnd = preview.text in setOf(
+            SLEEP_END_MISSING_WARNING,
+            INTERVAL_END_MISSING_WARNING,
+        )
+        return preview.takeIf {
+            isMissingRequiredEnd || shouldShowValidation(isDirty, attemptedConfirm)
+        }
+    }
+
+    fun canConfirm(nowMillis: Long = System.currentTimeMillis()): Boolean =
+        validationError(nowMillis) == null
+
+    /**
+     * Validates a clock-dialog end selection without mutating this draft.
+     * Sleep adds the one actionable cross-day hint only for end <= start.
+     */
+    fun endTimeRejectionMessage(
+        candidateEndTimestamp: Long,
+        nowMillis: Long = System.currentTimeMillis(),
+    ): String? {
+        val warning = copy(endTimestamp = candidateEndTimestamp)
+            .intervalDurationPreview(nowMillis) as? IntervalDurationPreview.Warning
+            ?: return null
+        return if (
+            mode == QuickRecordMode.Sleep &&
+            warning.text == SLEEP_END_ORDER_WARNING
+        ) {
+            "${warning.text}。跨天请先把日期改为次日"
+        } else {
+            warning.text
+        }
+    }
+
+    /**
+     * Footer copy is deferred until the user interacts, and interval warnings
+     * stay at the time controls instead of being repeated at the bottom.
+     */
+    fun footerValidationError(
+        nowMillis: Long = System.currentTimeMillis(),
+        isDirty: Boolean,
+        attemptedConfirm: Boolean,
+    ): String? {
+        if (!shouldShowValidation(isDirty, attemptedConfirm)) return null
+        val validation = validationError(nowMillis) ?: return null
+        val intervalWarning = intervalDurationPreview(nowMillis)
+            as? IntervalDurationPreview.Warning
+        return validation.takeUnless { it == intervalWarning?.text }
+    }
+
     fun validationError(nowMillis: Long = System.currentTimeMillis()): String? {
-        if (timestamp > nowMillis) return "记录时刻不能晚于现在"
+        if (timestamp > nowMillis) return FUTURE_TIME_WARNING
         if (note.length > 200) return "备注最多 200 字"
         return when (mode) {
             QuickRecordMode.Nursing -> {
@@ -152,27 +269,7 @@ internal data class QuickRecordDraft(
             QuickRecordMode.BothDiaper -> {
                 if (peeAmount !in 1..3) "请选择尿量" else stoolValidationError()
             }
-            QuickRecordMode.Sleep -> when (sleepAction) {
-                // 准备休息：结束可空（进睡眠中）；若填写则一次记完完整区间。
-                SleepDraftAction.SleepDown -> when {
-                    endTimestamp == null -> null
-                    endTimestamp <= timestamp -> "醒来时刻必须晚于睡下时刻"
-                    endTimestamp > nowMillis -> "醒来时刻不能晚于现在"
-                    else -> null
-                }
-                SleepDraftAction.WakeUp -> when {
-                    endTimestamp == null -> "请选择醒来时刻"
-                    endTimestamp <= timestamp -> "醒来时刻必须晚于睡下时刻"
-                    endTimestamp > nowMillis -> "醒来时刻不能晚于现在"
-                    else -> null
-                }
-                SleepDraftAction.Manual, null -> when {
-                    endTimestamp == null -> "请选择醒来时刻"
-                    endTimestamp <= timestamp -> "醒来时刻必须晚于睡下时刻"
-                    endTimestamp > nowMillis -> "醒来时刻不能晚于现在"
-                    else -> null
-                }
-            }
+            QuickRecordMode.Sleep -> intervalValidationError(nowMillis)
             QuickRecordMode.Temperature -> {
                 val raw = temperature.toDoubleOrNull()
                 val celsius = raw?.let {
@@ -196,12 +293,7 @@ internal data class QuickRecordDraft(
                 }
             }
             QuickRecordMode.Simple -> null
-            QuickRecordMode.Interval -> when {
-                endTimestamp == null -> "请选择结束时刻"
-                endTimestamp <= timestamp -> "结束时刻必须晚于开始时刻"
-                endTimestamp > nowMillis -> "结束时刻不能晚于现在"
-                else -> null
-            }
+            QuickRecordMode.Interval -> intervalValidationError(nowMillis)
             QuickRecordMode.Symptom -> {
                 if (severity in 1..3) null else "请选择程度"
             }
@@ -252,12 +344,18 @@ internal data class QuickRecordDraft(
     val isEditing: Boolean
         get() = existingRecordId != null && sleepAction != SleepDraftAction.WakeUp
 
+    private fun intervalValidationError(nowMillis: Long): String? =
+        (intervalDurationPreview(nowMillis) as? IntervalDurationPreview.Warning)?.text
+
     private fun stoolValidationError(): String? = when {
         stoolAmount !in 1..4 -> "请选择便量"
         stoolConsistency !in 1..4 -> "请选择软硬"
         stoolColor !in 0..7 -> "请选择颜色"
         else -> null
     }
+
+    private fun shouldShowValidation(isDirty: Boolean, attemptedConfirm: Boolean): Boolean =
+        isDirty || attemptedConfirm
 
     private fun payloadJson(): String = when (mode) {
         QuickRecordMode.Nursing -> sourcePayloadJson.patchJson(

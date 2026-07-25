@@ -109,6 +109,24 @@ class RecordPresentationTest {
         )
     }
 
+    @Test
+    fun recordDurationFormatterKeepsCompactTimelineGrammar() {
+        val cases = mapOf(
+            -1L to "不足1分",
+            0L to "不足1分",
+            1L to "1分",
+            59L to "59分",
+            60L to "1小时",
+            61L to "1小时1分",
+            120L to "2小时",
+            125L to "2小时5分",
+        )
+
+        cases.forEach { (minutes, expected) ->
+            assertEquals(expected, formatRecordDuration(minutes))
+        }
+    }
+
     private fun record(
         type: RecordType,
         payload: String = "{}",

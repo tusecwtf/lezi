@@ -373,6 +373,7 @@ fun RecordComposerHost(
                 )
                 else -> QuickRecordSheet(
                     draft = draft,
+                    interactionKey = request,
                     amountStepMl = state.amountStepMl,
                     timeStepMin = state.timeStepMin,
                     timePickerStyle = state.timePickerStyle,

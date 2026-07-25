@@ -315,7 +315,7 @@ fun Record.presentationSummary(): String {
         RecordType.SLEEP -> endTimestamp?.takeIf { it >= timestamp }?.let {
             listOf(
                 if (payloadBoolean("is_nap")) "午睡" else null,
-                "时长 ${formatDuration((it - timestamp) / 60_000L)}",
+                "时长 ${formatRecordDuration((it - timestamp) / 60_000L)}",
             ).filterNotNull().joinToString(" · ")
         } ?: if (payloadBoolean("is_nap")) "午睡 · 进行中" else "进行中"
         RecordType.TEMPERATURE ->
@@ -405,7 +405,8 @@ private fun Record.payloadBoolean(key: String): Boolean =
         ?.toBooleanStrictOrNull()
         ?: false
 
-private fun formatDuration(minutes: Long): String {
+/** Compact duration copy shared by saved-record summaries and draft previews. */
+fun formatRecordDuration(minutes: Long): String {
     if (minutes <= 0) return "不足1分"
     val hours = minutes / 60
     val remaining = minutes % 60

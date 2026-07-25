@@ -1,6 +1,7 @@
 package com.lezi.babylog.feature.log
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,6 +30,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import com.lezi.babylog.core.ui.RecordTypeIcon
 import com.lezi.babylog.core.ui.presentation
@@ -51,6 +53,7 @@ private enum class QuickClockTarget {
 @Composable
 internal fun QuickRecordSheet(
     draft: QuickRecordDraft,
+    interactionKey: Any,
     amountStepMl: Int,
     timeStepMin: Int,
     timePickerStyle: String = "dropdown",
@@ -69,14 +72,44 @@ internal fun QuickRecordSheet(
     val zone = ZoneId.systemDefault()
     val typeColor = leziRecordColor(draft.type.presentation.colorRole)
     val actionsEnabled = !saving && !deleting
+    val nowMillis = System.currentTimeMillis()
+    val intervalPreview = draft.intervalDurationPreview(nowMillis)
+    val confirmEnabled = actionsEnabled && draft.canConfirm(nowMillis)
     val dismissKeyboard = rememberDismissKeyboard()
-    var clockTarget by remember(draft.type, draft.existingRecordId) {
+    var clockTarget by remember(interactionKey) {
         mutableStateOf<QuickClockTarget?>(null)
     }
-    var error by remember(draft.type, draft.existingRecordId) { mutableStateOf<String?>(null) }
+    var clockError by remember(interactionKey) {
+        mutableStateOf<String?>(null)
+    }
+    var isDirty by remember(interactionKey) { mutableStateOf(false) }
+    var attemptedConfirm by remember(interactionKey) {
+        mutableStateOf(false)
+    }
+    val isIntervalMode = draft.mode in setOf(QuickRecordMode.Sleep, QuickRecordMode.Interval)
+    val visibleIntervalPreview = draft.visibleIntervalDurationPreview(
+        nowMillis = nowMillis,
+        isDirty = isDirty,
+        attemptedConfirm = attemptedConfirm,
+    )
+    val intervalWarning = (intervalPreview as? IntervalDurationPreview.Warning)?.text
+    val timeFeedback = if (isIntervalMode) {
+        clockError?.let { IntervalDurationPreview.Warning(it) } ?: visibleIntervalPreview
+    } else {
+        visibleIntervalPreview
+    }
+    val footerValidation = draft.footerValidationError(
+        nowMillis = nowMillis,
+        isDirty = isDirty,
+        attemptedConfirm = attemptedConfirm,
+    )
+    val footerError = clockError.takeUnless { isIntervalMode }
+        ?: saveError?.takeUnless { it == intervalWarning }
+        ?: footerValidation
 
     fun update(value: QuickRecordDraft) {
-        error = null
+        clockError = null
+        isDirty = true
         onDraftChange(value)
     }
 
@@ -154,18 +187,17 @@ internal fun QuickRecordSheet(
                 zone = zone,
                 onOpenStart = {
                     dismissKeyboard()
-                    error = null
+                    clockError = null
                     clockTarget = QuickClockTarget.Start
                 },
                 onOpenEnd = {
                     dismissKeyboard()
-                    error = null
+                    clockError = null
                     clockTarget = QuickClockTarget.End
                 },
                 onToggleRecordWake = if (draft.sleepAction == SleepDraftAction.SleepDown) {
                     { enabled ->
                         dismissKeyboard()
-                        error = null
                         update(
                             draft.copy(
                                 endTimestamp = if (enabled) {
@@ -180,6 +212,7 @@ internal fun QuickRecordSheet(
                     null
                 },
                 accentColor = if (draft.mode == QuickRecordMode.Sleep) typeColor else null,
+                intervalPreview = timeFeedback,
             )
 
             SectionLabel("备注")
@@ -194,7 +227,7 @@ internal fun QuickRecordSheet(
                 supportingText = { Text("${draft.note.length}/200") },
             )
 
-            (error ?: saveError)?.let {
+            footerError?.let {
                 Text(
                     it,
                     color = MaterialTheme.colorScheme.error,
@@ -224,25 +257,38 @@ internal fun QuickRecordSheet(
                 modifier = Modifier
                     .weight(1f),
             )
-            LeziPrimaryButton(
-                label = when {
-                    saving -> "保存中…"
-                    deleting -> "删除中…"
-                    else -> draft.confirmLabel()
-                },
-                onClick = {
-                    if (!actionsEnabled) return@LeziPrimaryButton
-                    dismissKeyboard()
-                    val validation = draft.validationError()
-                    if (validation == null) {
-                        onConfirm(draft)
-                    } else {
-                        error = validation
-                    }
-                },
-                modifier = Modifier.weight(1f),
-                enabled = actionsEnabled,
-            )
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .pointerInput(interactionKey, actionsEnabled, confirmEnabled) {
+                        if (actionsEnabled && !confirmEnabled) {
+                            // Save stays visually and semantically disabled; a physical tap only
+                            // reveals the delayed validation reason required by "打开不吼".
+                            detectTapGestures {
+                                attemptedConfirm = true
+                                dismissKeyboard()
+                            }
+                        }
+                    },
+            ) {
+                LeziPrimaryButton(
+                    label = when {
+                        saving -> "保存中…"
+                        deleting -> "删除中…"
+                        else -> draft.confirmLabel()
+                    },
+                    onClick = {
+                        if (!actionsEnabled) return@LeziPrimaryButton
+                        attemptedConfirm = true
+                        dismissKeyboard()
+                        if (draft.canConfirm()) {
+                            onConfirm(draft)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = confirmEnabled,
+                )
+            }
         }
         Spacer(Modifier.weight(1f))
     }
@@ -269,7 +315,6 @@ internal fun QuickRecordSheet(
             minuteStep = timeStepMin,
             timePickerStyle = timePickerStyle,
             preferredHand = preferredHand,
-            showCrossDayHint = isSleep,
             onConfirm = { picked ->
                 val pickedMillis = picked.toInstant().toEpochMilli()
                 val nowMillis = System.currentTimeMillis()
@@ -281,10 +326,14 @@ internal fun QuickRecordSheet(
                             newStartMillis = pickedMillis,
                         )
                         when {
-                            pickedMillis > nowMillis ->
-                                error = "记录时刻不能晚于现在"
-                            shiftedEnd != null && shiftedEnd > nowMillis ->
-                                error = "记录时段不能晚于现在"
+                            pickedMillis > nowMillis -> {
+                                isDirty = true
+                                clockError = FUTURE_TIME_WARNING
+                            }
+                            shiftedEnd != null && shiftedEnd > nowMillis -> {
+                                isDirty = true
+                                clockError = FUTURE_TIME_WARNING
+                            }
                             else -> update(
                                 draft.copy(
                                     timestamp = pickedMillis,
@@ -294,16 +343,16 @@ internal fun QuickRecordSheet(
                         }
                     }
                     QuickClockTarget.End -> {
-                        when {
-                            pickedMillis <= draft.timestamp ->
-                                error = if (isSleep) {
-                                    "结束时刻必须晚于开始时刻。跨天请先把日期改为次日，再选醒来时刻"
-                                } else {
-                                    "结束时刻必须晚于开始时刻"
-                                }
-                            pickedMillis > nowMillis ->
-                                error = "结束时刻不能晚于现在"
-                            else -> update(draft.copy(endTimestamp = pickedMillis))
+                        val updated = draft.copy(endTimestamp = pickedMillis)
+                        val rejection = draft.endTimeRejectionMessage(
+                            candidateEndTimestamp = pickedMillis,
+                            nowMillis = nowMillis,
+                        )
+                        if (rejection == null) {
+                            update(updated)
+                        } else {
+                            isDirty = true
+                            clockError = rejection
                         }
                     }
                 }

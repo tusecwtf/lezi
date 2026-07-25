@@ -39,6 +39,7 @@ internal fun TimeFields(
     /** SleepDown only: true → set end=now; false → clear end. */
     onToggleRecordWake: ((Boolean) -> Unit)? = null,
     accentColor: Color? = null,
+    intervalPreview: IntervalDurationPreview? = null,
 ) {
     val container = accentColor?.copy(alpha = 0.18f)
         ?: MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
@@ -54,14 +55,19 @@ internal fun TimeFields(
     when {
         draft.sleepAction == SleepDraftAction.WakeUp -> {
             TimeReadOnly("睡下", draft.timestamp, zone)
-            TimeButton(
-                label = "醒来",
-                millis = draft.endTimestamp ?: draft.timestamp,
-                zone = zone,
-                onClick = onOpenEnd,
-                containerColor = container,
-                accentColor = accent,
-            )
+            val end = draft.endTimestamp
+            if (end == null) {
+                EmptyTimeButton("选择醒来时刻", onOpenEnd)
+            } else {
+                TimeButton(
+                    label = "醒来",
+                    millis = end,
+                    zone = zone,
+                    onClick = onOpenEnd,
+                    containerColor = container,
+                    accentColor = accent,
+                )
+            }
         }
         draft.sleepAction == SleepDraftAction.SleepDown -> {
             TimeButton(
@@ -114,18 +120,14 @@ internal fun TimeFields(
                 accentColor = accent,
             )
             if (draft.endTimestamp == null) {
-                Surface(
+                EmptyTimeButton(
+                    prompt = if (draft.mode == QuickRecordMode.Sleep) {
+                        "选择醒来时刻"
+                    } else {
+                        "选择结束时刻"
+                    },
                     onClick = onOpenEnd,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = LeziShapes.Sm,
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-                ) {
-                    Text(
-                        "选择结束时刻",
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 13.dp),
-                        style = LeziTypography.BodyStrong,
-                    )
-                }
+                )
             } else {
                 TimeButton(
                     label = "结束",
@@ -144,6 +146,35 @@ internal fun TimeFields(
             onClick = onOpenStart,
             containerColor = container,
             accentColor = accent,
+        )
+    }
+    intervalPreview?.let { preview ->
+        Text(
+            text = preview.text,
+            modifier = Modifier.padding(horizontal = 4.dp),
+            style = LeziTypography.Meta,
+            color = when (preview) {
+                is IntervalDurationPreview.Duration ->
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                is IntervalDurationPreview.Warning ->
+                    MaterialTheme.colorScheme.error
+            },
+        )
+    }
+}
+
+@Composable
+private fun EmptyTimeButton(prompt: String, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
+        shape = LeziShapes.Sm,
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+    ) {
+        Text(
+            prompt,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 13.dp),
+            style = LeziTypography.BodyStrong,
         )
     }
 }

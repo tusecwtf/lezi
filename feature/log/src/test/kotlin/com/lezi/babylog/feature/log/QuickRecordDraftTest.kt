@@ -117,6 +117,60 @@ class QuickRecordDraftTest {
     }
 
     @Test
+    fun completedSleepPreviewsTheSameDurationCopyAsTheTimeline() {
+        val draft = QuickRecordDraft.create(
+            type = RecordType.SLEEP,
+            timestamp = tappedAt,
+            historical = true,
+        ).copy(endTimestamp = tappedAt + 125 * 60_000L)
+
+        assertEquals(
+            IntervalDurationPreview.Duration("时长 2小时5分"),
+            draft.intervalDurationPreview(nowMillis = tappedAt + 180 * 60_000L),
+        )
+        assertTrue(draft.canConfirm(nowMillis = tappedAt + 180 * 60_000L))
+    }
+
+    @Test
+    fun sleepDownWithoutWakeHasNoDurationPreviewAndCanConfirm() {
+        val draft = QuickRecordDraft.create(RecordType.SLEEP, tappedAt)
+
+        assertNull(draft.intervalDurationPreview(nowMillis = tappedAt + 60_000L))
+        assertTrue(draft.canConfirm(nowMillis = tappedAt + 60_000L))
+    }
+
+    @Test
+    fun sleepDownWithWakeAndWakeConfirmationBothPreviewDuration() {
+        val sleepDown = QuickRecordDraft.create(RecordType.SLEEP, tappedAt)
+            .copy(endTimestamp = tappedAt + 30 * 60_000L)
+        val openSleep = Record(
+            id = 42L,
+            clientUuid = "sleep-42",
+            babyId = 7L,
+            type = RecordType.SLEEP,
+            timestamp = tappedAt,
+            endTimestamp = null,
+            note = null,
+            createdByUserId = 1L,
+            payloadJson = "{}",
+            updatedAt = tappedAt,
+        )
+        val wake = QuickRecordDraft.wakeSleep(
+            openSleep = openSleep,
+            clickedAt = tappedAt + 45 * 60_000L,
+        )
+
+        assertEquals(
+            IntervalDurationPreview.Duration("时长 30分"),
+            sleepDown.intervalDurationPreview(nowMillis = tappedAt + 60 * 60_000L),
+        )
+        assertEquals(
+            IntervalDurationPreview.Duration("时长 45分"),
+            wake.intervalDurationPreview(nowMillis = tappedAt + 60 * 60_000L),
+        )
+    }
+
+    @Test
     fun sleepDownTurningOffRecordWakeClearsEnd() {
         val withEnd = QuickRecordDraft.create(RecordType.SLEEP, tappedAt)
             .copy(endTimestamp = tappedAt + 10_000L)
@@ -132,14 +186,145 @@ class QuickRecordDraftTest {
         val draft = QuickRecordDraft.create(RecordType.SLEEP, tappedAt)
 
         assertEquals(
-            "醒来时刻必须晚于睡下时刻",
+            "醒来须晚于睡下",
             draft.copy(endTimestamp = tappedAt)
                 .validationError(nowMillis = tappedAt + 60_000L),
         )
         assertEquals(
-            "醒来时刻不能晚于现在",
+            "不能选未来时刻",
             draft.copy(endTimestamp = tappedAt + 2 * 60_000L)
                 .validationError(nowMillis = tappedAt + 60_000L),
+        )
+    }
+
+    @Test
+    fun incompleteAndInvalidSleepUseShortWarningsAndCannotConfirm() {
+        val manual = QuickRecordDraft.create(
+            type = RecordType.SLEEP,
+            timestamp = tappedAt,
+            historical = true,
+        )
+        val now = tappedAt + 60_000L
+
+        assertEquals(
+            IntervalDurationPreview.Warning("请选择醒来时刻"),
+            manual.intervalDurationPreview(nowMillis = now),
+        )
+        assertFalse(manual.canConfirm(nowMillis = now))
+
+        val nonPositive = manual.copy(endTimestamp = tappedAt)
+        assertEquals(
+            IntervalDurationPreview.Warning("醒来须晚于睡下"),
+            nonPositive.intervalDurationPreview(nowMillis = now),
+        )
+        assertFalse(nonPositive.canConfirm(nowMillis = now))
+
+        val future = manual.copy(endTimestamp = now + 1L)
+        assertEquals(
+            IntervalDurationPreview.Warning("不能选未来时刻"),
+            future.intervalDurationPreview(nowMillis = now),
+        )
+        assertFalse(future.canConfirm(nowMillis = now))
+
+        val futureSleepDown = QuickRecordDraft.create(
+            type = RecordType.SLEEP,
+            timestamp = now + 1L,
+        )
+        assertEquals(
+            IntervalDurationPreview.Warning("不能选未来时刻"),
+            futureSleepDown.intervalDurationPreview(nowMillis = now),
+        )
+        assertFalse(futureSleepDown.canConfirm(nowMillis = now))
+    }
+
+    @Test
+    fun intervalPreviewUsesIntervalWordingAndSupportsSubMinuteDurations() {
+        val interval = QuickRecordDraft.create(RecordType.WALK, tappedAt)
+        val now = tappedAt + 90 * 60_000L
+
+        assertEquals(
+            IntervalDurationPreview.Warning("请选择结束时刻"),
+            interval.intervalDurationPreview(nowMillis = now),
+        )
+        assertEquals("请选择结束时刻", interval.validationError(nowMillis = now))
+        assertFalse(interval.canConfirm(nowMillis = now))
+        assertEquals(
+            IntervalDurationPreview.Warning("结束须晚于开始"),
+            interval.copy(endTimestamp = tappedAt)
+                .intervalDurationPreview(nowMillis = now),
+        )
+        assertEquals(
+            "结束须晚于开始",
+            interval.copy(endTimestamp = tappedAt).validationError(nowMillis = now),
+        )
+        assertEquals(
+            IntervalDurationPreview.Warning("不能选未来时刻"),
+            interval.copy(endTimestamp = now + 1L)
+                .intervalDurationPreview(nowMillis = now),
+        )
+        assertEquals(
+            IntervalDurationPreview.Duration("时长 不足1分"),
+            interval.copy(endTimestamp = tappedAt + 30_000L)
+                .intervalDurationPreview(nowMillis = now),
+        )
+        val repaired = interval.copy(endTimestamp = tappedAt + 65 * 60_000L)
+        assertEquals(
+            IntervalDurationPreview.Duration("时长 1小时5分"),
+            repaired.intervalDurationPreview(nowMillis = now),
+        )
+        assertTrue(repaired.canConfirm(nowMillis = now))
+    }
+
+    @Test
+    fun clockEndRejectionAddsCrossDayGuidanceOnlyForSleepOrdering() {
+        val now = tappedAt + 90 * 60_000L
+        val sleep = QuickRecordDraft.create(
+            type = RecordType.SLEEP,
+            timestamp = tappedAt,
+            historical = true,
+        )
+        val walk = QuickRecordDraft.create(RecordType.WALK, tappedAt)
+
+        assertEquals(
+            "醒来须晚于睡下。跨天请先把日期改为次日",
+            sleep.endTimeRejectionMessage(tappedAt, nowMillis = now),
+        )
+        assertEquals(
+            "结束须晚于开始",
+            walk.endTimeRejectionMessage(tappedAt, nowMillis = now),
+        )
+        assertEquals(
+            "不能选未来时刻",
+            sleep.endTimeRejectionMessage(now + 1L, nowMillis = now),
+        )
+        assertNull(
+            sleep.endTimeRejectionMessage(
+                candidateEndTimestamp = tappedAt + 30 * 60_000L,
+                nowMillis = now,
+            ),
+        )
+
+        val futureStart = sleep.copy(timestamp = now + 2L)
+        assertEquals(
+            "不能选未来时刻",
+            futureStart.endTimeRejectionMessage(
+                candidateEndTimestamp = now + 1L,
+                nowMillis = now,
+            ),
+        )
+    }
+
+    @Test
+    fun intervalPreviewExcludesHandEnteredDurationFields() {
+        assertNull(
+            QuickRecordDraft.create(RecordType.NURSING, tappedAt)
+                .copy(leftMin = "10")
+                .intervalDurationPreview(nowMillis = tappedAt + 60_000L),
+        )
+        assertNull(
+            QuickRecordDraft.create(RecordType.FORMULA, tappedAt)
+                .copy(durationMin = "10")
+                .intervalDurationPreview(nowMillis = tappedAt + 60_000L),
         )
     }
 
@@ -281,10 +466,168 @@ class QuickRecordDraftTest {
         )
 
         assertEquals(
-            "醒来时刻必须晚于睡下时刻",
+            "醒来须晚于睡下",
             QuickRecordDraft.wakeSleep(open, clickedAt = tappedAt)
                 .validationError(nowMillis = tappedAt + 60_000L),
         )
+    }
+
+    @Test
+    fun allInvalidDraftsLockConfirmButFooterWaitsForInteraction() {
+        val now = tappedAt + 60_000L
+        val cases = listOf(
+            QuickRecordDraft.create(RecordType.NURSING, tappedAt) to
+                "请填写左侧或右侧喂养时长",
+            QuickRecordDraft.create(RecordType.DIARY, tappedAt) to
+                "请填写日记正文",
+        )
+
+        cases.forEach { (draft, expected) ->
+            assertFalse(draft.canConfirm(nowMillis = now))
+            assertNull(
+                draft.footerValidationError(
+                    nowMillis = now,
+                    isDirty = false,
+                    attemptedConfirm = false,
+                ),
+            )
+            assertEquals(
+                expected,
+                draft.footerValidationError(
+                    nowMillis = now,
+                    isDirty = true,
+                    attemptedConfirm = false,
+                ),
+            )
+            assertEquals(
+                expected,
+                draft.footerValidationError(
+                    nowMillis = now,
+                    isDirty = false,
+                    attemptedConfirm = true,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun intervalWarningsStayAtTheTimeFieldsInsteadOfRepeatingInTheFooter() {
+        val draft = QuickRecordDraft.create(
+            type = RecordType.SLEEP,
+            timestamp = tappedAt,
+            historical = true,
+        )
+
+        assertEquals(
+            IntervalDurationPreview.Warning("请选择醒来时刻"),
+            draft.intervalDurationPreview(nowMillis = tappedAt + 60_000L),
+        )
+        assertNull(
+            draft.footerValidationError(
+                nowMillis = tappedAt + 60_000L,
+                isDirty = true,
+                attemptedConfirm = false,
+            ),
+        )
+    }
+
+    @Test
+    fun inlineValidationDefersWarningsExceptForAMissingRequiredEnd() {
+        val now = tappedAt + 60_000L
+        val manual = QuickRecordDraft.create(
+            type = RecordType.SLEEP,
+            timestamp = tappedAt,
+            historical = true,
+        )
+
+        assertEquals(
+            IntervalDurationPreview.Warning("请选择醒来时刻"),
+            manual.visibleIntervalDurationPreview(
+                nowMillis = now,
+                isDirty = false,
+                attemptedConfirm = false,
+            ),
+        )
+
+        val nonPositive = manual.copy(endTimestamp = tappedAt)
+        assertNull(
+            nonPositive.visibleIntervalDurationPreview(
+                nowMillis = now,
+                isDirty = false,
+                attemptedConfirm = false,
+            ),
+        )
+        assertEquals(
+            IntervalDurationPreview.Warning("醒来须晚于睡下"),
+            nonPositive.visibleIntervalDurationPreview(
+                nowMillis = now,
+                isDirty = true,
+                attemptedConfirm = false,
+            ),
+        )
+
+        val future = manual.copy(endTimestamp = now + 1L)
+        assertNull(
+            future.visibleIntervalDurationPreview(
+                nowMillis = now,
+                isDirty = false,
+                attemptedConfirm = false,
+            ),
+        )
+        assertEquals(
+            IntervalDurationPreview.Warning("不能选未来时刻"),
+            future.visibleIntervalDurationPreview(
+                nowMillis = now,
+                isDirty = false,
+                attemptedConfirm = true,
+            ),
+        )
+
+        val valid = manual.copy(endTimestamp = tappedAt + 30_000L)
+        assertEquals(
+            IntervalDurationPreview.Duration("时长 不足1分"),
+            valid.visibleIntervalDurationPreview(
+                nowMillis = now,
+                isDirty = false,
+                attemptedConfirm = false,
+            ),
+        )
+    }
+
+    @Test
+    fun distinctNonIntervalErrorStillAppearsBelowAValidDuration() {
+        val now = tappedAt + 60 * 60_000L
+        val draft = QuickRecordDraft.create(RecordType.WALK, tappedAt)
+            .copy(
+                endTimestamp = tappedAt + 30 * 60_000L,
+                note = "长".repeat(201),
+            )
+
+        assertEquals(
+            IntervalDurationPreview.Duration("时长 30分"),
+            draft.intervalDurationPreview(nowMillis = now),
+        )
+        assertEquals(
+            "备注最多 200 字",
+            draft.footerValidationError(
+                nowMillis = now,
+                isDirty = true,
+                attemptedConfirm = false,
+            ),
+        )
+        assertFalse(draft.canConfirm(nowMillis = now))
+    }
+
+    @Test
+    fun futurePointInTimeRecordUsesTheSharedShortWarning() {
+        val now = tappedAt
+        val draft = QuickRecordDraft.create(
+            type = RecordType.BATH,
+            timestamp = now + 1L,
+        )
+
+        assertEquals("不能选未来时刻", draft.validationError(nowMillis = now))
+        assertFalse(draft.canConfirm(nowMillis = now))
     }
 
     @Test
