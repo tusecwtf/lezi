@@ -3,11 +3,24 @@ set -eu
 
 version="${LEZI_SYNC_VERSION:-0.1.0}"
 image="${LEZI_SYNC_IMAGE:-lezi-sync:${version}}"
+build_context="$(mktemp -d "${TMPDIR:-/tmp}/lezi-sync-build.XXXXXX")"
+
+cleanup() {
+  rm -rf -- "${build_context}"
+}
+trap cleanup EXIT HUP INT TERM
+
+# Compose bind mounts may be owned by the container uid and unreadable to the
+# host user. Stage only the immutable image inputs so even legacy Docker
+# builders never traverse runtime data directories.
+mkdir "${build_context}/app"
+cp Dockerfile entrypoint.sh pyproject.toml "${build_context}/"
+cp -R app/. "${build_context}/app/"
 
 docker build \
   --build-arg "LEZI_SYNC_VERSION=${version}" \
   --tag "${image}" \
   --tag lezi-sync:latest \
-  .
+  "${build_context}"
 
 printf 'Built %s and lezi-sync:latest\n' "${image}"

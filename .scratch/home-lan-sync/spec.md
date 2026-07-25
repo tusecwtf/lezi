@@ -1,6 +1,6 @@
 # Spec: 家庭局域网同步（Home LAN Sync）
 
-Status: implementation-complete; docker-01 runtime done (rootless, not NAS prod); 09 dual-path partial (live dual-HTTP + single-emu; dual-phone pending)
+Status: implementation-complete; docker-01 runtime done (rootless, not NAS prod); 09 partial (dual-emu formula/pee UI path proven; remaining device Must pending)
 Feature: home-lan-sync
 Product: 乐记 (`com.lezi.babylog`)
 Prerequisite: V1 本地记账可用；账户页入口存在
@@ -52,5 +52,6 @@ Supersedes: `.scratch/v2-delivery` 中同步相关票 01–03 的「公网/后�
 - **01 Docker runtime done（本机 rootless Docker）**：镜像存在；`lezi-sync` 健康于
   `:8765`；单卷 `lezi-sync-data` 含 `lezi.db` + `media/`；`/health` 200 + version。
   **未**宣称 NAS 生产部署。证据：`docs/reviews/home-lan-sync-docker-acceptance-2026-07-25/01-docker/`。
-- **09 partial**：live 双 Client HTTP A/B 路径 18/18 通过；仅单模拟器经邀请码加入。
-  双物理机扫码、蜂窝硬件门闩、伴侣通知观察仍未验收。证据：`…/09-dual-path/`。
+- **09 partial**：双模拟器已验证建家、输入邀请码加入与 formula/pee 双向 UI 可见；
+  live HTTP 协议覆盖日志媒体和头像 ACL。相机扫码、日志图跨端 UI、蜂窝硬件门闩、
+  伴侣通知和独立设置仍未验收。证据：`docs/reviews/device-family-dual-emu-09/`。

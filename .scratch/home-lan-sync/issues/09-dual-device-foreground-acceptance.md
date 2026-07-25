@@ -2,7 +2,7 @@
 
 **Parent:** [../spec.md](../spec.md) · PRD `sync-home-lan` §5.4
 **Blocked by:** 04, 07, 08
-**Status:** done — dual-emu create+invite join + formula/pee UI cross-visible (QR camera scan / cellular / partner notify / dark dual-UI still not claimed)
+**Status:** partial — dual-emu formula/pee UI cross-visible；QR camera、日志图 UI、蜂窝、通知、独立设置待验
 
 ## What to build
 
@@ -15,10 +15,10 @@
 
 ## 验收标准（Must）
 
-- [x] A 建家，B 扫码加入（同家 Wi‑Fi + NAS） — **PASS invite path on dual emulators** (`emulator-5554` create + `emulator-5556` 输入邀请码 `TBAYSUCVKNTU`); owner invite QR **shot**; **dual-emu camera QR scan not automated**; local Docker `:8765` not NAS production
+- [ ] A 建家，B 扫码加入（同家 Wi‑Fi + NAS） — 已通过双模拟器建家 + **输入邀请码**加入并留有 QR 截图；未执行相机扫码，且后端是本机 Docker、非 NAS 生产
 - [x] A 前台记 formula → B **回前台或下拉** 后可见 — dual-emu UI: A 配方奶 120ml + 立即同步; B after pull + 设为当前 family baby shows formula (`04-ui-cross`)
 - [x] B 前台记 pee → A 下拉可见 — dual-emu UI: B pee@18:42; A 尿 1次→2次 after 立即同步 (`04-ui-cross`)
-- [x] 日志图：一端添加 → 另一端前台同步后可见 — live HTTP log media meta+bytes on **same device family** (protocol-verify 22/22); device UI image attach not re-run this track
+- [ ] 日志图：一端添加 → 另一端前台同步后可见 — live HTTP 已验证同家庭 metadata+bytes；本轮未执行设备 UI 添加与跨端可见
 - [x] 头像：仅 owner 可改；member 改被拒或 UI 不可用 — live HTTP member 403 / owner ok on device family (`04-backend`)
 - [ ] 蜂窝网络：不上传；回家 Wi‑Fi 打开 App 后 Outbox 冲刷 — **env-blocked** (no cellular toggle); unit: HomeNetworkPolicyTest + RealSyncPortTest.nonWifiStillSnapshots…
 - [ ] 无伴侣新记录系统通知 — **env-blocked** (cannot dual-device observe partner system notifications); SyncTriggerTest + UI copy 不会推送伴侣的新记录
@@ -58,7 +58,7 @@
     (`regression/regression-summary.md`).
   - **Not claimed:** two physical phones, dual-device QR join, NAS production deploy,
     cellular hardware gate, dual-device partner notification observation.
-- 2026-07-25 **device-family-dual-emu-09** — **Status → done**:
+- 2026-07-25 **device-family-dual-emu-09** — **Status remains partial**:
   - Dual emulators: `emulator-5554` (owner, `lezi_api35`) + `emulator-5556`
     (member, cloned `lezi_api35_b`); debug APK installed, `pm clear`, MainActivity both.
   - Volume wipe + healthy `lezi-sync:0.1.0` on `:8765`; backend smoke left server empty;
@@ -75,7 +75,7 @@
     - `REPORT.md`, `summary.json`
     - `00-reset/`, `01-devices/`, `02-owner/`, `02-backend-smoke/`, `03-join/`,
       `04-backend/`, `04-ui-cross/`
-  - **Still unchecked (env):** cellular hardware gate; partner system notifications;
-    independent dual-device dark mode UI.
+  - **Still unchecked:** camera QR E2E；日志图跨端 UI；cellular hardware gate；
+    partner system notifications；independent dual-device dark mode UI。
   - **Not claimed:** two physical phones; dual-device **camera** QR scan E2E; NAS production;
     background 60s sync.

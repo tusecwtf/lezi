@@ -85,7 +85,7 @@ V1 最小路径：创建默认 `Family` + 当前 `LocalUser`（匿名）+ `Baby`
 | `birthday` | 日龄基准 |
 | `due_date` | 修正月龄用，可选 |
 | `theme_color` | 本机展示；是否同步主题 **默认不同步**（见设置） |
-| `sort_order` | |
+| `sort_order` | 本机展示顺序；不同步 |
 | `client_uuid` | |
 | `updated_at` / `deleted_at` | 软删 |
 
@@ -294,7 +294,7 @@ interface SyncPort {
 | 同步域（首版） | **Baby + Record + 日志 MediaAsset（含字节）** |
 | 写权限 | 宝宝**头像**仅 owner；日志媒体家庭内可同步 |
 | 后置 | CustomItemDef、CalendarEvent |
-| 不同步 | SettingsLocal、下次喂奶时刻、Widget 配置、本机路径 |
+| 不同步 | SettingsLocal、Baby `theme_color`/`sort_order`、下次喂奶时刻、Widget 配置、本机路径 |
 | 共享粒度 | **全量**（同步域内）；不做字段白名单 |
 | 冲突 | 同 `client_uuid` 幂等；否则 `updated_at` LWW；删除 tombstone |
 | 跨机引用 | Record 使用 `baby_client_uuid`，不用对端本地自增 id |
@@ -302,6 +302,9 @@ interface SyncPort {
 | 验收 | 双方在家且打开 App 时回前台/下拉一致；**不**承诺息屏 60s |
 | 安全 | 默认家网 HTTP + family token；可选 HTTPS；加入前明示全量共享 |
 | 持久化 | NAS 单数据根：`DATA_DIR/lezi.db` + `DATA_DIR/media/` |
+
+Room schema v7 会把历史 `MediaAsset` 关联规范为二选一：`log` 仅保留
+`record_id`，`avatar` 仅保留 `baby_id`。
 
 ### 6.5 本地备份（可选，不依赖 SyncPort）
 

@@ -184,36 +184,45 @@ class CareLog @Inject constructor(
      * @throws DuplicateBabyNicknameException when another baby already uses the name
      */
     suspend fun updateBabyProfile(babyId: Long, input: UpdateBabyInput) {
-        val existing = babyDao.get(babyId) ?: return
-        val nickname = normalizeNickname(input.nickname)
-        ensureNicknameAvailable(nickname, excludeId = babyId)
-        babyDao.update(
-            existing.copy(
-                nickname = nickname,
-                sex = input.sex,
-                birthdayEpochDay = input.birthdayEpochDay,
-                birthWeightGrams = normalizeBirthWeightGrams(input.birthWeightGrams),
-                avatarPath = input.avatarPath,
-                dueDateEpochDay = input.dueDateEpochDay,
-                themeColorArgb = input.themeColorArgb ?: existing.themeColorArgb,
-                updatedAt = nextSyncUpdatedAt(
-                    existing.updatedAt,
-                    System.currentTimeMillis(),
+        val changed = transactionRunner.run {
+            val existing = babyDao.get(babyId) ?: return@run false
+            val nickname = normalizeNickname(input.nickname)
+            ensureNicknameAvailable(nickname, excludeId = babyId)
+            babyDao.update(
+                existing.copy(
+                    nickname = nickname,
+                    sex = input.sex,
+                    birthdayEpochDay = input.birthdayEpochDay,
+                    birthWeightGrams = normalizeBirthWeightGrams(input.birthWeightGrams),
+                    avatarPath = input.avatarPath,
+                    dueDateEpochDay = input.dueDateEpochDay,
+                    themeColorArgb = input.themeColorArgb ?: existing.themeColorArgb,
+                    updatedAt = nextSyncUpdatedAt(
+                        existing.updatedAt,
+                        System.currentTimeMillis(),
+                    ),
+                    syncDirty = true,
                 ),
-                syncDirty = true,
-            ),
-        )
+            )
+            true
+        }
+        if (!changed) return
         requestLocalSync()
     }
 
     /** Soft-delete a baby profile. Reassigns current baby if needed. Keeps at least one baby. */
     suspend fun deleteBaby(babyId: Long): Boolean {
-        val babies = babyDao.listAll()
-        if (babies.size <= 1) return false
-        val target = babies.find { it.id == babyId } ?: return false
-        val now = nextSyncUpdatedAt(target.updatedAt, System.currentTimeMillis())
-        babyDao.update(target.copy(deletedAt = now, updatedAt = now, syncDirty = true))
-        val remaining = babyDao.listAll()
+        var deleted = false
+        val remaining = transactionRunner.run {
+            val babies = babyDao.listAll()
+            if (babies.size <= 1) return@run emptyList()
+            val target = babies.find { it.id == babyId } ?: return@run emptyList()
+            val now = nextSyncUpdatedAt(target.updatedAt, System.currentTimeMillis())
+            babyDao.update(target.copy(deletedAt = now, updatedAt = now, syncDirty = true))
+            deleted = true
+            babyDao.listAll()
+        }
+        if (!deleted) return false
         val currentId = settings.currentBabyId.first()
         if (currentId == null || currentId == babyId || remaining.none { it.id == currentId }) {
             remaining.firstOrNull()?.let { settings.setCurrentBabyId(it.id) }
@@ -810,14 +819,21 @@ class CareLog @Inject constructor(
         .toList()
 
     suspend fun updateBabyDueDate(babyId: Long, dueDateEpochDay: Long?) {
-        val b = babyDao.get(babyId) ?: return
-        babyDao.update(
-            b.copy(
-                dueDateEpochDay = dueDateEpochDay,
-                updatedAt = nextSyncUpdatedAt(b.updatedAt, System.currentTimeMillis()),
-                syncDirty = true,
-            ),
-        )
+        val changed = transactionRunner.run {
+            val baby = babyDao.get(babyId) ?: return@run false
+            babyDao.update(
+                baby.copy(
+                    dueDateEpochDay = dueDateEpochDay,
+                    updatedAt = nextSyncUpdatedAt(
+                        baby.updatedAt,
+                        System.currentTimeMillis(),
+                    ),
+                    syncDirty = true,
+                ),
+            )
+            true
+        }
+        if (!changed) return
         requestLocalSync()
     }
 
@@ -847,17 +863,24 @@ class CareLog @Inject constructor(
     }
 
     suspend fun renameBaby(babyId: Long, nickname: String) {
-        val b = babyDao.get(babyId) ?: return
         val name = normalizeNickname(nickname)
-        if (b.nickname == name) return
-        ensureNicknameAvailable(name, excludeId = babyId)
-        babyDao.update(
-            b.copy(
-                nickname = name,
-                updatedAt = nextSyncUpdatedAt(b.updatedAt, System.currentTimeMillis()),
-                syncDirty = true,
-            ),
-        )
+        val changed = transactionRunner.run {
+            val baby = babyDao.get(babyId) ?: return@run false
+            if (baby.nickname == name) return@run false
+            ensureNicknameAvailable(name, excludeId = babyId)
+            babyDao.update(
+                baby.copy(
+                    nickname = name,
+                    updatedAt = nextSyncUpdatedAt(
+                        baby.updatedAt,
+                        System.currentTimeMillis(),
+                    ),
+                    syncDirty = true,
+                ),
+            )
+            true
+        }
+        if (!changed) return
         requestLocalSync()
     }
 

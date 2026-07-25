@@ -29,6 +29,7 @@ class SyncPreferencesTest {
                 deviceId = "device-uuid",
                 role = FamilyRole.Owner,
                 pullCursor = 41,
+                pullGeneration = "server-generation",
             ),
         )
         firstScope.cancel()
@@ -39,6 +40,7 @@ class SyncPreferencesTest {
         val restored = DataStoreSyncPreferences(secondStore)
 
         assertThat(restored.session.first().pullCursor).isEqualTo(41)
+        assertThat(restored.session.first().pullGeneration).isEqualTo("server-generation")
         assertThat(restored.session.first().familyToken).isEqualTo("secret-token")
         secondScope.cancel()
         file.delete()
@@ -78,6 +80,7 @@ class SyncPreferencesTest {
                 deviceId = "stable-device",
                 role = FamilyRole.Owner,
                 pullCursor = 99,
+                pullGeneration = "old-generation",
                 lastSuccessAt = 123,
             ),
         )
@@ -105,6 +108,7 @@ class SyncPreferencesTest {
                 deviceId = "stable-device",
                 role = FamilyRole.Owner,
                 pullCursor = 99,
+                pullGeneration = "old-generation",
                 lastSuccessAt = 123,
             ),
         )
@@ -121,6 +125,7 @@ class SyncPreferencesTest {
 
         assertThat(preferences.session.first().lastSuccessAt).isNull()
         assertThat(preferences.session.first().pullCursor).isEqualTo(0)
+        assertThat(preferences.session.first().pullGeneration).isEmpty()
     }
 
     @Test

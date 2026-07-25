@@ -77,7 +77,7 @@ python -m py_compile app/*.py tests/*.py
 | POST | `/v1/leave` | member 吊销自身 token；owner 返回 403 |
 | POST | `/v1/family/delete` | owner 删除家庭、实体、成员与媒体 |
 | POST | `/v1/push` | 严格接收 `baby|record|media` |
-| GET | `/v1/pull?cursor=N` | 按单调 `rev` 增量拉取 |
+| GET | `/v1/pull?cursor=N&generation=G` | 按进程代际内单调 `rev` 增量拉取 |
 | PUT/GET | `/v1/media/{client_uuid}` | 上传/下载媒体字节 |
 
 同步键是 `(family_id, type, client_uuid)`。只有更大的 `updated_at`
@@ -91,8 +91,15 @@ python -m py_compile app/*.py tests/*.py
 批次会先按 LWW 选出每个同步键真正生效的赢家，再执行关联与权限校验；
 因此已被服务端更新覆盖的旧 Baby 快照不会阻塞同批较新的 Record。
 
-若 NAS 从旧备份恢复，客户端保存的 cursor 可能高于服务端当前 cursor。
-此时 `/v1/pull` 返回 HTTP 409 和稳定的机器可读恢复契约：
+`/v1/pull` 成功响应同时返回 `generation`。服务每次启动都会生成新代际；
+客户端须与 cursor 一起持久化，并在后续 push/pull 回传。push 会在写入前
+拒绝旧代际；旧代际会得到
+`generation_changed/full_resync`，因此即使 NAS 旧备份复用了相同 revision，
+客户端也不会静默漏拉。既有安装出现“非零 cursor + 空 generation”时会先从
+cursor 0 校准；普通服务重启会保守地触发一次全量校准。
+
+若 NAS 从旧备份恢复，客户端保存的 cursor 也可能高于服务端当前 cursor。
+此时 `/v1/pull` 返回 HTTP 409 和同一机器可读恢复契约：
 
 ```json
 {
@@ -100,15 +107,18 @@ python -m py_compile app/*.py tests/*.py
     "code": "cursor_ahead",
     "action": "full_resync",
     "reset_cursor": 0,
-    "server_cursor": 12
+    "server_cursor": 12,
+    "server_generation": "..."
   }
 }
 ```
 
-客户端只应在 `code` 与 `action` 同时匹配时进入恢复流程：在同步互斥区内把
-本地 pull cursor 持久化为 `reset_cursor`，重新排队本地仍保留且有权写入的
-实体与媒体，再执行 push，最后从 cursor 0 全量 pull。不能直接把
-`server_cursor` 当作新 cursor，否则会跳过恢复后服务端仍存在的 revision。
+客户端只应在 `code`（`cursor_ahead` 或 `generation_changed`）与 `action`
+同时匹配时进入恢复流程：在同步互斥区内把本地 pull cursor 持久化为
+`reset_cursor` 并清空旧 generation。owner 重新排队本地仍保留且有权写入的
+实体与媒体再全量 pull；member 先全量 pull 取得 owner 的头像权威，再重建
+Outbox 和 push。不能直接把 `server_cursor` 当作新 cursor，否则会跳过恢复后
+服务端仍存在的 revision。恢复整个数据根后必须重启服务。
 此契约只能帮助各客户端重新汇合其仍持有的数据；服务器和所有客户端都已
 丢失的内容仍需从其它备份恢复。
 

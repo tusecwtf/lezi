@@ -2,6 +2,7 @@ package com.lezi.babylog.sync
 
 import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.BabyEntity
+import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.FamilyDao
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
@@ -16,6 +17,7 @@ import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
@@ -54,13 +56,18 @@ data class SyncEntity(
     val rev: Long = 0,
 )
 
-data class PullResult(val entities: List<SyncEntity>, val cursor: Long)
+data class PullResult(
+    val entities: List<SyncEntity>,
+    val cursor: Long,
+    val generation: String = "",
+)
 data class JoinResult(
     val familyId: String,
     val token: String,
     val role: FamilyRole,
     val entities: List<SyncEntity> = emptyList(),
     val cursor: Long = 0,
+    val generation: String = "",
 )
 
 interface SyncBackend {
@@ -165,12 +172,27 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
     override suspend fun push(session: SyncSession, entities: List<SyncEntity>): Int =
         post(session.baseUrl, "/v1/push", session.familyToken, buildJsonObject {
             put("device_id", session.deviceId)
+            session.pullGeneration.takeIf(String::isNotBlank)?.let {
+                put("generation", it)
+            }
             put("entities", buildJsonArray { entities.forEach { add(it.toJson()) } })
         })["applied"]?.jsonPrimitive?.longOrNull?.toInt() ?: 0
 
     override suspend fun pull(session: SyncSession): PullResult {
-        val json = get(session.baseUrl, "/v1/pull?cursor=${session.pullCursor}", session.familyToken)
-        return PullResult(json.entities(), json["cursor"]?.jsonPrimitive?.longOrNull ?: session.pullCursor)
+        val generation = session.pullGeneration
+            .takeIf(String::isNotBlank)
+            ?.let { "&generation=${URLEncoder.encode(it, Charsets.UTF_8.name())}" }
+            .orEmpty()
+        val json = get(
+            session.baseUrl,
+            "/v1/pull?cursor=${session.pullCursor}$generation",
+            session.familyToken,
+        )
+        return PullResult(
+            entities = json.entities(),
+            cursor = json["cursor"]?.jsonPrimitive?.longOrNull ?: session.pullCursor,
+            generation = json["generation"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+        )
     }
 
     override suspend fun invite(session: SyncSession): Invite {
@@ -295,6 +317,7 @@ class RealSyncPort @Inject constructor(
     private val clock: PolicyClock,
     private val foregroundState: ForegroundState,
     private val mediaFiles: SyncMediaFileStore,
+    private val transactionRunner: DatabaseTransactionRunner,
 ) : SyncPort {
     private val currentStatus = MutableStateFlow(SyncStatus.Disabled)
     private val processScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -399,40 +422,47 @@ class RealSyncPort @Inject constructor(
                 currentStatus.value = SyncStatus.Disabled
                 return@withLock
             }
+            // Baseline device-local media fields before snapshotting or any
+            // policy/backend I/O. Later sync-owned projections advance this
+            // guard; user edits made anywhere in the cycle do not.
+            val mediaEditGuard = captureLocalMediaEditGuard()
             // Snapshot first: a non-Wi-Fi write still leaves a durable outbox.
             captureLocalChanges(session)
             val decision = policy.evaluate(session.baseUrl, foregroundState.isForeground())
             requireAllowed(decision)
             currentStatus.value = SyncStatus.Syncing
             val plan = SyncPlan.forTrigger(trigger)
-            if (plan.push) {
-                pushPending(session)
+            var current = session
+            var recovered = false
+            if (current.pullCursor > 0 && current.pullGeneration.isBlank()) {
+                current = recoverFullResync(current, mediaEditGuard)
+                recovered = true
             }
-            if (plan.pull) {
-                var current = preferences.session.first()
+            if (plan.push && !recovered) {
+                try {
+                    pushPending(current)
+                } catch (error: SyncHttpException) {
+                    error.fullResyncCursorOrNull() ?: throw error
+                    current = recoverFullResync(current, mediaEditGuard)
+                    recovered = true
+                }
+            }
+            if (plan.pull && !recovered) {
                 requireAllowed(
                     policy.evaluate(current.baseUrl, foregroundState.isForeground()),
                 )
                 val pulled = try {
                     backend.pull(current)
                 } catch (error: SyncHttpException) {
-                    val resetCursor = error.fullResyncCursorOrNull() ?: throw error
-                    resetLocalSyncReceipts(
-                        previous = current,
-                        invalidateCurrentReceipts = true,
-                    )
-                    preferences.updateCursor(resetCursor)
-                    current = preferences.session.first()
-                    captureLocalChanges(current)
-                    pushPending(current)
-                    requireAllowed(
-                        policy.evaluate(current.baseUrl, foregroundState.isForeground()),
-                    )
-                    backend.pull(current)
+                    error.fullResyncCursorOrNull() ?: throw error
+                    recoverFullResync(current, mediaEditGuard)
+                    null
                 }
-                applyRemote(current, pulled.entities)
-                downloadMissingMedia(current)
-                preferences.updateCursor(pulled.cursor)
+                if (pulled != null) {
+                    applyRemote(current, pulled.entities, mediaEditGuard = mediaEditGuard)
+                    downloadMissingMedia(current, mediaEditGuard)
+                    preferences.updateCursor(pulled.cursor, pulled.generation)
+                }
             }
             preferences.markSuccess(clock.nowMillis())
             cachedSession = preferences.session.first()
@@ -487,7 +517,10 @@ class RealSyncPort @Inject constructor(
             // Otherwise a pull can reinsert records between the domain delete
             // and replica cleanup while the UI still reports success.
             clearLocal()
-            preferences.updateCursor(0)
+            // Keep the last server incarnation as a push precondition. If the
+            // server was restored while records were being cleared, the next
+            // dirty Baby must be rejected into full recovery before mutation.
+            preferences.updateCursor(0, generation = session.pullGeneration)
             if (session.familyId.isNotBlank()) {
                 outboxDao.deleteType(session.familyId, "record")
                 val mediaUuids = logMedia.map(MediaAssetEntity::clientUuid)
@@ -634,47 +667,78 @@ class RealSyncPort @Inject constructor(
         return selected.values.toList()
     }
 
-    private suspend fun applyRemote(session: SyncSession, entities: List<SyncEntity>) {
-        val unresolved = mutableListOf<SyncEntity>()
-        for (entity in entities.filter { it.type == "baby" }) {
-            if (!applyBaby(entity)) unresolved += entity
+    private suspend fun applyRemote(
+        session: SyncSession,
+        entities: List<SyncEntity>,
+        reconcileMemberAvatars: Boolean = false,
+        mediaEditGuard: LocalMediaEditGuard? = null,
+    ) {
+        val deletedLocalUris = mutableListOf<String>()
+        transactionRunner.run {
+            val unresolved = mutableListOf<SyncEntity>()
+            for (entity in entities.filter { it.type == "baby" }) {
+                if (!applyBaby(session, entity)) unresolved += entity
+            }
+            for (entity in entities.filter { it.type == "record" }) {
+                if (!applyRecord(entity)) unresolved += entity
+            }
+            for (entity in entities.filter { it.type == "media" }) {
+                if (!applyMedia(session, entity, deletedLocalUris)) unresolved += entity
+            }
+            require(unresolved.isEmpty()) {
+                "同步数据引用尚未就绪，保留 cursor 以便重试"
+            }
+            val affectedRecords = (
+                entities.filter { it.type == "record" }
+                    .mapNotNull { entity -> recordDao.getByClientUuid(entity.clientUuid)?.id } +
+                    entities.filter { it.type == "media" }
+                        .mapNotNull { entity ->
+                            mediaDao.getByClientUuid(entity.clientUuid)?.recordId
+                        }
+                )
+                .distinct()
+            affectedRecords.forEach {
+                refreshRecordPhotoPaths(it, mediaEditGuard)
+            }
+            (
+                entities.filter { it.type == "baby" }
+                    .mapNotNull { entity -> babyDao.getByClientUuid(entity.clientUuid)?.id } +
+                    entities.filter { it.type == "media" }
+                        .mapNotNull { entity ->
+                            mediaDao.getByClientUuid(entity.clientUuid)?.babyId
+                        }
+                )
+                .distinct()
+                .forEach {
+                    refreshBabyAvatar(it, mediaEditGuard)
+                }
+            if (reconcileMemberAvatars) {
+                reconcileMemberAvatarAuthority(entities, mediaEditGuard)
+            }
         }
-        for (entity in entities.filter { it.type == "record" }) {
-            if (!applyRecord(entity)) unresolved += entity
-        }
-        for (entity in entities.filter { it.type == "media" }) {
-            if (!applyMedia(session, entity)) unresolved += entity
-        }
-        require(unresolved.isEmpty()) {
-            "同步数据引用尚未就绪，保留 cursor 以便重试"
-        }
-        val affectedRecords = (
-            entities.filter { it.type == "record" }
-                .mapNotNull { entity -> recordDao.getByClientUuid(entity.clientUuid)?.id } +
-                entities.filter { it.type == "media" }
-                    .mapNotNull { entity ->
-                        mediaDao.getByClientUuid(entity.clientUuid)?.recordId
-                    }
-            )
-            .distinct()
-        affectedRecords.forEach { refreshRecordPhotoPaths(it) }
-        (
-            entities.filter { it.type == "baby" }
-                .mapNotNull { entity -> babyDao.getByClientUuid(entity.clientUuid)?.id } +
-                entities.filter { it.type == "media" }
-                    .mapNotNull { entity -> mediaDao.getByClientUuid(entity.clientUuid)?.babyId }
-            )
-            .distinct()
-            .forEach { refreshBabyAvatar(it) }
+        deletedLocalUris.forEach { mediaFiles.delete(it) }
         // Keep the parameter explicit: media bytes are authorized by this same
         // session during the immediately following reconciliation.
         check(session.isJoined)
     }
 
-    private suspend fun applyBaby(entity: SyncEntity): Boolean {
+    private suspend fun applyBaby(session: SyncSession, entity: SyncEntity): Boolean {
         val existing = babyDao.getByClientUuid(entity.clientUuid)
-        if (existing != null && existing.updatedAt > entity.updatedAt) return true
         val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
+        if (existing != null && existing.updatedAt > entity.updatedAt) {
+            if (session.role == FamilyRole.Member && "avatar_media_uuid" in payload) {
+                val remoteAvatar = payload.string("avatar_media_uuid")
+                if (existing.avatarMediaUuid != remoteAvatar) {
+                    babyDao.update(
+                        existing.copy(
+                            avatarMediaUuid = remoteAvatar,
+                            avatarPath = existing.avatarPath,
+                        ),
+                    )
+                }
+            }
+            return true
+        }
         val familyId = existing?.familyId ?: familyDao.listAll().firstOrNull()?.id ?: return false
         babyDao.upsert(
             BabyEntity(
@@ -698,7 +762,7 @@ class RealSyncPort @Inject constructor(
                     existing?.dueDateEpochDay
                 },
                 themeColorArgb = existing?.themeColorArgb ?: 0xFFE6A67A.toInt(),
-                sortOrder = payload.long("sort_order")?.toInt() ?: existing?.sortOrder ?: 0,
+                sortOrder = existing?.sortOrder ?: 0,
                 clientUuid = entity.clientUuid,
                 updatedAt = entity.updatedAt,
                 deletedAt = entity.deletedAt,
@@ -732,7 +796,10 @@ class RealSyncPort @Inject constructor(
                 createdByUserId = existing?.createdByUserId ?: 1,
                 createdByDeviceId = payload.string("created_by_device_id")
                     ?: existing?.createdByDeviceId,
-                payloadJson = SyncWireMapper.recordPayloadJson(payload),
+                payloadJson = preserveDeviceLocalPhotos(
+                    remotePayloadJson = SyncWireMapper.recordPayloadJson(payload),
+                    existingPayloadJson = existing?.payloadJson,
+                ),
                 schemaVersion = SyncWireMapper.recordSchemaVersion(payload),
                 updatedAt = entity.updatedAt,
                 deletedAt = entity.deletedAt,
@@ -742,7 +809,11 @@ class RealSyncPort @Inject constructor(
         return true
     }
 
-    private suspend fun applyMedia(session: SyncSession, entity: SyncEntity): Boolean {
+    private suspend fun applyMedia(
+        session: SyncSession,
+        entity: SyncEntity,
+        deletedLocalUris: MutableList<String>,
+    ): Boolean {
         val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
         val existing = mediaDao.getByClientUuid(entity.clientUuid)
         if (existing != null && existing.updatedAt > entity.updatedAt) return true
@@ -750,9 +821,10 @@ class RealSyncPort @Inject constructor(
         val recordId = payload.string("record_client_uuid")
             ?.let { recordDao.getByClientUuid(it)?.id }
             ?: existing?.recordId
-        val babyId = payload.string("baby_client_uuid")
+        val referencedBabyId = payload.string("baby_client_uuid")
             ?.let { babyDao.getByClientUuid(it)?.id }
             ?: existing?.babyId
+        val babyId = if (kind == "log") null else referencedBabyId
         if (kind == "log" && recordId == null) return false
         if (kind == "avatar" && babyId == null) return false
         mediaDao.upsert(
@@ -775,7 +847,7 @@ class RealSyncPort @Inject constructor(
             ),
         )
         if (entity.deletedAt != null && !existing?.localUri.isNullOrBlank()) {
-            mediaFiles.delete(existing!!.localUri)
+            deletedLocalUris += existing!!.localUri
             mediaDao.update(
                 requireNotNull(mediaDao.getByClientUuid(entity.clientUuid)).copy(localUri = ""),
             )
@@ -791,6 +863,7 @@ class RealSyncPort @Inject constructor(
             deviceId = deviceId,
             role = joined.role,
             pullCursor = joined.cursor,
+            pullGeneration = joined.generation,
         )
         // Upload receipts only prove that bytes exist in the previous
         // server/family namespace. A new family must reconcile them again.
@@ -829,6 +902,64 @@ class RealSyncPort @Inject constructor(
                     syncDirty = true,
                 ),
             )
+        }
+    }
+
+    private suspend fun recoverFullResync(
+        previous: SyncSession,
+        mediaEditGuard: LocalMediaEditGuard,
+    ): SyncSession {
+        resetLocalSyncReceipts(
+            previous = previous,
+            invalidateCurrentReceipts = true,
+        )
+        preferences.updateCursor(0, generation = "")
+        var current = preferences.session.first()
+        requireAllowed(policy.evaluate(current.baseUrl, foregroundState.isForeground()))
+        val authoritative = backend.pull(current)
+        applyRemote(
+            current,
+            authoritative.entities,
+            reconcileMemberAvatars = current.role == FamilyRole.Member,
+            mediaEditGuard = mediaEditGuard,
+        )
+        downloadMissingMedia(current, mediaEditGuard)
+        preferences.updateCursor(
+            authoritative.cursor,
+            authoritative.generation,
+        )
+        current = preferences.session.first()
+        captureLocalChanges(current)
+        pushPending(current)
+        current = preferences.session.first()
+        requireAllowed(policy.evaluate(current.baseUrl, foregroundState.isForeground()))
+        val finalPull = backend.pull(current)
+        applyRemote(current, finalPull.entities, mediaEditGuard = mediaEditGuard)
+        downloadMissingMedia(current, mediaEditGuard)
+        preferences.updateCursor(finalPull.cursor, finalPull.generation)
+        return preferences.session.first()
+    }
+
+    private suspend fun reconcileMemberAvatarAuthority(
+        entities: List<SyncEntity>,
+        mediaEditGuard: LocalMediaEditGuard?,
+    ) {
+        val serverPointers = entities
+            .filter { it.type == "baby" && it.deletedAt == null }
+            .associate { entity ->
+                val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
+                entity.clientUuid to payload.string("avatar_media_uuid")
+            }
+        babyDao.listAllIncludingDeleted().forEach { baby ->
+            val authoritativePointer = serverPointers[baby.clientUuid]
+            if (baby.avatarMediaUuid != authoritativePointer) {
+                babyDao.updateAvatarReplica(
+                    clientUuid = baby.clientUuid,
+                    avatarMediaUuid = authoritativePointer,
+                    avatarPath = null,
+                )
+                mediaEditGuard?.babyRefreshed(baby.clientUuid, null)
+            }
         }
     }
 
@@ -902,9 +1033,15 @@ class RealSyncPort @Inject constructor(
                 ?.let { pointer ->
                     eligibleAvatars.firstOrNull { it.clientUuid == pointer }?.clientUuid
                 }
-                ?: eligibleAvatars
-                    .maxWithOrNull(compareBy<MediaAssetEntity> { it.updatedAt }.thenBy { it.id })
-                    ?.clientUuid
+                ?: if (session.role == FamilyRole.Member) {
+                    null
+                } else {
+                    eligibleAvatars
+                        .maxWithOrNull(
+                            compareBy<MediaAssetEntity> { it.updatedAt }.thenBy { it.id },
+                        )
+                        ?.clientUuid
+                }
             enqueue(
                 session,
                 SyncWireMapper.baby(
@@ -962,10 +1099,51 @@ class RealSyncPort @Inject constructor(
         records: List<RecordEntity>,
     ) {
         if (includeAvatars) {
-            babies.forEach { baby ->
-                val existing = mediaDao.activeAvatarForBaby(baby.id)
-                val path = baby.avatarPath?.takeIf { it.isNotBlank() }
-                if (path == null) {
+            babies.forEach { snapshot ->
+                val snapshotPath = snapshot.avatarPath?.takeIf { it.isNotBlank() }
+                val inspected = snapshotPath?.let { mediaFiles.inspect(it) }
+                transactionRunner.run {
+                    val baby = babyDao.getIncludingDeleted(snapshot.id) ?: return@run
+                    if (
+                        baby.updatedAt != snapshot.updatedAt ||
+                        baby.avatarPath != snapshot.avatarPath
+                    ) {
+                        return@run
+                    }
+                    val existing = mediaDao.activeAvatarForBaby(baby.id)
+                    val path = baby.avatarPath?.takeIf { it.isNotBlank() }
+                    if (path == null) {
+                        if (existing != null) {
+                            mediaDao.update(
+                                existing.copy(
+                                    updatedAt = baby.updatedAt,
+                                    deletedAt = baby.updatedAt,
+                                    syncDirty = true,
+                                ),
+                            )
+                        }
+                        if (baby.avatarMediaUuid != null) {
+                            babyDao.updateAvatarMediaForLocalSnapshot(
+                                id = baby.id,
+                                expectedUpdatedAt = baby.updatedAt,
+                                expectedAvatarPath = baby.avatarPath,
+                                avatarMediaUuid = null,
+                            )
+                        }
+                        return@run
+                    }
+                    if (existing?.localUri == path) {
+                        if (baby.avatarMediaUuid != existing.clientUuid) {
+                            babyDao.updateAvatarMediaForLocalSnapshot(
+                                id = baby.id,
+                                expectedUpdatedAt = baby.updatedAt,
+                                expectedAvatarPath = baby.avatarPath,
+                                avatarMediaUuid = existing.clientUuid,
+                            )
+                        }
+                        return@run
+                    }
+                    val info = inspected ?: return@run
                     if (existing != null) {
                         mediaDao.update(
                             existing.copy(
@@ -975,90 +1153,97 @@ class RealSyncPort @Inject constructor(
                             ),
                         )
                     }
-                    if (baby.avatarMediaUuid != null) {
-                        babyDao.update(
-                            baby.copy(avatarMediaUuid = null, syncDirty = true),
-                        )
-                    }
-                    return@forEach
-                }
-                if (existing?.localUri == path) {
-                    if (baby.avatarMediaUuid != existing.clientUuid) {
-                        babyDao.update(
-                            baby.copy(
-                                avatarMediaUuid = existing.clientUuid,
-                                syncDirty = true,
-                            ),
-                        )
-                    }
-                    return@forEach
-                }
-                if (existing != null) {
-                    mediaDao.update(
-                        existing.copy(
+                    val avatarMediaUuid = UUID.randomUUID().toString()
+                    mediaDao.upsert(
+                        MediaAssetEntity(
+                            clientUuid = avatarMediaUuid,
+                            kind = "avatar",
+                            babyId = baby.id,
+                            localUri = path,
+                            mime = info.mime,
+                            width = info.width,
+                            height = info.height,
+                            byteSize = info.byteSize,
+                            createdAt = baby.updatedAt,
                             updatedAt = baby.updatedAt,
-                            deletedAt = baby.updatedAt,
+                        ),
+                    )
+                    check(
+                        babyDao.updateAvatarMediaForLocalSnapshot(
+                            id = baby.id,
+                            expectedUpdatedAt = baby.updatedAt,
+                            expectedAvatarPath = baby.avatarPath,
+                            avatarMediaUuid = avatarMediaUuid,
+                        ) == 1,
+                    ) {
+                        "宝宝头像在媒体快照期间发生变化"
+                    }
+                }
+            }
+        }
+        records.forEach { snapshot ->
+            val snapshotPaths = if (snapshot.deletedAt == null) {
+                localPhotoPaths(snapshot.payloadJson)
+            } else {
+                emptySet()
+            }
+            val inspected = snapshotPaths.associateWith { path ->
+                mediaFiles.inspect(path)
+            }
+            transactionRunner.run {
+                val record = recordDao.getIncludingDeleted(snapshot.id) ?: return@run
+                if (
+                    record.updatedAt != snapshot.updatedAt ||
+                    record.deletedAt != snapshot.deletedAt ||
+                    record.payloadJson != snapshot.payloadJson
+                ) {
+                    return@run
+                }
+                val paths = if (record.deletedAt == null) {
+                    localPhotoPaths(record.payloadJson)
+                } else {
+                    emptySet()
+                }
+                val existing = mediaDao.listForRecord(record.id)
+                    .map { asset ->
+                        if (asset.kind == "log" && asset.babyId != null) {
+                            asset.copy(babyId = null).also { mediaDao.update(it) }
+                        } else {
+                            asset
+                        }
+                    }
+                paths.forEach { path ->
+                    if (existing.any { it.localUri == path && it.deletedAt == null }) {
+                        return@forEach
+                    }
+                    val info = inspected[path] ?: return@forEach
+                    mediaDao.upsert(
+                        MediaAssetEntity(
+                            recordId = record.id,
+                            clientUuid = UUID.randomUUID().toString(),
+                            kind = "log",
+                            babyId = null,
+                            localUri = path,
+                            mime = info.mime,
+                            width = info.width,
+                            height = info.height,
+                            byteSize = info.byteSize,
+                            createdAt = record.updatedAt,
+                            updatedAt = record.updatedAt,
+                        ),
+                    )
+                }
+                existing.filter {
+                    it.deletedAt == null && it.localUri !in paths
+                }.forEach {
+                    mediaDao.update(
+                        it.copy(
+                            updatedAt = record.updatedAt,
+                            deletedAt = record.updatedAt,
                             syncDirty = true,
                         ),
                     )
                 }
-                val info = mediaFiles.inspect(path) ?: return@forEach
-                val avatarMediaUuid = UUID.randomUUID().toString()
-                mediaDao.upsert(
-                    MediaAssetEntity(
-                        clientUuid = avatarMediaUuid,
-                        kind = "avatar",
-                        babyId = baby.id,
-                        localUri = path,
-                        mime = info.mime,
-                        width = info.width,
-                        height = info.height,
-                        byteSize = info.byteSize,
-                        createdAt = baby.updatedAt,
-                        updatedAt = baby.updatedAt,
-                    ),
-                )
-                babyDao.update(
-                    baby.copy(avatarMediaUuid = avatarMediaUuid, syncDirty = true),
-                )
-            }
-        }
-        records.forEach { record ->
-            val paths = if (record.deletedAt == null) {
-                localPhotoPaths(record.payloadJson)
-            } else {
-                emptySet()
-            }
-            val existing = mediaDao.listForRecord(record.id)
-            paths.forEach { path ->
-                if (existing.any { it.localUri == path && it.deletedAt == null }) return@forEach
-                val info = mediaFiles.inspect(path) ?: return@forEach
-                mediaDao.upsert(
-                    MediaAssetEntity(
-                        recordId = record.id,
-                        clientUuid = UUID.randomUUID().toString(),
-                        kind = "log",
-                        babyId = record.babyId,
-                        localUri = path,
-                        mime = info.mime,
-                        width = info.width,
-                        height = info.height,
-                        byteSize = info.byteSize,
-                        createdAt = record.updatedAt,
-                        updatedAt = record.updatedAt,
-                    ),
-                )
-            }
-            existing.filter {
-                it.deletedAt == null && it.localUri !in paths
-            }.forEach {
-                mediaDao.update(
-                    it.copy(
-                        updatedAt = record.updatedAt,
-                        deletedAt = record.updatedAt,
-                        syncDirty = true,
-                    ),
-                )
             }
         }
     }
@@ -1079,26 +1264,40 @@ class RealSyncPort @Inject constructor(
         return portable
     }
 
-    private suspend fun downloadMissingMedia(session: SyncSession) {
+    private suspend fun downloadMissingMedia(
+        session: SyncSession,
+        mediaEditGuard: LocalMediaEditGuard?,
+    ) {
         mediaDao.listMissingLocalBytes()
             .filter { it.hasReceiptFor(session) }
             .forEach { media ->
-            requireAllowed(policy.evaluate(session.baseUrl, foregroundState.isForeground()))
-            val bytes = backend.getMedia(session, media.clientUuid)
-            val localUri = mediaFiles.saveDownloaded(
-                media.clientUuid,
-                media.kind,
-                bytes,
-                media.mime,
-            )
-            mediaDao.update(media.copy(localUri = localUri))
-            media.recordId?.let { refreshRecordPhotoPaths(it) }
-            media.babyId?.let { refreshBabyAvatar(it) }
+                requireAllowed(policy.evaluate(session.baseUrl, foregroundState.isForeground()))
+                val bytes = backend.getMedia(session, media.clientUuid)
+                val localUri = mediaFiles.saveDownloaded(
+                    media.clientUuid,
+                    media.kind,
+                    bytes,
+                    media.mime,
+                )
+                transactionRunner.run {
+                    val current = mediaDao.getByClientUuid(media.clientUuid) ?: return@run
+                    mediaDao.update(current.copy(localUri = localUri))
+                    current.recordId?.let { recordId ->
+                        refreshRecordPhotoPaths(recordId, mediaEditGuard)
+                    }
+                    current.babyId?.let { babyId ->
+                        refreshBabyAvatar(babyId, mediaEditGuard)
+                    }
+                }
             }
     }
 
-    private suspend fun refreshRecordPhotoPaths(recordId: Long) {
+    private suspend fun refreshRecordPhotoPaths(
+        recordId: Long,
+        mediaEditGuard: LocalMediaEditGuard? = null,
+    ) {
         val record = recordDao.getIncludingDeleted(recordId) ?: return
+        if (mediaEditGuard?.canRefresh(record) == false) return
         val photos = mediaDao.listActiveForRecord(recordId)
             .map(MediaAssetEntity::localUri)
             .filter(String::isNotBlank)
@@ -1114,12 +1313,21 @@ class RealSyncPort @Inject constructor(
             },
         ).toString()
         if (next != record.payloadJson) {
-            recordDao.update(record.copy(payloadJson = next))
+            recordDao.updatePayloadReplica(
+                id = record.id,
+                expectedPayloadJson = record.payloadJson,
+                payloadJson = next,
+            )
         }
+        mediaEditGuard?.recordRefreshed(record.clientUuid, photos.toSet())
     }
 
-    private suspend fun refreshBabyAvatar(babyId: Long) {
+    private suspend fun refreshBabyAvatar(
+        babyId: Long,
+        mediaEditGuard: LocalMediaEditGuard? = null,
+    ) {
         val baby = babyDao.getIncludingDeleted(babyId) ?: return
+        if (mediaEditGuard?.canRefresh(baby) == false) return
         val avatarPath = baby.avatarMediaUuid
             ?.let { mediaDao.getByClientUuid(it) }
             ?.takeIf {
@@ -1130,9 +1338,24 @@ class RealSyncPort @Inject constructor(
             ?.localUri
             ?.takeIf(String::isNotBlank)
         if (baby.avatarPath != avatarPath) {
-            babyDao.update(baby.copy(avatarPath = avatarPath))
+            babyDao.updateAvatarPathForReplica(
+                id = baby.id,
+                expectedAvatarMediaUuid = baby.avatarMediaUuid,
+                avatarPath = avatarPath,
+            )
         }
+        mediaEditGuard?.babyRefreshed(baby.clientUuid, avatarPath)
     }
+
+    private suspend fun captureLocalMediaEditGuard(): LocalMediaEditGuard =
+        LocalMediaEditGuard(
+            recordPhotos = recordDao.listAllIncludingDeleted()
+                .associate { it.clientUuid to localPhotoPaths(it.payloadJson) }
+                .toMutableMap(),
+            babyAvatarPaths = babyDao.listAllIncludingDeleted()
+                .associate { it.clientUuid to it.avatarPath }
+                .toMutableMap(),
+        )
 
     private suspend fun normalizeLegacyOutboxPayload(type: String, raw: String): String {
         if (type != "record") return raw
@@ -1180,6 +1403,7 @@ private fun JsonObject.toJoinResult(): JoinResult = JoinResult(
     role = if (get("role")?.jsonPrimitive?.content == "owner") FamilyRole.Owner else FamilyRole.Member,
     entities = entities(),
     cursor = get("cursor")?.jsonPrimitive?.longOrNull ?: 0,
+    generation = get("generation")?.jsonPrimitive?.contentOrNull.orEmpty(),
 )
 
 private fun HomeNetworkDecision.userMessage(): String = when (this) {
@@ -1215,7 +1439,7 @@ private fun SyncHttpException.fullResyncCursorOrNull(): Long? {
     val detail = runCatching {
         Json.parseToJsonElement(responseBody).jsonObject["detail"]?.jsonObject
     }.getOrNull() ?: return null
-    if (detail.string("code") != "cursor_ahead") return null
+    if (detail.string("code") !in setOf("cursor_ahead", "generation_changed")) return null
     if (detail.string("action") != "full_resync") return null
     return detail.long("reset_cursor")?.takeIf { it == 0L }
 }
@@ -1229,6 +1453,44 @@ private fun SyncSession.receiptFor(clientUuid: String): String {
 
 private fun MediaAssetEntity.hasReceiptFor(session: SyncSession): Boolean =
     remoteUri == clientUuid || remoteUri == session.receiptFor(clientUuid)
+
+private class LocalMediaEditGuard(
+    private val recordPhotos: MutableMap<String, Set<String>>,
+    private val babyAvatarPaths: MutableMap<String, String?>,
+) {
+    fun canRefresh(record: RecordEntity): Boolean =
+        record.clientUuid !in recordPhotos ||
+            recordPhotos[record.clientUuid] == localPhotoPaths(record.payloadJson)
+
+    fun canRefresh(baby: BabyEntity): Boolean =
+        baby.clientUuid !in babyAvatarPaths ||
+            babyAvatarPaths[baby.clientUuid] == baby.avatarPath
+
+    fun recordRefreshed(clientUuid: String, photos: Set<String>) {
+        recordPhotos[clientUuid] = photos
+    }
+
+    fun babyRefreshed(clientUuid: String, avatarPath: String?) {
+        babyAvatarPaths[clientUuid] = avatarPath
+    }
+}
+
+private fun preserveDeviceLocalPhotos(
+    remotePayloadJson: String,
+    existingPayloadJson: String?,
+): String {
+    val photos = existingPayloadJson
+        ?.let { raw ->
+            runCatching {
+                Json.parseToJsonElement(raw).jsonObject["photos"] as? JsonArray
+            }.getOrNull()
+        }
+        ?: return remotePayloadJson
+    val remote = runCatching {
+        Json.parseToJsonElement(remotePayloadJson).jsonObject
+    }.getOrDefault(JsonObject(emptyMap()))
+    return JsonObject(remote + ("photos" to photos)).toString()
+}
 
 private fun localPhotoPaths(raw: String): Set<String> =
     runCatching {

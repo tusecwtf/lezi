@@ -4,9 +4,10 @@
 > 主 PRD：[`README.md`](./README.md) · 数据契约：[`data-model.md`](./data-model.md) · Android：[`tech.md`](./tech.md)
 > 本文定义 **中心化 NAS + 仅前台 + 硬家庭 Wi‑Fi** 的完整架构与 NAS Docker 后端。
 >
-> **交付状态（2026-07-25）：** Android 与 `tools/lezi-sync` 实现及自动化
-> 已完成；当前环境无 Docker/Podman、无 ADB 双设备与 NAS 家网，镜像运行和
-> §5.4 设备级验收待补，不宣称已部署或双机验证通过。
+> **交付状态（2026-07-25）：** Android 与 `tools/lezi-sync` 实现及自动化已完成；
+> 本机 rootless Docker 和双模拟器 formula/pee 前台交叉可见已验证。Ticket 09
+> 仍为 partial：相机扫码、日志图跨端 UI、蜂窝/回家冲刷、通知与独立设置待验；
+> 不宣称 NAS 生产部署或全部设备级 Must 通过。
 
 ---
 
@@ -74,7 +75,7 @@
 | `HomeNetworkPolicy` | `TRANSPORT_WIFI` + `GET {baseUrl}/health` 成功 → `allowSync` |
 | `SyncPort` | push / pull / invite / join / leave / media 协调 |
 | `Outbox` | 待上行实体队列（baby / record / media 元数据） |
-| `SyncPreferences` | `baseUrl`、`familyId`、`familyToken`、`deviceId`、`pullCursor`（**持久化**） |
+| `SyncPreferences` | `baseUrl`、`familyId`、`familyToken`、`deviceId`、`pullCursor`、`pullGeneration`（**持久化**） |
 | 触发器 | `ProcessLifecycle` ON_START、下拉、前台写成功 |
 
 ### 2.3 写与同步路径
@@ -190,6 +191,9 @@
 | A 记账后杀进程，稍后打开 | 打开时 push 未送出 Outbox |
 | 非家网 | 不调用 NAS；本地可用 |
 | 无推送 | 伴侣新记录不弹通知 |
+
+当前证据仅闭合双模拟器 formula/pee 前台路径；完整设备级状态以
+`.scratch/home-lan-sync/issues/09-dual-device-foreground-acceptance.md` 为准。
 
 ---
 
@@ -341,7 +345,7 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health` 外均需 Bearer（`create`/`joi
 - 门闩：客户端仅在家调用
 - Body：`{ "create_request_id", "device_id", "display_name?" }`；客户端在成功
   落盘会话前必须复用同一高熵 `create_request_id`
-- 响应：`{ "family_id", "token", "role": "owner" }`
+- 响应：`{ "family_id", "token", "role": "owner", "generation" }`
 - 同一创建请求重试幂等恢复相同响应；一家一栈已有其它创建请求时返回 `409`
 
 ### 9.3 `POST /v1/invite`
@@ -355,7 +359,7 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health` 外均需 Bearer（`create`/`joi
 ### 9.4 `POST /v1/join`
 
 - Body：`{ "code", "device_id", "display_name?" }`
-- 响应：`{ "family_id", "token", "role":"member", "entities":[], "cursor":0 }`
+- 响应：`{ "family_id", "token", "role":"member", "entities":[], "cursor":0, "generation" }`
   （首包可空，随后 pull；或 join 时带全量，实现二选一，**须幂等**）
 
 ### 9.5 `POST /v1/push`
@@ -366,6 +370,7 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health` 外均需 Bearer（`create`/`joi
 ```json
 {
   "device_id": "...",
+  "generation": "...",
   "entities": [
     {
       "type": "record",
@@ -379,15 +384,21 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health` 外均需 Bearer（`create`/`joi
 ```
 
 - `type`：`baby` | `record` | `media`
+- `generation`：客户端已知服务代际；不匹配时服务端先返回结构化 `409`，
+  不应用任何实体
 - LWW：请求 `updated_at` 小于库中则 skip
 - avatar 类 media：非 owner → `403`
 - 响应：`{ "applied": N }`
 
-### 9.6 `GET /v1/pull?cursor=`
+### 9.6 `GET /v1/pull?cursor=&generation=`
 
 - Auth：token
-- 响应：`{ "entities":[...], "cursor": <rev> }`
-- `cursor` 为单调 `rev`；客户端**持久化**
+- 响应：`{ "entities":[...], "cursor": <rev>, "generation": "..." }`
+- `cursor` 在一个服务进程代际内单调；客户端同时持久化 `cursor` 与 `generation`
+- 服务重启会更换 `generation`。客户端携带旧代际时服务端返回结构化 `409`
+  `generation_changed/full_resync`，避免备份恢复后 revision 恰好复用而漏拉。
+  既有安装若只有非零 cursor、尚无 generation，也会先从 cursor 0 校准。
+  因此恢复整个数据根后必须重启服务；普通重启也会触发一次安全的全量校准。
 
 ### 9.7 媒体字节
 
@@ -420,12 +431,12 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health` 外均需 Bearer（`create`/`joi
   "sex": "...",
   "birthday": "...",
   "due_date": null,
-  "sort_order": 0,
   "avatar_media_uuid": null
 }
 ```
 
 - 不含本机 `avatarPath`
+- `sort_order` 与 `theme_color` 为本机展示字段，不进入 wire payload
 - `avatar_media_uuid` 指向 `type=media` 且 `kind=avatar` 的实体
 
 ### 10.2 `record`
@@ -510,7 +521,8 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health` 外均需 Bearer（`create`/`joi
 - [x] health / create / invite / join / push / pull / media / leave / delete
 - [x] avatar 写权限
 - [x] README：部署、备份、示例 `192.168.50.4:8765`
-- [ ] 在 Docker/Podman 环境构建并启动镜像，核对主机卷与容器 `/health`
+- [x] 在本机 rootless Docker 构建并启动镜像，核对单卷与容器 `/health`
+  （未宣称 NAS 生产）
 
 ### 14.2 Android
 
@@ -526,7 +538,8 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health` 外均需 Bearer（`create`/`joi
 - [x] 服务端 LWW / token / avatar 403
 - [x] 客户端门闩：非 Wi‑Fi 不请求
 - [x] 客户端 Fake backend / mock health 前台同步与媒体自动化
-- [ ] NAS 家网双设备前台同步、扫码与蜂窝/回家冲刷验收
+- [ ] 完成 Ticket 09 剩余设备 Must：相机扫码、日志图跨端 UI、蜂窝/回家冲刷、
+  通知与独立设置（formula/pee 双模拟器路径已通过）
 
 ---
 
@@ -534,5 +547,6 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health` 外均需 Bearer（`create`/`joi
 
 | 日期 | 说明 |
 |------|------|
-| 2026-07-25 | 实现收口：Android、`tools/lezi-sync` 与自动化完成；明确 Docker/NAS/双设备环境验收待补 |
+| 2026-07-25 | 验收校正：本机 Docker 与双模拟器 formula/pee 已验；Ticket 09 保持 partial |
+| 2026-07-25 | 实现收口：Android、`tools/lezi-sync` 与自动化完成；明确 NAS/完整设备环境验收待补 |
 | 2026-07-25 | grilling 锁定 Wi‑Fi/NAS 策略；明确 Python/FastAPI/Uvicorn/SQLite；DATA_DIR 合并 db+media；写入本规格 |

@@ -119,7 +119,6 @@ def baby_payload(
         "sex": "female",
         "birthday": "2025-01-02",
         "due_date": None,
-        "sort_order": 0,
         "avatar_media_uuid": avatar_media_uuid,
         "birth_weight_grams": 3200,
     }
@@ -385,7 +384,12 @@ def test_family_create_retry_survives_restart_without_storing_raw_credentials(
     )
 
     assert retry.status_code == 201
-    assert retry.json() == first.json()
+    assert {
+        key: value for key, value in retry.json().items() if key != "generation"
+    } == {
+        key: value for key, value in first.json().items() if key != "generation"
+    }
+    assert retry.json()["generation"] != first.json()["generation"]
     assert conflicting.status_code == 409
     assert restarted_client.post(
         "/v1/family/create",
@@ -469,7 +473,12 @@ def test_same_device_join_retry_survives_server_restart(
         json={"code": invitation["code"], "device_id": "retry-device"},
     )
     assert retry.status_code == 200
-    assert retry.json() == first_join.json()
+    assert {
+        key: value for key, value in retry.json().items() if key != "generation"
+    } == {
+        key: value for key, value in first_join.json().items() if key != "generation"
+    }
+    assert retry.json()["generation"] != first_join.json()["generation"]
 
 
 def test_tokens_are_high_entropy_and_raw_values_are_not_stored(
@@ -629,7 +638,11 @@ def test_push_is_idempotent_lww_and_pull_uses_monotonic_cursor(client: TestClien
     assert retry.json() == {"applied": 0, "skipped": 1, "cursor": 1}
     assert older.json() == {"applied": 0, "skipped": 1, "cursor": 1}
     assert newer.json() == {"applied": 1, "skipped": 0, "cursor": 2}
-    assert client.get("/v1/pull?cursor=1", headers=auth(owner["token"])).json() == {
+    pull = client.get("/v1/pull?cursor=1", headers=auth(owner["token"])).json()
+    assert {
+        "entities": pull["entities"],
+        "cursor": pull["cursor"],
+    } == {
         "entities": [{
             "type": "baby",
             "client_uuid": baby_id,
@@ -640,10 +653,19 @@ def test_push_is_idempotent_lww_and_pull_uses_monotonic_cursor(client: TestClien
         }],
         "cursor": 2,
     }
-    assert client.get("/v1/pull?cursor=2", headers=auth(owner["token"])).json() == {
+    assert isinstance(pull["generation"], str)
+    empty_pull = client.get(
+        "/v1/pull?cursor=2",
+        headers=auth(owner["token"]),
+    ).json()
+    assert {
+        "entities": empty_pull["entities"],
+        "cursor": empty_pull["cursor"],
+    } == {
         "entities": [],
         "cursor": 2,
     }
+    assert empty_pull["generation"] == pull["generation"]
     assert client.get("/v1/pull?cursor=3", headers=auth(owner["token"])).status_code == 409
 
 
@@ -695,20 +717,112 @@ def test_pull_reports_full_resync_contract_after_server_database_restore(
     rollback = client.get("/v1/pull?cursor=2", headers=auth(owner["token"]))
 
     assert rollback.status_code == 409
-    assert rollback.json() == {
-        "detail": {
-            "code": "cursor_ahead",
-            "action": "full_resync",
-            "reset_cursor": 0,
-            "server_cursor": 1,
-        },
+    detail = rollback.json()["detail"]
+    assert {
+        "code": detail["code"],
+        "action": detail["action"],
+        "reset_cursor": detail["reset_cursor"],
+        "server_cursor": detail["server_cursor"],
+    } == {
+        "code": "cursor_ahead",
+        "action": "full_resync",
+        "reset_cursor": 0,
+        "server_cursor": 1,
     }
+    assert isinstance(detail["server_generation"], str)
     full_pull = client.get("/v1/pull?cursor=0", headers=auth(owner["token"]))
     assert full_pull.status_code == 200
     assert [entity["client_uuid"] for entity in full_pull.json()["entities"]] == [
         first_baby_id,
     ]
     assert full_pull.json()["cursor"] == 1
+
+
+def test_pull_generation_detects_restore_even_when_cursor_is_reused(
+    data_dir: Path,
+    clock: MutableClock,
+) -> None:
+    first_app = create_app(data_dir=data_dir, clock=clock)
+    first = AsgiClient(first_app)
+    owner = create_family(first)
+    baby_id = str(uuid4())
+    assert first.post(
+        "/v1/push",
+        headers=auth(owner["token"]),
+        json={"entities": [{
+            "type": "baby",
+            "client_uuid": baby_id,
+            "updated_at": 100,
+            "payload": baby_payload(),
+        }]},
+    ).status_code == 200
+    first_pull = first.get("/v1/pull?cursor=1", headers=auth(owner["token"]))
+    generation = first_pull.json()["generation"]
+
+    restarted = AsgiClient(create_app(data_dir=data_dir, clock=clock))
+    rollback = restarted.get(
+        f"/v1/pull?cursor=1&generation={generation}",
+        headers=auth(owner["token"]),
+    )
+
+    assert rollback.status_code == 409
+    assert rollback.json()["detail"]["code"] == "generation_changed"
+    assert rollback.json()["detail"]["reset_cursor"] == 0
+
+
+def test_push_rejects_stale_generation_before_mutating_family(
+    client: TestClient,
+) -> None:
+    owner = create_family(client)
+    baby_id = str(uuid4())
+    entity = {
+        "type": "baby",
+        "client_uuid": baby_id,
+        "updated_at": 1,
+        "payload": baby_payload(),
+    }
+
+    stale = client.post(
+        "/v1/push",
+        headers=auth(owner["token"]),
+        json={"generation": "stale-generation", "entities": [entity]},
+    )
+    current = client.post(
+        "/v1/push",
+        headers=auth(owner["token"]),
+        json={"generation": owner["generation"], "entities": [entity]},
+    )
+
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "generation_changed"
+    assert current.json()["applied"] == 1
+    assert current.json()["cursor"] == 1
+
+
+def test_legacy_baby_sort_order_is_accepted_but_not_propagated(
+    client: TestClient,
+) -> None:
+    owner = create_family(client)
+    payload = baby_payload()
+    payload["sort_order"] = 99
+    baby_id = str(uuid4())
+
+    response = client.post(
+        "/v1/push",
+        headers=auth(owner["token"]),
+        json={"entities": [{
+            "type": "baby",
+            "client_uuid": baby_id,
+            "updated_at": 1,
+            "payload": payload,
+        }]},
+    )
+
+    assert response.status_code == 200
+    pulled = client.get("/v1/pull?cursor=0", headers=auth(owner["token"])).json()
+    pulled_payload = pulled["entities"][0]["payload"]
+    assert pulled["entities"][0]["client_uuid"] == baby_id
+    assert "sort_order" not in pulled_payload
 
 
 def test_record_requires_valid_baby_client_uuid(client: TestClient) -> None:
@@ -1374,7 +1488,99 @@ def test_owner_delete_cleans_family_and_media(client: TestClient, data_dir: Path
     assert not (data_dir / "media" / owner["family_id"]).exists()
     assert client.get("/v1/pull?cursor=0", headers=auth(owner["token"])).status_code == 401
     replacement = create_family(client, device_id="replacement-owner")
-    assert client.get("/v1/pull?cursor=0", headers=auth(replacement["token"])).json() == {
+    replacement_pull = client.get(
+        "/v1/pull?cursor=0",
+        headers=auth(replacement["token"]),
+    ).json()
+    assert {
+        "entities": replacement_pull["entities"],
+        "cursor": replacement_pull["cursor"],
+    } == {
         "entities": [],
         "cursor": 0,
     }
+    assert isinstance(replacement_pull["generation"], str)
+
+
+def test_owner_delete_waits_for_inflight_media_upload(
+    data_dir: Path,
+    clock: MutableClock,
+) -> None:
+    async def scenario() -> None:
+        app = create_app(data_dir=data_dir, clock=clock)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            owner_response = await client.post(
+                "/v1/family/create",
+                json={
+                    "create_request_id": str(uuid4()),
+                    "device_id": "owner-device",
+                    "display_name": "妈妈",
+                },
+            )
+            assert owner_response.status_code == 201
+            owner = owner_response.json()
+            baby_id = str(uuid4())
+            record_id = str(uuid4())
+            media_id = str(uuid4())
+            push = await client.post(
+                "/v1/push",
+                headers=auth(owner["token"]),
+                json={"entities": [
+                    {
+                        "type": "baby",
+                        "client_uuid": baby_id,
+                        "updated_at": 1,
+                        "payload": baby_payload(),
+                    },
+                    {
+                        "type": "record",
+                        "client_uuid": record_id,
+                        "updated_at": 1,
+                        "payload": record_payload(baby_id),
+                    },
+                    {
+                        "type": "media",
+                        "client_uuid": media_id,
+                        "updated_at": 1,
+                        "payload": log_media_payload(record_id),
+                    },
+                ]},
+            )
+            assert push.status_code == 200
+            upload_started = asyncio.Event()
+            release_upload = asyncio.Event()
+
+            async def chunks():
+                yield b"lo"
+                upload_started.set()
+                await release_upload.wait()
+                yield b"g"
+
+            upload = asyncio.create_task(
+                client.put(
+                    f"/v1/media/{media_id}",
+                    headers=auth(owner["token"]),
+                    content=chunks(),
+                )
+            )
+            await upload_started.wait()
+            deletion = asyncio.create_task(
+                client.post(
+                    "/v1/family/delete",
+                    headers=auth(owner["token"]),
+                    json={},
+                )
+            )
+            await asyncio.sleep(0)
+            assert not deletion.done()
+
+            release_upload.set()
+            assert (await upload).status_code == 200
+            assert (await deletion).status_code == 200
+            assert not (data_dir / "media" / owner["family_id"]).exists()
+
+    asyncio.run(scenario())

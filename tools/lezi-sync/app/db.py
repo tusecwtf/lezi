@@ -587,18 +587,28 @@ class Store:
                 """,
                 (family_id, cursor),
             ).fetchall()
-        entities = [
-            {
+        entities = []
+        for row in rows:
+            payload = json.loads(row["payload_json"])
+            if row["entity_type"] == "baby":
+                payload.pop("sort_order", None)
+            entities.append({
                 "type": row["entity_type"],
                 "client_uuid": row["client_uuid"],
                 "updated_at": row["updated_at"],
                 "deleted_at": row["deleted_at"],
-                "payload": json.loads(row["payload_json"]),
+                "payload": payload,
                 "rev": row["rev"],
-            }
-            for row in rows
-        ]
+            })
         return entities, current
+
+    def current_revision(self, family_id: str) -> int:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT rev FROM family_meta WHERE family_id = ?",
+                (family_id,),
+            ).fetchone()
+        return int(row["rev"]) if row is not None else 0
 
     def media_kind(self, family_id: str, client_uuid: str) -> str | None:
         with self.connect() as connection:

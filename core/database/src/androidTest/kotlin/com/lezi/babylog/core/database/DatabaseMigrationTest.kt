@@ -74,7 +74,56 @@ class DatabaseMigrationTest {
         }
     }
 
+    @Test
+    fun migrate6To7_normalizesExclusiveMediaAssociations() {
+        helper.createDatabase(MEDIA_DATABASE, 6).apply {
+            execSQL(
+                """
+                INSERT INTO media_assets (
+                    id, recordId, clientUuid, kind, babyId, localUri,
+                    byteSize, createdAt, updatedAt, syncDirty
+                ) VALUES (
+                    1, 11, 'legacy-log', 'log', 22, 'photos/log.jpg',
+                    12, 100, 100, 0
+                )
+                """.trimIndent(),
+            )
+            execSQL(
+                """
+                INSERT INTO media_assets (
+                    id, recordId, clientUuid, kind, babyId, localUri,
+                    byteSize, createdAt, updatedAt, syncDirty
+                ) VALUES (
+                    2, 33, 'legacy-avatar', 'avatar', 44, 'avatars/baby.jpg',
+                    12, 100, 100, 0
+                )
+                """.trimIndent(),
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            MEDIA_DATABASE,
+            7,
+            true,
+            MIGRATION_6_7,
+        ).apply {
+            query(
+                "SELECT recordId, babyId FROM media_assets ORDER BY id",
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(11L, cursor.getLong(0))
+                assertTrue(cursor.isNull(1))
+                assertTrue(cursor.moveToNext())
+                assertTrue(cursor.isNull(0))
+                assertEquals(44L, cursor.getLong(1))
+            }
+            close()
+        }
+    }
+
     private companion object {
         const val TEST_DATABASE = "lezi-migration-test"
+        const val MEDIA_DATABASE = "lezi-media-migration-test"
     }
 }

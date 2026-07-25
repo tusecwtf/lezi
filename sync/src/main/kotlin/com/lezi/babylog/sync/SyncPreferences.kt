@@ -25,6 +25,7 @@ data class SyncSession(
     val deviceId: String = "",
     val role: FamilyRole = FamilyRole.None,
     val pullCursor: Long = 0,
+    val pullGeneration: String = "",
     val lastSuccessAt: Long? = null,
 ) {
     val isJoined: Boolean
@@ -35,7 +36,7 @@ interface SyncPreferences {
     val session: Flow<SyncSession>
     suspend fun saveServer(baseUrl: String)
     suspend fun saveSession(session: SyncSession)
-    suspend fun updateCursor(cursor: Long)
+    suspend fun updateCursor(cursor: Long, generation: String = "")
     suspend fun markSuccess(atMillis: Long)
     suspend fun ensureDeviceId(): String
     suspend fun ensureCreateRequestId(): String
@@ -56,6 +57,7 @@ class DataStoreSyncPreferences @Inject constructor(
             role = prefs[Keys.ROLE]?.let { runCatching { FamilyRole.valueOf(it) }.getOrNull() }
                 ?: FamilyRole.None,
             pullCursor = prefs[Keys.PULL_CURSOR] ?: 0,
+            pullGeneration = prefs[Keys.PULL_GENERATION].orEmpty(),
             lastSuccessAt = prefs[Keys.LAST_SUCCESS_AT],
         )
     }
@@ -78,6 +80,11 @@ class DataStoreSyncPreferences @Inject constructor(
             prefs[Keys.DEVICE_ID] = session.deviceId
             prefs[Keys.ROLE] = session.role.name
             prefs[Keys.PULL_CURSOR] = session.pullCursor
+            if (session.pullGeneration.isBlank()) {
+                prefs.remove(Keys.PULL_GENERATION)
+            } else {
+                prefs[Keys.PULL_GENERATION] = session.pullGeneration
+            }
             if (session.lastSuccessAt == null) {
                 prefs.remove(Keys.LAST_SUCCESS_AT)
             } else {
@@ -86,8 +93,15 @@ class DataStoreSyncPreferences @Inject constructor(
         }
     }
 
-    override suspend fun updateCursor(cursor: Long) {
-        dataStore.edit { it[Keys.PULL_CURSOR] = cursor.coerceAtLeast(0) }
+    override suspend fun updateCursor(cursor: Long, generation: String) {
+        dataStore.edit {
+            it[Keys.PULL_CURSOR] = cursor.coerceAtLeast(0)
+            if (generation.isBlank()) {
+                it.remove(Keys.PULL_GENERATION)
+            } else {
+                it[Keys.PULL_GENERATION] = generation
+            }
+        }
     }
 
     override suspend fun markSuccess(atMillis: Long) {
@@ -136,6 +150,7 @@ class DataStoreSyncPreferences @Inject constructor(
         prefs.remove(Keys.FAMILY_TOKEN)
         prefs.remove(Keys.ROLE)
         prefs.remove(Keys.PULL_CURSOR)
+        prefs.remove(Keys.PULL_GENERATION)
         prefs.remove(Keys.LAST_SUCCESS_AT)
         prefs.remove(Keys.CREATE_REQUEST_ID)
     }
@@ -147,6 +162,7 @@ class DataStoreSyncPreferences @Inject constructor(
         val DEVICE_ID = stringPreferencesKey("sync_device_id")
         val ROLE = stringPreferencesKey("sync_family_role")
         val PULL_CURSOR = longPreferencesKey("sync_pull_cursor")
+        val PULL_GENERATION = stringPreferencesKey("sync_pull_generation")
         val LAST_SUCCESS_AT = longPreferencesKey("sync_last_success_at")
         val CREATE_REQUEST_ID = stringPreferencesKey("sync_create_request_id")
     }

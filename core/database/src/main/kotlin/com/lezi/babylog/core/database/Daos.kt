@@ -99,6 +99,55 @@ interface BabyDao {
     @Update
     suspend fun update(baby: BabyEntity)
 
+    @Query(
+        """
+        UPDATE babies
+        SET avatarMediaUuid = :avatarMediaUuid, avatarPath = :avatarPath
+        WHERE clientUuid = :clientUuid
+        """,
+    )
+    suspend fun updateAvatarReplica(
+        clientUuid: String,
+        avatarMediaUuid: String?,
+        avatarPath: String?,
+    )
+
+    @Query(
+        """
+        UPDATE babies
+        SET avatarMediaUuid = :avatarMediaUuid, syncDirty = 1
+        WHERE id = :id
+          AND updatedAt = :expectedUpdatedAt
+          AND (
+              avatarPath = :expectedAvatarPath
+              OR (avatarPath IS NULL AND :expectedAvatarPath IS NULL)
+          )
+        """,
+    )
+    suspend fun updateAvatarMediaForLocalSnapshot(
+        id: Long,
+        expectedUpdatedAt: Long,
+        expectedAvatarPath: String?,
+        avatarMediaUuid: String?,
+    ): Int
+
+    @Query(
+        """
+        UPDATE babies
+        SET avatarPath = :avatarPath
+        WHERE id = :id
+          AND (
+              avatarMediaUuid = :expectedAvatarMediaUuid
+              OR (avatarMediaUuid IS NULL AND :expectedAvatarMediaUuid IS NULL)
+          )
+        """,
+    )
+    suspend fun updateAvatarPathForReplica(
+        id: Long,
+        expectedAvatarMediaUuid: String?,
+        avatarPath: String?,
+    ): Int
+
     @Query("DELETE FROM babies")
     suspend fun deleteAll()
 }
@@ -283,6 +332,19 @@ interface RecordDao {
 
     @Update
     suspend fun update(record: RecordEntity)
+
+    @Query(
+        """
+        UPDATE records
+        SET payloadJson = :payloadJson
+        WHERE id = :id AND payloadJson = :expectedPayloadJson
+        """,
+    )
+    suspend fun updatePayloadReplica(
+        id: Long,
+        expectedPayloadJson: String,
+        payloadJson: String,
+    ): Int
 
     @Query(
         """

@@ -30,6 +30,7 @@
 - 2026-07-25：Android 测试覆盖 SyncPreferences、Wi-Fi/health/backoff、
   InvitePayloadCodec、三类前台 trigger、Outbox 批次/依赖、Fake/HTTP wire、
   pull apply、媒体上传下载及 CareLog 本地写/清除边界。
-- `tools/lezi-sync/tests/test_api.py` 覆盖 LWW、cursor、token 401、avatar 403、
-  invite 过期/重放、媒体与家庭生命周期；测试通过 ASGI seam，不依赖公网。
+- `tools/lezi-sync/tests/test_api.py` 覆盖 LWW、cursor/generation 回滚恢复、
+  token 401、avatar 403、delete/upload 竞态、invite 过期/重放、媒体与家庭
+  生命周期；测试通过 ASGI seam，不依赖公网。
 - Docker 容器运行与双真机路径分别由 01、09 跟踪，不影响本票自动化完成状态。

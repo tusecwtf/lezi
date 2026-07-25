@@ -1,4 +1,5 @@
 import base64
+import asyncio
 import hashlib
 import hmac
 import os
@@ -68,7 +69,9 @@ class BabyPayload(StrictModel):
     sex: str | None
     birthday: date
     due_date: date | None
-    sort_order: int
+    # Kept optional for backward compatibility with older clients. Ordering is
+    # device-local and new clients deliberately omit it from the wire.
+    sort_order: int | None = None
     avatar_media_uuid: UUID | None
     birth_weight_grams: int | None = Field(default=None, ge=0, le=100_000)
 
@@ -120,6 +123,9 @@ class EntityInput(StrictModel):
         }[self.type]
         validated = model.model_validate(self.payload)
         self.payload = validated.model_dump(mode="json", exclude_unset=True)
+        if self.type == "baby":
+            # Accept the legacy key without propagating a device-local order.
+            self.payload.pop("sort_order", None)
         return self
 
     def storage_dict(self) -> dict:
@@ -130,6 +136,7 @@ class EntityInput(StrictModel):
 
 class PushRequest(StrictModel):
     device_id: str | None = Field(default=None, min_length=1, max_length=128)
+    generation: str | None = Field(default=None, min_length=1, max_length=128)
     entities: list[EntityInput] = Field(max_length=1000)
 
 
@@ -214,6 +221,11 @@ def create_app(
     signing_secret = server_secret or load_or_create_server_secret(resolved_data_dir)
     bearer = HTTPBearer(auto_error=False)
     app = FastAPI(title="lezi-sync", version=service_version)
+    server_generation = secrets.token_urlsafe(24)
+    family_mutation_locks: dict[str, asyncio.Lock] = {}
+
+    def family_mutation_lock(family_id: str) -> asyncio.Lock:
+        return family_mutation_locks.setdefault(family_id, asyncio.Lock())
 
     def epoch_now() -> int:
         value = clock()
@@ -287,7 +299,12 @@ def create_app(
             )
         except FamilyAlreadyExists as error:
             raise HTTPException(status_code=409, detail="Family already exists") from error
-        return {"family_id": family_id, "token": token, "role": "owner"}
+        return {
+            "family_id": family_id,
+            "token": token,
+            "role": "owner",
+            "generation": server_generation,
+        }
 
     @app.post("/v1/invite", status_code=201)
     async def create_invite(
@@ -329,6 +346,7 @@ def create_app(
             "role": "member",
             "entities": [],
             "cursor": 0,
+            "generation": server_generation,
         }
 
     @app.post("/v1/leave")
@@ -351,10 +369,11 @@ def create_app(
         principal: Annotated[Principal, Depends(owner)],
     ) -> dict:
         del request
-        family_media = media_root / principal.family_id
-        if family_media.exists():
-            shutil.rmtree(family_media)
-        store.delete_family(principal.family_id)
+        async with family_mutation_lock(principal.family_id):
+            family_media = media_root / principal.family_id
+            if family_media.exists():
+                shutil.rmtree(family_media)
+            store.delete_family(principal.family_id)
         return {"ok": True}
 
     @app.post("/v1/push")
@@ -364,12 +383,24 @@ def create_app(
     ) -> dict:
         if request.device_id is not None and request.device_id != principal.device_id:
             raise HTTPException(status_code=403, detail="device_id does not match token")
-        try:
-            return store.push(
-                principal.family_id,
-                principal.role,
-                [entity.storage_dict() for entity in request.entities],
+        if request.generation is not None and request.generation != server_generation:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "generation_changed",
+                    "action": "full_resync",
+                    "reset_cursor": 0,
+                    "server_cursor": store.current_revision(principal.family_id),
+                    "server_generation": server_generation,
+                },
             )
+        try:
+            async with family_mutation_lock(principal.family_id):
+                return store.push(
+                    principal.family_id,
+                    principal.role,
+                    [entity.storage_dict() for entity in request.entities],
+                )
         except ForbiddenAvatar as error:
             raise HTTPException(status_code=403, detail="Only owner may change avatar") from error
         except ImmutableMediaAssociation as error:
@@ -384,7 +415,19 @@ def create_app(
     async def pull(
         principal: Annotated[Principal, Depends(authenticate)],
         cursor: Annotated[int, Query(ge=0)] = 0,
+        generation: str | None = None,
     ) -> dict:
+        if generation is not None and generation != server_generation:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "generation_changed",
+                    "action": "full_resync",
+                    "reset_cursor": 0,
+                    "server_cursor": store.current_revision(principal.family_id),
+                    "server_generation": server_generation,
+                },
+            )
         try:
             entities, current = store.pull(principal.family_id, cursor)
         except CursorAhead as error:
@@ -395,9 +438,14 @@ def create_app(
                     "action": "full_resync",
                     "reset_cursor": 0,
                     "server_cursor": error.server_cursor,
+                    "server_generation": server_generation,
                 },
             ) from error
-        return {"entities": entities, "cursor": current}
+        return {
+            "entities": entities,
+            "cursor": current,
+            "generation": server_generation,
+        }
 
     @app.put("/v1/media/{client_uuid}")
     async def put_media(
@@ -405,26 +453,27 @@ def create_app(
         request: Request,
         principal: Annotated[Principal, Depends(authenticate)],
     ) -> dict:
-        kind = store.media_kind(principal.family_id, str(client_uuid))
-        if kind is None:
-            raise HTTPException(status_code=404, detail="Media metadata not found")
-        if kind == "avatar" and principal.role != "owner":
-            raise HTTPException(status_code=403, detail="Only owner may change avatar")
-        declared_length = request.headers.get("content-length")
-        if declared_length is not None:
-            try:
-                if int(declared_length) > media_limit:
+        async with family_mutation_lock(principal.family_id):
+            kind = store.media_kind(principal.family_id, str(client_uuid))
+            if kind is None:
+                raise HTTPException(status_code=404, detail="Media metadata not found")
+            if kind == "avatar" and principal.role != "owner":
+                raise HTTPException(status_code=403, detail="Only owner may change avatar")
+            declared_length = request.headers.get("content-length")
+            if declared_length is not None:
+                try:
+                    if int(declared_length) > media_limit:
+                        raise HTTPException(status_code=413, detail="Media is too large")
+                except ValueError as error:
+                    raise HTTPException(status_code=400, detail="Invalid Content-Length") from error
+            content = bytearray()
+            async for chunk in request.stream():
+                if len(content) + len(chunk) > media_limit:
                     raise HTTPException(status_code=413, detail="Media is too large")
-            except ValueError as error:
-                raise HTTPException(status_code=400, detail="Invalid Content-Length") from error
-        content = bytearray()
-        async for chunk in request.stream():
-            if len(content) + len(chunk) > media_limit:
-                raise HTTPException(status_code=413, detail="Media is too large")
-            content.extend(chunk)
-        path = media_path(principal.family_id, client_uuid)
-        ensure_private_directory(path.parent)
-        write_private_file(path, bytes(content))
+                content.extend(chunk)
+            path = media_path(principal.family_id, client_uuid)
+            ensure_private_directory(path.parent)
+            write_private_file(path, bytes(content))
         return {"ok": True, "size": len(content)}
 
     @app.get("/v1/media/{client_uuid}")

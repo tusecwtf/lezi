@@ -15,7 +15,7 @@ import androidx.room.RoomDatabase
         CustomItemEntity::class,
         CalendarEventEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = true,
 )
 abstract class LeziDatabase : RoomDatabase() {

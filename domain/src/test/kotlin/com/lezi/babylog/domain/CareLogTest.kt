@@ -136,6 +136,25 @@ class CareLogTest {
     }
 
     @Test
+    fun babyReadModifyWritesUseTheSharedDatabaseTransaction() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val first = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 10))
+        val second = care.createBaby(CreateBabyInput(nickname = "果果", birthdayEpochDay = 11))
+        val before = fakes.transactions.runCount
+
+        care.updateBabyProfile(
+            first,
+            UpdateBabyInput(nickname = "豆豆", birthdayEpochDay = 12),
+        )
+        care.updateBabyDueDate(first, 20)
+        care.renameBaby(first, "豆豆新名")
+        assertThat(care.deleteBaby(second)).isTrue()
+
+        assertThat(fakes.transactions.runCount - before).isEqualTo(4)
+    }
+
+    @Test
     fun deleteBaby_removesExtraProfile() = runTest {
         val care = Fakes().careLog()
         val a = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
@@ -696,6 +715,7 @@ private class Fakes(
     val calendarEvents = FakeCalendarEventDao()
     val customItems = FakeCustomItemDao()
     val settings = FakeSettingsStore()
+    val transactions = RecordingTransactionRunner()
 
     fun careLog() = CareLog(
         babies,
@@ -707,10 +727,18 @@ private class Fakes(
         memberships,
         settings,
         syncPort,
-        object : com.lezi.babylog.core.database.DatabaseTransactionRunner {
-            override suspend fun <T> run(block: suspend () -> T): T = block()
-        },
+        transactions,
     )
+}
+
+private class RecordingTransactionRunner :
+    com.lezi.babylog.core.database.DatabaseTransactionRunner {
+    var runCount = 0
+
+    override suspend fun <T> run(block: suspend () -> T): T {
+        runCount += 1
+        return block()
+    }
 }
 
 private class RecordingSyncPort(
@@ -1028,6 +1056,68 @@ private class FakeBabyDao : BabyDao {
         items.update { cur -> cur.map { if (it.id == baby.id) baby else it } }
     }
 
+    override suspend fun updateAvatarReplica(
+        clientUuid: String,
+        avatarMediaUuid: String?,
+        avatarPath: String?,
+    ) {
+        items.update { current ->
+            current.map {
+                if (it.clientUuid == clientUuid) {
+                    it.copy(
+                        avatarMediaUuid = avatarMediaUuid,
+                        avatarPath = avatarPath,
+                    )
+                } else {
+                    it
+                }
+            }
+        }
+    }
+
+    override suspend fun updateAvatarMediaForLocalSnapshot(
+        id: Long,
+        expectedUpdatedAt: Long,
+        expectedAvatarPath: String?,
+        avatarMediaUuid: String?,
+    ): Int {
+        var changed = 0
+        items.update { current ->
+            current.map {
+                if (
+                    it.id == id &&
+                    it.updatedAt == expectedUpdatedAt &&
+                    it.avatarPath == expectedAvatarPath
+                ) {
+                    changed = 1
+                    it.copy(avatarMediaUuid = avatarMediaUuid, syncDirty = true)
+                } else {
+                    it
+                }
+            }
+        }
+        return changed
+    }
+
+    override suspend fun updateAvatarPathForReplica(
+        id: Long,
+        expectedAvatarMediaUuid: String?,
+        avatarPath: String?,
+    ): Int {
+        var changed = 0
+        items.update { current ->
+            current.map {
+                if (it.id == id && it.avatarMediaUuid == expectedAvatarMediaUuid) {
+                    changed = 1
+                    it.copy(avatarPath = avatarPath)
+                } else {
+                    it
+                }
+            }
+        }
+        return changed
+    }
+
     override suspend fun deleteAll() {
         items.value = emptyList()
     }
@@ -1177,6 +1267,25 @@ private class FakeRecordDao : RecordDao {
 
     override suspend fun update(record: RecordEntity) {
         items.update { cur -> cur.map { if (it.id == record.id) record else it } }
+    }
+
+    override suspend fun updatePayloadReplica(
+        id: Long,
+        expectedPayloadJson: String,
+        payloadJson: String,
+    ): Int {
+        var changed = 0
+        items.update { current ->
+            current.map {
+                if (it.id == id && it.payloadJson == expectedPayloadJson) {
+                    changed = 1
+                    it.copy(payloadJson = payloadJson)
+                } else {
+                    it
+                }
+            }
+        }
+        return changed
     }
 
     override suspend fun softDelete(id: Long, deletedAt: Long) {

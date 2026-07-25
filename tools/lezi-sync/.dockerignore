@@ -6,4 +6,5 @@
 **/*.egg-info
 .venv
 data
+data-*
 tests

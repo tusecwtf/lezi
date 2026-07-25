@@ -3,6 +3,7 @@ package com.lezi.babylog.sync
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.BabyEntity
+import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.FamilyDao
 import com.lezi.babylog.core.database.FamilyEntity
 import com.lezi.babylog.core.database.MediaAssetDao
@@ -347,7 +348,10 @@ class RealSyncPortTest {
     @Test
     fun localRecordClearResetsPullAndRemovesOnlyRecordReplicaMedia() = runTest {
         val rig = SyncRig(
-            session = joinedSession("family-a").copy(pullCursor = 9),
+            session = joinedSession("family-a").copy(
+                pullCursor = 9,
+                pullGeneration = "known-generation",
+            ),
         )
         val babyId = rig.babies.seed(localBaby())
         rig.records.seed(
@@ -406,6 +410,7 @@ class RealSyncPortTest {
         ).isTrue()
 
         assertThat(rig.preferences.current().pullCursor).isEqualTo(0)
+        assertThat(rig.preferences.current().pullGeneration).isEqualTo("known-generation")
         assertThat(rig.records.listAllIncludingDeleted()).isEmpty()
         assertThat(rig.media.getByClientUuid(logUuid)).isNull()
         assertThat(rig.media.getByClientUuid(avatarUuid)).isNotNull()
@@ -477,8 +482,98 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun clearKeepsGenerationSoDirtyMemberRecoversBeforeWritingToRestoredServer() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(
+                role = FamilyRole.Member,
+                pullCursor = 7,
+                pullGeneration = "old-generation",
+            ),
+        )
+        val avatarUuid = "11111111-1111-1111-1111-111111111111"
+        val babyId = rig.babies.seed(
+            localBaby().copy(
+                avatarMediaUuid = avatarUuid,
+                avatarPath = "baby_avatars/stale.jpg",
+                syncDirty = true,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                clientUuid = avatarUuid,
+                kind = "avatar",
+                babyId = babyId,
+                localUri = "baby_avatars/stale.jpg",
+                remoteUri = avatarUuid,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+
+        assertThat(rig.port.clearLocalRecords {}.isSuccess).isTrue()
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(0)
+        assertThat(rig.preferences.current().pullGeneration).isEqualTo("old-generation")
+
+        rig.backend.pushFailures.add(
+            SyncHttpException(
+                statusCode = 409,
+                responseBody = """
+                    {
+                      "detail":{
+                        "code":"generation_changed",
+                        "action":"full_resync",
+                        "reset_cursor":0,
+                        "server_cursor":1
+                      }
+                    }
+                """.trimIndent(),
+            ),
+        )
+        rig.backend.pullResults.add(
+            PullResult(
+                entities = listOf(
+                    remoteBaby().copy(
+                        clientUuid = "baby-local",
+                        payloadJson = """
+                            {
+                              "nickname":"服务器宝宝",
+                              "birthday":"2024-01-01",
+                              "avatar_media_uuid":null
+                            }
+                        """.trimIndent(),
+                        updatedAt = 50,
+                    ),
+                ),
+                cursor = 1,
+                generation = "new-generation",
+            ),
+        )
+        rig.backend.pullResults.add(
+            PullResult(emptyList(), cursor = 1, generation = "new-generation"),
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        assertThat(rig.backend.pushAttempts.first().pullGeneration)
+            .isEqualTo("old-generation")
+        assertThat(rig.backend.pullCursors).containsExactly(0L, 1L).inOrder()
+        val accepted = rig.backend.pushes
+            .flatMap(PushedBatch::entities)
+            .single { it.type == "baby" }
+        assertThat(accepted.payloadJson).contains("\"avatar_media_uuid\":null")
+        assertThat(rig.babies.getByClientUuid("baby-local")?.avatarMediaUuid).isNull()
+        assertThat(rig.preferences.current().pullGeneration).isEqualTo("new-generation")
+    }
+
+    @Test
     fun cursorAheadRequeuesCleanLocalReplicaThenPushesBeforeFullPull() = runTest {
-        val rig = SyncRig(session = joinedSession("family-a").copy(pullCursor = 9))
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(
+                pullCursor = 9,
+                pullGeneration = "old-generation",
+            ),
+        )
         val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
         rig.records.seed(
             localRecord(babyId).copy(
@@ -503,17 +598,564 @@ class RealSyncPortTest {
         )
         rig.backend.nextPull = PullResult(emptyList(), cursor = 2)
 
-        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        val result = rig.port.sync(SyncTrigger.PullToRefresh)
+        assertThat(result.exceptionOrNull()).isNull()
 
-        assertThat(rig.backend.pullCursors).containsExactly(9L, 0L).inOrder()
+        assertThat(rig.backend.pullCursors).containsExactly(9L, 0L, 2L).inOrder()
         assertThat(rig.backend.pushes.flatMap(PushedBatch::entities).map(SyncEntity::clientUuid))
             .containsAtLeast("baby-local", "record-after-backup")
         assertThat(rig.preferences.current().pullCursor).isEqualTo(2)
     }
 
     @Test
+    fun generationChangeAtTheSameCursorStillForcesAFullResync() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(
+                pullCursor = 1,
+                pullGeneration = "old-generation",
+            ),
+        )
+        rig.babies.seed(localBaby().copy(syncDirty = false))
+        rig.backend.pullFailures.add(
+            SyncHttpException(
+                statusCode = 409,
+                responseBody = """
+                    {
+                      "detail":{
+                        "code":"generation_changed",
+                        "action":"full_resync",
+                        "reset_cursor":0,
+                        "server_cursor":1
+                      }
+                    }
+                """.trimIndent(),
+            ),
+        )
+        rig.backend.nextPull = PullResult(emptyList(), cursor = 1)
+
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+
+        assertThat(rig.backend.pullCursors).containsExactly(1L, 0L, 1L).inOrder()
+        assertThat(rig.backend.pushes.flatMap(PushedBatch::entities).map(SyncEntity::clientUuid))
+            .contains("baby-local")
+    }
+
+    @Test
+    fun legacyNonzeroCursorWithoutGenerationCalibratesFromZeroBeforePush() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(
+                pullCursor = 7,
+                pullGeneration = "",
+            ),
+        )
+        rig.babies.seed(localBaby().copy(syncDirty = false))
+        rig.backend.nextPull = PullResult(
+            emptyList(),
+            cursor = 2,
+            generation = "first-generation",
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        assertThat(rig.backend.pullCursors).containsExactly(0L, 2L).inOrder()
+        assertThat(rig.backend.pushes.flatMap(PushedBatch::entities).map(SyncEntity::clientUuid))
+            .contains("baby-local")
+        assertThat(rig.preferences.current().pullGeneration).isEqualTo("first-generation")
+    }
+
+    @Test
+    fun memberFullResyncPullsOwnerAvatarAuthorityBeforeRequeueingLocalBaby() = runTest {
+        val session = joinedSession("family-a").copy(
+            role = FamilyRole.Member,
+            pullCursor = 1,
+            pullGeneration = "old-generation",
+        )
+        val rig = SyncRig(session = session)
+        val avatarUuid = "11111111-1111-1111-1111-111111111111"
+        val babyId = rig.babies.seed(
+            localBaby().copy(
+                avatarMediaUuid = avatarUuid,
+                avatarPath = "baby_avatars/stale.jpg",
+                syncDirty = true,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                clientUuid = avatarUuid,
+                kind = "avatar",
+                babyId = babyId,
+                localUri = "baby_avatars/stale.jpg",
+                remoteUri = avatarUuid,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+        rig.backend.rejectMemberAvatarPointers = true
+        rig.backend.pushFailures.add(
+            SyncHttpException(
+                statusCode = 409,
+                responseBody = """
+                    {
+                      "detail":{
+                        "code":"generation_changed",
+                        "action":"full_resync",
+                        "reset_cursor":0,
+                        "server_cursor":1
+                      }
+                    }
+                """.trimIndent(),
+            ),
+        )
+        rig.backend.pullResults.add(
+            PullResult(
+                entities = listOf(
+                    remoteBaby().copy(
+                        clientUuid = "baby-local",
+                        payloadJson = """
+                            {
+                              "nickname":"服务器宝宝",
+                              "birthday":"2024-01-01",
+                              "avatar_media_uuid":null
+                            }
+                        """.trimIndent(),
+                        updatedAt = 50,
+                    ),
+                ),
+                cursor = 1,
+                generation = "new-generation",
+            ),
+        )
+        rig.backend.pullResults.add(
+            PullResult(emptyList(), cursor = 1, generation = "new-generation"),
+        )
+
+        val result = rig.port.sync(SyncTrigger.PullToRefresh)
+        assertThat(result.exceptionOrNull()).isNull()
+
+        assertThat(rig.backend.pullCursors).containsExactly(0L, 1L).inOrder()
+        val pushedBaby = rig.backend.pushes
+            .flatMap(PushedBatch::entities)
+            .single { it.type == "baby" }
+        assertThat(pushedBaby.payloadJson).contains("\"avatar_media_uuid\":null")
+        assertThat(rig.babies.getByClientUuid("baby-local")?.avatarMediaUuid).isNull()
+        assertThat(rig.backend.mediaUploads).isEmpty()
+        assertThat(rig.preferences.current().pullGeneration).isEqualTo("new-generation")
+    }
+
+    @Test
+    fun avatarMaterializationNeverOverwritesAProfileChangedAfterSnapshot() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        val babyId = rig.babies.seed(
+            localBaby().copy(avatarPath = "baby_avatars/local.jpg"),
+        )
+        rig.mediaFiles.afterInspect = {
+            val current = requireNotNull(rig.babies.getIncludingDeleted(babyId))
+            rig.babies.update(
+                current.copy(
+                    nickname = "并发改名",
+                    updatedAt = current.updatedAt + 1,
+                    syncDirty = true,
+                ),
+            )
+        }
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        val baby = requireNotNull(rig.babies.getIncludingDeleted(babyId))
+        assertThat(baby.nickname).isEqualTo("并发改名")
+        assertThat(baby.updatedAt).isEqualTo(101)
+        assertThat(baby.avatarMediaUuid).isNull()
+        assertThat(baby.syncDirty).isTrue()
+    }
+
+    @Test
+    fun recordMediaMaterializationSkipsAStalePhotoSnapshot() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val recordId = rig.records.seed(
+            localRecord(babyId).copy(
+                payloadJson = """{"photos":["photos/snapshot-old.jpg"]}""",
+            ),
+        )
+        val mediaUuid = "32323232-3232-3232-3232-323232323232"
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = mediaUuid,
+                kind = "log",
+                localUri = "photos/user-new.jpg",
+                remoteUri = mediaUuid,
+                mime = "image/jpeg",
+                byteSize = 12,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+        rig.backend.remember("baby", "baby-local")
+        rig.backend.remember("record", "record-local")
+        rig.backend.remember("media", mediaUuid)
+        rig.mediaFiles.afterInspect = {
+            val current = requireNotNull(rig.records.getIncludingDeleted(recordId))
+            rig.records.update(
+                current.copy(
+                    payloadJson = """{"photos":["photos/user-new.jpg"]}""",
+                    updatedAt = current.updatedAt + 1,
+                    syncDirty = true,
+                ),
+            )
+        }
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        val record = requireNotNull(rig.records.getIncludingDeleted(recordId))
+        assertThat(record.payloadJson).contains("photos/user-new.jpg")
+        assertThat(record.updatedAt).isEqualTo(121)
+        assertThat(record.syncDirty).isTrue()
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.deletedAt).isNull()
+        assertThat(rig.media.listAllIncludingDeleted().map(MediaAssetEntity::localUri))
+            .containsExactly("photos/user-new.jpg")
+    }
+
+    @Test
+    fun downloadedPhotoRefreshPreservesAConcurrentRecordEdit() = runTest {
+        val session = joinedSession("family-a")
+        val rig = SyncRig(session = session)
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val recordId = rig.records.seed(
+            localRecord(babyId).copy(
+                payloadJson = """{"amount_ml":120}""",
+                syncDirty = false,
+            ),
+        )
+        val mediaUuid = "33333333-3333-3333-3333-333333333333"
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = mediaUuid,
+                kind = "log",
+                localUri = "",
+                remoteUri = mediaUuid,
+                mime = "image/jpeg",
+                byteSize = 12,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+        rig.backend.remember("baby", "baby-local")
+        rig.backend.remember("record", "record-local")
+        rig.backend.remember("media", mediaUuid)
+        rig.backend.beforeGetMediaReturn = {
+            val current = requireNotNull(rig.records.getIncludingDeleted(recordId))
+            rig.records.update(
+                current.copy(
+                    note = "并发补充说明",
+                    payloadJson = """
+                        {"amount_ml":120,"photos":["photos/user-new.jpg"]}
+                    """.trimIndent(),
+                    updatedAt = current.updatedAt + 1,
+                    syncDirty = true,
+                ),
+            )
+        }
+        rig.backend.nextPull = PullResult(
+            emptyList(),
+            cursor = 1,
+            generation = "current-generation",
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+
+        val record = requireNotNull(rig.records.getIncludingDeleted(recordId))
+        assertThat(record.note).isEqualTo("并发补充说明")
+        assertThat(record.updatedAt).isEqualTo(121)
+        assertThat(record.syncDirty).isTrue()
+        assertThat(record.payloadJson).contains("photos/user-new.jpg")
+        assertThat(record.payloadJson).doesNotContain("downloaded/$mediaUuid")
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.localUri)
+            .isEqualTo("downloaded/$mediaUuid")
+    }
+
+    @Test
+    fun pullWindowPhotoEditStaysAuthoritativeWhenDownloadStartsLater() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val recordId = rig.records.seed(
+            localRecord(babyId).copy(syncDirty = false),
+        )
+        val mediaUuid = "34343434-3434-3434-3434-343434343434"
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = mediaUuid,
+                kind = "log",
+                localUri = "",
+                remoteUri = mediaUuid,
+                mime = "image/jpeg",
+                byteSize = 12,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+        rig.backend.beforePullReturn = {
+            val current = requireNotNull(rig.records.getIncludingDeleted(recordId))
+            rig.records.update(
+                current.copy(
+                    payloadJson = """
+                        {"amount_ml":120,"photos":["photos/during-pull.jpg"]}
+                    """.trimIndent(),
+                    updatedAt = current.updatedAt + 1,
+                    syncDirty = true,
+                ),
+            )
+        }
+        rig.backend.nextPull = PullResult(
+            emptyList(),
+            cursor = 1,
+            generation = "current-generation",
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+
+        val record = requireNotNull(rig.records.getIncludingDeleted(recordId))
+        assertThat(record.payloadJson).contains("photos/during-pull.jpg")
+        assertThat(record.payloadJson).doesNotContain("downloaded/$mediaUuid")
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.localUri)
+            .isEqualTo("downloaded/$mediaUuid")
+    }
+
+    @Test
+    fun photoEditBetweenTwoDownloadsPreventsTheSecondDerivedRefresh() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val recordId = rig.records.seed(
+            localRecord(babyId).copy(syncDirty = false),
+        )
+        val mediaUuids = listOf(
+            "35353535-3535-3535-3535-353535353535",
+            "36363636-3636-3636-3636-363636363636",
+        )
+        mediaUuids.forEach { mediaUuid ->
+            rig.media.seed(
+                MediaAssetEntity(
+                    recordId = recordId,
+                    clientUuid = mediaUuid,
+                    kind = "log",
+                    localUri = "",
+                    remoteUri = mediaUuid,
+                    mime = "image/jpeg",
+                    byteSize = 12,
+                    createdAt = 100,
+                    updatedAt = 100,
+                    syncDirty = false,
+                ),
+            )
+        }
+        rig.mediaFiles.afterSaveDownloaded = {
+            val current = requireNotNull(rig.records.getIncludingDeleted(recordId))
+            rig.records.update(
+                current.copy(
+                    payloadJson = """
+                        {"amount_ml":120,"photos":["photos/between-downloads.jpg"]}
+                    """.trimIndent(),
+                    updatedAt = current.updatedAt + 1,
+                    syncDirty = true,
+                ),
+            )
+        }
+        rig.backend.nextPull = PullResult(
+            emptyList(),
+            cursor = 1,
+            generation = "current-generation",
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+
+        val record = requireNotNull(rig.records.getIncludingDeleted(recordId))
+        assertThat(record.payloadJson).contains("photos/between-downloads.jpg")
+        mediaUuids.forEach { mediaUuid ->
+            assertThat(record.payloadJson).doesNotContain("downloaded/$mediaUuid")
+            assertThat(rig.media.getByClientUuid(mediaUuid)?.localUri)
+                .isEqualTo("downloaded/$mediaUuid")
+        }
+    }
+
+    @Test
+    fun downloadedAvatarRefreshPreservesAProfileEditDuringFileSave() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        val mediaUuid = "44444444-4444-4444-4444-444444444444"
+        val babyId = rig.babies.seed(
+            localBaby().copy(
+                avatarMediaUuid = mediaUuid,
+                avatarPath = null,
+                syncDirty = false,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                clientUuid = mediaUuid,
+                kind = "avatar",
+                babyId = babyId,
+                localUri = "",
+                remoteUri = mediaUuid,
+                mime = "image/jpeg",
+                byteSize = 12,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+        rig.backend.remember("baby", "baby-local")
+        rig.backend.remember("media", mediaUuid)
+        rig.mediaFiles.afterSaveDownloaded = {
+            val current = requireNotNull(rig.babies.getIncludingDeleted(babyId))
+            rig.babies.update(
+                current.copy(
+                    avatarPath = "baby_avatars/user-new.jpg",
+                    updatedAt = current.updatedAt + 1,
+                    syncDirty = true,
+                ),
+            )
+        }
+        rig.backend.nextPull = PullResult(
+            emptyList(),
+            cursor = 1,
+            generation = "current-generation",
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+
+        val baby = requireNotNull(rig.babies.getIncludingDeleted(babyId))
+        assertThat(baby.avatarPath).isEqualTo("baby_avatars/user-new.jpg")
+        assertThat(baby.updatedAt).isEqualTo(101)
+        assertThat(baby.syncDirty).isTrue()
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.localUri)
+            .isEqualTo("downloaded/$mediaUuid")
+    }
+
+    @Test
+    fun noteOnlyEditAcceptsDownloadedPhotoAndNeverTombstonesItNextSync() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val recordId = rig.records.seed(
+            localRecord(babyId).copy(syncDirty = false),
+        )
+        val mediaUuid = "45454545-4545-4545-4545-454545454545"
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = mediaUuid,
+                kind = "log",
+                localUri = "",
+                remoteUri = mediaUuid,
+                mime = "image/jpeg",
+                byteSize = 12,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+        rig.backend.remember("baby", "baby-local")
+        rig.backend.remember("record", "record-local")
+        rig.backend.remember("media", mediaUuid)
+        rig.backend.beforeGetMediaReturn = {
+            val current = requireNotNull(rig.records.getIncludingDeleted(recordId))
+            rig.records.update(
+                current.copy(
+                    note = "只改备注",
+                    updatedAt = current.updatedAt + 1,
+                    syncDirty = true,
+                ),
+            )
+        }
+        rig.backend.nextPull = PullResult(
+            emptyList(),
+            cursor = 1,
+            generation = "current-generation",
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        val record = requireNotNull(rig.records.getIncludingDeleted(recordId))
+        assertThat(record.note).isEqualTo("只改备注")
+        assertThat(record.payloadJson).contains("downloaded/$mediaUuid")
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.deletedAt).isNull()
+        val pushedMedia = rig.backend.pushes
+            .flatMap(PushedBatch::entities)
+            .filter { it.clientUuid == mediaUuid }
+        assertThat(pushedMedia).isNotEmpty()
+        assertThat(pushedMedia.all { it.deletedAt == null }).isTrue()
+    }
+
+    @Test
+    fun nicknameOnlyEditAcceptsDownloadedAvatarAndNeverTombstonesItNextSync() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        val mediaUuid = "46464646-4646-4646-4646-464646464646"
+        val babyId = rig.babies.seed(
+            localBaby().copy(
+                avatarMediaUuid = mediaUuid,
+                avatarPath = null,
+                syncDirty = false,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                clientUuid = mediaUuid,
+                kind = "avatar",
+                babyId = babyId,
+                localUri = "",
+                remoteUri = mediaUuid,
+                mime = "image/jpeg",
+                byteSize = 12,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+        rig.backend.remember("baby", "baby-local")
+        rig.backend.remember("media", mediaUuid)
+        rig.mediaFiles.afterSaveDownloaded = {
+            val current = requireNotNull(rig.babies.getIncludingDeleted(babyId))
+            rig.babies.update(
+                current.copy(
+                    nickname = "只改昵称",
+                    updatedAt = current.updatedAt + 1,
+                    syncDirty = true,
+                ),
+            )
+        }
+        rig.backend.nextPull = PullResult(
+            emptyList(),
+            cursor = 1,
+            generation = "current-generation",
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        val baby = requireNotNull(rig.babies.getIncludingDeleted(babyId))
+        assertThat(baby.nickname).isEqualTo("只改昵称")
+        assertThat(baby.avatarPath).isEqualTo("downloaded/$mediaUuid")
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.deletedAt).isNull()
+        val pushedMedia = rig.backend.pushes
+            .flatMap(PushedBatch::entities)
+            .filter { it.clientUuid == mediaUuid }
+        assertThat(pushedMedia).isNotEmpty()
+        assertThat(pushedMedia.all { it.deletedAt == null }).isTrue()
+    }
+
+    @Test
     fun pullAdvancesCursorOnlyAfterAllReferencesApply() = runTest {
-        val rig = SyncRig(session = joinedSession("family-a").copy(pullCursor = 5))
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(
+                pullCursor = 5,
+                pullGeneration = "current-generation",
+            ),
+        )
         rig.backend.nextPull = PullResult(
             entities = listOf(remoteRecord()),
             cursor = 8,
@@ -535,6 +1177,7 @@ class RealSyncPortTest {
         assertThat(applied?.babyId).isEqualTo(rig.babies.getByClientUuid("baby-remote")?.id)
         assertThat(applied?.payloadJson).isEqualTo("""{"amount_ml":90}""")
         assertThat(applied?.createdByDeviceId).isEqualTo("device-b")
+        assertThat(rig.transactions.runCount).isEqualTo(2)
     }
 
     @Test
@@ -546,6 +1189,7 @@ class RealSyncPortTest {
                 sex = "female",
                 birthWeightGrams = 3_200,
                 dueDateEpochDay = 20_030,
+                sortOrder = 7,
                 syncDirty = false,
             ),
         )
@@ -559,7 +1203,7 @@ class RealSyncPortTest {
                           "birthday":"2024-01-01",
                           "birth_weight_grams":null,
                           "due_date":null,
-                          "sort_order":0,
+                          "sort_order":99,
                           "avatar_media_uuid":null
                         }
                     """.trimIndent(),
@@ -575,6 +1219,7 @@ class RealSyncPortTest {
         assertThat(baby?.sex).isNull()
         assertThat(baby?.birthWeightGrams).isNull()
         assertThat(baby?.dueDateEpochDay).isNull()
+        assertThat(baby?.sortOrder).isEqualTo(7)
     }
 
     @Test
@@ -758,6 +1403,7 @@ class RealSyncPortTest {
         assertThat(mediaPayload).contains("\"record_client_uuid\":\"record-local\"")
         assertThat(mediaPayload).contains("\"baby_client_uuid\":null")
         assertThat(mediaPayload).doesNotContain("baby-source")
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.babyId).isNull()
     }
 
     private fun localBaby() = BabyEntity(
@@ -816,10 +1462,13 @@ private data class PushedBatch(
 
 private class RecordingSyncBackend : SyncBackend {
     val pushes = mutableListOf<PushedBatch>()
+    val pushAttempts = mutableListOf<SyncSession>()
     val mediaUploads = mutableListOf<String>()
     var pullCount = 0
     var nextPull = PullResult(emptyList(), 0)
+    val pullResults = ArrayDeque<PullResult>()
     val pullFailures = ArrayDeque<Throwable>()
+    val pushFailures = ArrayDeque<Throwable>()
     val pullCursors = mutableListOf<Long>()
     var afterPush: (() -> Unit)? = null
     var pullStarted: CompletableDeferred<Unit>? = null
@@ -829,6 +1478,9 @@ private class RecordingSyncBackend : SyncBackend {
     var leaveFailure: Throwable? = null
     var deleteFailure: Throwable? = null
     var createFailure: Throwable? = null
+    var rejectMemberAvatarPointers = false
+    var beforeGetMediaReturn: (suspend () -> Unit)? = null
+    var beforePullReturn: (suspend () -> Unit)? = null
     val createRequestIds = mutableListOf<String>()
     var joinCalls = 0
     private val knownEntities = mutableSetOf<Pair<String, String>>()
@@ -855,6 +1507,8 @@ private class RecordingSyncBackend : SyncBackend {
     }
 
     override suspend fun push(session: SyncSession, entities: List<SyncEntity>): Int {
+        pushAttempts += session
+        pushFailures.removeFirstOrNull()?.let { throw it }
         val available = knownEntities + entities.map { it.type to it.clientUuid }
         entities.forEach { entity ->
             val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
@@ -863,7 +1517,12 @@ private class RecordingSyncBackend : SyncBackend {
                     ?.jsonPrimitive
                     ?.contentOrNull
                     ?.takeUnless { it == "null" }
-                    ?.let { require("media" to it in available) }
+                    ?.let {
+                        if (rejectMemberAvatarPointers && session.role == FamilyRole.Member) {
+                            throw SyncHttpException(403)
+                        }
+                        require("media" to it in available)
+                    }
                 "record" -> payload["baby_client_uuid"]
                     ?.jsonPrimitive
                     ?.contentOrNull
@@ -892,7 +1551,8 @@ private class RecordingSyncBackend : SyncBackend {
         pullStarted?.complete(Unit)
         releasePull?.await()
         pullFailures.removeFirstOrNull()?.let { throw it }
-        return nextPull
+        beforePullReturn?.also { beforePullReturn = null }?.invoke()
+        return pullResults.removeFirstOrNull() ?: nextPull
     }
 
     override suspend fun invite(session: SyncSession): Invite = error("not used")
@@ -922,8 +1582,10 @@ private class RecordingSyncBackend : SyncBackend {
         mediaUploads += clientUuid
     }
 
-    override suspend fun getMedia(session: SyncSession, clientUuid: String): ByteArray =
-        error("not used")
+    override suspend fun getMedia(session: SyncSession, clientUuid: String): ByteArray {
+        beforeGetMediaReturn?.also { beforeGetMediaReturn = null }?.invoke()
+        return byteArrayOf(1)
+    }
 }
 
 private class MemorySyncPreferences(initial: SyncSession) : SyncPreferences {
@@ -941,8 +1603,11 @@ private class MemorySyncPreferences(initial: SyncSession) : SyncPreferences {
         state.value = session
     }
 
-    override suspend fun updateCursor(cursor: Long) {
-        state.value = state.value.copy(pullCursor = cursor)
+    override suspend fun updateCursor(cursor: Long, generation: String) {
+        state.value = state.value.copy(
+            pullCursor = cursor,
+            pullGeneration = generation,
+        )
     }
 
     override suspend fun markSuccess(atMillis: Long) {
@@ -971,6 +1636,7 @@ private class MemorySyncPreferences(initial: SyncSession) : SyncPreferences {
             familyToken = "",
             role = FamilyRole.None,
             pullCursor = 0,
+            pullGeneration = "",
             lastSuccessAt = null,
         )
     }
@@ -991,9 +1657,13 @@ private class TestForegroundState(
 
 private class TestMediaFileStore : SyncMediaFileStore {
     val deleted = mutableListOf<String>()
+    var afterInspect: (suspend () -> Unit)? = null
+    var afterSaveDownloaded: (suspend () -> Unit)? = null
 
-    override suspend fun inspect(localUri: String) =
-        LocalMediaInfo(byteSize = 12, mime = "image/jpeg", width = 10, height = 10)
+    override suspend fun inspect(localUri: String): LocalMediaInfo {
+        afterInspect?.also { afterInspect = null }?.invoke()
+        return LocalMediaInfo(byteSize = 12, mime = "image/jpeg", width = 10, height = 10)
+    }
 
     override suspend fun prepareUpload(localUri: String) =
         PreparedMedia(byteArrayOf(1), "image/jpeg")
@@ -1003,7 +1673,10 @@ private class TestMediaFileStore : SyncMediaFileStore {
         kind: String,
         bytes: ByteArray,
         mime: String?,
-    ): String = "downloaded/$clientUuid"
+    ): String {
+        afterSaveDownloaded?.also { afterSaveDownloaded = null }?.invoke()
+        return "downloaded/$clientUuid"
+    }
 
     override suspend fun delete(localUri: String) {
         deleted += localUri
@@ -1021,6 +1694,7 @@ private class SyncRig(
     val babies = MemoryBabyDao()
     val media = MemoryMediaDao()
     val mediaFiles = TestMediaFileStore()
+    val transactions = RecordingTransactionRunner()
     val families = MemoryFamilyDao().apply {
         seed(FamilyEntity(id = 1, ownerUserId = 1, createdAt = 0))
     }
@@ -1043,7 +1717,17 @@ private class SyncRig(
         clock = clock,
         foregroundState = foreground,
         mediaFiles = mediaFiles,
+        transactionRunner = transactions,
     )
+}
+
+private class RecordingTransactionRunner : DatabaseTransactionRunner {
+    var runCount = 0
+
+    override suspend fun <T> run(block: suspend () -> T): T {
+        runCount += 1
+        return block()
+    }
 }
 
 private fun joinedSession(familyId: String) = SyncSession(
@@ -1173,6 +1857,62 @@ private class MemoryBabyDao : BabyDao {
         rows.value = rows.value.map { if (it.id == baby.id) baby else it }
     }
 
+    override suspend fun updateAvatarReplica(
+        clientUuid: String,
+        avatarMediaUuid: String?,
+        avatarPath: String?,
+    ) {
+        rows.value = rows.value.map {
+            if (it.clientUuid == clientUuid) {
+                it.copy(
+                    avatarMediaUuid = avatarMediaUuid,
+                    avatarPath = avatarPath,
+                )
+            } else {
+                it
+            }
+        }
+    }
+
+    override suspend fun updateAvatarMediaForLocalSnapshot(
+        id: Long,
+        expectedUpdatedAt: Long,
+        expectedAvatarPath: String?,
+        avatarMediaUuid: String?,
+    ): Int {
+        var changed = 0
+        rows.value = rows.value.map {
+            if (
+                it.id == id &&
+                it.updatedAt == expectedUpdatedAt &&
+                it.avatarPath == expectedAvatarPath
+            ) {
+                changed = 1
+                it.copy(avatarMediaUuid = avatarMediaUuid, syncDirty = true)
+            } else {
+                it
+            }
+        }
+        return changed
+    }
+
+    override suspend fun updateAvatarPathForReplica(
+        id: Long,
+        expectedAvatarMediaUuid: String?,
+        avatarPath: String?,
+    ): Int {
+        var changed = 0
+        rows.value = rows.value.map {
+            if (it.id == id && it.avatarMediaUuid == expectedAvatarMediaUuid) {
+                changed = 1
+                it.copy(avatarPath = avatarPath)
+            } else {
+                it
+            }
+        }
+        return changed
+    }
+
     override suspend fun deleteAll() {
         rows.value = emptyList()
     }
@@ -1299,6 +2039,23 @@ private class MemoryRecordDao : RecordDao {
 
     override suspend fun update(record: RecordEntity) {
         rows.value = rows.value.map { if (it.id == record.id) record else it }
+    }
+
+    override suspend fun updatePayloadReplica(
+        id: Long,
+        expectedPayloadJson: String,
+        payloadJson: String,
+    ): Int {
+        var changed = 0
+        rows.value = rows.value.map {
+            if (it.id == id && it.payloadJson == expectedPayloadJson) {
+                changed = 1
+                it.copy(payloadJson = payloadJson)
+            } else {
+                it
+            }
+        }
+        return changed
     }
 
     override suspend fun softDelete(id: Long, deletedAt: Long) {

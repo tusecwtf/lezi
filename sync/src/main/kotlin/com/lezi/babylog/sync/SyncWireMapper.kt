@@ -44,7 +44,6 @@ object SyncWireMapper {
             } else {
                 put("birth_weight_grams", birthWeightGrams)
             }
-            put("sort_order", entity.sortOrder)
             if (avatarMediaUuid == null) {
                 put("avatar_media_uuid", JsonNull)
             } else {
