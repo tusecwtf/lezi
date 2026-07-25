@@ -48,6 +48,7 @@ dependencies {
     implementation(libs.hilt.android)
     ksp(libs.hilt.compiler)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.kotlinx.serialization.json)
     implementation(libs.androidx.lifecycle.service)
     debugImplementation(libs.androidx.compose.ui.tooling)
     testImplementation(libs.junit)

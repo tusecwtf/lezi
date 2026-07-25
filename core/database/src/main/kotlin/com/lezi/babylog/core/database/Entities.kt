@@ -1,6 +1,7 @@
 package com.lezi.babylog.core.database
 
 import androidx.room.Entity
+import androidx.room.ColumnInfo
 import androidx.room.Index
 import androidx.room.PrimaryKey
 
@@ -36,6 +37,8 @@ data class MembershipEntity(
     indices = [
         Index("familyId"),
         Index(value = ["clientUuid"], unique = true),
+        Index("updatedAt"),
+        Index("syncDirty"),
     ],
 )
 data class BabyEntity(
@@ -52,6 +55,10 @@ data class BabyEntity(
     val clientUuid: String,
     val updatedAt: Long,
     val deletedAt: Long? = null,
+    @ColumnInfo(defaultValue = "1")
+    val syncDirty: Boolean = true,
+    /** Portable canonical avatar pointer; [avatarPath] remains device-local. */
+    val avatarMediaUuid: String? = null,
     /** App-private relative path. Never sync this device-local value. */
     val avatarPath: String? = null,
 )
@@ -62,6 +69,8 @@ data class BabyEntity(
         Index("babyId", "timestamp"),
         Index(value = ["clientUuid"], unique = true),
         Index("babyId", "type", "timestamp"),
+        Index("updatedAt"),
+        Index("syncDirty"),
     ],
 )
 data class RecordEntity(
@@ -73,20 +82,44 @@ data class RecordEntity(
     val endTimestamp: Long? = null,
     val note: String? = null,
     val createdByUserId: Long,
+    val createdByDeviceId: String? = null,
     val payloadJson: String = "{}",
     val schemaVersion: Int = 1,
     val updatedAt: Long,
     val deletedAt: Long? = null,
+    @ColumnInfo(defaultValue = "1")
+    val syncDirty: Boolean = true,
 )
 
-@Entity(tableName = "media_assets")
+@Entity(
+    tableName = "media_assets",
+    indices = [
+        Index(value = ["clientUuid"], unique = true),
+        Index("recordId"),
+        Index("babyId", "kind", "deletedAt"),
+        Index("updatedAt"),
+        Index("syncDirty"),
+    ],
+)
 data class MediaAssetEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val recordId: Long,
+    val recordId: Long? = null,
+    @ColumnInfo(defaultValue = "''")
+    val clientUuid: String = "",
+    @ColumnInfo(defaultValue = "'log'")
+    val kind: String = "log",
+    val babyId: Long? = null,
     val localUri: String,
     val remoteUri: String? = null,
     val mime: String? = null,
     val width: Int? = null,
     val height: Int? = null,
+    @ColumnInfo(defaultValue = "0")
+    val byteSize: Long = 0,
     val createdAt: Long,
+    @ColumnInfo(defaultValue = "0")
+    val updatedAt: Long = createdAt,
+    val deletedAt: Long? = null,
+    @ColumnInfo(defaultValue = "1")
+    val syncDirty: Boolean = true,
 )

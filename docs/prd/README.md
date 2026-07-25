@@ -11,18 +11,19 @@
 | 定位 | 家庭育儿日志：低摩擦记录 + 日/周回顾 + 成长曲线；后期家庭同步 |
 | 语言 | **简体中文**（V1） |
 | 商业 | **无**广告 / 会员 / IAP / 付费主题墙 |
-| 数据 | **V1 纯本地**；模型与 UI 按家庭设计；同步见 [`data-model.md`](./data-model.md) 的 `SyncPort` |
+| 数据 | **V1 纯本地**；模型与 UI 按家庭设计；同步见 [`data-model.md`](./data-model.md) 与 [`sync-home-lan.md`](./sync-home-lan.md) |
 
-当前 APK 的验收边界是 **Offline V2 Beta**：离线记录、汇总、成长、搜索、导出、
-日程提醒和 Widget 属于本轮；同步、服务端与网络 hardening 不属于该版本的通过判定。
-同步文档描述后续目标，不代表当前 APK 已交付。
+当前版本名仍为 **Offline V2 Beta**。家庭局域网同步的 Android 与服务端实现
+及自动化测试已完成，但 Docker 镜像运行、NAS 实机和双设备前台路径尚未在
+当前环境验收；因此不将其表述为已部署或已通过双机交付。
 
 **子文档**
 
 | 文件 | 内容 |
 |------|------|
 | [ui.md](./ui.md) | 画风、设计原则、页面与组件 |
-| [data-model.md](./data-model.md) | 实体、字段、本地优先、同步接口契约 |
+| [data-model.md](./data-model.md) | 实体、字段、本地优先、SyncPort 契约 |
+| [sync-home-lan.md](./sync-home-lan.md) | **V2 家庭局域网同步**：门闩、前台策略、NAS Docker（`lezi-sync`） |
 | [tech.md](./tech.md) | Android 技术栈、模块、权限、验收 |
 | [prototype-v1/](./prototype-v1/) | **可丢弃**竖版网页原型（V1 全表面交互） |
 | [assets-notes.md](./assets-notes.md) | 排泄图标资源约定（尿尿量档 / 便便分档） |
@@ -227,11 +228,11 @@
 | 阶段 | 行为 |
 |------|------|
 | **V1** | 引导可选「创建家庭」或「加入家庭」；发码/扫码 UI 存在；**SyncPort 为空实现**；文案说明「同步即将支持」；本机完整可用 |
-| **V2** | 接后端；邀请码/QR；家庭内 **全量** 记录共享；下拉刷新；目标：对方新记录约 60s 内可见 |
+| **V2** | **家庭局域网中心化**：自建 NAS Docker `lezi-sync`；**仅家 Wi‑Fi + NAS 可达**；**仅前台**同步（回前台 / 下拉 / 写成功 push）；邀请码 + family token；同步 **Baby + Record + 日志媒体**（头像仅管理员可改） |
 | 本机独立 | 主题、图标排序、暗色、下次喂奶提醒、时间制等 **不同步** |
-| 不做 | 部分字段共享、伴侣每条推送、奶库 |
+| 不做 | 部分字段共享、伴侣推送/即时通知同步、后台轮询同步、P2P 主路径、奶库、公网强制云 |
 
-详见 [data-model.md](./data-model.md)。
+权威细节：[sync-home-lan.md](./sync-home-lan.md) · 数据接口：[data-model.md](./data-model.md)。
 
 ### 4.8 导出与其它
 
@@ -284,7 +285,7 @@ Widget 每个实例独立保存 `widgetId`、绑定 `babyId` 和快捷记录类�
 - [ ] 时间轴展示/编辑/删除；日汇总与时间条正确
 - [ ] 图标显隐排序；深色模式；多宝宝
 - [ ] 下次喂奶本地通知
-- [ ] 账户/共享页可见且标明同步未开通；**无强制登录**
+- [ ] 账户/共享页可见；未配置时显示本机模式；**无强制登录**
 - [ ] 杀进程再开数据仍在
 - [ ] 中文主路径完整
 - [ ] 无广告、无购买入口
@@ -297,8 +298,11 @@ Widget 每个实例独立保存 `widgetId`、绑定 `babyId` 和快捷记录类�
 
 ### 6.3 V2
 
-- [ ] SyncPort 真实现；双机全量同步  
-- [ ] PDF、自定义项目、辅食类、扩展测量、疫苗手记、日程  
+- [x] Android `SyncPort`、家网门闩、前台触发、Outbox、媒体与家庭 UI 实现
+- [x] NAS `tools/lezi-sync` API、SQLite、Docker/Compose 单数据根配置与自动化测试
+- [ ] 在 Docker/Podman 环境实际构建并启动镜像
+- [ ] **家局域网 NAS** 双设备前台验收（见 [sync-home-lan.md](./sync-home-lan.md) §5.4）
+- [ ] PDF、自定义项目、辅食类、扩展测量、疫苗手记、日程
 
 ### 6.4 APK 交付
 

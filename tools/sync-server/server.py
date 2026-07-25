@@ -7,7 +7,14 @@ Endpoints:
   POST /v1/invite        {family_id} -> {code, expires_at}
   POST /v1/join          {code, device_id, display_name?} -> {family_id, entities}
 
-Storage: SQLite file beside this script (lezi_sync.db).
+Storage (single data root — db + media side by side):
+  $LEZI_DATA_DIR/lezi.db
+  $LEZI_DATA_DIR/media/
+
+  LEZI_DATA_DIR default: directory of this script (local dev).
+  Docker: LEZI_DATA_DIR=/data (compose volume).
+
+  Legacy: LEZI_SYNC_DB still overrides the SQLite file path if set.
 """
 from __future__ import annotations
 
@@ -19,9 +26,13 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-DB_PATH = os.environ.get("LEZI_SYNC_DB", os.path.join(os.path.dirname(__file__), "lezi_sync.db"))
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.environ.get("LEZI_DATA_DIR", _SCRIPT_DIR)
+DB_PATH = os.environ.get("LEZI_SYNC_DB", os.path.join(DATA_DIR, "lezi.db"))
+MEDIA_DIR = os.path.join(DATA_DIR, "media")
 HOST = os.environ.get("LEZI_SYNC_HOST", "0.0.0.0")
 PORT = int(os.environ.get("LEZI_SYNC_PORT", "8765"))
+VERSION = os.environ.get("LEZI_SYNC_VERSION", "0.1.0-dev")
 
 
 def db() -> sqlite3.Connection:
@@ -30,7 +41,13 @@ def db() -> sqlite3.Connection:
     return conn
 
 
+def ensure_data_dirs() -> None:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(MEDIA_DIR, exist_ok=True)
+
+
 def init_db() -> None:
+    ensure_data_dirs()
     with db() as conn:
         conn.executescript(
             """
@@ -99,7 +116,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/health":
-            return json_response(self, 200, {"ok": True})
+            return json_response(
+                self,
+                200,
+                {"ok": True, "version": VERSION, "data_dir": DATA_DIR},
+            )
         if parsed.path == "/v1/pull":
             qs = parse_qs(parsed.query)
             family_id = (qs.get("family_id") or [""])[0]
@@ -236,7 +257,10 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     init_db()
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"lezi sync server on http://{HOST}:{PORT} db={DB_PATH}")
+    print(
+        f"lezi sync server on http://{HOST}:{PORT} "
+        f"data_dir={DATA_DIR} db={DB_PATH} media={MEDIA_DIR}"
+    )
     httpd.serve_forever()
 
 

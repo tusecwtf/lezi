@@ -2,12 +2,14 @@ package com.lezi.babylog.domain
 
 import com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
 import com.lezi.babylog.core.model.GrowthMeasurementFacts
+import com.lezi.babylog.core.model.GrowthReferenceBand
 import com.lezi.babylog.core.model.MeasurementPayload
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordPayloadCodec
 import com.lezi.babylog.core.model.RecordPayloadDocument
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.RecordTime
+import com.lezi.babylog.core.model.Sex
 import dagger.Binds
 import dagger.Module
 import dagger.hilt.InstallIn
@@ -28,11 +30,13 @@ import kotlinx.coroutines.flow.map
  * hidden by the implementation.
  */
 interface GrowthMeasurementLifecycle {
-    fun observe(request: ObserveGrowthMeasurements): Flow<List<GrowthMeasurementFact>>
+    fun observe(request: ObserveGrowthMeasurements): Flow<GrowthMeasurementSnapshot>
+
+    fun validationError(type: RecordType, displayValue: Double): String?
 
     suspend fun save(request: SaveGrowthMeasurement): GrowthMeasurementSaveResult
 
-    suspend fun delete(recordId: Long)
+    suspend fun delete(babyId: Long, recordId: Long): Boolean
 }
 
 data class ObserveGrowthMeasurements(
@@ -42,6 +46,12 @@ data class ObserveGrowthMeasurements(
     val dueDate: LocalDate?,
     val correctedAge: Boolean,
     val zone: ZoneId,
+    val sex: Sex?,
+)
+
+data class GrowthMeasurementSnapshot(
+    val measurements: List<GrowthMeasurementFact>,
+    val referenceBands: List<GrowthReferenceBand>,
 )
 
 data class GrowthMeasurementFact(
@@ -51,7 +61,12 @@ data class GrowthMeasurementFact(
     val measuredAt: Long,
     val note: String?,
     val monthAge: Float,
+    val referenceWarning: String?,
 )
+
+interface GrowthReferenceSource {
+    fun bands(type: RecordType, sex: Sex?): List<GrowthReferenceBand>
+}
 
 data class SaveGrowthMeasurement(
     val babyId: Long,
@@ -71,32 +86,48 @@ sealed interface GrowthMeasurementSaveResult {
 @Singleton
 internal class DefaultGrowthMeasurementLifecycle @Inject constructor(
     private val store: GrowthMeasurementRecordStore,
+    private val references: GrowthReferenceSource,
 ) : GrowthMeasurementLifecycle {
     override fun observe(
         request: ObserveGrowthMeasurements,
-    ): Flow<List<GrowthMeasurementFact>> =
-        store.observe(request.babyId, request.type).map { records ->
-            records.mapNotNull { record ->
+    ): Flow<GrowthMeasurementSnapshot> {
+        val referenceBands = references.bands(request.type, request.sex)
+        return store.observe(request.babyId, request.type).map { records ->
+            val measurements = records.mapNotNull { record ->
                 val payload = record.payload.payload as? MeasurementPayload
                     ?: return@mapNotNull null
                 val measuredDate = Instant.ofEpochMilli(record.timestamp)
                     .atZone(request.zone)
                     .toLocalDate()
+                val displayValue = GrowthMeasurementFacts.displayValue(payload)
+                val monthAge = GrowthMeasurementFacts.monthAge(
+                    birthday = request.birthday,
+                    dueDate = request.dueDate,
+                    measuredDate = measuredDate,
+                    corrected = request.correctedAge,
+                )
                 GrowthMeasurementFact(
                     recordId = record.id,
                     type = record.type,
-                    displayValue = GrowthMeasurementFacts.displayValue(payload),
+                    displayValue = displayValue,
                     measuredAt = record.timestamp,
                     note = record.note,
-                    monthAge = GrowthMeasurementFacts.monthAge(
-                        birthday = request.birthday,
-                        dueDate = request.dueDate,
-                        measuredDate = measuredDate,
-                        corrected = request.correctedAge,
-                    ),
+                    monthAge = monthAge,
+                    referenceWarning = GrowthMeasurementFacts.referenceAt(
+                        monthAge,
+                        referenceBands,
+                    )?.warningFor(displayValue.toFloat()),
                 )
             }.sortedBy(GrowthMeasurementFact::measuredAt)
+            GrowthMeasurementSnapshot(
+                measurements = measurements,
+                referenceBands = referenceBands,
+            )
         }
+    }
+
+    override fun validationError(type: RecordType, displayValue: Double): String? =
+        GrowthMeasurementFacts.validationError(type, displayValue)
 
     override suspend fun save(
         request: SaveGrowthMeasurement,
@@ -104,7 +135,7 @@ internal class DefaultGrowthMeasurementLifecycle @Inject constructor(
         if (request.measuredAt > request.nowMillis) {
             return GrowthMeasurementSaveResult.Rejected("不能选未来时刻")
         }
-        GrowthMeasurementFacts.validationError(request.type, request.displayValue)?.let {
+        validationError(request.type, request.displayValue)?.let {
             return GrowthMeasurementSaveResult.Rejected(it)
         }
         val payload = GrowthMeasurementFacts.payload(request.type, request.displayValue)
@@ -114,8 +145,14 @@ internal class DefaultGrowthMeasurementLifecycle @Inject constructor(
         } else {
             null
         }
+        if (request.existingRecordId != null && existing == null) {
+            return GrowthMeasurementSaveResult.Rejected("测量记录已不存在")
+        }
         if (existing != null && existing.babyId != request.babyId) {
             return GrowthMeasurementSaveResult.Rejected("记录不属于当前宝宝")
+        }
+        if (existing != null && existing.type != request.type) {
+            return GrowthMeasurementSaveResult.Rejected("测量类型不匹配")
         }
         val source = existing?.payload
         val document = RecordPayloadDocument(
@@ -145,8 +182,11 @@ internal class DefaultGrowthMeasurementLifecycle @Inject constructor(
         return GrowthMeasurementSaveResult.Saved(id)
     }
 
-    override suspend fun delete(recordId: Long) {
+    override suspend fun delete(babyId: Long, recordId: Long): Boolean {
+        val record = store.get(recordId)
+        if (record?.babyId != babyId) return false
         store.delete(recordId)
+        return true
     }
 }
 

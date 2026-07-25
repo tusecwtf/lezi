@@ -4,6 +4,7 @@ import com.lezi.babylog.core.model.MilkPayload
 import com.lezi.babylog.core.model.NursingPayload
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.TemperaturePayload
 import com.lezi.babylog.core.model.businessLabel
 import com.lezi.babylog.core.model.payloadSummary
@@ -25,7 +26,7 @@ object CareAggregation {
         records: List<Record>,
         date: LocalDate,
         zone: ZoneId = ZoneId.systemDefault(),
-        now: Long = System.currentTimeMillis(),
+        now: Long = RecordTime.currentTimeMillis(),
     ): CareDay {
         val start = date.atStartOfDay(zone).toInstant().toEpochMilli()
         val end = date.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
@@ -37,7 +38,7 @@ object CareAggregation {
         startDate: LocalDate,
         dayCount: Int,
         zone: ZoneId = ZoneId.systemDefault(),
-        now: Long = System.currentTimeMillis(),
+        now: Long = RecordTime.currentTimeMillis(),
     ): CareRange {
         require(dayCount > 0) { "dayCount must be positive" }
         val days = List(dayCount) { offset ->
@@ -55,7 +56,7 @@ object CareAggregation {
         records: List<Record>,
         weekStart: LocalDate,
         zone: ZoneId = ZoneId.systemDefault(),
-        now: Long = System.currentTimeMillis(),
+        now: Long = RecordTime.currentTimeMillis(),
     ): WeekSummary {
         val days = range(records, weekStart, 7, zone, now).days.map(CareDay::bucket)
         return WeekSummary(weekStart = weekStart, days = days)
@@ -65,7 +66,7 @@ object CareAggregation {
         records: List<Record>,
         date: LocalDate,
         zone: ZoneId = ZoneId.systemDefault(),
-        now: Long = System.currentTimeMillis(),
+        now: Long = RecordTime.currentTimeMillis(),
     ): List<TimeBarSegment> {
         val dayStart = date.atStartOfDay(zone).toInstant().toEpochMilli()
         val dayEnd = date.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
@@ -105,7 +106,7 @@ object CareAggregation {
         babyName: String,
         date: LocalDate,
         zone: ZoneId = ZoneId.systemDefault(),
-        now: Long = System.currentTimeMillis(),
+        now: Long = RecordTime.currentTimeMillis(),
     ): WidgetSummaryDto {
         val day = day(records, date, zone, now)
         val latest = records.asSequence()

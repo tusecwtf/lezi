@@ -258,77 +258,30 @@ internal data class QuickRecordDraft(
         if (existingRecordId != null && sourcePayloadDocument().isUnknown) {
             return "此记录格式暂不支持安全编辑，原始数据已保留"
         }
-        return when (mode) {
+        val draftFormatError = when (mode) {
             QuickRecordMode.Nursing -> {
-                val left = leftMin.toIntOrNull() ?: -1
-                val right = rightMin.toIntOrNull() ?: -1
-                when {
-                    left < 0 || right < 0 -> "左右时长请输入非负整数"
-                    left + right <= 0 -> "请填写左侧或右侧喂养时长"
-                    else -> null
+                val left = leftMin.toIntOrNull()
+                val right = rightMin.toIntOrNull()
+                "左右时长请输入非负整数".takeIf {
+                    left == null || right == null || left < 0 || right < 0
                 }
             }
             QuickRecordMode.Milk -> when {
-                amountMl !in 1..999 -> "奶量需在 1–999 ml 之间"
-                preparedMl.isNotBlank() && preparedMl.toIntOrNull() !in 0..999 ->
+                preparedMl.isNotBlank() && preparedMl.toIntOrNull() == null ->
                     "冲调量需在 0–999 ml 之间"
-                durationMin.isNotBlank() && durationMin.toIntOrNull() !in 0..1_440 ->
+                durationMin.isNotBlank() && durationMin.toIntOrNull() == null ->
                     "时长需在 0–1440 分钟之间"
                 else -> null
             }
-            QuickRecordMode.Pee -> {
-                if (peeAmount in 1..3) null else "请选择尿量"
-            }
-            QuickRecordMode.Poop -> stoolValidationError()
-            QuickRecordMode.BothDiaper -> {
-                if (peeAmount !in 1..3) "请选择尿量" else stoolValidationError()
-            }
             QuickRecordMode.Sleep -> intervalValidationError(nowMillis)
             QuickRecordMode.Temperature -> {
-                val raw = temperature.toDoubleOrNull()
-                val celsius = raw?.let {
-                    if (temperatureUnit == TemperatureUnit.Fahrenheit) {
-                        (it - 32.0) * 5.0 / 9.0
-                    } else {
-                        it
-                    }
-                }
-                if (celsius == null || celsius !in 34.0..43.0) {
-                    "请输入合理的体温"
-                } else {
-                    null
-                }
+                "请输入合理的体温".takeIf { temperature.toDoubleOrNull() == null }
             }
-            QuickRecordMode.Text -> {
-                if (body.isBlank()) {
-                    if (type == RecordType.DIARY) "请填写日记正文" else "请填写内容"
-                } else {
-                    null
-                }
-            }
-            QuickRecordMode.Simple -> null
-            QuickRecordMode.Symptom -> {
-                if (severity in 1..3) null else "请选择程度"
-            }
-            QuickRecordMode.Medicine -> {
-                if (medicineName.isBlank()) "请填写药品名称" else null
-            }
-            QuickRecordMode.Hospital -> {
-                if (hospitalReason.isBlank()) "请填写就诊原因" else null
-            }
-            QuickRecordMode.CustomText -> {
-                if (customTitle.isBlank()) "请填写标题" else null
-            }
-            QuickRecordMode.Measurement -> {
-                GrowthMeasurementFacts.validationError(type, measurementValue.toDoubleOrNull())
-            }
-            QuickRecordMode.Food -> {
-                if (foodContent.isBlank()) "请填写内容" else null
-            }
-            QuickRecordMode.Vaccine -> {
-                if (vaccineName.isBlank()) "请填写疫苗名称" else null
-            }
+            else -> null
         }
+        if (draftFormatError != null) return draftFormatError
+        val payloadError = RecordPayloadCodec.validate(payloadDocument().payload).firstOrNull()
+        return payloadError?.let(::payloadValidationMessage)
     }
 
     fun toSaveCommand(): QuickRecordSaveCommand = QuickRecordSaveCommand(
@@ -355,11 +308,21 @@ internal data class QuickRecordDraft(
     private fun intervalValidationError(nowMillis: Long): String? =
         (intervalDurationPreview(nowMillis) as? IntervalDurationPreview.Warning)?.text
 
-    private fun stoolValidationError(): String? = when {
-        stoolAmount !in 1..4 -> "请选择便量"
-        stoolConsistency !in 1..4 -> "请选择软硬"
-        stoolColor !in 0..7 -> "请选择颜色"
-        else -> null
+    private fun payloadValidationMessage(error: String): String = when (error) {
+        "至少记录一侧时长" -> "请填写左侧或右侧喂养时长"
+        "尿量必须是 1–3" -> "请选择尿量"
+        "便量必须是 1–4" -> "请选择便量"
+        "软硬必须是 1–4" -> "请选择软硬"
+        "颜色必须是 0–7" -> "请选择颜色"
+        "体温超出可记录范围" -> "请输入合理的体温"
+        "正文不能为空" -> if (type == RecordType.DIARY) "请填写日记正文" else "请填写内容"
+        "症状程度必须是 1–3" -> "请选择程度"
+        "药品名称不能为空" -> "请填写药品名称"
+        "就诊原因不能为空" -> "请填写就诊原因"
+        "标题不能为空", "自定义标题不能为空" -> "请填写标题"
+        "内容不能为空" -> "请填写内容"
+        "疫苗名称不能为空" -> "请填写疫苗名称"
+        else -> error
     }
 
     private fun shouldShowValidation(isDirty: Boolean, attemptedConfirm: Boolean): Boolean =

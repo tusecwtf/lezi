@@ -44,8 +44,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.datastore.SettingsStore
-import com.lezi.babylog.core.model.GrowthMeasurementFacts
 import com.lezi.babylog.core.model.GrowthReferenceBand
+import com.lezi.babylog.core.model.RecordDateDecision
 import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordTimeDecision
 import com.lezi.babylog.core.model.RecordType
@@ -72,7 +72,6 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.ZoneOffset
-import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import javax.inject.Inject
 import kotlin.math.max
@@ -94,6 +93,7 @@ data class MeasurePoint(
     val recordId: Long,
     val measuredAt: Long,
     val note: String?,
+    val referenceWarning: String?,
 )
 
 /** Draft for create or edit of a growth measurement. */
@@ -120,7 +120,6 @@ class GrowthViewModel @Inject constructor(
     private val careLog: CareLog,
     private val settingsStore: SettingsStore,
     private val measurements: GrowthMeasurementLifecycle,
-    private val referenceCatalog: GrowthReferenceCatalog,
 ) : ViewModel() {
     private val metric = MutableStateFlow(GrowthMetric.WEIGHT)
     private val corrected = settingsStore.settings
@@ -162,20 +161,22 @@ class GrowthViewModel @Inject constructor(
                     dueDate = due,
                     correctedAge = corr,
                     zone = zone,
+                    sex = baby.sex,
                 ),
-            ).map { facts ->
+            ).map { snapshot ->
                 GrowthUi(
                     metric = m,
-                    points = facts.map { fact ->
+                    points = snapshot.measurements.map { fact ->
                         MeasurePoint(
                             monthAge = fact.monthAge,
                             value = fact.displayValue.toFloat(),
                             recordId = fact.recordId,
                             measuredAt = fact.measuredAt,
                             note = fact.note,
+                            referenceWarning = fact.referenceWarning,
                         )
                     },
-                    bands = referenceCatalog.bands(type, baby.sex),
+                    bands = snapshot.referenceBands,
                     corrected = corr,
                     dueDateEpochDay = baby.dueDateEpochDay,
                     babyName = baby.nickname,
@@ -196,9 +197,21 @@ class GrowthViewModel @Inject constructor(
         }
     }
 
-    fun addMeasurement(value: Double, timestamp: Long, note: String, onDone: () -> Unit) {
+    fun validationError(value: Double): String? =
+        measurements.validationError(metric.value.recordType, value)
+
+    fun addMeasurement(
+        value: Double,
+        timestamp: Long,
+        note: String,
+        onResult: (String?) -> Unit,
+    ) {
         viewModelScope.launch {
-            val baby = careLog.getCurrentBaby() ?: return@launch
+            val baby = careLog.getCurrentBaby()
+            if (baby == null) {
+                onResult("请先添加宝宝")
+                return@launch
+            }
             val result = measurements.save(
                 SaveGrowthMeasurement(
                     babyId = baby.id,
@@ -208,7 +221,7 @@ class GrowthViewModel @Inject constructor(
                     note = note.ifBlank { null },
                 ),
             )
-            if (result is GrowthMeasurementSaveResult.Saved) onDone()
+            onResult(result.errorOrNull())
         }
     }
 
@@ -217,10 +230,14 @@ class GrowthViewModel @Inject constructor(
         value: Double,
         timestamp: Long,
         note: String,
-        onDone: () -> Unit,
+        onResult: (String?) -> Unit,
     ) {
         viewModelScope.launch {
-            val baby = careLog.getCurrentBaby() ?: return@launch
+            val baby = careLog.getCurrentBaby()
+            if (baby == null) {
+                onResult("请先添加宝宝")
+                return@launch
+            }
             val result = measurements.save(
                 SaveGrowthMeasurement(
                     babyId = baby.id,
@@ -231,14 +248,14 @@ class GrowthViewModel @Inject constructor(
                     existingRecordId = recordId,
                 ),
             )
-            if (result is GrowthMeasurementSaveResult.Saved) onDone()
+            onResult(result.errorOrNull())
         }
     }
 
     fun deleteMeasurement(recordId: Long, onDone: () -> Unit) {
         viewModelScope.launch {
-            measurements.delete(recordId)
-            onDone()
+            val baby = careLog.getCurrentBaby() ?: return@launch
+            if (measurements.delete(baby.id, recordId)) onDone()
         }
     }
 
@@ -248,6 +265,11 @@ class GrowthViewModel @Inject constructor(
             careLog.updateBabyDueDate(baby.id, epochDay)
         }
     }
+}
+
+private fun GrowthMeasurementSaveResult.errorOrNull(): String? = when (this) {
+    is GrowthMeasurementSaveResult.Rejected -> message
+    is GrowthMeasurementSaveResult.Saved -> null
 }
 
 private val GrowthMetric.recordType: RecordType
@@ -260,7 +282,7 @@ private val GrowthMetric.recordType: RecordType
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun GrowthRoute(
-    initialDate: LocalDate = LocalDate.now(),
+    initialDate: LocalDate = RecordTime.today(ZoneId.systemDefault()),
     vm: GrowthViewModel = hiltViewModel(),
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
@@ -415,11 +437,7 @@ fun GrowthRoute(
                         style = LeziTypography.Metric,
                     )
                     GrowthChart(points = ui.points, bands = bands, metric = ui.metric)
-                    growthRangeWarning(
-                        monthAge = latest.monthAge,
-                        value = latest.value,
-                        bands = bands,
-                    )?.let { warning ->
+                    latest.referenceWarning?.let { warning ->
                         Surface(
                             modifier = Modifier.fillMaxWidth(),
                             color = MaterialTheme.colorScheme.errorContainer,
@@ -551,12 +569,12 @@ fun GrowthRoute(
                 TextButton(
                     onClick = {
                         val value = activeDraft.valueText.toDoubleOrNull()
-                        if (value == null || value <= 0.0) {
-                            measurementError = if (ui.metric == GrowthMetric.WEIGHT) {
-                                "请输入有效体重（大于 0 公斤）"
-                            } else {
-                                "请输入有效数值（大于 0 厘米）"
-                            }
+                        if (value == null) {
+                            measurementError = "请填写有效数值"
+                            return@TextButton
+                        }
+                        vm.validationError(value)?.let { error ->
+                            measurementError = error
                             return@TextButton
                         }
                         if (
@@ -572,12 +590,20 @@ fun GrowthRoute(
                         val at = activeDraft.measuredAt
                         val recordId = activeDraft.recordId
                         if (recordId != null) {
-                            vm.updateMeasurement(recordId, value, at, note) {
-                                closeMeasurementDraft()
+                            vm.updateMeasurement(recordId, value, at, note) { error ->
+                                if (error == null) {
+                                    closeMeasurementDraft()
+                                } else {
+                                    measurementError = error
+                                }
                             }
                         } else {
-                            vm.addMeasurement(value, at, note) {
-                                closeMeasurementDraft()
+                            vm.addMeasurement(value, at, note) { error ->
+                                if (error == null) {
+                                    closeMeasurementDraft()
+                                } else {
+                                    measurementError = error
+                                }
                             }
                         }
                     },
@@ -592,7 +618,7 @@ fun GrowthRoute(
     if (showDueDate) {
         val initialEpochDay = ui.dueDateEpochDay
             ?: ui.birthdayEpochDay
-            ?: LocalDate.now(zone).toEpochDay()
+            ?: RecordTime.today(zone).toEpochDay()
         val initialUtc = LocalDate.ofEpochDay(initialEpochDay)
             .atStartOfDay(ZoneOffset.UTC)
             .toInstant()
@@ -675,10 +701,13 @@ fun GrowthRoute(
                             val selectedDate = Instant.ofEpochMilli(millis)
                                 .atZone(ZoneOffset.UTC)
                                 .toLocalDate()
-                            val safeDate = minOf(selectedDate, LocalDate.now(zone))
+                            val dateDecision = RecordTime.selectDate(
+                                selectedDate = selectedDate,
+                                zone = zone,
+                            )
                             val decision = RecordTime.merge(
                                 value = current,
-                                date = safeDate,
+                                date = dateDecision.date,
                                 hour = current.hour,
                                 minute = current.minute,
                                 step = 1,
@@ -692,7 +721,9 @@ fun GrowthRoute(
                                     draft = draftForPickers.copy(
                                         measuredAt = decision.value.toInstant().toEpochMilli(),
                                     )
-                                    measurementError = if (selectedDate != safeDate) {
+                                    measurementError = if (
+                                        dateDecision is RecordDateDecision.ClampedToToday
+                                    ) {
                                         "测量日期不能晚于今天，已保留为今天"
                                     } else {
                                         null
@@ -720,8 +751,12 @@ fun GrowthRoute(
             timePickerStyle = timePickerStyle,
             preferredHand = preferredHand,
             onConfirm = { picked ->
-                if (picked.isAfter(ZonedDateTime.now(zone))) {
-                    measurementError = "测量时刻不能晚于现在"
+                val error = RecordTime.pointError(
+                    picked.toInstant().toEpochMilli(),
+                    RecordTime.currentTimeMillis(),
+                )
+                if (error != null) {
+                    measurementError = error
                 } else {
                     draft = draftForPickers.copy(measuredAt = picked.toInstant().toEpochMilli())
                     measurementError = null
@@ -779,14 +814,6 @@ private fun formatMeasurementValue(metric: GrowthMetric, value: Float): String {
     } else {
         "%.1f".format(value) + " cm"
     }
-}
-
-internal fun growthRangeWarning(
-    monthAge: Float,
-    value: Float,
-    bands: List<CurveBand>,
-): String? {
-    return GrowthMeasurementFacts.referenceAt(monthAge, bands)?.warningFor(value)
 }
 
 @Composable

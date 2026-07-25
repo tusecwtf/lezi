@@ -1,6 +1,6 @@
 # 乐记 — Android 技术说明
 
-> 主 PRD：[`README.md`](./README.md) · 数据：[`data-model.md`](./data-model.md)
+> 主 PRD：[`README.md`](./README.md) · 数据：[`data-model.md`](./data-model.md) · 家庭同步：[`sync-home-lan.md`](./sync-home-lan.md)
 
 ---
 
@@ -12,14 +12,15 @@
 | 架构 | 多模块 + ViewModel + StateFlow | |
 | DB | Room | 唯一真相源（V1） |
 | 偏好 | DataStore | SettingsLocal |
-| 异步 | Coroutines + Flow | 当前没有 WorkManager 后台同步任务 |
+| 异步 | Coroutines + Flow | **同步不做** WorkManager 后台轮询（规格：仅前台） |
 | DI | Hilt | |
 | 导航 | Navigation Compose | |
 | 图表 | Canvas 时间条 + 轻量图表库（如 Vico） | |
 | 通知 | NotificationCompat + **非精确**本地闹钟 | 下次喂奶 / 日程；**不要求** `SCHEDULE_EXACT_ALARM`；**不为同步/伴侣新记录推送** |
 | 计时 | 前台服务 + 状态持久化 | 关 App 仍跑 |
 | Widget | Glance（V1.5） | |
-| 同步 | `SyncPort` + `RealSyncPort` 原型 | 当前 DI 使用 RealSync；仍是未通过 V2 安全验收的开发态实现 |
+| 同步 | `RealSyncPort` + 家局域网 NAS | 已实现持久会话、家网/前台门闩、Outbox、Bearer push/pull 与媒体 |
+| NAS 后端 | **Python 3.12 + FastAPI + Uvicorn + SQLite** | 交付物 `tools/lezi-sync`；单卷 `DATA_DIR`（db+media） |
 | IAP / 广告 | **不引入** | |
 | 测试 | JUnit + 聚合纯函数单测 + 关键 Compose 测试 | |
 
@@ -31,7 +32,7 @@
 | minSdk | 26 |
 | compileSdk | 35 |
 | targetSdk | 35 |
-| versionName | `0.2.0-offline-v2-beta`（同步不在该版本验收范围） |
+| versionName | `0.2.0-offline-v2-beta`（同步实现已入工作树，环境验收待补） |
 | 应用名 | 乐记 |
 
 ---
@@ -47,7 +48,7 @@
 :core:ui
 :designsystem
 :domain
-:sync                 # SyncPort + NoOpSync + 当前 RealSync 开发原型
+:sync                 # SyncPort + NoOpSync + RealSyncPort 家网实现
 :feature:onboarding
 :feature:log          # 记录首页、编辑、图标网格
 :feature:timer
@@ -61,7 +62,8 @@
 ```
 
 目标依赖方向：`app → feature → domain → core`；feature 互不依赖。当前 `domain → sync`
-是 RealSync 原型遗留的 V2 架构问题，已在源码审查中登记并延期到 V2 hardening。
+用于本地写后的同步触发 seam；后续可把端口接口下沉到更内层模块，避免 domain
+依赖具体同步模块。
 计时状态落 `core`/`domain`，避免 log ↔ timer 循环依赖。
 
 ---
@@ -72,12 +74,13 @@
 UI 事件
   → domain UseCase
   → Room（立刻成功 → UI 刷新）
-  → 当前部分写路径 enqueue Outbox
-  → 用户在家庭页触发 RealSyncPort push / pull
+  → 标记 syncDirty；同步触发将 baby / record / media 快照入 Outbox
+  → 仅当：前台 && 家 Wi‑Fi && NAS health && 已配置 token
+        → push；回前台/下拉 → pull + 媒体字节
 ```
 
-当前没有 WorkManager 自动同步。RealSync 默认注入、进程内默认开启，连接开发机
-`http://10.0.2.2:8765`；这条链路仅供开发验证，不是可发布的安全同步能力。
+实现无后台同步、无推送拉同步；`baseUrl` 无内置默认（QR 可带地址）。
+未配置时为 `Disabled`，离线/非家网写入仍先落 Room 并保留待同步状态。
 
 计时器：
 
@@ -97,7 +100,8 @@ UI 事件
 | FOREGROUND_SERVICE（及合规类型） | 喂奶计时 | V1 |
 | RECEIVE_BOOT_COMPLETED | 重启恢复本地提醒/计时 | V1 |
 | 相册 / Photo Picker | 日记照片 | V1 |
-| INTERNET | RealSync 开发原型 | 当前 Manifest 已声明；V2 hardening 后再决定发布策略 |
+| INTERNET / ACCESS_NETWORK_STATE | 家网 health、push/pull 与媒体 | 已声明；网络调用仍受前台 + Wi-Fi + health 门闩 |
+| CAMERA | 扫描家庭邀请 QR | 可选硬件；无相机仍可粘贴载荷 |
 | SCHEDULE_EXACT_ALARM / USE_EXACT_ALARM | **不申请**；喂奶/日程提醒用非精确闹钟即可 | |
 | 麦克风 / 定位 | **不申请** | |
 
@@ -114,12 +118,12 @@ UI 事件
 | family UI；NoOpSync 实现保留（非默认 DI） | ✓ | | |
 | summary / growth / search / export TXT / widget | | ✓ | |
 | PDF / custom / food types / calendar | | | ✓ |
-| RealSync | | 开发原型已存在 | V2 完成安全、鉴权、持久化与后台策略验收 |
+| RealSync 家网实现 | | | 代码与自动化完成；双设备环境验收待补 |
+| `lezi-sync` NAS | | | API/镜像配置完成；Docker/NAS 运行验收待补 |
 
-> 2026-07-24 源码审查将 V2-1～V2-9（认证与 ACL、明文 HTTP、默认开启、
-> 清库/outbox 完整性、family id 与 cursor 持久化、异常写路径、模块方向、
-> 双 outbox 路径及后台同步测试）明确延期。本期只同步文档事实，不将现有
-> RealSync 原型标记为“已修复”或“可发布”。
+> **V2 同步策略（2026-07-25）**：中心化 NAS、硬家网、仅前台、无即时通知；
+> **不做**后台 60s 对齐。实现与自动化已完成；当前环境无 Docker/Podman、
+> ADB 双设备和 NAS 家网，故仍需镜像运行与双端设备验收后才能宣称可部署交付。
 
 ---
 

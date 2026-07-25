@@ -551,10 +551,32 @@ class CareLogTest {
             timestamp = ts + 2,
             payloadJson = """{"amount_ml":120,"internal_debug":"secretvalue"}""",
         )
+        care.addRecord(
+            babyId,
+            RecordType.WEIGHT,
+            timestamp = ts + 3,
+            payloadJson = """{"value":6350,"unit":"g"}""",
+        )
+        care.addRecord(
+            babyId,
+            RecordType.PEE,
+            timestamp = ts + 4,
+            payloadJson = """{"pee_amount":3}""",
+        )
+        care.addRecord(
+            babyId,
+            RecordType.NURSING,
+            timestamp = ts + 5,
+            payloadJson = """{"left_min":10,"right_min":0,"order":"L"}""",
+        )
         assertThat(care.search(babyId, "布洛芬")).hasSize(1)
         assertThat(care.search(babyId, "发烧")).hasSize(1)
         assertThat(care.search(babyId, "配方奶").single().type).isEqualTo(RecordType.FORMULA)
         assertThat(care.search(babyId, "120ml").single().type).isEqualTo(RecordType.FORMULA)
+        assertThat(care.search(babyId, "6.35kg").single().type).isEqualTo(RecordType.WEIGHT)
+        assertThat(care.search(babyId, "6.35").single().type).isEqualTo(RecordType.WEIGHT)
+        assertThat(care.search(babyId, "尿量大").single().type).isEqualTo(RecordType.PEE)
+        assertThat(care.search(babyId, "左10分").single().type).isEqualTo(RecordType.NURSING)
         assertThat(care.search(babyId, "amount_ml")).isEmpty()
         assertThat(care.search(babyId, "secretvalue")).isEmpty()
         assertThat(care.search(babyId, "不存在的词xyz")).isEmpty()
@@ -638,8 +660,34 @@ class CareLogTest {
         assertThat(care.observeCustomItems().first()).hasSize(10)
     }
 
+    @Test
+    fun clearRecordsOnlyHardDeletesLocallyWithoutRequestingFamilySync() = runTest {
+        val sync = RecordingSyncPort()
+        val fakes = Fakes(sync)
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        care.addRecord(babyId, RecordType.PEE, timestamp = 1_000)
+        val requestsBeforeClear = sync.requests
+
+        care.clearRecordsOnly()
+
+        assertThat(fakes.records.listAllIncludingDeleted()).isEmpty()
+        assertThat(sync.requests).isEqualTo(requestsBeforeClear)
+        assertThat(sync.localRecordReconciliations).isEqualTo(1)
+    }
+
+    @Test
+    fun syncVersionAlwaysAdvancesAcrossClockRollbackAndSameMillisecondWrites() {
+        assertThat(nextSyncUpdatedAt(previous = 2_000, candidate = 900)).isEqualTo(2_001)
+        assertThat(nextSyncUpdatedAt(previous = 2_000, candidate = 2_000)).isEqualTo(2_001)
+        assertThat(nextSyncUpdatedAt(previous = 2_000, candidate = 2_500)).isEqualTo(2_500)
+    }
+
 }
-private class Fakes {
+private class Fakes(
+    private val syncPort: com.lezi.babylog.sync.SyncPort =
+        com.lezi.babylog.sync.NoOpSyncPort(),
+) {
     val users = FakeLocalUserDao()
     val families = FakeFamilyDao()
     val memberships = FakeMembershipDao()
@@ -658,12 +706,28 @@ private class Fakes {
         families,
         memberships,
         settings,
-        FakeOutboxDao(),
-        com.lezi.babylog.sync.NoOpSyncPort(),
+        syncPort,
         object : com.lezi.babylog.core.database.DatabaseTransactionRunner {
             override suspend fun <T> run(block: suspend () -> T): T = block()
         },
     )
+}
+
+private class RecordingSyncPort(
+    delegate: com.lezi.babylog.sync.SyncPort = com.lezi.babylog.sync.NoOpSyncPort(),
+) : com.lezi.babylog.sync.SyncPort by delegate {
+    var requests = 0
+    var localRecordReconciliations = 0
+
+    override fun requestSync(trigger: com.lezi.babylog.sync.SyncTrigger) {
+        requests++
+    }
+
+    override suspend fun clearLocalRecords(clearLocal: suspend () -> Unit): Result<Unit> {
+        localRecordReconciliations++
+        clearLocal()
+        return Result.success(Unit)
+    }
 }
 
 private class FakeCustomItemDao : CustomItemDao {
@@ -919,6 +983,33 @@ private class FakeBabyDao : BabyDao {
 
     override suspend fun get(id: Long): BabyEntity? = active().find { it.id == id }
 
+    override suspend fun getIncludingDeleted(id: Long): BabyEntity? =
+        items.value.find { it.id == id }
+
+    override suspend fun getByClientUuid(uuid: String): BabyEntity? =
+        active().find { it.clientUuid == uuid }
+
+    override suspend fun listAllIncludingDeleted(): List<BabyEntity> = items.value
+
+    override suspend fun listPendingSync(): List<BabyEntity> =
+        items.value.filter(BabyEntity::syncDirty).sortedBy(BabyEntity::id)
+
+    override suspend fun markSynced(clientUuid: String, updatedAt: Long) {
+        items.update { values ->
+            values.map {
+                if (it.clientUuid == clientUuid && it.updatedAt == updatedAt) {
+                    it.copy(syncDirty = false)
+                } else {
+                    it
+                }
+            }
+        }
+    }
+
+    override suspend fun markAllPendingSync() {
+        items.update { values -> values.map { it.copy(syncDirty = true) } }
+    }
+
     override suspend fun countByNickname(nickname: String, excludeId: Long): Int =
         active().count {
             it.nickname.trim() == nickname.trim() && (excludeId < 0 || it.id != excludeId)
@@ -986,8 +1077,32 @@ private class FakeRecordDao : RecordDao {
     override suspend fun get(id: Long): RecordEntity? =
         items.value.find { it.id == id && it.deletedAt == null }
 
+    override suspend fun getIncludingDeleted(id: Long): RecordEntity? =
+        items.value.find { it.id == id }
+
     override suspend fun getByClientUuid(uuid: String): RecordEntity? =
         items.value.find { it.clientUuid == uuid }
+
+    override suspend fun listAllIncludingDeleted(): List<RecordEntity> = items.value
+
+    override suspend fun listPendingSync(): List<RecordEntity> =
+        items.value.filter(RecordEntity::syncDirty).sortedBy(RecordEntity::id)
+
+    override suspend fun markSynced(clientUuid: String, updatedAt: Long) {
+        items.update { values ->
+            values.map {
+                if (it.clientUuid == clientUuid && it.updatedAt == updatedAt) {
+                    it.copy(syncDirty = false)
+                } else {
+                    it
+                }
+            }
+        }
+    }
+
+    override suspend fun markAllPendingSync() {
+        items.update { values -> values.map { it.copy(syncDirty = true) } }
+    }
 
     override suspend fun findOpenSleep(babyId: Long): RecordEntity? =
         items.value
@@ -1067,7 +1182,11 @@ private class FakeRecordDao : RecordDao {
     override suspend fun softDelete(id: Long, deletedAt: Long) {
         items.update { cur ->
             cur.map {
-                if (it.id == id) it.copy(deletedAt = deletedAt, updatedAt = deletedAt) else it
+                if (it.id == id) {
+                    it.copy(deletedAt = deletedAt, updatedAt = deletedAt, syncDirty = true)
+                } else {
+                    it
+                }
             }
         }
     }
@@ -1090,17 +1209,4 @@ private class FakeRecordDao : RecordDao {
                         )
                 )
     }
-}
-
-private class FakeOutboxDao : com.lezi.babylog.core.database.OutboxDao {
-    private val items = mutableListOf<com.lezi.babylog.core.database.OutboxEntity>()
-    private val seq = java.util.concurrent.atomic.AtomicLong(1)
-    override suspend fun enqueue(row: com.lezi.babylog.core.database.OutboxEntity): Long {
-        val id = if (row.id == 0L) seq.getAndIncrement() else row.id
-        items += row.copy(id = id)
-        return id
-    }
-    override suspend fun peek(limit: Int) = items.take(limit)
-    override suspend fun deleteIds(ids: List<Long>) { items.removeAll { it.id in ids } }
-    override suspend fun deleteAll() { items.clear() }
 }

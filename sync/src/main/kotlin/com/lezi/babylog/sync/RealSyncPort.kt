@@ -1,8 +1,10 @@
 package com.lezi.babylog.sync
 
-import com.lezi.babylog.core.common.newClientUuid
 import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.BabyEntity
+import com.lezi.babylog.core.database.FamilyDao
+import com.lezi.babylog.core.database.MediaAssetDao
+import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.OutboxDao
 import com.lezi.babylog.core.database.OutboxEntity
 import com.lezi.babylog.core.database.RecordDao
@@ -14,23 +16,34 @@ import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
-import javax.inject.Named
 import javax.inject.Singleton
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
-import org.json.JSONObject
-
-interface SyncBackend {
-    suspend fun push(familyId: String, deviceId: String, entities: List<SyncEntity>): Result<Int>
-    suspend fun pull(familyId: String, cursor: Long): Result<PullResult>
-    suspend fun invite(familyId: String): Result<Invite>
-    suspend fun join(code: String, deviceId: String): Result<JoinResult>
-}
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.put
 
 data class SyncEntity(
     val type: String,
@@ -42,318 +55,1193 @@ data class SyncEntity(
 )
 
 data class PullResult(val entities: List<SyncEntity>, val cursor: Long)
-data class JoinResult(val familyId: String, val entities: List<SyncEntity>, val cursor: Long)
+data class JoinResult(
+    val familyId: String,
+    val token: String,
+    val role: FamilyRole,
+    val entities: List<SyncEntity> = emptyList(),
+    val cursor: Long = 0,
+)
 
-class HttpSyncBackend(
-    private val baseUrl: String,
-) : SyncBackend {
-    override suspend fun push(familyId: String, deviceId: String, entities: List<SyncEntity>): Result<Int> =
-        withContext(Dispatchers.IO) {
-            runCatching {
-                val arr = JSONArray()
-                entities.forEach { e ->
-                    arr.put(
-                        JSONObject()
-                            .put("type", e.type)
-                            .put("client_uuid", e.clientUuid)
-                            .put("payload", JSONObject(e.payloadJson))
-                            .put("updated_at", e.updatedAt)
-                            .put("deleted_at", e.deletedAt),
-                    )
-                }
-                val body = JSONObject()
-                    .put("family_id", familyId)
-                    .put("device_id", deviceId)
-                    .put("entities", arr)
-                val resp = postJson("$baseUrl/v1/push", body)
-                resp.getInt("applied")
-            }
-        }
+interface SyncBackend {
+    suspend fun create(
+        baseUrl: String,
+        deviceId: String,
+        displayName: String?,
+        createRequestId: String,
+    ): JoinResult
+    suspend fun push(session: SyncSession, entities: List<SyncEntity>): Int
+    suspend fun pull(session: SyncSession): PullResult
+    suspend fun invite(session: SyncSession): Invite
+    suspend fun join(baseUrl: String, code: String, deviceId: String): JoinResult
+    suspend fun leave(session: SyncSession)
+    suspend fun deleteFamily(session: SyncSession)
+    suspend fun putMedia(session: SyncSession, clientUuid: String, bytes: ByteArray, mime: String?)
+    suspend fun getMedia(session: SyncSession, clientUuid: String): ByteArray
+}
 
-    override suspend fun pull(familyId: String, cursor: Long): Result<PullResult> =
-        withContext(Dispatchers.IO) {
-            runCatching {
-                val url = "$baseUrl/v1/pull?family_id=${familyId}&cursor=$cursor"
-                val resp = getJson(url)
-                val arr = resp.getJSONArray("entities")
-                val list = buildList {
-                    for (i in 0 until arr.length()) {
-                        val o = arr.getJSONObject(i)
-                        add(
-                            SyncEntity(
-                                type = o.getString("type"),
-                                clientUuid = o.getString("client_uuid"),
-                                payloadJson = o.getJSONObject("payload").toString(),
-                                updatedAt = o.getLong("updated_at"),
-                                deletedAt = if (o.isNull("deleted_at")) null else o.getLong("deleted_at"),
-                                rev = o.optLong("rev"),
-                            ),
-                        )
-                    }
-                }
-                PullResult(list, resp.getLong("cursor"))
-            }
-        }
+/** Deterministic in-memory backend for coordinator and dual-client tests. */
+class FakeSyncBackend : SyncBackend {
+    private data class Row(val entity: SyncEntity, val rev: Long)
+    private val rows = mutableMapOf<String, MutableMap<String, Row>>()
+    private val invites = mutableMapOf<String, Pair<String, Long>>()
+    private var revision = 0L
 
-    override suspend fun invite(familyId: String): Result<Invite> =
-        withContext(Dispatchers.IO) {
-            runCatching {
-                val resp = postJson("$baseUrl/v1/invite", JSONObject().put("family_id", familyId))
-                Invite(resp.getString("code"), resp.getLong("expires_at"))
-            }
-        }
+    suspend fun push(familyId: String, deviceId: String, entities: List<SyncEntity>): Result<Int> =
+        runCatching { pushRows(familyId, entities) }
 
-    override suspend fun join(code: String, deviceId: String): Result<JoinResult> =
-        withContext(Dispatchers.IO) {
-            runCatching {
-                val resp = postJson(
-                    "$baseUrl/v1/join",
-                    JSONObject().put("code", code).put("device_id", deviceId),
-                )
-                val arr = resp.getJSONArray("entities")
-                val list = buildList {
-                    for (i in 0 until arr.length()) {
-                        val o = arr.getJSONObject(i)
-                        add(
-                            SyncEntity(
-                                type = o.getString("type"),
-                                clientUuid = o.getString("client_uuid"),
-                                payloadJson = o.getJSONObject("payload").toString(),
-                                updatedAt = o.getLong("updated_at"),
-                                deletedAt = if (o.isNull("deleted_at")) null else o.getLong("deleted_at"),
-                                rev = o.optLong("rev"),
-                            ),
-                        )
-                    }
-                }
-                JoinResult(resp.getString("family_id"), list, resp.getLong("cursor"))
-            }
-        }
+    suspend fun pull(familyId: String, cursor: Long): Result<PullResult> =
+        runCatching { pullRows(familyId, cursor) }
 
-    private fun postJson(url: String, body: JSONObject): JSONObject {
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            doOutput = true
-            setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            connectTimeout = 8000
-            readTimeout = 8000
-        }
-        OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(body.toString()) }
-        val code = conn.responseCode
-        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-        val text = BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).use { it.readText() }
-        if (code !in 200..299) error("HTTP $code: $text")
-        return JSONObject(text)
+    suspend fun invite(familyId: String): Result<Invite> = runCatching {
+        val invite = Invite("TEST${invites.size + 1}", System.currentTimeMillis() + 86_400_000)
+        invites[invite.code] = familyId to invite.expiresAt
+        invite
     }
 
-    private fun getJson(url: String): JSONObject {
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 8000
-            readTimeout = 8000
+    suspend fun join(code: String, deviceId: String): Result<JoinResult> = runCatching {
+        val invite = invites[code.uppercase()] ?: error("invalid code")
+        require(invite.second >= System.currentTimeMillis()) { "expired" }
+        val pull = pullRows(invite.first, 0)
+        JoinResult(invite.first, "fake-token", FamilyRole.Member, pull.entities, pull.cursor)
+    }
+
+    override suspend fun create(
+        baseUrl: String,
+        deviceId: String,
+        displayName: String?,
+        createRequestId: String,
+    ) =
+        JoinResult("family-${rows.size + 1}", "owner-token", FamilyRole.Owner)
+
+    override suspend fun push(session: SyncSession, entities: List<SyncEntity>) =
+        pushRows(session.familyId, entities)
+
+    override suspend fun pull(session: SyncSession) = pullRows(session.familyId, session.pullCursor)
+    override suspend fun invite(session: SyncSession) = invite(session.familyId).getOrThrow()
+    override suspend fun join(baseUrl: String, code: String, deviceId: String) =
+        join(code, deviceId).getOrThrow()
+    override suspend fun leave(session: SyncSession) = Unit
+    override suspend fun deleteFamily(session: SyncSession) { rows.remove(session.familyId) }
+    override suspend fun putMedia(session: SyncSession, clientUuid: String, bytes: ByteArray, mime: String?) = Unit
+    override suspend fun getMedia(session: SyncSession, clientUuid: String) = byteArrayOf()
+
+    private fun pushRows(familyId: String, entities: List<SyncEntity>): Int {
+        val family = rows.getOrPut(familyId) { mutableMapOf() }
+        var applied = 0
+        entities.forEach { entity ->
+            val key = "${entity.type}:${entity.clientUuid}"
+            val existing = family[key]
+            if (existing != null && existing.entity.updatedAt >= entity.updatedAt) return@forEach
+            revision++
+            family[key] = Row(entity, revision)
+            applied++
         }
-        val code = conn.responseCode
-        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-        val text = BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).use { it.readText() }
-        if (code !in 200..299) error("HTTP $code: $text")
-        return JSONObject(text)
+        return applied
+    }
+
+    private fun pullRows(familyId: String, cursor: Long): PullResult {
+        val changed = rows[familyId].orEmpty().values.filter { it.rev > cursor }.sortedBy { it.rev }
+        return PullResult(
+            changed.map { it.entity.copy(rev = it.rev) },
+            changed.lastOrNull()?.rev ?: cursor,
+        )
     }
 }
 
-/** In-memory dual-client backend for unit tests. */
-class FakeSyncBackend : SyncBackend {
-    private data class Row(
-        val type: String,
-        val clientUuid: String,
-        var payloadJson: String,
-        var updatedAt: Long,
-        var deletedAt: Long?,
-        var rev: Long,
+class HttpSyncBackend @Inject constructor() : SyncBackend {
+    override suspend fun create(
+        baseUrl: String,
+        deviceId: String,
+        displayName: String?,
+        createRequestId: String,
+    ) =
+        post(baseUrl, "/v1/family/create", null, buildJsonObject {
+            put("device_id", deviceId)
+            put("create_request_id", createRequestId)
+            displayName?.let { put("display_name", it) }
+        }).toJoinResult()
+
+    override suspend fun push(session: SyncSession, entities: List<SyncEntity>): Int =
+        post(session.baseUrl, "/v1/push", session.familyToken, buildJsonObject {
+            put("device_id", session.deviceId)
+            put("entities", buildJsonArray { entities.forEach { add(it.toJson()) } })
+        })["applied"]?.jsonPrimitive?.longOrNull?.toInt() ?: 0
+
+    override suspend fun pull(session: SyncSession): PullResult {
+        val json = get(session.baseUrl, "/v1/pull?cursor=${session.pullCursor}", session.familyToken)
+        return PullResult(json.entities(), json["cursor"]?.jsonPrimitive?.longOrNull ?: session.pullCursor)
+    }
+
+    override suspend fun invite(session: SyncSession): Invite {
+        val json = post(session.baseUrl, "/v1/invite", session.familyToken, buildJsonObject {})
+        return inviteFromWire(json)
+    }
+
+    override suspend fun join(baseUrl: String, code: String, deviceId: String): JoinResult =
+        post(baseUrl, "/v1/join", null, buildJsonObject {
+            put("code", code)
+            put("device_id", deviceId)
+        }).toJoinResult()
+
+    override suspend fun leave(session: SyncSession) {
+        post(session.baseUrl, "/v1/leave", session.familyToken, buildJsonObject {})
+    }
+
+    override suspend fun deleteFamily(session: SyncSession) {
+        post(session.baseUrl, "/v1/family/delete", session.familyToken, buildJsonObject {})
+    }
+
+    override suspend fun putMedia(
+        session: SyncSession,
+        clientUuid: String,
+        bytes: ByteArray,
+        mime: String?,
+    ) = requestBytes(session.baseUrl, "/v1/media/$clientUuid", "PUT", session.familyToken, bytes, mime).let { Unit }
+
+    override suspend fun getMedia(session: SyncSession, clientUuid: String): ByteArray =
+        requestBytes(session.baseUrl, "/v1/media/$clientUuid", "GET", session.familyToken)
+
+    private suspend fun post(base: String, path: String, token: String?, body: JsonObject): JsonObject =
+        requestJson(base, path, "POST", token, body)
+
+    private suspend fun get(base: String, path: String, token: String?): JsonObject =
+        requestJson(base, path, "GET", token, null)
+
+    private suspend fun requestJson(
+        base: String,
+        path: String,
+        method: String,
+        token: String?,
+        body: JsonObject?,
+    ): JsonObject = withContext(Dispatchers.IO) {
+        val connection = open(base, path, method, token)
+        if (body != null) {
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { it.write(body.toString()) }
+        }
+        readResponse(connection).let { Json.parseToJsonElement(it).jsonObject }
+    }
+
+    private suspend fun requestBytes(
+        base: String,
+        path: String,
+        method: String,
+        token: String,
+        body: ByteArray? = null,
+        mime: String? = null,
+    ): ByteArray = withContext(Dispatchers.IO) {
+        val connection = open(base, path, method, token)
+        if (body != null) {
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Type", mime ?: "application/octet-stream")
+            connection.outputStream.use { it.write(body) }
+        }
+        val code = connection.responseCode
+        val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+        val bytes = stream?.use { it.readBytes() } ?: byteArrayOf()
+        connection.disconnect()
+        if (code !in 200..299) {
+            throw SyncHttpException(code, bytes.toString(Charsets.UTF_8))
+        }
+        bytes
+    }
+
+    private fun open(base: String, path: String, method: String, token: String?): HttpURLConnection =
+        (URL("${base.trimEnd('/')}$path").openConnection() as HttpURLConnection).apply {
+            requestMethod = method
+            connectTimeout = 8_000
+            readTimeout = 8_000
+            useCaches = false
+            if (!token.isNullOrBlank()) setRequestProperty("Authorization", "Bearer $token")
+        }
+
+    private fun readResponse(connection: HttpURLConnection): String {
+        val code = connection.responseCode
+        val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+        val text = stream?.let { BufferedReader(InputStreamReader(it, Charsets.UTF_8)).use(BufferedReader::readText) }.orEmpty()
+        connection.disconnect()
+        if (code !in 200..299) throw SyncHttpException(code, text)
+        return text.ifBlank { "{}" }
+    }
+}
+
+internal fun inviteFromWire(json: JsonObject): Invite {
+    val expiresAtSeconds = requireNotNull(
+        json["expires_at"]?.jsonPrimitive?.longOrNull,
+    ) { "邀请响应缺少 expires_at" }
+    require(expiresAtSeconds in 0..Long.MAX_VALUE / MILLIS_PER_SECOND) {
+        "邀请失效时间无效"
+    }
+    return Invite(
+        code = requireNotNull(json["code"]?.jsonPrimitive?.contentOrNull) {
+            "邀请响应缺少 code"
+        },
+        expiresAt = expiresAtSeconds * MILLIS_PER_SECOND,
     )
-
-    private val store = mutableMapOf<String, MutableMap<String, Row>>() // family -> key->row
-    private val invites = mutableMapOf<String, Pair<String, Long>>() // code -> family, exp
-    private var rev = 0L
-
-    private fun key(type: String, uuid: String) = "$type::$uuid"
-
-    override suspend fun push(familyId: String, deviceId: String, entities: List<SyncEntity>): Result<Int> {
-        val map = store.getOrPut(familyId) { mutableMapOf() }
-        var applied = 0
-        for (e in entities) {
-            val k = key(e.type, e.clientUuid)
-            val existing = map[k]
-            if (existing != null && existing.updatedAt > e.updatedAt) continue
-            rev += 1
-            map[k] = Row(e.type, e.clientUuid, e.payloadJson, e.updatedAt, e.deletedAt, rev)
-            applied++
-        }
-        return Result.success(applied)
-    }
-
-    override suspend fun pull(familyId: String, cursor: Long): Result<PullResult> {
-        val rows = store[familyId]?.values?.filter { it.rev > cursor }?.sortedBy { it.rev }.orEmpty()
-        val entities = rows.map {
-            SyncEntity(it.type, it.clientUuid, it.payloadJson, it.updatedAt, it.deletedAt, it.rev)
-        }
-        return Result.success(PullResult(entities, entities.lastOrNull()?.rev ?: cursor))
-    }
-
-    override suspend fun invite(familyId: String): Result<Invite> {
-        val code = newClientUuid().take(8).uppercase()
-        val exp = System.currentTimeMillis() + 24 * 3600_000L
-        invites[code] = familyId to exp
-        return Result.success(Invite(code, exp))
-    }
-
-    override suspend fun join(code: String, deviceId: String): Result<JoinResult> {
-        val inv = invites[code.uppercase()] ?: return Result.failure(IllegalArgumentException("invalid code"))
-        if (inv.second < System.currentTimeMillis()) return Result.failure(IllegalStateException("expired"))
-        val pull = pull(inv.first, 0).getOrThrow()
-        return Result.success(JoinResult(inv.first, pull.entities, pull.cursor))
-    }
 }
 
 @Singleton
 class RealSyncPort @Inject constructor(
     private val backend: SyncBackend,
+    private val preferences: SyncPreferences,
+    private val policy: HomeNetworkPolicy,
     private val outboxDao: OutboxDao,
     private val recordDao: RecordDao,
     private val babyDao: BabyDao,
+    private val mediaDao: MediaAssetDao,
+    private val familyDao: FamilyDao,
+    private val clock: PolicyClock,
+    private val foregroundState: ForegroundState,
+    private val mediaFiles: SyncMediaFileStore,
 ) : SyncPort {
-    private val _status = MutableStateFlow(SyncStatus.Idle)
-    private var enabled = true
-    private var pullCursor = 0L
-    private var joinedFamilyId: String? = null
+    private val currentStatus = MutableStateFlow(SyncStatus.Disabled)
+    private val processScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val syncMutex = Mutex()
+    private val syncSignal = Channel<Unit>(Channel.CONFLATED)
+    private val pullRequested = AtomicBoolean(false)
+    @Volatile private var cachedSession = SyncSession()
 
-    override fun status(): Flow<SyncStatus> = _status.asStateFlow()
-    override fun isEnabled(): Boolean = enabled
-
-    fun setEnabled(value: Boolean) {
-        enabled = value
-        _status.value = if (value) SyncStatus.Idle else SyncStatus.Disabled
-    }
-
-    override suspend fun pull(familyId: String): Result<Unit> {
-        if (!enabled) return Result.success(Unit)
-        _status.value = SyncStatus.Syncing
-        return backend.pull(familyId, pullCursor).mapCatching { result ->
-            applyRemote(result.entities)
-            pullCursor = result.cursor
-            joinedFamilyId = familyId
-            _status.value = SyncStatus.Idle
-        }.onFailure { _status.value = SyncStatus.Error }
-    }
-
-    override suspend fun push(familyId: String): Result<Unit> {
-        if (!enabled) return Result.success(Unit)
-        _status.value = SyncStatus.Syncing
-        val pending = outboxDao.peek(200)
-        if (pending.isEmpty()) {
-            _status.value = SyncStatus.Idle
-            return Result.success(Unit)
-        }
-        val entities = pending.map {
-            SyncEntity(
-                type = it.entityType,
-                clientUuid = it.clientUuid,
-                payloadJson = it.payloadJson,
-                updatedAt = it.updatedAt,
-                deletedAt = it.deletedAt,
-            )
-        }
-        return backend.push(familyId, "device", entities).mapCatching {
-            outboxDao.deleteIds(pending.map { row -> row.id })
-            _status.value = SyncStatus.Idle
-        }.onFailure { _status.value = SyncStatus.Error }
-    }
-
-    override suspend fun createInvite(familyId: String): Result<Invite> {
-        if (!enabled) return Result.failure(SyncNotEnabledException())
-        return backend.invite(familyId)
-    }
-
-    override suspend fun joinWithCode(code: String): Result<Family> {
-        if (!enabled) return Result.failure(SyncNotEnabledException())
-        return backend.join(code, "device").mapCatching { join ->
-            applyRemote(join.entities)
-            pullCursor = join.cursor
-            joinedFamilyId = join.familyId
-            Family(id = join.familyId.toLongOrNull() ?: 1L, ownerUserId = 0, createdAt = System.currentTimeMillis())
-        }
-    }
-
-    override suspend fun leave(familyId: String): Result<Unit> {
-        joinedFamilyId = null
-        pullCursor = 0
-        return Result.success(Unit)
-    }
-
-    private suspend fun applyRemote(entities: List<SyncEntity>) {
-        for (e in entities) {
-            when (e.type) {
-                "record" -> {
-                    val existing = recordDao.getByClientUuid(e.clientUuid)
-                    if (existing != null && existing.updatedAt > e.updatedAt) continue
-                    val p = JSONObject(e.payloadJson)
-                    recordDao.upsert(
-                        RecordEntity(
-                            id = existing?.id ?: 0,
-                            clientUuid = e.clientUuid,
-                            babyId = p.optLong("baby_id", existing?.babyId ?: 0),
-                            type = p.optString("type", existing?.type ?: "other"),
-                            timestamp = p.optLong("timestamp", e.updatedAt),
-                            endTimestamp = if (p.has("end_timestamp") && !p.isNull("end_timestamp")) p.getLong("end_timestamp") else existing?.endTimestamp,
-                            note = if (p.has("note") && !p.isNull("note")) p.getString("note") else existing?.note,
-                            createdByUserId = p.optLong("created_by_user_id", existing?.createdByUserId ?: 1),
-                            payloadJson = p.optJSONObject("payload")?.toString() ?: p.optString("payload_json", existing?.payloadJson ?: "{}"),
-                            updatedAt = e.updatedAt,
-                            deletedAt = e.deletedAt,
-                        ),
-                    )
+    init {
+        processScope.launch {
+            preferences.session.collect { session ->
+                cachedSession = session
+                if (!session.isJoined) {
+                    currentStatus.value = SyncStatus.Disabled
+                } else if (currentStatus.value == SyncStatus.Disabled) {
+                    currentStatus.value = SyncStatus.Idle
                 }
-                "baby" -> {
-                    // best-effort upsert by client uuid not indexed for get — skip complex merge; records are main path
+            }
+        }
+        processScope.launch {
+            for (ignored in syncSignal) {
+                val trigger = if (pullRequested.getAndSet(false)) {
+                    SyncTrigger.Foreground
+                } else {
+                    SyncTrigger.LocalWrite
+                }
+                if (preferences.session.first().isJoined) {
+                    sync(trigger)
                 }
             }
         }
     }
-}
 
-@Singleton
-class OutboxWriter @Inject constructor(
-    private val outboxDao: OutboxDao,
-    private val syncPort: SyncPort,
-) {
-    suspend fun enqueueRecord(
-        familyId: String,
-        clientUuid: String,
-        babyId: Long,
-        type: String,
-        timestamp: Long,
-        endTimestamp: Long?,
-        note: String?,
-        payloadJson: String,
-        updatedAt: Long,
-        deletedAt: Long? = null,
-    ) {
-        if (!syncPort.isEnabled()) return
-        val payload = JSONObject()
-            .put("baby_id", babyId)
-            .put("type", type)
-            .put("timestamp", timestamp)
-            .put("end_timestamp", endTimestamp)
-            .put("note", note)
-            .put("payload_json", payloadJson)
-        outboxDao.enqueue(
-            OutboxEntity(
+    override fun status(): Flow<SyncStatus> = currentStatus
+    override fun session(): Flow<SyncSession> = preferences.session
+    override fun isEnabled(): Boolean = cachedSession.isJoined
+    override fun requestSync(trigger: SyncTrigger) {
+        if (trigger != SyncTrigger.LocalWrite) {
+            pullRequested.set(true)
+        }
+        syncSignal.trySend(Unit)
+    }
+
+    override suspend fun saveServer(baseUrl: String) = runCatching {
+        syncMutex.withLock {
+            val previous = preferences.session.first()
+            val normalized = baseUrl.trim().trimEnd('/')
+            require(!previous.isJoined || previous.baseUrl == normalized) {
+                "请先退出当前家庭，再修改服务器地址"
+            }
+            if (previous.baseUrl != normalized) {
+                resetLocalSyncReceipts(previous)
+            }
+            preferences.saveServer(baseUrl)
+            cachedSession = preferences.session.first()
+            currentStatus.value = if (cachedSession.isJoined) SyncStatus.Idle else SyncStatus.Disabled
+        }
+    }.onFailure(::updateFailureStatus)
+
+    override suspend fun createFamily(displayName: String?) = gatedWithoutSession { baseUrl ->
+        val deviceId = preferences.ensureDeviceId()
+        val createRequestId = preferences.ensureCreateRequestId()
+        backend.create(baseUrl, deviceId, displayName, createRequestId).let { joined ->
+            persistJoin(baseUrl, deviceId, joined).also {
+                preferences.clearCreateRequestId()
+                requestSync(SyncTrigger.LocalWrite)
+            }
+        }
+    }
+
+    override suspend fun joinWithPayload(payload: String) = runCatching {
+        syncMutex.withLock {
+            require(!preferences.session.first().isJoined) {
+                "请先退出当前家庭，再加入新的家庭"
+            }
+            val decoded = InvitePayloadCodec.decode(payload)
+            val baseUrl = decoded.baseUrl.ifBlank { preferences.session.first().baseUrl }
+            if (baseUrl.isBlank()) requireAllowed(HomeNetworkDecision.MissingServer)
+            val decision = policy.evaluate(baseUrl, foregroundState.isForeground())
+            requireAllowed(decision)
+            val deviceId = preferences.ensureDeviceId()
+            val joined = backend.join(baseUrl, decoded.code, deviceId)
+            persistJoin(baseUrl, deviceId, joined).also {
+                requestSync(SyncTrigger.PullToRefresh)
+            }
+        }
+    }.onFailure(::updateFailureStatus)
+
+    override suspend fun joinWithCode(code: String): Result<Family> =
+        joinWithPayload(code).map { Family(it.familyId.toLongOrNull() ?: 1, 0, System.currentTimeMillis()) }
+
+    override suspend fun createInvite(familyId: String): Result<Invite> = withAllowedSession {
+        require(it.role == FamilyRole.Owner) { "仅家庭管理员可生成邀请" }
+        backend.invite(it)
+    }
+
+    override suspend fun sync(trigger: SyncTrigger): Result<Unit> = runCatching {
+        syncMutex.withLock {
+            val session = preferences.session.first()
+            cachedSession = session
+            if (!session.isJoined) {
+                currentStatus.value = SyncStatus.Disabled
+                return@withLock
+            }
+            // Snapshot first: a non-Wi-Fi write still leaves a durable outbox.
+            captureLocalChanges(session)
+            val decision = policy.evaluate(session.baseUrl, foregroundState.isForeground())
+            requireAllowed(decision)
+            currentStatus.value = SyncStatus.Syncing
+            val plan = SyncPlan.forTrigger(trigger)
+            if (plan.push) {
+                pushPending(session)
+            }
+            if (plan.pull) {
+                var current = preferences.session.first()
+                requireAllowed(
+                    policy.evaluate(current.baseUrl, foregroundState.isForeground()),
+                )
+                val pulled = try {
+                    backend.pull(current)
+                } catch (error: SyncHttpException) {
+                    val resetCursor = error.fullResyncCursorOrNull() ?: throw error
+                    resetLocalSyncReceipts(
+                        previous = current,
+                        invalidateCurrentReceipts = true,
+                    )
+                    preferences.updateCursor(resetCursor)
+                    current = preferences.session.first()
+                    captureLocalChanges(current)
+                    pushPending(current)
+                    requireAllowed(
+                        policy.evaluate(current.baseUrl, foregroundState.isForeground()),
+                    )
+                    backend.pull(current)
+                }
+                applyRemote(current, pulled.entities)
+                downloadMissingMedia(current)
+                preferences.updateCursor(pulled.cursor)
+            }
+            preferences.markSuccess(clock.nowMillis())
+            cachedSession = preferences.session.first()
+            currentStatus.value = SyncStatus.Idle
+        }
+    }.onFailure(::updateFailureStatus)
+
+    override suspend fun push(familyId: String) = sync(SyncTrigger.LocalWrite)
+    override suspend fun pull(familyId: String) = sync(SyncTrigger.PullToRefresh)
+
+    override suspend fun leave(familyId: String) = withAllowedSession {
+        require(it.role == FamilyRole.Member) {
+            "家庭管理员请使用“删除家庭数据”完成退出"
+        }
+        try {
+            backend.leave(it)
+        } catch (error: SyncHttpException) {
+            if (!error.meansSessionIsGone()) throw error
+        }
+        outboxDao.deleteFamily(it.familyId)
+        resetLocalSyncReceipts(it)
+        preferences.clearFamilySession()
+        cachedSession = preferences.session.first()
+        currentStatus.value = SyncStatus.Disabled
+    }
+
+    override suspend fun deleteFamily() = withAllowedSession {
+        require(it.role == FamilyRole.Owner) { "仅家庭管理员可删除家庭" }
+        try {
+            backend.deleteFamily(it)
+        } catch (error: SyncHttpException) {
+            if (!error.meansSessionIsGone()) throw error
+        }
+        outboxDao.deleteFamily(it.familyId)
+        resetLocalSyncReceipts(it)
+        preferences.clearFamilySession()
+        cachedSession = preferences.session.first()
+        currentStatus.value = SyncStatus.Disabled
+    }
+
+    override suspend fun clearLocalRecords(clearLocal: suspend () -> Unit): Result<Unit> = runCatching {
+        syncMutex.withLock {
+            val session = preferences.session.first()
+            val logMedia = mediaDao.listAllIncludingDeleted().filter { it.kind == "log" }
+            val localMediaPaths = buildList {
+                addAll(logMedia.map(MediaAssetEntity::localUri))
+                recordDao.listAllIncludingDeleted().forEach { record ->
+                    addAll(localPhotoPaths(record.payloadJson))
+                }
+            }.filter(String::isNotBlank).distinct()
+            // The authoritative delete must share the same barrier as pull/apply.
+            // Otherwise a pull can reinsert records between the domain delete
+            // and replica cleanup while the UI still reports success.
+            clearLocal()
+            preferences.updateCursor(0)
+            if (session.familyId.isNotBlank()) {
+                outboxDao.deleteType(session.familyId, "record")
+                val mediaUuids = logMedia.map(MediaAssetEntity::clientUuid)
+                mediaUuids.chunked(OUTBOX_DELETE_CHUNK_SIZE).forEach { chunk ->
+                    outboxDao.deleteEntities(session.familyId, "media", chunk)
+                }
+            }
+            mediaDao.deleteLogMedia()
+            localMediaPaths.forEach { localUri ->
+                runCatching { mediaFiles.delete(localUri) }
+            }
+            cachedSession = preferences.session.first()
+        }
+    }.onFailure(::updateFailureStatus)
+
+    private suspend fun pushPending(session: SyncSession) {
+        while (pushPendingBatch(session)) {
+            // Each acknowledged batch is deleted before the next peek, so rows
+            // beyond the bounded request size cannot be starved by re-snapshotting.
+        }
+    }
+
+    private suspend fun pushPendingBatch(session: SyncSession): Boolean {
+        val roots = outboxDao.peek(session.familyId, PUSH_ROOT_BATCH_SIZE)
+        if (roots.isEmpty()) return false
+        val queued = expandBatchWithDependencies(session, roots)
+        val unauthorizedAvatarRows = if (session.role == FamilyRole.Member) {
+            queued.filter { row ->
+                row.entityType == "media" &&
+                    runCatching {
+                        Json.parseToJsonElement(row.payloadJson)
+                            .jsonObject
+                            .string("kind") == "avatar"
+                    }.getOrDefault(false)
+            }
+        } else {
+            emptyList()
+        }
+        if (unauthorizedAvatarRows.isNotEmpty()) {
+            outboxDao.deleteIds(unauthorizedAvatarRows.map { it.id })
+        }
+        val pending = queued - unauthorizedAvatarRows.toSet()
+        if (pending.isEmpty()) return true
+        val uploads = mutableListOf<MediaAssetEntity>()
+        val entities = pending
+            .map { row ->
+                var payload = normalizeLegacyOutboxPayload(row.entityType, row.payloadJson)
+                if (row.entityType == "media" && row.deletedAt == null) {
+                    val media = mediaDao.getByClientUuid(row.clientUuid)
+                        ?: error("本地媒体元数据不存在")
+                    if (!media.hasReceiptFor(session)) {
+                        val prepared = mediaFiles.prepareUpload(media.localUri)
+                        val updated = media.copy(
+                            mime = prepared.mime,
+                            width = prepared.width ?: media.width,
+                            height = prepared.height ?: media.height,
+                            byteSize = prepared.bytes.size.toLong(),
+                        )
+                        mediaDao.update(updated)
+                        uploads += updated
+                        val rawObject = Json.parseToJsonElement(payload).jsonObject
+                        payload = JsonObject(
+                            rawObject +
+                                ("mime" to JsonPrimitive(updated.mime)) +
+                                ("byte_size" to JsonPrimitive(updated.byteSize)) +
+                                listOfNotNull(
+                                    updated.width?.let { "width" to JsonPrimitive(it) },
+                                    updated.height?.let { "height" to JsonPrimitive(it) },
+                                ).toMap(),
+                        ).toString()
+                    }
+                }
+                SyncEntity(
+                    row.entityType,
+                    row.clientUuid,
+                    payload,
+                    row.updatedAt,
+                    row.deletedAt,
+                )
+            }
+            .sortedBy { ENTITY_ORDER.indexOf(it.type).takeIf { index -> index >= 0 } ?: Int.MAX_VALUE }
+        requireAllowed(policy.evaluate(session.baseUrl, foregroundState.isForeground()))
+        backend.push(session, entities)
+        uploads.forEach { media ->
+            requireAllowed(policy.evaluate(session.baseUrl, foregroundState.isForeground()))
+            // Metadata needs the compressed byte size, so preparation happens
+            // once before the metadata push and again here. Re-preparing one
+            // file at a time bounds resident JPEG bytes to a single upload.
+            val prepared = mediaFiles.prepareUpload(media.localUri)
+            backend.putMedia(session, media.clientUuid, prepared.bytes, prepared.mime)
+            mediaDao.update(media.copy(remoteUri = session.receiptFor(media.clientUuid)))
+        }
+        pending.forEach { row ->
+            when (row.entityType) {
+                "baby" -> babyDao.markSynced(row.clientUuid, row.updatedAt)
+                "record" -> recordDao.markSynced(row.clientUuid, row.updatedAt)
+                "media" -> mediaDao.markSynced(row.clientUuid, row.updatedAt)
+            }
+        }
+        outboxDao.deleteIds(pending.map { it.id })
+        return true
+    }
+
+    private suspend fun expandBatchWithDependencies(
+        session: SyncSession,
+        roots: List<OutboxEntity>,
+    ): List<OutboxEntity> {
+        val selected = linkedMapOf<Pair<String, String>, OutboxEntity>()
+        roots.forEach { row -> selected[row.entityType to row.clientUuid] = row }
+        var index = 0
+        while (index < selected.size) {
+            val row = selected.values.elementAt(index++)
+            val payload = runCatching {
+                Json.parseToJsonElement(
+                    normalizeLegacyOutboxPayload(row.entityType, row.payloadJson),
+                ).jsonObject
+            }.getOrNull() ?: continue
+            val dependencies = when (row.entityType) {
+                "baby" -> listOfNotNull(
+                    payload.string("avatar_media_uuid")?.let { "media" to it },
+                )
+                "record" -> listOfNotNull(
+                    payload.string("baby_client_uuid")?.let { "baby" to it },
+                )
+                "media" -> listOfNotNull(
+                    payload.string("record_client_uuid")?.let { "record" to it },
+                    payload.string("baby_client_uuid")?.let { "baby" to it },
+                )
+                else -> emptyList()
+            }
+            dependencies.forEach { reference ->
+                if (reference !in selected) {
+                    outboxDao.find(
+                        session.familyId,
+                        reference.first,
+                        reference.second,
+                    )?.let { selected[reference] = it }
+                }
+            }
+        }
+        require(selected.size <= MAX_PUSH_BATCH_SIZE) {
+            "同步依赖批次过大，请稍后重试"
+        }
+        return selected.values.toList()
+    }
+
+    private suspend fun applyRemote(session: SyncSession, entities: List<SyncEntity>) {
+        val unresolved = mutableListOf<SyncEntity>()
+        for (entity in entities.filter { it.type == "baby" }) {
+            if (!applyBaby(entity)) unresolved += entity
+        }
+        for (entity in entities.filter { it.type == "record" }) {
+            if (!applyRecord(entity)) unresolved += entity
+        }
+        for (entity in entities.filter { it.type == "media" }) {
+            if (!applyMedia(session, entity)) unresolved += entity
+        }
+        require(unresolved.isEmpty()) {
+            "同步数据引用尚未就绪，保留 cursor 以便重试"
+        }
+        val affectedRecords = (
+            entities.filter { it.type == "record" }
+                .mapNotNull { entity -> recordDao.getByClientUuid(entity.clientUuid)?.id } +
+                entities.filter { it.type == "media" }
+                    .mapNotNull { entity ->
+                        mediaDao.getByClientUuid(entity.clientUuid)?.recordId
+                    }
+            )
+            .distinct()
+        affectedRecords.forEach { refreshRecordPhotoPaths(it) }
+        (
+            entities.filter { it.type == "baby" }
+                .mapNotNull { entity -> babyDao.getByClientUuid(entity.clientUuid)?.id } +
+                entities.filter { it.type == "media" }
+                    .mapNotNull { entity -> mediaDao.getByClientUuid(entity.clientUuid)?.babyId }
+            )
+            .distinct()
+            .forEach { refreshBabyAvatar(it) }
+        // Keep the parameter explicit: media bytes are authorized by this same
+        // session during the immediately following reconciliation.
+        check(session.isJoined)
+    }
+
+    private suspend fun applyBaby(entity: SyncEntity): Boolean {
+        val existing = babyDao.getByClientUuid(entity.clientUuid)
+        if (existing != null && existing.updatedAt > entity.updatedAt) return true
+        val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
+        val familyId = existing?.familyId ?: familyDao.listAll().firstOrNull()?.id ?: return false
+        babyDao.upsert(
+            BabyEntity(
+                id = existing?.id ?: 0,
                 familyId = familyId,
-                entityType = "record",
-                clientUuid = clientUuid,
-                payloadJson = payload.toString(),
-                updatedAt = updatedAt,
-                deletedAt = deletedAt,
+                nickname = payload.string("nickname") ?: existing?.nickname ?: "宝宝",
+                sex = if ("sex" in payload) payload.string("sex") else existing?.sex,
+                birthdayEpochDay = SyncWireMapper.birthdayEpochDay(payload)
+                    ?: existing?.birthdayEpochDay
+                    ?: return false,
+                birthWeightGrams = if ("birth_weight_grams" in payload) {
+                    payload.long("birth_weight_grams")?.toInt()
+                } else {
+                    existing?.birthWeightGrams
+                },
+                dueDateEpochDay = if (
+                    "due_date" in payload || "due_date_epoch_day" in payload
+                ) {
+                    SyncWireMapper.dueDateEpochDay(payload)
+                } else {
+                    existing?.dueDateEpochDay
+                },
+                themeColorArgb = existing?.themeColorArgb ?: 0xFFE6A67A.toInt(),
+                sortOrder = payload.long("sort_order")?.toInt() ?: existing?.sortOrder ?: 0,
+                clientUuid = entity.clientUuid,
+                updatedAt = entity.updatedAt,
+                deletedAt = entity.deletedAt,
+                syncDirty = false,
+                avatarMediaUuid = if ("avatar_media_uuid" in payload) {
+                    payload.string("avatar_media_uuid")
+                } else {
+                    existing?.avatarMediaUuid
+                },
+                avatarPath = existing?.avatarPath,
+            ),
+        )
+        return true
+    }
+
+    private suspend fun applyRecord(entity: SyncEntity): Boolean {
+        val existing = recordDao.getByClientUuid(entity.clientUuid)
+        if (existing != null && existing.updatedAt > entity.updatedAt) return true
+        val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
+        val babyUuid = payload.string("baby_client_uuid") ?: return false
+        val baby = babyDao.getByClientUuid(babyUuid) ?: return false
+        recordDao.upsert(
+            RecordEntity(
+                id = existing?.id ?: 0,
+                clientUuid = entity.clientUuid,
+                babyId = baby.id,
+                type = payload.string("type") ?: existing?.type ?: "other",
+                timestamp = payload.long("timestamp") ?: entity.updatedAt,
+                endTimestamp = payload.long("end_timestamp"),
+                note = payload.string("note"),
+                createdByUserId = existing?.createdByUserId ?: 1,
+                createdByDeviceId = payload.string("created_by_device_id")
+                    ?: existing?.createdByDeviceId,
+                payloadJson = SyncWireMapper.recordPayloadJson(payload),
+                schemaVersion = SyncWireMapper.recordSchemaVersion(payload),
+                updatedAt = entity.updatedAt,
+                deletedAt = entity.deletedAt,
+                syncDirty = false,
+            ),
+        )
+        return true
+    }
+
+    private suspend fun applyMedia(session: SyncSession, entity: SyncEntity): Boolean {
+        val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
+        val existing = mediaDao.getByClientUuid(entity.clientUuid)
+        if (existing != null && existing.updatedAt > entity.updatedAt) return true
+        val kind = payload.string("kind") ?: existing?.kind ?: return false
+        val recordId = payload.string("record_client_uuid")
+            ?.let { recordDao.getByClientUuid(it)?.id }
+            ?: existing?.recordId
+        val babyId = payload.string("baby_client_uuid")
+            ?.let { babyDao.getByClientUuid(it)?.id }
+            ?: existing?.babyId
+        if (kind == "log" && recordId == null) return false
+        if (kind == "avatar" && babyId == null) return false
+        mediaDao.upsert(
+            MediaAssetEntity(
+                id = existing?.id ?: 0,
+                recordId = recordId,
+                clientUuid = entity.clientUuid,
+                kind = kind,
+                babyId = babyId,
+                localUri = existing?.localUri.orEmpty(),
+                remoteUri = session.receiptFor(entity.clientUuid),
+                mime = payload.string("mime"),
+                width = payload.long("width")?.toInt(),
+                height = payload.long("height")?.toInt(),
+                byteSize = payload.long("byte_size") ?: 0,
+                createdAt = existing?.createdAt ?: entity.updatedAt,
+                updatedAt = entity.updatedAt,
+                deletedAt = entity.deletedAt,
+                syncDirty = false,
+            ),
+        )
+        if (entity.deletedAt != null && !existing?.localUri.isNullOrBlank()) {
+            mediaFiles.delete(existing!!.localUri)
+            mediaDao.update(
+                requireNotNull(mediaDao.getByClientUuid(entity.clientUuid)).copy(localUri = ""),
+            )
+        }
+        return true
+    }
+
+    private suspend fun persistJoin(baseUrl: String, deviceId: String, joined: JoinResult): SyncSession {
+        val session = SyncSession(
+            baseUrl = baseUrl,
+            familyId = joined.familyId,
+            familyToken = joined.token,
+            deviceId = deviceId,
+            role = joined.role,
+            pullCursor = joined.cursor,
+        )
+        // Upload receipts only prove that bytes exist in the previous
+        // server/family namespace. A new family must reconcile them again.
+        resetLocalSyncReceipts(preferences.session.first())
+        if (joined.entities.isNotEmpty()) {
+            applyRemote(session, joined.entities)
+        }
+        preferences.saveSession(session)
+        cachedSession = session
+        currentStatus.value = SyncStatus.Idle
+        return session
+    }
+
+    private suspend fun resetLocalSyncReceipts(
+        previous: SyncSession,
+        invalidateCurrentReceipts: Boolean = false,
+    ) {
+        babyDao.markAllPendingSync()
+        recordDao.markAllPendingSync()
+        mediaDao.listAllIncludingDeleted().forEach { media ->
+            val hasCurrentReceipt = previous.isJoined && media.hasReceiptFor(previous)
+            val preserveCurrentReceipt = !invalidateCurrentReceipts ||
+                (previous.role == FamilyRole.Member && media.kind == "avatar")
+            val nextReceipt = when {
+                media.remoteUri.isNullOrBlank() -> null
+                media.remoteUri!!.startsWith(RECEIPT_PREFIX) -> {
+                    if (hasCurrentReceipt && !preserveCurrentReceipt) null else media.remoteUri
+                }
+                !previous.isJoined -> null
+                !preserveCurrentReceipt -> null
+                else -> previous.receiptFor(media.clientUuid)
+            }
+            mediaDao.update(
+                media.copy(
+                    remoteUri = nextReceipt,
+                    syncDirty = true,
+                ),
+            )
+        }
+    }
+
+    private suspend fun <T> gatedWithoutSession(block: suspend (String) -> T): Result<T> = runCatching {
+        syncMutex.withLock {
+            val current = preferences.session.first()
+            require(!current.isJoined) {
+                "请先退出当前家庭，再创建新的家庭"
+            }
+            val baseUrl = current.baseUrl
+            if (baseUrl.isBlank()) requireAllowed(HomeNetworkDecision.MissingServer)
+            val decision = policy.evaluate(baseUrl, foregroundState.isForeground())
+            requireAllowed(decision)
+            block(baseUrl)
+        }
+    }.onFailure(::updateFailureStatus)
+
+    private suspend fun <T> withAllowedSession(block: suspend (SyncSession) -> T): Result<T> = runCatching {
+        syncMutex.withLock {
+            val session = preferences.session.first()
+            cachedSession = session
+            if (!session.isJoined) throw SyncNotEnabledException()
+            val decision = policy.evaluate(session.baseUrl, foregroundState.isForeground())
+            requireAllowed(decision)
+            block(session)
+        }
+    }.onFailure(::updateFailureStatus)
+
+    private fun requireAllowed(decision: HomeNetworkDecision) {
+        if (decision == HomeNetworkDecision.Allowed) return
+        currentStatus.value = decision.toSyncStatus()
+        throw HomeNetworkBlockedException(decision.userMessage())
+    }
+
+    private fun updateFailureStatus(error: Throwable) {
+        currentStatus.value = when (error) {
+            is HomeNetworkBlockedException -> currentStatus.value
+            is SyncNotEnabledException -> SyncStatus.Disabled
+            else -> SyncStatus.Error
+        }
+    }
+
+    private suspend fun captureLocalChanges(session: SyncSession) {
+        val babies = babyDao.listPendingSync()
+        val records = recordDao.listPendingSync()
+        materializeLocalMedia(
+            includeAvatars = session.role != FamilyRole.Member,
+            babies = babies,
+            records = records,
+        )
+        val directlyChangedMedia = mediaDao.listPendingSync()
+        val referencedMedia = buildList {
+            babies.forEach { baby ->
+                mediaDao.activeAvatarForBaby(baby.id)?.let(::add)
+            }
+            records.forEach { record ->
+                addAll(mediaDao.listForRecord(record.id))
+            }
+        }
+        val media = ensurePortableMediaUuids(
+            (directlyChangedMedia + referencedMedia).distinctBy(MediaAssetEntity::id),
+        )
+        babies.forEach { baby ->
+            val eligibleAvatars = media.filter {
+                it.kind == "avatar" &&
+                    it.babyId == baby.id &&
+                    it.deletedAt == null &&
+                    (session.role != FamilyRole.Member || it.hasReceiptFor(session))
+            }
+            val avatarMediaUuid = baby.avatarMediaUuid
+                ?.let { pointer ->
+                    eligibleAvatars.firstOrNull { it.clientUuid == pointer }?.clientUuid
+                }
+                ?: eligibleAvatars
+                    .maxWithOrNull(compareBy<MediaAssetEntity> { it.updatedAt }.thenBy { it.id })
+                    ?.clientUuid
+            enqueue(
+                session,
+                SyncWireMapper.baby(
+                    baby,
+                    avatarMediaUuid,
+                ),
+            )
+        }
+        records.forEach { record ->
+            val babyUuid = babyDao.getIncludingDeleted(record.babyId)?.clientUuid
+                ?: return@forEach
+            enqueue(
+                session,
+                SyncWireMapper.record(
+                    record,
+                    babyUuid,
+                    record.createdByDeviceId ?: session.deviceId,
+                ),
+            )
+        }
+        media.forEach { asset ->
+            if (session.role == FamilyRole.Member && asset.kind == "avatar") {
+                return@forEach
+            }
+            val recordUuid = asset.recordId
+                ?.let { recordDao.getIncludingDeleted(it)?.clientUuid }
+            val babyUuid = asset.babyId
+                ?.let { babyDao.getIncludingDeleted(it)?.clientUuid }
+            if (
+                (asset.kind == "log" && recordUuid == null) ||
+                (asset.kind == "avatar" && babyUuid == null)
+            ) {
+                return@forEach
+            }
+            enqueue(session, SyncWireMapper.media(asset, recordUuid, babyUuid))
+        }
+    }
+
+    private suspend fun enqueue(session: SyncSession, entity: SyncEntity) {
+        outboxDao.enqueue(
+            com.lezi.babylog.core.database.OutboxEntity(
+                familyId = session.familyId,
+                entityType = entity.type,
+                clientUuid = entity.clientUuid,
+                payloadJson = entity.payloadJson,
+                updatedAt = entity.updatedAt,
+                deletedAt = entity.deletedAt,
             ),
         )
     }
+
+    private suspend fun materializeLocalMedia(
+        includeAvatars: Boolean,
+        babies: List<BabyEntity>,
+        records: List<RecordEntity>,
+    ) {
+        if (includeAvatars) {
+            babies.forEach { baby ->
+                val existing = mediaDao.activeAvatarForBaby(baby.id)
+                val path = baby.avatarPath?.takeIf { it.isNotBlank() }
+                if (path == null) {
+                    if (existing != null) {
+                        mediaDao.update(
+                            existing.copy(
+                                updatedAt = baby.updatedAt,
+                                deletedAt = baby.updatedAt,
+                                syncDirty = true,
+                            ),
+                        )
+                    }
+                    if (baby.avatarMediaUuid != null) {
+                        babyDao.update(
+                            baby.copy(avatarMediaUuid = null, syncDirty = true),
+                        )
+                    }
+                    return@forEach
+                }
+                if (existing?.localUri == path) {
+                    if (baby.avatarMediaUuid != existing.clientUuid) {
+                        babyDao.update(
+                            baby.copy(
+                                avatarMediaUuid = existing.clientUuid,
+                                syncDirty = true,
+                            ),
+                        )
+                    }
+                    return@forEach
+                }
+                if (existing != null) {
+                    mediaDao.update(
+                        existing.copy(
+                            updatedAt = baby.updatedAt,
+                            deletedAt = baby.updatedAt,
+                            syncDirty = true,
+                        ),
+                    )
+                }
+                val info = mediaFiles.inspect(path) ?: return@forEach
+                val avatarMediaUuid = UUID.randomUUID().toString()
+                mediaDao.upsert(
+                    MediaAssetEntity(
+                        clientUuid = avatarMediaUuid,
+                        kind = "avatar",
+                        babyId = baby.id,
+                        localUri = path,
+                        mime = info.mime,
+                        width = info.width,
+                        height = info.height,
+                        byteSize = info.byteSize,
+                        createdAt = baby.updatedAt,
+                        updatedAt = baby.updatedAt,
+                    ),
+                )
+                babyDao.update(
+                    baby.copy(avatarMediaUuid = avatarMediaUuid, syncDirty = true),
+                )
+            }
+        }
+        records.forEach { record ->
+            val paths = if (record.deletedAt == null) {
+                localPhotoPaths(record.payloadJson)
+            } else {
+                emptySet()
+            }
+            val existing = mediaDao.listForRecord(record.id)
+            paths.forEach { path ->
+                if (existing.any { it.localUri == path && it.deletedAt == null }) return@forEach
+                val info = mediaFiles.inspect(path) ?: return@forEach
+                mediaDao.upsert(
+                    MediaAssetEntity(
+                        recordId = record.id,
+                        clientUuid = UUID.randomUUID().toString(),
+                        kind = "log",
+                        babyId = record.babyId,
+                        localUri = path,
+                        mime = info.mime,
+                        width = info.width,
+                        height = info.height,
+                        byteSize = info.byteSize,
+                        createdAt = record.updatedAt,
+                        updatedAt = record.updatedAt,
+                    ),
+                )
+            }
+            existing.filter {
+                it.deletedAt == null && it.localUri !in paths
+            }.forEach {
+                mediaDao.update(
+                    it.copy(
+                        updatedAt = record.updatedAt,
+                        deletedAt = record.updatedAt,
+                        syncDirty = true,
+                    ),
+                )
+            }
+        }
+    }
+
+    private suspend fun ensurePortableMediaUuids(
+        candidates: List<MediaAssetEntity>,
+    ): List<MediaAssetEntity> {
+        val portable = mutableListOf<MediaAssetEntity>()
+        candidates.forEach { media ->
+            if (runCatching { UUID.fromString(media.clientUuid) }.isSuccess) {
+                portable += media
+            } else {
+                val updated = media.copy(clientUuid = UUID.randomUUID().toString())
+                mediaDao.update(updated)
+                portable += updated
+            }
+        }
+        return portable
+    }
+
+    private suspend fun downloadMissingMedia(session: SyncSession) {
+        mediaDao.listMissingLocalBytes()
+            .filter { it.hasReceiptFor(session) }
+            .forEach { media ->
+            requireAllowed(policy.evaluate(session.baseUrl, foregroundState.isForeground()))
+            val bytes = backend.getMedia(session, media.clientUuid)
+            val localUri = mediaFiles.saveDownloaded(
+                media.clientUuid,
+                media.kind,
+                bytes,
+                media.mime,
+            )
+            mediaDao.update(media.copy(localUri = localUri))
+            media.recordId?.let { refreshRecordPhotoPaths(it) }
+            media.babyId?.let { refreshBabyAvatar(it) }
+            }
+    }
+
+    private suspend fun refreshRecordPhotoPaths(recordId: Long) {
+        val record = recordDao.getIncludingDeleted(recordId) ?: return
+        val photos = mediaDao.listActiveForRecord(recordId)
+            .map(MediaAssetEntity::localUri)
+            .filter(String::isNotBlank)
+        val payload = runCatching { Json.parseToJsonElement(record.payloadJson).jsonObject }
+            .getOrDefault(JsonObject(emptyMap()))
+        val next = JsonObject(
+            if (photos.isEmpty()) {
+                payload - "photos"
+            } else {
+                payload + (
+                    "photos" to JsonArray(photos.map(::JsonPrimitive))
+                )
+            },
+        ).toString()
+        if (next != record.payloadJson) {
+            recordDao.update(record.copy(payloadJson = next))
+        }
+    }
+
+    private suspend fun refreshBabyAvatar(babyId: Long) {
+        val baby = babyDao.getIncludingDeleted(babyId) ?: return
+        val avatarPath = baby.avatarMediaUuid
+            ?.let { mediaDao.getByClientUuid(it) }
+            ?.takeIf {
+                it.kind == "avatar" &&
+                    it.babyId == babyId &&
+                    it.deletedAt == null
+            }
+            ?.localUri
+            ?.takeIf(String::isNotBlank)
+        if (baby.avatarPath != avatarPath) {
+            babyDao.update(baby.copy(avatarPath = avatarPath))
+        }
+    }
+
+    private suspend fun normalizeLegacyOutboxPayload(type: String, raw: String): String {
+        if (type != "record") return raw
+        var payload = Json.parseToJsonElement(raw).jsonObject
+        if (payload["baby_client_uuid"] == null) {
+            val babyId = payload["baby_id"]?.jsonPrimitive?.longOrNull
+            val babyUuid = babyId?.let { babyDao.getIncludingDeleted(it)?.clientUuid }
+            require(!babyUuid.isNullOrBlank()) { "记录缺少宝宝同步标识" }
+            payload = JsonObject(payload - "baby_id" + ("baby_client_uuid" to JsonPrimitive(babyUuid)))
+        }
+        val inner = payload["payload_json"]
+        if (inner is JsonPrimitive && inner.isString) {
+            val parsed = runCatching { Json.parseToJsonElement(inner.content).jsonObject }
+                .getOrDefault(JsonObject(emptyMap()))
+            payload = JsonObject(payload + ("payload_json" to JsonObject(parsed - "photos")))
+        }
+        return payload.toString()
+    }
 }
+
+private fun SyncEntity.toJson() = buildJsonObject {
+    put("type", type)
+    put("client_uuid", clientUuid)
+    put("payload", Json.parseToJsonElement(payloadJson))
+    put("updated_at", updatedAt)
+    deletedAt?.let { put("deleted_at", it) }
+}
+
+private fun JsonObject.entities(): List<SyncEntity> =
+    (get("entities") as? JsonArray).orEmpty().map { element ->
+        val value = element.jsonObject
+        SyncEntity(
+            type = value["type"]!!.jsonPrimitive.content,
+            clientUuid = value["client_uuid"]!!.jsonPrimitive.content,
+            payloadJson = value["payload"]?.toString() ?: "{}",
+            updatedAt = value["updated_at"]!!.jsonPrimitive.longOrNull ?: 0,
+            deletedAt = value["deleted_at"]?.jsonPrimitive?.longOrNull,
+            rev = value["rev"]?.jsonPrimitive?.longOrNull ?: 0,
+        )
+    }
+
+private fun JsonObject.toJoinResult(): JoinResult = JoinResult(
+    familyId = get("family_id")!!.jsonPrimitive.content,
+    token = get("token")!!.jsonPrimitive.content,
+    role = if (get("role")?.jsonPrimitive?.content == "owner") FamilyRole.Owner else FamilyRole.Member,
+    entities = entities(),
+    cursor = get("cursor")?.jsonPrimitive?.longOrNull ?: 0,
+)
+
+private fun HomeNetworkDecision.userMessage(): String = when (this) {
+    HomeNetworkDecision.MissingServer -> "请先填写家庭服务器地址"
+    HomeNetworkDecision.NotOnWifi, HomeNetworkDecision.ServerUnavailable,
+    HomeNetworkDecision.BackingOff -> "无法连接家庭服务器，请确认在家中 Wi‑Fi"
+    HomeNetworkDecision.Background -> "家庭同步仅在前台运行"
+    HomeNetworkDecision.Allowed -> ""
+}
+
+private fun HomeNetworkDecision.toSyncStatus(): SyncStatus = when (this) {
+    HomeNetworkDecision.MissingServer -> SyncStatus.Disabled
+    HomeNetworkDecision.NotOnWifi,
+    HomeNetworkDecision.ServerUnavailable,
+    HomeNetworkDecision.BackingOff,
+    HomeNetworkDecision.Background,
+    -> SyncStatus.BlockedOfflineHome
+    HomeNetworkDecision.Allowed -> SyncStatus.Idle
+}
+
+private class HomeNetworkBlockedException(message: String) : IllegalStateException(message)
+
+internal class SyncHttpException(
+    val statusCode: Int,
+    val responseBody: String = "",
+) : IllegalStateException("家庭服务器请求失败（HTTP $statusCode）")
+
+private fun SyncHttpException.meansSessionIsGone(): Boolean =
+    statusCode == 401
+
+private fun SyncHttpException.fullResyncCursorOrNull(): Long? {
+    if (statusCode != 409) return null
+    val detail = runCatching {
+        Json.parseToJsonElement(responseBody).jsonObject["detail"]?.jsonObject
+    }.getOrNull() ?: return null
+    if (detail.string("code") != "cursor_ahead") return null
+    if (detail.string("action") != "full_resync") return null
+    return detail.long("reset_cursor")?.takeIf { it == 0L }
+}
+
+private fun SyncSession.receiptFor(clientUuid: String): String {
+    val namespace = UUID.nameUUIDFromBytes(
+        "${baseUrl.trimEnd('/')}\n$familyId".toByteArray(Charsets.UTF_8),
+    )
+    return "$RECEIPT_PREFIX$namespace:$clientUuid"
+}
+
+private fun MediaAssetEntity.hasReceiptFor(session: SyncSession): Boolean =
+    remoteUri == clientUuid || remoteUri == session.receiptFor(clientUuid)
+
+private fun localPhotoPaths(raw: String): Set<String> =
+    runCatching {
+        val photos = Json.parseToJsonElement(raw).jsonObject["photos"] as? JsonArray
+        photos.orEmpty()
+            .mapNotNull { it.jsonPrimitive.contentOrNull }
+            .filter(String::isNotBlank)
+            .toSet()
+    }.getOrDefault(emptySet())
+
+private val ENTITY_ORDER = listOf("baby", "record", "media")
+private const val PUSH_ROOT_BATCH_SIZE = 200
+private const val MAX_PUSH_BATCH_SIZE = 1_000
+private const val OUTBOX_DELETE_CHUNK_SIZE = 400
+private const val MILLIS_PER_SECOND = 1_000L
+private const val RECEIPT_PREFIX = "lezi-sync:"

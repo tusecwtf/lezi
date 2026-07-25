@@ -1,0 +1,21 @@
+Final emulator acceptance session
+APK sha256: 937ba0047af5423f7c3f2aa69becb81fdb197312376ec0a75c925592c9bd9dae
+Package: com.lezi.babylog.debug
+
+Query:
+  adb logcat -d -v threadtime |
+    rg 'FATAL EXCEPTION|AndroidRuntime.*FATAL|Process: com\.lezi\.babylog\.debug'
+
+Result:
+  0 matches
+
+FATAL EXCEPTION count: 0
+Application AndroidRuntime FATAL count: 0
+
+Observed unrelated emulator/system E-level lines:
+  AtomicFile install_sessions rename failure
+  Binder IPC transaction failure
+  TaskPersister recents directory missing
+  GNSS PSDS server not configured
+
+No E-level line referenced com.lezi.babylog.debug.

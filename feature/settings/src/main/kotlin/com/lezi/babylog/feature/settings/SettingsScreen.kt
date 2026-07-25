@@ -780,7 +780,11 @@ fun SettingsRoute(
         AlertDialog(
             onDismissRequest = { clearStep = 0 },
             title = { Text("确认清除记录？") },
-            text = { Text("将删除全部喂养、睡眠等记录，宝宝档案会保留。") },
+            text = {
+                Text(
+                    "只删除这台设备上的喂养、睡眠等记录，宝宝档案和家庭服务器数据会保留。",
+                )
+            },
             confirmButton = {
                 TextButton(onClick = { clearStep = 2 }) {
                     Text("继续", color = MaterialTheme.colorScheme.error)
@@ -795,7 +799,12 @@ fun SettingsRoute(
         AlertDialog(
             onDismissRequest = { clearStep = 0 },
             title = { Text("最后确认") },
-            text = { Text("真的要清除全部记录吗？宝宝不会被删除。") },
+            text = {
+                Text(
+                    "真的要清除本机全部记录吗？宝宝不会被删除；下次家庭同步时，" +
+                        "服务器上的记录可能重新下载。",
+                )
+            },
             confirmButton = {
                 TextButton(onClick = { vm.clearRecords { clearStep = 0 } }) {
                     Text("清除记录", color = MaterialTheme.colorScheme.error)

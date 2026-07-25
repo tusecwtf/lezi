@@ -16,11 +16,9 @@ import com.lezi.babylog.core.database.MembershipDao
 import com.lezi.babylog.core.database.MembershipEntity
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
-import com.lezi.babylog.core.database.OutboxDao
-import com.lezi.babylog.core.database.OutboxEntity
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.sync.SyncPort
-import org.json.JSONObject
+import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
 import com.lezi.babylog.core.model.NursingPayload
@@ -130,7 +128,6 @@ class CareLog @Inject constructor(
     private val familyDao: FamilyDao,
     private val membershipDao: MembershipDao,
     private val settings: SettingsStore,
-    private val outboxDao: OutboxDao,
     private val syncPort: SyncPort,
     private val transactionRunner: DatabaseTransactionRunner,
 ) {
@@ -178,6 +175,7 @@ class CareLog @Inject constructor(
             ),
         )
         settings.setCurrentBabyId(id)
+        requestLocalSync()
         return id
     }
 
@@ -198,9 +196,14 @@ class CareLog @Inject constructor(
                 avatarPath = input.avatarPath,
                 dueDateEpochDay = input.dueDateEpochDay,
                 themeColorArgb = input.themeColorArgb ?: existing.themeColorArgb,
-                updatedAt = System.currentTimeMillis(),
+                updatedAt = nextSyncUpdatedAt(
+                    existing.updatedAt,
+                    System.currentTimeMillis(),
+                ),
+                syncDirty = true,
             ),
         )
+        requestLocalSync()
     }
 
     /** Soft-delete a baby profile. Reassigns current baby if needed. Keeps at least one baby. */
@@ -208,13 +211,14 @@ class CareLog @Inject constructor(
         val babies = babyDao.listAll()
         if (babies.size <= 1) return false
         val target = babies.find { it.id == babyId } ?: return false
-        val now = System.currentTimeMillis()
-        babyDao.update(target.copy(deletedAt = now, updatedAt = now))
+        val now = nextSyncUpdatedAt(target.updatedAt, System.currentTimeMillis())
+        babyDao.update(target.copy(deletedAt = now, updatedAt = now, syncDirty = true))
         val remaining = babyDao.listAll()
         val currentId = settings.currentBabyId.first()
         if (currentId == null || currentId == babyId || remaining.none { it.id == currentId }) {
             remaining.firstOrNull()?.let { settings.setCurrentBabyId(it.id) }
         }
+        requestLocalSync()
         return true
     }
 
@@ -450,20 +454,22 @@ class CareLog @Inject constructor(
             schemaVersion = schemaVersion,
             updatedAt = now,
         )
-        return if (type == RecordType.SLEEP && endTimestamp == null) {
+        val id = if (type == RecordType.SLEEP && endTimestamp == null) {
             sleepMutationMutex.withLock {
                 transactionRunner.run {
                     if (recordDao.findOpenSleep(babyId) != null) {
                         throw SleepStateChangedException()
                     }
-                    insertRecordAndOutbox(record)
+                    insertRecord(record)
                 }
             }
         } else {
             transactionRunner.run {
-                insertRecordAndOutbox(record)
+                insertRecord(record)
             }
         }
+        requestLocalSync()
+        return id
     }
 
     suspend fun updateRecord(
@@ -487,7 +493,7 @@ class CareLog @Inject constructor(
                     throw IllegalArgumentException("已完成的睡眠不可改为进行中")
                 }
                 validateSleepInterval(type, timestamp, endTimestamp)
-                updateRecordAndOutbox(
+                updateRecordEntity(
                     existing.copy(
                         timestamp = timestamp,
                         endTimestamp = endTimestamp,
@@ -499,29 +505,24 @@ class CareLog @Inject constructor(
                 )
             }
         }
+        requestLocalSync()
     }
 
     suspend fun deleteRecord(id: Long) {
-        val now = System.currentTimeMillis()
         sleepMutationMutex.withLock {
             transactionRunner.run {
                 val existing = recordDao.get(id)
-                recordDao.softDelete(id, now)
                 if (existing != null) {
-                    enqueueOutboxRecord(
-                        existing.clientUuid,
-                        existing.babyId,
-                        existing.type,
-                        existing.timestamp,
-                        existing.endTimestamp,
-                        existing.note,
-                        existing.payloadJson,
-                        now,
-                        now,
+                    val deletedAt = nextSyncUpdatedAt(
+                        existing.updatedAt,
+                        System.currentTimeMillis(),
                     )
+                    recordDao.softDelete(id, deletedAt)
                 }
+                existing
             }
         }
+        requestLocalSync()
     }
 
     suspend fun completeNursing(
@@ -579,123 +580,135 @@ class CareLog @Inject constructor(
         note: String?,
         payloadJson: String,
         schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-    ): Long = sleepMutationMutex.withLock {
-        validateSleepInterval(RecordType.SLEEP, timestamp, endTimestamp)
-        transactionRunner.run {
-            val currentOpen = recordDao.findOpenSleep(babyId)
-            if (expectedOpenSleepId == null) {
-                if (currentOpen != null) throw SleepStateChangedException()
-                val now = System.currentTimeMillis()
-                insertRecordAndOutbox(
-                    RecordEntity(
-                        clientUuid = newClientUuid(),
-                        babyId = babyId,
-                        type = RecordType.SLEEP.key,
-                        timestamp = timestamp,
-                        endTimestamp = endTimestamp,
-                        note = note,
-                        createdByUserId = ensureLocalUser(now),
-                        payloadJson = payloadJson,
-                        schemaVersion = schemaVersion,
-                        updatedAt = now,
-                    ),
-                )
-            } else {
-                if (currentOpen?.id != expectedOpenSleepId) {
-                    throw SleepStateChangedException()
+    ): Long {
+        val id = sleepMutationMutex.withLock {
+            validateSleepInterval(RecordType.SLEEP, timestamp, endTimestamp)
+            transactionRunner.run {
+                val currentOpen = recordDao.findOpenSleep(babyId)
+                if (expectedOpenSleepId == null) {
+                    if (currentOpen != null) throw SleepStateChangedException()
+                    val now = System.currentTimeMillis()
+                    insertRecord(
+                        RecordEntity(
+                            clientUuid = newClientUuid(),
+                            babyId = babyId,
+                            type = RecordType.SLEEP.key,
+                            timestamp = timestamp,
+                            endTimestamp = endTimestamp,
+                            note = note,
+                            createdByUserId = ensureLocalUser(now),
+                            payloadJson = payloadJson,
+                            schemaVersion = schemaVersion,
+                            updatedAt = now,
+                        ),
+                    )
+                } else {
+                    if (currentOpen?.id != expectedOpenSleepId) {
+                        throw SleepStateChangedException()
+                    }
+                    updateRecordEntity(
+                        currentOpen.copy(
+                            timestamp = timestamp,
+                            endTimestamp = endTimestamp,
+                            note = note,
+                            payloadJson = payloadJson,
+                            schemaVersion = schemaVersion,
+                            updatedAt = System.currentTimeMillis(),
+                        ),
+                    )
+                    expectedOpenSleepId
                 }
-                updateRecordAndOutbox(
-                    currentOpen.copy(
-                        timestamp = timestamp,
-                        endTimestamp = endTimestamp,
-                        note = note,
-                        payloadJson = payloadJson,
-                        schemaVersion = schemaVersion,
-                        updatedAt = System.currentTimeMillis(),
-                    ),
-                )
-                expectedOpenSleepId
             }
         }
+        requestLocalSync()
+        return id
     }
 
     suspend fun sleepDown(
         babyId: Long,
         at: Long = System.currentTimeMillis(),
-    ): Long = sleepMutationMutex.withLock {
-        transactionRunner.run {
-            val open = recordDao.findOpenSleep(babyId)
-            if (open != null) {
-                val flagged = withAnomaly(open.payloadJson, open.schemaVersion)
-                if (flagged.first != open.payloadJson) {
-                    updateRecordAndOutbox(
-                        open.copy(
-                            payloadJson = flagged.first,
-                            schemaVersion = flagged.second,
-                            updatedAt = System.currentTimeMillis(),
-                        ),
-                    )
+    ): Long {
+        val id = sleepMutationMutex.withLock {
+            transactionRunner.run {
+                val open = recordDao.findOpenSleep(babyId)
+                if (open != null) {
+                    val flagged = withAnomaly(open.payloadJson, open.schemaVersion)
+                    if (flagged.first != open.payloadJson) {
+                        updateRecordEntity(
+                            open.copy(
+                                payloadJson = flagged.first,
+                                schemaVersion = flagged.second,
+                                updatedAt = System.currentTimeMillis(),
+                            ),
+                        )
+                    }
+                    return@run open.id
                 }
-                return@run open.id
-            }
 
-            val now = System.currentTimeMillis()
-            insertRecordAndOutbox(
-                RecordEntity(
-                    clientUuid = newClientUuid(),
-                    babyId = babyId,
-                    type = RecordType.SLEEP.key,
-                    timestamp = at,
-                    endTimestamp = null,
-                    note = null,
-                    createdByUserId = ensureLocalUser(now),
-                    payloadJson = "{}",
-                    updatedAt = now,
-                ),
-            )
+                val now = System.currentTimeMillis()
+                insertRecord(
+                    RecordEntity(
+                        clientUuid = newClientUuid(),
+                        babyId = babyId,
+                        type = RecordType.SLEEP.key,
+                        timestamp = at,
+                        endTimestamp = null,
+                        note = null,
+                        createdByUserId = ensureLocalUser(now),
+                        payloadJson = "{}",
+                        updatedAt = now,
+                    ),
+                )
+            }
         }
+        requestLocalSync()
+        return id
     }
 
     suspend fun sleepUp(
         babyId: Long,
         at: Long = System.currentTimeMillis(),
-    ): Long = sleepMutationMutex.withLock {
-        transactionRunner.run {
-            val open = recordDao.findOpenSleep(babyId)
-            if (open != null) {
-                validateSleepInterval(RecordType.SLEEP, open.timestamp, at)
-                updateRecordAndOutbox(
-                    open.copy(
+    ): Long {
+        val id = sleepMutationMutex.withLock {
+            transactionRunner.run {
+                val open = recordDao.findOpenSleep(babyId)
+                if (open != null) {
+                    validateSleepInterval(RecordType.SLEEP, open.timestamp, at)
+                    updateRecordEntity(
+                        open.copy(
+                            endTimestamp = at,
+                            updatedAt = System.currentTimeMillis(),
+                        ),
+                    )
+                    return@run open.id
+                }
+
+                val now = System.currentTimeMillis()
+                val start = at - 60_000L
+                insertRecord(
+                    RecordEntity(
+                        clientUuid = newClientUuid(),
+                        babyId = babyId,
+                        type = RecordType.SLEEP.key,
+                        timestamp = start,
                         endTimestamp = at,
-                        updatedAt = System.currentTimeMillis(),
+                        note = null,
+                        createdByUserId = ensureLocalUser(now),
+                        payloadJson = RecordPayloadCodec.encode(
+                            RecordPayloadDocument(
+                                type = RecordType.SLEEP,
+                                payload = SleepPayload(anomaly = true),
+                                schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+                            ),
+                        ),
+                        schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+                        updatedAt = now,
                     ),
                 )
-                return@run open.id
             }
-
-            val now = System.currentTimeMillis()
-            val start = at - 60_000L
-            insertRecordAndOutbox(
-                RecordEntity(
-                    clientUuid = newClientUuid(),
-                    babyId = babyId,
-                    type = RecordType.SLEEP.key,
-                    timestamp = start,
-                    endTimestamp = at,
-                    note = null,
-                    createdByUserId = ensureLocalUser(now),
-                    payloadJson = RecordPayloadCodec.encode(
-                        RecordPayloadDocument(
-                            type = RecordType.SLEEP,
-                            payload = SleepPayload(anomaly = true),
-                            schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-                        ),
-                    ),
-                    schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-                    updatedAt = now,
-                ),
-            )
         }
+        requestLocalSync()
+        return id
     }
 
     suspend fun getRecord(id: Long): Record? = recordDao.get(id)?.toModel()
@@ -715,9 +728,19 @@ class CareLog @Inject constructor(
     suspend fun search(babyId: Long, query: String): List<Record> {
         val normalizedQuery = query.trim().lowercase()
         if (normalizedQuery.isEmpty()) return emptyList()
+        val queryNeedsConvertedWeightCandidate =
+            normalizedQuery.toDoubleOrNull()?.isFinite() == true
         val matchingTypeKeys = RecordType.entries
             .filter { type ->
-                type.candidateSearchTerms().any { it.lowercase().contains(normalizedQuery) }
+                (
+                    type == RecordType.WEIGHT &&
+                        queryNeedsConvertedWeightCandidate
+                    ) ||
+                    type.candidateSearchTerms().any { term ->
+                        val normalizedTerm = term.lowercase()
+                        normalizedTerm.contains(normalizedQuery) ||
+                            normalizedQuery.contains(normalizedTerm)
+                    }
             }
             .map { it.key }
             .ifEmpty { listOf(NO_MATCHING_RECORD_TYPE) }
@@ -745,9 +768,6 @@ class CareLog @Inject constructor(
             zone = zone,
         )
     }
-
-    suspend fun listMeasurements(babyId: Long, type: RecordType): List<Record> =
-        recordDao.listByType(babyId, type.key).map { it.toModel() }
 
     fun observeMeasurements(babyId: Long, type: RecordType): Flow<List<Record>> =
         recordDao.observeRange(
@@ -791,13 +811,24 @@ class CareLog @Inject constructor(
 
     suspend fun updateBabyDueDate(babyId: Long, dueDateEpochDay: Long?) {
         val b = babyDao.get(babyId) ?: return
-        babyDao.update(b.copy(dueDateEpochDay = dueDateEpochDay, updatedAt = System.currentTimeMillis()))
+        babyDao.update(
+            b.copy(
+                dueDateEpochDay = dueDateEpochDay,
+                updatedAt = nextSyncUpdatedAt(b.updatedAt, System.currentTimeMillis()),
+                syncDirty = true,
+            ),
+        )
+        requestLocalSync()
     }
 
     /** Wipe records only. Baby profiles are intentionally retained. */
     suspend fun clearRecordsOnly() {
-        recordDao.deleteAll()
-        settings.clearNextFeedAt()
+        // Settings cleanup is deliberately local-only. A synced tombstone
+        // would delete the family's shared history on every other device.
+        syncPort.clearLocalRecords {
+            recordDao.deleteAll()
+            settings.clearNextFeedAt()
+        }.getOrThrow()
     }
 
     /**
@@ -820,7 +851,14 @@ class CareLog @Inject constructor(
         val name = normalizeNickname(nickname)
         if (b.nickname == name) return
         ensureNicknameAvailable(name, excludeId = babyId)
-        babyDao.update(b.copy(nickname = name, updatedAt = System.currentTimeMillis()))
+        babyDao.update(
+            b.copy(
+                nickname = name,
+                updatedAt = nextSyncUpdatedAt(b.updatedAt, System.currentTimeMillis()),
+                syncDirty = true,
+            ),
+        )
+        requestLocalSync()
     }
 
     /**
@@ -854,17 +892,33 @@ class CareLog @Inject constructor(
             val target = babyDao.get(preview.targetBabyId) ?: return@run
             if (source.familyId != target.familyId) return@run
             recordDao.listForBaby(source.id).forEach { record ->
-                recordDao.update(record.copy(babyId = target.id, updatedAt = now))
+                recordDao.update(
+                    record.copy(
+                        babyId = target.id,
+                        updatedAt = nextSyncUpdatedAt(record.updatedAt, now),
+                        syncDirty = true,
+                    ),
+                )
             }
             calendarEventDao.listForBaby(source.id).forEach { event ->
                 calendarEventDao.update(event.copy(babyId = target.id, updatedAt = now))
             }
-            babyDao.update(source.copy(deletedAt = now, updatedAt = now))
+            babyDao.update(
+                nextSyncUpdatedAt(source.updatedAt, now).let { deletedAt ->
+                    source.copy(
+                        deletedAt = deletedAt,
+                        updatedAt = deletedAt,
+                        syncDirty = true,
+                    )
+                },
+            )
         }
         if (settings.currentBabyId.first() == sourceBabyId) {
             settings.setCurrentBabyId(targetBabyId)
         }
-        return babyDao.get(sourceBabyId) == null && babyDao.get(targetBabyId) != null
+        val merged = babyDao.get(sourceBabyId) == null && babyDao.get(targetBabyId) != null
+        if (merged) requestLocalSync()
+        return merged
     }
 
     private fun normalizeNickname(raw: String): String =
@@ -909,67 +963,22 @@ class CareLog @Inject constructor(
     }
 
 
-    private suspend fun enqueueOutboxRecord(
-        clientUuid: String,
-        babyId: Long,
-        type: String,
-        timestamp: Long,
-        endTimestamp: Long?,
-        note: String?,
-        payloadJson: String,
-        updatedAt: Long,
-        deletedAt: Long?,
-    ) {
-        if (!syncPort.isEnabled()) return
-        val familyId = familyDao.listAll().firstOrNull()?.id?.toString() ?: "1"
-        val payload = JSONObject()
-            .put("baby_id", babyId)
-            .put("type", type)
-            .put("timestamp", timestamp)
-            .put("end_timestamp", endTimestamp)
-            .put("note", note)
-            .put("payload_json", payloadJson)
-        outboxDao.enqueue(
-            OutboxEntity(
-                familyId = familyId,
-                entityType = "record",
-                clientUuid = clientUuid,
-                payloadJson = payload.toString(),
-                updatedAt = updatedAt,
-                deletedAt = deletedAt,
+    private suspend fun insertRecord(record: RecordEntity): Long = recordDao.upsert(record)
+
+    private suspend fun updateRecordEntity(record: RecordEntity) {
+        val previous = recordDao.getIncludingDeleted(record.id)?.updatedAt
+        recordDao.update(
+            record.copy(
+                updatedAt = previous
+                    ?.let { nextSyncUpdatedAt(it, record.updatedAt) }
+                    ?: record.updatedAt,
+                syncDirty = true,
             ),
         )
     }
 
-    private suspend fun insertRecordAndOutbox(record: RecordEntity): Long {
-        val id = recordDao.upsert(record)
-        enqueueOutboxRecord(
-            clientUuid = record.clientUuid,
-            babyId = record.babyId,
-            type = record.type,
-            timestamp = record.timestamp,
-            endTimestamp = record.endTimestamp,
-            note = record.note,
-            payloadJson = record.payloadJson,
-            updatedAt = record.updatedAt,
-            deletedAt = record.deletedAt,
-        )
-        return id
-    }
-
-    private suspend fun updateRecordAndOutbox(record: RecordEntity) {
-        recordDao.update(record)
-        enqueueOutboxRecord(
-            clientUuid = record.clientUuid,
-            babyId = record.babyId,
-            type = record.type,
-            timestamp = record.timestamp,
-            endTimestamp = record.endTimestamp,
-            note = record.note,
-            payloadJson = record.payloadJson,
-            updatedAt = record.updatedAt,
-            deletedAt = record.deletedAt,
-        )
+    private fun requestLocalSync() {
+        syncPort.requestSync(SyncTrigger.LocalWrite)
     }
 
     private fun pickCurrent(babies: List<BabyEntity>, storedId: Long?): BabyEntity? {
@@ -978,6 +987,13 @@ class CareLog @Inject constructor(
     }
 
 }
+
+internal fun nextSyncUpdatedAt(previous: Long, candidate: Long): Long =
+    if (previous == Long.MAX_VALUE) {
+        Long.MAX_VALUE
+    } else {
+        maxOf(candidate, previous + 1)
+    }
 
 private val NURSING_ORDER_ALLOWLIST = setOf("L", "R", "LR", "RL")
 

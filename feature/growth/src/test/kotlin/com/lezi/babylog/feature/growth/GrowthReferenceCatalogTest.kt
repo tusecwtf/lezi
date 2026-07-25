@@ -1,10 +1,20 @@
 package com.lezi.babylog.feature.growth
 
+import com.lezi.babylog.core.model.Sex
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class GrowthReferenceCatalogTest {
+    @Test
+    fun referenceSexKeyAbstainsWhenSexIsUnknownOrMissing() {
+        assertEquals("boys", growthReferenceSexKey(Sex.MALE))
+        assertEquals("girls", growthReferenceSexKey(Sex.FEMALE))
+        assertNull(growthReferenceSexKey(Sex.UNKNOWN))
+        assertNull(growthReferenceSexKey(null))
+    }
+
     @Test
     fun parserReturnsTypedBandsForAValidMetric() {
         val source = """

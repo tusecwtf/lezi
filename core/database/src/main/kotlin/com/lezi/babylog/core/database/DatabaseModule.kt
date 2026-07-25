@@ -71,6 +71,96 @@ internal val MIGRATION_3_4 = object : Migration(3, 4) {
     }
 }
 
+internal val MIGRATION_4_5 = object : Migration(4, 5) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS media_assets_v5 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                recordId INTEGER,
+                clientUuid TEXT NOT NULL DEFAULT '',
+                kind TEXT NOT NULL DEFAULT 'log',
+                babyId INTEGER,
+                localUri TEXT NOT NULL,
+                remoteUri TEXT,
+                mime TEXT,
+                width INTEGER,
+                height INTEGER,
+                byteSize INTEGER NOT NULL DEFAULT 0,
+                createdAt INTEGER NOT NULL,
+                updatedAt INTEGER NOT NULL DEFAULT 0,
+                deletedAt INTEGER
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO media_assets_v5 (
+                id, recordId, clientUuid, kind, babyId, localUri, remoteUri,
+                mime, width, height, byteSize, createdAt, updatedAt, deletedAt
+            )
+            SELECT
+                id, recordId, 'legacy-' || id, 'log', NULL, localUri, remoteUri,
+                mime, width, height, 0, createdAt, createdAt, NULL
+            FROM media_assets
+            """.trimIndent(),
+        )
+        db.execSQL("DROP TABLE media_assets")
+        db.execSQL("ALTER TABLE media_assets_v5 RENAME TO media_assets")
+        db.execSQL(
+            """
+            DELETE FROM outbox
+            WHERE id NOT IN (
+                SELECT MAX(id)
+                FROM outbox
+                GROUP BY familyId, entityType, clientUuid
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS index_media_assets_clientUuid " +
+                "ON media_assets(clientUuid)",
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS index_outbox_familyId_entityType_clientUuid " +
+                "ON outbox(familyId, entityType, clientUuid)",
+        )
+    }
+}
+
+internal val MIGRATION_5_6 = object : Migration(5, 6) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE records ADD COLUMN createdByDeviceId TEXT")
+        db.execSQL(
+            "ALTER TABLE babies ADD COLUMN syncDirty INTEGER NOT NULL DEFAULT 1",
+        )
+        db.execSQL("ALTER TABLE babies ADD COLUMN avatarMediaUuid TEXT")
+        db.execSQL(
+            "ALTER TABLE records ADD COLUMN syncDirty INTEGER NOT NULL DEFAULT 1",
+        )
+        db.execSQL(
+            "ALTER TABLE media_assets ADD COLUMN syncDirty INTEGER NOT NULL DEFAULT 1",
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_babies_updatedAt ON babies(updatedAt)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_babies_syncDirty ON babies(syncDirty)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_records_updatedAt ON records(updatedAt)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_records_syncDirty ON records(syncDirty)")
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_media_assets_updatedAt ON media_assets(updatedAt)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_media_assets_syncDirty ON media_assets(syncDirty)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_media_assets_recordId ON media_assets(recordId)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS index_media_assets_babyId_kind_deletedAt " +
+                "ON media_assets(babyId, kind, deletedAt)",
+        )
+    }
+}
+
 @Module
 @InstallIn(SingletonComponent::class)
 object DatabaseModule {
@@ -78,7 +168,13 @@ object DatabaseModule {
     @Singleton
     fun provideDatabase(@ApplicationContext context: Context): LeziDatabase =
         Room.databaseBuilder(context, LeziDatabase::class.java, "lezi.db")
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+            .addMigrations(
+                MIGRATION_1_2,
+                MIGRATION_2_3,
+                MIGRATION_3_4,
+                MIGRATION_4_5,
+                MIGRATION_5_6,
+            )
             .build()
 
     @Provides fun localUserDao(db: LeziDatabase): LocalUserDao = db.localUserDao()

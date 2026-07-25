@@ -21,7 +21,7 @@ class DatabaseMigrationTest {
     )
 
     @Test
-    fun migrate1To4_preservesV1DataAndCreatesLaterTables() {
+    fun migrate1To6_preservesV1DataAndCreatesLaterTables() {
         helper.createDatabase(TEST_DATABASE, 1).apply {
             execSQL(
                 """
@@ -34,11 +34,13 @@ class DatabaseMigrationTest {
 
         helper.runMigrationsAndValidate(
             TEST_DATABASE,
-            4,
+            6,
             true,
             MIGRATION_1_2,
             MIGRATION_2_3,
             MIGRATION_3_4,
+            MIGRATION_4_5,
+            MIGRATION_5_6,
         ).apply {
             query("SELECT displayName, deviceId, createdAt FROM local_users WHERE id = 7").use { cursor ->
                 assertTrue(cursor.moveToFirst())
@@ -51,6 +53,18 @@ class DatabaseMigrationTest {
                 query(
                     "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
                     arrayOf(table),
+                ).use { cursor ->
+                    assertTrue(cursor.moveToFirst())
+                    assertEquals(1L, cursor.getLong(0))
+                }
+            }
+            listOf(
+                "index_media_assets_recordId",
+                "index_media_assets_babyId_kind_deletedAt",
+            ).forEach { index ->
+                query(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?",
+                    arrayOf(index),
                 ).use { cursor ->
                     assertTrue(cursor.moveToFirst())
                     assertEquals(1L, cursor.getLong(0))

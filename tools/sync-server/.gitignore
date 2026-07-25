@@ -1,0 +1,7 @@
+# Runtime data root (db + media)
+/data/
+*.db
+*.db-wal
+*.db-shm
+__pycache__/
+*.pyc

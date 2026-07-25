@@ -279,7 +279,15 @@ object RecordPayloadCodec {
                 if (payload.order !in setOf("L", "R", "LR", "RL")) add("不支持的喂养顺序")
                 if (payload.recordMode !in setOf("start", "end")) add("不支持的记录时刻模式")
             }
-            is MilkPayload -> if (payload.amountMl !in 1..999) add("奶量需在 1–999 ml 之间")
+            is MilkPayload -> {
+                if (payload.amountMl !in 1..999) add("奶量需在 1–999 ml 之间")
+                if (payload.preparedMl != null && payload.preparedMl !in 0..999) {
+                    add("冲调量需在 0–999 ml 之间")
+                }
+                if (payload.durationMinutes != null && payload.durationMinutes !in 0..1_440) {
+                    add("时长需在 0–1440 分钟之间")
+                }
+            }
             is PeePayload -> if (payload.amount !in 1..3) add("尿量必须是 1–3")
             is StoolPayload -> validateStool(payload.amount, payload.consistency, payload.color)
             is BothDiaperPayload -> {
@@ -287,7 +295,12 @@ object RecordPayloadCodec {
                 validateStool(payload.stoolAmount, payload.stoolConsistency, payload.stoolColor)
             }
             is TemperaturePayload -> if (payload.celsius !in 34.0..43.0) add("体温超出可记录范围")
-            is MeasurementPayload -> if (payload.value <= 0.0) add("测量值必须为正数")
+            is MeasurementPayload -> {
+                GrowthMeasurementFacts.validationError(
+                    payload.type,
+                    GrowthMeasurementFacts.displayValue(payload),
+                )?.let(::add)
+            }
             is TextPayload -> if (payload.body.isBlank()) add("正文不能为空")
             is SymptomPayload -> if (payload.severity !in 1..3) add("症状程度必须是 1–3")
             is MedicinePayload -> if (payload.name.isBlank()) add("药品名称不能为空")
@@ -295,7 +308,8 @@ object RecordPayloadCodec {
             is FoodPayload -> if (payload.content.isBlank()) add("内容不能为空")
             is VaccinePayload -> if (payload.name.isBlank()) add("疫苗名称不能为空")
             is CustomPayload -> if (payload.titleSnapshot.isBlank()) add("自定义标题不能为空")
-            is EmptyPayload, is OtherPayload, is SleepPayload, is UnknownPayload -> Unit
+            is OtherPayload -> if (payload.title.isBlank()) add("标题不能为空")
+            is EmptyPayload, is SleepPayload, is UnknownPayload -> Unit
         }
     }
 

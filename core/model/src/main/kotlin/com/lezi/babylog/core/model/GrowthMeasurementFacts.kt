@@ -63,8 +63,9 @@ object GrowthMeasurementFacts {
         monthAge: Float,
         bands: List<GrowthReferenceBand>,
     ): GrowthReferenceRange? {
-        if (bands.isEmpty()) return null
+        if (bands.isEmpty() || !monthAge.isFinite()) return null
         val sorted = bands.sortedBy(GrowthReferenceBand::month)
+        if (monthAge < sorted.first().month || monthAge > sorted.last().month) return null
         val upperIndex = sorted.indexOfFirst { it.month >= monthAge }
         val lower: GrowthReferenceBand
         val upper: GrowthReferenceBand

@@ -1,5 +1,7 @@
 package com.lezi.babylog.feature.family
 
+import com.lezi.babylog.core.model.SyncStatus
+import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.sync.SyncNotEnabledException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -31,8 +33,86 @@ class FamilyErrorCopyTest {
             familySyncError(IllegalArgumentException("邀请码已失效"), "加入失败"),
         )
         assertEquals(
-            "家庭同步将在后续版本开放",
+            "请先填写家庭服务器地址并加入家庭",
             familySyncError(SyncNotEnabledException(), "同步失败"),
+        )
+    }
+
+    @Test
+    fun syncStatesUseProductFacingChineseLabels() {
+        assertEquals("未启用", syncStatusLabel(SyncStatus.Disabled))
+        assertEquals("等待家庭 Wi‑Fi", syncStatusLabel(SyncStatus.BlockedOfflineHome))
+        assertEquals("空闲", syncStatusLabel(SyncStatus.Idle))
+        assertEquals("同步中", syncStatusLabel(SyncStatus.Syncing))
+        assertEquals("同步错误", syncStatusLabel(SyncStatus.Error))
+    }
+
+    @Test
+    fun onlyMembersLoseAvatarEditingCapability() {
+        assertEquals(true, canEditFamilyAvatar(FamilyRole.None))
+        assertEquals(true, canEditFamilyAvatar(FamilyRole.Owner))
+        assertEquals(false, canEditFamilyAvatar(FamilyRole.Member))
+    }
+
+    @Test
+    fun storageCopyReflectsWhetherFamilySyncIsActive() {
+        assertEquals("数据仅保存在本机 · 无需登录", familyStorageCopy(false))
+        assertEquals(
+            "记录本地优先，并同步到家庭服务器 · 无需云账号",
+            familyStorageCopy(true),
+        )
+    }
+
+    @Test
+    fun joinedFamilyHidesServerAndJoinControlsButKeepsRoleActions() {
+        assertEquals(
+            FamilyControlVisibility(
+                showServerSetup = false,
+                showJoin = false,
+                showCreateFamily = false,
+                showInvite = true,
+                showJoinedActions = true,
+                showLeave = false,
+            ),
+            familyControlVisibility(isJoined = true, role = FamilyRole.Owner),
+        )
+        assertEquals(
+            FamilyControlVisibility(
+                showServerSetup = false,
+                showJoin = false,
+                showCreateFamily = false,
+                showInvite = false,
+                showJoinedActions = true,
+                showLeave = true,
+            ),
+            familyControlVisibility(isJoined = true, role = FamilyRole.Member),
+        )
+    }
+
+    @Test
+    fun localFamilySetupIsAvailableOnlyBeforeJoining() {
+        assertEquals(
+            FamilyControlVisibility(
+                showServerSetup = true,
+                showJoin = true,
+                showCreateFamily = true,
+                showInvite = false,
+                showJoinedActions = false,
+                showLeave = false,
+            ),
+            familyControlVisibility(isJoined = false, role = FamilyRole.None),
+        )
+    }
+
+    @Test
+    fun syncSessionDeviceIdIsTheDisplayedReplicationIdentity() {
+        assertEquals(
+            "sync-device",
+            familyDeviceId(syncDeviceId = "sync-device", localDeviceId = "legacy-device"),
+        )
+        assertEquals(
+            "legacy-device",
+            familyDeviceId(syncDeviceId = "", localDeviceId = "legacy-device"),
         )
     }
 }

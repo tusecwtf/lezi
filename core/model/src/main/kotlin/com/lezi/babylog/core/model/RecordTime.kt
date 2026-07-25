@@ -4,6 +4,7 @@ import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.Clock
+import java.time.Instant
 import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.ZonedDateTime
@@ -15,6 +16,24 @@ import java.time.ZonedDateTime
  */
 object RecordTime {
     fun currentTimeMillis(clock: Clock = Clock.systemUTC()): Long = clock.millis()
+
+    fun today(
+        zone: ZoneId,
+        nowMillis: Long = currentTimeMillis(),
+    ): LocalDate = Instant.ofEpochMilli(nowMillis).atZone(zone).toLocalDate()
+
+    fun selectDate(
+        selectedDate: LocalDate,
+        zone: ZoneId,
+        nowMillis: Long = currentTimeMillis(),
+    ): RecordDateDecision {
+        val today = today(zone, nowMillis)
+        return if (selectedDate > today) {
+            RecordDateDecision.ClampedToToday(today)
+        } else {
+            RecordDateDecision.Accepted(selectedDate)
+        }
+    }
 
     fun snap(hour: Int, minute: Int, step: Int): RecordTimeTick {
         val normalized = normalizedMinuteStep(step)
@@ -62,7 +81,11 @@ object RecordTime {
         zone: ZoneId = ZoneId.systemDefault(),
         now: ZonedDateTime = ZonedDateTime.now(zone),
     ): Long {
-        val safeDate = minOf(selectedDate, now.toLocalDate())
+        val safeDate = selectDate(
+            selectedDate = selectedDate,
+            zone = zone,
+            nowMillis = now.toInstant().toEpochMilli(),
+        ).date
         val time = now.toLocalTime().withSecond(0).withNano(0)
         val resolved = resolve(safeDate, time, zone, now.offset)
         val value = (resolved as? RecordTimeDecision.Accepted)?.value
@@ -141,6 +164,13 @@ data class RecordTimeTick(val hour: Int, val minute: Int)
 sealed interface RecordTimeDecision {
     data class Accepted(val value: ZonedDateTime) : RecordTimeDecision
     data object RejectedGap : RecordTimeDecision
+}
+
+sealed interface RecordDateDecision {
+    val date: LocalDate
+
+    data class Accepted(override val date: LocalDate) : RecordDateDecision
+    data class ClampedToToday(override val date: LocalDate) : RecordDateDecision
 }
 
 enum class FutureEventError {

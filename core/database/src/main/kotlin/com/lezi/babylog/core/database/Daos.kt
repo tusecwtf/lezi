@@ -57,6 +57,29 @@ interface BabyDao {
     @Query("SELECT * FROM babies WHERE id = :id AND deletedAt IS NULL")
     suspend fun get(id: Long): BabyEntity?
 
+    @Query("SELECT * FROM babies WHERE id = :id")
+    suspend fun getIncludingDeleted(id: Long): BabyEntity?
+
+    @Query("SELECT * FROM babies WHERE clientUuid = :uuid LIMIT 1")
+    suspend fun getByClientUuid(uuid: String): BabyEntity?
+
+    @Query("SELECT * FROM babies ORDER BY sortOrder ASC, id ASC")
+    suspend fun listAllIncludingDeleted(): List<BabyEntity>
+
+    @Query("SELECT * FROM babies WHERE syncDirty = 1 ORDER BY id ASC")
+    suspend fun listPendingSync(): List<BabyEntity>
+
+    @Query(
+        """
+        UPDATE babies SET syncDirty = 0
+        WHERE clientUuid = :clientUuid AND updatedAt = :updatedAt
+        """,
+    )
+    suspend fun markSynced(clientUuid: String, updatedAt: Long)
+
+    @Query("UPDATE babies SET syncDirty = 1")
+    suspend fun markAllPendingSync()
+
     @Query(
         """
         SELECT COUNT(*) FROM babies
@@ -143,8 +166,28 @@ interface RecordDao {
     @Query("SELECT * FROM records WHERE id = :id AND deletedAt IS NULL")
     suspend fun get(id: Long): RecordEntity?
 
+    @Query("SELECT * FROM records WHERE id = :id")
+    suspend fun getIncludingDeleted(id: Long): RecordEntity?
+
     @Query("SELECT * FROM records WHERE clientUuid = :uuid LIMIT 1")
     suspend fun getByClientUuid(uuid: String): RecordEntity?
+
+    @Query("SELECT * FROM records ORDER BY id ASC")
+    suspend fun listAllIncludingDeleted(): List<RecordEntity>
+
+    @Query("SELECT * FROM records WHERE syncDirty = 1 ORDER BY id ASC")
+    suspend fun listPendingSync(): List<RecordEntity>
+
+    @Query(
+        """
+        UPDATE records SET syncDirty = 0
+        WHERE clientUuid = :clientUuid AND updatedAt = :updatedAt
+        """,
+    )
+    suspend fun markSynced(clientUuid: String, updatedAt: Long)
+
+    @Query("UPDATE records SET syncDirty = 1")
+    suspend fun markAllPendingSync()
 
     @Query(
         """
@@ -241,7 +284,13 @@ interface RecordDao {
     @Update
     suspend fun update(record: RecordEntity)
 
-    @Query("UPDATE records SET deletedAt = :deletedAt, updatedAt = :deletedAt WHERE id = :id")
+    @Query(
+        """
+        UPDATE records
+        SET deletedAt = :deletedAt, updatedAt = :deletedAt, syncDirty = 1
+        WHERE id = :id
+        """,
+    )
     suspend fun softDelete(id: Long, deletedAt: Long)
 
     @Query("DELETE FROM records")
@@ -255,6 +304,62 @@ interface MediaAssetDao {
 
     @Query("SELECT * FROM media_assets WHERE recordId = :recordId")
     suspend fun listForRecord(recordId: Long): List<MediaAssetEntity>
+
+    @Query(
+        """
+        SELECT * FROM media_assets
+        WHERE recordId = :recordId AND deletedAt IS NULL
+        ORDER BY id ASC
+        """,
+    )
+    suspend fun listActiveForRecord(recordId: Long): List<MediaAssetEntity>
+
+    @Query(
+        """
+        SELECT * FROM media_assets
+        WHERE babyId = :babyId AND kind = 'avatar' AND deletedAt IS NULL
+        ORDER BY updatedAt DESC, id DESC
+        LIMIT 1
+        """,
+    )
+    suspend fun activeAvatarForBaby(babyId: Long): MediaAssetEntity?
+
+    @Query("SELECT * FROM media_assets ORDER BY id ASC")
+    suspend fun listAllIncludingDeleted(): List<MediaAssetEntity>
+
+    @Query("SELECT * FROM media_assets WHERE syncDirty = 1 ORDER BY id ASC")
+    suspend fun listPendingSync(): List<MediaAssetEntity>
+
+    @Query(
+        """
+        UPDATE media_assets SET syncDirty = 0
+        WHERE clientUuid = :clientUuid AND updatedAt = :updatedAt
+        """,
+    )
+    suspend fun markSynced(clientUuid: String, updatedAt: Long)
+
+    @Query(
+        """
+        SELECT * FROM media_assets
+        WHERE deletedAt IS NULL
+          AND remoteUri IS NOT NULL
+          AND localUri = ''
+        ORDER BY id ASC
+        """,
+    )
+    suspend fun listMissingLocalBytes(): List<MediaAssetEntity>
+
+    @Query("SELECT * FROM media_assets WHERE clientUuid = :uuid LIMIT 1")
+    suspend fun getByClientUuid(uuid: String): MediaAssetEntity?
+
+    @Update
+    suspend fun update(asset: MediaAssetEntity)
+
+    @Query("UPDATE media_assets SET remoteUri = NULL, syncDirty = 1")
+    suspend fun clearRemoteUris()
+
+    @Query("DELETE FROM media_assets WHERE kind = 'log'")
+    suspend fun deleteLogMedia()
 
     @Query("DELETE FROM media_assets WHERE recordId = :recordId")
     suspend fun deleteForRecord(recordId: Long)

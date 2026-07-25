@@ -41,4 +41,17 @@ class GrowthMeasurementFactsTest {
         assertThat(reference.warningFor(4.4f)).contains("低于")
         assertThat(reference.warningFor(5.5f)).isNull()
     }
+
+    @Test
+    fun referenceAtAbstainsOutsideTheAvailableMonthRange() {
+        val bands = listOf(
+            GrowthReferenceBand(0f, 2.5f, 3.3f, 4.5f),
+            GrowthReferenceBand(6f, 6.5f, 8.0f, 9.5f),
+        )
+
+        assertThat(GrowthMeasurementFacts.referenceAt(-0.01f, bands)).isNull()
+        assertThat(GrowthMeasurementFacts.referenceAt(6.01f, bands)).isNull()
+        assertThat(GrowthMeasurementFacts.referenceAt(0f, bands)).isNotNull()
+        assertThat(GrowthMeasurementFacts.referenceAt(6f, bands)).isNotNull()
+    }
 }

@@ -1,8 +1,12 @@
 package com.lezi.babylog.domain
 
 import com.google.common.truth.Truth.assertThat
+import com.lezi.babylog.core.model.GrowthReferenceBand
+import com.lezi.babylog.core.model.GrowthMeasurementFacts
 import com.lezi.babylog.core.model.Record
+import com.lezi.babylog.core.model.RecordPayloadCodec
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.Sex
 import java.time.LocalDate
 import java.time.ZoneOffset
 import kotlinx.coroutines.flow.Flow
@@ -17,7 +21,7 @@ class GrowthMeasurementLifecycleTest {
     @Test
     fun createObserveUpdateDeleteUsesOneDisplayUnitLifecycle() = runTest {
         val store = FakeGrowthMeasurementRecordStore()
-        val lifecycle = DefaultGrowthMeasurementLifecycle(store)
+        val lifecycle = DefaultGrowthMeasurementLifecycle(store, FakeGrowthReferenceSource())
         val babyId = 7L
         val day = LocalDate.of(2026, 7, 23)
         val measuredAt = day.atTime(10, 0).toInstant(ZoneOffset.UTC).toEpochMilli()
@@ -28,6 +32,7 @@ class GrowthMeasurementLifecycleTest {
             dueDate = null,
             correctedAge = false,
             zone = ZoneOffset.UTC,
+            sex = Sex.MALE,
         )
 
         val created = lifecycle.save(
@@ -40,8 +45,10 @@ class GrowthMeasurementLifecycleTest {
                 nowMillis = measuredAt + 1,
             ),
         ) as GrowthMeasurementSaveResult.Saved
-        assertThat(lifecycle.observe(observe).first().single().displayValue)
+        val createdSnapshot = lifecycle.observe(observe).first()
+        assertThat(createdSnapshot.measurements.single().displayValue)
             .isWithin(0.001).of(6.35)
+        assertThat(createdSnapshot.referenceBands).hasSize(2)
 
         lifecycle.save(
             SaveGrowthMeasurement(
@@ -54,16 +61,17 @@ class GrowthMeasurementLifecycleTest {
                 nowMillis = measuredAt + 1,
             ),
         )
-        assertThat(lifecycle.observe(observe).first().single().note).isEqualTo("复测")
+        assertThat(lifecycle.observe(observe).first().measurements.single().note)
+            .isEqualTo("复测")
 
-        lifecycle.delete(created.recordId)
-        assertThat(lifecycle.observe(observe).first()).isEmpty()
+        assertThat(lifecycle.delete(babyId, created.recordId)).isTrue()
+        assertThat(lifecycle.observe(observe).first().measurements).isEmpty()
     }
 
     @Test
-    fun rejectsFutureNonPositiveAndCrossBabyEdit() = runTest {
+    fun rejectsFutureNonPositiveCrossBabyAndCrossMetricMutations() = runTest {
         val store = FakeGrowthMeasurementRecordStore()
-        val lifecycle = DefaultGrowthMeasurementLifecycle(store)
+        val lifecycle = DefaultGrowthMeasurementLifecycle(store, FakeGrowthReferenceSource())
         val now = 2_000L
         val existing = lifecycle.save(
             SaveGrowthMeasurement(1, RecordType.HEIGHT, 66.0, 1_000L, null, nowMillis = now),
@@ -74,6 +82,9 @@ class GrowthMeasurementLifecycleTest {
                 SaveGrowthMeasurement(1, RecordType.HEIGHT, 0.0, 1_000L, null, nowMillis = now),
             ),
         ).isInstanceOf(GrowthMeasurementSaveResult.Rejected::class.java)
+
+        assertThat(lifecycle.delete(2, existing.recordId)).isFalse()
+        assertThat(store.get(existing.recordId)).isNotNull()
         assertThat(
             lifecycle.save(
                 SaveGrowthMeasurement(1, RecordType.HEIGHT, 66.0, now + 1, null, nowMillis = now),
@@ -92,7 +103,94 @@ class GrowthMeasurementLifecycleTest {
                 ),
             ),
         ).isInstanceOf(GrowthMeasurementSaveResult.Rejected::class.java)
+        assertThat(
+            lifecycle.save(
+                SaveGrowthMeasurement(
+                    1,
+                    RecordType.WEIGHT,
+                    6.5,
+                    1_000L,
+                    null,
+                    existing.recordId,
+                    now,
+                ),
+            ),
+        ).isInstanceOf(GrowthMeasurementSaveResult.Rejected::class.java)
     }
+
+    @Test
+    fun lifecycleOwnsReferenceWarningAndDisplayValueValidation() = runTest {
+        val store = FakeGrowthMeasurementRecordStore()
+        val lifecycle = DefaultGrowthMeasurementLifecycle(store, FakeGrowthReferenceSource())
+        val day = LocalDate.of(2026, 7, 23)
+        val measuredAt = day.atTime(10, 0).toInstant(ZoneOffset.UTC).toEpochMilli()
+
+        assertThat(lifecycle.validationError(RecordType.WEIGHT, 101.0))
+            .isEqualTo("体重需在 0–100 kg 之间")
+        lifecycle.save(
+            SaveGrowthMeasurement(
+                babyId = 7,
+                type = RecordType.WEIGHT,
+                displayValue = 12.0,
+                measuredAt = measuredAt,
+                note = null,
+                nowMillis = measuredAt + 1,
+            ),
+        )
+
+        val snapshot = lifecycle.observe(
+            ObserveGrowthMeasurements(
+                babyId = 7,
+                type = RecordType.WEIGHT,
+                birthday = LocalDate.of(2026, 1, 23),
+                dueDate = null,
+                correctedAge = false,
+                zone = ZoneOffset.UTC,
+                sex = Sex.FEMALE,
+            ),
+        ).first()
+
+        assertThat(snapshot.referenceBands).hasSize(2)
+        assertThat(snapshot.measurements.single().referenceWarning)
+            .isEqualTo("该数值高于同月龄参考范围，请确认单位和录入值。")
+    }
+
+    @Test
+    fun growthAndComposerPayloadPathsShareMeasurementValidation() {
+        val lifecycle = DefaultGrowthMeasurementLifecycle(
+            FakeGrowthMeasurementRecordStore(),
+            FakeGrowthReferenceSource(),
+        )
+        val cases = listOf(
+            RecordType.WEIGHT to 6.35,
+            RecordType.WEIGHT to 0.0,
+            RecordType.WEIGHT to 101.0,
+            RecordType.HEIGHT to 66.0,
+            RecordType.HEIGHT to 251.0,
+            RecordType.HEAD to 42.0,
+        )
+
+        cases.forEach { (type, value) ->
+            val payload = GrowthMeasurementFacts.payload(type, value)
+            val composerError = payload?.let {
+                RecordPayloadCodec.validate(it).singleOrNull()
+            } ?: GrowthMeasurementFacts.validationError(type, value)
+
+            assertThat(lifecycle.validationError(type, value)).isEqualTo(composerError)
+        }
+    }
+}
+
+private class FakeGrowthReferenceSource : GrowthReferenceSource {
+    override fun bands(type: RecordType, sex: Sex?): List<GrowthReferenceBand> =
+        if (type == RecordType.WEIGHT) {
+            listOf(
+                GrowthReferenceBand(month = 0f, p3 = 2.5f, p50 = 3.3f, p97 = 4.5f),
+                GrowthReferenceBand(month = 6f, p3 = 6.4f, p50 = 7.9f, p97 = 9.8f),
+            )
+        } else {
+            emptyList()
+        }
 }
 
 private class FakeGrowthMeasurementRecordStore : GrowthMeasurementRecordStore {

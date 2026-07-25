@@ -23,6 +23,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -84,6 +85,8 @@ import com.lezi.babylog.domain.CareAggregation
 import com.lezi.babylog.domain.DailySummary
 import com.lezi.babylog.domain.formatClock
 import com.lezi.babylog.domain.relativeTimeLabel
+import com.lezi.babylog.sync.SyncPort
+import com.lezi.babylog.sync.SyncTrigger
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.LocalDate
 import java.time.LocalTime
@@ -97,6 +100,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 
 data class LogUiState(
     val loading: Boolean = true,
@@ -110,15 +114,18 @@ data class LogUiState(
     val careLanes: List<TimelineLaneSegment> = emptyList(),
     val settings: SettingsLocal = SettingsLocal(),
     val openSleep: Record? = null,
+    val refreshing: Boolean = false,
 )
 
 @HiltViewModel
 class LogViewModel @Inject constructor(
     private val careLog: CareLog,
     private val settingsStore: SettingsStore,
+    private val syncPort: SyncPort,
 ) : ViewModel() {
     private val zone = ZoneId.systemDefault()
     private val dayFlow = MutableStateFlow(LocalDate.now(zone))
+    private val refreshing = MutableStateFlow(false)
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val uiState = combine(
@@ -163,10 +170,23 @@ class LogViewModel @Inject constructor(
                 )
             }
         }
+    }.combine(refreshing) { state, isRefreshing ->
+        state.copy(refreshing = isRefreshing)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), LogUiState())
 
     fun setExternalDay(day: LocalDate) {
         dayFlow.value = day
+    }
+
+    fun refresh() {
+        if (!refreshing.compareAndSet(expect = false, update = true)) return
+        viewModelScope.launch {
+            try {
+                syncPort.sync(SyncTrigger.PullToRefresh)
+            } finally {
+                refreshing.value = false
+            }
+        }
     }
 }
 
@@ -375,8 +395,13 @@ fun LogRoute(
 
     PageScaffoldBackground {
         Column(Modifier.fillMaxSize().testTag(UiTags.LOG_HOME)) {
-            LazyColumn(
-                    modifier = Modifier.weight(1f),
+            PullToRefreshBox(
+                isRefreshing = state.refreshing,
+                onRefresh = vm::refresh,
+                modifier = Modifier.weight(1f),
+            ) {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(bottom = LeziSpacing.Md),
                     verticalArrangement = Arrangement.spacedBy(if (journal) 4.dp else LeziSpacing.SectionGap),
                 ) {
@@ -535,6 +560,7 @@ fun LogRoute(
                         }
                     }
 
+                }
             }
             OneHandQuickDock(
                 preferredHand = state.settings.preferredHand,

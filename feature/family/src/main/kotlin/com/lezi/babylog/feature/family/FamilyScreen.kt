@@ -4,6 +4,7 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -62,6 +64,14 @@ import com.lezi.babylog.domain.UpdateBabyInput
 import com.lezi.babylog.domain.babyAgeLabel
 import com.lezi.babylog.sync.SyncNotEnabledException
 import com.lezi.babylog.sync.SyncPort
+import com.lezi.babylog.sync.FamilyRole
+import com.lezi.babylog.sync.InvitePayload
+import com.lezi.babylog.sync.InvitePayloadCodec
+import com.lezi.babylog.sync.SyncTrigger
+import com.google.zxing.BarcodeFormat
+import com.journeyapps.barcodescanner.BarcodeEncoder
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate
@@ -89,6 +99,15 @@ data class FamilyUi(
     val familyId: String = "1",
     val current: Baby? = null,
     val babies: List<Baby> = emptyList(),
+    val baseUrl: String = "",
+    val role: FamilyRole = FamilyRole.None,
+    val lastSuccessAt: Long? = null,
+)
+
+data class FamilyInviteView(
+    val code: String,
+    val payload: String,
+    val expiresAt: Long,
 )
 
 @HiltViewModel
@@ -104,17 +123,24 @@ class FamilyViewModel @Inject constructor(
         careLog.observeHasBaby(),
         careLog.observeCurrentBaby(),
         careLog.observeBabies(),
-    ) { st, hasBaby, current, babies ->
+        sync.session(),
+    ) { st, hasBaby, current, babies, session ->
         val identity = careLog.localFamilyIdentity()
         FamilyUi(
-            deviceId = identity.deviceId,
+            deviceId = familyDeviceId(
+                syncDeviceId = session.deviceId,
+                localDeviceId = identity.deviceId,
+            ),
             displayName = identity.displayName,
             status = st,
-            enabled = sync.isEnabled(),
+            enabled = session.isJoined,
             hasLocalBaby = hasBaby,
-            familyId = identity.familyId.toString(),
+            familyId = session.familyId.ifBlank { identity.familyId.toString() },
             current = current,
             babies = babies,
+            baseUrl = session.baseUrl,
+            role = session.role,
+            lastSuccessAt = session.lastSuccessAt,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), FamilyUi())
 
@@ -141,6 +167,7 @@ class FamilyViewModel @Inject constructor(
                 }
                 var writtenAvatarPath: String? = null
                 var profileCommitted = false
+                val mayEditAvatar = canEditFamilyAvatar(ui.value.role)
 
                 suspend fun rollbackWrittenAvatar() {
                     val path = writtenAvatarPath ?: return
@@ -155,12 +182,12 @@ class FamilyViewModel @Inject constructor(
 
                 val errorMessage = try {
                     val avatarPath = when {
-                        avatarJpeg != null -> {
+                        mayEditAvatar && avatarJpeg != null -> {
                             avatarFileStore.write(existing.clientUuid, avatarJpeg).also {
                                 writtenAvatarPath = it
                             }
                         }
-                        removeAvatar -> null
+                        mayEditAvatar && removeAvatar -> null
                         else -> existing.avatarPath
                     }
                     currentCoroutineContext().ensureActive()
@@ -245,46 +272,37 @@ class FamilyViewModel @Inject constructor(
         }
     }
 
-    fun createInvite(onMessage: (String) -> Unit) {
+    fun createInvite(onResult: (Result<FamilyInviteView>) -> Unit) {
         viewModelScope.launch {
             val familyId = ui.value.familyId
             val result = sync.createInvite(familyId)
-            onMessage(
-                result.fold(
-                    onSuccess = { "共享码 ${it.code}（24 小时内有效）" },
-                    onFailure = {
-                        familySyncError(it, fallback = "生成共享码失败，请稍后重试")
+            onResult(
+                result
+                    .map {
+                        FamilyInviteView(
+                            code = it.code,
+                            payload = InvitePayloadCodec.encode(
+                                InvitePayload(ui.value.baseUrl, it.code),
+                            ),
+                            expiresAt = it.expiresAt,
+                        )
+                    }
+                    .recoverCatching {
+                        throw IllegalStateException(
+                            familySyncError(it, fallback = "生成共享码失败，请稍后重试"),
+                        )
                     },
-                ),
             )
         }
     }
 
-    fun join(code: String, clearFirst: Boolean, onMessage: (String) -> Unit) {
+    fun join(code: String, onMessage: (String) -> Unit) {
         viewModelScope.launch {
-            if (ui.value.hasLocalBaby && !clearFirst) {
-                onMessage("本机已有宝宝数据。请先 TXT 导出，或选择清空本机后加入。")
-                return@launch
-            }
-            if (clearFirst) {
-                try {
-                    withContext(NonCancellable) {
-                        careLog.clearAllLocalData()
-                        avatarFileStore.deleteAll()
-                    }
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (error: Throwable) {
-                    onMessage("清空本机数据失败，请重试")
-                    return@launch
-                }
-            }
-            val result = sync.joinWithCode(code.trim())
+            val result = sync.joinWithPayload(code.trim())
             onMessage(
                 result.fold(
                     onSuccess = {
-                        sync.pull(it.id.toString())
-                        "已加入家庭 ${it.id}"
+                        "已加入家庭 ${it.familyId}"
                     },
                     onFailure = {
                         familySyncError(it, fallback = "加入家庭失败，请稍后重试")
@@ -310,14 +328,39 @@ class FamilyViewModel @Inject constructor(
     fun pullNow(onMessage: (String) -> Unit) {
         viewModelScope.launch {
             val id = ui.value.familyId
-            sync.push(id)
-            val r = sync.pull(id)
+            val r = sync.sync(SyncTrigger.PullToRefresh)
             onMessage(
                 r.fold(
                     onSuccess = { "已同步" },
                     onFailure = { familySyncError(it, fallback = "同步失败，请稍后重试") },
                 ),
             )
+        }
+    }
+
+    fun saveServer(baseUrl: String, onMessage: (String) -> Unit) {
+        viewModelScope.launch {
+            onMessage(sync.saveServer(baseUrl).fold({ "家庭服务器地址已保存" }) {
+                familySyncError(it, "服务器地址无效")
+            })
+        }
+    }
+
+    fun createFamily(onMessage: (String) -> Unit) {
+        viewModelScope.launch {
+            onMessage(sync.createFamily(ui.value.displayName).fold(
+                { "家庭已创建" },
+                { familySyncError(it, "创建家庭失败") },
+            ))
+        }
+    }
+
+    fun deleteFamily(onMessage: (String) -> Unit) {
+        viewModelScope.launch {
+            onMessage(sync.deleteFamily().fold(
+                { "家庭数据已删除" },
+                { familySyncError(it, "删除家庭失败") },
+            ))
         }
     }
 }
@@ -334,12 +377,53 @@ internal fun familySyncError(error: Throwable, fallback: String): String {
     ).any { marker -> message.contains(marker, ignoreCase = true) } ||
         Regex("""/?\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?""").containsMatchIn(message)
     return when {
-        error is SyncNotEnabledException -> "家庭同步将在后续版本开放"
+        error is SyncNotEnabledException -> "请先填写家庭服务器地址并加入家庭"
         technicalNetworkDetail -> "家庭同步服务暂未连接，请稍后重试"
         message.any { it.code in 0x4E00..0x9FFF } -> message
         else -> fallback
     }
 }
+
+internal fun syncStatusLabel(status: SyncStatus): String = when (status) {
+    SyncStatus.Disabled -> "未启用"
+    SyncStatus.BlockedOfflineHome -> "等待家庭 Wi‑Fi"
+    SyncStatus.Idle -> "空闲"
+    SyncStatus.Syncing -> "同步中"
+    SyncStatus.Error -> "同步错误"
+}
+
+internal fun canEditFamilyAvatar(role: FamilyRole): Boolean = role != FamilyRole.Member
+
+internal fun familyStorageCopy(enabled: Boolean): String =
+    if (enabled) {
+        "记录本地优先，并同步到家庭服务器 · 无需云账号"
+    } else {
+        "数据仅保存在本机 · 无需登录"
+    }
+
+internal fun familyDeviceId(syncDeviceId: String, localDeviceId: String): String =
+    syncDeviceId.ifBlank { localDeviceId }
+
+internal data class FamilyControlVisibility(
+    val showServerSetup: Boolean,
+    val showJoin: Boolean,
+    val showCreateFamily: Boolean,
+    val showInvite: Boolean,
+    val showJoinedActions: Boolean,
+    val showLeave: Boolean,
+)
+
+internal fun familyControlVisibility(
+    isJoined: Boolean,
+    role: FamilyRole,
+): FamilyControlVisibility = FamilyControlVisibility(
+    showServerSetup = !isJoined,
+    showJoin = !isJoined,
+    showCreateFamily = !isJoined && role == FamilyRole.None,
+    showInvite = isJoined && role == FamilyRole.Owner,
+    showJoinedActions = isJoined,
+    showLeave = isJoined && role == FamilyRole.Member,
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -348,14 +432,26 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
     var message by remember { mutableStateOf<String?>(null) }
     var showJoin by remember { mutableStateOf(false) }
     var joinCode by remember { mutableStateOf("") }
-    var confirmClearJoin by remember { mutableStateOf(false) }
+    var serverAddress by remember(ui.baseUrl) { mutableStateOf(ui.baseUrl) }
+    var confirmDeleteFamily by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf<Baby?>(null) }
     var confirmDelete by remember { mutableStateOf<Baby?>(null) }
     var mergeSource by remember { mutableStateOf<Baby?>(null) }
     var mergePreview by remember { mutableStateOf<BabyMergePreview?>(null) }
+    var inviteView by remember { mutableStateOf<FamilyInviteView?>(null) }
+    val scanInvite = rememberLauncherForActivityResult(ScanContract()) { result ->
+        val payload = result.contents?.trim().orEmpty()
+        if (payload.isNotEmpty()) {
+            joinCode = payload
+            showJoin = true
+        }
+    }
     val current = ui.current
     val nickCounts = remember(ui.babies) {
         ui.babies.groupingBy { it.nickname.trim() }.eachCount()
+    }
+    val controls = remember(ui.enabled, ui.role) {
+        familyControlVisibility(isJoined = ui.enabled, role = ui.role)
     }
 
     PageScaffoldBackground {
@@ -436,7 +532,7 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
             }
 
             LeziCard(modifier = Modifier.fillMaxWidth()) {
-                Text("数据仅保存在本机 · 无需登录", style = LeziTypography.BodyStrong)
+                Text(familyStorageCopy(ui.enabled), style = LeziTypography.BodyStrong)
                 Text(
                     "本机 ID：${ui.deviceId.take(12).uppercase()}",
                     style = LeziTypography.Meta,
@@ -506,36 +602,87 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
             )
 
             SectionHeading(title = "家人一起记")
-            LeziPrimaryButton(
-                "新建家庭 / 生成共享码",
-                onClick = { vm.createInvite { message = it } },
-                modifier = Modifier.fillMaxWidth(),
-            )
-            LeziSecondaryButton(
-                "输入邀请码",
-                onClick = { showJoin = true },
-                modifier = Modifier.fillMaxWidth(),
-            )
-            LeziSecondaryButton(
-                "扫码加入",
-                onClick = { message = if (ui.enabled) "请使用「输入邀请码」" else "家庭同步将在后续版本开放" },
-                modifier = Modifier.fillMaxWidth(),
-            )
-            if (ui.enabled) {
+            if (controls.showServerSetup) {
+                OutlinedTextField(
+                    value = serverAddress,
+                    onValueChange = { serverAddress = it },
+                    label = { Text("家庭服务器地址（必填）") },
+                    placeholder = { Text("http://192.168.50.4:8765") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                LeziSecondaryButton(
+                    "保存服务器地址",
+                    onClick = { vm.saveServer(serverAddress) { message = it } },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            if (controls.showCreateFamily || controls.showInvite) {
+                LeziPrimaryButton(
+                    if (controls.showCreateFamily) "新建家庭" else "生成邀请二维码",
+                    onClick = {
+                        if (controls.showCreateFamily) {
+                            vm.createFamily { message = it }
+                        } else {
+                            vm.createInvite { result ->
+                                result.fold(
+                                    onSuccess = { inviteView = it },
+                                    onFailure = {
+                                        message = it.message ?: "生成共享码失败，请稍后重试"
+                                    },
+                                )
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            if (controls.showJoin) {
+                LeziSecondaryButton(
+                    "输入邀请码",
+                    onClick = { showJoin = true },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                LeziSecondaryButton(
+                    "扫码加入",
+                    onClick = {
+                        scanInvite.launch(
+                            ScanOptions()
+                                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                                .setPrompt("扫描家庭邀请二维码")
+                                .setBeepEnabled(false)
+                                .setOrientationLocked(false),
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            if (controls.showJoinedActions) {
                 LeziSecondaryButton(
                     "立即同步",
                     onClick = { vm.pullNow { message = it } },
                     modifier = Modifier.fillMaxWidth(),
                 )
-                LeziSecondaryButton(
-                    "离开家庭",
-                    onClick = { vm.leave { message = it } },
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                if (controls.showLeave) {
+                    LeziSecondaryButton(
+                        "离开家庭",
+                        onClick = { vm.leave { message = it } },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                if (ui.role == FamilyRole.Owner) {
+                    LeziSecondaryButton(
+                        "删除家庭数据",
+                        onClick = { confirmDeleteFamily = true },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
             }
             Text(
-                if (ui.enabled) "加入前将全量共享家庭记录。设置与深色模式不同步。"
-                else "家庭同步将在后续版本开放",
+                "仅在家庭 Wi‑Fi 且服务器可达时前台同步；不会推送伴侣的新记录。\n" +
+                    "状态：${syncStatusLabel(ui.status)}" +
+                    (ui.lastSuccessAt?.let { " · 上次成功：${java.text.DateFormat.getDateTimeInstance().format(it)}" }
+                        ?: ""),
                 style = LeziTypography.Body,
                 color = MaterialTheme.colorScheme.primary,
             )
@@ -543,18 +690,18 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
         }
     }
 
-    if (showJoin) {
+    if (showJoin && controls.showJoin) {
         AlertDialog(
             onDismissRequest = { showJoin = false },
             title = { Text("加入家庭") },
             text = {
                 Column(Modifier.dismissKeyboardOnTap()) {
-                    Text("加入后将全量共享该家庭数据。若本机已有宝宝，默认拒绝；可先导出 TXT。")
+                    Text("加入后将全量共享育儿记录与日志图片；本机数据不会在加入成功前清除。")
                     Spacer(Modifier.height(LeziSpacing.Sm))
                     OutlinedTextField(
                         value = joinCode,
                         onValueChange = { joinCode = it },
-                        label = { Text("邀请码") },
+                        label = { Text("邀请码或 QR JSON 载荷") },
                         singleLine = true,
                     )
                 }
@@ -563,8 +710,7 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                 TextButton(
                     onClick = {
                         showJoin = false
-                        if (ui.hasLocalBaby) confirmClearJoin = true
-                        else vm.join(joinCode, clearFirst = false) { message = it }
+                        vm.join(joinCode) { message = it }
                     },
                 ) { Text("加入") }
             },
@@ -574,21 +720,58 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
         )
     }
 
-    if (confirmClearJoin) {
+    inviteView?.let { invite ->
+        val qrBitmap = remember(invite.payload) {
+            BarcodeEncoder()
+                .encodeBitmap(invite.payload, BarcodeFormat.QR_CODE, 640, 640)
+                .asImageBitmap()
+        }
         AlertDialog(
-            onDismissRequest = { confirmClearJoin = false },
-            title = { Text("本机已有数据") },
-            text = { Text("默认不能直接加入。可先 TXT 导出，或清空本机后再加入。") },
+            onDismissRequest = { inviteView = null },
+            title = { Text("家庭邀请二维码") },
+            text = {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
+                ) {
+                    Image(
+                        bitmap = qrBitmap,
+                        contentDescription = "家庭邀请二维码",
+                        modifier = Modifier.size(240.dp),
+                    )
+                    Text(
+                        "共享码 ${invite.code} · 有效至 " +
+                            java.text.DateFormat.getDateTimeInstance().format(invite.expiresAt),
+                        style = LeziTypography.BodyStrong,
+                    )
+                    SelectionContainer {
+                        Text(
+                            invite.payload,
+                            style = LeziTypography.Meta,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            },
             confirmButton = {
-                TextButton(
-                    onClick = {
-                        confirmClearJoin = false
-                        vm.join(joinCode, clearFirst = true) { message = it }
-                    },
-                ) { Text("清空本机后加入") }
+                TextButton(onClick = { inviteView = null }) { Text("完成") }
+            },
+        )
+    }
+
+    if (confirmDeleteFamily) {
+        AlertDialog(
+            onDismissRequest = { confirmDeleteFamily = false },
+            title = { Text("删除家庭服务器上的全部数据？") },
+            text = { Text("这会删除家庭记录、成员凭证和媒体文件，且不可恢复。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmDeleteFamily = false
+                    vm.deleteFamily { message = it }
+                }) { Text("确认永久删除", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = {
-                TextButton(onClick = { confirmClearJoin = false }) { Text("取消") }
+                TextButton(onClick = { confirmDeleteFamily = false }) { Text("取消") }
             },
         )
     }
@@ -694,6 +877,7 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
     editing?.let { baby ->
         BabyEditDialog(
             baby = baby,
+            canEditAvatar = canEditFamilyAvatar(ui.role),
             onDismiss = { editing = null },
             onSave = {
                     nick,
@@ -730,6 +914,7 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
 @Composable
 private fun BabyEditDialog(
     baby: Baby,
+    canEditAvatar: Boolean,
     onDismiss: () -> Unit,
     onSave: (
         nickname: String,
@@ -799,20 +984,22 @@ private fun BabyEditDialog(
                         modifier = Modifier.weight(1f),
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                        OutlinedButton(
-                            enabled = !saving,
-                            onClick = {
-                                avatarPicker.launch(
-                                    PickVisualMediaRequest(
-                                        ActivityResultContracts.PickVisualMedia.ImageOnly,
-                                    ),
-                                )
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text(if (hasAvatar) "更换照片" else "选择照片")
+                        if (canEditAvatar) {
+                            OutlinedButton(
+                                enabled = !saving,
+                                onClick = {
+                                    avatarPicker.launch(
+                                        PickVisualMediaRequest(
+                                            ActivityResultContracts.PickVisualMedia.ImageOnly,
+                                        ),
+                                    )
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Text(if (hasAvatar) "更换照片" else "选择照片")
+                            }
                         }
-                        if (hasAvatar) {
+                        if (canEditAvatar && hasAvatar) {
                             TextButton(
                                 enabled = !saving,
                                 onClick = {
@@ -822,6 +1009,13 @@ private fun BabyEditDialog(
                             ) {
                                 Text("移除照片")
                             }
+                        }
+                        if (!canEditAvatar) {
+                            Text(
+                                "仅家庭管理员可更换头像",
+                                style = LeziTypography.Meta,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
                 }

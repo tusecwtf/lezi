@@ -90,7 +90,11 @@ class CalendarViewModel @Inject constructor(
     val events = careLog.observeCurrentBaby().flatMapLatest { baby ->
         if (baby == null) flowOf(emptyList())
         else {
-            val start = LocalDate.now(zone).minusYears(1).atStartOfDay(zone).toInstant().toEpochMilli()
+            val start = RecordTime.today(zone)
+                .minusYears(1)
+                .atStartOfDay(zone)
+                .toInstant()
+                .toEpochMilli()
             val end = LocalDate.of(2101, 1, 1).atStartOfDay(zone).toInstant().toEpochMilli()
             careLog.observeCalendarEvents(baby.id, start, end)
         }
@@ -189,7 +193,7 @@ class CalendarViewModel @Inject constructor(
 @Composable
 fun CalendarRoute(
     onBack: () -> Unit,
-    initialDate: LocalDate = LocalDate.now(),
+    initialDate: LocalDate = RecordTime.today(ZoneId.systemDefault()),
     vm: CalendarViewModel = hiltViewModel(),
 ) {
     val events by vm.events.collectAsStateWithLifecycle()

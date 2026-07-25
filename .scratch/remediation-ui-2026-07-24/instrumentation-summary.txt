@@ -1,0 +1,15 @@
+Command:
+  ./gradlew :core:database:connectedDebugAndroidTest
+
+Device:
+  lezi_api35(AVD) - Android 15
+
+Final result:
+  Starting 1 tests
+  Finished 1 tests
+  BUILD SUCCESSFUL in 30s
+  PASS 1/1
+
+Note:
+  The first device attempt exposed a missing androidx.test.runner.AndroidJUnitRunner
+  dependency. After the dependency was added, the same command passed.

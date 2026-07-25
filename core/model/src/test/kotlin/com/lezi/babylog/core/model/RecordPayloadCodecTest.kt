@@ -98,6 +98,33 @@ class RecordPayloadCodecTest {
         assertThat(failure).isInstanceOf(IllegalArgumentException::class.java)
     }
 
+    @Test
+    fun typedValidationOwnsMilkAndMeasurementBounds() {
+        assertThat(
+            RecordPayloadCodec.validate(
+                MilkPayload(
+                    type = RecordType.FORMULA,
+                    amountMl = 120,
+                    preparedMl = 1_000,
+                    durationMinutes = 1_441,
+                ),
+            ),
+        ).containsExactly(
+            "冲调量需在 0–999 ml 之间",
+            "时长需在 0–1440 分钟之间",
+        ).inOrder()
+
+        assertThat(
+            RecordPayloadCodec.validate(
+                MeasurementPayload(
+                    type = RecordType.WEIGHT,
+                    value = 101_000.0,
+                    unit = "g",
+                ),
+            ),
+        ).containsExactly("体重需在 0–100 kg 之间")
+    }
+
     private fun validV1Json(type: RecordType): String = when (type) {
         RecordType.NURSING -> """{"left_min":1,"right_min":2}"""
         RecordType.FORMULA, RecordType.PUMPED_FEED, RecordType.PUMP_EXPRESS ->

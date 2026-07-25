@@ -23,3 +23,19 @@ out/
 keystore.properties
 *.jks
 *.keystore
+
+# Sync server runtime (db + media under tools/sync-server/data)
+tools/sync-server/data/
+tools/sync-server/*.db
+tools/sync-server/*.db-wal
+tools/sync-server/*.db-shm
+
+# lezi-sync local runtime / venv (also tools/lezi-sync/.gitignore)
+tools/lezi-sync/.venv/
+tools/lezi-sync/data*/
+tools/lezi-sync/*.db
+tools/lezi-sync/*.db-wal
+tools/lezi-sync/*.db-shm
+
+# accidental local dump
+sys,re

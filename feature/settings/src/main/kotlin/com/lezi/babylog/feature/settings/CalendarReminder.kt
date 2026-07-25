@@ -15,6 +15,7 @@ import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
+import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.domain.CalendarEvent
 import com.lezi.babylog.domain.CareLog
 import dagger.hilt.android.AndroidEntryPoint
@@ -29,7 +30,7 @@ class CalendarReminderScheduler @Inject constructor(
 ) {
     fun schedule(event: CalendarEvent): Boolean {
         val remindAt = event.remindAt ?: return false
-        if (remindAt <= System.currentTimeMillis()) return false
+        if (remindAt <= RecordTime.currentTimeMillis()) return false
         ensureChannel(context)
         val alarm = context.getSystemService(AlarmManager::class.java)
         val pending = pendingIntent(context, event)

@@ -107,6 +107,7 @@ data class SettingsLocal(
 
 enum class SyncStatus {
     Disabled,
+    BlockedOfflineHome,
     Idle,
     Syncing,
     Error,

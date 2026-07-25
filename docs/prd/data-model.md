@@ -1,7 +1,7 @@
 # 乐记 — 数据模型与同步契约
 
 > V1：**仅本地**（Room）。  
-> V2：同一模型经 **`SyncPort`** 接后端。  
+> V2：同一模型经 **`SyncPort`** 接家庭局域网 `lezi-sync`。
 > 主 PRD：[`README.md`](./README.md)
 
 ---
@@ -11,7 +11,8 @@
 1. **先写本地，再同步**（有实现时）：UI 只依赖 Room。  
 2. **家庭域 vs 本机域** 分离，避免设置冲突。  
 3. 每条业务实体带 **`client_uuid`**，便于幂等与后期同步。  
-4. V1 的 `SyncPort` 实现为空操作或返回「未启用」，**不得**阻塞记账。
+4. 未配置或不满足家网门闩时，`SyncPort` 安全 no-op / 保留 Outbox，
+   **不得**阻塞记账。
 
 ---
 
@@ -145,11 +146,15 @@ V1 最小路径：创建默认 `Family` + 当前 `LocalUser`（匿名）+ `Baby`
 | 字段 | 说明 |
 |------|------|
 | `id` | |
-| `record_id` | |
-| `local_uri` | V1 主用 |
-| `remote_uri` | V2 |
+| `client_uuid` | 跨设备同步键，UNIQUE |
+| `kind` | `log` \| `avatar` |
+| `record_id` / `baby_id` | 日志图关联 Record；头像关联 Baby，二选一 |
+| `local_uri` | 本机私有文件路径，不进入 wire payload |
+| `remote_uri` | 当前家庭服务器已上传标记；更换服务器时清除 |
 | `mime` / `width` / `height` | |
-| `created_at` | |
+| `byte_size` | |
+| `created_at` / `updated_at` / `deleted_at` | LWW 与 tombstone |
+| `sync_dirty` | 需快照入当前家庭 Outbox |
 
 仅图片（V1/V2 初版）；视频不做。
 
@@ -202,11 +207,12 @@ V1 最小路径：创建默认 `Family` + 当前 `LocalUser`（匿名）+ `Baby`
 
 | 字段 | 说明 |
 |------|------|
-| `op` | upsert / delete |
-| `entity_type` | baby / record / media / … |
-| `entity_id` / `client_uuid` | |
-| `payload` | |
-| `attempts` / `next_retry_at` | |
+| `family_id` | 队列所属家庭，防止跨家庭 ACK |
+| `entity_type` | `baby` \| `record` \| `media` |
+| `client_uuid` | portable 实体键 |
+| `payload_json` | 不含本机自增 id / 文件绝对路径 |
+| `updated_at` / `deleted_at` | LWW 与 tombstone |
+| 唯一约束 | `(family_id, entity_type, client_uuid)`，后写覆盖同键待发送快照 |
 
 ---
 
@@ -238,7 +244,8 @@ V1 最小路径：创建默认 `Family` + 当前 `LocalUser`（匿名）+ `Baby`
 
 ```kotlin
 enum class SyncStatus {
-  Disabled,   // V1 默认
+  Disabled,            // 未配置服务器或未加入家庭
+  BlockedOfflineHome,  // 非 Wi-Fi、health 失败、退避或不在前台
   Idle,
   Syncing,
   Error,
@@ -250,45 +257,51 @@ enum class SyncStatus {
 ```text
 interface SyncPort {
   fun status(): Flow<SyncStatus>
+  fun session(): Flow<SyncSession>
 
-  /** V1: false。V2: 用户开启且已加入家庭后 true */
+  /** 已保存服务器且持有家庭会话时为 true */
   fun isEnabled(): Boolean
 
-  /** 拉取家庭增量；V1: no-op 成功 */
-  suspend fun pull(familyId: String): Result<Unit>
+  /** 前台非阻塞触发；未加入家庭时 no-op */
+  fun requestSync(trigger: SyncTrigger)
 
-  /** 将 Outbox 推送；V1: no-op 成功 */
-  suspend fun push(familyId: String): Result<Unit>
+  suspend fun saveServer(baseUrl: String): Result<Unit>
+  suspend fun createFamily(displayName: String?): Result<SyncSession>
+  suspend fun sync(trigger: SyncTrigger): Result<Unit>
 
-  /** 创建邀请；V1: Result.failure(SyncNotEnabled) */
   suspend fun createInvite(familyId: String): Result<Invite>
-
-  /** 用码加入；V1: failure */
-  suspend fun joinWithCode(code: String): Result<Family>
-
-  /** 停止共享 / 退出 */
+  suspend fun joinWithPayload(payload: String): Result<SyncSession>
   suspend fun leave(familyId: String): Result<Unit>
+  suspend fun deleteFamily(): Result<Unit>
 }
 ```
 
-### 6.3 V1 实现
+### 6.3 未配置实现
 
-- `isEnabled() = false`  
-- `pull` / `push` 立即 `Result.success`  
-- 邀请相关返回明确错误，UI 展示「同步将在后续版本提供」  
-- **不写** Outbox 或写了也不上传  
+- 无会话时状态保持 `Disabled`，前台与本地写触发为安全 no-op。
+- 建家、加入、邀请前必须配置服务器；失败返回中文产品文案。
+- 只有已加入家庭的会话才会生成并上传 Outbox；服务器地址变化时原子清除旧 token/cursor。
 
-### 6.4 V2 规则
+### 6.4 V2 规则（摘要）
+
+> **网络拓扑、门闩、前台策略、NAS Docker 与 API 的权威说明见 [`sync-home-lan.md`](./sync-home-lan.md)。** 本节仅保留数据契约摘要。
 
 | 规则 | 说明 |
 |------|------|
-| 同步域 | Family 下 Baby、Record、Media 元数据、CustomItem、CalendarEvent |
-| 不同步 | SettingsLocal、下次喂奶时刻、Widget 配置 |
-| 共享粒度 | **全量**；不做字段白名单 |
-| 冲突 | 同 `client_uuid` 幂等；否则按 `updated_at` LWW；删除用 tombstone |
-| 通知 | **不**对成员新记录默认推送 |
-| 验收 | 双机同家庭，A 新记录约 **60s 内** B 可见（可下拉加速） |
-| 安全 | TLS；加入前文案：将共享全部育儿记录 |
+| 部署 | 家庭 NAS 中心化（Docker `lezi-sync`）；**非** P2P 主路径 |
+| 门闩 | **硬家庭局域网**：Wi‑Fi + NAS health；蜂窝不同步 |
+| 触发 | **仅前台**：回前台、下拉、前台写成功后 push；**无**后台轮询、**无**推送拉同步 |
+| 同步域（首版） | **Baby + Record + 日志 MediaAsset（含字节）** |
+| 写权限 | 宝宝**头像**仅 owner；日志媒体家庭内可同步 |
+| 后置 | CustomItemDef、CalendarEvent |
+| 不同步 | SettingsLocal、下次喂奶时刻、Widget 配置、本机路径 |
+| 共享粒度 | **全量**（同步域内）；不做字段白名单 |
+| 冲突 | 同 `client_uuid` 幂等；否则 `updated_at` LWW；删除 tombstone |
+| 跨机引用 | Record 使用 `baby_client_uuid`，不用对端本地自增 id |
+| 通知 | **不**对成员新记录推送 |
+| 验收 | 双方在家且打开 App 时回前台/下拉一致；**不**承诺息屏 60s |
+| 安全 | 默认家网 HTTP + family token；可选 HTTPS；加入前明示全量共享 |
+| 持久化 | NAS 单数据根：`DATA_DIR/lezi.db` + `DATA_DIR/media/` |
 
 ### 6.5 本地备份（可选，不依赖 SyncPort）
 
@@ -301,8 +314,9 @@ V1 可提供「导出数据库/JSON 到文件」便于换机；与家庭实时�
 | 操作 | 行为 |
 |------|------|
 | 删一条记录 | `deleted_at` 软删；V2 进 Outbox |
-| 成员退出 | membership revoked；数据留在家庭侧 |
-| 清除本机全部 | 多重确认后清空本地库；V2 需定义是否删云端（默认仅本地除非显式「删除家庭」） |
+| 成员退出 | membership revoked + 吊销本机 token；**NAS 业务数据保留** |
+| 清除本机全部 | 多重确认后清空本地库；**默认仅本地** |
+| 管理员删除家庭数据 | 多重确认后清空 NAS entities + `DATA_DIR/media/`（见 sync-home-lan） |
 
 ---
 
