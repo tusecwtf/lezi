@@ -69,6 +69,8 @@ internal data class RecordComposerUiState(
     val birthdayEpochDay: Long? = null,
     val amountStepMl: Int = 5,
     val timeStepMin: Int = 1,
+    val timePickerStyle: String = "dropdown",
+    val preferredHand: String = "right",
     val canStartNursingTimer: Boolean = false,
     val saving: Boolean = false,
     val deleting: Boolean = false,
@@ -151,6 +153,8 @@ class RecordComposerViewModel @Inject constructor(
                         activeRequest = request,
                         amountStepMl = settings.amountStepMl,
                         timeStepMin = settings.timeStepMin,
+                        timePickerStyle = settings.timePickerStyle,
+                        preferredHand = settings.preferredHand,
                         error = error.message ?: "记录加载失败",
                     )
                 }
@@ -166,6 +170,8 @@ class RecordComposerViewModel @Inject constructor(
                     birthdayEpochDay = birthdayEpochDay,
                     amountStepMl = settings.amountStepMl,
                     timeStepMin = settings.timeStepMin,
+                    timePickerStyle = settings.timePickerStyle,
+                    preferredHand = settings.preferredHand,
                     canStartNursingTimer = request is RecordComposerRequest.New &&
                         !request.historical &&
                         request.type == RecordType.NURSING &&
@@ -367,6 +373,8 @@ fun RecordComposerHost(
                     draft = draft,
                     amountStepMl = state.amountStepMl,
                     timeStepMin = state.timeStepMin,
+                    timePickerStyle = state.timePickerStyle,
+                    preferredHand = state.preferredHand,
                     birthdayEpochDay = state.birthdayEpochDay,
                     saving = state.saving,
                     deleting = state.deleting,

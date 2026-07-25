@@ -46,6 +46,8 @@ internal fun NursingCompletionSheet(
     saving: Boolean,
     saveError: String?,
     timeStepMin: Int,
+    timePickerStyle: String = "dropdown",
+    preferredHand: String = "right",
     onDraftChange: (NursingCompletionDraft) -> Unit,
     onDismiss: () -> Unit,
     onConfirm: (NursingCompletionDraft) -> Unit,
@@ -225,6 +227,8 @@ internal fun NursingCompletionSheet(
             title = "选择结束时刻",
             value = Instant.ofEpochMilli(draft.endedAt).atZone(zone),
             minuteStep = timeStepMin,
+            timePickerStyle = timePickerStyle,
+            preferredHand = preferredHand,
             onConfirm = { picked ->
                 val pickedAt = picked.toInstant().toEpochMilli()
                 val now = System.currentTimeMillis()

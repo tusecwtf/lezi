@@ -90,6 +90,12 @@ data class SettingsLocal(
     val unitsJson: String = "{}",
     val amountStepMl: Int = 5,
     val timeStepMin: Int = 1,
+    /**
+     * Time editor style in record sheets:
+     * - "dropdown": 24-hour hour/minute menus
+     * - "dial": Material clock dial with 上午/下午 selection
+     */
+    val timePickerStyle: String = "dropdown",
     val curveDataset: String = "default",
     val timelineOrder: String = "newest_first",
 )

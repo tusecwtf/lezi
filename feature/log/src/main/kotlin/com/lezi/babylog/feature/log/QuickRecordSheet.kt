@@ -52,6 +52,8 @@ internal fun QuickRecordSheet(
     draft: QuickRecordDraft,
     amountStepMl: Int,
     timeStepMin: Int,
+    timePickerStyle: String = "dropdown",
+    preferredHand: String = "right",
     birthdayEpochDay: Long? = null,
     saving: Boolean,
     deleting: Boolean,
@@ -235,6 +237,8 @@ internal fun QuickRecordSheet(
             },
             value = Instant.ofEpochMilli(initialMillis).atZone(zone),
             minuteStep = timeStepMin,
+            timePickerStyle = timePickerStyle,
+            preferredHand = preferredHand,
             showCrossDayHint = isSleep,
             onConfirm = { picked ->
                 val pickedMillis = picked.toInstant().toEpochMilli()

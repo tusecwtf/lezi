@@ -92,6 +92,8 @@ class SettingsViewModel @Inject constructor(
     fun setTimer(enabled: Boolean) = viewModelScope.launch { settingsStore.setTimerEnabled(enabled) }
     fun setStep(step: Int) = viewModelScope.launch { settingsStore.setAmountStepMl(step) }
     fun setTimeStep(step: Int) = viewModelScope.launch { settingsStore.setTimeStepMin(step) }
+    fun setTimePickerStyle(style: String) =
+        viewModelScope.launch { settingsStore.setTimePickerStyle(style) }
     fun setInterval(min: Int) = viewModelScope.launch { settingsStore.setNursingIntervalMin(min) }
     fun setRecordAt(v: String) = viewModelScope.launch { settingsStore.setRecordAt(v) }
     fun setCurrent(id: Long) = viewModelScope.launch { careLog.setCurrentBaby(id) }
@@ -346,6 +348,24 @@ fun SettingsRoute(
                             )
                         }
                     }
+                    Text("时间选择方式", style = LeziTypography.Label)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(
+                            "dropdown" to "数字时钟",
+                            "dial" to "指针时钟",
+                        ).forEach { (key, label) ->
+                            FilterChip(
+                                selected = ui.settings.timePickerStyle == key,
+                                onClick = { vm.setTimePickerStyle(key) },
+                                label = { Text(label) },
+                            )
+                        }
+                    }
+                    Text(
+                        "数字时钟为 0–23 点下拉；指针时钟为圆盘，上午/下午竖排在时分大按钮旁（位置跟随惯用手）。",
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             },
             confirmButton = { TextButton(onClick = { showDisplay = false }) { Text("完成") } },

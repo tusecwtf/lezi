@@ -229,6 +229,12 @@ class TimerViewModel @Inject constructor(
     val timeStepMin = settings.settings
         .map { it.timeStepMin }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 1)
+    val timePickerStyle = settings.settings
+        .map { it.timePickerStyle }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "dropdown")
+    val preferredHand = settings.settings
+        .map { it.preferredHand }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "right")
 
     init {
         viewModelScope.launch {
@@ -472,6 +478,8 @@ fun TimerRoute(
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
     val timeStepMin by vm.timeStepMin.collectAsStateWithLifecycle()
+    val timePickerStyle by vm.timePickerStyle.collectAsStateWithLifecycle()
+    val preferredHand by vm.preferredHand.collectAsStateWithLifecycle()
     var tick by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
     LaunchedEffect(state.leftRunning, state.rightRunning) {
         while (true) {
@@ -615,6 +623,8 @@ fun TimerRoute(
                 saving = completionSaving,
                 saveError = completionSaveError,
                 timeStepMin = timeStepMin,
+                timePickerStyle = timePickerStyle,
+                preferredHand = preferredHand,
                 onDraftChange = {
                     completionSaveError = null
                     completionDraft = it

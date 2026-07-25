@@ -119,6 +119,14 @@ class GrowthViewModel @Inject constructor(
         .map { it.timeStepMin }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 1)
 
+    val timePickerStyle = settingsStore.settings
+        .map { it.timePickerStyle }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "dropdown")
+
+    val preferredHand = settingsStore.settings
+        .map { it.preferredHand }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "right")
+
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     val ui = combine(
         careLog.observeCurrentBaby(),
@@ -268,6 +276,8 @@ fun GrowthRoute(
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
     val timeStepMin by vm.timeStepMin.collectAsStateWithLifecycle()
+    val timePickerStyle by vm.timePickerStyle.collectAsStateWithLifecycle()
+    val preferredHand by vm.preferredHand.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val bands = remember(ui.metric) {
         loadBands(context, ui.metric)
@@ -644,6 +654,8 @@ fun GrowthRoute(
             title = "选择测量时刻",
             value = Instant.ofEpochMilli(draftForPickers.measuredAt).atZone(zone),
             minuteStep = timeStepMin,
+            timePickerStyle = timePickerStyle,
+            preferredHand = preferredHand,
             onConfirm = { picked ->
                 if (picked.isAfter(ZonedDateTime.now(zone))) {
                     measurementError = "测量时刻不能晚于现在"

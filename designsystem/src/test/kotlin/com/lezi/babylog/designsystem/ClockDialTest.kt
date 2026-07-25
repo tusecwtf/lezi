@@ -19,6 +19,14 @@ class ClockDialTest {
     }
 
     @Test
+    fun twelveHourLabelUsesChineseAmPm() {
+        assertEquals("上午 12:00", formatClockTime12h(0, 0))
+        assertEquals("上午 8:05", formatClockTime12h(8, 5))
+        assertEquals("下午 12:00", formatClockTime12h(12, 0))
+        assertEquals("下午 10:00", formatClockTime12h(22, 0))
+    }
+
+    @Test
     fun unsupportedStepFallsBackToOneMinute() {
         assertEquals(ClockTick(8, 17), snapClock(8, 17, 3))
     }

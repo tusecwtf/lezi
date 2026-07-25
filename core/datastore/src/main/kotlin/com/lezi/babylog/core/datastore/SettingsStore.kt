@@ -19,6 +19,7 @@ interface SettingsStore {
     suspend fun setTimerEnabled(enabled: Boolean)
     suspend fun setAmountStepMl(step: Int)
     suspend fun setTimeStepMin(step: Int)
+    suspend fun setTimePickerStyle(style: String)
     suspend fun setNursingIntervalMin(min: Int)
     suspend fun setRecordAt(startOrEnd: String)
     suspend fun setNextFeedAt(epochMs: Long?)

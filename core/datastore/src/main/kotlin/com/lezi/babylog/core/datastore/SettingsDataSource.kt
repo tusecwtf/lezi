@@ -38,6 +38,9 @@ class SettingsDataSource @Inject constructor(
             unitsJson = prefs[Keys.UNITS] ?: "{}",
             amountStepMl = prefs[Keys.AMOUNT_STEP] ?: 5,
             timeStepMin = (prefs[Keys.TIME_STEP] ?: 1).takeIf { it == 1 || it == 5 } ?: 1,
+            timePickerStyle = (prefs[Keys.TIME_PICKER_STYLE] ?: "dropdown")
+                .takeIf { it == "dropdown" || it == "dial" }
+                ?: "dropdown",
             curveDataset = prefs[Keys.CURVE_DATASET] ?: "default",
             timelineOrder = prefs[Keys.TIMELINE_ORDER] ?: "newest_first",
         )
@@ -83,6 +86,13 @@ class SettingsDataSource @Inject constructor(
     override suspend fun setTimeStepMin(step: Int) {
         require(step == 1 || step == 5) { "Time step must be 1 or 5 minutes" }
         dataStore.edit { it[Keys.TIME_STEP] = step }
+    }
+
+    override suspend fun setTimePickerStyle(style: String) {
+        require(style == "dropdown" || style == "dial") {
+            "Time picker style must be dropdown or dial"
+        }
+        dataStore.edit { it[Keys.TIME_PICKER_STYLE] = style }
     }
 
     override suspend fun setNursingIntervalMin(min: Int) {
@@ -153,6 +163,7 @@ class SettingsDataSource @Inject constructor(
         val UNITS = stringPreferencesKey("units_json")
         val AMOUNT_STEP = intPreferencesKey("amount_step_ml")
         val TIME_STEP = intPreferencesKey("time_step_min")
+        val TIME_PICKER_STYLE = stringPreferencesKey("time_picker_style")
         val CURVE_DATASET = stringPreferencesKey("curve_dataset")
         val TIMELINE_ORDER = stringPreferencesKey("timeline_order")
         val CURRENT_BABY_ID = longPreferencesKey("current_baby_id")

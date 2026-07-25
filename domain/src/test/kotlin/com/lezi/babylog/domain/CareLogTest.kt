@@ -690,6 +690,8 @@ private class FakeSettingsStore : SettingsStore {
 
     override suspend fun setTimeStepMin(step: Int) = Unit
 
+    override suspend fun setTimePickerStyle(style: String) = Unit
+
     override suspend fun setNursingIntervalMin(min: Int) {
         interval.value = min
     }

@@ -2,11 +2,22 @@ package com.lezi.babylog.designsystem
 
 import android.content.res.Configuration
 import android.os.LocaleList
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CalendarMonth
 import androidx.compose.material3.AlertDialog
@@ -16,6 +27,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuAnchorType
@@ -23,9 +35,15 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TimePicker
+import androidx.compose.material3.TimePickerLayoutType
+import androidx.compose.material3.TimePickerSelectionMode
+import androidx.compose.material3.TimePickerState
 import androidx.compose.material3.rememberDatePickerState
+import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -33,10 +51,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -50,12 +72,19 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
+/** Settings / callers: "dropdown" (24h menus) or "dial" (clock + 上午/下午). */
+const val TIME_PICKER_STYLE_DROPDOWN = "dropdown"
+const val TIME_PICKER_STYLE_DIAL = "dial"
+
 /**
  * Shared date + time editor used across Lezi.
  *
- * Time is always **24-hour dropdowns** (hour 0–23, minute by step) so AM/PM
- * cannot flip sleep or feed intervals. Date stays a separate calendar card.
- * Callers still enforce domain rules such as "not in the future".
+ * [timePickerStyle]:
+ * - [TIME_PICKER_STYLE_DROPDOWN]: 数字时钟 — 24-hour hour/minute dropdowns
+ * - [TIME_PICKER_STYLE_DIAL]: 指针时钟 — clock face + vertical 上午/下午 chips
+ *   beside the hour/minute display (side follows [preferredHand]).
+ *
+ * Date stays a separate calendar card. Callers still enforce domain rules.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -63,6 +92,9 @@ fun LeziClockDialDialog(
     title: String,
     value: ZonedDateTime,
     minuteStep: Int = 1,
+    timePickerStyle: String = TIME_PICKER_STYLE_DROPDOWN,
+    /** "left" | "right" — places 上午/下午 beside the hour/minute boxes on the thumb side. */
+    preferredHand: String = "right",
     /** Sleep-only: explain that overnight spans need a next-day date. */
     showCrossDayHint: Boolean = false,
     onConfirm: (ZonedDateTime) -> Unit,
@@ -72,15 +104,58 @@ fun LeziClockDialDialog(
     val initialTick = snapClock(value.hour, value.minute, step)
     var clockError by remember(value) { mutableStateOf<String?>(null) }
     var selectedDate by remember(value) { mutableStateOf(value.toLocalDate()) }
+    var showDatePicker by remember(value) { mutableStateOf(false) }
+    val useDial = timePickerStyle == TIME_PICKER_STYLE_DIAL
+    // Thumb side: left-handed → chips left of hour/minute; right-handed → chips right.
+    val periodOnStart = preferredHand != "right"
+
+    // Dropdown-mode state (24h)
     var selectedHour by remember(value) { mutableIntStateOf(initialTick.hour) }
     var selectedMinute by remember(value) { mutableIntStateOf(initialTick.minute) }
-    var showDatePicker by remember(value) { mutableStateOf(false) }
+
+    // Dial-mode: 24h internal hours so Material does not draw a second AM/PM control.
+    // 上午/下午 is only the custom vertical chip column beside the hour/minute boxes.
+    val pickerState = rememberTimePickerState(
+        initialHour = initialTick.hour,
+        initialMinute = initialTick.minute,
+        is24Hour = true,
+    )
+    var isAm by remember(value) {
+        mutableStateOf(initialTick.hour < 12)
+    }
+    LaunchedEffect(pickerState.hour, pickerState.minute, step) {
+        val snapped = snapClock(pickerState.hour, pickerState.minute, step)
+        if (pickerState.hour != snapped.hour || pickerState.minute != snapped.minute) {
+            pickerState.hour = snapped.hour
+            pickerState.minute = snapped.minute
+        }
+        isAm = snapped.hour < 12
+    }
 
     val hourOptions = remember { (0..23).toList() }
     val minuteOptions = remember(step) {
         generateSequence(0) { it + step }
             .takeWhile { it < 60 }
             .toList()
+    }
+
+    fun setPeriodAm(wantAm: Boolean) {
+        val h = pickerState.hour
+        if (wantAm && h >= 12) {
+            pickerState.hour = h - 12
+        } else if (!wantAm && h < 12) {
+            pickerState.hour = h + 12
+        }
+        isAm = wantAm
+        clockError = null
+    }
+
+    fun resolvedHourMinute(): Pair<Int, Int> {
+        return if (useDial) {
+            pickerState.hour to pickerState.minute
+        } else {
+            selectedHour to selectedMinute
+        }
     }
 
     AlertDialog(
@@ -121,52 +196,74 @@ fun LeziClockDialDialog(
                     }
                 }
 
-                Text(
-                    "时间（24 小时制）",
-                    style = LeziTypography.Label,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    formatClockTime(selectedHour, selectedMinute),
-                    style = LeziTypography.TitleSm,
-                    color = MaterialTheme.colorScheme.onSurface,
-                )
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    TimeDropdownField(
-                        label = "时",
-                        value = selectedHour,
-                        options = hourOptions,
-                        format = { hour -> "%02d".format(hour) },
-                        onSelect = {
-                            selectedHour = it
-                            clockError = null
-                        },
-                        modifier = Modifier.weight(1f),
-                        contentDescription = "选择小时，24 小时制",
+                if (useDial) {
+                    // No "时间" section label — dial + 上午/下午 already make the role obvious.
+                    // Material-style layout: display row (period + HH:MM) is one centered unit;
+                    // dial is a separate centered unit so neither is clipped nor shifted by the other.
+                    // TimePicker's built-in display is clipped away; we draw our own with 上午/下午.
+                    DialTimePickerBody(
+                        pickerState = pickerState,
+                        isAm = isAm,
+                        periodOnStart = periodOnStart,
+                        onSelectAm = { setPeriodAm(true) },
+                        onSelectPm = { setPeriodAm(false) },
                     )
-                    TimeDropdownField(
-                        label = "分",
-                        value = selectedMinute,
-                        options = minuteOptions,
-                        format = { minute -> "%02d".format(minute) },
-                        onSelect = {
-                            selectedMinute = it
-                            clockError = null
-                        },
-                        modifier = Modifier.weight(1f),
-                        contentDescription = "选择分钟",
-                    )
-                }
-                if (step > 1) {
+                    if (step > 1) {
+                        Text(
+                            "分钟按 $step 分钟步进，拖动时自动吸附",
+                            style = LeziTypography.Meta,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                } else {
                     Text(
-                        "分钟按 $step 分钟步进可选",
-                        style = LeziTypography.Meta,
+                        "时间",
+                        style = LeziTypography.Label,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    Text(
+                        formatClockTime(selectedHour, selectedMinute),
+                        style = LeziTypography.TitleSm,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        TimeDropdownField(
+                            label = "时",
+                            value = selectedHour,
+                            options = hourOptions,
+                            format = { hour -> "%02d".format(hour) },
+                            onSelect = {
+                                selectedHour = it
+                                clockError = null
+                            },
+                            modifier = Modifier.weight(1f),
+                            contentDescription = "选择小时，24 小时制",
+                        )
+                        TimeDropdownField(
+                            label = "分",
+                            value = selectedMinute,
+                            options = minuteOptions,
+                            format = { minute -> "%02d".format(minute) },
+                            onSelect = {
+                                selectedMinute = it
+                                clockError = null
+                            },
+                            modifier = Modifier.weight(1f),
+                            contentDescription = "选择分钟",
+                        )
+                    }
+                    if (step > 1) {
+                        Text(
+                            "分钟按 $step 分钟步进可选",
+                            style = LeziTypography.Meta,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
+
                 if (showCrossDayHint) {
                     Text(
                         "跨天请先改日期：例如 22:00 睡下、次日 06:00 醒来。",
@@ -182,11 +279,12 @@ fun LeziClockDialDialog(
         confirmButton = {
             TextButton(
                 onClick = {
+                    val (hour, minute) = resolvedHourMinute()
                     val merged = mergeDateAndClock(
                         value = value,
                         date = selectedDate,
-                        hour = selectedHour,
-                        minute = selectedMinute,
+                        hour = hour,
+                        minute = minute,
                         step = step,
                     )
                     if (merged == null) {
@@ -237,20 +335,7 @@ fun LeziClockDialDialog(
                 }
             },
         ) {
-            val baseConfiguration = LocalConfiguration.current
-            val baseContext = LocalContext.current
-            val chineseConfiguration = remember(baseConfiguration) {
-                Configuration(baseConfiguration).apply {
-                    setLocales(LocaleList.forLanguageTags("zh-CN"))
-                }
-            }
-            val chineseContext = remember(baseContext, chineseConfiguration) {
-                baseContext.createConfigurationContext(chineseConfiguration)
-            }
-            CompositionLocalProvider(
-                LocalConfiguration provides chineseConfiguration,
-                LocalContext provides chineseContext,
-            ) {
+            ChineseLocale {
                 DatePicker(
                     state = dateState,
                     title = {
@@ -282,6 +367,256 @@ fun LeziClockDialDialog(
             }
         }
     }
+}
+
+/**
+ * Material3 TimePicker token sizes (androidx.compose.material3 TimePickerTokens).
+ * Display row and period match native sizes; dial is shown alone so layout can center each unit.
+ */
+private val TimeDisplayNumberWidth = 96.dp
+private val TimeDisplaySeparatorWidth = 24.dp
+private val TimeDisplayRowHeight = 80.dp
+private val PeriodToggleWidth = 52.dp
+private val PeriodToggleHeight = TimeDisplayRowHeight
+private val PeriodToggleGap = 12.dp
+private val ClockDialSize = 256.dp
+private val ClockDisplayBottomMargin = 36.dp
+/** Material VerticalTimePicker trailing spacer under the dial. */
+private val ClockFaceBottomMargin = 24.dp
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DialTimePickerBody(
+    pickerState: TimePickerState,
+    isAm: Boolean,
+    periodOnStart: Boolean,
+    onSelectAm: () -> Unit,
+    onSelectPm: () -> Unit,
+) {
+    val hour12 = hour24To12(pickerState.hour)
+    val hourSelected = pickerState.selection == TimePickerSelectionMode.Hour
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        // One centered unit: [上午/下午?] [时] : [分] [上午/下午?]
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (periodOnStart) {
+                PeriodToggle(
+                    isAm = isAm,
+                    onSelectAm = onSelectAm,
+                    onSelectPm = onSelectPm,
+                )
+                Spacer(Modifier.width(PeriodToggleGap))
+            }
+            DialClockDisplay(
+                hour = hour12,
+                minute = pickerState.minute,
+                hourSelected = hourSelected,
+                onHourClick = { pickerState.selection = TimePickerSelectionMode.Hour },
+                onMinuteClick = { pickerState.selection = TimePickerSelectionMode.Minute },
+            )
+            if (!periodOnStart) {
+                Spacer(Modifier.width(PeriodToggleGap))
+                PeriodToggle(
+                    isAm = isAm,
+                    onSelectAm = onSelectAm,
+                    onSelectPm = onSelectPm,
+                )
+            }
+        }
+        // Show only Material's dial: hide its built-in HH:MM by shifting it up, while keeping
+        // the display→dial margin + full 256dp face inside the viewport (previous -116 offset
+        // ate the top of the circle).
+        Box(
+            modifier = Modifier
+                .width(ClockDialSize)
+                .height(ClockDisplayBottomMargin + ClockDialSize + ClockFaceBottomMargin)
+                .clip(RectangleShape),
+        ) {
+            ChineseLocale {
+                TimePicker(
+                    state = pickerState,
+                    layoutType = TimePickerLayoutType.Vertical,
+                    modifier = Modifier
+                        .wrapContentSize(align = Alignment.TopCenter, unbounded = true)
+                        .offset(y = -TimeDisplayRowHeight),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DialClockDisplay(
+    hour: Int,
+    minute: Int,
+    hourSelected: Boolean,
+    onHourClick: () -> Unit,
+    onMinuteClick: () -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        TimeSelectorBox(
+            text = "%d".format(hour.coerceIn(1, 12)),
+            selected = hourSelected,
+            onClick = onHourClick,
+            contentDescription = "选择小时",
+        )
+        Box(
+            modifier = Modifier
+                .width(TimeDisplaySeparatorWidth)
+                .height(TimeDisplayRowHeight),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = ":",
+                style = MaterialTheme.typography.displayLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                textAlign = TextAlign.Center,
+            )
+        }
+        TimeSelectorBox(
+            text = "%02d".format(minute.coerceIn(0, 59)),
+            selected = !hourSelected,
+            onClick = onMinuteClick,
+            contentDescription = "选择分钟",
+        )
+    }
+}
+
+@Composable
+private fun TimeSelectorBox(
+    text: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    contentDescription: String,
+) {
+    val shape = RoundedCornerShape(8.dp)
+    val container = if (selected) {
+        MaterialTheme.colorScheme.primaryContainer
+    } else {
+        MaterialTheme.colorScheme.surfaceContainerHighest
+    }
+    val content = if (selected) {
+        MaterialTheme.colorScheme.onPrimaryContainer
+    } else {
+        MaterialTheme.colorScheme.onSurface
+    }
+    Box(
+        modifier = Modifier
+            .size(width = TimeDisplayNumberWidth, height = TimeDisplayRowHeight)
+            .clip(shape)
+            .background(container)
+            .clickable(onClick = onClick)
+            .semantics { this.contentDescription = contentDescription },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.displayLarge,
+            color = content,
+            maxLines = 1,
+        )
+    }
+}
+
+/** Vertical 上午/下午 segmented control (Material period selector 52×80). */
+@Composable
+private fun PeriodToggle(
+    isAm: Boolean,
+    onSelectAm: () -> Unit,
+    onSelectPm: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val shape = RoundedCornerShape(8.dp)
+    val outline = MaterialTheme.colorScheme.outline
+    val selectedContainer = MaterialTheme.colorScheme.tertiaryContainer
+    val selectedContent = MaterialTheme.colorScheme.onTertiaryContainer
+    val unselectedContent = MaterialTheme.colorScheme.onSurfaceVariant
+    Column(
+        modifier = modifier
+            .size(width = PeriodToggleWidth, height = PeriodToggleHeight)
+            .border(width = 1.dp, color = outline, shape = shape)
+            .clip(shape)
+            .semantics { contentDescription = if (isAm) "上午" else "下午" },
+    ) {
+        PeriodToggleHalf(
+            label = "上午",
+            selected = isAm,
+            selectedContainer = selectedContainer,
+            selectedContent = selectedContent,
+            unselectedContent = unselectedContent,
+            onClick = onSelectAm,
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+        )
+        HorizontalDivider(thickness = 1.dp, color = outline)
+        PeriodToggleHalf(
+            label = "下午",
+            selected = !isAm,
+            selectedContainer = selectedContainer,
+            selectedContent = selectedContent,
+            unselectedContent = unselectedContent,
+            onClick = onSelectPm,
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+        )
+    }
+}
+
+@Composable
+private fun PeriodToggleHalf(
+    label: String,
+    selected: Boolean,
+    selectedContainer: Color,
+    selectedContent: Color,
+    unselectedContent: Color,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .background(if (selected) selectedContainer else Color.Transparent)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.titleSmall,
+            color = if (selected) selectedContent else unselectedContent,
+            maxLines = 1,
+        )
+    }
+}
+
+private fun hour24To12(hour24: Int): Int {
+    val h = hour24.coerceIn(0, 23)
+    return when {
+        h == 0 -> 12
+        h > 12 -> h - 12
+        else -> h
+    }
+}
+
+@Composable
+private fun ChineseLocale(content: @Composable () -> Unit) {
+    val baseConfiguration = LocalConfiguration.current
+    val baseContext = LocalContext.current
+    val chineseConfiguration = remember(baseConfiguration) {
+        Configuration(baseConfiguration).apply {
+            setLocales(LocaleList.forLanguageTags("zh-CN"))
+        }
+    }
+    val chineseContext = remember(baseContext, chineseConfiguration) {
+        baseContext.createConfigurationContext(chineseConfiguration)
+    }
+    CompositionLocalProvider(
+        LocalConfiguration provides chineseConfiguration,
+        LocalContext provides chineseContext,
+        content = content,
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -378,6 +713,18 @@ private fun formatClockDate(date: LocalDate): String =
 private fun formatClockTime(hour: Int, minute: Int): String =
     "%02d:%02d".format(hour.coerceIn(0, 23), minute.coerceIn(0, 59))
 
+/** Display helper with Chinese 上午/下午 for dial mode. */
+internal fun formatClockTime12h(hour: Int, minute: Int): String {
+    val h24 = hour.coerceIn(0, 23)
+    val period = if (h24 < 12) "上午" else "下午"
+    val h12 = when {
+        h24 == 0 -> 12
+        h24 > 12 -> h24 - 12
+        else -> h24
+    }
+    return "$period %d:%02d".format(h12, minute.coerceIn(0, 59))
+}
+
 /**
  * Resolve a local wall-clock value without silently normalizing a DST gap.
  * During an overlap, the caller's existing offset wins when it is still valid.
@@ -416,9 +763,9 @@ fun timestampOnLeziDate(
         .toEpochMilli()
 }
 
-@Preview(name = "Shared 24h time dropdown", widthDp = 390, heightDp = 844, showBackground = true)
+@Preview(name = "Time dial right hand", widthDp = 390, heightDp = 844, showBackground = true)
 @Composable
-private fun ClockDialPreview() {
+private fun ClockDialPreviewRightHand() {
     LeziTheme(visualStyle = "journal") {
         LeziClockDialDialog(
             title = "选择记录时刻",
@@ -428,6 +775,28 @@ private fun ClockDialPreview() {
                 ZoneId.of("Asia/Shanghai"),
             ),
             minuteStep = 5,
+            timePickerStyle = TIME_PICKER_STYLE_DIAL,
+            preferredHand = "right",
+            onConfirm = {},
+            onDismiss = {},
+        )
+    }
+}
+
+@Preview(name = "Time dial left hand", widthDp = 390, heightDp = 844, showBackground = true)
+@Composable
+private fun ClockDialPreviewLeftHand() {
+    LeziTheme(visualStyle = "journal") {
+        LeziClockDialDialog(
+            title = "选择记录时刻",
+            value = ZonedDateTime.of(
+                LocalDate.of(2026, 7, 23),
+                LocalTime.of(1, 23),
+                ZoneId.of("Asia/Shanghai"),
+            ),
+            minuteStep = 1,
+            timePickerStyle = TIME_PICKER_STYLE_DIAL,
+            preferredHand = "left",
             onConfirm = {},
             onDismiss = {},
         )

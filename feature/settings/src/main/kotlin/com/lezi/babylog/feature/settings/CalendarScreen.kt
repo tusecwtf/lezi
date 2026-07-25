@@ -86,6 +86,14 @@ class CalendarViewModel @Inject constructor(
         .map { it.timeStepMin }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 1)
 
+    val timePickerStyle = settingsStore.settings
+        .map { it.timePickerStyle }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "dropdown")
+
+    val preferredHand = settingsStore.settings
+        .map { it.preferredHand }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "right")
+
     fun add(
         title: String,
         eventAt: Long,
@@ -123,6 +131,8 @@ fun CalendarRoute(
 ) {
     val events by vm.events.collectAsStateWithLifecycle()
     val timeStepMin by vm.timeStepMin.collectAsStateWithLifecycle()
+    val timePickerStyle by vm.timePickerStyle.collectAsStateWithLifecycle()
+    val preferredHand by vm.preferredHand.collectAsStateWithLifecycle()
     val zone = ZoneId.systemDefault()
     var showAdd by remember { mutableStateOf(false) }
     var title by remember { mutableStateOf("") }
@@ -345,6 +355,8 @@ fun CalendarRoute(
             title = if (target == CalendarClockTarget.Event) "选择日程时刻" else "选择提醒时刻",
             value = Instant.ofEpochMilli(value).atZone(zone),
             minuteStep = timeStepMin,
+            timePickerStyle = timePickerStyle,
+            preferredHand = preferredHand,
             onConfirm = { picked ->
                 val changed = picked.toInstant().toEpochMilli()
                 if (target == CalendarClockTarget.Event) {
