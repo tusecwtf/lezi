@@ -153,7 +153,13 @@ internal data class QuickRecordDraft(
                 if (peeAmount !in 1..3) "请选择尿量" else stoolValidationError()
             }
             QuickRecordMode.Sleep -> when (sleepAction) {
-                SleepDraftAction.SleepDown -> null
+                // 准备休息：结束可空（进睡眠中）；若填写则一次记完完整区间。
+                SleepDraftAction.SleepDown -> when {
+                    endTimestamp == null -> null
+                    endTimestamp <= timestamp -> "醒来时刻必须晚于睡下时刻"
+                    endTimestamp > nowMillis -> "醒来时刻不能晚于现在"
+                    else -> null
+                }
                 SleepDraftAction.WakeUp -> when {
                     endTimestamp == null -> "请选择醒来时刻"
                     endTimestamp <= timestamp -> "醒来时刻必须晚于睡下时刻"
@@ -238,6 +244,7 @@ internal data class QuickRecordDraft(
     fun confirmLabel(): String = when {
         sleepAction == SleepDraftAction.WakeUp -> "确认醒来"
         existingRecordId != null -> "保存修改"
+        sleepAction == SleepDraftAction.SleepDown && endTimestamp != null -> "确认记录"
         sleepAction == SleepDraftAction.SleepDown -> "确认睡下"
         else -> "确认记录"
     }

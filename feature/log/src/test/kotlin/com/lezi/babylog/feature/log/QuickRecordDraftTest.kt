@@ -104,6 +104,46 @@ class QuickRecordDraftTest {
     }
 
     @Test
+    fun sleepDownWithEndRecordsCompletedIntervalInOneStep() {
+        // Mirrors switch「同时记醒来」ON (end defaults to a valid moment).
+        val end = tappedAt + 30 * 60_000L
+        val draft = QuickRecordDraft.create(RecordType.SLEEP, tappedAt)
+            .copy(endTimestamp = end)
+
+        assertEquals(SleepDraftAction.SleepDown, draft.sleepAction)
+        assertEquals("确认记录", draft.confirmLabel())
+        assertNull(draft.validationError(nowMillis = tappedAt + 60 * 60_000L))
+        assertEquals(end, draft.toSaveCommand().endTimestamp)
+    }
+
+    @Test
+    fun sleepDownTurningOffRecordWakeClearsEnd() {
+        val withEnd = QuickRecordDraft.create(RecordType.SLEEP, tappedAt)
+            .copy(endTimestamp = tappedAt + 10_000L)
+        val cleared = withEnd.copy(endTimestamp = null)
+
+        assertEquals("确认睡下", cleared.confirmLabel())
+        assertNull(cleared.toSaveCommand().endTimestamp)
+        assertNull(cleared.validationError(nowMillis = tappedAt + 60_000L))
+    }
+
+    @Test
+    fun sleepDownWithInvalidEndIsRejected() {
+        val draft = QuickRecordDraft.create(RecordType.SLEEP, tappedAt)
+
+        assertEquals(
+            "醒来时刻必须晚于睡下时刻",
+            draft.copy(endTimestamp = tappedAt)
+                .validationError(nowMillis = tappedAt + 60_000L),
+        )
+        assertEquals(
+            "醒来时刻不能晚于现在",
+            draft.copy(endTimestamp = tappedAt + 2 * 60_000L)
+                .validationError(nowMillis = tappedAt + 60_000L),
+        )
+    }
+
+    @Test
     fun wakeConfirmationUpdatesTheExistingOpenSleepAndPreservesPayload() {
         val open = Record(
             id = 42L,

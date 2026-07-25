@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -113,13 +114,18 @@ internal fun AppHeaderBar(
         Row(
             modifier = Modifier
                 .weight(1f)
-                .height(48.dp)
+                .height(54.dp)
                 .clip(RoundedCornerShape(12.dp))
                 .clickable(enabled = canCycleBaby, onClick = onCycleBaby)
-                .padding(horizontal = 4.dp, vertical = 5.dp),
+                .padding(horizontal = 4.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(modifier = Modifier.size(38.dp)) {
+            // Taller than avatar so the sleep cap can rise; avatar stays BottomStart (seam on crown).
+            Box(
+                modifier = Modifier
+                    .width(38.dp)
+                    .height(46.dp),
+            ) {
                 BabyAvatar(
                     nickname = babyName,
                     avatarPath = avatarPath,
@@ -289,7 +295,7 @@ private fun SleepMoonCap(
     val motion = rememberInfiniteTransition(label = "sleepCapMotion")
     val bob by motion.animateFloat(
         initialValue = 0f,
-        targetValue = -0.8f,
+        targetValue = -1.2f,
         animationSpec = infiniteRepeatable(
             animation = tween(durationMillis = 1_400, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse,
@@ -303,12 +309,16 @@ private fun SleepMoonCap(
     Canvas(
         modifier = modifier.fillMaxSize(),
     ) {
-        fun px(value: Float): Float = size.width * value / 38f
+        // Design space: 38×46. Avatar 34 sits at bottom → crown ≈ y=12 design units.
+        // X scales by width; Y scales by height so the cap can grow upward while the seam
+        // stays on the avatar edge.
+        fun pxX(value: Float): Float = size.width * value / 38f
+        fun pxY(value: Float): Float = size.height * value / 46f
         val seamOval = Rect(
-            left = px(0.5f),
-            top = px(4.5f),
-            right = px(33.5f),
-            bottom = px(37.5f),
+            left = pxX(0.5f),
+            top = pxY(12.5f),
+            right = pxX(33.5f),
+            bottom = pxY(45.5f),
         )
         val seamStartAngle = 205f
         val seamSweep = 125f
@@ -323,19 +333,20 @@ private fun SleepMoonCap(
         }
         val seamStart = pointOnSeam(seamStartAngle)
         val seamEnd = pointOnSeam(seamStartAngle + seamSweep)
+        // Peak raised toward y≈1 so the hat reads taller above the avatar crown.
         val cap = Path().apply {
             moveTo(seamStart.x, seamStart.y)
             cubicTo(
-                px(7f),
-                px(4.5f),
-                px(15f),
-                px(0.2f),
-                px(25f),
-                px(0.8f),
+                pxX(7f),
+                pxY(11f),
+                pxX(15f),
+                pxY(1.0f),
+                pxX(25f),
+                pxY(1.6f),
             )
             quadraticTo(
-                px(32.5f),
-                px(1.4f),
+                pxX(32.5f),
+                pxY(2.4f),
                 seamEnd.x,
                 seamEnd.y,
             )
@@ -359,20 +370,20 @@ private fun SleepMoonCap(
             style = Stroke(width = 2.4.dp.toPx(), cap = StrokeCap.Round),
         )
 
-        val moonCenter = Offset(px(20.5f), px(4.5f))
-        drawCircle(moonColor, radius = px(2.5f), center = moonCenter)
+        val moonCenter = Offset(pxX(20.5f), pxY(5.5f))
+        drawCircle(moonColor, radius = pxX(2.5f), center = moonCenter)
         drawCircle(
             capColor,
-            radius = px(2.5f),
+            radius = pxX(2.5f),
             center = moonCenter.copy(
-                x = moonCenter.x + px(1.1f),
-                y = moonCenter.y - px(0.8f),
+                x = moonCenter.x + pxX(1.1f),
+                y = moonCenter.y - pxY(0.8f),
             ),
         )
         drawCircle(
             color = moonColor,
-            radius = px(1.8f),
-            center = Offset(px(32f), px(2.4f + bob)),
+            radius = pxX(1.8f),
+            center = Offset(pxX(32f), pxY(3.2f + bob)),
         )
     }
 }

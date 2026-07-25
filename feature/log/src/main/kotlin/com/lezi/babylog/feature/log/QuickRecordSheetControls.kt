@@ -12,10 +12,12 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
@@ -34,7 +36,13 @@ internal fun TimeFields(
     zone: ZoneId,
     onOpenStart: () -> Unit,
     onOpenEnd: () -> Unit,
+    /** SleepDown only: true → set end=now; false → clear end. */
+    onToggleRecordWake: ((Boolean) -> Unit)? = null,
+    accentColor: Color? = null,
 ) {
+    val container = accentColor?.copy(alpha = 0.18f)
+        ?: MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+    val accent = accentColor ?: MaterialTheme.colorScheme.primary
     SectionLabel(
         when (draft.sleepAction) {
             SleepDraftAction.SleepDown -> "睡下时间"
@@ -46,11 +54,65 @@ internal fun TimeFields(
     when {
         draft.sleepAction == SleepDraftAction.WakeUp -> {
             TimeReadOnly("睡下", draft.timestamp, zone)
-            TimeButton("醒来", draft.endTimestamp ?: draft.timestamp, zone, onOpenEnd)
+            TimeButton(
+                label = "醒来",
+                millis = draft.endTimestamp ?: draft.timestamp,
+                zone = zone,
+                onClick = onOpenEnd,
+                containerColor = container,
+                accentColor = accent,
+            )
+        }
+        draft.sleepAction == SleepDraftAction.SleepDown -> {
+            TimeButton(
+                label = "睡下",
+                millis = draft.timestamp,
+                zone = zone,
+                onClick = onOpenStart,
+                containerColor = container,
+                accentColor = accent,
+            )
+            val recordWake = draft.endTimestamp != null
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .semantics {
+                        contentDescription = if (recordWake) {
+                            "同时记醒来，已打开"
+                        } else {
+                            "同时记醒来，已关闭"
+                        }
+                    },
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text("同时记醒来", style = LeziTypography.BodyStrong)
+                Switch(
+                    checked = recordWake,
+                    onCheckedChange = { checked -> onToggleRecordWake?.invoke(checked) },
+                )
+            }
+            if (recordWake) {
+                TimeButton(
+                    label = "醒来",
+                    millis = draft.endTimestamp!!,
+                    zone = zone,
+                    onClick = onOpenEnd,
+                    containerColor = container,
+                    accentColor = accent,
+                )
+            }
         }
         draft.sleepAction == SleepDraftAction.Manual ||
             draft.mode == QuickRecordMode.Interval -> {
-            TimeButton("开始", draft.timestamp, zone, onOpenStart)
+            TimeButton(
+                label = "开始",
+                millis = draft.timestamp,
+                zone = zone,
+                onClick = onOpenStart,
+                containerColor = container,
+                accentColor = accent,
+            )
             if (draft.endTimestamp == null) {
                 Surface(
                     onClick = onOpenEnd,
@@ -65,14 +127,23 @@ internal fun TimeFields(
                     )
                 }
             } else {
-                TimeButton("结束", draft.endTimestamp, zone, onOpenEnd)
+                TimeButton(
+                    label = "结束",
+                    millis = draft.endTimestamp,
+                    zone = zone,
+                    onClick = onOpenEnd,
+                    containerColor = container,
+                    accentColor = accent,
+                )
             }
         }
         else -> TimeButton(
-            label = if (draft.sleepAction == SleepDraftAction.SleepDown) "睡下" else "记录",
+            label = "记录",
             millis = draft.timestamp,
             zone = zone,
             onClick = onOpenStart,
+            containerColor = container,
+            accentColor = accent,
         )
     }
 }
@@ -83,6 +154,8 @@ private fun TimeButton(
     millis: Long,
     zone: ZoneId,
     onClick: () -> Unit,
+    containerColor: Color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+    accentColor: Color = MaterialTheme.colorScheme.primary,
 ) {
     Surface(
         onClick = onClick,
@@ -90,7 +163,7 @@ private fun TimeButton(
             .fillMaxWidth()
             .semantics { contentDescription = "$label，${formatRecordTime(millis, zone)}，选择时间" },
         shape = LeziShapes.Sm,
-        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+        color = containerColor,
     ) {
         Row(
             Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
@@ -101,7 +174,7 @@ private fun TimeButton(
                 Text(label, style = LeziTypography.Meta)
                 Text(formatRecordTime(millis, zone), style = LeziTypography.BodyStrong)
             }
-            Text("选择时间", style = LeziTypography.Label, color = MaterialTheme.colorScheme.primary)
+            Text("选择时间", style = LeziTypography.Label, color = accentColor)
         }
     }
 }

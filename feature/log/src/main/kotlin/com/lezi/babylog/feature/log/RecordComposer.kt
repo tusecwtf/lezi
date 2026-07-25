@@ -255,7 +255,9 @@ class RecordComposerViewModel @Inject constructor(
                     }
                 }
                 when {
-                    draft.sleepAction == SleepDraftAction.SleepDown -> "已开始睡眠"
+                    draft.sleepAction == SleepDraftAction.SleepDown &&
+                        draft.endTimestamp == null -> "已开始睡眠"
+                    draft.sleepAction == SleepDraftAction.SleepDown -> "已记录睡眠"
                     draft.sleepAction == SleepDraftAction.WakeUp -> "已记录醒来"
                     draft.isEditing -> "已保存修改"
                     else -> "已记录${command.type.presentation.label}"

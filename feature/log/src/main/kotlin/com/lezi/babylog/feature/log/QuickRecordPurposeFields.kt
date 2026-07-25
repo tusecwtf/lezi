@@ -84,7 +84,7 @@ internal fun PurposeFields(
             PeeFields(draft, onDraftChange)
             StoolFields(draft, onDraftChange)
         }
-        QuickRecordMode.Sleep -> SleepFields(draft, onDraftChange)
+        QuickRecordMode.Sleep -> SleepFields(draft)
         QuickRecordMode.Temperature -> TemperatureFields(draft, onDraftChange)
         QuickRecordMode.Text -> TextFields(draft, onDraftChange)
         QuickRecordMode.Simple -> SimpleFields(draft.type)
@@ -365,33 +365,14 @@ private fun ExcretionChoice(
 }
 
 @Composable
-private fun SleepFields(
-    draft: QuickRecordDraft,
-    onDraftChange: (QuickRecordDraft) -> Unit,
-) {
+private fun SleepFields(draft: QuickRecordDraft) {
+    // No instructional copy / sleep-type chips — time fields + switch carry the action.
     Column(
         Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         SleepActionAnimation(draft.sleepAction ?: SleepDraftAction.Manual)
-        Text(
-            when {
-                draft.isEditing && draft.endTimestamp == null -> "保存后继续保持睡眠进行中"
-                draft.isEditing -> "调整这段睡眠的起止时间与类型"
-                else -> when (draft.sleepAction) {
-                    SleepDraftAction.SleepDown -> "确认后开始睡眠计时"
-                    SleepDraftAction.WakeUp -> "确认后结束当前睡眠"
-                    SleepDraftAction.Manual, null -> "补记一段已经完成的睡眠"
-                }
-            },
-            style = LeziTypography.BodyStrong,
-        )
     }
-    ChoiceStrip(
-        label = "睡眠类型",
-        choices = listOf(false to "夜间 / 长睡", true to "午睡"),
-        selected = draft.isNap,
-    ) { onDraftChange(draft.copy(isNap = it)) }
 }
 
 @Composable

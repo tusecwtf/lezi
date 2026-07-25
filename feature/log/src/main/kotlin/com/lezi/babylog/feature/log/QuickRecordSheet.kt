@@ -28,6 +28,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.lezi.babylog.core.ui.RecordTypeIcon
 import com.lezi.babylog.core.ui.presentation
@@ -104,7 +105,15 @@ internal fun QuickRecordSheet(
             }
             Spacer(Modifier.size(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(sheetKicker(draft), style = LeziTypography.Eyebrow)
+                Text(
+                    sheetKicker(draft),
+                    style = LeziTypography.Eyebrow,
+                    color = if (draft.mode == QuickRecordMode.Sleep) {
+                        typeColor
+                    } else {
+                        Color.Unspecified
+                    },
+                )
                 Text(sheetTitle(draft), style = LeziTypography.Title)
             }
             if (onDelete != null) {
@@ -153,6 +162,24 @@ internal fun QuickRecordSheet(
                     error = null
                     clockTarget = QuickClockTarget.End
                 },
+                onToggleRecordWake = if (draft.sleepAction == SleepDraftAction.SleepDown) {
+                    { enabled ->
+                        dismissKeyboard()
+                        error = null
+                        update(
+                            draft.copy(
+                                endTimestamp = if (enabled) {
+                                    System.currentTimeMillis()
+                                } else {
+                                    null
+                                },
+                            ),
+                        )
+                    }
+                } else {
+                    null
+                },
+                accentColor = if (draft.mode == QuickRecordMode.Sleep) typeColor else null,
             )
 
             SectionLabel("备注")
@@ -231,7 +258,10 @@ internal fun QuickRecordSheet(
                 target == QuickClockTarget.Start &&
                     draft.sleepAction == SleepDraftAction.SleepDown -> "选择睡下时刻"
                 target == QuickClockTarget.End &&
-                    draft.sleepAction == SleepDraftAction.WakeUp -> "选择醒来时刻"
+                    draft.sleepAction in setOf(
+                        SleepDraftAction.SleepDown,
+                        SleepDraftAction.WakeUp,
+                    ) -> "选择醒来时刻"
                 target == QuickClockTarget.End -> "选择结束时刻"
                 else -> "选择记录时刻"
             },
