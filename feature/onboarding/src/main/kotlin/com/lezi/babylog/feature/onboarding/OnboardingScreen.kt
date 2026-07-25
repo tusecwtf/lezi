@@ -1,5 +1,7 @@
 package com.lezi.babylog.feature.onboarding
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,12 +19,16 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -41,13 +47,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import com.lezi.babylog.core.common.productUiError
+import com.lezi.babylog.core.ui.CameraCapture
 import com.lezi.babylog.core.ui.UiTags
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.domain.CareLog
@@ -55,6 +65,7 @@ import com.lezi.babylog.domain.CreateBabyInput
 import com.lezi.babylog.sync.DEFAULT_SERVER_HOST
 import com.lezi.babylog.sync.DEFAULT_SERVER_PORT
 import com.lezi.babylog.sync.HomeLanServerConfig
+import com.lezi.babylog.sync.InvitePayloadCodec
 import com.lezi.babylog.sync.NetworkState
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
@@ -189,14 +200,70 @@ fun OnboardingRoute(
     var showJoin by remember { mutableStateOf(false) }
     var nameError by remember { mutableStateOf(false) }
     var formError by remember { mutableStateOf<String?>(null) }
-    // 小白空态：host=192.168.50.4、port=8765、SSID1=当前 Wi‑Fi（可读时）；预填≠已保存
+    // Prefill unsaved defaults, including the current Wi-Fi name when available.
     val novice = remember { HomeLanServerConfig.noviceUiDefaults(vm.currentWifiSsid()) }
     var joinHost by remember { mutableStateOf(novice.host) }
     var joinPort by remember { mutableStateOf(novice.port.toString()) }
     var joinSsid1 by remember { mutableStateOf(novice.allowedSsids.getOrNull(0).orEmpty()) }
     var joinSsid2 by remember { mutableStateOf("") }
     var joinCode by remember { mutableStateOf("") }
-    // 打开对话框时再读一次 SSID（权限可能刚授予；未改动时刷新）
+    val context = LocalContext.current
+    fun applyScannedInvite(raw: String) {
+        val payload = raw.trim()
+        if (payload.isEmpty()) return
+        joinCode = payload
+        formError = null
+        // QR carries host/port + optional home Wi‑Fi names for novice prefill.
+        runCatching { InvitePayloadCodec.decode(payload) }.getOrNull()?.let { decoded ->
+            val config = decoded.homeLanConfig
+            if (config.host.isNotBlank()) {
+                joinHost = config.host
+                joinPort = config.port.toString()
+            }
+            if (decoded.ssids.isNotEmpty()) {
+                joinSsid1 = decoded.ssids.getOrNull(0).orEmpty()
+                joinSsid2 = decoded.ssids.getOrNull(1).orEmpty()
+            }
+        }
+        showJoin = true
+    }
+    val scanInvite = rememberLauncherForActivityResult(ScanContract()) { result ->
+        result.contents?.let(::applyScannedInvite)
+    }
+    fun launchInviteScan() {
+        if (!CameraCapture.hasCameraHardware(context)) {
+            formError = "此设备没有可用相机，请改用手动输入邀请码"
+            showJoin = true
+            return
+        }
+        scanInvite.launch(
+            ScanOptions()
+                .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                .setPrompt("扫描家庭邀请二维码")
+                .setBeepEnabled(false)
+                .setOrientationLocked(false)
+                .setBarcodeImageEnabled(false),
+        )
+    }
+    val scanCameraPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            launchInviteScan()
+        } else {
+            formError = "需要相机权限才能扫码，请在系统设置中开启，或改用输入邀请码"
+            showJoin = true
+        }
+    }
+    fun requestOrLaunchInviteScan() {
+        formError = null
+        if (CameraCapture.hasPermission(context)) {
+            launchInviteScan()
+        } else {
+            scanCameraPermission.launch(CameraCapture.PERMISSION)
+        }
+    }
+    // Refresh an untouched SSID field because permission may have just been granted.
     LaunchedEffect(showJoin) {
         if (!showJoin) return@LaunchedEffect
         if (joinHost.isBlank()) joinHost = DEFAULT_SERVER_HOST
@@ -304,13 +371,31 @@ fun OnboardingRoute(
             Text("开始记录")
         }
         Spacer(modifier = Modifier.height(12.dp))
-        OutlinedButton(
-            onClick = { showJoin = true },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(52.dp),
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("加入家庭")
+            OutlinedButton(
+                onClick = { showJoin = true },
+                modifier = Modifier
+                    .weight(1f)
+                    .height(52.dp),
+            ) {
+                Text("加入家庭")
+            }
+            OutlinedButton(
+                onClick = { requestOrLaunchInviteScan() },
+                modifier = Modifier.height(52.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.QrCodeScanner,
+                    contentDescription = "扫码加入家庭",
+                    modifier = Modifier.size(22.dp),
+                )
+                Spacer(Modifier.size(6.dp))
+                Text("扫码")
+            }
         }
     }
 
@@ -355,8 +440,8 @@ fun OnboardingRoute(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Text(
-                        "已预填当前 Wi‑Fi 与常见服务器地址，一般只需粘贴邀请码即可加入。" +
-                            "加入后将共享育儿记录与日志图片。",
+                        "已预填当前 Wi‑Fi 与常见服务器地址。可点扫码图标扫描邀请二维码，" +
+                            "也可手动粘贴邀请码。加入后将共享育儿记录与日志图片。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -422,7 +507,28 @@ fun OnboardingRoute(
                         onValueChange = { joinCode = it },
                         label = { Text("邀请码或 QR 载荷") },
                         singleLine = true,
+                        trailingIcon = {
+                            IconButton(onClick = { requestOrLaunchInviteScan() }) {
+                                Icon(
+                                    imageVector = Icons.Outlined.QrCodeScanner,
+                                    contentDescription = "扫码填入邀请",
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
                     )
+                    OutlinedButton(
+                        onClick = { requestOrLaunchInviteScan() },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.QrCodeScanner,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Spacer(Modifier.size(8.dp))
+                        Text("扫码填入邀请码")
+                    }
                     formError?.let { err ->
                         Text(err, color = MaterialTheme.colorScheme.error)
                     }

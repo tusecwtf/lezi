@@ -23,11 +23,15 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -75,6 +79,7 @@ import com.lezi.babylog.domain.babyAgeLabel
 import com.lezi.babylog.sync.SyncNotEnabledException
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.FamilyRole
+import com.lezi.babylog.sync.HomeLanServerConfig
 import com.lezi.babylog.sync.InvitePayload
 import com.lezi.babylog.sync.InvitePayloadCodec
 import com.lezi.babylog.sync.PUBLIC_CLEARTEXT_WARNING
@@ -300,10 +305,25 @@ class FamilyViewModel @Inject constructor(
             onResult(
                 result
                     .map {
+                        val session = ui.value
+                        val host = session.serverHost.ifBlank {
+                            HomeLanServerConfig.fromBaseUrl(session.baseUrl).host
+                        }
+                        val port = session.serverPort.takeIf { p -> p in 1..65535 }
+                            ?: HomeLanServerConfig.fromBaseUrl(session.baseUrl).port
+                        val base = session.baseUrl.ifBlank {
+                            HomeLanServerConfig(host = host, port = port).baseUrl
+                        }
                         FamilyInviteView(
                             code = it.code,
                             payload = InvitePayloadCodec.encode(
-                                InvitePayload(ui.value.baseUrl, it.code),
+                                InvitePayload(
+                                    baseUrl = base,
+                                    code = it.code,
+                                    host = host,
+                                    port = port,
+                                    ssids = session.allowedSsids,
+                                ),
                             ),
                             expiresAt = it.expiresAt,
                         )
@@ -533,12 +553,32 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
     var mergePreview by remember { mutableStateOf<BabyMergePreview?>(null) }
     var inviteView by remember { mutableStateOf<FamilyInviteView?>(null) }
     val familyContext = LocalContext.current
-    val scanInvite = rememberLauncherForActivityResult(ScanContract()) { result ->
-        val payload = result.contents?.trim().orEmpty()
-        if (payload.isNotEmpty()) {
-            joinCode = payload
-            showJoin = true
+    fun applyScannedInvite(raw: String) {
+        val payload = raw.trim()
+        if (payload.isEmpty()) return
+        joinCode = payload
+        runCatching { InvitePayloadCodec.decode(payload) }.getOrNull()?.let { decoded ->
+            val config = decoded.homeLanConfig
+            if (config.host.isNotBlank()) {
+                serverHost = config.host
+                serverPort = config.port.toString()
+            }
+            if (decoded.ssids.isNotEmpty()) {
+                ssid1 = decoded.ssids.getOrNull(0).orEmpty()
+                ssid2 = decoded.ssids.getOrNull(1).orEmpty()
+            }
+            message = buildString {
+                append("已扫入邀请")
+                if (config.host.isNotBlank()) append(" · ${config.host}:${config.port}")
+                if (decoded.ssids.isNotEmpty()) {
+                    append(" · Wi‑Fi ${decoded.ssids.joinToString(" / ")}")
+                }
+            }
         }
+        showJoin = true
+    }
+    val scanInvite = rememberLauncherForActivityResult(ScanContract()) { result ->
+        result.contents?.let(::applyScannedInvite)
     }
     fun launchInviteScan() {
         if (!CameraCapture.hasCameraHardware(familyContext)) {
@@ -876,7 +916,43 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                         onValueChange = { joinCode = it },
                         label = { Text("邀请码或 QR JSON 载荷") },
                         singleLine = true,
+                        trailingIcon = {
+                            IconButton(
+                                onClick = {
+                                    if (CameraCapture.hasPermission(familyContext)) {
+                                        launchInviteScan()
+                                    } else {
+                                        scanCameraPermission.launch(CameraCapture.PERMISSION)
+                                    }
+                                },
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.QrCodeScanner,
+                                    contentDescription = "扫码填入邀请",
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
                     )
+                    Spacer(Modifier.height(LeziSpacing.Sm))
+                    OutlinedButton(
+                        onClick = {
+                            if (CameraCapture.hasPermission(familyContext)) {
+                                launchInviteScan()
+                            } else {
+                                scanCameraPermission.launch(CameraCapture.PERMISSION)
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.QrCodeScanner,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Spacer(Modifier.size(8.dp))
+                        Text("扫码填入邀请码")
+                    }
                 }
             },
             confirmButton = {
@@ -910,7 +986,7 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                     verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
                 ) {
                     Text(
-                        "请勿在公共场合展示；截屏与录屏已暂时禁用。",
+                        "二维码含服务器地址与已保存的家庭 Wi‑Fi 名称，对方扫码可自动填入。请勿在公共场合展示；截屏与录屏已暂时禁用。",
                         style = LeziTypography.Meta,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

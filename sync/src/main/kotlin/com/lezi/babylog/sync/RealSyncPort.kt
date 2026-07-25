@@ -487,8 +487,7 @@ class RealSyncPort @Inject constructor(
             val parsed = HomeLanServerConfig.fromBaseUrl(baseUrl).withNormalized()
             require(parsed.isServerConfigured) { "请先填写家庭服务器地址" }
             val merged = parsed.copy(allowedSsids = previous.allowedSsids)
-            // Before join: clear stale upload receipts for the old host.
-            // After join (G10): keep token; receipts reset + cursor zeroed in prefs.
+            // Changing hosts invalidates upload receipts from the previous server.
             if (previous.baseUrl.isNotBlank() && previous.baseUrl != merged.baseUrl) {
                 resetLocalSyncReceipts(previous)
             }
@@ -502,7 +501,7 @@ class RealSyncPort @Inject constructor(
         syncMutex.withLock {
             val previous = preferences.session.first()
             val merged = config.withNormalized().let { c ->
-                // Keep existing SSIDs if caller only updated host/port with empty list by mistake
+                // An empty SSID list must not erase an existing allowlist on a host-only update.
                 if (c.allowedSsids.isEmpty() && previous.allowedSsids.isNotEmpty() && c.host == previous.serverHost) {
                     c.copy(allowedSsids = previous.allowedSsids)
                 } else {
@@ -537,19 +536,22 @@ class RealSyncPort @Inject constructor(
             }
             val decoded = InvitePayloadCodec.decode(payload)
             val previous = preferences.session.first()
-            val fromQr = decoded.baseUrl.takeIf { it.isNotBlank() }?.let { HomeLanServerConfig.fromBaseUrl(it) }
+            val fromQr = decoded.homeLanConfig.takeIf { it.isServerConfigured }
+                ?: decoded.baseUrl.takeIf { it.isNotBlank() }?.let { HomeLanServerConfig.fromBaseUrl(it) }
             val baseConfig = (fromQr ?: previous.homeLanConfig).withNormalized()
             val currentSsid = networkState.currentWifiSsid()?.trim().orEmpty()
-            val ssids = previous.allowedSsids.toMutableList()
-            if (currentSsid.isNotEmpty() && !HomeNetworkPolicy.isUnknownSsid(currentSsid)) {
-                if (ssids.none { it == currentSsid }) {
-                    if (ssids.size >= MAX_ALLOWED_SSIDS) {
-                        error("Wi‑Fi 名称已满 2 个，请先删除一个再绑定当前网络")
-                    }
-                    ssids += currentSsid
-                }
+            // Prefer QR-carried SSIDs (owner's home Wi‑Fi names), then local, then current.
+            val ssids = HomeLanServerConfig.normalizeSsids(
+                decoded.ssids + previous.allowedSsids + listOfNotNull(
+                    currentSsid.takeIf {
+                        it.isNotEmpty() && !HomeNetworkPolicy.isUnknownSsid(it)
+                    },
+                ),
+            )
+            require(ssids.isNotEmpty()) {
+                "请先填写家庭 Wi‑Fi 名称（扫码邀请若未带 Wi‑Fi 名，可手动填写）"
             }
-            val config = baseConfig.copy(allowedSsids = HomeLanServerConfig.normalizeSsids(ssids))
+            val config = baseConfig.copy(allowedSsids = ssids)
             preferences.saveHomeLanConfig(config, clearSessionIfServerChanged = false)
             val decision = policy.evaluate(config, foregroundState.isForeground())
             requireAllowed(decision)
@@ -557,7 +559,7 @@ class RealSyncPort @Inject constructor(
             val deviceId = preferences.ensureDeviceId()
             val joined = backend.join(baseUrl, decoded.code, deviceId)
             persistJoin(baseUrl, deviceId, joined).also {
-                // re-persist SSIDs after join session write
+                // The join response replaces session fields, so restore the local-only SSID allowlist.
                 val after = preferences.session.first()
                 preferences.saveHomeLanConfig(
                     after.homeLanConfig.copy(allowedSsids = config.allowedSsids),
@@ -910,8 +912,7 @@ class RealSyncPort @Inject constructor(
             }
         }
         deletedLocalUris.forEach { mediaFiles.delete(it) }
-        // Keep the parameter explicit: media bytes are authorized by this same
-        // session during the immediately following reconciliation.
+        // The applied batch must belong to the joined session that authorized its media.
         check(session.isJoined)
     }
 

@@ -5,9 +5,10 @@
 > 本文定义 **中心化 NAS + 仅前台 + 硬家庭 Wi‑Fi** 的完整架构与 NAS Docker 后端。
 >
 > **交付状态（2026-07-25）：** Android 与 `tools/lezi-sync` 实现及自动化已完成；
-> 本机 rootless Docker 和双模拟器 formula/pee 前台交叉可见已验证。Ticket 09
-> 仍为 partial：相机扫码、日志图跨端 UI、蜂窝/回家冲刷、通知与独立设置待验；
-> 不宣称 NAS 生产部署或全部设备级 Must 通过。
+> 本机 rootless Docker 和双模拟器 formula/pee 前台交叉可见已验证；严格使用
+> `192.168.50.4:8765` 的服务端还完成了建家、邀请码加入、双向协议记录与头像 ACL。
+> Ticket 09 仍为 partial：相机扫码、日志图跨端 UI、蜂窝/回家冲刷、通知与独立设置待验；
+> 不宣称物理 NAS 生产部署或全部设备级 Must 通过。
 
 ---
 
@@ -31,7 +32,7 @@
 | 6b | 落盘布局 | **data 与 media 同一数据根路径**（单 volume） |
 | 7 | 多家庭 | **一家一栈** 交付；schema 保留 `family_id`，不多租户产品化 |
 | 8 | 触发 | **回前台 + 下拉 + 前台写成功后 push**；无后台、无 60s 定时、无推送拉同步 |
-| 9 | 服务器地址 | **单一** host（IP/域名）+ **端口**（默认 8765）→ `baseUrl=http://{host}:{port}`；**SSID 白名单最多 2**（共用该 host:port，不为每个 SSID 记不同 IP）；**邀请 QR 仍含 baseUrl + code**；可手改 |
+| 9 | 服务器地址 | **单一** host（IP/域名）+ **端口**（默认 8765）→ `baseUrl=http://{host}:{port}`；**SSID 白名单最多 2**（共用该 host:port，不为每个 SSID 记不同 IP）；**邀请 QR 含 baseUrl/host/port + code + 可选 ssids≤2**；可手改 |
 | 9b | 小白默认（空态预填） | host 预填 **`192.168.50.4`**，端口 **8765**，SSID 第一格预填 **当前连接 Wi‑Fi 名**（可读时）；预填 ≠ 已保存，保存/加入成功后才持久化 |
 | 10 | 退出 / 删除 | member 可 leave；owner 二次确认后**删除家庭数据**；**leave 与 delete 成功后本机均清空** host/port、SSID 白名单与会话 token |
 | 11 | 持久化引擎 | 首版 **SQLite**；API 不绑死引擎，可替换 |
@@ -214,8 +215,10 @@ SSID 白名单 **仅存本机**，不随家庭同步到 NAS。两台手机可登
 | 非家网 | 不调用 NAS；本地可用 |
 | 无推送 | 伴侣新记录不弹通知 |
 
-当前证据仅闭合双模拟器 formula/pee 前台路径；完整设备级状态以
-`.scratch/home-lan-sync/issues/09-dual-device-foreground-acceptance.md` 为准。
+当前验收闭合了本机 Docker、双模拟器 formula/pee UI 交叉可见，以及严格 live
+服务端上的建家、邀请码加入、双向协议记录与头像 ACL。相机扫码、日志图 UI、
+蜂窝/回家冲刷、伴侣通知和双端独立设置仍未闭合；完整状态以
+[Ticket 09](../../.scratch/home-lan-sync/issues/09-dual-device-foreground-acceptance.md) 为准。
 
 ---
 
@@ -380,8 +383,10 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health` 外均需 Bearer（`create`/`joi
 - Auth：owner token
 - Body：`{ "family_id" }`（可从 token 推导则可不传）
 - 响应：`{ "code", "expires_at" }`，`expires_at` 为 Unix epoch 秒
-- 客户端生成 QR：建议载荷 JSON
-  `{ "v":1, "baseUrl":"http://192.168.50.4:8765", "code":"ABCD1234" }`
+- 客户端生成 QR：建议载荷 JSON（含 host/port 与本机已保存的 Wi‑Fi 名，便于对方预填）
+  `{ "v":1, "baseUrl":"http://192.168.50.4:8765", "host":"192.168.50.4", "port":8765, "ssids":["Home-2.4G","Home-5G"], "code":"ABCD1234" }`
+  - `ssids` 最多 2 个，可选；扫码端写入本机白名单（仍不上传服务器）
+  - 兼容旧载荷：仅 `baseUrl`+`code` 或纯邀请码
 
 ### 9.4 `POST /v1/join`
 
@@ -531,7 +536,7 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health` 外均需 Bearer（`create`/`joi
 |----|------|
 | `data-model.md` SyncPort | 仍成立；V2 规则以 **本文** 为网络与触发权威 |
 | 旧「约 60s 可见」 | **废止为后台 SLA**；改为 §5.4 前台验收 |
-| `tools/lezi-sync` | 本文 NAS API 的交付实现；Docker/NAS 运行仍需有容器环境验收 |
+| `tools/lezi-sync` | 本文 NAS API 的交付实现；本机 Docker 已验，物理 NAS 生产部署未宣称 |
 | `RealSyncPort` | 已对齐持久会话、无默认 baseUrl、家网/前台门闩、Outbox 与媒体 |
 | 双端 P2P | 不在范围 |
 
@@ -574,6 +579,7 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health` 外均需 Bearer（`create`/`joi
 
 | 日期 | 说明 |
 |------|------|
+| 2026-07-26 | 严格 live 服务端完成双模拟器建家、邀请码加入、双向协议与头像 ACL；Ticket 09 仍 partial |
 | 2026-07-25 | NAS 服务原位迁移为 Rust/Axum/Tokio/rusqlite；保留 HTTP、SQLite 与 token 派生兼容，删除重复原型入口 |
 | 2026-07-25 | 验收校正：本机 Docker 与双模拟器 formula/pee 已验；Ticket 09 保持 partial |
 | 2026-07-25 | 实现收口：Android、`tools/lezi-sync` 与自动化完成；明确 NAS/完整设备环境验收待补 |
