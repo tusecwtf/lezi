@@ -72,7 +72,7 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
-/** Settings / callers: "dropdown" (24h menus) or "dial" (clock + 上午/下午). */
+/** Settings / callers: "dropdown" (24h menus) or "dial" (24h clock + 上午/下午 ±12). */
 const val TIME_PICKER_STYLE_DROPDOWN = "dropdown"
 const val TIME_PICKER_STYLE_DIAL = "dial"
 
@@ -81,10 +81,12 @@ const val TIME_PICKER_STYLE_DIAL = "dial"
  *
  * [timePickerStyle]:
  * - [TIME_PICKER_STYLE_DROPDOWN]: 数字时钟 — 24-hour hour/minute dropdowns
- * - [TIME_PICKER_STYLE_DIAL]: 指针时钟 — clock face + vertical 上午/下午 chips
- *   beside the hour/minute display (side follows [preferredHand]).
+ * - [TIME_PICKER_STYLE_DIAL]: 指针时钟 — 24h face + hour/minute boxes (00–23) +
+ *   vertical 上午/下午 chips that only ±12 (side follows [preferredHand]).
+ *   Wall clock only: midnight is 0:00, noon is 12:00, never 24:00.
  *
  * Date stays a separate calendar card. Callers still enforce domain rules.
+ * Confirm always emits hour in 0–23 from the same selected state the UI shows.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -109,27 +111,27 @@ fun LeziClockDialDialog(
     // Thumb side: left-handed → chips left of hour/minute; right-handed → chips right.
     val periodOnStart = preferredHand != "right"
 
-    // Dropdown-mode state (24h)
+    // Single source of truth for both styles: wall-clock hour 0–23 (never 24).
+    // Midnight is 0:00; noon is 12:00. 上午/下午 only ±12 within that range.
     var selectedHour by remember(value) { mutableIntStateOf(initialTick.hour) }
     var selectedMinute by remember(value) { mutableIntStateOf(initialTick.minute) }
 
-    // Dial-mode: 24h internal hours so Material does not draw a second AM/PM control.
-    // 上午/下午 is only the custom vertical chip column beside the hour/minute boxes.
+    // Dial face: Material 24h picker (no built-in AM/PM). Custom chips only do ±12.
     val pickerState = rememberTimePickerState(
         initialHour = initialTick.hour,
         initialMinute = initialTick.minute,
         is24Hour = true,
     )
-    var isAm by remember(value) {
-        mutableStateOf(initialTick.hour < 12)
-    }
-    LaunchedEffect(pickerState.hour, pickerState.minute, step) {
+    // Dial drag/tap → snap → selectedHour/Minute (confirm always reads selected*).
+    LaunchedEffect(useDial, pickerState.hour, pickerState.minute, step) {
+        if (!useDial) return@LaunchedEffect
         val snapped = snapClock(pickerState.hour, pickerState.minute, step)
         if (pickerState.hour != snapped.hour || pickerState.minute != snapped.minute) {
             pickerState.hour = snapped.hour
             pickerState.minute = snapped.minute
         }
-        isAm = snapped.hour < 12
+        if (selectedHour != snapped.hour) selectedHour = snapped.hour
+        if (selectedMinute != snapped.minute) selectedMinute = snapped.minute
     }
 
     val hourOptions = remember { (0..23).toList() }
@@ -140,23 +142,15 @@ fun LeziClockDialDialog(
     }
 
     fun setPeriodAm(wantAm: Boolean) {
-        val h = pickerState.hour
-        if (wantAm && h >= 12) {
-            pickerState.hour = h - 12
-        } else if (!wantAm && h < 12) {
-            pickerState.hour = h + 12
+        val newHour = applyClockPeriod(selectedHour, wantAm)
+        selectedHour = newHour
+        if (useDial) {
+            pickerState.hour = newHour
         }
-        isAm = wantAm
         clockError = null
     }
 
-    fun resolvedHourMinute(): Pair<Int, Int> {
-        return if (useDial) {
-            pickerState.hour to pickerState.minute
-        } else {
-            selectedHour to selectedMinute
-        }
-    }
+    fun resolvedHourMinute(): Pair<Int, Int> = selectedHour to selectedMinute
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -203,7 +197,9 @@ fun LeziClockDialDialog(
                     // TimePicker's built-in display is clipped away; we draw our own with 上午/下午.
                     DialTimePickerBody(
                         pickerState = pickerState,
-                        isAm = isAm,
+                        hour24 = selectedHour,
+                        minute = selectedMinute,
+                        isAm = isClockAm(selectedHour),
                         periodOnStart = periodOnStart,
                         onSelectAm = { setPeriodAm(true) },
                         onSelectPm = { setPeriodAm(false) },
@@ -388,18 +384,19 @@ private val ClockFaceBottomMargin = 24.dp
 @Composable
 private fun DialTimePickerBody(
     pickerState: TimePickerState,
+    hour24: Int,
+    minute: Int,
     isAm: Boolean,
     periodOnStart: Boolean,
     onSelectAm: () -> Unit,
     onSelectPm: () -> Unit,
 ) {
-    val hour12 = hour24To12(pickerState.hour)
     val hourSelected = pickerState.selection == TimePickerSelectionMode.Hour
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        // One centered unit: [上午/下午?] [时] : [分] [上午/下午?]
+        // One centered unit: [上午/下午?] [时 0–23] : [分] [上午/下午?]
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (periodOnStart) {
                 PeriodToggle(
@@ -410,8 +407,8 @@ private fun DialTimePickerBody(
                 Spacer(Modifier.width(PeriodToggleGap))
             }
             DialClockDisplay(
-                hour = hour12,
-                minute = pickerState.minute,
+                hour = hour24,
+                minute = minute,
                 hourSelected = hourSelected,
                 onHourClick = { pickerState.selection = TimePickerSelectionMode.Hour },
                 onMinuteClick = { pickerState.selection = TimePickerSelectionMode.Minute },
@@ -457,10 +454,10 @@ private fun DialClockDisplay(
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         TimeSelectorBox(
-            text = "%d".format(hour.coerceIn(1, 12)),
+            text = "%02d".format(hour.coerceIn(0, 23)),
             selected = hourSelected,
             onClick = onHourClick,
-            contentDescription = "选择小时",
+            contentDescription = "选择小时，24 小时制",
         )
         Box(
             modifier = Modifier
@@ -591,14 +588,22 @@ private fun PeriodToggleHalf(
     }
 }
 
-private fun hour24To12(hour24: Int): Int {
+/**
+ * 上午/下午 quick toggle on a 24h wall clock (0–23).
+ * 下午 adds 12 when still in the morning half; 上午 subtracts 12 when in the afternoon half.
+ * Already in the requested half → unchanged. Midnight is 0; noon is 12; never 24.
+ */
+internal fun applyClockPeriod(hour24: Int, wantAm: Boolean): Int {
     val h = hour24.coerceIn(0, 23)
     return when {
-        h == 0 -> 12
-        h > 12 -> h - 12
+        wantAm && h >= 12 -> h - 12
+        !wantAm && h < 12 -> h + 12
         else -> h
     }
 }
+
+/** Morning half-day: hours 0–11 (includes midnight 0:00). Noon 12:00 is afternoon. */
+internal fun isClockAm(hour24: Int): Boolean = hour24.coerceIn(0, 23) < 12
 
 @Composable
 private fun ChineseLocale(content: @Composable () -> Unit) {
