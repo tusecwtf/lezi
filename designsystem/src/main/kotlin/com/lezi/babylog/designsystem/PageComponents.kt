@@ -59,7 +59,7 @@ fun PageScaffoldBackground(content: @Composable BoxScope.() -> Unit) {
     )
 }
 
-/** Prototype top brand strip: 乐 mark + 乐记 + tagline + search/theme. */
+/** Brand strip aligned to AppHeaderBar: 68dp coral fill, 乐 mark + tagline + tools. */
 @Composable
 fun AppBrandBar(
     onSearch: (() -> Unit)? = null,
@@ -67,32 +67,41 @@ fun AppBrandBar(
     dark: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
+    // Match AppHeaderBar surface + ink so account/menu top chrome lines up with log tabs.
+    val background = if (dark) MaterialTheme.colorScheme.surface else LeziColors.JournalAccent
+    val content = if (dark) MaterialTheme.colorScheme.onSurface else Color(0xFF271015)
     Row(
         modifier
             .fillMaxWidth()
-            .padding(horizontal = LeziSpacing.Page, vertical = 10.dp),
+            .height(68.dp)
+            .background(background)
+            .padding(horizontal = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
             Modifier
-                .size(42.dp)
+                .size(34.dp)
                 .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.primary),
+                .background(content.copy(alpha = 0.18f)),
             contentAlignment = Alignment.Center,
         ) {
             Text(
                 "乐",
-                color = MaterialTheme.colorScheme.onPrimary,
+                color = content,
                 style = LeziTypography.TitleSm.copy(fontWeight = FontWeight.Bold),
             )
         }
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
-            Text("乐记", style = LeziTypography.TitleSm.copy(fontWeight = FontWeight.SemiBold))
+            Text(
+                "乐记",
+                color = content,
+                style = LeziTypography.TitleSm.copy(fontWeight = FontWeight.SemiBold),
+            )
             Text(
                 "今天也好好长大",
                 style = LeziTypography.Meta,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = content.copy(alpha = 0.82f),
             )
         }
         if (onSearch != null) {
@@ -100,7 +109,7 @@ fun AppBrandBar(
                 Icon(
                     Icons.Outlined.Search,
                     contentDescription = "搜索",
-                    tint = MaterialTheme.colorScheme.onSurface,
+                    tint = content,
                 )
             }
         }
@@ -109,7 +118,7 @@ fun AppBrandBar(
                 Icon(
                     if (dark) Icons.Filled.DarkMode else Icons.Outlined.DarkMode,
                     contentDescription = "切换深色",
-                    tint = MaterialTheme.colorScheme.onSurface,
+                    tint = content,
                 )
             }
         }

@@ -354,7 +354,7 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
             verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
         ) {
             com.lezi.babylog.designsystem.PageHero(
-                eyebrow = "一起照顾，一起记",
+                eyebrow = "",
                 title = "账户",
                 subtitle = "宝宝档案、家庭成员和同步设置都在这里。",
             )

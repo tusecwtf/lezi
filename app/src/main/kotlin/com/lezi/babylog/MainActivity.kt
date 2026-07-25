@@ -64,6 +64,7 @@ import androidx.navigation.compose.rememberNavController
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.ui.UiTags
+import com.lezi.babylog.designsystem.AppBrandBar
 import com.lezi.babylog.designsystem.LeziColors
 import com.lezi.babylog.designsystem.LeziTheme
 import com.lezi.babylog.domain.CareLog
@@ -254,6 +255,16 @@ class RootViewModel @Inject constructor(
         }
     }
 
+    fun toggleDark() {
+        viewModelScope.launch {
+            val next = when (ui.value.darkMode) {
+                "dark" -> "light"
+                else -> "dark"
+            }
+            settings.setDarkMode(next)
+        }
+    }
+
     fun shiftDay(delta: Long) {
         updateSelectedDate(dayFlow.value.plusDays(delta))
     }
@@ -339,6 +350,10 @@ fun LeziRoot(
         TopDest.Summary.route,
         TopDest.Growth.route,
     )
+    val showBrandHeader = current in setOf(
+        TopDest.Family.route,
+        TopDest.Settings.route,
+    )
 
     LaunchedEffect(today) {
         vm.refreshToday()
@@ -356,39 +371,60 @@ fun LeziRoot(
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
-            if (!hideChrome && showContextHeader) {
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .background(
-                            if (dark) {
-                                MaterialTheme.colorScheme.surface
-                            } else {
-                                LeziColors.JournalAccent
+            when {
+                !hideChrome && showContextHeader -> {
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(
+                                if (dark) {
+                                    MaterialTheme.colorScheme.surface
+                                } else {
+                                    LeziColors.JournalAccent
+                                },
+                            )
+                            .statusBarsPadding(),
+                    ) {
+                        AppHeaderBar(
+                            babyName = ui.baby?.nickname.orEmpty(),
+                            babyAge = ui.baby?.let { babyAgeLabel(it.birthdayEpochDay) }.orEmpty(),
+                            avatarPath = ui.baby?.avatarPath,
+                            sleeping = ui.sleeping,
+                            selectedDate = ui.selectedDate,
+                            today = today,
+                            canCycleBaby = ui.babies.size > 1,
+                            canGoNext = ui.selectedDate.isBefore(today),
+                            dark = dark,
+                            onCycleBaby = { vm.cycleBaby() },
+                            onPreviousDate = { vm.shiftDay(-1) },
+                            onNextDate = { vm.shiftDay(1) },
+                            onOpenDatePicker = {
+                                displayedMonth = YearMonth.from(ui.selectedDate)
+                                vm.setCalendarMonth(displayedMonth)
+                                showHeaderCalendar = true
                             },
+                            onSearch = { nav.navigate("search") },
                         )
-                        .statusBarsPadding(),
-                ) {
-                    AppHeaderBar(
-                        babyName = ui.baby?.nickname.orEmpty(),
-                        babyAge = ui.baby?.let { babyAgeLabel(it.birthdayEpochDay) }.orEmpty(),
-                        avatarPath = ui.baby?.avatarPath,
-                        sleeping = ui.sleeping,
-                        selectedDate = ui.selectedDate,
-                        today = today,
-                        canCycleBaby = ui.babies.size > 1,
-                        canGoNext = ui.selectedDate.isBefore(today),
-                        dark = dark,
-                        onCycleBaby = { vm.cycleBaby() },
-                        onPreviousDate = { vm.shiftDay(-1) },
-                        onNextDate = { vm.shiftDay(1) },
-                        onOpenDatePicker = {
-                            displayedMonth = YearMonth.from(ui.selectedDate)
-                            vm.setCalendarMonth(displayedMonth)
-                            showHeaderCalendar = true
-                        },
-                        onSearch = { nav.navigate("search") },
-                    )
+                    }
+                }
+                !hideChrome && showBrandHeader -> {
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(
+                                if (dark) {
+                                    MaterialTheme.colorScheme.surface
+                                } else {
+                                    LeziColors.JournalAccent
+                                },
+                            )
+                            .statusBarsPadding(),
+                    ) {
+                        AppBrandBar(
+                            onToggleTheme = { vm.toggleDark() },
+                            dark = dark,
+                        )
+                    }
                 }
             }
         },
