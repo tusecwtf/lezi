@@ -226,12 +226,12 @@
 
 | 层 | 选型 | 理由 |
 |----|------|------|
-| 语言 | **Python 3.12** | NAS 上易维护；`python:3.12-slim` 镜像小 |
-| Web 框架 | **FastAPI** | 路由/OpenAPI 清晰；原生适合 multipart 上传与 Bearer 依赖注入 |
-| ASGI 服务器 | **Uvicorn**（单 worker） | SQLite 友好；家用负载极低 |
-| DB 访问 | **stdlib `sqlite3`**（或 SQLAlchemy 2 可选，**非必须**） | 零额外运维；一家一栈足够 |
+| 语言 | **Rust 2021** | 单二进制、低常驻内存、无解释器运行时，适合 NAS 长期运行 |
+| Web 框架 | **Axum** | typed extractor、流式 body 与 Tokio 生态；HTTP interface 易于直接测试 |
+| 异步运行时 | **Tokio**（单进程） | family 写路径由应用锁串行，SQLite 事务继续保证原子性 |
+| DB 访问 | **rusqlite + bundled SQLite** | 镜像不依赖外部数据库或宿主 SQLite 版本 |
 | 鉴权 | Bearer token，哈希存库（如 SHA-256） | 不存明文 token |
-| 容器基座 | **`python:3.12-slim`** | 体积与安全基线平衡 |
+| 容器基座 | **Rust builder + `debian:bookworm-slim` runtime** | 最终镜像只含 Rust 二进制和最小运行时 |
 | 编排 | **Docker Compose 单服务** | 一家一栈 |
 | 反向代理 | **可选**（Caddy/Nginx 做 HTTPS） | 默认不强制；规格预留 |
 | 队列 / Redis / Postgres | **不引入（首版）** | 降低 NAS 复杂度 |
@@ -240,10 +240,10 @@
 
 | 选项 | 原因 |
 |------|------|
-| 纯 stdlib 永久作为唯一实现 | 路由校验、鉴权依赖与 OpenAPI 可维护性差；**交付规格以 FastAPI 为准** |
+| 保留多语言并行实现 | 两套服务器会产生协议漂移和 NAS 误部署；Rust 是唯一交付实现 |
 | PostgreSQL 必选 | 家用过重；见决策 11，引擎可替换但不默认 |
 | 与 App 同仓强制用 Kotlin 后端 | NAS 部署与镜像生态更差 |
-| 多 worker + SQLite | 写锁风险；单 worker 即可 |
+| 多进程 + SQLite | 跨进程 family 锁失效；当前交付保持单进程 |
 
 ### 7.2 仓库布局（交付）
 
@@ -252,21 +252,24 @@ tools/
   lezi-sync/                 # NAS 交付后端（规格名）
     Dockerfile
     docker-compose.yml
-    pyproject.toml / requirements.txt
+    Cargo.toml
+    Cargo.lock
     README.md                # 部署：端口、DATA_DIR、备份
-    app/
-      main.py                # FastAPI 入口
-      db.py
+    src/
+      main.rs                # 进程入口与内置 healthcheck
+      lib.rs                 # HTTP interface + 安全文件/媒体实现
+      model.rs               # 严格 wire 校验
+      store.rs               # SQLite 事务、LWW、ACL
     tests/
-      test_api.py
+      api.rs                 # 与客户端相同的 Router/HTTP interface
 ```
 
 ### 7.3 依赖（已实现）
 
 ```text
-fastapi>=0.115
-uvicorn>=0.30
-# 无数据库服务器依赖
+axum + tokio
+rusqlite (bundled SQLite)
+serde + uuid + hmac/sha2
 ```
 
 ### 7.4 进程与配置
@@ -277,9 +280,11 @@ uvicorn>=0.30
 | `LEZI_HOST` | `0.0.0.0` | |
 | `LEZI_PORT` | `8765` | |
 | `LEZI_INVITE_TTL_HOURS` | `24` | |
-| `LEZI_TLS_CERTFILE` / `LEZI_TLS_KEYFILE` | 空 | 非空则 HTTPS |
+| `LEZI_MAX_MEDIA_BYTES` | `10485760` | 单媒体大小上限 |
 
-单 worker：`uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8765 --workers 1`
+服务进程：`lezi-sync`。容器健康检查调用 `lezi-sync healthcheck`，不依赖 shell、
+curl 或解释器。HTTPS 由 NAS 的 Caddy/Nginx/系统反向代理终止；容器端口只暴露
+在家庭 LAN 或私有 Docker 网络。
 
 ---
 
@@ -516,13 +521,13 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health` 外均需 Bearer（`create`/`joi
 
 ### 14.1 NAS `lezi-sync`
 
-- [x] FastAPI 项目骨架 + Dockerfile + compose（静态单卷 `/data` 配置）
+- [x] Rust/Axum 项目骨架 + 多阶段 Dockerfile + compose（静态单卷 `/data` 配置）
 - [x] SQLite schema：entities、invites、tokens、meta.rev
 - [x] health / create / invite / join / push / pull / media / leave / delete
 - [x] avatar 写权限
 - [x] README：部署、备份、示例 `192.168.50.4:8765`
-- [x] 在本机 rootless Docker 构建并启动镜像，核对单卷与容器 `/health`
-  （未宣称 NAS 生产）
+- [x] 在本机全局 Docker 构建并启动 Rust 镜像，核对单卷、非 root、`/health`
+  与旧数据卷升级兼容（未宣称 NAS 生产）
 
 ### 14.2 Android
 
@@ -547,6 +552,7 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health` 外均需 Bearer（`create`/`joi
 
 | 日期 | 说明 |
 |------|------|
+| 2026-07-25 | NAS 服务原位迁移为 Rust/Axum/Tokio/rusqlite；保留 HTTP、SQLite 与 token 派生兼容，删除重复原型入口 |
 | 2026-07-25 | 验收校正：本机 Docker 与双模拟器 formula/pee 已验；Ticket 09 保持 partial |
 | 2026-07-25 | 实现收口：Android、`tools/lezi-sync` 与自动化完成；明确 NAS/完整设备环境验收待补 |
-| 2026-07-25 | grilling 锁定 Wi‑Fi/NAS 策略；明确 Python/FastAPI/Uvicorn/SQLite；DATA_DIR 合并 db+media；写入本规格 |
+| 2026-07-25 | grilling 锁定 Wi‑Fi/NAS 策略；DATA_DIR 合并 db+media；写入本规格 |

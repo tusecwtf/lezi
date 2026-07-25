@@ -20,7 +20,7 @@
 | 计时 | 前台服务 + 状态持久化 | 关 App 仍跑 |
 | Widget | Glance（V1.5） | |
 | 同步 | `RealSyncPort` + 家局域网 NAS | 已实现持久会话、家网/前台门闩、Outbox、Bearer push/pull 与媒体 |
-| NAS 后端 | **Python 3.12 + FastAPI + Uvicorn + SQLite** | 交付物 `tools/lezi-sync`；单卷 `DATA_DIR`（db+media） |
+| NAS 后端 | **Rust + Axum + Tokio + SQLite** | 交付物 `tools/lezi-sync`；单二进制、单卷 `DATA_DIR`（db+media） |
 | IAP / 广告 | **不引入** | |
 | 测试 | JUnit + 聚合纯函数单测 + 关键 Compose 测试 | |
 

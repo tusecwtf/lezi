@@ -53,7 +53,7 @@
     - `09-dual-path/device/` (shots, dumps, device-notes.txt)
     - `live-api.json`, `android-sync-tests.txt`
     - device-ui track: `device-ui.md`, `device-ui/shots/`, `device-ui/logs/`
-  - Regression (supporting, not dual-phone): pytest 26 passed/1 skipped;
+  - Regression (supporting, not dual-phone): legacy server suite 26 passed/1 skipped;
     Gradle `:sync:test` + `:feature:family:testDebugUnitTest` 103 tests pass
     (`regression/regression-summary.md`).
   - **Not claimed:** two physical phones, dual-device QR join, NAS production deploy,

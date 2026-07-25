@@ -1,13 +1,14 @@
 services:
   lezi-sync:
-    image: ${LEZI_SYNC_IMAGE:-lezi-sync:0.1.0}
+    image: ${LEZI_SYNC_IMAGE:-lezi-sync:0.2.0}
     build:
       context: .
       dockerfile: Dockerfile
       args:
-        LEZI_SYNC_VERSION: ${LEZI_SYNC_VERSION:-0.1.0}
-    container_name: lezi-sync
+        LEZI_SYNC_VERSION: ${LEZI_SYNC_VERSION:-0.2.0}
     restart: unless-stopped
+    stop_grace_period: 30s
+    init: true
     ports:
       - "${LEZI_SYNC_PORT:-8765}:8765"
     environment:
@@ -16,18 +17,19 @@ services:
       LEZI_PORT: "8765"
       LEZI_INVITE_TTL_HOURS: ${LEZI_INVITE_TTL_HOURS:-24}
       LEZI_MAX_MEDIA_BYTES: ${LEZI_MAX_MEDIA_BYTES:-10485760}
-      LEZI_TLS_CERTFILE: ${LEZI_TLS_CERTFILE:-}
-      LEZI_TLS_KEYFILE: ${LEZI_TLS_KEYFILE:-}
     volumes:
       - ${LEZI_DATA_HOST_PATH:-./data}:/data
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import os,ssl,urllib.request; s='https' if os.getenv('LEZI_TLS_CERTFILE') else 'http'; c=ssl._create_unverified_context() if s == 'https' else None; urllib.request.urlopen(f'{s}://127.0.0.1:8765/health', timeout=2, context=c)",
-        ]
+      test: ["CMD", "lezi-sync", "healthcheck"]
       interval: 30s
       timeout: 3s
       retries: 3

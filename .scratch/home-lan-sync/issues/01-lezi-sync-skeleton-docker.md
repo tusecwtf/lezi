@@ -8,7 +8,7 @@
 
 交付路径 `tools/lezi-sync/`：
 
-- Python 3.12 + **FastAPI** + **Uvicorn**（单 worker）
+- Rust + **Axum** + **Tokio**（单进程）
 - `Dockerfile` + `docker-compose.yml` + `build-image.sh`
 - 环境变量 `LEZI_DATA_DIR`（默认 `/data`）
 - 单数据根：`$DATA_DIR/lezi.db` + `$DATA_DIR/media/`
@@ -35,10 +35,15 @@
 
 ## Comments
 
-- 2026-07-25：`tools/lezi-sync/` 已包含 FastAPI/Uvicorn/SQLite 服务、
+- 2026-07-25：`tools/lezi-sync/` 已原位迁移为 Rust/Axum/Tokio/rusqlite 服务，
   Dockerfile、Compose、`build-image.sh`、单 `/data` 挂载、非 root 用户及部署/备份说明。
-- API 测试通过 ASGI seam 验证 `/health` 会在同一数据根创建 `lezi.db` 与 `media/`；
+- Rust interface 测试通过 Router seam 验证 `/health` 会在同一数据根创建 `lezi.db` 与 `media/`；
   shell 脚本语法也已校验。
+- 2026-07-25 **Rust migration acceptance**：全局 Docker 构建
+  `lezi-sync:0.2.0`（29,738,684 bytes）；容器以 `10001:10001` 运行；
+  health、认证、push/pull、媒体和旧卷升级均通过。物理 NAS 部署等待明确远端
+  host/user/data path。证据：
+  `docs/reviews/home-lan-sync-rust-migration-2026-07-25/REPORT.md`。
 - 2026-07-25 **runtime acceptance (docker-01)** — **Status → done**
   - **Rootless Docker** active (`DOCKER_HOST=unix:///run/user/$(id -u)/docker.sock`,
     rootlesskit). Host user **cannot** readdir volume `_data` directly; single-volume

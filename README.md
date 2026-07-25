@@ -39,16 +39,14 @@ adb shell am start -n com.lezi.babylog.debug/com.lezi.babylog.MainActivity
 规格（门闩、前台策略、NAS 选型与 API）：[`docs/prd/sync-home-lan.md`](docs/prd/sync-home-lan.md)
 
 交付实现：Android `:sync` / `:feature:family` +
-[`tools/lezi-sync`](tools/lezi-sync/)（FastAPI、Uvicorn、SQLite、Docker
+[`tools/lezi-sync`](tools/lezi-sync/)（Rust、Axum、Tokio、SQLite、Docker
 单卷）。客户端不内置服务器地址；须在账户页填写家中 NAS 地址或扫描邀请 QR。
 
 ```bash
 # 本机运行 API 与自动化测试
 cd tools/lezi-sync
-python3.12 -m venv .venv
-. .venv/bin/activate
-pip install -e '.[test]'
-pytest
+cargo test --locked
+cargo clippy --all-targets --all-features -- -D warnings
 
 # 在有 Docker 的 NAS/主机上构建并启动
 ./build-image.sh
@@ -61,8 +59,8 @@ Android 模拟器调试本机服务时，在账户页手动填写
 
 ## 已知限制
 
-- **同步**：实现与自动化已完成；当前交付环境无 Docker/Podman、无 ADB
-  双设备与 NAS 家网，镜像运行及双机前台链路仍待环境验收；未宣称已部署
+- **同步**：Rust 服务端、Android 实现与自动化已完成；本机 Docker 与双模拟器
+  已有支撑验收，物理双设备与 NAS 生产部署仍待目标环境执行；未宣称已部署
 - **同步策略**：仅家 Wi‑Fi + NAS 可达 + App 前台；无后台轮询和伴侣记录通知；
   设置/深色**不同步**
 - **成长曲线**：离线内置 WHO 0–24 月、分性别参考数据，**非医疗诊断**

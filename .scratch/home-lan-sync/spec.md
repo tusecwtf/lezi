@@ -21,7 +21,7 @@ Supersedes: `.scratch/v2-delivery` 中同步相关票 01–03 的「公网/后�
 
 ## Solution
 
-1. NAS 部署 **`lezi-sync`**（Python 3.12 + FastAPI + Uvicorn + SQLite，Docker 单卷 `DATA_DIR` = db + media）
+1. NAS 部署 **`lezi-sync`**（Rust + Axum + Tokio + SQLite，Docker 单卷 `DATA_DIR` = db + media）
 2. Android：`HomeNetworkPolicy` + 持久化 `baseUrl`/token/cursor；**无内置默认地址**；QR 可带 baseUrl+code
 3. 触发：回前台、下拉、前台写成功 push；**无**后台轮询、**无**推送拉同步
 4. 同步域首版：**Baby + Record + 日志 MediaAsset**；头像仅 owner 可改
@@ -48,7 +48,12 @@ Supersedes: `.scratch/v2-delivery` 中同步相关票 01–03 的「公网/后�
 
 ### 交付状态（2026-07-25）
 
-- Android 与服务端实现、单元/API 自动化测试已完成（含 pytest 与 Gradle 模块回归）。
+- Android 与服务端实现、单元/API 自动化测试已完成（含 Cargo 与 Gradle 模块回归）。
+- **Rust migration local acceptance passed**：`lezi-sync:0.2.0` 为 29.7 MB
+  非 root 镜像；完整 HTTP/媒体 smoke 通过；旧 `0.1.0` 写入的数据卷由
+  `0.2.0` 原位读取，owner token、family 与 cursor 兼容。物理 NAS 上线仍需
+  明确远端目标。证据：
+  `docs/reviews/home-lan-sync-rust-migration-2026-07-25/REPORT.md`。
 - **01 Docker runtime done（本机 rootless Docker）**：镜像存在；`lezi-sync` 健康于
   `:8765`；单卷 `lezi-sync-data` 含 `lezi.db` + `media/`；`/health` 200 + version。
   **未**宣称 NAS 生产部署。证据：`docs/reviews/home-lan-sync-docker-acceptance-2026-07-25/01-docker/`。

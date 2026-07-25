@@ -1,0 +1,38 @@
+[package]
+name = "lezi-sync"
+version = "0.2.0"
+edition = "2021"
+description = "Lezi family home-LAN sync server for NAS"
+license = "MIT"
+publish = false
+
+[dependencies]
+axum = { version = "0.8.8", features = ["json"] }
+base64 = "0.22.1"
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+futures-util = "0.3.32"
+hex = "0.4.3"
+hmac = "0.12.1"
+http-body-util = "0.1.3"
+libc = "0.2.183"
+rand = "0.8.6"
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+sha2 = "0.10.9"
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "signal", "net", "sync"] }
+tower-http = { version = "0.6.11", features = ["trace"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+uuid = { version = "1.23.4", features = ["serde", "v4"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tower = { version = "0.5.3", features = ["util"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+strip = true

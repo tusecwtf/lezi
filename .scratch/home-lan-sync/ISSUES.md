@@ -50,8 +50,13 @@ PRD: [`docs/prd/sync-home-lan.md`](../../docs/prd/sync-home-lan.md)
 
 ## 验证边界（2026-07-25）
 
-- 实现与自动化：Android 单元测试、`lezi-sync` API/pytest、`:sync` / `:feature:family`
+- 实现与自动化：Android 单元测试、`lezi-sync` Rust HTTP interface、`:sync` / `:feature:family`
   模块测试已通过（见 `docs/reviews/home-lan-sync-docker-acceptance-2026-07-25/regression/`）。
+- **Rust migration local acceptance passed**：全局 Docker 构建
+  `lezi-sync:0.2.0`/`latest`；非 root、health、认证、push/pull、媒体通过；
+  旧 `0.1.0` 数据卷升级到 `0.2.0` 后 token/family/entity/cursor 保持兼容。
+  临时容器/卷和旧本地镜像已清理。证据：
+  `docs/reviews/home-lan-sync-rust-migration-2026-07-25/REPORT.md`。
 - **01 Docker runtime done（本机 rootless Docker，非 NAS 生产）**：镜像
   `lezi-sync:0.1.0`/`latest` 存在；容器 `lezi-sync` 健康监听 `:8765`；命名卷
   `lezi-sync-data` 下同一路径含 `lezi.db` + `media/`（alpine 挂载证明；host 无法直接

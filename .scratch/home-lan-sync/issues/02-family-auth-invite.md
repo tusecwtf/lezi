@@ -39,5 +39,5 @@
 
 ## Comments
 
-- 2026-07-25：`tools/lezi-sync/tests/test_api.py` 覆盖建家重试、token 哈希、
+- 2026-07-25：`tools/lezi-sync/tests/api.rs` 覆盖建家重试、token 哈希、
   邀请/过期/重复消费、角色权限、退出吊销与 owner 删除；API 自动化通过。

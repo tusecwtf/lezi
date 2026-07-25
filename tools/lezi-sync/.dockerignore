@@ -1,10 +1,7 @@
 .git
 .gitignore
-.pytest_cache
-**/__pycache__
-**/*.py[cod]
-**/*.egg-info
-.venv
+target
 data
 data-*
+*.db
 tests
