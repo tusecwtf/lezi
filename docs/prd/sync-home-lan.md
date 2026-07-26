@@ -466,8 +466,8 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
   展示「我的家庭」/「{宝宝昵称}的家庭」）；最长 64 个 Unicode 字符；控制字符或
   Unicode 双向文本格式控制符 → `422`
 - 响应：`{ "ok": true, "family_name": "…" | null }`
-- 与 create 的可选 `family_name` 同一规范化规则。冷启动时客户端依赖本机会话缓存
-  的家庭名（create/join/rename 回写）；本路由不另提供 GET 读路径
+- 与 create 的可选 `family_name` 同一规范化规则。改名发起端立即回写本机会话缓存；
+  其他已加入成员在下一次允许的前台/下拉 pull 中收敛；不另提供 GET 读路径
 
 ### 9.6 `POST /v1/push`
 
@@ -510,7 +510,14 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 
 - Auth：token
 - 响应：
-  `{ "entities":[...], "cursor": <本页已扫描 rev>, "generation": "...", "has_more": true|false }`
+  `{ "entities":[...], "cursor": <本页已扫描 rev>, "generation": "...", "has_more": true|false, "family_name": "…"|null }`
+- 新服务端每个成功页（包括零实体页）都返回 NAS 权威、已规范化的 `family_name`。
+  客户端要求同轮多页中所有 present 值一致；若并发改名导致页间值变化，本轮失败
+  并从最后完整检查点重试，不能静默采用最后一页。客户端必须区分三态：旧 NAS
+  省略字段时保留本地缓存；显式 `null` 清空缓存并让 UI 使用「我的家庭」/宝宝昵称兜底；字符串覆盖
+  缓存。家庭名与该页 `cursor` / `generation` 在同一次 DataStore edit 中发布，不能
+  用整份旧 session 覆盖并发更新的 membership、SSID 等字段。full-resync 延迟发布
+  cursor 时，家庭名也随最终完整检查点一起发布；中途失败不发布半轮 metadata。
 - 服务端按实体数（默认最多 200）与序列化体积（目标最多 8 MiB）双重分页；
   `has_more=true` 时客户端必须用本页 `cursor` 继续拉取。每页 apply 与缺失媒体落盘
   全部成功后才持久化该页 cursor，任一页失败只重试未完成页。full-resync 在重新

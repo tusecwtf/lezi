@@ -1296,6 +1296,75 @@ async fn shared_family_name_persists_on_create_join_and_owner_rename() {
 }
 
 #[tokio::test]
+async fn zero_entity_pull_reports_family_name_value_and_null_across_restart() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "pull-family-name-owner",
+        "pull-family-name-owner-request-000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let member = invite_and_join(&rig.app, owner_token, "pull-family-name-member").await;
+    let member_token = member["token"].as_str().unwrap();
+
+    let (rename_status, rename_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/name",
+        Some(owner_token),
+        json!({"family_name": "  小星星一家  "}),
+    )
+    .await;
+    assert_eq!(rename_status, StatusCode::OK, "{rename_body}");
+    let (value_status, value_pull) =
+        get_json(&rig.app, "/v1/pull?cursor=0", Some(member_token)).await;
+    assert_eq!(value_status, StatusCode::OK, "{value_pull}");
+    assert_eq!(value_pull["entities"], json!([]));
+    assert_eq!(value_pull["family_name"], "小星星一家");
+
+    let restarted = rig.restart("generation-b");
+    let (restart_value_status, restart_value_pull) =
+        get_json(&restarted, "/v1/pull?cursor=0", Some(member_token)).await;
+    assert_eq!(restart_value_status, StatusCode::OK, "{restart_value_pull}");
+    assert_eq!(restart_value_pull["entities"], json!([]));
+    assert_eq!(restart_value_pull["family_name"], "小星星一家");
+
+    let (clear_status, clear_body) = json_request(
+        &restarted,
+        Method::POST,
+        "/v1/family/name",
+        Some(owner_token),
+        json!({"family_name": null}),
+    )
+    .await;
+    assert_eq!(clear_status, StatusCode::OK, "{clear_body}");
+    let (null_status, null_pull) =
+        get_json(&restarted, "/v1/pull?cursor=0", Some(member_token)).await;
+    assert_eq!(null_status, StatusCode::OK, "{null_pull}");
+    assert_eq!(null_pull["entities"], json!([]));
+    assert!(
+        null_pull.as_object().unwrap().contains_key("family_name"),
+        "new NAS must distinguish explicit null from an omitted legacy field: {null_pull}"
+    );
+    assert!(null_pull["family_name"].is_null(), "{null_pull}");
+
+    let restarted_again = rig.restart("generation-c");
+    let (restart_null_status, restart_null_pull) =
+        get_json(&restarted_again, "/v1/pull?cursor=0", Some(member_token)).await;
+    assert_eq!(restart_null_status, StatusCode::OK, "{restart_null_pull}");
+    assert_eq!(restart_null_pull["entities"], json!([]));
+    assert!(
+        restart_null_pull
+            .as_object()
+            .unwrap()
+            .contains_key("family_name"),
+        "restarted NAS omitted explicit null: {restart_null_pull}"
+    );
+    assert!(restart_null_pull["family_name"].is_null());
+}
+
+#[tokio::test]
 async fn family_members_project_canonical_memberships_without_role_promotion() {
     let rig = Rig::new();
     let owner = create_family(
@@ -2429,6 +2498,15 @@ async fn pull_pages_large_bootstrap_without_skipping_the_remaining_entities() {
     )
     .await;
     let token = owner["token"].as_str().unwrap();
+    let (rename_status, rename_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/name",
+        Some(token),
+        json!({"family_name": "分页家庭"}),
+    )
+    .await;
+    assert_eq!(rename_status, StatusCode::OK, "{rename_body}");
     let entities = (0..201)
         .map(|index| {
             json!({
@@ -2454,12 +2532,14 @@ async fn pull_pages_large_bootstrap_without_skipping_the_remaining_entities() {
     assert_eq!(first["entities"].as_array().unwrap().len(), 200);
     assert_eq!(first["cursor"], 200);
     assert_eq!(first["has_more"], true);
+    assert_eq!(first["family_name"], "分页家庭");
 
     let (second_status, second) = get_json(&rig.app, "/v1/pull?cursor=200", Some(token)).await;
     assert_eq!(second_status, StatusCode::OK);
     assert_eq!(second["entities"].as_array().unwrap().len(), 1);
     assert_eq!(second["cursor"], 201);
     assert_eq!(second["has_more"], false);
+    assert_eq!(second["family_name"], first["family_name"]);
 }
 
 #[tokio::test]

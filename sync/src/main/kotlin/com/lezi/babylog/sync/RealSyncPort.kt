@@ -1685,6 +1685,7 @@ class RealSyncPort @Inject constructor(
             null
         }
         var pageCount = 0
+        var observedFamilyName: PullFamilyName.Present? = null
         do {
             require(pageCount < MAX_PULL_PAGE_COUNT) {
                 "家庭服务器同步超过 $MAX_PULL_PAGE_COUNT 页上限，请稍后重试"
@@ -1710,6 +1711,13 @@ class RealSyncPort @Inject constructor(
                     "家庭服务器在分页期间切换了同步代际"
                 }
             }
+            val pageFamilyName = normalizedPulledFamilyName(pulled.familyName)
+            if (pageFamilyName is PullFamilyName.Present) {
+                require(observedFamilyName == null || observedFamilyName == pageFamilyName) {
+                    "家庭服务器在分页期间变更了家庭名，请重试"
+                }
+                if (observedFamilyName == null) observedFamilyName = pageFamilyName
+            }
             authoritativeMemberAvatarPointers?.let { pointers ->
                 pulled.entities
                     .filter { it.type == "baby" }
@@ -1730,7 +1738,11 @@ class RealSyncPort @Inject constructor(
             downloadMissingMedia(current, mediaEditGuard)
             val nextGeneration = pulled.generation.ifBlank { current.pullGeneration }
             if (!deferCursorUntilComplete) {
-                preferences.updateCursor(pulled.cursor, nextGeneration)
+                preferences.updatePullCheckpoint(
+                    cursor = pulled.cursor,
+                    generation = nextGeneration,
+                    familyName = pageFamilyName,
+                )
                 current = preferences.session.first()
             } else {
                 // The authoritative pre-push phase of full resync must not
@@ -1740,6 +1752,10 @@ class RealSyncPort @Inject constructor(
                 current = current.copy(
                     pullCursor = pulled.cursor,
                     pullGeneration = nextGeneration,
+                    familyName = resolvePulledFamilyName(
+                        previous = current.familyName,
+                        pulled = pageFamilyName,
+                    ),
                 )
             }
         } while (pulled.hasMore == true)
@@ -1749,7 +1765,11 @@ class RealSyncPort @Inject constructor(
             }
         }
         if (deferCursorUntilComplete) {
-            preferences.updateCursor(current.pullCursor, current.pullGeneration)
+            preferences.updatePullCheckpoint(
+                cursor = current.pullCursor,
+                generation = current.pullGeneration,
+                familyName = observedFamilyName ?: PullFamilyName.Omitted,
+            )
             current = preferences.session.first()
         }
         return current
@@ -2293,6 +2313,21 @@ class RealSyncPort @Inject constructor(
             },
         ).toString()
     }
+}
+
+private fun normalizedPulledFamilyName(pulled: PullFamilyName): PullFamilyName = when (pulled) {
+    PullFamilyName.Omitted -> PullFamilyName.Omitted
+    is PullFamilyName.Present -> PullFamilyName.Present(
+        normalizeFamilyNameForWire(pulled.value),
+    )
+}
+
+private fun resolvePulledFamilyName(
+    previous: String?,
+    pulled: PullFamilyName,
+): String? = when (pulled) {
+    PullFamilyName.Omitted -> previous
+    is PullFamilyName.Present -> normalizeFamilyNameForWire(pulled.value)
 }
 
 private fun HomeNetworkDecision.userMessage(): String = when (this) {

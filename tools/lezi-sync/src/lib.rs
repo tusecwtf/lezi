@@ -660,6 +660,7 @@ async fn pull_entities(
         "cursor": page.cursor,
         "generation": state.generation,
         "has_more": page.has_more,
+        "family_name": page.family_name,
     })))
 }
 

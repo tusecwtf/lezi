@@ -35,6 +35,8 @@ class FakeSyncBackend : SyncBackend {
         mutableMapOf<String, MutableMap<String, MutableMap<String, ByteArray>>>()
     /** When false, atomic bundle calls throw [AtomicBundleUnsupportedException]. */
     var supportsAtomicBundle: Boolean = true
+    /** Set false to simulate a legacy NAS that omits pull `family_name`. */
+    var includesFamilyNameInPull: Boolean = true
     private var revision = 0L
     private var membershipSeq = 0
 
@@ -617,6 +619,11 @@ class FakeSyncBackend : SyncBackend {
         return PullResult(
             changed.map { it.entity.copy(rev = it.rev) },
             changed.lastOrNull()?.rev ?: cursor,
+            familyName = if (includesFamilyNameInPull) {
+                PullFamilyName.Present(familyNames[familyId])
+            } else {
+                PullFamilyName.Omitted
+            },
         )
     }
 }

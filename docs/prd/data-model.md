@@ -361,7 +361,14 @@ enum class SyncStatus {
 |------|------|
 | `serverHost` / `serverPort` | 单一 NAS；port 默认 8765；派生 `baseUrl=http://host:port` |
 | `allowedSsids` | 最多 2 个；trim 后精确匹配当前 Wi‑Fi 名 |
-| 会话字段 | `familyId` / token / role / cursor / generation（同前） |
+| 会话身份字段 | `familyId` / token / role / `membershipId`（同前） |
+| pull 检查点 | `cursor` / `generation` / `familyName` 缓存；成功页原子更新 |
+
+`familyName` 是 NAS 权威共享家庭名的本机会话缓存：create/join/本机 rename 会立即
+写入；之后每次允许的前台/下拉 pull 都可刷新，即使该页没有实体。新版 NAS 显式
+返回 `null` 时清空缓存并走产品兜底；旧 NAS 省略字段时保留缓存。更新检查点只改
+`cursor`、`generation` 和 presence-aware `familyName`，不得覆盖并发变化的家庭身份
+或本机网络配置。
 
 ### 6.2 接口（契约级，语言示意）
 

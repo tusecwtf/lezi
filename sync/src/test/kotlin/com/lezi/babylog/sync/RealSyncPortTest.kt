@@ -939,6 +939,190 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun zeroEntityPullAppliesFamilyNameTriStateWithoutOverwritingConcurrentSessionFields() =
+        runTest {
+            val valueRig = SyncRig(
+                session = joinedSession("family-a").copy(
+                    familyName = "旧名字",
+                    membershipId = "membership-before",
+                    pullCursor = 4,
+                    pullGeneration = "g0",
+                ),
+            )
+            valueRig.backend.nextPull = PullResult(
+                entities = emptyList(),
+                cursor = 5,
+                generation = "g0",
+                familyName = PullFamilyName.Present("  NAS 新名字  "),
+            )
+            valueRig.backend.beforePullReturn = {
+                valueRig.preferences.saveSession(
+                    valueRig.preferences.current().copy(
+                        familyName = "本机并发名字",
+                        membershipId = "membership-concurrent",
+                        allowedSsids = listOf("Home", "Backup"),
+                    ),
+                )
+            }
+
+            assertThat(valueRig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+            assertThat(valueRig.preferences.current().familyName).isEqualTo("NAS 新名字")
+            assertThat(valueRig.preferences.current().pullCursor).isEqualTo(5)
+            assertThat(valueRig.preferences.current().pullGeneration).isEqualTo("g0")
+            assertThat(valueRig.preferences.current().membershipId)
+                .isEqualTo("membership-concurrent")
+            assertThat(valueRig.preferences.current().allowedSsids)
+                .containsExactly("Home", "Backup")
+                .inOrder()
+
+            val nullRig = SyncRig(
+                session = joinedSession("family-a").copy(familyName = "旧名字"),
+            )
+            nullRig.backend.nextPull = PullResult(
+                entities = emptyList(),
+                cursor = 1,
+                generation = "g1",
+                familyName = PullFamilyName.Present(null),
+            )
+
+            assertThat(nullRig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+            assertThat(nullRig.preferences.current().familyName).isNull()
+            assertThat(nullRig.preferences.current().pullCursor).isEqualTo(1)
+            assertThat(nullRig.preferences.current().pullGeneration).isEqualTo("g1")
+
+            val omittedRig = SyncRig(
+                session = joinedSession("family-a").copy(familyName = "旧名字"),
+            )
+            omittedRig.backend.nextPull = PullResult(
+                entities = emptyList(),
+                cursor = 1,
+                generation = "g1",
+                familyName = PullFamilyName.Omitted,
+            )
+
+            assertThat(omittedRig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+            assertThat(omittedRig.preferences.current().familyName).isEqualTo("旧名字")
+            assertThat(omittedRig.preferences.current().pullCursor).isEqualTo(1)
+            assertThat(omittedRig.preferences.current().pullGeneration).isEqualTo("g1")
+        }
+
+    @Test
+    fun fakeBackendConvergesFamilyNameAcrossTwoClientsOnZeroEntityPull() = runTest {
+        val sharedBackend = FakeSyncBackend()
+        val ownerJoin = sharedBackend.create(
+            baseUrl = "http://192.168.1.20:8787",
+            deviceId = "owner-device",
+            displayName = "妈妈",
+            createRequestId = "create-request-family-name-convergence",
+            bootstrapSecret = "bootstrap",
+            familyName = "旧家庭名",
+        )
+        val ownerSession = joinedSession(ownerJoin.familyId).copy(
+            familyToken = ownerJoin.token,
+            deviceId = "owner-device",
+            role = ownerJoin.role,
+            familyName = ownerJoin.familyName,
+            membershipId = ownerJoin.membershipId.orEmpty(),
+        )
+        val invite = sharedBackend.invite(ownerSession)
+        val memberJoin = sharedBackend.join(
+            baseUrl = ownerSession.baseUrl,
+            code = invite.code,
+            deviceId = "member-device",
+            displayName = "爸爸",
+        )
+        val memberSession = joinedSession(memberJoin.familyId).copy(
+            familyToken = memberJoin.token,
+            deviceId = "member-device",
+            role = memberJoin.role,
+            familyName = memberJoin.familyName,
+            membershipId = memberJoin.membershipId.orEmpty(),
+        )
+        val ownerRig = SyncRig(ownerSession, syncBackend = sharedBackend)
+        val memberRig = SyncRig(memberSession, syncBackend = sharedBackend)
+
+        assertThat(ownerRig.port.renameFamily("  新家庭名  ").isSuccess).isTrue()
+        assertThat(memberRig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        assertThat(memberRig.preferences.current().familyName).isEqualTo("新家庭名")
+        assertThat(memberRig.records.listPendingSync()).isEmpty()
+
+        assertThat(ownerRig.port.renameFamily("  ").isSuccess).isTrue()
+        assertThat(memberRig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        assertThat(memberRig.preferences.current().familyName).isNull()
+        assertThat(memberRig.records.listPendingSync()).isEmpty()
+
+        memberRig.preferences.saveSession(
+            memberRig.preferences.current().copy(familyName = "旧 NAS 本地缓存"),
+        )
+        sharedBackend.includesFamilyNameInPull = false
+        assertThat(ownerRig.port.renameFamily("NAS 未下发名字").isSuccess).isTrue()
+
+        assertThat(memberRig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        assertThat(memberRig.preferences.current().familyName).isEqualTo("旧 NAS 本地缓存")
+    }
+
+    @Test
+    fun multiPagePullKeepsFamilyNameFromEarlierPresentEnvelope() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(
+                familyName = "旧名字",
+                pullGeneration = "g1",
+            ),
+        )
+        rig.backend.pullResults += PullResult(
+            entities = emptyList(),
+            cursor = 1,
+            generation = "g1",
+            hasMore = true,
+            familyName = PullFamilyName.Present("  分页新名字  "),
+        )
+        rig.backend.pullResults += PullResult(
+            entities = emptyList(),
+            cursor = 1,
+            generation = "g1",
+            hasMore = false,
+            familyName = PullFamilyName.Omitted,
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+
+        assertThat(rig.preferences.current().familyName).isEqualTo("分页新名字")
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(1)
+        assertThat(rig.preferences.current().pullGeneration).isEqualTo("g1")
+    }
+
+    @Test
+    fun multiPagePullRejectsConflictingFamilyNamesInsteadOfUsingTheLastPage() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(
+                familyName = "拉取前名字",
+                pullGeneration = "g1",
+            ),
+        )
+        rig.backend.pullResults += PullResult(
+            entities = emptyList(),
+            cursor = 1,
+            generation = "g1",
+            hasMore = true,
+            familyName = PullFamilyName.Present("第一页名字"),
+        )
+        rig.backend.pullResults += PullResult(
+            entities = emptyList(),
+            cursor = 1,
+            generation = "g1",
+            hasMore = false,
+            familyName = PullFamilyName.Present("第二页名字"),
+        )
+
+        val result = rig.port.sync(SyncTrigger.PullToRefresh)
+
+        assertThat(result.isFailure).isTrue()
+        assertThat(result.exceptionOrNull()?.message).contains("分页期间变更了家庭名")
+        assertThat(rig.preferences.current().familyName).isEqualTo("第一页名字")
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(1)
+    }
+
+    @Test
     fun blankBootstrapSecretFailsBeforePolicyOrBackendIo() = runTest {
         val rig = SyncRig(
             session = SyncSession(
@@ -4573,6 +4757,22 @@ private class MemorySyncPreferences(initial: SyncSession) : SyncPreferences {
         )
     }
 
+    override suspend fun updatePullCheckpoint(
+        cursor: Long,
+        generation: String,
+        familyName: PullFamilyName,
+    ) {
+        val current = state.value
+        state.value = current.copy(
+            pullCursor = cursor,
+            pullGeneration = generation,
+            familyName = when (familyName) {
+                PullFamilyName.Omitted -> current.familyName
+                is PullFamilyName.Present -> normalizeFamilyNameForWire(familyName.value)
+            },
+        )
+    }
+
     override suspend fun markSuccess(atMillis: Long) {
         state.value = state.value.copy(lastSuccessAt = atMillis)
     }
@@ -4659,6 +4859,7 @@ private class SyncRig(
     healthCapabilities: Set<String> = setOf(CAPABILITY_ATOMIC_BUNDLE),
     healthCapabilitiesSequence: List<Set<String>> = emptyList(),
     carePlanApplied: suspend (List<String>) -> Unit = {},
+    syncBackend: SyncBackend? = null,
 ) {
     val backend = RecordingSyncBackend()
     val preferences = MemorySyncPreferences(session)
@@ -4695,7 +4896,7 @@ private class SyncRig(
         clock = clock,
     )
     val port = RealSyncPort(
-        backend = backend,
+        backend = syncBackend ?: backend,
         preferences = preferences,
         policy = policy,
         networkState = networkState,

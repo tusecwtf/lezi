@@ -9,12 +9,19 @@ data class SyncEntity(
     val rev: Long = 0,
 )
 
+sealed interface PullFamilyName {
+    data object Omitted : PullFamilyName
+    data class Present(val value: String?) : PullFamilyName
+}
+
 data class PullResult(
     val entities: List<SyncEntity>,
     val cursor: Long,
     val generation: String = "",
     /** Null means a legacy response omitted the additive `has_more` field. */
     val hasMore: Boolean? = null,
+    /** Presence-aware shared family name from the pull response envelope. */
+    val familyName: PullFamilyName = PullFamilyName.Omitted,
 )
 
 /** Server-owned Record author returned after an accepted push or atomic commit. */

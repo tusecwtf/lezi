@@ -65,6 +65,11 @@ interface SyncPreferences {
     suspend fun saveHomeLanConfig(config: HomeLanServerConfig, clearSessionIfServerChanged: Boolean = true)
     suspend fun saveSession(session: SyncSession)
     suspend fun updateCursor(cursor: Long, generation: String = "")
+    suspend fun updatePullCheckpoint(
+        cursor: Long,
+        generation: String,
+        familyName: PullFamilyName,
+    )
     suspend fun markSuccess(atMillis: Long)
     suspend fun ensureDeviceId(): String
     suspend fun ensureCreateRequestId(): String
@@ -223,6 +228,31 @@ class DataStoreSyncPreferences @Inject constructor(
                 it.remove(Keys.PULL_GENERATION)
             } else {
                 it[Keys.PULL_GENERATION] = generation
+            }
+        }
+    }
+
+    override suspend fun updatePullCheckpoint(
+        cursor: Long,
+        generation: String,
+        familyName: PullFamilyName,
+    ) {
+        migratePlaintextTokenIfPresent()
+        val normalizedFamilyName = (familyName as? PullFamilyName.Present)
+            ?.let { normalizeFamilyNameForWire(it.value) }
+        dataStore.edit {
+            it[Keys.PULL_CURSOR] = cursor.coerceAtLeast(0)
+            if (generation.isBlank()) {
+                it.remove(Keys.PULL_GENERATION)
+            } else {
+                it[Keys.PULL_GENERATION] = generation
+            }
+            if (familyName is PullFamilyName.Present) {
+                if (normalizedFamilyName == null) {
+                    it.remove(Keys.FAMILY_NAME)
+                } else {
+                    it[Keys.FAMILY_NAME] = normalizedFamilyName
+                }
             }
         }
     }

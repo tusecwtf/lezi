@@ -205,6 +205,54 @@ class HttpSyncBackendTest {
     }
 
     @Test
+    fun pullDistinguishesOmittedNullAndValueFamilyName() = runTest {
+        val server = ServerSocket(0, 3, InetAddress.getByName("127.0.0.1"))
+        val bodies = ArrayDeque(
+            listOf(
+                """{"entities":[],"cursor":0,"generation":"g"}""",
+                """{"entities":[],"cursor":0,"generation":"g","family_name":null}""",
+                """{"entities":[],"cursor":0,"generation":"g","family_name":"  乐乐一家  "}""",
+            ),
+        )
+        val responder = thread(name = "lezi-family-name-pull-test-server") {
+            repeat(3) {
+                runCatching {
+                    server.accept().use { socket ->
+                        readRequest(socket)
+                        val body = bodies.removeFirst().toByteArray(Charsets.UTF_8)
+                        socket.getOutputStream().use { output ->
+                            output.write(
+                                (
+                                    "HTTP/1.1 200 OK\r\n" +
+                                        "Content-Type: application/json\r\n" +
+                                        "Content-Length: ${body.size}\r\n" +
+                                        "Connection: close\r\n\r\n"
+                                ).toByteArray(Charsets.US_ASCII),
+                            )
+                            output.write(body)
+                        }
+                    }
+                }
+            }
+        }
+
+        try {
+            val backend = HttpSyncBackend()
+            val session = testSession(server)
+
+            assertThat(backend.pull(session).familyName)
+                .isEqualTo(PullFamilyName.Omitted)
+            assertThat(backend.pull(session).familyName)
+                .isEqualTo(PullFamilyName.Present(null))
+            assertThat(backend.pull(session).familyName)
+                .isEqualTo(PullFamilyName.Present("乐乐一家"))
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
     fun createSendsBootstrapSecretOnlyAsTheExpectedHeader() = runTest {
         val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
         val captured = CompletableFuture<String>()

@@ -128,6 +128,7 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
             cursor = json["cursor"]?.jsonPrimitive?.longOrNull ?: session.pullCursor,
             generation = json["generation"]?.jsonPrimitive?.contentOrNull.orEmpty(),
             hasMore = json["has_more"]?.jsonPrimitive?.booleanOrNull,
+            familyName = json.pullFamilyName(),
         )
     }
 
@@ -524,6 +525,19 @@ private fun JsonObject.toJoinResult(): JoinResult = JoinResult(
         ?.trim()
         ?.takeIf { it.isNotEmpty() },
 )
+
+private fun JsonObject.pullFamilyName(): PullFamilyName {
+    if ("family_name" !in this) return PullFamilyName.Omitted
+    val value = when (val raw = get("family_name")) {
+        null, JsonNull -> null
+        is JsonPrimitive -> {
+            require(raw.isString) { "family_name must be a string or null" }
+            raw.contentOrNull
+        }
+        else -> error("family_name must be a string or null")
+    }
+    return PullFamilyName.Present(normalizeFamilyNameForWire(value))
+}
 
 internal class SyncHttpException(
     val statusCode: Int,

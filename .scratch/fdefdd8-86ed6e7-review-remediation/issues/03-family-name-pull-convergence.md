@@ -4,7 +4,7 @@
 
 **Blocked by:** 02；07（均为交付排序依赖，避免同时修改 sync response/session surface）
 
-**Status:** ready-for-agent
+**Status:** in-progress（自动化完成，双设备 / Docker smoke pending）
 
 **Size:** M
 **Review finding:** P2 #3 — family name 只更新改名发起设备
@@ -33,13 +33,13 @@
 
 ## Acceptance criteria
 
-- [ ] owner A rename 后，member B 在下一次 Foreground/PullToRefresh 成功 pull 后看到新家庭名，无需重加、清数据或打开成员列表。
-- [ ] pull cursor 已在最新且返回 0 entity 时仍刷新家庭名。
-- [ ] owner 将家庭名清空时，B 收到 explicit null 并使用产品 fallback；不能因 Kotlin nullable 混淆而保留旧名。
-- [ ] 旧 NAS 省略字段时保留本地 cache，不误清空、不崩溃。
-- [ ] family-name cache 与 pull cursor/generation 的写入顺序不会把新名字与旧 session 覆盖；并发 rename/local session save 有测试。
-- [ ] 多页 pull 任一页返回的 family metadata 一致；服务端测试锁定，客户端不以最后一页偶然字段决定语义。
-- [ ] Fake backend 能模拟 omitted/null/value，用于 RealSyncPort 双客户端测试。
+- [x] owner A rename 后，member B 在下一次 Foreground/PullToRefresh 成功 pull 后看到新家庭名，无需重加、清数据或打开成员列表（Fake 双客户端自动化；最终设备复验待办）。
+- [x] pull cursor 已在最新且返回 0 entity 时仍刷新家庭名。
+- [x] owner 将家庭名清空时，B 收到 explicit null 并使用产品 fallback；不能因 Kotlin nullable 混淆而保留旧名。
+- [x] 旧 NAS 省略字段时保留本地 cache，不误清空、不崩溃。
+- [x] family-name cache 与 pull cursor/generation 的写入顺序不会把新名字与旧 session 覆盖；并发 rename/local session save 有测试。
+- [x] 多页 pull 任一页返回的 family metadata 一致；服务端测试锁定稳定页，客户端检测并发改名造成的页间冲突并失败重试，不以最后一页偶然字段决定语义。
+- [x] Fake backend 能模拟 omitted/null/value，用于 RealSyncPort 双客户端测试。
 - [ ] 原 family-identity ticket 02 的“全员一致”acceptance 完成并回写 `partial → done`，附测试/双设备证据。
 
 ## Validation
@@ -62,4 +62,5 @@
 
 ## Comments
 
-- 当前 create/join/owner rename 只写发起设备 DataStore；members list 也不保证在前台同步执行，因此不能承担收敛。
+- 实现前 create/join/owner rename 只写发起设备 DataStore，members list 也不能承担收敛；现由既有 pull envelope 负责跨设备刷新。
+- 2026-07-27 自动化证据：Rust 13 unit + 69 API；Android sync 199（1 个既有外部 fixture skipped）+ family 22；Fake 双客户端覆盖 value / explicit null / legacy omitted，DataStore 测试覆盖原子检查点与并发 session 字段保留；Standards/Spec 双轴复核均为 Critical 0 / Important 0。最终 Docker + 双模拟器 smoke 后再关闭本票与原 ticket 02。

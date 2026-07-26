@@ -52,6 +52,7 @@ pub struct PullPage {
     pub entities: Vec<PulledEntity>,
     pub cursor: i64,
     pub has_more: bool,
+    pub family_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -879,10 +880,15 @@ impl Store {
 
     pub fn pull(&self, family_id: &str, cursor: i64) -> Result<PullPage, StoreError> {
         let connection = self.connect()?;
-        let current: i64 = connection.query_row(
-            "SELECT rev FROM family_meta WHERE family_id = ?1",
+        let (current, family_name): (i64, Option<String>) = connection.query_row(
+            "
+            SELECT family_meta.rev, families.name
+            FROM family_meta
+            JOIN families ON families.id = family_meta.family_id
+            WHERE family_meta.family_id = ?1
+            ",
             params![family_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         if cursor > current {
             return Err(StoreError::CursorAhead(current));
@@ -954,6 +960,7 @@ impl Store {
             entities,
             cursor: page_cursor,
             has_more,
+            family_name,
         })
     }
 

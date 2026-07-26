@@ -109,6 +109,76 @@ class SyncPreferencesTest {
     }
 
     @Test
+    fun pullCheckpointAppliesFamilyNamePresenceWithoutReplacingConcurrentSessionFields() =
+        runTest {
+            val file = File.createTempFile("lezi-sync-checkpoint-", ".preferences_pb")
+                .also { it.delete() }
+            val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
+            val preferences = preferences(store)
+            preferences.saveSession(
+                SyncSession(
+                    serverHost = "nas",
+                    familyId = "family",
+                    familyToken = "token",
+                    deviceId = "device",
+                    role = FamilyRole.Member,
+                    pullCursor = 4,
+                    pullGeneration = "g0",
+                    familyName = "旧名字",
+                    membershipId = "membership-before",
+                    allowedSsids = listOf("Home"),
+                ),
+            )
+            preferences.saveSession(
+                preferences.session.first().copy(
+                    membershipId = "membership-concurrent",
+                    allowedSsids = listOf("Home", "Backup"),
+                ),
+            )
+
+            preferences.updatePullCheckpoint(
+                cursor = 5,
+                generation = "g1",
+                familyName = PullFamilyName.Present("  NAS 新名字  "),
+            )
+
+            assertThat(preferences.session.first().pullCursor).isEqualTo(5)
+            assertThat(preferences.session.first().pullGeneration).isEqualTo("g1")
+            assertThat(preferences.session.first().familyName).isEqualTo("NAS 新名字")
+            assertThat(preferences.session.first().membershipId)
+                .isEqualTo("membership-concurrent")
+            assertThat(preferences.session.first().allowedSsids)
+                .containsExactly("Home", "Backup")
+                .inOrder()
+
+            preferences.saveSession(
+                preferences.session.first().copy(familyName = "旧 NAS 本地缓存"),
+            )
+            preferences.updatePullCheckpoint(
+                cursor = 6,
+                generation = "g1",
+                familyName = PullFamilyName.Omitted,
+            )
+            assertThat(preferences.session.first().familyName).isEqualTo("旧 NAS 本地缓存")
+            assertThat(preferences.session.first().pullCursor).isEqualTo(6)
+
+            preferences.updatePullCheckpoint(
+                cursor = 7,
+                generation = "g2",
+                familyName = PullFamilyName.Present(null),
+            )
+            assertThat(preferences.session.first().familyName).isNull()
+            assertThat(preferences.session.first().pullCursor).isEqualTo(7)
+            assertThat(preferences.session.first().pullGeneration).isEqualTo("g2")
+            assertThat(preferences.session.first().membershipId)
+                .isEqualTo("membership-concurrent")
+            assertThat(preferences.session.first().allowedSsids)
+                .containsExactly("Home", "Backup")
+                .inOrder()
+            file.delete()
+        }
+
+    @Test
     fun familyTokenIsNotWrittenToPlaintextDataStore() = runTest {
         val file = File.createTempFile("lezi-sync-", ".preferences_pb").also { it.delete() }
         val tokens = InMemorySecureFamilyTokenStore()
