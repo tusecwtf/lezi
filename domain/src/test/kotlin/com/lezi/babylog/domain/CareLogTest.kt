@@ -693,6 +693,41 @@ class CareLogTest {
     }
 
     @Test
+    fun completeNursing_replayWithSoftDeletedCompletionUuidFailsClosed() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
+        val completionUuid = "03ac5d03-5815-4777-a4ae-17097cb9cad9"
+        val deletedId = care.completeNursing(
+            babyId = babyId,
+            leftMin = 3,
+            rightMin = 2,
+            order = "LR",
+            startedAt = 1_000L,
+            endedAt = 301_000L,
+            completionClientUuid = completionUuid,
+        )
+        care.deleteRecord(deletedId)
+
+        val failure = runCatching {
+            care.completeNursing(
+                babyId = babyId,
+                leftMin = 4,
+                rightMin = 1,
+                order = "LR",
+                startedAt = 1_000L,
+                endedAt = 301_000L,
+                completionClientUuid = completionUuid,
+            )
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(IllegalStateException::class.java)
+        assertThat(failure).hasMessageThat().isEqualTo("这次计时记录已删除，请重试或改记")
+        assertThat(fakes.records.listAllIncludingDeleted()).hasSize(1)
+        assertThat(fakes.records.getIncludingDeleted(deletedId)!!.deletedAt).isNotNull()
+    }
+
+    @Test
     fun completeNursing_rejectsUntrustedOrderBeforePersistence() = runTest {
         val fakes = Fakes()
         val care = fakes.careLog()

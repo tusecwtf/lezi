@@ -599,6 +599,9 @@ class CareLog @Inject constructor(
         val id = transactionRunner.run {
             val existing = recordDao.getByClientUuid(completionClientUuid)
             if (existing != null) {
+                check(existing.deletedAt == null) {
+                    "这次计时记录已删除，请重试或改记"
+                }
                 require(existing.babyId == babyId && existing.type == RecordType.NURSING.key) {
                     "计时完成标识与既有记录冲突"
                 }
