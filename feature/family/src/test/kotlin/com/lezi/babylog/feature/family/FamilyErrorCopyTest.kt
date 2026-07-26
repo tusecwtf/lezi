@@ -51,15 +51,34 @@ class FamilyErrorCopyTest {
             familySyncError(IllegalArgumentException("邀请码已失效"), "加入失败"),
         )
         assertEquals(
-            "请先填写家庭服务器地址并加入家庭",
+            "请先填写家庭服务器地址并绑定 Wi‑Fi 名称后加入家庭",
             familySyncError(SyncNotEnabledException(), "同步失败"),
         )
     }
 
     @Test
     fun syncStatesUseProductFacingChineseLabels() {
-        assertEquals("未启用", syncStatusLabel(SyncStatus.Disabled))
-        assertEquals("等待家庭 Wi‑Fi", syncStatusLabel(SyncStatus.BlockedOfflineHome))
+        assertEquals(
+            "未加入家庭（请先保存服务器与 Wi‑Fi 名称）",
+            syncStatusLabel(SyncStatus.Disabled),
+        )
+        assertEquals(
+            "网络已配置 · 尚未加入家庭",
+            syncStatusLabel(
+                SyncStatus.Disabled,
+                hasServer = true,
+                hasSsid = true,
+                isJoined = false,
+            ),
+        )
+        assertEquals(
+            "未加入家庭（请先保存 Wi‑Fi 名称）",
+            syncStatusLabel(SyncStatus.Disabled, hasServer = true, hasSsid = false),
+        )
+        assertEquals(
+            "等待家庭 Wi‑Fi 或服务器可达",
+            syncStatusLabel(SyncStatus.BlockedOfflineHome),
+        )
         assertEquals("空闲", syncStatusLabel(SyncStatus.Idle))
         assertEquals("同步中", syncStatusLabel(SyncStatus.Syncing))
         assertEquals("同步错误", syncStatusLabel(SyncStatus.Error))
@@ -111,7 +130,7 @@ class FamilyErrorCopyTest {
     fun localFamilySetupIsAvailableOnlyBeforeJoining() {
         assertEquals(
             FamilyControlVisibility(
-                showServerSetup = true,
+                showServerSetup = false,
                 showJoin = true,
                 showCreateFamily = true,
                 showInvite = false,
@@ -120,6 +139,35 @@ class FamilyErrorCopyTest {
             ),
             familyControlVisibility(isJoined = false, role = FamilyRole.None),
         )
+    }
+
+    @Test
+    fun primaryHidesNetworkEditorsWhenJoinedAndConfigured() {
+        assertTrue(isHomeLanNetworkConfigured("192.168.50.4", "", listOf("Home")))
+        assertFalse(isHomeLanNetworkConfigured("", "", emptyList()))
+        assertFalse(isHomeLanNetworkConfigured("192.168.50.4", "", emptyList()))
+
+        val joinedConfigured = familyPrimarySurface(
+            isJoined = true,
+            role = FamilyRole.Owner,
+            networkConfigured = true,
+        )
+        assertTrue(joinedConfigured.compactJoined)
+        assertFalse(joinedConfigured.showNetworkEditorsOnPrimary)
+        assertTrue(joinedConfigured.showNetworkSecondaryEntry)
+        assertTrue(joinedConfigured.showInvite)
+        assertTrue(joinedConfigured.showJoinedActions)
+        assertFalse(joinedConfigured.showCreateJoin)
+
+        val unjoined = familyPrimarySurface(
+            isJoined = false,
+            role = FamilyRole.None,
+            networkConfigured = false,
+        )
+        assertFalse(unjoined.compactJoined)
+        assertFalse(unjoined.showNetworkEditorsOnPrimary)
+        assertTrue(unjoined.showCreateJoin)
+        assertTrue(unjoined.showNetworkSecondaryEntry)
     }
 
     @Test

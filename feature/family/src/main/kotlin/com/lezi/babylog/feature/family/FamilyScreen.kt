@@ -33,11 +33,13 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -461,8 +463,23 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
     else -> null
 }
 
-internal fun syncStatusLabel(status: SyncStatus): String = when (status) {
-    SyncStatus.Disabled -> "未启用（需服务器与 Wi‑Fi 名称）"
+/**
+ * Product-facing status line.
+ * [hasServer]/[hasSsid] reflect **saved** prefs (not the unsaved form draft).
+ */
+internal fun syncStatusLabel(
+    status: SyncStatus,
+    hasServer: Boolean = false,
+    hasSsid: Boolean = false,
+    isJoined: Boolean = false,
+): String = when (status) {
+    SyncStatus.Disabled -> when {
+        isJoined -> "未启用"
+        !hasServer && !hasSsid -> "未加入家庭（请先保存服务器与 Wi‑Fi 名称）"
+        !hasServer -> "未加入家庭（请先保存服务器地址）"
+        !hasSsid -> "未加入家庭（请先保存 Wi‑Fi 名称）"
+        else -> "网络已配置 · 尚未加入家庭"
+    }
     SyncStatus.BlockedOfflineHome -> "等待家庭 Wi‑Fi 或服务器可达"
     SyncStatus.Idle -> "空闲"
     SyncStatus.Syncing -> "同步中"
@@ -494,13 +511,62 @@ internal fun familyControlVisibility(
     isJoined: Boolean,
     role: FamilyRole,
 ): FamilyControlVisibility = FamilyControlVisibility(
-    showServerSetup = !isJoined,
+    // Network editors live on a secondary surface, not the primary list.
+    showServerSetup = false,
     showJoin = !isJoined,
     showCreateFamily = !isJoined && role == FamilyRole.None,
     showInvite = isJoined && role == FamilyRole.Owner,
     showJoinedActions = isJoined,
     showLeave = isJoined && role == FamilyRole.Member,
 )
+
+/** Saved host/baseUrl + non-empty SSID allowlist. */
+internal fun isHomeLanNetworkConfigured(
+    serverHost: String,
+    baseUrl: String,
+    allowedSsids: List<String>,
+): Boolean =
+    (serverHost.isNotBlank() || baseUrl.isNotBlank()) && allowedSsids.isNotEmpty()
+
+/**
+ * Primary account “家人一起记” layout rules.
+ * Network host/port/SSID editors are never on the primary surface.
+ */
+internal data class FamilyPrimarySurface(
+    /** Joined with saved network config → compact operational essentials only. */
+    val compactJoined: Boolean,
+    val showCreateJoin: Boolean,
+    val showInvite: Boolean,
+    val showJoinedActions: Boolean,
+    val showLeave: Boolean,
+    /** Always true: open secondary network settings. */
+    val showNetworkSecondaryEntry: Boolean,
+    /** Primary must not render host/port/SSID editors. */
+    val showNetworkEditorsOnPrimary: Boolean,
+)
+
+internal fun familyPrimarySurface(
+    isJoined: Boolean,
+    role: FamilyRole,
+    networkConfigured: Boolean,
+): FamilyPrimarySurface {
+    val controls = familyControlVisibility(isJoined, role)
+    return FamilyPrimarySurface(
+        compactJoined = isJoined && networkConfigured,
+        showCreateJoin = controls.showJoin || controls.showCreateFamily,
+        showInvite = controls.showInvite,
+        showJoinedActions = controls.showJoinedActions,
+        showLeave = controls.showLeave,
+        showNetworkSecondaryEntry = true,
+        showNetworkEditorsOnPrimary = false,
+    )
+}
+
+internal fun familyRoleLabel(role: FamilyRole): String = when (role) {
+    FamilyRole.Owner -> "管理员"
+    FamilyRole.Member -> "成员"
+    FamilyRole.None -> "未加入"
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -552,6 +618,9 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
     var mergeSource by remember { mutableStateOf<Baby?>(null) }
     var mergePreview by remember { mutableStateOf<BabyMergePreview?>(null) }
     var inviteView by remember { mutableStateOf<FamilyInviteView?>(null) }
+    var showNetworkSettings by remember { mutableStateOf(false) }
+    var pendingAfterNetworkSave by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val networkSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val familyContext = LocalContext.current
     fun applyScannedInvite(raw: String) {
         val payload = raw.trim()
@@ -609,6 +678,24 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
     }
     val controls = remember(ui.enabled, ui.role) {
         familyControlVisibility(isJoined = ui.enabled, role = ui.role)
+    }
+    val networkConfigured = remember(ui.serverHost, ui.baseUrl, ui.allowedSsids) {
+        isHomeLanNetworkConfigured(ui.serverHost, ui.baseUrl, ui.allowedSsids)
+    }
+    val primary = remember(ui.enabled, ui.role, networkConfigured) {
+        familyPrimarySurface(
+            isJoined = ui.enabled,
+            role = ui.role,
+            networkConfigured = networkConfigured,
+        )
+    }
+    val savedSummaryBaseUrl = remember(ui.serverHost, ui.serverPort, ui.baseUrl) {
+        when {
+            ui.serverHost.isNotBlank() ->
+                HomeLanServerConfig(ui.serverHost, ui.serverPort, ui.allowedSsids).baseUrl
+            ui.baseUrl.isNotBlank() -> ui.baseUrl
+            else -> ""
+        }
     }
 
     PageScaffoldBackground {
@@ -758,8 +845,194 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
             )
 
             SectionHeading(title = "家人一起记")
-            if (controls.showServerSetup || true) {
-                // Keep network settings editable after joining so the host or SSID can be rebound.
+            fun saveNetworkThen(onReady: () -> Unit) {
+                val host = serverHost.trim()
+                val ssids = listOf(ssid1, ssid2).map { it.trim() }.filter { it.isNotEmpty() }
+                val dirty =
+                    host != ui.serverHost.trim() ||
+                        ssids != ui.allowedSsids ||
+                        ui.allowedSsids.isEmpty()
+                if (host.isBlank() || ssids.isEmpty()) {
+                    pendingAfterNetworkSave = onReady
+                    showNetworkSettings = true
+                    message = "请先在「家庭网络设置」中填写并保存服务器与 Wi‑Fi 名称"
+                    return
+                }
+                if (!dirty && ui.serverHost.isNotBlank() && ui.allowedSsids.isNotEmpty()) {
+                    onReady()
+                    return
+                }
+                vm.saveHomeLanConfig(serverHost, serverPort, ssid1, ssid2) { result ->
+                    message = result
+                    if (result.contains("已保存")) onReady()
+                }
+            }
+
+            // Compact summary: no host/port/SSID editors on primary.
+            LeziCard(modifier = Modifier.fillMaxWidth()) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        if (ui.enabled) {
+                            "家庭 · ${familyRoleLabel(ui.role)}"
+                        } else {
+                            "尚未加入家庭"
+                        },
+                        style = LeziTypography.BodyStrong,
+                    )
+                    Text(
+                        "状态：${syncStatusLabel(
+                            status = ui.status,
+                            hasServer = ui.serverHost.isNotBlank() || ui.baseUrl.isNotBlank(),
+                            hasSsid = ui.allowedSsids.isNotEmpty(),
+                            isJoined = ui.enabled,
+                        )}" +
+                            (ui.lastSuccessAt?.let {
+                                " · 上次成功：${java.text.DateFormat.getDateTimeInstance().format(it)}"
+                            } ?: ""),
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (networkConfigured) {
+                        Text(
+                            buildString {
+                                append(savedSummaryBaseUrl.ifBlank { "服务器已配置" })
+                                if (ui.allowedSsids.isNotEmpty()) {
+                                    append(" · Wi‑Fi ")
+                                    append(ui.allowedSsids.joinToString(" / "))
+                                }
+                            },
+                            style = LeziTypography.Meta,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        Text(
+                            "同步前请在网络设置中绑定服务器与家庭 Wi‑Fi 名称。",
+                            style = LeziTypography.Meta,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (savedSummaryBaseUrl.isNotBlank() && isPublicCleartextBaseUrl(savedSummaryBaseUrl)) {
+                        Text(
+                            PUBLIC_CLEARTEXT_WARNING,
+                            style = LeziTypography.Meta,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
+            }
+
+            if (primary.showNetworkSecondaryEntry) {
+                LeziSecondaryButton(
+                    "家庭网络设置",
+                    onClick = {
+                        pendingAfterNetworkSave = null
+                        showNetworkSettings = true
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+
+            if (primary.showCreateJoin) {
+                if (controls.showCreateFamily) {
+                    LeziPrimaryButton(
+                        "新建家庭",
+                        onClick = { saveNetworkThen { vm.createFamily { message = it } } },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                if (controls.showJoin) {
+                    LeziSecondaryButton(
+                        "输入邀请码",
+                        onClick = { saveNetworkThen { showJoin = true } },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    LeziSecondaryButton(
+                        "扫码加入",
+                        onClick = {
+                            saveNetworkThen {
+                                if (CameraCapture.hasPermission(familyContext)) {
+                                    launchInviteScan()
+                                } else {
+                                    scanCameraPermission.launch(CameraCapture.PERMISSION)
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+
+            if (primary.showInvite) {
+                LeziPrimaryButton(
+                    "生成邀请二维码",
+                    onClick = {
+                        vm.createInvite { result ->
+                            result.fold(
+                                onSuccess = { inviteView = it },
+                                onFailure = {
+                                    message = it.message ?: "生成共享码失败，请稍后重试"
+                                },
+                            )
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+
+            if (primary.showJoinedActions) {
+                LeziSecondaryButton(
+                    "立即同步",
+                    onClick = { vm.pullNow { message = it } },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (primary.showLeave) {
+                    LeziSecondaryButton(
+                        "离开家庭",
+                        onClick = { vm.leave { message = it } },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                if (ui.role == FamilyRole.Owner) {
+                    LeziSecondaryButton(
+                        "删除家庭数据",
+                        onClick = { confirmDeleteFamily = true },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+
+            Text(
+                "仅在已绑定的家庭 Wi‑Fi 且服务器可达时前台同步。",
+                style = LeziTypography.Meta,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(LeziSpacing.Xxl))
+        }
+    }
+
+    if (showNetworkSettings) {
+        ModalBottomSheet(
+            onDismissRequest = {
+                showNetworkSettings = false
+                pendingAfterNetworkSave = null
+            },
+            sheetState = networkSheetState,
+        ) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = LeziSpacing.Page)
+                    .padding(bottom = LeziSpacing.Xxl)
+                    .dismissKeyboardOnTap(),
+                verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
+            ) {
+                Text("家庭网络设置", style = LeziTypography.TitleSm)
+                Text(
+                    "服务器与 Wi‑Fi 名称仅保存在本机。保存后才会用于同步与加入家庭。",
+                    style = LeziTypography.Meta,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 OutlinedTextField(
                     value = serverHost,
                     onValueChange = { serverHost = it },
@@ -817,89 +1090,42 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                         color = MaterialTheme.colorScheme.error,
                     )
                 }
-                if (persistedEmpty) {
+                val draftHost = serverHost.trim()
+                val draftPort = serverPort.toIntOrNull()
+                    ?: com.lezi.babylog.sync.DEFAULT_SERVER_PORT
+                val draftSsids = listOf(ssid1, ssid2).map { it.trim() }.filter { it.isNotEmpty() }
+                val networkDraftDirty =
+                    draftHost != ui.serverHost.trim() ||
+                        (ui.serverHost.isNotBlank() && draftPort != ui.serverPort) ||
+                        (ui.serverHost.isBlank() && draftHost.isNotBlank()) ||
+                        draftSsids != ui.allowedSsids
+                if (persistedEmpty || networkDraftDirty) {
                     Text(
-                        "已预填常见示例地址与当前 Wi‑Fi，请确认后保存（未保存不会生效）。",
+                        if (networkDraftDirty && !persistedEmpty) {
+                            "当前填写尚未保存，请点「保存」后才会生效。"
+                        } else {
+                            "请确认后保存（未保存不会生效）。"
+                        },
                         style = LeziTypography.Meta,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = MaterialTheme.colorScheme.error,
                     )
                 }
-                LeziSecondaryButton(
+                LeziPrimaryButton(
                     "保存家庭网络与服务器",
                     onClick = {
-                        vm.saveHomeLanConfig(serverHost, serverPort, ssid1, ssid2) { message = it }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-            if (controls.showCreateFamily || controls.showInvite) {
-                LeziPrimaryButton(
-                    if (controls.showCreateFamily) "新建家庭" else "生成邀请二维码",
-                    onClick = {
-                        if (controls.showCreateFamily) {
-                            vm.createFamily { message = it }
-                        } else {
-                            vm.createInvite { result ->
-                                result.fold(
-                                    onSuccess = { inviteView = it },
-                                    onFailure = {
-                                        message = it.message ?: "生成共享码失败，请稍后重试"
-                                    },
-                                )
+                        vm.saveHomeLanConfig(serverHost, serverPort, ssid1, ssid2) { result ->
+                            message = result
+                            if (result.contains("已保存")) {
+                                val next = pendingAfterNetworkSave
+                                pendingAfterNetworkSave = null
+                                showNetworkSettings = false
+                                next?.invoke()
                             }
                         }
                     },
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
-            if (controls.showJoin) {
-                LeziSecondaryButton(
-                    "输入邀请码",
-                    onClick = { showJoin = true },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                LeziSecondaryButton(
-                    "扫码加入",
-                    onClick = {
-                        if (CameraCapture.hasPermission(familyContext)) {
-                            launchInviteScan()
-                        } else {
-                            scanCameraPermission.launch(CameraCapture.PERMISSION)
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-            if (controls.showJoinedActions) {
-                LeziSecondaryButton(
-                    "立即同步",
-                    onClick = { vm.pullNow { message = it } },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                if (controls.showLeave) {
-                    LeziSecondaryButton(
-                        "离开家庭",
-                        onClick = { vm.leave { message = it } },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-                if (ui.role == FamilyRole.Owner) {
-                    LeziSecondaryButton(
-                        "删除家庭数据",
-                        onClick = { confirmDeleteFamily = true },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-            }
-            Text(
-                "仅在已绑定的家庭 Wi‑Fi（最多 2 个名称，如 2.4G/5G）且服务器可达时前台同步；不会推送伴侣的新记录。\n" +
-                    "状态：${syncStatusLabel(ui.status)}" +
-                    (ui.lastSuccessAt?.let { " · 上次成功：${java.text.DateFormat.getDateTimeInstance().format(it)}" }
-                        ?: ""),
-                style = LeziTypography.Body,
-                color = MaterialTheme.colorScheme.primary,
-            )
-            Spacer(Modifier.height(LeziSpacing.Xxl))
         }
     }
 
