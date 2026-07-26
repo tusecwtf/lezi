@@ -39,18 +39,21 @@ interface SyncPort {
     suspend fun saveHomeLanConfig(config: HomeLanServerConfig): Result<Unit>
     suspend fun createFamily(
         displayName: String? = null,
-        bootstrapSecret: String? = null,
+        bootstrapSecret: String,
     ): Result<SyncSession>
     suspend fun sync(trigger: SyncTrigger): Result<Unit>
     suspend fun pull(familyId: String): Result<Unit>
     suspend fun push(familyId: String): Result<Unit>
     suspend fun createInvite(familyId: String): Result<Invite>
+    suspend fun joinFamily(command: JoinFamilyCommand): Result<SyncSession>
     /**
      * Join via invite code or full invite payload.
-     * Prefer [joinWithPayload] from UI; this is a thin alias that returns the
-     * same [SyncSession] (server `family_id` is a UUID string — never a local Long).
+     * Compatibility alias for tests and old callers. Product UI must build a
+     * complete [JoinFamilyCommand] instead of relying on saved endpoint state.
      */
+    @Deprecated("Use joinFamily with an explicit HomeLanServerConfig")
     suspend fun joinWithCode(code: String): Result<SyncSession>
+    @Deprecated("Use joinFamily with an explicit HomeLanServerConfig")
     suspend fun joinWithPayload(
         payload: String,
         preferredConfig: HomeLanServerConfig? = null,
@@ -84,13 +87,17 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
     override fun requestSync(trigger: SyncTrigger) = Unit
     override suspend fun saveServer(baseUrl: String) = Result.success(Unit)
     override suspend fun saveHomeLanConfig(config: HomeLanServerConfig) = Result.success(Unit)
-    override suspend fun createFamily(displayName: String?, bootstrapSecret: String?) =
+    override suspend fun createFamily(displayName: String?, bootstrapSecret: String) =
         Result.failure<SyncSession>(SyncNotEnabledException())
     override suspend fun sync(trigger: SyncTrigger) = Result.success(Unit)
     override suspend fun pull(familyId: String) = Result.success(Unit)
     override suspend fun push(familyId: String) = Result.success(Unit)
     override suspend fun createInvite(familyId: String) = Result.failure<Invite>(SyncNotEnabledException())
+    override suspend fun joinFamily(command: JoinFamilyCommand) =
+        Result.failure<SyncSession>(SyncNotEnabledException())
+    @Deprecated("Use joinFamily with an explicit HomeLanServerConfig")
     override suspend fun joinWithCode(code: String) = Result.failure<SyncSession>(SyncNotEnabledException())
+    @Deprecated("Use joinFamily with an explicit HomeLanServerConfig")
     override suspend fun joinWithPayload(
         payload: String,
         preferredConfig: HomeLanServerConfig?,

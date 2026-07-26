@@ -13,6 +13,7 @@ import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.sync.HomeLanServerConfig
 import com.lezi.babylog.sync.InvitePayload
 import com.lezi.babylog.sync.InvitePayloadCodec
+import com.lezi.babylog.sync.JoinFamilyCommand
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -361,10 +362,12 @@ class FamilyViewModel @Inject constructor(
                 onDone(false, it.message ?: "服务器地址无效")
                 return@launch
             }
-            val result = sync.joinWithPayload(
-                payload = code.trim(),
-                preferredConfig = config,
-                displayName = ui.value.displayName,
+            val result = sync.joinFamily(
+                JoinFamilyCommand(
+                    invitation = code.trim(),
+                    homeLanConfig = config,
+                    displayName = ui.value.displayName,
+                ),
             )
             onDone(
                 result.isSuccess,

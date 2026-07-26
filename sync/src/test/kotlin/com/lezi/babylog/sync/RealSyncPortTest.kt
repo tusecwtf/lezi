@@ -277,7 +277,7 @@ class RealSyncPortTest {
         val initial = joinedSession("family-a")
         val rig = SyncRig(session = initial)
 
-        assertThat(rig.port.createFamily("妈妈").isFailure).isTrue()
+        assertThat(rig.port.createFamily("妈妈", "bootstrap-secret").isFailure).isTrue()
         assertThat(rig.port.joinWithPayload("ANY-CODE").isFailure).isTrue()
 
         assertThat(rig.preferences.current()).isEqualTo(initial)
@@ -292,7 +292,7 @@ class RealSyncPortTest {
                 allowedSsids = listOf("Home"),
             ),
         )
-        assertThat(ownerRig.port.createFamily("我（本机）").isSuccess).isTrue()
+        assertThat(ownerRig.port.createFamily("我（本机）", "bootstrap-secret").isSuccess).isTrue()
         assertThat(ownerRig.backend.createDisplayNames).hasSize(1)
         assertThat(ownerRig.backend.createDisplayNames.single()).isNull()
 
@@ -372,6 +372,41 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun joinCommandUsesItsRequiredEndpointWithoutSavedOrQrPriority() = runTest {
+        val rig = SyncRig(
+            session = SyncSession(
+                serverHost = "saved.home",
+                serverPort = 8765,
+                allowedSsids = listOf("SavedHome"),
+            ),
+            ssid = "EditedHome",
+        )
+        val qr = InvitePayloadCodec.encode(
+            InvitePayload(
+                baseUrl = "http://stale-qr.home:8787",
+                code = "ABCD1234",
+                ssids = listOf("StaleHome"),
+            ),
+        )
+        val command = JoinFamilyCommand(
+            invitation = qr,
+            homeLanConfig = HomeLanServerConfig(
+                host = "edited.home",
+                port = 9443,
+                scheme = "https",
+                allowedSsids = listOf("EditedHome"),
+            ),
+            displayName = "爸爸",
+        )
+
+        assertThat(rig.port.joinFamily(command).isSuccess).isTrue()
+
+        assertThat(rig.backend.joinBaseUrls).containsExactly("https://edited.home:9443")
+        assertThat(rig.backend.joinDisplayNames).containsExactly("爸爸")
+        assertThat(rig.preferences.current().homeLanConfig).isEqualTo(command.homeLanConfig)
+    }
+
+    @Test
     fun familyMemberListUsesTheJoinedHomeLanSession() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         rig.backend.nextMembers = listOf(
@@ -425,9 +460,9 @@ class RealSyncPortTest {
         )
         rig.backend.createFailure = IllegalStateException("response lost")
 
-        assertThat(rig.port.createFamily("妈妈").isFailure).isTrue()
+        assertThat(rig.port.createFamily("妈妈", "bootstrap-secret").isFailure).isTrue()
         rig.backend.createFailure = null
-        assertThat(rig.port.createFamily("妈妈").isSuccess).isTrue()
+        assertThat(rig.port.createFamily("妈妈", "bootstrap-secret").isSuccess).isTrue()
 
         assertThat(rig.backend.createRequestIds).hasSize(2)
         assertThat(rig.backend.createRequestIds.distinct()).hasSize(1)
@@ -455,6 +490,23 @@ class RealSyncPortTest {
             .containsExactly("one-time-bootstrap-secret")
         assertThat(rig.preferences.current().toString())
             .doesNotContain("one-time-bootstrap-secret")
+    }
+
+    @Test
+    fun blankBootstrapSecretFailsBeforePolicyOrBackendIo() = runTest {
+        val rig = SyncRig(
+            session = SyncSession(
+                serverHost = "192.168.1.20",
+                serverPort = 8787,
+                allowedSsids = listOf("Home"),
+            ),
+        )
+
+        val failure = rig.port.createFamily("妈妈", "  ").exceptionOrNull()
+
+        assertThat(failure).hasMessageThat().contains("初始化口令")
+        assertThat(rig.backend.createRequestIds).isEmpty()
+        assertThat(rig.healthProbeCalls).isEqualTo(0)
     }
 
     @Test
@@ -496,7 +548,7 @@ class RealSyncPortTest {
         rig.backend.createStarted = CompletableDeferred()
         rig.backend.releaseCreate = CompletableDeferred()
 
-        val creating = async { rig.port.createFamily("妈妈") }
+        val creating = async { rig.port.createFamily("妈妈", "bootstrap-secret") }
         rig.backend.createStarted!!.await()
         val joining = async { rig.port.joinWithPayload("JOIN-CODE") }
         runCurrent()
@@ -2579,13 +2631,17 @@ private class SyncRig(
     }
     val clock = MutablePolicyClock()
     val foreground = TestForegroundState()
+    var healthProbeCalls = 0
     private val networkState = object : NetworkState {
         override fun isWifiConnected(): Boolean = wifi
         override fun currentWifiSsid(): String? = ssid
     }
     private val policy = HomeNetworkPolicy(
         networkState = networkState,
-        healthProbe = HealthProbe { true },
+        healthProbe = HealthProbe {
+            healthProbeCalls++
+            true
+        },
         clock = clock,
     )
     val port = RealSyncPort(

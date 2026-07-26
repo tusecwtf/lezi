@@ -141,66 +141,48 @@ class RealSyncPort @Inject constructor(
 
     override suspend fun createFamily(
         displayName: String?,
-        bootstrapSecret: String?,
-    ) = gatedWithoutSession { baseUrl ->
-        val deviceId = preferences.ensureDeviceId()
-        val createRequestId = preferences.ensureCreateRequestId()
-        val joined = try {
-            backend.create(
-                baseUrl,
-                deviceId,
-                memberDisplayNameForWire(displayName),
-                createRequestId,
-                bootstrapSecret,
-            )
-        } catch (error: SyncHttpException) {
-            if (error.statusCode == 401 || error.statusCode == 403) {
-                throw BootstrapSecretRejectedException()
-            }
-            throw error
+        bootstrapSecret: String,
+    ): Result<SyncSession> {
+        if (bootstrapSecret.isBlank()) {
+            return Result.failure<SyncSession>(
+                IllegalArgumentException("请填写服务器初始化口令"),
+            ).onFailure(::updateFailureStatus)
         }
-        persistJoin(baseUrl, deviceId, joined).also {
-            preferences.clearCreateRequestId()
-            requestSync(SyncTrigger.LocalWrite)
+        return gatedWithoutSession { baseUrl ->
+            val deviceId = preferences.ensureDeviceId()
+            val createRequestId = preferences.ensureCreateRequestId()
+            val joined = try {
+                backend.create(
+                    baseUrl,
+                    deviceId,
+                    memberDisplayNameForWire(displayName),
+                    createRequestId,
+                    bootstrapSecret,
+                )
+            } catch (error: SyncHttpException) {
+                if (error.statusCode == 401 || error.statusCode == 403) {
+                    throw BootstrapSecretRejectedException()
+                }
+                throw error
+            }
+            persistJoin(baseUrl, deviceId, joined).also {
+                preferences.clearCreateRequestId()
+                requestSync(SyncTrigger.LocalWrite)
+            }
         }
     }
 
-    override suspend fun joinWithPayload(
-        payload: String,
-        preferredConfig: HomeLanServerConfig?,
-        displayName: String?,
+    override suspend fun joinFamily(
+        command: JoinFamilyCommand,
     ) = runCatching {
         syncMutex.withLock {
             require(!preferences.session.first().isJoined) {
                 "请先退出当前家庭，再加入新的家庭"
             }
-            val decoded = InvitePayloadCodec.decode(payload)
-            val previous = preferences.session.first()
-            val fromQr = decoded.homeLanConfig.takeIf { it.isServerConfigured }
-                ?: decoded.baseUrl.takeIf { it.isNotBlank() }?.let { HomeLanServerConfig.fromBaseUrl(it) }
-            // QR values are editable prefill hints. Once the user saves the form, that explicit
-            // local choice must win over a stale address embedded in the invite.
-            val editedConfig = preferredConfig
-                ?.withNormalized()
-                ?.takeIf { it.isServerConfigured }
-            val savedConfig = previous.homeLanConfig.takeIf { it.isServerConfigured }
-            val baseConfig = (editedConfig ?: savedConfig ?: fromQr ?: previous.homeLanConfig)
-                .withNormalized()
-            val currentSsid = networkState.currentWifiSsid()?.trim().orEmpty()
-            val preferredSsids = editedConfig?.allowedSsids?.takeIf { it.isNotEmpty() }
-                ?: previous.allowedSsids.takeIf { it.isNotEmpty() }
-                ?: decoded.ssids
-            val ssids = HomeLanServerConfig.normalizeSsids(
-                preferredSsids + listOfNotNull(
-                    currentSsid.takeIf {
-                        it.isNotEmpty() && !HomeNetworkPolicy.isUnknownSsid(it)
-                    },
-                ),
-            )
-            require(ssids.isNotEmpty()) {
-                "请先填写家庭 Wi‑Fi 名称（扫码邀请若未带 Wi‑Fi 名，可手动填写）"
-            }
-            val config = baseConfig.copy(allowedSsids = ssids)
+            val decoded = InvitePayloadCodec.decode(command.invitation.trim())
+            val config = command.homeLanConfig.withNormalized()
+            require(config.isServerConfigured) { "请先填写家庭服务器地址" }
+            require(config.allowedSsids.isNotEmpty()) { "请至少填写一个家庭 Wi‑Fi 名称" }
             val decision = policy.evaluate(config, foregroundState.isForeground())
             requireAllowed(decision)
             val baseUrl = config.baseUrl
@@ -209,7 +191,7 @@ class RealSyncPort @Inject constructor(
                 baseUrl,
                 decoded.code,
                 deviceId,
-                memberDisplayNameForWire(displayName),
+                memberDisplayNameForWire(command.displayName),
             )
             persistJoin(baseUrl, deviceId, joined, config).also {
                 requestSync(SyncTrigger.PullToRefresh)
@@ -217,8 +199,47 @@ class RealSyncPort @Inject constructor(
         }
     }.onFailure(::updateFailureStatus)
 
+    @Deprecated("Use joinFamily with an explicit HomeLanServerConfig")
+    override suspend fun joinWithPayload(
+        payload: String,
+        preferredConfig: HomeLanServerConfig?,
+        displayName: String?,
+    ): Result<SyncSession> {
+        val previous = preferences.session.first()
+        val decoded = runCatching { InvitePayloadCodec.decode(payload) }.getOrElse { error ->
+            return Result.failure<SyncSession>(error).onFailure(::updateFailureStatus)
+        }
+        val explicit = preferredConfig?.withNormalized()?.takeIf { it.isServerConfigured }
+        val saved = previous.homeLanConfig.takeIf { it.isServerConfigured }
+        val invited = decoded.homeLanConfig.takeIf { it.isServerConfigured }
+        val base = explicit ?: saved ?: invited ?: previous.homeLanConfig
+        val currentSsid = networkState.currentWifiSsid()?.trim().orEmpty()
+        val ssids = HomeLanServerConfig.normalizeSsids(
+            (explicit?.allowedSsids?.takeIf { it.isNotEmpty() }
+                ?: previous.allowedSsids.takeIf { it.isNotEmpty() }
+                ?: decoded.ssids) + listOfNotNull(
+                currentSsid.takeIf {
+                    it.isNotEmpty() && !HomeNetworkPolicy.isUnknownSsid(it)
+                },
+            ),
+        )
+        return joinFamily(
+            JoinFamilyCommand(
+                invitation = payload,
+                homeLanConfig = base.copy(allowedSsids = ssids),
+                displayName = displayName,
+            ),
+        )
+    }
+
+    @Deprecated("Use joinFamily with an explicit HomeLanServerConfig")
     override suspend fun joinWithCode(code: String): Result<SyncSession> =
-        joinWithPayload(code, null, null)
+        joinFamily(
+            JoinFamilyCommand(
+                invitation = code,
+                homeLanConfig = preferences.session.first().homeLanConfig,
+            ),
+        )
 
     override suspend fun createInvite(familyId: String): Result<Invite> = withAllowedSession {
         require(it.role == FamilyRole.Owner) { "仅家庭管理员可生成邀请" }

@@ -79,6 +79,7 @@ import com.lezi.babylog.sync.DEFAULT_SERVER_HOST
 import com.lezi.babylog.sync.DEFAULT_SERVER_PORT
 import com.lezi.babylog.sync.HomeLanServerConfig
 import com.lezi.babylog.sync.HomeWifiPermission
+import com.lezi.babylog.sync.JoinFamilyCommand
 import com.lezi.babylog.sync.HomeWifiSettingsTarget
 import com.lezi.babylog.sync.InvitePayloadCodec
 import com.lezi.babylog.sync.NetworkState
@@ -186,10 +187,12 @@ class OnboardingViewModel @Inject constructor(
             }
             // The edited endpoint is an in-memory join candidate. RealSyncPort persists it
             // atomically with the joined session only after the server accepts the invite.
-            val join = sync.joinWithPayload(
-                payload = invitePayload.trim(),
-                preferredConfig = config,
-                displayName = displayName,
+            val join = sync.joinFamily(
+                JoinFamilyCommand(
+                    invitation = invitePayload.trim(),
+                    homeLanConfig = config,
+                    displayName = displayName,
+                ),
             )
             if (join.isFailure) {
                 onDone(productUiError(join.exceptionOrNull() ?: Exception("加入失败"), "加入家庭失败"))
