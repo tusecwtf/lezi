@@ -330,12 +330,6 @@ class LogViewModel @Inject constructor(
             runCatching { careLog.skipCarePlan(planId) }
         }
     }
-
-    fun deleteCarePlan(planId: Long) {
-        viewModelScope.launch {
-            runCatching { careLog.deleteCarePlan(planId) }
-        }
-    }
 }
 
 /** Pure map of record id → uploader display label (S3 seam for timeline composition). */
@@ -958,17 +952,6 @@ fun LogRoute(
                                                 "care_plan_skip_${plan.id}",
                                             ),
                                         ) { Text("跳过") }
-                                        TextButton(
-                                            onClick = { vm.deleteCarePlan(plan.id) },
-                                            modifier = Modifier.testTag(
-                                                "care_plan_delete_${plan.id}",
-                                            ),
-                                        ) {
-                                            Text(
-                                                "删除",
-                                                color = MaterialTheme.colorScheme.error,
-                                            )
-                                        }
                                     }
                                 }
                             }

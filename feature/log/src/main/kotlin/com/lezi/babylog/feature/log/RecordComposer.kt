@@ -852,21 +852,20 @@ fun RecordComposerHost(
     }
 
     if (confirmDelete) {
-        val deletingPlan = state.draft?.let { it.carePlanId != null && it.editCarePlan } == true
+        val planConfirmation = state.draft
+            ?.takeIf { it.carePlanId != null && it.editCarePlan }
+            ?.let(::carePlanDeleteConfirmation)
         AlertDialog(
             onDismissRequest = {
                 if (!state.deleting) confirmDelete = false
             },
             title = {
-                Text(if (deletingPlan) "删除这条护理计划？" else "删除这条记录？")
+                Text(planConfirmation?.title ?: "删除这条记录？")
             },
             text = {
                 Text(
-                    if (deletingPlan) {
-                        "删除后计划会从待履行列表移除，不会生成护理记录。"
-                    } else {
-                        "删除后会从时间轴和汇总中移除，无法撤销。"
-                    },
+                    planConfirmation?.message
+                        ?: "删除后会从时间轴和汇总中移除，无法撤销。",
                 )
             },
             confirmButton = {
