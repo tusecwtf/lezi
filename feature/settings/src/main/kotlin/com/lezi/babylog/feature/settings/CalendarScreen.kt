@@ -2,10 +2,15 @@ package com.lezi.babylog.feature.settings
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -17,8 +22,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -28,6 +36,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -39,9 +48,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -49,9 +63,16 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.datastore.SettingsStore
+import com.lezi.babylog.core.model.CarePlan
+import com.lezi.babylog.core.model.CarePlanStatus
+import com.lezi.babylog.core.model.ConflictNotAdoptedAudit
 import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordTimeDecision
 import com.lezi.babylog.core.model.FutureEventError
+import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.businessLabel
+import com.lezi.babylog.core.model.displayLabel
+import com.lezi.babylog.core.model.SettingsLocal
 import com.lezi.babylog.designsystem.LeziClockDialDialog
 import com.lezi.babylog.designsystem.LeziDatePicker
 import com.lezi.babylog.designsystem.LeziDetailTopBar
@@ -64,10 +85,13 @@ import com.lezi.babylog.designsystem.StateKind
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CalendarEvent
+import com.lezi.babylog.domain.CustomRecordItem
+import com.lezi.babylog.domain.SYSTEM_CALENDAR_UNSYNCED_LABEL
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalTime
+import kotlinx.coroutines.flow.combine
 import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.ZonedDateTime
@@ -76,11 +100,24 @@ import javax.inject.Inject
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+
+/** Row on the lezi calendar: either a care plan or a legacy free-title event. */
+sealed class CalendarDayItem {
+    abstract val sortAt: Long
+    data class Plan(val plan: CarePlan) : CalendarDayItem() {
+        override val sortAt: Long get() = plan.scheduledAt
+    }
+    data class LegacyEvent(val event: CalendarEvent) : CalendarDayItem() {
+        override val sortAt: Long get() = event.eventAt
+    }
+}
 
 @HiltViewModel
 class CalendarViewModel @Inject constructor(
@@ -91,19 +128,151 @@ class CalendarViewModel @Inject constructor(
     private val _status = MutableStateFlow<String?>(null)
     val status = _status
 
+    private val windowStart = RecordTime.today(zone)
+        .minusYears(1)
+        .atStartOfDay(zone)
+        .toInstant()
+        .toEpochMilli()
+    private val windowEnd =
+        LocalDate.of(2101, 1, 1).atStartOfDay(zone).toInstant().toEpochMilli()
+
+    /** Family owner/admin — gates conflict audit entry (domain still re-checks). */
+    val isFamilyAdmin = flow { emit(careLog.isFamilyAdmin()) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    private val _conflictAudits = MutableStateFlow<List<ConflictNotAdoptedAudit>>(emptyList())
+    val conflictAudits = _conflictAudits.asStateFlow()
+
+    private val _conflictDetail = MutableStateFlow<ConflictNotAdoptedAudit?>(null)
+    val conflictDetail = _conflictDetail.asStateFlow()
+
+    private val _conflictBusy = MutableStateFlow(false)
+    val conflictBusy = _conflictBusy.asStateFlow()
+
     @OptIn(ExperimentalCoroutinesApi::class)
     val events = careLog.observeCurrentBaby().flatMapLatest { baby ->
         if (baby == null) flowOf(emptyList())
-        else {
-            val start = RecordTime.today(zone)
-                .minusYears(1)
-                .atStartOfDay(zone)
-                .toInstant()
-                .toEpochMilli()
-            val end = LocalDate.of(2101, 1, 1).atStartOfDay(zone).toInstant().toEpochMilli()
-            careLog.observeCalendarEvents(baby.id, start, end)
-        }
+        else careLog.observeCalendarEvents(baby.id, windowStart, windowEnd)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val carePlans = careLog.observeCurrentBaby().flatMapLatest { baby ->
+        if (baby == null) flowOf(emptyList())
+        else careLog.observeCarePlansInRange(baby.id, windowStart, windowEnd)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /**
+     * plan.clientUuid → conflict-not-adopted count for admin chrome on completed plans.
+     * Non-admins always get empty (domain list returns empty).
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val conflictCountByPlanUuid = combine(carePlans, isFamilyAdmin) { plans, admin ->
+        plans to admin
+    }.flatMapLatest { (plans, admin) ->
+        flow {
+            if (!admin) {
+                emit(emptyMap())
+                return@flow
+            }
+            val completed = plans.filter {
+                it.status == CarePlanStatus.COMPLETED ||
+                    it.effectiveStatus() == CarePlanStatus.COMPLETED
+            }
+            val counts = buildMap {
+                for (plan in completed) {
+                    val n = careLog.listConflictNotAdoptedAudits(
+                        carePlanClientUuid = plan.clientUuid,
+                    ).size
+                    if (n > 0) put(plan.clientUuid, n)
+                }
+            }
+            emit(counts)
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
+    val dayItems = combine(events, carePlans) { legacy, plans ->
+        (plans.map { CalendarDayItem.Plan(it) } + legacy.map { CalendarDayItem.LegacyEvent(it) })
+            .sortedBy { it.sortAt }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    fun loadConflictAuditsForPlan(carePlanClientUuid: String, onLoaded: (Int) -> Unit = {}) {
+        viewModelScope.launch {
+            val list = careLog.listConflictNotAdoptedAudits(
+                carePlanClientUuid = carePlanClientUuid,
+            )
+            _conflictAudits.value = list
+            _conflictDetail.value = null
+            onLoaded(list.size)
+        }
+    }
+
+    fun openConflictDetail(candidateClientUuid: String) {
+        viewModelScope.launch {
+            _conflictDetail.value = careLog.getConflictNotAdoptedAudit(candidateClientUuid)
+        }
+    }
+
+    fun clearConflictDetail() {
+        _conflictDetail.value = null
+    }
+
+    fun clearConflictAudits() {
+        _conflictAudits.value = emptyList()
+        _conflictDetail.value = null
+    }
+
+    fun convertConflictToIndependentRecord(
+        candidateClientUuid: String,
+        onResult: (String?) -> Unit,
+    ) {
+        viewModelScope.launch {
+            if (_conflictBusy.value) return@launch
+            _conflictBusy.value = true
+            runCatching {
+                careLog.convertConflictNotAdoptedToIndependentRecord(candidateClientUuid)
+            }.onSuccess {
+                _status.value = "已转为独立护理记录"
+                // Refresh list + detail so converted badge and id show.
+                val planUuid = _conflictAudits.value
+                    .firstOrNull { it.candidateClientUuid == candidateClientUuid }
+                    ?.carePlanClientUuid
+                if (planUuid != null) {
+                    _conflictAudits.value = careLog.listConflictNotAdoptedAudits(
+                        carePlanClientUuid = planUuid,
+                    )
+                }
+                _conflictDetail.value = careLog.getConflictNotAdoptedAudit(candidateClientUuid)
+                onResult(null)
+            }.onFailure { err ->
+                onResult(err.message ?: "转换失败")
+            }
+            _conflictBusy.value = false
+        }
+    }
+
+    /**
+     * Open plans that wanted system-calendar projection but are currently unsynced
+     * (permission revoked, target gone, or event missing). Feeds「未同步到系统日历」chrome.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val systemCalendarUnsyncedPlanIds = combine(carePlans, settingsStore.settings) { plans, prefs ->
+        plans to prefs
+    }.flatMapLatest { (plans, prefs) ->
+        flow {
+            if (!prefs.systemCalendarEnabled || prefs.systemCalendarId.isNullOrBlank()) {
+                emit(emptySet())
+                return@flow
+            }
+            val open = plans.filter {
+                val s = it.effectiveStatus()
+                s == CarePlanStatus.PENDING || s == CarePlanStatus.MISSED
+            }
+            val unsynced = open.mapNotNull { plan ->
+                plan.id.takeIf { careLog.isCarePlanSystemCalendarUnsynced(it) }
+            }.toSet()
+            emit(unsynced)
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
 
     val timeStepMin = settingsStore.settings
         .map { it.timeStepMin }
@@ -117,6 +286,16 @@ class CalendarViewModel @Inject constructor(
         .map { it.preferredHand }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "right")
 
+    val settings = settingsStore.settings
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsLocal())
+
+    val customItems = careLog.observeCustomItems()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /**
+     * Legacy free-title create is retired from the calendar ＋ entry.
+     * Kept for tests / migration tooling that still call through ViewModel.
+     */
     fun add(
         title: String,
         eventAt: Long,
@@ -143,6 +322,28 @@ class CalendarViewModel @Inject constructor(
             val scheduled = remindAt != null
             _status.value = scheduleStatus(scheduled, remindAt != null)
             onResult(null)
+        }
+    }
+
+    fun convertEventToCarePlan(
+        event: CalendarEvent,
+        type: RecordType,
+        customItemId: Long? = null,
+        onResult: (String?) -> Unit,
+    ) {
+        viewModelScope.launch {
+            runCatching {
+                careLog.convertCalendarEventToCarePlan(
+                    eventId = event.id,
+                    type = type,
+                    customItemId = customItemId,
+                )
+            }.onSuccess {
+                _status.value = "已转换为护理计划；原日程提醒已取消"
+                onResult(null)
+            }.onFailure { err ->
+                onResult(err.message ?: "转换失败，原日程保持不变")
+            }
         }
     }
 
@@ -195,17 +396,40 @@ class CalendarViewModel @Inject constructor(
 fun CalendarRoute(
     onBack: () -> Unit,
     initialDate: LocalDate = RecordTime.today(ZoneId.systemDefault()),
+    /** Open “安排护理” Composer for a concrete built-in or custom item. */
+    onScheduleCare: (type: RecordType, scheduledAt: Long, customItemId: Long?) -> Unit =
+        { _, _, _ -> },
+    /** Open fulfill Composer for an open plan. */
+    onFulfillPlan: (carePlanId: Long) -> Unit = {},
+    /** Open edit-plan Composer for completed/skipped rows (or open plans). */
+    onEditPlan: (carePlanId: Long) -> Unit = {},
     vm: CalendarViewModel = hiltViewModel(),
 ) {
+    val dayItems by vm.dayItems.collectAsStateWithLifecycle()
     val events by vm.events.collectAsStateWithLifecycle()
     val timeStepMin by vm.timeStepMin.collectAsStateWithLifecycle()
     val timePickerStyle by vm.timePickerStyle.collectAsStateWithLifecycle()
     val preferredHand by vm.preferredHand.collectAsStateWithLifecycle()
     val reminderStatus by vm.status.collectAsStateWithLifecycle()
+    val settings by vm.settings.collectAsStateWithLifecycle()
+    val customItems by vm.customItems.collectAsStateWithLifecycle()
+    val systemCalendarUnsyncedPlanIds by vm.systemCalendarUnsyncedPlanIds.collectAsStateWithLifecycle()
+    val isFamilyAdmin by vm.isFamilyAdmin.collectAsStateWithLifecycle()
+    val conflictCountByPlanUuid by vm.conflictCountByPlanUuid.collectAsStateWithLifecycle()
+    val conflictAudits by vm.conflictAudits.collectAsStateWithLifecycle()
+    val conflictDetail by vm.conflictDetail.collectAsStateWithLifecycle()
+    val conflictBusy by vm.conflictBusy.collectAsStateWithLifecycle()
     val zone = ZoneId.systemDefault()
     val context = LocalContext.current
     var showAdd by remember { mutableStateOf(false) }
+    var showPlanTypePicker by remember { mutableStateOf(false) }
+    var convertEvent by remember { mutableStateOf<CalendarEvent?>(null) }
     var editingEvent by remember { mutableStateOf<CalendarEvent?>(null) }
+    var showConflictList by remember { mutableStateOf(false) }
+    var confirmConvertCandidate by remember { mutableStateOf<String?>(null) }
+    var conflictError by remember { mutableStateOf<String?>(null) }
+    var previewPhotos by remember { mutableStateOf<List<String>?>(null) }
+    var previewStartIndex by remember { mutableStateOf(0) }
     var title by remember { mutableStateOf("") }
     var eventAt by remember(initialDate) {
         mutableStateOf(RecordTime.defaultFutureEventTimestamp(initialDate, zone))
@@ -222,7 +446,14 @@ fun CalendarRoute(
         saveAfterPermission?.invoke(granted)
         saveAfterPermission = null
     }
+    val planableItems = remember(settings.hiddenItems, customItems) {
+        calendarPlanableItems(settings.hiddenItems, customItems)
+    }
+    val openPlanTypePicker = {
+        showPlanTypePicker = true
+    }
     val openCalendarDraft = {
+        // Legacy free-title draft is only used when editing an existing CalendarEvent.
         editingEvent = null
         eventAt = RecordTime.defaultFutureEventTimestamp(initialDate, zone)
         remindAt = eventAt - 60 * 60_000L
@@ -243,7 +474,7 @@ fun CalendarRoute(
     }
     Scaffold(
         topBar = {
-            LeziDetailTopBar(title = "日程", onBack = onBack)
+            LeziDetailTopBar(title = "乐记日历", onBack = onBack)
         },
     ) { padding ->
         Column(
@@ -253,8 +484,8 @@ fun CalendarRoute(
                 .padding(LeziSpacing.Page),
         ) {
             LeziPrimaryButton(
-                "添加日程",
-                onClick = openCalendarDraft,
+                "＋ 安排护理",
+                onClick = openPlanTypePicker,
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(LeziSpacing.Sm))
@@ -266,41 +497,114 @@ fun CalendarRoute(
                 )
                 Spacer(Modifier.height(LeziSpacing.Xs))
             }
-            if (events.isEmpty()) {
+            if (dayItems.isEmpty()) {
                 StateContainer(
                     kind = StateKind.Empty,
-                    title = "还没有日程",
-                    message = "为体检、用药或重要安排设一个时间",
-                    actionLabel = "添加日程",
-                    onAction = openCalendarDraft,
+                    title = "还没有安排",
+                    message = "选择具体记录项目安排护理，或继续管理历史自由标题日程",
+                    actionLabel = "安排护理",
+                    onAction = openPlanTypePicker,
                 )
             } else {
                 LazyColumn(
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
                 ) {
-                    items(events, key = { it.id }) { e ->
-                        LeziCard(
-                            modifier = Modifier.fillMaxWidth(),
-                            onClick = {
-                                editingEvent = e
-                                title = e.title
-                                eventAt = e.eventAt
-                                reminderEnabled = e.remindAt != null
-                                remindAt = e.remindAt ?: (e.eventAt - 60 * 60_000L)
-                                addError = null
-                                showAdd = true
-                            },
-                        ) {
-                            Text(
-                                e.title,
-                                style = LeziTypography.BodyStrong,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            Text(formatCalendarDateTime(e.eventAt, zone), style = LeziTypography.Meta)
-                            e.remindAt?.let {
-                                Text("提醒 ${formatCalendarDateTime(it, zone)}", style = LeziTypography.Meta)
+                    items(
+                        dayItems,
+                        key = {
+                            when (it) {
+                                is CalendarDayItem.Plan -> "plan-${it.plan.id}"
+                                is CalendarDayItem.LegacyEvent -> "event-${it.event.id}"
+                            }
+                        },
+                    ) { item ->
+                        when (item) {
+                            is CalendarDayItem.Plan -> {
+                                val plan = item.plan
+                                val effective = plan.effectiveStatus()
+                                val unsynced = plan.id in systemCalendarUnsyncedPlanIds
+                                val conflictCount = conflictCountByPlanUuid[plan.clientUuid] ?: 0
+                                LeziCard(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("calendar_plan_${plan.id}"),
+                                    onClick = {
+                                        val open = effective == CarePlanStatus.PENDING ||
+                                            effective == CarePlanStatus.MISSED
+                                        when {
+                                            open -> onFulfillPlan(plan.id)
+                                            shouldOpenConflictAudit(
+                                                isFamilyAdmin = isFamilyAdmin,
+                                                effective = effective,
+                                                conflictCount = conflictCount,
+                                            ) -> {
+                                                // Completed/history entry for conflict audit.
+                                                vm.loadConflictAuditsForPlan(plan.clientUuid) {
+                                                    showConflictList = true
+                                                }
+                                            }
+                                            else -> onEditPlan(plan.id)
+                                        }
+                                    },
+                                ) {
+                                    Text(plan.displayLabel(), style = LeziTypography.BodyStrong)
+                                    Text(
+                                        carePlanCalendarMetaLine(
+                                            plan = plan,
+                                            effective = effective,
+                                            deviceZone = zone,
+                                            systemCalendarUnsynced = unsynced,
+                                        ),
+                                        style = LeziTypography.Meta,
+                                    )
+                                    if (isFamilyAdmin && conflictCount > 0) {
+                                        Text(
+                                            "冲突未采纳 $conflictCount · 点此审计",
+                                            style = LeziTypography.Meta,
+                                            color = MaterialTheme.colorScheme.tertiary,
+                                            modifier = Modifier.testTag(
+                                                "calendar_plan_conflict_${plan.id}",
+                                            ),
+                                        )
+                                    }
+                                }
+                            }
+                            is CalendarDayItem.LegacyEvent -> {
+                                val e = item.event
+                                LeziCard(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    onClick = {
+                                        editingEvent = e
+                                        title = e.title
+                                        eventAt = e.eventAt
+                                        reminderEnabled = e.remindAt != null
+                                        remindAt = e.remindAt ?: (e.eventAt - 60 * 60_000L)
+                                        addError = null
+                                        showAdd = true
+                                    },
+                                ) {
+                                    Text(
+                                        e.title,
+                                        style = LeziTypography.BodyStrong,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Text(
+                                        formatCalendarDateTime(e.eventAt, zone),
+                                        style = LeziTypography.Meta,
+                                    )
+                                    e.remindAt?.let {
+                                        Text(
+                                            "提醒 ${formatCalendarDateTime(it, zone)}",
+                                            style = LeziTypography.Meta,
+                                        )
+                                    }
+                                    Text("历史日程 · 可编辑或转为护理计划", style = LeziTypography.Meta)
+                                    TextButton(onClick = { convertEvent = e }) {
+                                        Text("转为护理计划")
+                                    }
+                                }
                             }
                         }
                     }
@@ -308,12 +612,84 @@ fun CalendarRoute(
             }
         }
     }
+    if (showPlanTypePicker) {
+        AlertDialog(
+            onDismissRequest = { showPlanTypePicker = false },
+            title = { Text("选择记录项目") },
+            text = {
+                Column(
+                    Modifier
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    if (planableItems.isEmpty()) {
+                        Text(
+                            "没有已开启的可安排项目。可在记录设置中重新开启，或添加自定义项目。",
+                            style = LeziTypography.Meta,
+                        )
+                    }
+                    planableItems.forEach { item ->
+                        TextButton(
+                            onClick = {
+                                showPlanTypePicker = false
+                                val at = RecordTime.defaultFutureEventTimestamp(initialDate, zone)
+                                onScheduleCare(item.type, at, item.customItemId)
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(item.label)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showPlanTypePicker = false }) { Text("取消") }
+            },
+        )
+    }
+    convertEvent?.let { event ->
+        AlertDialog(
+            onDismissRequest = { convertEvent = null },
+            title = { Text("转为护理计划") },
+            text = {
+                Column(
+                    Modifier
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text("选择具体项目后将创建护理计划并取消原日程提醒。")
+                    planableItems.forEach { item ->
+                        TextButton(
+                            onClick = {
+                                vm.convertEventToCarePlan(
+                                    event,
+                                    item.type,
+                                    customItemId = item.customItemId,
+                                ) { err ->
+                                    if (err == null) convertEvent = null
+                                    else addError = err
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(item.label)
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { convertEvent = null }) { Text("取消") }
+            },
+        )
+    }
     if (showAdd) {
         AlertDialog(
             onDismissRequest = closeCalendarDraft,
             modifier = Modifier.imePadding(),
             properties = DialogProperties(decorFitsSystemWindows = false),
-            title = { Text(if (editingEvent == null) "新日程" else "编辑日程") },
+            title = { Text(if (editingEvent == null) "编辑历史日程" else "编辑日程") },
             text = {
                 Column(
                     Modifier
@@ -545,9 +921,281 @@ fun CalendarRoute(
             onDismiss = { clockTarget = null },
         )
     }
+
+    if (showConflictList) {
+        AlertDialog(
+            onDismissRequest = {
+                showConflictList = false
+                vm.clearConflictAudits()
+                conflictError = null
+            },
+            title = { Text("冲突未采纳履行") },
+            text = {
+                Column(
+                    Modifier
+                        .heightIn(max = 480.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
+                ) {
+                    Text(
+                        "以下履行未成为该计划的权威事实。若两次护理都实际发生，可转为独立记录。",
+                        style = LeziTypography.Meta,
+                    )
+                    conflictError?.let {
+                        Text(it, style = LeziTypography.Meta, color = MaterialTheme.colorScheme.error)
+                    }
+                    if (conflictAudits.isEmpty()) {
+                        Text("暂无冲突未采纳项", style = LeziTypography.Meta)
+                    }
+                    conflictAudits.forEach { audit ->
+                        LeziCard(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("conflict_audit_${audit.candidateClientUuid}"),
+                            onClick = { vm.openConflictDetail(audit.candidateClientUuid) },
+                        ) {
+                            Text(audit.typeLabel, style = LeziTypography.BodyStrong)
+                            Text(
+                                "提交者 ${audit.submitterDisplayName}",
+                                style = LeziTypography.Meta,
+                            )
+                            Text(
+                                "确认 ${formatCalendarDateTime(audit.confirmedAt, zone)}",
+                                style = LeziTypography.Meta,
+                            )
+                            Text(audit.notAdoptedReason, style = LeziTypography.Meta)
+                            if (audit.isConverted) {
+                                Text("已转为独立记录", style = LeziTypography.Meta)
+                            } else {
+                                Text("点此查看详情", style = LeziTypography.Meta)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showConflictList = false
+                        vm.clearConflictAudits()
+                        conflictError = null
+                    },
+                ) { Text("关闭") }
+            },
+        )
+    }
+
+    conflictDetail?.let { detail ->
+        AlertDialog(
+            onDismissRequest = { vm.clearConflictDetail() },
+            title = { Text("冲突未采纳详情") },
+            text = {
+                Column(
+                    Modifier
+                        .heightIn(max = 520.dp)
+                        .verticalScroll(rememberScrollState())
+                        .testTag("conflict_audit_detail"),
+                    verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
+                ) {
+                    Text("类型 ${detail.typeLabel}", style = LeziTypography.BodyStrong)
+                    Text("提交者 ${detail.submitterDisplayName}", style = LeziTypography.Meta)
+                    Text(
+                        "确认时间 ${formatCalendarDateTime(detail.confirmedAt, zone)}",
+                        style = LeziTypography.Meta,
+                    )
+                    detail.actualTimestamp?.let { actual ->
+                        Text(
+                            "实际发生 ${formatCalendarDateTime(actual, zone)}",
+                            style = LeziTypography.Meta,
+                        )
+                    }
+                    detail.note?.takeIf { it.isNotBlank() }?.let { note ->
+                        Text("备注 $note", style = LeziTypography.Meta)
+                    }
+                    Text(detail.notAdoptedReason, style = LeziTypography.Meta)
+                    if (detail.photoLocalPaths.isNotEmpty()) {
+                        Text(
+                            "照片 ${detail.photoLocalPaths.size} 张 · 点图预览",
+                            style = LeziTypography.Meta,
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            detail.photoLocalPaths.forEachIndexed { index, path ->
+                                val bitmap = remember(path) {
+                                    BitmapFactory.decodeFile(path)?.asImageBitmap()
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .size(72.dp)
+                                        .testTag("conflict_photo_$index")
+                                        .clickable {
+                                            previewPhotos = detail.photoLocalPaths
+                                            previewStartIndex = index
+                                        },
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    if (bitmap != null) {
+                                        Image(
+                                            bitmap = bitmap,
+                                            contentDescription = "冲突未采纳照片 ${index + 1}",
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentScale = ContentScale.Crop,
+                                        )
+                                    } else {
+                                        Text("图", style = LeziTypography.Meta)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (detail.isConverted) {
+                        Text("已转为独立护理记录", style = LeziTypography.Meta)
+                    }
+                    conflictError?.let {
+                        Text(it, style = LeziTypography.Meta, color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
+            confirmButton = {
+                if (!detail.isConverted) {
+                    TextButton(
+                        enabled = !conflictBusy,
+                        onClick = { confirmConvertCandidate = detail.candidateClientUuid },
+                        modifier = Modifier.testTag("conflict_convert_button"),
+                    ) { Text("转为独立记录") }
+                } else {
+                    TextButton(onClick = { vm.clearConflictDetail() }) { Text("关闭") }
+                }
+            },
+            dismissButton = {
+                if (!detail.isConverted) {
+                    TextButton(onClick = { vm.clearConflictDetail() }) { Text("返回") }
+                }
+            },
+        )
+    }
+
+    confirmConvertCandidate?.let { candidateUuid ->
+        AlertDialog(
+            onDismissRequest = { if (!conflictBusy) confirmConvertCandidate = null },
+            title = { Text("确认转为独立记录") },
+            text = {
+                Text(
+                    "将根据未采纳履行内容创建一条新的护理记录，进入时间轴与汇总。" +
+                        "原计划的权威履行与冲突审计保持不变。",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !conflictBusy,
+                    onClick = {
+                        vm.convertConflictToIndependentRecord(candidateUuid) { err ->
+                            if (err == null) {
+                                confirmConvertCandidate = null
+                                conflictError = null
+                            } else {
+                                conflictError = err
+                                confirmConvertCandidate = null
+                            }
+                        }
+                    },
+                    modifier = Modifier.testTag("conflict_convert_confirm"),
+                ) { Text("确认转换") }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !conflictBusy,
+                    onClick = { confirmConvertCandidate = null },
+                ) { Text("取消") }
+            },
+        )
+    }
+
+    previewPhotos?.let { photos ->
+        ConflictPhotoPreviewDialog(
+            photos = photos,
+            startIndex = previewStartIndex.coerceIn(0, (photos.size - 1).coerceAtLeast(0)),
+            onDismiss = { previewPhotos = null },
+        )
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ConflictPhotoPreviewDialog(
+    photos: List<String>,
+    startIndex: Int,
+    onDismiss: () -> Unit,
+) {
+    if (photos.isEmpty()) return
+    val pagerState = rememberPagerState(
+        initialPage = startIndex.coerceIn(0, photos.lastIndex),
+        pageCount = { photos.size },
+    )
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = Color.Black,
+        ) {
+            Box(Modifier.fillMaxSize()) {
+                HorizontalPager(
+                    state = pagerState,
+                    modifier = Modifier.fillMaxSize(),
+                ) { page ->
+                    val path = photos[page]
+                    val bitmap = remember(path) {
+                        BitmapFactory.decodeFile(path)?.asImageBitmap()
+                    }
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        if (bitmap != null) {
+                            Image(
+                                bitmap = bitmap,
+                                contentDescription = "冲突未采纳照片预览 ${page + 1}/${photos.size}",
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Fit,
+                            )
+                        } else {
+                            Text(
+                                "无法预览图片",
+                                color = Color.White,
+                                style = LeziTypography.Body,
+                            )
+                        }
+                    }
+                }
+                TextButton(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(LeziSpacing.Page),
+                ) {
+                    Text("关闭", color = Color.White)
+                }
+            }
+        }
+    }
 }
 
 private enum class CalendarClockTarget { Event, Reminder }
+
+/** Pure entry policy: completed/history + admin + conflicts → audit sheet. */
+internal fun shouldOpenConflictAudit(
+    isFamilyAdmin: Boolean,
+    effective: CarePlanStatus,
+    conflictCount: Int,
+): Boolean {
+    val open = effective == CarePlanStatus.PENDING || effective == CarePlanStatus.MISSED
+    if (open) return false
+    return isFamilyAdmin && conflictCount > 0
+}
 
 internal fun calendarEventError(
     title: String,
@@ -581,3 +1229,37 @@ private fun formatCalendarDateTime(timestamp: Long, zone: ZoneId): String =
     Instant.ofEpochMilli(timestamp)
         .atZone(zone)
         .format(DateTimeFormatter.ofPattern("M月d日 HH:mm"))
+
+/**
+ * Local device time + status, and original plan-zone clock when zones differ
+ * (ticket 14: 展示状态和本地/原计划时间).
+ */
+internal fun carePlanCalendarMetaLine(
+    plan: CarePlan,
+    effective: CarePlanStatus,
+    deviceZone: ZoneId,
+    systemCalendarUnsynced: Boolean = false,
+): String {
+    val statusLabel = when (effective) {
+        CarePlanStatus.PENDING -> "待执行"
+        CarePlanStatus.MISSED -> "已错过"
+        CarePlanStatus.COMPLETED -> "已完成"
+        CarePlanStatus.SKIPPED -> "已跳过"
+    }
+    val local = formatCalendarDateTime(plan.scheduledAt, deviceZone)
+    val planZone = runCatching { ZoneId.of(plan.scheduledZoneId) }.getOrDefault(deviceZone)
+    val zoneHint = if (planZone != deviceZone) {
+        val original = Instant.ofEpochMilli(plan.scheduledAt)
+            .atZone(planZone)
+            .format(DateTimeFormatter.ofPattern("HH:mm"))
+        " · 原计划 $original (${plan.scheduledZoneId})"
+    } else {
+        ""
+    }
+    val unsyncedHint = if (systemCalendarUnsynced) {
+        " · $SYSTEM_CALENDAR_UNSYNCED_LABEL"
+    } else {
+        ""
+    }
+    return "$local · $statusLabel$zoneHint$unsyncedHint"
+}

@@ -57,10 +57,16 @@ fun TimerRoute(
     onDone: () -> Unit,
     initialNote: String = "",
     initialAmountMl: String = "",
+    /** When set, bind this open nursing care plan to the timer session (ticket 16). */
+    carePlanId: Long? = null,
+    babyId: Long? = null,
     vm: TimerViewModel = hiltViewModel(),
 ) {
     val context = LocalContext.current
     val state by vm.state.collectAsStateWithLifecycle()
+    LaunchedEffect(carePlanId, babyId) {
+        vm.bindCarePlanIfIdle(carePlanId = carePlanId, babyId = babyId)
+    }
     val timeStepMin by vm.timeStepMin.collectAsStateWithLifecycle()
     val timePickerStyle by vm.timePickerStyle.collectAsStateWithLifecycle()
     val preferredHand by vm.preferredHand.collectAsStateWithLifecycle()

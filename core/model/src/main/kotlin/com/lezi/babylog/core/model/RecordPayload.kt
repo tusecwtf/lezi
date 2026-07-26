@@ -18,6 +18,43 @@ import kotlinx.serialization.json.put
 
 const val CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION = 2
 
+/** Maximum photos attachable to one care record (or care plan) via the shared note area. */
+const val MAX_RECORD_PHOTOS = 3
+
+/**
+ * Local-path photo replica stored in payload JSON for historical diary/memo rows and
+ * for current sync materialization/export until atomic media bundles land.
+ */
+fun localPhotoPaths(payloadJson: String): List<String> {
+    val obj = runCatching { Json.parseToJsonElement(payloadJson).jsonObject }
+        .getOrNull()
+        ?: return emptyList()
+    return runCatching {
+        obj["photos"]?.jsonArray
+            ?.mapNotNull { element ->
+                element.jsonPrimitive.contentOrNull?.takeIf(String::isNotBlank)
+            }
+            .orEmpty()
+    }.getOrDefault(emptyList())
+}
+
+/** Rewrite the top-level `photos` array while leaving every other payload field intact. */
+fun withLocalPhotoPaths(payloadJson: String, photoPaths: List<String>): String {
+    val obj = runCatching { Json.parseToJsonElement(payloadJson).jsonObject }
+        .getOrDefault(JsonObject(emptyMap()))
+    val normalized = photoPaths.filter { it.isNotBlank() }.distinct()
+    val next = if (normalized.isEmpty()) {
+        JsonObject(obj - "photos")
+    } else {
+        JsonObject(
+            obj + (
+                "photos" to JsonArray(normalized.map(::JsonPrimitive))
+                ),
+        )
+    }
+    return next.toString()
+}
+
 sealed interface RecordPayload {
     val type: RecordType
 }

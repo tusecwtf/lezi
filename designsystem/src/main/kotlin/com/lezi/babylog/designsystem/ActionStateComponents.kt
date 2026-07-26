@@ -148,37 +148,78 @@ fun StateContainer(
     }
 }
 
+/**
+ * Visual / interactive mode for [LeziPrimaryButton].
+ *
+ * [ExplainedDisabled] keeps the normal shape and remains clickable so the caller
+ * can show a concrete reason; it is not a Material-disabled control.
+ */
+enum class LeziPrimaryButtonMode {
+    Enabled,
+    ExplainedDisabled,
+    Disabled,
+}
+
 @Composable
 fun LeziPrimaryButton(
     label: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    mode: LeziPrimaryButtonMode = if (enabled) {
+        LeziPrimaryButtonMode.Enabled
+    } else {
+        LeziPrimaryButtonMode.Disabled
+    },
 ) {
     val journal = LeziThemeExt.isJournal
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
+    val clickable = mode != LeziPrimaryButtonMode.Disabled
+    val shape = if (journal) LeziShapes.JournalButton else LeziShapes.Button
+    val fillColor = when (mode) {
+        LeziPrimaryButtonMode.Enabled -> MaterialTheme.colorScheme.primary
+        LeziPrimaryButtonMode.ExplainedDisabled ->
+            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
+        LeziPrimaryButtonMode.Disabled ->
+            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+    }
+    val labelColor = when (mode) {
+        LeziPrimaryButtonMode.Enabled -> MaterialTheme.colorScheme.onPrimary
+        LeziPrimaryButtonMode.ExplainedDisabled ->
+            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f)
+        LeziPrimaryButtonMode.Disabled ->
+            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+    }
+    val elevation = when {
+        mode != LeziPrimaryButtonMode.Enabled -> 0.dp
+        pressed -> 0.dp
+        else -> 4.dp
+    }
     Surface(
         modifier = modifier
             .heightIn(min = LeziSpacing.Touch)
+            .then(
+                if (mode == LeziPrimaryButtonMode.ExplainedDisabled) {
+                    Modifier.border(
+                        width = 1.dp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.28f),
+                        shape = shape,
+                    )
+                } else {
+                    Modifier
+                },
+            )
             .clickable(
-                enabled = enabled,
+                enabled = clickable,
                 interactionSource = interaction,
-                indication = ripple(),
+                indication = if (clickable) ripple() else null,
                 onClick = onClick,
             ),
-        shape = if (journal) LeziShapes.JournalButton else LeziShapes.Button,
-        color = if (enabled) {
-            MaterialTheme.colorScheme.primary
-        } else {
-            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
-        },
-        contentColor = if (enabled) {
-            MaterialTheme.colorScheme.onPrimary
-        } else {
-            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
-        },
-        shadowElevation = if (pressed) 0.dp else 4.dp,
+        shape = shape,
+        color = fillColor,
+        contentColor = labelColor,
+        shadowElevation = elevation,
     ) {
         Box(
             Modifier.padding(horizontal = 18.dp, vertical = 12.dp),

@@ -1,13 +1,16 @@
 package com.lezi.babylog.sync
 
 /**
- * Link-key decision (family-identity ticket 01):
+ * Link-key decision (family-identity tickets 01 / 03):
  *
  * Record payloads attribute writers with `created_by_device_id`. Members list
  * returns the same value as `device_id` so clients can resolve the writer's
  * **current** 家庭称呼 without a historical name snapshot.
  *
  * - `device_id` is a **client-only link key** — never render it in product UI.
+ * - `membership_id` is the server-minted stable public identity for ACL (plans,
+ *   custom defs, fulfillment). Keep it parallel to device_id until record author
+ *   fields migrate; do not treat client-claimed device_id as authority.
  * - Tokens / token hashes / family_id remain omitted from members.
  * - Self records must not show an uploader label; unresolved non-self use
  *   role/「家人」fallbacks, never 「我（本机）」.
@@ -17,6 +20,7 @@ data class UploaderMemberRef(
     val displayName: String?,
     val role: FamilyRole,
     val isSelf: Boolean = false,
+    val membershipId: String? = null,
 )
 
 /**
@@ -54,5 +58,6 @@ fun FamilyMember.toUploaderRef(): UploaderMemberRef? {
         displayName = displayName,
         role = role,
         isSelf = isSelf,
+        membershipId = membershipId?.trim()?.takeIf { it.isNotEmpty() },
     )
 }

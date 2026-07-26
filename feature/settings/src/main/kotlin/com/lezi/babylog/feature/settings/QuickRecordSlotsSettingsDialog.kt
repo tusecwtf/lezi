@@ -1,0 +1,189 @@
+package com.lezi.babylog.feature.settings
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import com.lezi.babylog.core.model.QUICK_RECORD_SLOT_COUNT
+import com.lezi.babylog.core.model.RecordItemIdentity
+import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.SettingsLocal
+import com.lezi.babylog.core.model.availableForNewEntry
+import com.lezi.babylog.core.ui.presentation
+import com.lezi.babylog.designsystem.LeziSpacing
+import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.domain.CustomRecordItem
+
+/**
+ * Minimal settings UI to pick / clear / reorder the four home quick-record slots.
+ * Drag reorder lands in ticket 06; here ↑↓ swap still satisfies 换位.
+ */
+@Composable
+internal fun QuickRecordSlotsSettingsDialog(
+    settings: SettingsLocal,
+    customItems: List<CustomRecordItem>,
+    onDismiss: () -> Unit,
+    onSlotsChanged: (List<String>) -> Unit,
+) {
+    val slots = remember(settings.quickRecordSlots) {
+        normalizeSlots(settings.quickRecordSlots)
+    }
+    var pickingIndex by remember { mutableIntStateOf(-1) }
+    val candidates = remember(settings.hiddenItems, customItems) {
+        slotCandidates(settings.hiddenItems, customItems)
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("常用记录槽位") },
+        text = {
+            Column(
+                Modifier
+                    .heightIn(max = 520.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
+            ) {
+                Text(
+                    "首页固定四个常用槽位，可选择已开启的具体项目；清空后显示「＋ 选择」。关闭或删除的项目不会自动补位。",
+                    style = LeziTypography.Meta,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                slots.forEachIndexed { index, key ->
+                    val label = slotLabel(key, customItems)
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("槽位 ${index + 1}", style = LeziTypography.Label)
+                            Text(
+                                label,
+                                style = LeziTypography.BodyStrong,
+                            )
+                        }
+                        Row {
+                            TextButton(
+                                enabled = index > 0,
+                                onClick = {
+                                    onSlotsChanged(swapSlots(slots, index, index - 1))
+                                },
+                            ) { Text("↑") }
+                            TextButton(
+                                enabled = index < slots.lastIndex,
+                                onClick = {
+                                    onSlotsChanged(swapSlots(slots, index, index + 1))
+                                },
+                            ) { Text("↓") }
+                            TextButton(onClick = { pickingIndex = index }) { Text("选") }
+                            TextButton(
+                                enabled = key.isNotEmpty(),
+                                onClick = {
+                                    val next = slots.toMutableList()
+                                    next[index] = ""
+                                    onSlotsChanged(next)
+                                },
+                            ) { Text("空") }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
+    )
+
+    if (pickingIndex in slots.indices) {
+        AlertDialog(
+            onDismissRequest = { pickingIndex = -1 },
+            title = { Text("选择槽位 ${pickingIndex + 1}") },
+            text = {
+                Column(
+                    Modifier
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    candidates.forEach { candidate ->
+                        FilterChip(
+                            selected = slots[pickingIndex] == candidate.catalogKey,
+                            onClick = {
+                                val next = slots.toMutableList()
+                                next[pickingIndex] = candidate.catalogKey
+                                onSlotsChanged(next)
+                                pickingIndex = -1
+                            },
+                            label = { Text(candidate.label) },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { pickingIndex = -1 }) { Text("取消") }
+            },
+        )
+    }
+}
+
+private data class SlotCandidate(val catalogKey: String, val label: String)
+
+private fun normalizeSlots(slots: List<String>): List<String> {
+    val padded = slots.map { it.trim() }.toMutableList()
+    while (padded.size < QUICK_RECORD_SLOT_COUNT) padded += ""
+    return padded.take(QUICK_RECORD_SLOT_COUNT)
+}
+
+private fun swapSlots(slots: List<String>, from: Int, to: Int): List<String> {
+    val list = normalizeSlots(slots).toMutableList()
+    if (from !in list.indices || to !in list.indices) return list
+    val tmp = list[from]
+    list[from] = list[to]
+    list[to] = tmp
+    return list
+}
+
+private fun slotLabel(key: String, customItems: List<CustomRecordItem>): String {
+    if (key.isBlank()) return "＋ 选择常用记录"
+    val identity = RecordItemIdentity.parseCatalogKey(key) ?: return "无效引用 · 点击重选"
+    return when (identity) {
+        is RecordItemIdentity.BuiltIn -> identity.type.presentation.label
+        is RecordItemIdentity.Custom ->
+            customItems.firstOrNull { it.id == identity.customItemId }?.name
+                ?: "已删除项目 · 点击重选"
+    }
+}
+
+private fun slotCandidates(
+    hiddenItems: Set<String>,
+    customItems: List<CustomRecordItem>,
+): List<SlotCandidate> {
+    val builtIns = RecordType.availableForNewEntry()
+        .filter { it.key !in hiddenItems }
+        .map { SlotCandidate(it.key, it.presentation.label) }
+    val customs = customItems
+        .filter { RecordItemIdentity.customCatalogKey(it.id) !in hiddenItems }
+        .map {
+            SlotCandidate(
+                RecordItemIdentity.customCatalogKey(it.id),
+                it.name,
+            )
+        }
+    return builtIns + customs
+}

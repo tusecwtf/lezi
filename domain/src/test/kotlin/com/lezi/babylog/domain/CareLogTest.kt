@@ -5,10 +5,14 @@ import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.BabyEntity
 import com.lezi.babylog.core.database.CalendarEventDao
 import com.lezi.babylog.core.database.CalendarEventEntity
+import com.lezi.babylog.core.database.CarePlanDao
+import com.lezi.babylog.core.database.CarePlanEntity
 import com.lezi.babylog.core.database.CustomItemDao
 import com.lezi.babylog.core.database.CustomItemEntity
 import com.lezi.babylog.core.database.FamilyDao
 import com.lezi.babylog.core.database.FamilyEntity
+import com.lezi.babylog.core.database.FulfillmentCandidateDao
+import com.lezi.babylog.core.database.FulfillmentCandidateEntity
 import com.lezi.babylog.core.database.LocalUserDao
 import com.lezi.babylog.core.database.LocalUserEntity
 import com.lezi.babylog.core.database.MediaAssetDao
@@ -20,8 +24,15 @@ import com.lezi.babylog.core.database.PendingReminderCleanupEntity
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.datastore.SettingsStore
+import com.lezi.babylog.core.model.CarePlan
+import com.lezi.babylog.core.model.CarePlanStatus
+import com.lezi.babylog.core.model.RecordItemIdentity
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.Sex
 import com.lezi.babylog.core.model.SettingsLocal
+import com.lezi.babylog.core.model.displayLabel
+import com.lezi.babylog.core.model.isPlanableNonStateful
+import com.lezi.babylog.core.model.itemIdentity
 import com.lezi.babylog.core.model.visibleBusinessText
 import java.time.LocalDate
 import java.time.ZoneOffset
@@ -1051,6 +1062,1110 @@ class CareLogTest {
     }
 
     @Test
+    fun concreteCustomRecordRoundTripsItemIdentityAndTitleSnapshot() = runTest {
+        val care = Fakes().careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val itemId = care.addCustomItem("抚触", iconSlot = 2)
+
+        val recordId = care.addRecord(
+            babyId = babyId,
+            type = RecordType.CUSTOM,
+            timestamp = 2_000L,
+            payloadJson = """{"title":"抚触","detail":"晚间","custom_item_id":$itemId,"icon_slot":2}""",
+        )
+        val loaded = care.getRecord(recordId)!!
+
+        assertThat(loaded.type).isEqualTo(RecordType.CUSTOM)
+        assertThat(loaded.displayLabel()).isEqualTo("抚触")
+        assertThat(loaded.itemIdentity()).isEqualTo(RecordItemIdentity.custom(itemId))
+        // Renaming the definition does not rewrite the historical snapshot.
+        care.updateCustomItem(
+            care.observeCustomItems().first().single().copy(name = "新抚触"),
+        )
+        val afterRename = care.getRecord(recordId)!!
+        assertThat(afterRename.displayLabel()).isEqualTo("抚触")
+        assertThat(afterRename.itemIdentity()).isEqualTo(RecordItemIdentity.custom(itemId))
+    }
+
+    @Test
+    fun customItemOwnership_memberCanOnlyManageOwnAndAdminManagesAll() = runTest {
+        assertThat(
+            canManageCustomItemDefinition(
+                creatorMembershipId = "m-creator",
+                actorMembershipId = "m-creator",
+                actorIsAdmin = false,
+            ),
+        ).isTrue()
+        assertThat(
+            canManageCustomItemDefinition(
+                creatorMembershipId = "m-creator",
+                actorMembershipId = "m-other",
+                actorIsAdmin = false,
+            ),
+        ).isFalse()
+        assertThat(
+            canManageCustomItemDefinition(
+                creatorMembershipId = "m-creator",
+                actorMembershipId = "m-admin",
+                actorIsAdmin = true,
+            ),
+        ).isTrue()
+        // Creator left: admin still manages the definition.
+        assertThat(
+            canManageCustomItemDefinition(
+                creatorMembershipId = "m-left",
+                actorMembershipId = "m-admin",
+                actorIsAdmin = true,
+            ),
+        ).isTrue()
+        // Offline single-device: empty creator and actor.
+        assertThat(
+            canManageCustomItemDefinition(
+                creatorMembershipId = "",
+                actorMembershipId = "",
+                actorIsAdmin = false,
+            ),
+        ).isTrue()
+        // Legacy empty creator after join: non-admin cannot claim.
+        assertThat(
+            canManageCustomItemDefinition(
+                creatorMembershipId = "",
+                actorMembershipId = "m-member",
+                actorIsAdmin = false,
+            ),
+        ).isFalse()
+    }
+
+    @Test
+    fun customItemStampsCreatorMembershipAndRejectsNonOwnerEdit() = runTest {
+        val memberSync = RecordingSyncPort(
+            membershipId = "m-member",
+            role = com.lezi.babylog.sync.FamilyRole.Member,
+            familyId = "fam-1",
+            deviceId = "dev-1",
+        )
+        val fakes = Fakes(memberSync)
+        val care = fakes.careLog()
+        care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val id = care.addCustomItem("药", 1)
+        val item = care.observeCustomItems().first().single()
+        assertThat(item.createdByMembershipId).isEqualTo("m-member")
+        assertThat(item.clientUuid).isNotEmpty()
+
+        // Simulate another member's definition present in DB.
+        fakes.customItems.upsert(
+            CustomItemEntity(
+                id = 99L,
+                clientUuid = "uuid-other",
+                familyId = 1L,
+                name = "他人项目",
+                iconSlot = 0,
+                sortOrder = 1,
+                updatedAt = 1L,
+                createdByMembershipId = "m-other",
+            ),
+        )
+        val foreign = care.observeCustomItems().first().first { it.id == 99L }
+        val denied = runCatching {
+            care.updateCustomItem(foreign.copy(name = "篡改"))
+        }.exceptionOrNull()
+        assertThat(denied).isInstanceOf(CustomItemPermissionException::class.java)
+        assertThat(care.observeCustomItems().first().first { it.id == 99L }.name)
+            .isEqualTo("他人项目")
+
+        // Owner may manage the foreign definition (leave takeover).
+        val adminSync = RecordingSyncPort(
+            membershipId = "m-admin",
+            role = com.lezi.babylog.sync.FamilyRole.Owner,
+            familyId = "fam-1",
+            deviceId = "dev-admin",
+        )
+        val adminCare = Fakes(adminSync).let { f ->
+            f.customItems.upsert(
+                CustomItemEntity(
+                    id = 99L,
+                    clientUuid = "uuid-other",
+                    familyId = 1L,
+                    name = "他人项目",
+                    iconSlot = 0,
+                    sortOrder = 1,
+                    updatedAt = 1L,
+                    createdByMembershipId = "m-left",
+                ),
+            )
+            f.careLog()
+        }
+        // Need a baby for family scaffold paths; update only needs existing row.
+        adminCare.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        adminCare.updateCustomItem(
+            CustomRecordItem(
+                id = 99L,
+                name = "管理员接管",
+                iconSlot = 0,
+                sortOrder = 1,
+                createdByMembershipId = "m-left",
+            ),
+        )
+    }
+
+    @Test
+    fun customItemTombstoneHidesFromObserveButKeepsIncludingDeleted() = runTest {
+        val owned = Fakes()
+        val log = owned.careLog()
+        log.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val itemId = log.addCustomItem("保留墓碑", 0)
+        log.deleteCustomItem(itemId)
+        assertThat(log.observeCustomItems().first()).isEmpty()
+        assertThat(owned.customItems.listAllIncludingDeleted()).hasSize(1)
+        assertThat(owned.customItems.listAllIncludingDeleted().single().deletedAt).isNotNull()
+        // Local hide (settings) is separate from tombstone — still a preference key only.
+        assertThat(RecordItemIdentity.customCatalogKey(itemId)).isEqualTo("custom:$itemId")
+    }
+
+    @Test
+    fun customItemFieldSnapshotDoesNotUseLiveNameAfterRename() = runTest {
+        val item = CustomRecordItem(id = 3, name = "抚触", iconSlot = 2, sortOrder = 0)
+        val snap = item.toFieldSnapshot()
+        assertThat(snap.titleSnapshot).isEqualTo("抚触")
+        assertThat(snap.iconSlot).isEqualTo(2)
+        assertThat(snap.customItemId).isEqualTo(3L)
+        val renamed = item.copy(name = "新名")
+        // Historical snapshot object stays independent of later renames.
+        assertThat(snap.titleSnapshot).isEqualTo("抚触")
+        assertThat(renamed.toFieldSnapshot().titleSnapshot).isEqualTo("新名")
+    }
+
+    @Test
+    fun carePlanCreateIsIsolatedFromRecordSurfacesAndFulfillIsAtomic() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 1_000_000L
+        val scheduled = now + 3_600_000L
+
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.PEE,
+            scheduledAt = scheduled,
+            note = "换尿布",
+            payloadJson = """{"pee_amount":2}""",
+            nowMillis = now,
+        )
+        val plan = care.getCarePlan(planId)!!
+        assertThat(plan.type).isEqualTo(RecordType.PEE)
+        assertThat(plan.status).isEqualTo(CarePlanStatus.PENDING)
+        assertThat(plan.note).isEqualTo("换尿布")
+
+        // Isolation: day records / summary / search do not include the plan.
+        val day = java.time.Instant.ofEpochMilli(scheduled)
+            .atZone(java.time.ZoneOffset.UTC).toLocalDate()
+        assertThat(care.dayRecords(babyId, day, java.time.ZoneOffset.UTC)).isEmpty()
+        val summary = care.daySummary(babyId, day, java.time.ZoneOffset.UTC, now)
+        assertThat(summary.peeCount).isEqualTo(0)
+        assertThat(summary.feedMl).isEqualTo(0)
+        assertThat(care.search(babyId, "换尿布")).isEmpty()
+        assertThat(
+            care.observeDayPendingPlans(babyId, day, java.time.ZoneOffset.UTC).first(),
+        ).hasSize(1)
+
+        // Future actual time is rejected.
+        val futureFail = runCatching {
+            care.fulfillCarePlan(
+                carePlanId = planId,
+                actualTimestamp = now + 10_000L,
+                nowMillis = now,
+            )
+        }.exceptionOrNull()
+        assertThat(futureFail).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(care.getCarePlan(planId)!!.status).isEqualTo(CarePlanStatus.PENDING)
+
+        val recordId = care.fulfillCarePlan(
+            carePlanId = planId,
+            actualTimestamp = now - 1_000L,
+            nowMillis = now,
+        )
+        val completed = care.getCarePlan(planId)!!
+        assertThat(completed.status).isEqualTo(CarePlanStatus.COMPLETED)
+        assertThat(completed.fulfilledRecordClientUuid).isNotNull()
+        val record = care.getRecord(recordId)!!
+        assertThat(record.type).isEqualTo(RecordType.PEE)
+        assertThat(record.clientUuid).isEqualTo(completed.fulfilledRecordClientUuid)
+        assertThat(care.observeDayPendingPlans(babyId, day, java.time.ZoneOffset.UTC).first())
+            .isEmpty()
+    }
+
+    @Test
+    fun carePlanUpdateToPastBecomesMissedWithoutRecordAndSkipTombstones() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val zone = java.time.ZoneOffset.UTC
+        val now = 10_000_000L
+        val future = now + 3_600_000L
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.PEE,
+            scheduledAt = future,
+            note = "计划",
+            nowMillis = now,
+            zone = zone,
+        )
+        // Move scheduled time into the past → effective missed, no Record.
+        care.updateCarePlan(
+            carePlanId = planId,
+            scheduledAt = now - 60_000L,
+            note = "改到过去",
+            nowMillis = now,
+        )
+        val updated = care.getCarePlan(planId)!!
+        assertThat(updated.note).isEqualTo("改到过去")
+        assertThat(updated.status).isEqualTo(CarePlanStatus.PENDING)
+        assertThat(updated.effectiveStatus(now)).isEqualTo(CarePlanStatus.MISSED)
+        assertThat(care.dayRecords(babyId, java.time.Instant.ofEpochMilli(now).atZone(zone).toLocalDate(), zone))
+            .isEmpty()
+
+        // Today list: missed first (ASC within group). Keep all times on the same UTC day.
+        val dayStart = java.time.LocalDate.of(2024, 6, 15)
+            .atStartOfDay(zone).toInstant().toEpochMilli()
+        val dayNow = dayStart + 12 * 3_600_000L // noon
+        val sameDayPending = dayNow + 3_600_000L // 13:00
+        val otherDayStart = dayStart + 24 * 3_600_000L
+        val otherDayPlanAt = otherDayStart + 10 * 3_600_000L
+
+        val plan2 = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.BATH,
+            scheduledAt = sameDayPending,
+            nowMillis = dayNow,
+            zone = zone,
+        )
+        val earlierMissed = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.WALK,
+            scheduledAt = dayNow + 1_000L,
+            nowMillis = dayNow - 5_000L,
+            zone = zone,
+        )
+        val otherDayPlan = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.DIARY,
+            scheduledAt = otherDayPlanAt,
+            nowMillis = dayNow,
+            zone = zone,
+        )
+        // Force earlierMissed + planId into past relative to dayNow via update.
+        care.updateCarePlan(earlierMissed, scheduledAt = dayNow - 120_000L, nowMillis = dayNow)
+        care.updateCarePlan(planId, scheduledAt = dayNow - 30_000L, nowMillis = dayNow)
+        val today = care.observeTodayPendingPlans(babyId, zone, dayNow).first()
+        assertThat(today.map { it.id }).containsExactly(earlierMissed, planId, plan2).inOrder()
+        assertThat(today.map { it.effectiveStatus(dayNow) }).containsExactly(
+            CarePlanStatus.MISSED,
+            CarePlanStatus.MISSED,
+            CarePlanStatus.PENDING,
+        ).inOrder()
+        // other-day plan is not mixed into "today" until its local day (missed-after-midnight
+        // still appears in today via overdue branch — otherDayPlan is still in the future).
+        assertThat(today.map { it.id }).doesNotContain(otherDayPlan)
+
+        // Non-today day bounds only that local day.
+        val otherDay = java.time.Instant.ofEpochMilli(otherDayPlanAt).atZone(zone).toLocalDate()
+        val dayOnly = care.observeDayPendingPlans(babyId, otherDay, zone).first()
+        assertThat(dayOnly.map { it.id }).containsExactly(otherDayPlan)
+
+        care.skipCarePlan(plan2, nowMillis = dayNow)
+        assertThat(care.getCarePlan(plan2)!!.status).isEqualTo(CarePlanStatus.SKIPPED)
+        assertThat(care.observeTodayPendingPlans(babyId, zone, dayNow).first().map { it.id })
+            .doesNotContain(plan2)
+        assertThat(fakes.records.listAllIncludingDeleted()).isEmpty()
+
+        care.deleteCarePlan(planId, nowMillis = dayNow)
+        assertThat(care.getCarePlan(planId)!!.deletedAt).isNotNull()
+        assertThat(care.observeTodayPendingPlans(babyId, zone, dayNow).first().map { it.id })
+            .doesNotContain(planId)
+    }
+
+    @Test
+    fun carePlanPhotosCreateUpdateFulfillAndTombstoneKeepOwnership() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 20_000_000L
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.PEE,
+            scheduledAt = now + 60_000L,
+            note = "带图计划",
+            photoLocalPaths = listOf("plans/a.jpg", "plans/b.jpg"),
+            nowMillis = now,
+        )
+        assertThat(care.listCarePlanPhotoPaths(planId)).containsExactly("plans/a.jpg", "plans/b.jpg")
+        val planMedia = fakes.media.listActiveForCarePlan(planId)
+        assertThat(planMedia).hasSize(2)
+        assertThat(planMedia.all { it.recordId == null && it.carePlanId == planId }).isTrue()
+
+        care.updateCarePlan(
+            carePlanId = planId,
+            scheduledAt = now + 90_000L,
+            photoLocalPaths = listOf("plans/a.jpg", "plans/c.jpg"),
+            nowMillis = now + 1,
+        )
+        assertThat(care.listCarePlanPhotoPaths(planId)).containsExactly("plans/a.jpg", "plans/c.jpg")
+        val tombstonedB = fakes.media.listForCarePlan(planId).first { it.localUri == "plans/b.jpg" }
+        assertThat(tombstonedB.deletedAt).isNotNull()
+
+        val recordId = care.fulfillCarePlan(
+            carePlanId = planId,
+            actualTimestamp = now,
+            photoLocalPaths = listOf("plans/a.jpg", "plans/c.jpg"),
+            nowMillis = now + 2,
+        )
+        // Record owns its own media rows; plan rows remain plan-owned.
+        val recordMedia = fakes.media.listActiveForRecord(recordId)
+        assertThat(recordMedia.map { it.localUri }).containsExactly("plans/a.jpg", "plans/c.jpg")
+        assertThat(recordMedia.all { it.carePlanId == null && it.recordId == recordId }).isTrue()
+        assertThat(fakes.media.listActiveForCarePlan(planId).map { it.localUri })
+            .containsExactly("plans/a.jpg", "plans/c.jpg")
+
+        // Soft-delete another plan with photos → media tombstones, files not required gone.
+        val plan2 = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.BATH,
+            scheduledAt = now + 120_000L,
+            photoLocalPaths = listOf("plans/x.jpg"),
+            nowMillis = now + 3,
+        )
+        care.deleteCarePlan(plan2, nowMillis = now + 4)
+        assertThat(fakes.media.listActiveForCarePlan(plan2)).isEmpty()
+        assertThat(fakes.media.listForCarePlan(plan2).single().deletedAt).isNotNull()
+    }
+
+    @Test
+    fun carePlanManagePermissionMatchesMembershipAcl() = runTest {
+        val creatorSync = RecordingSyncPort(
+            membershipId = "m-creator",
+            role = com.lezi.babylog.sync.FamilyRole.Member,
+            familyId = "fam-1",
+            deviceId = "dev-1",
+        )
+        val fakes = Fakes(creatorSync)
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 5_000_000L
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.PEE,
+            scheduledAt = now + 60_000L,
+            nowMillis = now,
+        )
+        assertThat(care.getCarePlan(planId)!!.createdByMembershipId).isEqualTo("m-creator")
+
+        // Foreign member cannot skip/edit/delete.
+        val foreignSync = RecordingSyncPort(
+            membershipId = "m-other",
+            role = com.lezi.babylog.sync.FamilyRole.Member,
+            familyId = "fam-1",
+            deviceId = "dev-2",
+        )
+        val foreignCare = Fakes(foreignSync).let { f ->
+            f.wireTransactionalSnapshots()
+            // Share the same plan row.
+            f.carePlans.upsert(fakes.carePlans.get(planId)!!)
+            f.babies.upsert(
+                BabyEntity(
+                    id = babyId,
+                    familyId = 1L,
+                    clientUuid = "b",
+                    nickname = "年年",
+                    birthdayEpochDay = 1,
+                    themeColorArgb = 0,
+                    updatedAt = 1L,
+                ),
+            )
+            f.careLog()
+        }
+        assertThat(
+            runCatching { foreignCare.skipCarePlan(planId, nowMillis = now) }.exceptionOrNull(),
+        ).isInstanceOf(CarePlanPermissionException::class.java)
+        assertThat(
+            runCatching {
+                foreignCare.updateCarePlan(planId, scheduledAt = now + 90_000L, nowMillis = now)
+            }.exceptionOrNull(),
+        ).isInstanceOf(CarePlanPermissionException::class.java)
+        assertThat(
+            runCatching { foreignCare.deleteCarePlan(planId, nowMillis = now) }.exceptionOrNull(),
+        ).isInstanceOf(CarePlanPermissionException::class.java)
+
+        // Owner can manage others' plans.
+        val adminSync = RecordingSyncPort(
+            membershipId = "m-admin",
+            role = com.lezi.babylog.sync.FamilyRole.Owner,
+            familyId = "fam-1",
+            deviceId = "dev-admin",
+        )
+        val adminCare = Fakes(adminSync).let { f ->
+            f.wireTransactionalSnapshots()
+            f.carePlans.upsert(fakes.carePlans.get(planId)!!)
+            f.babies.upsert(
+                BabyEntity(
+                    id = babyId,
+                    familyId = 1L,
+                    clientUuid = "b",
+                    nickname = "年年",
+                    birthdayEpochDay = 1,
+                    themeColorArgb = 0,
+                    updatedAt = 1L,
+                ),
+            )
+            f.careLog()
+        }
+        adminCare.skipCarePlan(planId, nowMillis = now)
+        assertThat(adminCare.getCarePlan(planId)!!.status).isEqualTo(CarePlanStatus.SKIPPED)
+    }
+
+    @Test
+    fun foreignMemberCanFulfillOthersPlanWithoutGainingManageRights() = runTest {
+        val creatorSync = RecordingSyncPort(
+            membershipId = "m-creator",
+            role = com.lezi.babylog.sync.FamilyRole.Member,
+            familyId = "fam-1",
+            deviceId = "dev-1",
+        )
+        val fakes = Fakes(creatorSync)
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 6_000_000L
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.PEE,
+            scheduledAt = now + 60_000L,
+            nowMillis = now,
+        )
+        val plan = fakes.carePlans.get(planId)!!
+
+        // Foreign ordinary member fulfills the creator's plan.
+        val foreignSync = RecordingSyncPort(
+            membershipId = "m-other",
+            role = com.lezi.babylog.sync.FamilyRole.Member,
+            familyId = "fam-1",
+            deviceId = "dev-2",
+        )
+        val foreign = Fakes(foreignSync)
+        foreign.wireTransactionalSnapshots()
+        foreign.carePlans.upsert(plan)
+        foreign.babies.upsert(
+            BabyEntity(
+                id = babyId,
+                familyId = 1L,
+                clientUuid = "b",
+                nickname = "年年",
+                birthdayEpochDay = 1,
+                themeColorArgb = 0,
+                updatedAt = 1L,
+            ),
+        )
+        val foreignCare = foreign.careLog()
+        val recordId = foreignCare.fulfillCarePlan(
+            carePlanId = planId,
+            actualTimestamp = now,
+            nowMillis = now + 1,
+        )
+        assertThat(recordId).isGreaterThan(0L)
+        val completed = foreignCare.getCarePlan(planId)!!
+        assertThat(completed.status).isEqualTo(CarePlanStatus.COMPLETED)
+        assertThat(completed.createdByMembershipId).isEqualTo("m-creator")
+        val candidates = foreignCare.listFulfillmentCandidatesForPlan(completed.clientUuid)
+        assertThat(candidates).hasSize(1)
+        assertThat(candidates.single().recordClientUuid)
+            .isEqualTo(completed.fulfilledRecordClientUuid)
+        assertThat(candidates.single().confirmedAt).isEqualTo(completed.fulfilledAt)
+        assertThat(candidates.single().syncDirty).isTrue()
+
+        // Fulfilling does not grant manage rights on the author's plan.
+        assertThat(foreignCare.canManageCarePlan(completed)).isFalse()
+        // Open plan owned by creator: skip/delete/update still ACL-denied.
+        val openId = foreign.carePlans.upsert(
+            plan.copy(
+                id = 0,
+                clientUuid = "plan-still-open",
+                status = "pending",
+                fulfilledRecordClientUuid = null,
+                fulfilledAt = null,
+                updatedAt = now + 3,
+            ),
+        )
+        assertThat(
+            runCatching {
+                foreignCare.updateCarePlan(
+                    openId,
+                    scheduledAt = now + 120_000L,
+                    nowMillis = now + 4,
+                )
+            }.exceptionOrNull(),
+        ).isInstanceOf(CarePlanPermissionException::class.java)
+        assertThat(
+            runCatching { foreignCare.skipCarePlan(openId, nowMillis = now + 5) }.exceptionOrNull(),
+        ).isInstanceOf(CarePlanPermissionException::class.java)
+        assertThat(
+            runCatching { foreignCare.deleteCarePlan(openId, nowMillis = now + 6) }.exceptionOrNull(),
+        ).isInstanceOf(CarePlanPermissionException::class.java)
+    }
+
+    @Test
+    fun multiCandidateFulfillmentPicksAdminAndHidesLoserFromOrdinarySurfaces() = runTest {
+        // Joined member session so fulfill stamps offline role/membership trails
+        // (ticket 26 residual: originator adjudication before server freeze pull).
+        val memberSync = RecordingSyncPort(
+            membershipId = "m-member",
+            role = com.lezi.babylog.sync.FamilyRole.Member,
+            familyId = "fam-1",
+            deviceId = "dev-member",
+        )
+        val fakes = Fakes(memberSync)
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 8_000_000L
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.BATH,
+            scheduledAt = now + 60_000L,
+            nowMillis = now,
+        )
+        val planUuid = care.getCarePlan(planId)!!.clientUuid
+        val zone = java.time.ZoneOffset.UTC
+        val day = java.time.Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
+
+        // Local member fulfill first (only fact visible until peers arrive).
+        val localRecordId = care.fulfillCarePlan(
+            carePlanId = planId,
+            actualTimestamp = now,
+            note = "local-member-fulfill",
+            nowMillis = now + 1,
+        )
+        val localRecord = care.getRecord(localRecordId)!!
+        assertThat(care.dayRecords(babyId, day, zone).map { it.clientUuid })
+            .contains(localRecord.clientUuid)
+        val localCand = care.listFulfillmentCandidatesForPlan(planUuid).single()
+        assertThat(localCand.adoptionStatus)
+            .isEqualTo(com.lezi.babylog.core.model.FulfillmentAdoptionStatus.ADOPTED)
+        assertThat(localCand.submitterMembershipId).isEqualTo("m-member")
+        assertThat(localCand.submitterRole).isEqualTo("member")
+
+        // Simulate remote owner candidate arriving with later confirmed_at but admin role.
+        val ownerRecordUuid = "owner-fulfill-record"
+        fakes.records.upsert(
+            RecordEntity(
+                clientUuid = ownerRecordUuid,
+                babyId = babyId,
+                type = RecordType.BATH.key,
+                timestamp = now,
+                note = "owner-fulfill",
+                createdByUserId = 1L,
+                payloadJson = "{}",
+                updatedAt = now + 50,
+                syncDirty = false,
+            ),
+        )
+        fakes.fulfillmentCandidates.upsert(
+            FulfillmentCandidateEntity(
+                clientUuid = "owner-cand",
+                carePlanClientUuid = planUuid,
+                recordClientUuid = ownerRecordUuid,
+                actualTimestamp = now + 9_000,
+                confirmedAt = now + 100,
+                submitterMembershipId = "m-owner",
+                submitterRole = "owner",
+                updatedAt = now + 100,
+                syncDirty = false,
+            ),
+        )
+        care.resolveFulfillmentAuthorityForPlan(planUuid)
+
+        val plan = care.getCarePlan(planId)!!
+        assertThat(plan.fulfilledRecordClientUuid).isEqualTo(ownerRecordUuid)
+        val candidates = care.listFulfillmentCandidatesForPlan(planUuid)
+        assertThat(candidates).hasSize(2)
+        val winner = candidates.single { it.clientUuid == "owner-cand" }
+        val loser = candidates.single { it.clientUuid == localCand.clientUuid }
+        assertThat(winner.adoptionStatus)
+            .isEqualTo(com.lezi.babylog.core.model.FulfillmentAdoptionStatus.ADOPTED)
+        assertThat(loser.adoptionStatus)
+            .isEqualTo(com.lezi.babylog.core.model.FulfillmentAdoptionStatus.CONFLICT_NOT_ADOPTED)
+        // Loser record and photos retained.
+        assertThat(care.getRecord(localRecordId)).isNotNull()
+        assertThat(care.getRecord(localRecordId)!!.deletedAt).isNull()
+
+        // Ordinary surfaces only show winner.
+        assertThat(care.dayRecords(babyId, day, zone).map { it.clientUuid })
+            .containsExactly(ownerRecordUuid)
+        assertThat(care.search(babyId, "owner-fulfill").map { it.clientUuid })
+            .containsExactly(ownerRecordUuid)
+        assertThat(care.search(babyId, "local-member-fulfill")).isEmpty()
+        // Idempotent re-resolve.
+        care.resolveFulfillmentAuthorityForPlan(planUuid)
+        assertThat(care.getCarePlan(planId)!!.fulfilledRecordClientUuid).isEqualTo(ownerRecordUuid)
+        assertThat(
+            care.listFulfillmentCandidatesForPlan(planUuid)
+                .map { it.clientUuid to it.adoptionStatus }
+                .toSet(),
+        ).containsExactly(
+            "owner-cand" to com.lezi.babylog.core.model.FulfillmentAdoptionStatus.ADOPTED,
+            localCand.clientUuid to
+                com.lezi.babylog.core.model.FulfillmentAdoptionStatus.CONFLICT_NOT_ADOPTED,
+        )
+    }
+
+    @Test
+    fun conflictAuditListAndConvertAreAdminOnlyAndIdempotent() = runTest {
+        val memberSync = RecordingSyncPort(
+            membershipId = "m-member",
+            role = com.lezi.babylog.sync.FamilyRole.Member,
+            familyId = "fam-audit",
+            deviceId = "dev-member",
+        )
+        val memberFakes = Fakes(memberSync)
+        memberFakes.wireTransactionalSnapshots()
+        val memberCare = memberFakes.careLog()
+        val babyId = memberCare.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 11_000_000L
+        val planId = memberCare.createCarePlan(
+            babyId = babyId,
+            type = RecordType.BATH,
+            scheduledAt = now + 60_000L,
+            nowMillis = now,
+        )
+        val planUuid = memberCare.getCarePlan(planId)!!.clientUuid
+        val loserRecordId = memberCare.fulfillCarePlan(
+            carePlanId = planId,
+            actualTimestamp = now,
+            note = "member-fulfill",
+            photoLocalPaths = listOf("loser/photo.jpg"),
+            nowMillis = now + 1,
+        )
+        val loserRecord = memberCare.getRecord(loserRecordId)!!
+        // Remote admin candidate wins authority.
+        memberFakes.records.upsert(
+            RecordEntity(
+                clientUuid = "owner-rec-audit",
+                babyId = babyId,
+                type = RecordType.BATH.key,
+                timestamp = now,
+                note = "owner-fulfill",
+                createdByUserId = 1L,
+                payloadJson = "{}",
+                updatedAt = now + 50,
+                syncDirty = false,
+            ),
+        )
+        memberFakes.fulfillmentCandidates.upsert(
+            FulfillmentCandidateEntity(
+                clientUuid = "owner-cand-audit",
+                carePlanClientUuid = planUuid,
+                recordClientUuid = "owner-rec-audit",
+                actualTimestamp = now + 9_000,
+                confirmedAt = now + 100,
+                submitterMembershipId = "m-owner",
+                submitterRole = "owner",
+                updatedAt = now + 100,
+                syncDirty = false,
+            ),
+        )
+        memberCare.resolveFulfillmentAuthorityForPlan(planUuid)
+        val loserCand = memberCare.listFulfillmentCandidatesForPlan(planUuid)
+            .single { it.recordClientUuid == loserRecord.clientUuid }
+        assertThat(loserCand.adoptionStatus)
+            .isEqualTo(com.lezi.babylog.core.model.FulfillmentAdoptionStatus.CONFLICT_NOT_ADOPTED)
+
+        // Non-admin: empty list, null detail, convert throws.
+        assertThat(memberCare.listConflictNotAdoptedAudits(carePlanClientUuid = planUuid))
+            .isEmpty()
+        assertThat(memberCare.getConflictNotAdoptedAudit(loserCand.clientUuid)).isNull()
+        val denied = runCatching {
+            memberCare.convertConflictNotAdoptedToIndependentRecord(loserCand.clientUuid)
+        }.exceptionOrNull()
+        assertThat(denied).isInstanceOf(ConflictAuditPermissionException::class.java)
+
+        // Admin path on same data (rebind CareLog with owner session).
+        val adminSync = RecordingSyncPort(
+            membershipId = "m-owner",
+            role = com.lezi.babylog.sync.FamilyRole.Owner,
+            familyId = "fam-audit",
+            deviceId = "dev-owner",
+        )
+        val adminCare = CareLog(
+            memberFakes.babies,
+            memberFakes.records,
+            memberFakes.carePlans,
+            memberFakes.calendarEvents,
+            memberFakes.customItems,
+            memberFakes.users,
+            memberFakes.families,
+            memberFakes.memberships,
+            memberFakes.media,
+            memberFakes.pendingReminderCleanup,
+            memberFakes.settings,
+            adminSync,
+            memberFakes.reminders,
+            memberFakes.transactions,
+            memberFakes.systemCalendar,
+            memberFakes.fulfillmentCandidates,
+        )
+        val audits = adminCare.listConflictNotAdoptedAudits(carePlanClientUuid = planUuid)
+        assertThat(audits).hasSize(1)
+        val audit = audits.single()
+        assertThat(audit.candidateClientUuid).isEqualTo(loserCand.clientUuid)
+        assertThat(audit.photoLocalPaths).containsExactly("loser/photo.jpg")
+        assertThat(audit.notAdoptedReason).contains("管理员")
+        assertThat(audit.isConverted).isFalse()
+
+        val convertedId = adminCare.convertConflictNotAdoptedToIndependentRecord(
+            candidateClientUuid = loserCand.clientUuid,
+            nowMillis = now + 200,
+        )
+        val converted = adminCare.getRecord(convertedId)!!
+        assertThat(converted.clientUuid).isNotEqualTo(loserRecord.clientUuid)
+        assertThat(converted.note).isEqualTo("member-fulfill")
+        assertThat(adminCare.listRecordPhotoPaths(convertedId))
+            .containsExactly("loser/photo.jpg")
+        // Ordinary surfaces include the new independent record.
+        val day = java.time.Instant.ofEpochMilli(now)
+            .atZone(java.time.ZoneOffset.UTC)
+            .toLocalDate()
+        assertThat(
+            adminCare.dayRecords(babyId, day, java.time.ZoneOffset.UTC).map { it.clientUuid },
+        ).contains(converted.clientUuid)
+        // Loser still excluded; plan authority unchanged.
+        assertThat(
+            adminCare.dayRecords(babyId, day, java.time.ZoneOffset.UTC).map { it.clientUuid },
+        ).doesNotContain(loserRecord.clientUuid)
+        assertThat(adminCare.getCarePlan(planId)!!.fulfilledRecordClientUuid)
+            .isEqualTo("owner-rec-audit")
+        val after = adminCare.listFulfillmentCandidatesForPlan(planUuid)
+            .single { it.clientUuid == loserCand.clientUuid }
+        assertThat(after.adoptionStatus)
+            .isEqualTo(com.lezi.babylog.core.model.FulfillmentAdoptionStatus.CONFLICT_NOT_ADOPTED)
+        assertThat(after.convertedRecordClientUuid).isEqualTo(converted.clientUuid)
+
+        // Idempotent retry.
+        val again = adminCare.convertConflictNotAdoptedToIndependentRecord(
+            candidateClientUuid = loserCand.clientUuid,
+            nowMillis = now + 300,
+        )
+        assertThat(again).isEqualTo(convertedId)
+        val ordinaryBath = adminCare.dayRecords(babyId, day, java.time.ZoneOffset.UTC)
+            .filter { it.type == RecordType.BATH }
+        assertThat(ordinaryBath.map { it.clientUuid }.toSet())
+            .containsExactly("owner-rec-audit", converted.clientUuid)
+        // Media ownership is independent (new media clientUuids on converted record).
+        val loserMedia = memberFakes.media.listActiveForRecord(loserRecordId)
+        val convertedMedia = memberFakes.media.listActiveForRecord(convertedId)
+        assertThat(convertedMedia).hasSize(1)
+        assertThat(loserMedia).hasSize(1)
+        assertThat(convertedMedia.single().clientUuid)
+            .isNotEqualTo(loserMedia.single().clientUuid)
+        assertThat(convertedMedia.single().localUri).isEqualTo("loser/photo.jpg")
+    }
+
+    @Test
+    fun fulfillCarePlanStampsLocalSubmitterTrailFromJoinedSession() = runTest {
+        val ownerSync = RecordingSyncPort(
+            membershipId = "m-owner-local",
+            role = com.lezi.babylog.sync.FamilyRole.Owner,
+            familyId = "fam-stamp",
+            deviceId = "dev-owner",
+        )
+        val fakes = Fakes(ownerSync)
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 8_500_000L
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.BATH,
+            scheduledAt = now + 60_000L,
+            nowMillis = now,
+        )
+        val planUuid = care.getCarePlan(planId)!!.clientUuid
+        care.fulfillCarePlan(
+            carePlanId = planId,
+            actualTimestamp = now,
+            nowMillis = now + 1,
+        )
+        val cand = care.listFulfillmentCandidatesForPlan(planUuid).single()
+        assertThat(cand.submitterMembershipId).isEqualTo("m-owner-local")
+        assertThat(cand.submitterRole).isEqualTo("owner")
+        assertThat(cand.adoptionStatus)
+            .isEqualTo(com.lezi.babylog.core.model.FulfillmentAdoptionStatus.ADOPTED)
+        // Unjoined session leaves blank trails (server freeze still required for peers).
+        val offline = Fakes()
+        offline.wireTransactionalSnapshots()
+        val offlineCare = offline.careLog()
+        val offlineBaby = offlineCare.createBaby(
+            CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 2),
+        )
+        val offlinePlan = offlineCare.createCarePlan(
+            babyId = offlineBaby,
+            type = RecordType.PEE,
+            scheduledAt = now + 90_000L,
+            nowMillis = now + 2,
+        )
+        offlineCare.fulfillCarePlan(
+            carePlanId = offlinePlan,
+            actualTimestamp = now + 2,
+            nowMillis = now + 3,
+        )
+        val offlineCand = offlineCare.listFulfillmentCandidatesForPlan(
+            offlineCare.getCarePlan(offlinePlan)!!.clientUuid,
+        ).single()
+        assertThat(offlineCand.submitterMembershipId).isEmpty()
+        assertThat(offlineCand.submitterRole).isEmpty()
+    }
+
+    @Test
+    fun multiCandidateEarlierConfirmedAtWinsAmongPeersAndIgnoresActualTime() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 9_000_000L
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.FORMULA,
+            scheduledAt = now + 60_000L,
+            nowMillis = now,
+        )
+        val planUuid = care.getCarePlan(planId)!!.clientUuid
+        fakes.carePlans.update(
+            fakes.carePlans.get(planId)!!.copy(
+                status = "completed",
+                fulfilledRecordClientUuid = "rec-late",
+                fulfilledAt = now + 200,
+                updatedAt = now + 200,
+                syncDirty = false,
+            ),
+        )
+        fakes.records.upsert(
+            RecordEntity(
+                clientUuid = "rec-late",
+                babyId = babyId,
+                type = RecordType.FORMULA.key,
+                timestamp = now + 50,
+                createdByUserId = 1L,
+                payloadJson = """{"amount_ml":90}""",
+                updatedAt = now + 200,
+            ),
+        )
+        fakes.records.upsert(
+            RecordEntity(
+                clientUuid = "rec-early",
+                babyId = babyId,
+                type = RecordType.FORMULA.key,
+                timestamp = now + 5_000,
+                createdByUserId = 1L,
+                payloadJson = """{"amount_ml":120}""",
+                updatedAt = now + 100,
+            ),
+        )
+        fakes.fulfillmentCandidates.upsert(
+            FulfillmentCandidateEntity(
+                clientUuid = "cand-late",
+                carePlanClientUuid = planUuid,
+                recordClientUuid = "rec-late",
+                actualTimestamp = now + 50,
+                confirmedAt = now + 200,
+                submitterRole = "member",
+                updatedAt = now + 200,
+                syncDirty = false,
+            ),
+        )
+        fakes.fulfillmentCandidates.upsert(
+            FulfillmentCandidateEntity(
+                clientUuid = "cand-early",
+                carePlanClientUuid = planUuid,
+                recordClientUuid = "rec-early",
+                actualTimestamp = now + 5_000,
+                confirmedAt = now + 100,
+                submitterRole = "member",
+                updatedAt = now + 100,
+                syncDirty = false,
+            ),
+        )
+        care.resolveFulfillmentAuthorityForPlan(planUuid)
+        assertThat(care.getCarePlan(planId)!!.fulfilledRecordClientUuid).isEqualTo("rec-early")
+        val day = java.time.Instant.ofEpochMilli(now).atZone(java.time.ZoneOffset.UTC).toLocalDate()
+        assertThat(
+            care.dayRecords(babyId, day, java.time.ZoneOffset.UTC).map { it.clientUuid },
+        ).containsExactly("rec-early")
+    }
+
+    @Test
+    fun fulfillCarePlanEmitsStableCandidateAndRetryReusesIdentity() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 7_000_000L
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.BATH,
+            scheduledAt = now + 60_000L,
+            photoLocalPaths = listOf("plans/a.jpg"),
+            nowMillis = now,
+        )
+        val planUuid = care.getCarePlan(planId)!!.clientUuid
+        val recordId = care.fulfillCarePlan(
+            carePlanId = planId,
+            actualTimestamp = now,
+            photoLocalPaths = listOf("records/f1.jpg"),
+            nowMillis = now + 1,
+        )
+        val first = care.listFulfillmentCandidatesForPlan(planUuid).single()
+        assertThat(first.recordClientUuid).isEqualTo(care.getRecord(recordId)!!.clientUuid)
+        assertThat(first.confirmedAt).isEqualTo(care.getCarePlan(planId)!!.fulfilledAt)
+        assertThat(first.clientUuid).isNotEmpty()
+        val frozenUuid = first.clientUuid
+        val frozenConfirm = first.confirmedAt
+
+        // Simulate sync mark then retry re-dirty via ensure path (completeNursing replay).
+        fakes.fulfillmentCandidates.markSynced(first.clientUuid, first.updatedAt)
+        assertThat(care.listFulfillmentCandidatesForPlan(planUuid).single().syncDirty).isFalse()
+        // Idempotent completeOpen path through completeNursing-style ensure:
+        // re-dirty same candidate without minting a new uuid.
+        val nursingPlanId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.NURSING,
+            scheduledAt = now + 120_000L,
+            nowMillis = now + 2,
+        )
+        val nursingUuid = care.getCarePlan(nursingPlanId)!!.clientUuid
+        val completionUuid = "nursing-complete-uuid-stable"
+        care.completeNursing(
+            babyId = babyId,
+            leftMin = 5,
+            rightMin = 3,
+            order = "LR",
+            startedAt = now,
+            endedAt = now + 500,
+            completionClientUuid = completionUuid,
+            carePlanId = nursingPlanId,
+        )
+        val nursingCand = care.listFulfillmentCandidatesForPlan(nursingUuid).single()
+        // Replay completeNursing with same completion id → same candidate identity.
+        care.completeNursing(
+            babyId = babyId,
+            leftMin = 5,
+            rightMin = 3,
+            order = "LR",
+            startedAt = now,
+            endedAt = now + 500,
+            completionClientUuid = completionUuid,
+            carePlanId = nursingPlanId,
+        )
+        val nursingCand2 = care.listFulfillmentCandidatesForPlan(nursingUuid).single()
+        assertThat(nursingCand2.clientUuid).isEqualTo(nursingCand.clientUuid)
+        assertThat(nursingCand2.confirmedAt).isEqualTo(nursingCand.confirmedAt)
+        assertThat(care.listFulfillmentCandidatesForPlan(planUuid).single().clientUuid)
+            .isEqualTo(frozenUuid)
+        assertThat(care.listFulfillmentCandidatesForPlan(planUuid).single().confirmedAt)
+            .isEqualTo(frozenConfirm)
+    }
+
+    @Test
+    fun recordHasPriorFamilyRevisionUsesMediaReceiptsIncludingTombstones() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val recordId = care.addRecord(
+            babyId = babyId,
+            type = RecordType.FORMULA,
+            timestamp = 1_000L,
+            photoLocalPaths = listOf("photos/old.jpg"),
+        )
+        assertThat(care.recordHasPriorFamilyRevision(recordId)).isFalse()
+
+        // Family-published receipt on the active photo → mutation chrome path.
+        val active = fakes.media.listActiveForRecord(recordId).single()
+        fakes.media.update(active.copy(remoteUri = "lezi-sync:media-old", syncDirty = false))
+        assertThat(care.recordHasPriorFamilyRevision(recordId)).isTrue()
+
+        // Even after the photo is tombstoned (user removed it in a new edit), the
+        // prior package receipt still proves family still sees the old complete version.
+        fakes.media.update(active.copy(remoteUri = "lezi-sync:media-old", deletedAt = 2_000L, syncDirty = false))
+        assertThat(care.recordHasPriorFamilyRevision(recordId)).isTrue()
+    }
+
+    @Test
+    fun carePlanFulfillRollsBackWhenRecordInsertFails() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        // Fail second record insert path by throwing inside transaction after plan load:
+        // use a non-existent baby on a crafted plan to force requireActiveBaby failure mid-tx.
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 2_000_000L
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.BATH,
+            scheduledAt = now + 60_000L,
+            nowMillis = now,
+        )
+        // Soft-delete baby so fulfill fails requireActiveBaby after plan is loaded.
+        fakes.babies.listAll().first().let { baby ->
+            fakes.babies.update(baby.copy(deletedAt = now))
+        }
+        // FakeBabyDao.get may still return deleted — force by clearing babies.
+        fakes.babies.deleteAll()
+        val failure = runCatching {
+            care.fulfillCarePlan(
+                carePlanId = planId,
+                actualTimestamp = now - 100L,
+                nowMillis = now,
+            )
+        }.exceptionOrNull()
+        assertThat(failure).isNotNull()
+        // Plan row still pending (transaction rolled back).
+        assertThat(fakes.carePlans.get(planId)?.status).isEqualTo("pending")
+        assertThat(fakes.records.listAllIncludingDeleted()).isEmpty()
+    }
+
+    @Test
+    fun historicalMemoAndBareCustomRemainReadableWithoutMigration() = runTest {
+        val care = Fakes().careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val memoId = care.addRecord(
+            babyId = babyId,
+            type = RecordType.MEMO,
+            timestamp = 1_000L,
+            payloadJson = """{"body":"旧备注"}""",
+        )
+        val otherId = care.addRecord(
+            babyId = babyId,
+            type = RecordType.OTHER,
+            timestamp = 1_100L,
+            payloadJson = """{"title":"旧其他","detail":"x"}""",
+        )
+        val bareCustomId = care.addRecord(
+            babyId = babyId,
+            type = RecordType.CUSTOM,
+            timestamp = 1_200L,
+            payloadJson = """{"title":"仅标题历史"}""",
+        )
+
+        assertThat(care.getRecord(memoId)!!.type).isEqualTo(RecordType.MEMO)
+        assertThat(care.getRecord(otherId)!!.displayLabel()).isEqualTo("旧其他")
+        assertThat(care.getRecord(bareCustomId)!!.displayLabel()).isEqualTo("仅标题历史")
+        assertThat(care.getRecord(bareCustomId)!!.itemIdentity()).isNull()
+        assertThat(RecordItemIdentity.isInvalidNewEntryReference("memo")).isTrue()
+        assertThat(RecordItemIdentity.isInvalidNewEntryReference("other")).isTrue()
+        assertThat(RecordItemIdentity.isInvalidNewEntryReference("custom")).isTrue()
+    }
+
+    @Test
     fun clearRecordsOnlyHardDeletesLocallyWithoutRequestingFamilySync() = runTest {
         val sync = RecordingSyncPort()
         val fakes = Fakes(sync)
@@ -1301,6 +2416,1290 @@ class CareLogTest {
         assertThat(nextSyncUpdatedAt(previous = 2_000, candidate = 2_500)).isEqualTo(2_500)
     }
 
+    @Test
+    fun addRecordAttachesUpToThreePhotosInOneTransactionForAnyType() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val paths = listOf(
+            "/data/user/0/com.lezi/files/record-media/a.jpg",
+            "/data/user/0/com.lezi/files/record-media/b.jpg",
+            "/data/user/0/com.lezi/files/record-media/c.jpg",
+        )
+
+        val recordId = care.addRecord(
+            babyId = babyId,
+            type = RecordType.PEE,
+            timestamp = 1_000L,
+            payloadJson = """{"pee_amount":2}""",
+            photoLocalPaths = paths,
+        )
+
+        assertThat(care.listRecordPhotoPaths(recordId)).containsExactlyElementsIn(paths).inOrder()
+        assertThat(fakes.media.listActiveForRecord(recordId).map { it.localUri })
+            .containsExactlyElementsIn(paths)
+        val stored = fakes.records.get(recordId)!!
+        assertThat(stored.payloadJson).contains("\"photos\"")
+        assertThat(stored.payloadJson).contains("a.jpg")
+        assertThat(fakes.transactions.runCount).isAtLeast(1)
+
+        val overLimit = runCatching {
+            care.addRecord(
+                babyId = babyId,
+                type = RecordType.FORMULA,
+                timestamp = 2_000L,
+                payloadJson = """{"amount_ml":120}""",
+                photoLocalPaths = paths + "/data/user/0/com.lezi/files/record-media/d.jpg",
+            )
+        }.exceptionOrNull()
+        assertThat(overLimit).isInstanceOf(IllegalArgumentException::class.java)
+    }
+
+    @Test
+    fun updateRecordReconcilesMediaAndSoftDeleteTombstonesPhotos() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val keep = "/data/user/0/com.lezi/files/record-media/keep.jpg"
+        val drop = "/data/user/0/com.lezi/files/record-media/drop.jpg"
+        val add = "/data/user/0/com.lezi/files/record-media/add.jpg"
+        val recordId = care.addRecord(
+            babyId = babyId,
+            type = RecordType.DIARY,
+            timestamp = 1_000L,
+            payloadJson = """{"body":"日记"}""",
+            photoLocalPaths = listOf(keep, drop),
+        )
+
+        care.updateRecord(
+            id = recordId,
+            timestamp = 1_100L,
+            endTimestamp = null,
+            note = null,
+            payloadJson = """{"body":"日记改"}""",
+            photoLocalPaths = listOf(keep, add),
+        )
+
+        assertThat(care.listRecordPhotoPaths(recordId)).containsExactly(keep, add).inOrder()
+        val allMedia = fakes.media.listForRecord(recordId)
+        assertThat(allMedia.filter { it.deletedAt == null }.map { it.localUri })
+            .containsExactly(keep, add)
+        assertThat(allMedia.single { it.localUri == drop }.deletedAt).isNotNull()
+
+        care.deleteRecord(recordId)
+        assertThat(fakes.media.listActiveForRecord(recordId)).isEmpty()
+        assertThat(fakes.media.listForRecord(recordId).all { it.deletedAt != null }).isTrue()
+        assertThat(fakes.records.getIncludingDeleted(recordId)!!.deletedAt).isNotNull()
+    }
+
+    @Test
+    fun listRecordPhotoPathsFallsBackToLegacyPayloadPhotosWithoutMediaRows() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        // Historical row: photos only in payload, no media_assets (pre-common-attachment).
+        val recordId = fakes.records.upsert(
+            RecordEntity(
+                clientUuid = "legacy-memo",
+                babyId = babyId,
+                type = RecordType.MEMO.key,
+                timestamp = 1_000L,
+                endTimestamp = null,
+                note = null,
+                createdByUserId = 1L,
+                payloadJson = """{"body":"旧备注","photos":["legacy/a.jpg","legacy/b.jpg"]}""",
+                schemaVersion = 1,
+                updatedAt = 1_000L,
+            ),
+        )
+
+        assertThat(care.listRecordPhotoPaths(recordId))
+            .containsExactly("legacy/a.jpg", "legacy/b.jpg")
+            .inOrder()
+        assertThat(fakes.media.listActiveForRecord(recordId)).isEmpty()
+
+        // Subsequent edit normalizes onto MediaAsset while preserving paths.
+        care.updateRecord(
+            id = recordId,
+            timestamp = 1_000L,
+            endTimestamp = null,
+            note = null,
+            payloadJson = """{"body":"旧备注"}""",
+            photoLocalPaths = listOf("legacy/a.jpg", "legacy/b.jpg"),
+        )
+        assertThat(fakes.media.listActiveForRecord(recordId).map { it.localUri })
+            .containsExactly("legacy/a.jpg", "legacy/b.jpg")
+        assertThat(fakes.records.get(recordId)!!.payloadJson).contains("legacy/a.jpg")
+    }
+
+    @Test
+    fun confirmSleepPersistsPhotosWithOpenAndClosedIntervals() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val path = "/data/user/0/com.lezi/files/record-media/sleep.jpg"
+        val openId = care.confirmSleep(
+            babyId = babyId,
+            expectedOpenSleepId = null,
+            timestamp = 1_000L,
+            endTimestamp = null,
+            note = null,
+            payloadJson = """{"is_nap":true}""",
+            photoLocalPaths = listOf(path),
+        )
+        assertThat(care.listRecordPhotoPaths(openId)).containsExactly(path)
+
+        care.confirmSleep(
+            babyId = babyId,
+            expectedOpenSleepId = openId,
+            timestamp = 1_000L,
+            endTimestamp = 3_600_000L,
+            note = "小睡",
+            payloadJson = """{"is_nap":true}""",
+            photoLocalPaths = listOf(path),
+        )
+        assertThat(care.listRecordPhotoPaths(openId)).containsExactly(path)
+        assertThat(fakes.records.get(openId)!!.payloadJson).contains("sleep.jpg")
+    }
+
+    @Test
+    fun addRecordPhotoAttachFailureLeavesNoVisibleRecordOrMedia() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val recordsBefore = fakes.records.listAllIncludingDeleted().size
+        val mediaBefore = fakes.media.listAllIncludingDeleted().size
+
+        fakes.media.failUpserts = true
+        val err = runCatching {
+            care.addRecord(
+                babyId = babyId,
+                type = RecordType.FORMULA,
+                timestamp = 2_000L,
+                payloadJson = """{"amount_ml":120}""",
+                photoLocalPaths = listOf("/data/user/0/com.lezi/files/record-media/boom.jpg"),
+            )
+        }.exceptionOrNull()
+
+        assertThat(err).isInstanceOf(IllegalStateException::class.java)
+        assertThat(err!!.message).contains("media upsert failed")
+        // Same domain transaction as record insert — failure must not leave orphans.
+        assertThat(fakes.records.listAllIncludingDeleted()).hasSize(recordsBefore)
+        assertThat(fakes.media.listAllIncludingDeleted()).hasSize(mediaBefore)
+    }
+
+    @Test
+    fun createCarePlanSchedulesReminderAndFulfillCancels() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.PEE,
+            scheduledAt = now + 60_000L,
+            payloadJson = """{"pee_amount":2}""",
+            nowMillis = now,
+        )
+        assertThat(fakes.reminders.scheduledCarePlanIds).contains(planId)
+        care.fulfillCarePlan(
+            carePlanId = planId,
+            actualTimestamp = now,
+            payloadJson = """{"pee_amount":2}""",
+            nowMillis = now + 1,
+        )
+        assertThat(fakes.reminders.scheduledCarePlanIds).doesNotContain(planId)
+        assertThat(fakes.reminders.cancelledCarePlanIds).contains(planId)
+    }
+
+    @Test
+    fun createUpdateSkipDeleteCarePlanMarksDirtyAndRequestsFamilySync() = runTest {
+        val sync = RecordingSyncPort()
+        val fakes = Fakes(sync)
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val beforeCreate = sync.requests
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.FORMULA,
+            scheduledAt = now + 120_000L,
+            photoLocalPaths = listOf("photos/p0.jpg"),
+            payloadJson = """{"amount_ml":90}""",
+            nowMillis = now,
+        )
+        val created = care.getCarePlan(planId)!!
+        assertThat(created.syncDirty).isTrue()
+        assertThat(sync.requests).isGreaterThan(beforeCreate)
+        assertThat(fakes.media.listActiveForCarePlan(planId)).hasSize(1)
+        assertThat(fakes.media.listActiveForCarePlan(planId).single().syncDirty).isTrue()
+
+        val beforeUpdate = sync.requests
+        care.updateCarePlan(
+            carePlanId = planId,
+            scheduledAt = now + 180_000L,
+            note = "改备注",
+            nowMillis = now + 1,
+        )
+        assertThat(care.getCarePlan(planId)!!.syncDirty).isTrue()
+        assertThat(sync.requests).isGreaterThan(beforeUpdate)
+
+        val beforeSkip = sync.requests
+        care.skipCarePlan(planId, nowMillis = now + 2)
+        assertThat(fakes.carePlans.get(planId)!!.syncDirty).isTrue()
+        assertThat(fakes.carePlans.get(planId)!!.status).isEqualTo("skipped")
+        assertThat(sync.requests).isGreaterThan(beforeSkip)
+
+        val plan2 = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.PEE,
+            scheduledAt = now + 200_000L,
+            nowMillis = now + 3,
+        )
+        val beforeDelete = sync.requests
+        care.deleteCarePlan(plan2, nowMillis = now + 4)
+        assertThat(fakes.carePlans.get(plan2)!!.deletedAt).isNotNull()
+        assertThat(fakes.carePlans.get(plan2)!!.syncDirty).isTrue()
+        assertThat(sync.requests).isGreaterThan(beforeDelete)
+    }
+
+    @Test
+    fun onFamilyCarePlansAppliedProjectsOpenAndCancelsTerminalWithoutRequestingPermission() =
+        runTest {
+            val fakes = Fakes()
+            fakes.systemCalendar.permission = false
+            val care = fakes.careLog()
+            val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+            val now = System.currentTimeMillis()
+            val openId = care.createCarePlan(
+                babyId = babyId,
+                type = RecordType.PEE,
+                scheduledAt = now + 60_000L,
+                nowMillis = now,
+            )
+            val openUuid = care.getCarePlan(openId)!!.clientUuid
+            // Simulate remote-applied clean row (syncDirty=false).
+            fakes.carePlans.update(
+                fakes.carePlans.get(openId)!!.copy(syncDirty = false),
+            )
+            fakes.reminders.scheduledCarePlanIds.clear()
+            care.onFamilyCarePlansApplied(listOf(openUuid))
+            // No calendar permission → Lezi reminder path; never requests permission.
+            assertThat(fakes.systemCalendar.upserts).isEmpty()
+            assertThat(fakes.reminders.scheduledCarePlanIds).contains(openId)
+
+            val skipId = care.createCarePlan(
+                babyId = babyId,
+                type = RecordType.FORMULA,
+                scheduledAt = now + 90_000L,
+                nowMillis = now + 1,
+            )
+            care.skipCarePlan(skipId, nowMillis = now + 2)
+            val skipUuid = fakes.carePlans.get(skipId)!!.clientUuid
+            fakes.carePlans.update(
+                fakes.carePlans.get(skipId)!!.copy(syncDirty = false),
+            )
+            fakes.reminders.cancelledCarePlanIds.clear()
+            care.onFamilyCarePlansApplied(listOf(skipUuid))
+            assertThat(fakes.reminders.cancelledCarePlanIds).contains(skipId)
+        }
+
+    @Test
+    fun onFamilyCarePlansAppliedCancelsReminderAndSystemCalendarOnPeerCompleteAndDelete() =
+        runTest {
+            // Dual-device residual path: peer terminal package lands on next foreground
+            // sync → receiving device cancels its own Lezi reminder + system calendar copy.
+            val fakes = Fakes()
+            fakes.systemCalendar.permission = true
+            fakes.settings.setSystemCalendarEnabled(true)
+            fakes.settings.setSystemCalendarId("cal-1")
+            val care = fakes.careLog()
+            val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+            val now = System.currentTimeMillis()
+
+            // Peer complete: local open plan already projected to system calendar.
+            val completeId = care.createCarePlan(
+                babyId = babyId,
+                type = RecordType.BATH,
+                scheduledAt = now + 60_000L,
+                nowMillis = now,
+            )
+            val completeUuid = care.getCarePlan(completeId)!!.clientUuid
+            val completeEvent = parseSystemCalendarEventMap(
+                fakes.settings.settings.first().systemCalendarEventMapJson,
+            )[completeUuid]
+            assertThat(completeEvent).isNotNull()
+            // Simulate remote-applied completed package (syncDirty=false, status completed).
+            fakes.carePlans.update(
+                fakes.carePlans.get(completeId)!!.copy(
+                    status = CarePlanStatus.COMPLETED.storageKey,
+                    fulfilledRecordClientUuid = "peer-record",
+                    fulfilledAt = now + 10,
+                    updatedAt = now + 10,
+                    syncDirty = false,
+                ),
+            )
+            fakes.reminders.cancelledCarePlanIds.clear()
+            fakes.systemCalendar.deleted.clear()
+            care.onFamilyCarePlansApplied(listOf(completeUuid))
+            assertThat(fakes.reminders.cancelledCarePlanIds).contains(completeId)
+            assertThat(fakes.systemCalendar.deleted).contains(completeEvent)
+            assertThat(
+                parseSystemCalendarEventMap(
+                    fakes.settings.settings.first().systemCalendarEventMapJson,
+                ),
+            ).doesNotContainKey(completeUuid)
+
+            // Peer delete/tombstone: open plan projected, then remote soft-delete applied.
+            val deleteId = care.createCarePlan(
+                babyId = babyId,
+                type = RecordType.PEE,
+                scheduledAt = now + 120_000L,
+                nowMillis = now + 20,
+            )
+            val deleteUuid = care.getCarePlan(deleteId)!!.clientUuid
+            val deleteEvent = parseSystemCalendarEventMap(
+                fakes.settings.settings.first().systemCalendarEventMapJson,
+            )[deleteUuid]
+            assertThat(deleteEvent).isNotNull()
+            fakes.carePlans.update(
+                fakes.carePlans.get(deleteId)!!.copy(
+                    deletedAt = now + 30,
+                    updatedAt = now + 30,
+                    syncDirty = false,
+                ),
+            )
+            fakes.reminders.cancelledCarePlanIds.clear()
+            fakes.systemCalendar.deleted.clear()
+            care.onFamilyCarePlansApplied(listOf(deleteUuid))
+            assertThat(fakes.reminders.cancelledCarePlanIds).contains(deleteId)
+            assertThat(fakes.systemCalendar.deleted).contains(deleteEvent)
+            assertThat(
+                parseSystemCalendarEventMap(
+                    fakes.settings.settings.first().systemCalendarEventMapJson,
+                ),
+            ).doesNotContainKey(deleteUuid)
+        }
+
+    @Test
+    fun convertCalendarEventToCarePlanCancelsEventReminderOnSuccessOnly() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val eventId = care.addCalendarEvent(
+            babyId = babyId,
+            title = "疫苗",
+            eventAt = now + 120_000L,
+            remindAt = now + 60_000L,
+        )
+        assertThat(fakes.reminders.scheduledCalendarIds).contains(eventId)
+        val planId = care.convertCalendarEventToCarePlan(
+            eventId = eventId,
+            type = RecordType.VACCINE,
+            payloadJson = """{"name":"五联"}""",
+            nowMillis = now,
+        )
+        assertThat(planId).isGreaterThan(0L)
+        assertThat(fakes.reminders.scheduledCalendarIds).doesNotContain(eventId)
+        assertThat(care.listCalendarEvents(babyId).none { it.id == eventId }).isTrue()
+        assertThat(care.getCarePlan(planId)!!.type).isEqualTo(RecordType.VACCINE)
+        assertThat(fakes.reminders.scheduledCarePlanIds).contains(planId)
+    }
+
+    @Test
+    fun createCustomCarePlanStampsNameIconSnapshot() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val customId = care.addCustomItem("抚触", iconSlot = 2)
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.CUSTOM,
+            scheduledAt = now + 90_000L,
+            customItemId = customId,
+            payloadJson = "{}",
+            nowMillis = now,
+        )
+        val plan = care.getCarePlan(planId)!!
+        assertThat(plan.customItemId).isEqualTo(customId)
+        assertThat(plan.payloadJson).contains("抚触")
+        assertThat(plan.displayLabel()).isEqualTo("抚触")
+        care.updateCustomItem(
+            care.observeCustomItems().first().single().copy(name = "新名字"),
+        )
+        // Historical plan keeps snapshot label.
+        assertThat(care.getCarePlan(planId)!!.displayLabel()).isEqualTo("抚触")
+    }
+
+    @Test
+    fun everyPlanableNonStatefulBuiltInCanCreateAndFulfillCarePlan() = runTest {
+        val planable = RecordType.entries.filter { it.isPlanableNonStateful }
+        assertThat(planable).isNotEmpty()
+        assertThat(planable).doesNotContain(RecordType.SLEEP)
+        assertThat(planable).doesNotContain(RecordType.NURSING)
+        assertThat(planable).doesNotContain(RecordType.MEMO)
+        assertThat(planable).doesNotContain(RecordType.OTHER)
+        assertThat(planable).doesNotContain(RecordType.CUSTOM)
+
+        for (type in planable) {
+            val fakes = Fakes()
+            val care = fakes.careLog()
+            val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+            // Reminder adapter uses wall-clock now for eligibility.
+            val now = System.currentTimeMillis()
+            val payload = samplePlanPayload(type)
+            val planId = care.createCarePlan(
+                babyId = babyId,
+                type = type,
+                scheduledAt = now + 60_000L,
+                payloadJson = payload,
+                nowMillis = now,
+            )
+            val plan = care.getCarePlan(planId)!!
+            assertThat(plan.type).isEqualTo(type)
+            assertThat(plan.status).isEqualTo(CarePlanStatus.PENDING)
+            assertThat(fakes.reminders.scheduledCarePlanIds).contains(planId)
+
+            val recordId = care.fulfillCarePlan(
+                carePlanId = planId,
+                actualTimestamp = now,
+                payloadJson = payload,
+                nowMillis = now + 1,
+            )
+            assertThat(recordId).isGreaterThan(0L)
+            assertThat(care.getCarePlan(planId)!!.status).isEqualTo(CarePlanStatus.COMPLETED)
+            assertThat(fakes.records.get(recordId)!!.type).isEqualTo(type.key)
+            assertThat(fakes.reminders.cancelledCarePlanIds).contains(planId)
+        }
+    }
+
+    private fun samplePlanPayload(type: RecordType): String = when (type) {
+        RecordType.PEE -> """{"pee_amount":2}"""
+        RecordType.POOP -> """{"poop_amount":2,"poop_color":1,"poop_shape":1}"""
+        RecordType.BOTH_DIAPER ->
+            """{"pee_amount":1,"poop_amount":1,"poop_color":1,"poop_shape":1}"""
+        RecordType.FORMULA, RecordType.PUMPED_FEED -> """{"amount_ml":90}"""
+        RecordType.PUMP_EXPRESS -> """{"amount_ml":60}"""
+        RecordType.TEMPERATURE -> """{"celsius":36.8}"""
+        RecordType.MEDICINE -> """{"name":"维生素","dose":"1滴"}"""
+        RecordType.VACCINE -> """{"name":"五联"}"""
+        RecordType.HEIGHT -> """{"value":55.0,"unit":"cm"}"""
+        RecordType.WEIGHT -> """{"value":5000.0,"unit":"g"}"""
+        RecordType.HEAD, RecordType.CHEST, RecordType.FOOT_SIZE ->
+            """{"value":35.0,"unit":"cm"}"""
+        RecordType.BABY_FOOD, RecordType.SNACK, RecordType.DRINK ->
+            """{"name":"米糊","amount":"1勺"}"""
+        RecordType.DIARY, RecordType.BATH, RecordType.WALK, RecordType.COUGH,
+        RecordType.RASH, RecordType.VOMIT, RecordType.INJURY, RecordType.HOSPITAL,
+        -> """{"body":"备注"}"""
+        else -> "{}"
+    }
+
+    @Test
+    fun hiddenCustomItemStillAllowsFulfillOfExistingPlan() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val customId = care.addCustomItem("抚触", iconSlot = 0)
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.CUSTOM,
+            scheduledAt = now + 60_000L,
+            customItemId = customId,
+            nowMillis = now,
+        )
+        // Local hide must not block fulfill of an already-created plan.
+        fakes.settings.setHiddenItems(setOf("custom:$customId"))
+        val recordId = care.fulfillCarePlan(
+            carePlanId = planId,
+            actualTimestamp = now,
+            nowMillis = now + 1,
+        )
+        assertThat(recordId).isGreaterThan(0L)
+        assertThat(care.getCarePlan(planId)!!.displayLabel()).isEqualTo("抚触")
+    }
+
+    @Test
+    fun carePlanReminderPermissionDeniedDoesNotBlockCreate() = runTest {
+        val fakes = Fakes()
+        fakes.reminders.carePlanPermissionGranted = false
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.FORMULA,
+            scheduledAt = now + 60_000L,
+            payloadJson = """{"amount_ml":80}""",
+            nowMillis = now,
+        )
+        assertThat(planId).isGreaterThan(0L)
+        assertThat(care.getCarePlan(planId)).isNotNull()
+        // Schedule attempted but adapter soft-failed without throwing.
+        assertThat(fakes.reminders.scheduledCarePlanIds).doesNotContain(planId)
+    }
+
+    @Test
+    fun updateCarePlanReschedulesReminderAndSkipCancels() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 5_000_000L
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.PEE,
+            scheduledAt = now + 60_000L,
+            payloadJson = """{"pee_amount":1}""",
+            nowMillis = now,
+        )
+        assertThat(fakes.reminders.scheduledCarePlanIds).contains(planId)
+        care.updateCarePlan(
+            carePlanId = planId,
+            scheduledAt = now + 120_000L,
+            nowMillis = now + 1,
+        )
+        assertThat(fakes.reminders.scheduledCarePlanIds).contains(planId)
+        care.skipCarePlan(planId, nowMillis = now + 2)
+        assertThat(fakes.reminders.scheduledCarePlanIds).doesNotContain(planId)
+        assertThat(fakes.reminders.cancelledCarePlanIds).contains(planId)
+    }
+
+    @Test
+    fun convertCalendarEventFailureKeepsLegacyEventAndReminder() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val eventId = care.addCalendarEvent(
+            babyId = babyId,
+            title = "疫苗",
+            eventAt = now + 180_000L,
+            remindAt = now + 60_000L,
+        )
+        assertThat(fakes.reminders.scheduledCalendarIds).contains(eventId)
+        // Retired memo is not planable — conversion must fail closed and keep the event.
+        val err = runCatching {
+            care.convertCalendarEventToCarePlan(
+                eventId = eventId,
+                type = RecordType.MEMO,
+                nowMillis = now,
+            )
+        }.exceptionOrNull()
+        assertThat(err).isNotNull()
+        assertThat(care.listCalendarEvents(babyId).any { it.id == eventId }).isTrue()
+        assertThat(fakes.reminders.scheduledCalendarIds).contains(eventId)
+        assertThat(care.getCarePlan(1L)).isNull()
+    }
+
+    @Test
+    fun nursingCarePlanIsIntentOnlyAndManualFulfillCompletesAtomically() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.NURSING,
+            scheduledAt = now + 60_000L,
+            payloadJson = """{"left_min":0,"right_min":0,"order":"LR"}""",
+            nowMillis = now,
+        )
+        assertThat(care.getCarePlan(planId)!!.status).isEqualTo(CarePlanStatus.PENDING)
+        // Schedule must not invent a nursing Record.
+        assertThat(
+            fakes.records.listAllIncludingDeleted().none { it.type == RecordType.NURSING.key },
+        ).isTrue()
+
+        val recordId = care.fulfillCarePlan(
+            carePlanId = planId,
+            actualTimestamp = now,
+            payloadJson = """{"left_min":10,"right_min":5,"order":"LR"}""",
+            nowMillis = now + 1,
+        )
+        assertThat(recordId).isGreaterThan(0L)
+        assertThat(care.getCarePlan(planId)!!.status).isEqualTo(CarePlanStatus.COMPLETED)
+        assertThat(fakes.records.get(recordId)!!.type).isEqualTo(RecordType.NURSING.key)
+        // Second fulfill fails closed (no double record).
+        val second = runCatching {
+            care.fulfillCarePlan(
+                carePlanId = planId,
+                actualTimestamp = now,
+                payloadJson = """{"left_min":1,"right_min":1,"order":"LR"}""",
+                nowMillis = now + 2,
+            )
+        }.exceptionOrNull()
+        assertThat(second).isNotNull()
+        assertThat(
+            fakes.records.listAllIncludingDeleted()
+                .count { it.type == RecordType.NURSING.key && it.deletedAt == null },
+        ).isEqualTo(1)
+    }
+
+    @Test
+    fun completeNursingWithCarePlanIdCompletesPlanIdempotently() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.NURSING,
+            scheduledAt = now + 60_000L,
+            nowMillis = now,
+        )
+        val completionUuid = "nursing-complete-uuid-1"
+        val first = care.completeNursing(
+            babyId = babyId,
+            leftMin = 8,
+            rightMin = 4,
+            order = "LR",
+            startedAt = now - 12 * 60_000L,
+            endedAt = now,
+            completionClientUuid = completionUuid,
+            carePlanId = planId,
+        )
+        assertThat(care.getCarePlan(planId)!!.status).isEqualTo(CarePlanStatus.COMPLETED)
+        assertThat(care.getCarePlan(planId)!!.fulfilledRecordClientUuid).isEqualTo(completionUuid)
+        // Replay same completion uuid: same record, plan stays completed once.
+        val replay = care.completeNursing(
+            babyId = babyId,
+            leftMin = 8,
+            rightMin = 4,
+            order = "LR",
+            startedAt = now - 12 * 60_000L,
+            endedAt = now,
+            completionClientUuid = completionUuid,
+            carePlanId = planId,
+        )
+        assertThat(replay).isEqualTo(first)
+        assertThat(
+            fakes.records.listAllIncludingDeleted()
+                .count { it.type == RecordType.NURSING.key && it.deletedAt == null },
+        ).isEqualTo(1)
+        // Cancel path: clearing timer without completeNursing leaves other plans pending.
+        val plan2 = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.NURSING,
+            scheduledAt = now + 120_000L,
+            nowMillis = now + 1,
+        )
+        assertThat(care.getCarePlan(plan2)!!.status).isEqualTo(CarePlanStatus.PENDING)
+    }
+
+    @Test
+    fun sleepCarePlanIsIntentOnlyOpenAndClosedFulfill() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.SLEEP,
+            scheduledAt = now + 60_000L,
+            nowMillis = now,
+        )
+        assertThat(care.getCarePlan(planId)!!.status).isEqualTo(CarePlanStatus.PENDING)
+        assertThat(
+            fakes.records.listAllIncludingDeleted().none { it.type == RecordType.SLEEP.key },
+        ).isTrue()
+
+        // Confirm 睡下: open interval is the fact; plan completes with it.
+        val openId = care.fulfillCarePlan(
+            carePlanId = planId,
+            actualTimestamp = now,
+            endTimestamp = null,
+            nowMillis = now + 1,
+        )
+        val open = fakes.records.get(openId)!!
+        assertThat(open.type).isEqualTo(RecordType.SLEEP.key)
+        assertThat(open.endTimestamp).isNull()
+        assertThat(care.getCarePlan(planId)!!.status).isEqualTo(CarePlanStatus.COMPLETED)
+
+        // Second open-sleep fulfill while open sleep exists fails closed.
+        val plan2 = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.SLEEP,
+            scheduledAt = now + 90_000L,
+            nowMillis = now + 2,
+        )
+        val race = runCatching {
+            care.fulfillCarePlan(
+                carePlanId = plan2,
+                actualTimestamp = now,
+                endTimestamp = null,
+                nowMillis = now + 3,
+            )
+        }.exceptionOrNull()
+        assertThat(race).isInstanceOf(SleepStateChangedException::class.java)
+        assertThat(care.getCarePlan(plan2)!!.status).isEqualTo(CarePlanStatus.PENDING)
+
+        // Close the open sleep, then closed-interval fulfill of plan2 succeeds.
+        care.sleepUp(babyId, at = now + 30 * 60_000L)
+        val closedId = care.fulfillCarePlan(
+            carePlanId = plan2,
+            actualTimestamp = now - 40 * 60_000L,
+            endTimestamp = now - 10 * 60_000L,
+            nowMillis = now + 4,
+        )
+        val closed = fakes.records.get(closedId)!!
+        assertThat(closed.endTimestamp).isEqualTo(now - 10 * 60_000L)
+        assertThat(care.getCarePlan(plan2)!!.status).isEqualTo(CarePlanStatus.COMPLETED)
+    }
+
+    @Test
+    fun systemCalendarProjectionCancelsLeziReminderOnSuccess() = runTest {
+        val fakes = Fakes()
+        fakes.systemCalendar.permission = true
+        fakes.settings.setSystemCalendarEnabled(true)
+        fakes.settings.setSystemCalendarId("cal-1")
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.FORMULA,
+            scheduledAt = now + 60_000L,
+            payloadJson = """{"amount_ml":90}""",
+            nowMillis = now,
+        )
+        assertThat(fakes.systemCalendar.upserts).isNotEmpty()
+        assertThat(fakes.reminders.scheduledCarePlanIds).doesNotContain(planId)
+        assertThat(fakes.reminders.cancelledCarePlanIds).contains(planId)
+        assertThat(care.isCarePlanSystemCalendarUnsynced(planId)).isFalse()
+    }
+
+    @Test
+    fun systemCalendarFailureFallsBackToLeziReminderWithoutRollingBackPlan() = runTest {
+        val fakes = Fakes()
+        fakes.systemCalendar.permission = true
+        fakes.systemCalendar.failUpsert = true
+        fakes.settings.setSystemCalendarEnabled(true)
+        fakes.settings.setSystemCalendarId("cal-1")
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.PEE,
+            scheduledAt = now + 60_000L,
+            payloadJson = """{"pee_amount":1}""",
+            nowMillis = now,
+        )
+        assertThat(care.getCarePlan(planId)).isNotNull()
+        assertThat(fakes.reminders.scheduledCarePlanIds).contains(planId)
+        assertThat(care.isCarePlanSystemCalendarUnsynced(planId)).isTrue()
+    }
+
+    @Test
+    fun systemCalendarUnconfiguredUsesLeziReminderOnly() = runTest {
+        val fakes = Fakes()
+        // Enabled false / no calendar id — never project, never request permission.
+        fakes.systemCalendar.permission = false
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.BATH,
+            scheduledAt = now + 60_000L,
+            nowMillis = now,
+        )
+        assertThat(fakes.systemCalendar.upserts).isEmpty()
+        assertThat(fakes.reminders.scheduledCarePlanIds).contains(planId)
+        assertThat(care.isCarePlanSystemCalendarUnsynced(planId)).isFalse()
+    }
+
+    @Test
+    fun systemCalendarPermissionRevokeMarksUnsyncedWithoutRollingBackPlan() = runTest {
+        val fakes = Fakes()
+        fakes.systemCalendar.permission = true
+        fakes.settings.setSystemCalendarEnabled(true)
+        fakes.settings.setSystemCalendarId("cal-1")
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.FORMULA,
+            scheduledAt = now + 90_000L,
+            payloadJson = """{"amount_ml":90}""",
+            nowMillis = now,
+        )
+        assertThat(care.isCarePlanSystemCalendarUnsynced(planId)).isFalse()
+        fakes.systemCalendar.permission = false
+        assertThat(care.isCarePlanSystemCalendarUnsynced(planId)).isTrue()
+        assertThat(care.getCarePlan(planId)!!.status).isEqualTo(CarePlanStatus.PENDING)
+        assertThat(SYSTEM_CALENDAR_UNSYNCED_LABEL).isEqualTo("未同步到系统日历")
+    }
+
+    @Test
+    fun systemCalendarVanishedTargetOrEventMarksUnsynced() = runTest {
+        val fakes = Fakes()
+        fakes.systemCalendar.permission = true
+        fakes.settings.setSystemCalendarEnabled(true)
+        fakes.settings.setSystemCalendarId("cal-1")
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.PEE,
+            scheduledAt = now + 90_000L,
+            payloadJson = """{"pee_amount":1}""",
+            nowMillis = now,
+        )
+        assertThat(care.isCarePlanSystemCalendarUnsynced(planId)).isFalse()
+        // Target calendar disappears from provider.
+        fakes.systemCalendar.writableCalendarIds = emptySet()
+        assertThat(care.isCarePlanSystemCalendarUnsynced(planId)).isTrue()
+        // Restore target but drop the mapped event.
+        fakes.systemCalendar.writableCalendarIds = setOf("cal-1")
+        val plan = care.getCarePlan(planId)!!
+        val map = parseSystemCalendarEventMap(
+            fakes.settings.settings.first().systemCalendarEventMapJson,
+        )
+        val eventId = map[plan.clientUuid]
+        assertThat(eventId).isNotNull()
+        fakes.systemCalendar.missingEventIds += eventId!!
+        assertThat(care.isCarePlanSystemCalendarUnsynced(planId)).isTrue()
+    }
+
+    @Test
+    fun systemCalendarDisclosureLevelsProjectTitleDescriptionAndDeepLink() = runTest {
+        val fakes = Fakes()
+        fakes.systemCalendar.permission = true
+        fakes.settings.setSystemCalendarEnabled(true)
+        fakes.settings.setSystemCalendarId("cal-1")
+        fakes.settings.setSystemCalendarDisclosureLevel(1)
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.FORMULA,
+            scheduledAt = now + 60_000L,
+            note = "补充维D",
+            payloadJson = """{"amount_ml":90}""",
+            photoLocalPaths = listOf(
+                "file:///data/data/com.lezi.babylog/cache/photo1.jpg",
+                "content://media/external/images/media/99",
+            ),
+            nowMillis = now,
+        )
+        val l1 = fakes.systemCalendar.upserts.last()
+        assertThat(l1.title).isEqualTo("乐记 · 护理计划")
+        assertThat(l1.description).isNull()
+        assertThat(l1.customAppUri).isNull()
+        assertThat(l1.title).doesNotContain("content://")
+        assertThat(l1.title).doesNotContain("file://")
+
+        fakes.settings.setSystemCalendarDisclosureLevel(2)
+        care.projectOrScheduleCarePlanReminder(care.getCarePlan(planId)!!)
+        val l2 = fakes.systemCalendar.upserts.last()
+        assertThat(l2.title).isEqualTo("年年 · 配方奶")
+        assertThat(l2.description).isNull()
+        assertThat(l2.customAppUri).isNull()
+
+        fakes.settings.setSystemCalendarDisclosureLevel(3)
+        care.projectOrScheduleCarePlanReminder(care.getCarePlan(planId)!!)
+        val l3 = fakes.systemCalendar.upserts.last()
+        val plan = care.getCarePlan(planId)!!
+        assertThat(l3.title).isEqualTo("年年 · 配方奶")
+        assertThat(l3.description).contains("补充维D")
+        assertThat(l3.description).contains("照片 2 张，打开乐记查看")
+        assertThat(l3.description).contains("lezi://care-plan/${plan.clientUuid}")
+        assertThat(l3.customAppUri).isEqualTo("lezi://care-plan/${plan.clientUuid}")
+        // Photo local paths / content URIs must never leak into calendar text.
+        assertThat(l3.description).doesNotContain("content://")
+        assertThat(l3.description).doesNotContain("file://")
+        assertThat(l3.description).doesNotContain("/data/data/")
+        assertThat(l3.description).doesNotContain("photo1.jpg")
+        assertThat(fakes.reminders.scheduledCarePlanIds).doesNotContain(planId)
+    }
+
+    @Test
+    fun systemCalendarDisclosureChangeReprojectsOnlyOpenFuturePlans() = runTest {
+        val fakes = Fakes()
+        fakes.systemCalendar.permission = true
+        fakes.settings.setSystemCalendarEnabled(true)
+        fakes.settings.setSystemCalendarId("cal-1")
+        fakes.settings.setSystemCalendarDisclosureLevel(2)
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val futureId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.BATH,
+            scheduledAt = now + 120_000L,
+            nowMillis = now,
+        )
+        val pastId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.PEE,
+            scheduledAt = now + 30_000L,
+            payloadJson = """{"pee_amount":1}""",
+            nowMillis = now,
+        )
+        // Move past plan into missed (scheduled before "later" now).
+        care.skipCarePlan(pastId, nowMillis = now + 1)
+        // Re-create a completed terminal path: fulfill is heavier; soft-delete also terminals.
+        care.deleteCarePlan(pastId, nowMillis = now + 2)
+
+        fakes.systemCalendar.upserts.clear()
+        fakes.settings.setSystemCalendarDisclosureLevel(1)
+        care.reprojectOpenFutureSystemCalendarCopies(nowMillis = now + 10)
+        // Only the still-open future plan is reprojected.
+        assertThat(fakes.systemCalendar.upserts).hasSize(1)
+        assertThat(fakes.systemCalendar.upserts.single().title).isEqualTo("乐记 · 护理计划")
+        val futurePlan = care.getCarePlan(futureId)!!
+        assertThat(fakes.systemCalendar.upserts.single().carePlanClientUuid)
+            .isEqualTo(futurePlan.clientUuid)
+    }
+
+    @Test
+    fun systemCalendarExternalDeleteRebuildsEventWithoutDuplicateLeziReminder() = runTest {
+        val fakes = Fakes()
+        fakes.systemCalendar.permission = true
+        fakes.settings.setSystemCalendarEnabled(true)
+        fakes.settings.setSystemCalendarId("cal-1")
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.FORMULA,
+            scheduledAt = now + 90_000L,
+            payloadJson = """{"amount_ml":120}""",
+            nowMillis = now,
+        )
+        val plan = care.getCarePlan(planId)!!
+        val firstMap = parseSystemCalendarEventMap(
+            fakes.settings.settings.first().systemCalendarEventMapJson,
+        )
+        val oldEventId = firstMap[plan.clientUuid]!!
+        assertThat(fakes.reminders.scheduledCarePlanIds).doesNotContain(planId)
+
+        // User deletes the event outside Lezi.
+        fakes.systemCalendar.missingEventIds += oldEventId
+        fakes.systemCalendar.upserts.clear()
+        fakes.reminders.scheduledCarePlanIds.clear()
+        fakes.reminders.cancelledCarePlanIds.clear()
+
+        val ok = care.projectOrScheduleCarePlanReminder(plan)
+        assertThat(ok).isTrue()
+        // Update fails, then insert rebuilds a new event id.
+        assertThat(fakes.systemCalendar.upserts.size).isAtLeast(2)
+        assertThat(fakes.systemCalendar.upserts.first().existingEventId).isEqualTo(oldEventId)
+        assertThat(fakes.systemCalendar.upserts.last().existingEventId).isNull()
+        val newMap = parseSystemCalendarEventMap(
+            fakes.settings.settings.first().systemCalendarEventMapJson,
+        )
+        val newEventId = newMap[plan.clientUuid]
+        assertThat(newEventId).isNotNull()
+        assertThat(newEventId).isNotEqualTo(oldEventId)
+        // Single reminder owner remains system calendar — no Lezi schedule.
+        assertThat(fakes.reminders.scheduledCarePlanIds).doesNotContain(planId)
+        assertThat(fakes.reminders.cancelledCarePlanIds).contains(planId)
+    }
+
+    @Test
+    fun systemCalendarRemovedOnCompleteSkipAndDelete() = runTest {
+        val fakes = Fakes()
+        fakes.systemCalendar.permission = true
+        fakes.settings.setSystemCalendarEnabled(true)
+        fakes.settings.setSystemCalendarId("cal-1")
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+
+        val skipId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.BATH,
+            scheduledAt = now + 60_000L,
+            nowMillis = now,
+        )
+        val skipPlan = care.getCarePlan(skipId)!!
+        val skipEvent = parseSystemCalendarEventMap(
+            fakes.settings.settings.first().systemCalendarEventMapJson,
+        )[skipPlan.clientUuid]
+        assertThat(skipEvent).isNotNull()
+        care.skipCarePlan(skipId, nowMillis = now + 1)
+        assertThat(fakes.systemCalendar.deleted).contains(skipEvent)
+        assertThat(
+            parseSystemCalendarEventMap(
+                fakes.settings.settings.first().systemCalendarEventMapJson,
+            ),
+        ).doesNotContainKey(skipPlan.clientUuid)
+
+        val delId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.PEE,
+            scheduledAt = now + 90_000L,
+            payloadJson = """{"pee_amount":1}""",
+            nowMillis = now,
+        )
+        val delPlan = care.getCarePlan(delId)!!
+        val delEvent = parseSystemCalendarEventMap(
+            fakes.settings.settings.first().systemCalendarEventMapJson,
+        )[delPlan.clientUuid]
+        care.deleteCarePlan(delId, nowMillis = now + 2)
+        assertThat(fakes.systemCalendar.deleted).contains(delEvent)
+        assertThat(
+            parseSystemCalendarEventMap(
+                fakes.settings.settings.first().systemCalendarEventMapJson,
+            ),
+        ).doesNotContainKey(delPlan.clientUuid)
+
+        val fulfillId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.FORMULA,
+            scheduledAt = now + 120_000L,
+            payloadJson = """{"amount_ml":90}""",
+            nowMillis = now,
+        )
+        val fulfillPlan = care.getCarePlan(fulfillId)!!
+        val fulfillEvent = parseSystemCalendarEventMap(
+            fakes.settings.settings.first().systemCalendarEventMapJson,
+        )[fulfillPlan.clientUuid]
+        care.fulfillCarePlan(
+            carePlanId = fulfillId,
+            actualTimestamp = now,
+            payloadJson = """{"amount_ml":90}""",
+            nowMillis = now,
+        )
+        assertThat(fakes.systemCalendar.deleted).contains(fulfillEvent)
+        assertThat(
+            parseSystemCalendarEventMap(
+                fakes.settings.settings.first().systemCalendarEventMapJson,
+            ),
+        ).doesNotContainKey(fulfillPlan.clientUuid)
+    }
+
+    @Test
+    fun convertRecordToCarePlanProjectsSystemCalendarByDefault() = runTest {
+        val fakes = Fakes()
+        fakes.systemCalendar.permission = true
+        fakes.settings.setSystemCalendarEnabled(true)
+        fakes.settings.setSystemCalendarId("cal-1")
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val recordId = care.addRecord(
+            babyId = babyId,
+            type = RecordType.FORMULA,
+            timestamp = now - 60_000L,
+            payloadJson = """{"amount_ml":80}""",
+            note = "转计划",
+        )
+        fakes.systemCalendar.upserts.clear()
+        val planId = care.convertRecordToCarePlan(
+            recordId = recordId,
+            scheduledAt = now + 180_000L,
+            note = "转计划",
+            nowMillis = now,
+        )
+        assertThat(fakes.systemCalendar.upserts).isNotEmpty()
+        val plan = care.getCarePlan(planId)!!
+        val map = parseSystemCalendarEventMap(
+            fakes.settings.settings.first().systemCalendarEventMapJson,
+        )
+        assertThat(map).containsKey(plan.clientUuid)
+        assertThat(fakes.reminders.scheduledCarePlanIds).doesNotContain(planId)
+    }
+
+    @Test
+    fun convertCalendarEventToNursingCarePlanSucceeds() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val eventId = care.addCalendarEvent(
+            babyId = babyId,
+            title = "喂奶",
+            eventAt = now + 180_000L,
+            remindAt = now + 60_000L,
+        )
+        val planId = care.convertCalendarEventToCarePlan(
+            eventId = eventId,
+            type = RecordType.NURSING,
+            nowMillis = now,
+        )
+        assertThat(planId).isGreaterThan(0L)
+        assertThat(care.getCarePlan(planId)!!.type).isEqualTo(RecordType.NURSING)
+        assertThat(care.listCalendarEvents(babyId).none { it.id == eventId }).isTrue()
+        assertThat(
+            fakes.records.listAllIncludingDeleted().none { it.type == RecordType.NURSING.key },
+        ).isTrue()
+    }
+
+    @Test
+    fun convertRecordToCarePlanTransfersFieldsPhotosAndTombstonesRecord() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 30_000_000L
+        val keep = "/data/user/0/com.lezi/files/record-media/keep.jpg"
+        val drop = "/data/user/0/com.lezi/files/record-media/drop.jpg"
+        val recordId = care.addRecord(
+            babyId = babyId,
+            type = RecordType.PEE,
+            timestamp = now - 60_000L,
+            note = "原备注",
+            payloadJson = """{"pee_amount":2}""",
+            photoLocalPaths = listOf(keep, drop),
+        )
+        val sourceUuid = fakes.records.get(recordId)!!.clientUuid
+
+        val planId = care.convertRecordToCarePlan(
+            recordId = recordId,
+            scheduledAt = now + 120_000L,
+            note = "改后备注",
+            payloadJson = """{"pee_amount":3}""",
+            photoLocalPaths = listOf(keep),
+            nowMillis = now,
+        )
+
+        // Original fact is soft-deleted and gone from ordinary surfaces.
+        assertThat(fakes.records.get(recordId)).isNull()
+        assertThat(fakes.records.getIncludingDeleted(recordId)!!.deletedAt).isNotNull()
+        assertThat(fakes.media.listActiveForRecord(recordId)).isEmpty()
+        assertThat(fakes.media.listForRecord(recordId).all { it.deletedAt != null }).isTrue()
+
+        val plan = care.getCarePlan(planId)!!
+        assertThat(plan.status).isEqualTo(CarePlanStatus.PENDING)
+        assertThat(plan.scheduledAt).isEqualTo(now + 120_000L)
+        assertThat(plan.note).isEqualTo("改后备注")
+        assertThat(plan.payloadJson).contains("\"pee_amount\":3")
+        assertThat(plan.sourceRecordClientUuid).isEqualTo(sourceUuid)
+        assertThat(care.listCarePlanPhotoPaths(planId)).containsExactly(keep)
+        val planMedia = fakes.media.listActiveForCarePlan(planId)
+        assertThat(planMedia.map { it.localUri }).containsExactly(keep)
+        assertThat(planMedia.all { it.recordId == null && it.carePlanId == planId }).isTrue()
+        // No dual-active ownership for the same path.
+        assertThat(
+            fakes.media.listAllIncludingDeleted()
+                .filter { it.localUri == keep && it.deletedAt == null },
+        ).hasSize(1)
+        assertThat(fakes.reminders.scheduledCarePlanIds).contains(planId)
+    }
+
+    @Test
+    fun convertRecordToCarePlanFailureLeavesRecordAndMediaIntact() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 31_000_000L
+        val path = "/data/user/0/com.lezi/files/record-media/stable.jpg"
+        val recordId = care.addRecord(
+            babyId = babyId,
+            type = RecordType.FORMULA,
+            timestamp = now - 10_000L,
+            payloadJson = """{"amount_ml":120}""",
+            photoLocalPaths = listOf(path),
+        )
+        val recordsBefore = fakes.records.listAllIncludingDeleted().size
+        val mediaBefore = fakes.media.listAllIncludingDeleted().size
+        val plansBefore = fakes.carePlans.listAllIncludingDeleted().size
+
+        fakes.media.failUpserts = true
+        val err = runCatching {
+            care.convertRecordToCarePlan(
+                recordId = recordId,
+                scheduledAt = now + 60_000L,
+                payloadJson = """{"amount_ml":120}""",
+                photoLocalPaths = listOf(path),
+                nowMillis = now,
+            )
+        }.exceptionOrNull()
+
+        assertThat(err).isInstanceOf(IllegalStateException::class.java)
+        assertThat(fakes.records.get(recordId)).isNotNull()
+        assertThat(fakes.records.get(recordId)!!.deletedAt).isNull()
+        assertThat(care.listRecordPhotoPaths(recordId)).containsExactly(path)
+        assertThat(fakes.records.listAllIncludingDeleted()).hasSize(recordsBefore)
+        assertThat(fakes.media.listAllIncludingDeleted()).hasSize(mediaBefore)
+        assertThat(fakes.carePlans.listAllIncludingDeleted()).hasSize(plansBefore)
+        assertThat(fakes.reminders.scheduledCarePlanIds).isEmpty()
+    }
+
+    @Test
+    fun convertRecordToCarePlanRejectsNonFutureAndDoesNotStartStatefulActions() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 32_000_000L
+        val nursingId = care.addRecord(
+            babyId = babyId,
+            type = RecordType.NURSING,
+            timestamp = now - 30_000L,
+            payloadJson = """{"left_min":5,"right_min":4,"order":"LR"}""",
+        )
+        val past = runCatching {
+            care.convertRecordToCarePlan(
+                recordId = nursingId,
+                scheduledAt = now,
+                nowMillis = now,
+            )
+        }.exceptionOrNull()
+        assertThat(past).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(fakes.records.get(nursingId)!!.deletedAt).isNull()
+
+        // Sleep open interval convert: soft-deletes open sleep, never leaves a new open interval.
+        val openSleepId = care.confirmSleep(
+            babyId = babyId,
+            expectedOpenSleepId = null,
+            timestamp = now - 5_000L,
+            endTimestamp = null,
+            note = null,
+            payloadJson = """{"is_nap":true}""",
+        )
+        assertThat(fakes.records.findOpenSleep(babyId)?.id).isEqualTo(openSleepId)
+        val planId = care.convertRecordToCarePlan(
+            recordId = openSleepId,
+            scheduledAt = now + 90_000L,
+            payloadJson = """{"is_nap":true}""",
+            nowMillis = now,
+        )
+        assertThat(care.getCarePlan(planId)!!.type).isEqualTo(RecordType.SLEEP)
+        assertThat(care.getCarePlan(planId)!!.sourceRecordClientUuid)
+            .isEqualTo(fakes.records.getIncludingDeleted(openSleepId)!!.clientUuid)
+        assertThat(fakes.records.findOpenSleep(babyId)).isNull()
+        assertThat(
+            fakes.records.listAllIncludingDeleted()
+                .none { it.type == RecordType.SLEEP.key && it.deletedAt == null },
+        ).isTrue()
+
+        // Ordinary updateRecord cannot sneak a future timestamp past convert.
+        val formulaId = care.addRecord(
+            babyId = babyId,
+            type = RecordType.FORMULA,
+            timestamp = now - 1_000L,
+            payloadJson = """{"amount_ml":100}""",
+        )
+        val futureUpdate = runCatching {
+            care.updateRecord(
+                id = formulaId,
+                timestamp = now + 10_000L,
+                endTimestamp = null,
+                note = null,
+                payloadJson = """{"amount_ml":100}""",
+                nowMillis = now,
+            )
+        }.exceptionOrNull()
+        assertThat(futureUpdate).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(fakes.records.get(formulaId)!!.timestamp).isEqualTo(now - 1_000L)
+    }
+
 }
 private class Fakes(
     private val syncPort: com.lezi.babylog.sync.SyncPort =
@@ -1310,18 +3709,54 @@ private class Fakes(
     val families = FakeFamilyDao()
     val memberships = FakeMembershipDao()
     val babies = FakeBabyDao()
-    val records = FakeRecordDao()
+    val fulfillmentCandidates = FakeFulfillmentCandidateDao()
+    val records = FakeRecordDao(
+        conflictExcluded = {
+            fulfillmentCandidates.itemsSnapshot()
+                .filter {
+                    it.adoptionStatus ==
+                        com.lezi.babylog.core.model.FulfillmentAdoptionStatus.CONFLICT_NOT_ADOPTED &&
+                        it.deletedAt == null
+                }
+                .map { it.recordClientUuid }
+                .toSet()
+        },
+    )
+    val carePlans = FakeCarePlanDao()
     val calendarEvents = FakeCalendarEventDao()
     val customItems = FakeCustomItemDao()
     val media = FakeMediaAssetDao()
     val pendingReminderCleanup = FakePendingReminderCleanupDao()
     val settings = FakeSettingsStore()
     val reminders = FakeReminderCleanupPort()
+    val systemCalendar = FakeSystemCalendarPort()
     val transactions = RecordingTransactionRunner()
+
+    fun wireTransactionalSnapshots() {
+        transactions.onBegin += {
+            records.beginTx()
+            media.beginTx()
+            carePlans.beginTx()
+            fulfillmentCandidates.beginTx()
+        }
+        transactions.onCommit += {
+            records.commitTx()
+            media.commitTx()
+            carePlans.commitTx()
+            fulfillmentCandidates.commitTx()
+        }
+        transactions.onRollback += {
+            records.rollbackTx()
+            media.rollbackTx()
+            carePlans.rollbackTx()
+            fulfillmentCandidates.rollbackTx()
+        }
+    }
 
     fun careLog() = CareLog(
         babies,
         records,
+        carePlans,
         calendarEvents,
         customItems,
         users,
@@ -1333,8 +3768,73 @@ private class Fakes(
         syncPort,
         reminders,
         transactions,
+        systemCalendar,
+        fulfillmentCandidates,
     )
 }
+
+private class FakeSystemCalendarPort : SystemCalendarPort {
+    var permission = false
+    var failUpsert = false
+    /** When non-null, only these calendar ids are writable (simulates vanished target). */
+    var writableCalendarIds: Set<String>? = null
+    /** Event ids that no longer exist in the provider (external delete). */
+    val missingEventIds = mutableSetOf<String>()
+    val upserts = mutableListOf<SystemCalendarUpsert>()
+    val deleted = mutableListOf<String>()
+    private var nextEventId = 1L
+    private val liveEventIds = mutableSetOf<String>()
+
+    override fun hasCalendarPermission(): Boolean = permission
+
+    override suspend fun listWritableCalendars(): List<SystemCalendarTarget> =
+        if (!permission) {
+            emptyList()
+        } else {
+            val ids = writableCalendarIds ?: setOf("cal-1")
+            ids.map { id ->
+                SystemCalendarTarget(
+                    calendarId = id,
+                    displayName = "本地",
+                    accountName = "local",
+                )
+            }
+        }
+
+    override suspend fun upsertEvent(request: SystemCalendarUpsert): String? {
+        upserts += request
+        if (!permission || failUpsert) return null
+        if (!isWritableCalendar(request.calendarId)) return null
+        val existing = request.existingEventId
+        if (!existing.isNullOrBlank()) {
+            // Simulate external delete: update of a vanished event fails.
+            if (existing in missingEventIds || existing !in liveEventIds) {
+                return null
+            }
+            return existing
+        }
+        val id = "evt-${nextEventId++}"
+        liveEventIds += id
+        missingEventIds.remove(id)
+        return id
+    }
+
+    override suspend fun deleteEvent(eventId: String): Boolean {
+        deleted += eventId
+        liveEventIds.remove(eventId)
+        return true
+    }
+
+    override suspend fun eventExists(eventId: String): Boolean {
+        if (!permission) return false
+        if (eventId in missingEventIds) return false
+        return eventId in liveEventIds
+    }
+
+    override suspend fun isWritableCalendar(calendarId: String): Boolean =
+        permission && listWritableCalendars().any { it.calendarId == calendarId }
+}
+
 
 private class FakeReminderCleanupPort : ReminderCleanupPort {
     var nextFeedScheduled: Boolean = false
@@ -1364,6 +3864,32 @@ private class FakeReminderCleanupPort : ReminderCleanupPort {
 
     override suspend fun cancelCalendar(eventId: Long) {
         scheduledCalendarIds -= eventId
+    }
+
+    val scheduledCarePlanIds = linkedSetOf<Long>()
+    val cancelledCarePlanIds = mutableListOf<Long>()
+    var carePlanScheduleEnabled: Boolean = true
+    var carePlanPermissionGranted: Boolean = true
+
+    override suspend fun scheduleCarePlan(plan: CarePlan): Boolean {
+        if (!carePlanScheduleEnabled || !carePlanPermissionGranted) return false
+        if (plan.deletedAt != null) return false
+        // Domain already gates future scheduledAt via nowMillis. Tests inject
+        // synthetic epochs, so do not re-check wall-clock here (real adapter does).
+        if (plan.status != CarePlanStatus.PENDING) return false
+        scheduledCarePlanIds += plan.id
+        // Replace semantics: a later schedule supersedes prior cancel bookkeeping.
+        cancelledCarePlanIds.removeAll { it == plan.id }
+        return true
+    }
+
+    override suspend fun cancelCarePlan(carePlanId: Long) {
+        scheduledCarePlanIds -= carePlanId
+        cancelledCarePlanIds += carePlanId
+    }
+
+    override suspend fun cancelCarePlanByClientUuid(clientUuid: String) {
+        // Test adapter keys by local id only.
     }
 
     override suspend fun cancelForRecordsClear(calendarEventIds: Collection<Long>) {
@@ -1403,10 +3929,21 @@ private class FakePendingReminderCleanupDao : PendingReminderCleanupDao {
 private class RecordingTransactionRunner :
     com.lezi.babylog.core.database.DatabaseTransactionRunner {
     var runCount = 0
+    val onBegin = mutableListOf<() -> Unit>()
+    val onCommit = mutableListOf<() -> Unit>()
+    val onRollback = mutableListOf<() -> Unit>()
 
     override suspend fun <T> run(block: suspend () -> T): T {
         runCount += 1
-        return block()
+        onBegin.forEach { it() }
+        return try {
+            val result = block()
+            onCommit.forEach { it() }
+            result
+        } catch (t: Throwable) {
+            onRollback.forEach { it() }
+            throw t
+        }
     }
 }
 
@@ -1415,6 +3952,8 @@ private class RecordingSyncPort(
     private val familyServerRetained: Boolean = false,
     private val deviceId: String = "",
     private val familyId: String = if (familyServerRetained) "family-a" else "",
+    private val membershipId: String = "",
+    private val role: com.lezi.babylog.sync.FamilyRole = com.lezi.babylog.sync.FamilyRole.None,
 ) : com.lezi.babylog.sync.SyncPort by delegate {
     var requests = 0
     var localRecordReconciliations = 0
@@ -1426,6 +3965,8 @@ private class RecordingSyncPort(
         com.lezi.babylog.sync.SyncSession(
             familyId = familyId,
             deviceId = deviceId,
+            membershipId = membershipId,
+            role = role,
         ),
     )
 
@@ -1466,6 +4007,29 @@ private class RecordingSyncPort(
 private class FakeMediaAssetDao : MediaAssetDao {
     private val items = mutableListOf<MediaAssetEntity>()
     private val seq = AtomicLong(1)
+    var failUpserts: Boolean = false
+    private var txSnapshot: List<MediaAssetEntity>? = null
+    private var txSeq: Long? = null
+
+    fun beginTx() {
+        txSnapshot = items.toList()
+        txSeq = seq.get()
+    }
+
+    fun commitTx() {
+        txSnapshot = null
+        txSeq = null
+    }
+
+    fun rollbackTx() {
+        txSnapshot?.let {
+            items.clear()
+            items += it
+        }
+        txSeq?.let { seq.set(it) }
+        txSnapshot = null
+        txSeq = null
+    }
 
     fun seed(entity: MediaAssetEntity): Long {
         val id = entity.id.takeIf { it != 0L } ?: seq.getAndIncrement()
@@ -1474,13 +4038,24 @@ private class FakeMediaAssetDao : MediaAssetDao {
         return id
     }
 
-    override suspend fun upsert(asset: MediaAssetEntity): Long = seed(asset)
+    override suspend fun upsert(asset: MediaAssetEntity): Long {
+        if (failUpserts) {
+            throw IllegalStateException("media upsert failed")
+        }
+        return seed(asset)
+    }
 
     override suspend fun listForRecord(recordId: Long): List<MediaAssetEntity> =
         items.filter { it.recordId == recordId }
 
     override suspend fun listActiveForRecord(recordId: Long): List<MediaAssetEntity> =
         items.filter { it.recordId == recordId && it.deletedAt == null }.sortedBy { it.id }
+
+    override suspend fun listForCarePlan(carePlanId: Long): List<MediaAssetEntity> =
+        items.filter { it.carePlanId == carePlanId }
+
+    override suspend fun listActiveForCarePlan(carePlanId: Long): List<MediaAssetEntity> =
+        items.filter { it.carePlanId == carePlanId && it.deletedAt == null }.sortedBy { it.id }
 
     override suspend fun activeAvatarForBaby(babyId: Long): MediaAssetEntity? =
         items.filter { it.babyId == babyId && it.kind == "avatar" && it.deletedAt == null }
@@ -1531,12 +4106,274 @@ private class FakeMediaAssetDao : MediaAssetDao {
     }
 }
 
+private class FakeFulfillmentCandidateDao : FulfillmentCandidateDao {
+    private val items = MutableStateFlow<List<FulfillmentCandidateEntity>>(emptyList())
+    private val seq = AtomicLong(1)
+    private var snapshot: List<FulfillmentCandidateEntity>? = null
+
+    fun itemsSnapshot(): List<FulfillmentCandidateEntity> = items.value
+
+    fun beginTx() {
+        snapshot = items.value
+    }
+
+    fun commitTx() {
+        snapshot = null
+    }
+
+    fun rollbackTx() {
+        snapshot?.let { items.value = it }
+        snapshot = null
+    }
+
+    override suspend fun get(id: Long): FulfillmentCandidateEntity? =
+        items.value.firstOrNull { it.id == id }
+
+    override suspend fun getByClientUuid(clientUuid: String): FulfillmentCandidateEntity? =
+        items.value.firstOrNull { it.clientUuid == clientUuid }
+
+    override suspend fun listForCarePlan(carePlanClientUuid: String): List<FulfillmentCandidateEntity> =
+        items.value.filter { it.carePlanClientUuid == carePlanClientUuid }.sortedBy { it.id }
+
+    override suspend fun listForRecord(recordClientUuid: String): List<FulfillmentCandidateEntity> =
+        items.value.filter { it.recordClientUuid == recordClientUuid }.sortedBy { it.id }
+
+    override suspend fun listAllIncludingDeleted(): List<FulfillmentCandidateEntity> = items.value
+
+    override suspend fun listPendingSync(): List<FulfillmentCandidateEntity> =
+        items.value.filter { it.syncDirty }.sortedBy { it.id }
+
+    override suspend fun listConflictNotAdoptedRecordUuids(): List<String> =
+        items.value
+            .filter {
+                it.adoptionStatus ==
+                    com.lezi.babylog.core.model.FulfillmentAdoptionStatus.CONFLICT_NOT_ADOPTED &&
+                    it.deletedAt == null
+            }
+            .map { it.recordClientUuid }
+
+    override suspend fun listConflictNotAdopted(): List<FulfillmentCandidateEntity> =
+        items.value
+            .filter {
+                it.adoptionStatus ==
+                    com.lezi.babylog.core.model.FulfillmentAdoptionStatus.CONFLICT_NOT_ADOPTED &&
+                    it.deletedAt == null
+            }
+            .sortedWith(compareBy({ it.confirmedAt }, { it.clientUuid }))
+
+    override suspend fun listConflictNotAdoptedForCarePlan(
+        carePlanClientUuid: String,
+    ): List<FulfillmentCandidateEntity> =
+        listConflictNotAdopted().filter { it.carePlanClientUuid == carePlanClientUuid }
+
+    override fun observeConflictNotAdoptedRecordUuids(): Flow<List<String>> =
+        items.map { list ->
+            list.filter {
+                it.adoptionStatus ==
+                    com.lezi.babylog.core.model.FulfillmentAdoptionStatus.CONFLICT_NOT_ADOPTED &&
+                    it.deletedAt == null
+            }.map { it.recordClientUuid }
+        }
+
+    override suspend fun markSynced(clientUuid: String, updatedAt: Long) {
+        items.value = items.value.map {
+            if (it.clientUuid == clientUuid && it.updatedAt == updatedAt) {
+                it.copy(syncDirty = false)
+            } else {
+                it
+            }
+        }
+    }
+
+    override suspend fun upsert(candidate: FulfillmentCandidateEntity): Long {
+        val id = candidate.id.takeIf { it > 0 } ?: seq.getAndIncrement()
+        items.value = items.value.filterNot { it.id == id || it.clientUuid == candidate.clientUuid } +
+            candidate.copy(id = id)
+        return id
+    }
+
+    override suspend fun update(candidate: FulfillmentCandidateEntity) {
+        items.value = items.value.map { if (it.id == candidate.id) candidate else it }
+    }
+
+    override suspend fun deleteAll() {
+        items.value = emptyList()
+    }
+}
+
+private class FakeCarePlanDao : CarePlanDao {
+    private val items = MutableStateFlow<List<CarePlanEntity>>(emptyList())
+    private val seq = AtomicLong(1)
+    private var snapshot: List<CarePlanEntity>? = null
+
+    fun beginTx() {
+        snapshot = items.value
+    }
+
+    fun commitTx() {
+        snapshot = null
+    }
+
+    fun rollbackTx() {
+        snapshot?.let { items.value = it }
+        snapshot = null
+    }
+
+    override fun observeDayPending(
+        babyId: Long,
+        startInclusive: Long,
+        endExclusive: Long,
+    ): Flow<List<CarePlanEntity>> = items.map { list ->
+        list.filter {
+            it.babyId == babyId &&
+                it.deletedAt == null &&
+                it.status in setOf("pending", "missed") &&
+                it.scheduledAt >= startInclusive &&
+                it.scheduledAt < endExclusive
+        }.sortedBy { it.scheduledAt }
+    }
+
+    override fun observeTodayPending(
+        babyId: Long,
+        dayStart: Long,
+        dayEnd: Long,
+        nowMillis: Long,
+    ): Flow<List<CarePlanEntity>> = items.map { list ->
+        list.filter {
+            it.babyId == babyId &&
+                it.deletedAt == null &&
+                it.status in setOf("pending", "missed") &&
+                (it.scheduledAt < nowMillis ||
+                    (it.scheduledAt >= dayStart && it.scheduledAt < dayEnd))
+        }.sortedBy { it.scheduledAt }
+    }
+
+    override fun observeRange(
+        babyId: Long,
+        startInclusive: Long,
+        endExclusive: Long,
+    ): Flow<List<CarePlanEntity>> = items.map { list ->
+        list.filter {
+            it.babyId == babyId &&
+                it.deletedAt == null &&
+                it.scheduledAt >= startInclusive &&
+                it.scheduledAt < endExclusive
+        }.sortedBy { it.scheduledAt }
+    }
+
+    override suspend fun listOpenFuture(babyId: Long, nowMillis: Long): List<CarePlanEntity> =
+        items.value.filter {
+            it.babyId == babyId &&
+                it.deletedAt == null &&
+                it.status in setOf("pending", "missed") &&
+                it.scheduledAt > nowMillis
+        }.sortedBy { it.scheduledAt }
+
+    override suspend fun listAllOpenFuture(nowMillis: Long): List<CarePlanEntity> =
+        items.value.filter {
+            it.deletedAt == null &&
+                it.status in setOf("pending", "missed") &&
+                it.scheduledAt > nowMillis
+        }.sortedBy { it.scheduledAt }
+
+    override suspend fun get(id: Long): CarePlanEntity? =
+        items.value.firstOrNull { it.id == id }
+
+    override suspend fun getByClientUuid(clientUuid: String): CarePlanEntity? =
+        items.value.firstOrNull { it.clientUuid == clientUuid }
+
+    /** Test-only: includes tombstones for convert failure rollback assertions. */
+    override suspend fun listAllIncludingDeleted(): List<CarePlanEntity> = items.value
+
+    override suspend fun listPendingSync(): List<CarePlanEntity> =
+        items.value.filter { it.syncDirty }.sortedBy { it.id }
+
+    override suspend fun markSynced(clientUuid: String, updatedAt: Long) {
+        items.value = items.value.map {
+            if (it.clientUuid == clientUuid && it.updatedAt == updatedAt) {
+                it.copy(syncDirty = false)
+            } else {
+                it
+            }
+        }
+    }
+
+    override suspend fun markAllPendingSync() {
+        items.value = items.value.map { it.copy(syncDirty = true) }
+    }
+
+    override suspend fun upsert(plan: CarePlanEntity): Long {
+        val id = plan.id.takeIf { it > 0 } ?: seq.getAndIncrement()
+        items.value = items.value.filterNot { it.id == id } + plan.copy(id = id)
+        return id
+    }
+
+    override suspend fun update(plan: CarePlanEntity) {
+        items.value = items.value.map { if (it.id == plan.id) plan else it }
+    }
+
+    override suspend fun updatePayloadReplica(
+        id: Long,
+        expectedPayloadJson: String,
+        payloadJson: String,
+    ): Int {
+        var changed = 0
+        items.value = items.value.map {
+            if (it.id == id && it.payloadJson == expectedPayloadJson) {
+                changed = 1
+                it.copy(payloadJson = payloadJson)
+            } else {
+                it
+            }
+        }
+        return changed
+    }
+
+    override suspend fun softDelete(id: Long, deletedAt: Long) {
+        items.value = items.value.map {
+            if (it.id == id) {
+                it.copy(deletedAt = deletedAt, updatedAt = deletedAt, syncDirty = true)
+            } else {
+                it
+            }
+        }
+    }
+
+    override suspend fun deleteAll() {
+        items.value = emptyList()
+    }
+}
+
 private class FakeCustomItemDao : CustomItemDao {
     private val items = MutableStateFlow<List<CustomItemEntity>>(emptyList())
     private val seq = AtomicLong(1)
 
-    override fun observeAll(): Flow<List<CustomItemEntity>> = items
-    override suspend fun listAll(): List<CustomItemEntity> = items.value
+    override fun observeAll(): Flow<List<CustomItemEntity>> =
+        items.map { list -> list.filter { it.deletedAt == null } }
+
+    override suspend fun listAll(): List<CustomItemEntity> =
+        items.value.filter { it.deletedAt == null }
+
+    override suspend fun listAllIncludingDeleted(): List<CustomItemEntity> = items.value
+
+    override suspend fun getById(id: Long): CustomItemEntity? =
+        items.value.firstOrNull { it.id == id }
+
+    override suspend fun getByClientUuid(clientUuid: String): CustomItemEntity? =
+        items.value.firstOrNull { it.clientUuid == clientUuid }
+
+    override suspend fun listPendingSync(): List<CustomItemEntity> =
+        items.value.filter { it.syncDirty }
+
+    override suspend fun markSynced(clientUuid: String, updatedAt: Long) {
+        items.value = items.value.map {
+            if (it.clientUuid == clientUuid && it.updatedAt == updatedAt) {
+                it.copy(syncDirty = false)
+            } else {
+                it
+            }
+        }
+    }
 
     override suspend fun upsert(item: CustomItemEntity): Long {
         val id = item.id.takeIf { it > 0 } ?: seq.getAndIncrement()
@@ -1549,9 +4386,14 @@ private class FakeCustomItemDao : CustomItemDao {
     }
 
     override suspend fun softDelete(id: Long, deletedAt: Long) {
+        // Keep tombstone in memory (include-deleted semantics for leave/ownership tests).
         items.value = items.value.map {
-            if (it.id == id) it.copy(deletedAt = deletedAt, updatedAt = deletedAt) else it
-        }.filter { it.deletedAt == null }
+            if (it.id == id) {
+                it.copy(deletedAt = deletedAt, updatedAt = deletedAt, syncDirty = true)
+            } else {
+                it
+            }
+        }
     }
 
     override suspend fun deleteAll() {
@@ -1624,31 +4466,36 @@ private class FakeSettingsStore : SettingsStore {
     private val order = MutableStateFlow("[]")
     private val hidden = MutableStateFlow(emptySet<String>())
     private val weekStart = MutableStateFlow(1)
+    private val systemCalEnabled = MutableStateFlow(false)
+    private val systemCalId = MutableStateFlow<String?>(null)
+    private val systemCalDisclosure = MutableStateFlow(2)
+    private val systemCalMap = MutableStateFlow("{}")
+    private val showAvg = MutableStateFlow(false)
+    private val comparePrev = MutableStateFlow(false)
 
-    override val settings: Flow<SettingsLocal> =
-        kotlinx.coroutines.flow.combine(dark, step) { d, st -> d to st }
-            .let { base ->
-                kotlinx.coroutines.flow.combine(base, timerEnabled, interval, recordAt) { pair, te, iv, ra ->
-                    SettingsLocal(
-                        darkMode = pair.first,
-                        amountStepMl = pair.second,
-                        timerEnabled = te,
-                        nursingIntervalMin = iv,
-                        recordAtStartOrEnd = ra,
-                    )
-                }
-            }
-            .let { partial ->
-                kotlinx.coroutines.flow.combine(partial, nextFeed, order, hidden, weekStart) { s, nf, od, hd, ws ->
-                    s.copy(
-                        nextFeedAt = nf,
-                        itemOrderJson = od,
-                        hiddenItems = hd,
-                        weekStart = ws,
-                    )
-                }
-            }
+    private fun snapshot(): SettingsLocal = SettingsLocal(
+        darkMode = dark.value,
+        amountStepMl = step.value,
+        timerEnabled = timerEnabled.value,
+        nursingIntervalMin = interval.value,
+        recordAtStartOrEnd = recordAt.value,
+        nextFeedAt = nextFeed.value,
+        itemOrderJson = order.value,
+        hiddenItems = hidden.value,
+        weekStart = weekStart.value,
+        systemCalendarEnabled = systemCalEnabled.value,
+        systemCalendarId = systemCalId.value,
+        systemCalendarDisclosureLevel = systemCalDisclosure.value,
+        systemCalendarEventMapJson = systemCalMap.value,
+    )
 
+    private val settingsState = MutableStateFlow(snapshot())
+
+    private fun publish() {
+        settingsState.value = snapshot()
+    }
+
+    override val settings: Flow<SettingsLocal> = settingsState
 
     override val currentBabyId: Flow<Long?> = babyId
     override val nursingTimerJson: Flow<String?> = timer
@@ -1659,6 +4506,7 @@ private class FakeSettingsStore : SettingsStore {
 
     override suspend fun setDarkMode(mode: String) {
         dark.value = mode
+        publish()
     }
 
     override suspend fun setVisualStyle(style: String) = Unit
@@ -1666,10 +4514,12 @@ private class FakeSettingsStore : SettingsStore {
 
     override suspend fun setTimerEnabled(enabled: Boolean) {
         timerEnabled.value = enabled
+        publish()
     }
 
     override suspend fun setAmountStepMl(stepMl: Int) {
         step.value = stepMl
+        publish()
     }
 
     override suspend fun setTimeStepMin(step: Int) = Unit
@@ -1679,27 +4529,37 @@ private class FakeSettingsStore : SettingsStore {
 
     override suspend fun setNursingIntervalMin(min: Int) {
         interval.value = min
+        publish()
     }
 
     override suspend fun setRecordAt(startOrEnd: String) {
         recordAt.value = startOrEnd
+        publish()
     }
 
     override suspend fun setNextFeedAt(epochMs: Long?) {
         nextFeed.value = epochMs
+        publish()
     }
 
     override suspend fun clearNextFeedAt() {
         nextFeed.value = null
+        publish()
     }
 
     override suspend fun setItemOrderJson(json: String) {
         order.value = json
+        publish()
     }
+
+    override suspend fun setCategoryOrderJson(json: String) = Unit
 
     override suspend fun setHiddenItems(items: Set<String>) {
         hidden.value = items
+        publish()
     }
+
+    override suspend fun setQuickRecordSlots(slots: List<String>) = Unit
 
     override suspend fun setTimelineOrder(order: String) = Unit
 
@@ -1709,15 +4569,36 @@ private class FakeSettingsStore : SettingsStore {
 
     override suspend fun setWeekStart(day: Int) {
         weekStart.value = day
+        publish()
     }
 
-    private val showAvg = MutableStateFlow(false)
-    private val comparePrev = MutableStateFlow(false)
     override val showAvgSleep = showAvg
     override val comparePrevWeek = comparePrev
     override suspend fun setShowAvgSleep(enabled: Boolean) {
         showAvg.value = enabled
     }
+    override suspend fun setCarePlanLocalRemindersEnabled(enabled: Boolean) = Unit
+
+    override suspend fun setSystemCalendarEnabled(enabled: Boolean) {
+        systemCalEnabled.value = enabled
+        publish()
+    }
+
+    override suspend fun setSystemCalendarId(calendarId: String?) {
+        systemCalId.value = calendarId
+        publish()
+    }
+
+    override suspend fun setSystemCalendarDisclosureLevel(level: Int) {
+        systemCalDisclosure.value = level
+        publish()
+    }
+
+    override suspend fun setSystemCalendarEventMapJson(json: String) {
+        systemCalMap.value = json
+        publish()
+    }
+
     override suspend fun setComparePrevWeek(enabled: Boolean) {
         comparePrev.value = enabled
     }
@@ -1900,9 +4781,33 @@ private class FakeBabyDao : BabyDao {
     }
 }
 
-private class FakeRecordDao : RecordDao {
+private class FakeRecordDao(
+    private val conflictExcluded: () -> Set<String> = { emptySet() },
+) : RecordDao {
     private val items = MutableStateFlow<List<RecordEntity>>(emptyList())
     private val seq = AtomicLong(1)
+    private var txSnapshot: List<RecordEntity>? = null
+    private var txSeq: Long? = null
+
+    private fun RecordEntity.isOrdinarySurface(): Boolean =
+        clientUuid !in conflictExcluded()
+
+    fun beginTx() {
+        txSnapshot = items.value
+        txSeq = seq.get()
+    }
+
+    fun commitTx() {
+        txSnapshot = null
+        txSeq = null
+    }
+
+    fun rollbackTx() {
+        txSnapshot?.let { items.value = it }
+        txSeq?.let { seq.set(it) }
+        txSnapshot = null
+        txSeq = null
+    }
 
     override fun observeRange(
         babyId: Long,
@@ -1913,6 +4818,7 @@ private class FakeRecordDao : RecordDao {
             list.filter {
                 it.babyId == babyId &&
                     it.deletedAt == null &&
+                    it.isOrdinarySurface() &&
                     it.overlapsRange(startInclusive, endExclusive)
             }.sortedByDescending { it.timestamp }
         }
@@ -1926,6 +4832,7 @@ private class FakeRecordDao : RecordDao {
             list.filter {
                 it.babyId == babyId &&
                     it.deletedAt == null &&
+                    it.isOrdinarySurface() &&
                     it.overlapsRange(startInclusive, endExclusive)
             }.sortedByDescending { it.timestamp }
         }
@@ -1938,6 +4845,7 @@ private class FakeRecordDao : RecordDao {
         items.value.filter {
             it.babyId == babyId &&
                 it.deletedAt == null &&
+                it.isOrdinarySurface() &&
                 it.overlapsRange(startInclusive, endExclusive)
         }.sortedByDescending { it.timestamp }
 
@@ -2001,8 +4909,9 @@ private class FakeRecordDao : RecordDao {
         }
 
     override suspend fun listForBaby(babyId: Long): List<RecordEntity> =
-        items.value.filter { it.babyId == babyId && it.deletedAt == null }
-            .sortedByDescending { it.timestamp }
+        items.value.filter {
+            it.babyId == babyId && it.deletedAt == null && it.isOrdinarySurface()
+        }.sortedByDescending { it.timestamp }
 
     override suspend fun searchCandidates(
         babyId: Long,
@@ -2015,6 +4924,7 @@ private class FakeRecordDao : RecordDao {
         return items.value.filter {
             it.babyId == babyId &&
                 it.deletedAt == null &&
+                it.isOrdinarySurface() &&
                 (
                     it.note?.lowercase()?.let { note ->
                         matchesSqlLike(note, escapedPattern)
@@ -2033,12 +4943,16 @@ private class FakeRecordDao : RecordDao {
         items.value.filter {
             it.babyId == babyId &&
                 it.deletedAt == null &&
+                it.isOrdinarySurface() &&
                 it.overlapsRange(startInclusive, endExclusive)
         }.sortedBy { it.timestamp }
 
     override suspend fun listByType(babyId: Long, type: String): List<RecordEntity> =
         items.value.filter {
-            it.babyId == babyId && it.deletedAt == null && it.type == type
+            it.babyId == babyId &&
+                it.deletedAt == null &&
+                it.isOrdinarySurface() &&
+                it.type == type
         }.sortedBy { it.timestamp }
 
     override suspend fun upsert(record: RecordEntity): Long {

@@ -2,8 +2,16 @@ package com.lezi.babylog.sync
 
 import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.BabyEntity
+import com.lezi.babylog.core.database.CarePlanDao
+import com.lezi.babylog.core.database.CarePlanEntity
+import com.lezi.babylog.core.database.CustomItemDao
+import com.lezi.babylog.core.database.CustomItemEntity
 import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.FamilyDao
+import com.lezi.babylog.core.database.FulfillmentCandidateDao
+import com.lezi.babylog.core.database.FulfillmentCandidateEntity
+import com.lezi.babylog.core.model.FulfillmentAuthority
+import com.lezi.babylog.core.model.FulfillmentCandidateEvidence
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.OutboxDao
@@ -49,13 +57,18 @@ class RealSyncPort @Inject constructor(
     private val networkState: NetworkState,
     private val outboxDao: OutboxDao,
     private val recordDao: RecordDao,
+    private val carePlanDao: CarePlanDao,
     private val babyDao: BabyDao,
     private val mediaDao: MediaAssetDao,
+    private val customItemDao: CustomItemDao,
     private val familyDao: FamilyDao,
     private val clock: PolicyClock,
     private val foregroundState: ForegroundState,
     private val mediaFiles: SyncMediaFileStore,
     private val transactionRunner: DatabaseTransactionRunner,
+    private val carePlanAppliedListener: CarePlanFamilyAppliedListener =
+        NoOpCarePlanFamilyAppliedListener(),
+    private val fulfillmentCandidateDao: FulfillmentCandidateDao,
 ) : SyncPort {
     private val currentStatus = MutableStateFlow(SyncStatus.Disabled)
     private val processScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -495,8 +508,51 @@ class RealSyncPort @Inject constructor(
         }
         val pending = queued - staleAfterHardDelete.toSet() - unauthorizedAvatarRows.toSet()
         if (pending.isEmpty()) return true
+
+        // Record and care_plan packages always use atomic bundles (0–3 photos).
+        // No metadata-first fallback when the NAS lacks atomic_bundle.
+        val recordRows = pending.filter { it.entityType == "record" }
+        val carePlanRows = pending.filter { it.entityType == "care_plan" }
+        val recordClientUuids = recordRows.map { it.clientUuid }.toSet()
+        val carePlanClientUuids = carePlanRows.map { it.clientUuid }.toSet()
+        val logMediaForRecords = pending.filter { row ->
+            if (row.entityType != "media") return@filter false
+            val media = mediaDao.getByClientUuid(row.clientUuid) ?: return@filter false
+            val recordId = media.recordId ?: return@filter false
+            media.kind == "log" &&
+                recordDao.getIncludingDeleted(recordId)?.clientUuid in recordClientUuids
+        }
+        val logMediaForPlans = pending.filter { row ->
+            if (row.entityType != "media") return@filter false
+            val media = mediaDao.getByClientUuid(row.clientUuid) ?: return@filter false
+            val planId = media.carePlanId ?: return@filter false
+            media.kind == "log" &&
+                carePlanDao.get(planId)?.clientUuid in carePlanClientUuids
+        }
+        val atomicPackageRows =
+            (recordRows + carePlanRows + logMediaForRecords + logMediaForPlans).toSet()
+        val residual = pending - atomicPackageRows
+
+        if (recordRows.isNotEmpty() || carePlanRows.isNotEmpty()) {
+            requireAllowed(policy.evaluate(session.homeLanConfig, foregroundState.isForeground()))
+            if (!policy.supportsAtomicBundle) {
+                throw AtomicBundleUnsupportedException()
+            }
+            // Ticket 25 full-set visibility: publish completed care_plan before the
+            // fulfill Record so NAS/receive never has a window where the Record is
+            // visible while the plan is still pending. Receivers co-gate completed
+            // plans until the linked record is present (same-page apply is one txn).
+            for (planRow in carePlanRows) {
+                pushCarePlanAtomicBundle(session, planRow, pending)
+            }
+            for (recordRow in recordRows) {
+                pushRecordAtomicBundle(session, recordRow, pending)
+            }
+        }
+
+        if (residual.isEmpty()) return true
         val uploads = mutableListOf<MediaAssetEntity>()
-        val entities = pending
+        val entities = residual
             .map { row ->
                 var payload = normalizeLegacyOutboxPayload(row.entityType, row.payloadJson)
                 if (row.entityType == "media" && row.deletedAt == null) {
@@ -544,28 +600,240 @@ class RealSyncPort @Inject constructor(
             backend.putMedia(session, media.clientUuid, prepared.bytes, prepared.mime)
             mediaDao.update(media.copy(remoteUri = session.receiptFor(media.clientUuid)))
         }
-        pending.forEach { row ->
+        residual.forEach { row ->
             when (row.entityType) {
                 "baby" -> babyDao.markSynced(row.clientUuid, row.updatedAt)
                 "record" -> recordDao.markSynced(row.clientUuid, row.updatedAt)
+                "care_plan" -> carePlanDao.markSynced(row.clientUuid, row.updatedAt)
                 "media" -> mediaDao.markSynced(row.clientUuid, row.updatedAt)
+                "custom_item" -> customItemDao.markSynced(row.clientUuid, row.updatedAt)
+                "fulfillment_candidate" ->
+                    fulfillmentCandidateDao.markSynced(row.clientUuid, row.updatedAt)
             }
         }
-        outboxDao.deleteIds(pending.map { it.id })
+        outboxDao.deleteIds(residual.map { it.id })
         return true
     }
+
+    /**
+     * Push one record + its 0–3 log photos as an atomic NAS package.
+     * Idempotent [bundleId] = recordUuid + updatedAt so retries do not create duplicates.
+     */
+    private suspend fun pushRecordAtomicBundle(
+        session: SyncSession,
+        recordRow: OutboxEntity,
+        pending: List<OutboxEntity>,
+    ) {
+        val record = recordDao.getByClientUuid(recordRow.clientUuid)
+            ?: error("本地记录不存在")
+        val baby = babyDao.get(record.babyId)
+            ?: error("本地宝宝档案不存在")
+        val mediaRows = pending.filter { row ->
+            if (row.entityType != "media") return@filter false
+            val media = mediaDao.getByClientUuid(row.clientUuid) ?: return@filter false
+            media.kind == "log" && media.recordId == record.id
+        }
+        val mediaEntities = mutableListOf<SyncEntity>()
+        val mediaBytes = mutableListOf<Pair<MediaAssetEntity, PreparedMedia>>()
+        for (row in mediaRows) {
+            var payload = normalizeLegacyOutboxPayload(row.entityType, row.payloadJson)
+            val media = mediaDao.getByClientUuid(row.clientUuid)
+                ?: error("本地媒体元数据不存在")
+            if (row.deletedAt == null && media.localUri.isNotBlank()) {
+                val prepared = mediaFiles.prepareUpload(media.localUri)
+                val updated = media.copy(
+                    mime = prepared.mime,
+                    width = prepared.width ?: media.width,
+                    height = prepared.height ?: media.height,
+                    byteSize = prepared.bytes.size.toLong(),
+                )
+                mediaDao.update(updated)
+                mediaBytes += updated to prepared
+                val rawObject = Json.parseToJsonElement(payload).jsonObject
+                payload = JsonObject(
+                    rawObject +
+                        ("mime" to JsonPrimitive(updated.mime)) +
+                        ("byte_size" to JsonPrimitive(updated.byteSize)) +
+                        listOfNotNull(
+                            updated.width?.let { "width" to JsonPrimitive(it) },
+                            updated.height?.let { "height" to JsonPrimitive(it) },
+                        ).toMap(),
+                ).toString()
+            }
+            mediaEntities += SyncEntity(
+                type = "media",
+                clientUuid = row.clientUuid,
+                payloadJson = payload,
+                updatedAt = row.updatedAt,
+                deletedAt = row.deletedAt,
+            )
+        }
+        val mapped = SyncWireMapper.record(
+            entity = record,
+            babyClientUuid = baby.clientUuid,
+            createdByDeviceId = record.createdByDeviceId ?: session.deviceId,
+        )
+        // Prefer durable outbox wire payload (includes baby_client_uuid) when valid.
+        val outboxPayload = normalizeLegacyOutboxPayload("record", recordRow.payloadJson)
+        val rootPayload = runCatching {
+            val obj = Json.parseToJsonElement(outboxPayload).jsonObject
+            if ("baby_client_uuid" in obj) outboxPayload else mapped.payloadJson
+        }.getOrDefault(mapped.payloadJson)
+        val root = mapped.copy(
+            payloadJson = rootPayload,
+            updatedAt = recordRow.updatedAt,
+            deletedAt = recordRow.deletedAt,
+        )
+        val bundleId = atomicRecordBundleId(record.clientUuid, recordRow.updatedAt)
+        requireAllowed(policy.evaluate(session.homeLanConfig, foregroundState.isForeground()))
+        backend.stageBundle(
+            session,
+            AtomicBundleDraft(
+                bundleId = bundleId,
+                root = root,
+                media = mediaEntities,
+            ),
+        )
+        for ((media, prepared) in mediaBytes) {
+            requireAllowed(policy.evaluate(session.homeLanConfig, foregroundState.isForeground()))
+            backend.putBundleMedia(
+                session,
+                bundleId,
+                media.clientUuid,
+                prepared.bytes,
+                prepared.mime,
+            )
+            mediaDao.update(media.copy(remoteUri = session.receiptFor(media.clientUuid)))
+        }
+        requireAllowed(policy.evaluate(session.homeLanConfig, foregroundState.isForeground()))
+        backend.commitBundle(session, bundleId)
+        recordDao.markSynced(record.clientUuid, recordRow.updatedAt)
+        mediaRows.forEach { mediaDao.markSynced(it.clientUuid, it.updatedAt) }
+        outboxDao.deleteIds((listOf(recordRow) + mediaRows).map { it.id })
+    }
+
+    private fun atomicRecordBundleId(recordClientUuid: String, updatedAt: Long): String =
+        "record:$recordClientUuid:$updatedAt"
+
+    /**
+     * Push one care plan + its 0–3 plan photos as an atomic NAS package.
+     * Idempotent [bundleId] = care_planUuid + updatedAt so retries do not create duplicates.
+     */
+    private suspend fun pushCarePlanAtomicBundle(
+        session: SyncSession,
+        planRow: OutboxEntity,
+        pending: List<OutboxEntity>,
+    ) {
+        val plan = carePlanDao.getByClientUuid(planRow.clientUuid)
+            ?: error("本地护理计划不存在")
+        val baby = babyDao.get(plan.babyId)
+            ?: error("本地宝宝档案不存在")
+        val mediaRows = pending.filter { row ->
+            if (row.entityType != "media") return@filter false
+            val media = mediaDao.getByClientUuid(row.clientUuid) ?: return@filter false
+            media.kind == "log" && media.carePlanId == plan.id
+        }
+        val mediaEntities = mutableListOf<SyncEntity>()
+        val mediaBytes = mutableListOf<Pair<MediaAssetEntity, PreparedMedia>>()
+        for (row in mediaRows) {
+            var payload = normalizeLegacyOutboxPayload(row.entityType, row.payloadJson)
+            val media = mediaDao.getByClientUuid(row.clientUuid)
+                ?: error("本地媒体元数据不存在")
+            if (row.deletedAt == null && media.localUri.isNotBlank()) {
+                val prepared = mediaFiles.prepareUpload(media.localUri)
+                val updated = media.copy(
+                    mime = prepared.mime,
+                    width = prepared.width ?: media.width,
+                    height = prepared.height ?: media.height,
+                    byteSize = prepared.bytes.size.toLong(),
+                )
+                mediaDao.update(updated)
+                mediaBytes += updated to prepared
+                val rawObject = Json.parseToJsonElement(payload).jsonObject
+                payload = JsonObject(
+                    rawObject +
+                        ("mime" to JsonPrimitive(updated.mime)) +
+                        ("byte_size" to JsonPrimitive(updated.byteSize)) +
+                        listOfNotNull(
+                            updated.width?.let { "width" to JsonPrimitive(it) },
+                            updated.height?.let { "height" to JsonPrimitive(it) },
+                        ).toMap(),
+                ).toString()
+            }
+            mediaEntities += SyncEntity(
+                type = "media",
+                clientUuid = row.clientUuid,
+                payloadJson = payload,
+                updatedAt = row.updatedAt,
+                deletedAt = row.deletedAt,
+            )
+        }
+        val customItemUuid = plan.customItemId
+            ?.let { customItemDao.getById(it)?.clientUuid }
+        val mapped = SyncWireMapper.carePlan(
+            entity = plan,
+            babyClientUuid = baby.clientUuid,
+            customItemClientUuid = customItemUuid,
+        )
+        val outboxPayload = normalizeLegacyOutboxPayload("care_plan", planRow.payloadJson)
+        val rootPayload = runCatching {
+            val obj = Json.parseToJsonElement(outboxPayload).jsonObject
+            if ("baby_client_uuid" in obj) outboxPayload else mapped.payloadJson
+        }.getOrDefault(mapped.payloadJson)
+        val root = mapped.copy(
+            payloadJson = rootPayload,
+            updatedAt = planRow.updatedAt,
+            deletedAt = planRow.deletedAt,
+        )
+        val bundleId = atomicCarePlanBundleId(plan.clientUuid, planRow.updatedAt)
+        requireAllowed(policy.evaluate(session.homeLanConfig, foregroundState.isForeground()))
+        backend.stageBundle(
+            session,
+            AtomicBundleDraft(
+                bundleId = bundleId,
+                root = root,
+                media = mediaEntities,
+            ),
+        )
+        for ((media, prepared) in mediaBytes) {
+            requireAllowed(policy.evaluate(session.homeLanConfig, foregroundState.isForeground()))
+            backend.putBundleMedia(
+                session,
+                bundleId,
+                media.clientUuid,
+                prepared.bytes,
+                prepared.mime,
+            )
+            mediaDao.update(media.copy(remoteUri = session.receiptFor(media.clientUuid)))
+        }
+        requireAllowed(policy.evaluate(session.homeLanConfig, foregroundState.isForeground()))
+        backend.commitBundle(session, bundleId)
+        carePlanDao.markSynced(plan.clientUuid, planRow.updatedAt)
+        mediaRows.forEach { mediaDao.markSynced(it.clientUuid, it.updatedAt) }
+        outboxDao.deleteIds((listOf(planRow) + mediaRows).map { it.id })
+    }
+
+    private fun atomicCarePlanBundleId(planClientUuid: String, updatedAt: Long): String =
+        "care_plan:$planClientUuid:$updatedAt"
 
     private suspend fun isStaleAfterHardDelete(row: OutboxEntity): Boolean = when (row.entityType) {
         "baby" -> babyDao.getByClientUuid(row.clientUuid) == null
         "record" -> recordDao.getByClientUuid(row.clientUuid) == null
+        "care_plan" -> carePlanDao.getByClientUuid(row.clientUuid) == null
+        "custom_item" -> customItemDao.getByClientUuid(row.clientUuid) == null
+        "fulfillment_candidate" ->
+            fulfillmentCandidateDao.getByClientUuid(row.clientUuid) == null
         "media" -> {
             val media = mediaDao.getByClientUuid(row.clientUuid)
             val recordId = media?.recordId
+            val carePlanId = media?.carePlanId
             media == null || (
                 media.kind == "log" && (
-                    recordId == null || recordDao.getIncludingDeleted(recordId) == null
+                    (recordId != null && recordDao.getIncludingDeleted(recordId) == null) ||
+                        (carePlanId != null && carePlanDao.get(carePlanId) == null) ||
+                        (recordId == null && carePlanId == null)
+                    )
                 )
-            )
         }
         else -> false
     }
@@ -588,11 +856,37 @@ class RealSyncPort @Inject constructor(
                 "baby" -> listOfNotNull(
                     payload.string("avatar_media_uuid")?.let { "media" to it },
                 )
-                "record" -> listOfNotNull(
-                    payload.string("baby_client_uuid")?.let { "baby" to it },
+                "record" -> {
+                    // Baby for FK + every pending log media row for this record so
+                    // atomic packages stage a complete 0–3 photo manifest.
+                    val babyDep = payload.string("baby_client_uuid")?.let { "baby" to it }
+                    val mediaDeps = recordDao.getByClientUuid(row.clientUuid)?.id?.let { recordId ->
+                        mediaDao.listForRecord(recordId)
+                            .filter { it.kind == "log" }
+                            .map { "media" to it.clientUuid }
+                    }.orEmpty()
+                    listOfNotNull(babyDep) + mediaDeps
+                }
+                "care_plan" -> {
+                    val babyDep = payload.string("baby_client_uuid")?.let { "baby" to it }
+                    val customDep = payload.string("custom_item_client_uuid")
+                        ?.let { "custom_item" to it }
+                    val fulfilledDep = payload.string("fulfilled_record_client_uuid")
+                        ?.let { "record" to it }
+                    val mediaDeps = carePlanDao.getByClientUuid(row.clientUuid)?.id?.let { planId ->
+                        mediaDao.listForCarePlan(planId)
+                            .filter { it.kind == "log" }
+                            .map { "media" to it.clientUuid }
+                    }.orEmpty()
+                    listOfNotNull(babyDep, customDep, fulfilledDep) + mediaDeps
+                }
+                "fulfillment_candidate" -> listOfNotNull(
+                    payload.string("care_plan_client_uuid")?.let { "care_plan" to it },
+                    payload.string("record_client_uuid")?.let { "record" to it },
                 )
                 "media" -> listOfNotNull(
                     payload.string("record_client_uuid")?.let { "record" to it },
+                    payload.string("care_plan_client_uuid")?.let { "care_plan" to it },
                     payload.string("baby_client_uuid")?.let { "baby" to it },
                 )
                 else -> emptyList()
@@ -619,19 +913,56 @@ class RealSyncPort @Inject constructor(
         mediaEditGuard: LocalMediaEditGuard? = null,
     ) {
         val deletedLocalUris = mutableListOf<String>()
+        // Atomic receive: download all log media bytes for new/updated packages into
+        // a staging map BEFORE any Room apply, so partial failure never exposes a
+        // record/plan with placeholder media or advances past an incomplete package.
+        val stagedLogMediaBytes = stageLogMediaDownloads(session, entities)
+        val appliedCarePlanUuids = mutableListOf<String>()
         transactionRunner.run {
             val unresolved = mutableListOf<SyncEntity>()
             for (entity in entities.filter { it.type == "baby" }) {
                 if (!applyBaby(session, entity)) unresolved += entity
             }
+            for (entity in entities.filter { it.type == "custom_item" }) {
+                if (!applyCustomItem(entity)) unresolved += entity
+            }
+            // Fulfillment full-set: record(+photos) before completed care_plan before
+            // fulfillment_candidate. Incomplete sets leave cursor unmoved (unresolved).
             for (entity in entities.filter { it.type == "record" }) {
                 if (!applyRecord(entity)) unresolved += entity
             }
+            for (entity in entities.filter { it.type == "care_plan" }) {
+                val applied = applyCarePlan(entity)
+                if (!applied) {
+                    unresolved += entity
+                } else {
+                    appliedCarePlanUuids += entity.clientUuid
+                }
+            }
             for (entity in entities.filter { it.type == "media" }) {
-                if (!applyMedia(session, entity, deletedLocalUris)) unresolved += entity
+                if (!applyMedia(session, entity, deletedLocalUris, stagedLogMediaBytes)) {
+                    unresolved += entity
+                }
+            }
+            for (entity in entities.filter { it.type == "fulfillment_candidate" }) {
+                if (!applyFulfillmentCandidate(entity)) unresolved += entity
             }
             require(unresolved.isEmpty()) {
                 "同步数据引用尚未就绪，保留 cursor 以便重试"
+            }
+            // Full page applied: re-link each affected plan to the deterministic
+            // authority (independent of care_plan LWW / push arrival order).
+            val planUuidsForResolve = buildSet {
+                entities.filter { it.type == "fulfillment_candidate" }.forEach { entity ->
+                    runCatching {
+                        Json.parseToJsonElement(entity.payloadJson).jsonObject
+                            .string("care_plan_client_uuid")
+                    }.getOrNull()?.let { add(it) }
+                }
+                entities.filter { it.type == "care_plan" }.forEach { add(it.clientUuid) }
+            }
+            for (planUuid in planUuidsForResolve) {
+                resolveFulfillmentAuthority(planUuid)
             }
             entities.filter { it.type == "record" }
                 .mapNotNull { entity -> recordDao.getByClientUuid(entity.clientUuid)?.babyId }
@@ -649,6 +980,18 @@ class RealSyncPort @Inject constructor(
             affectedRecords.forEach {
                 refreshRecordPhotoPaths(it, mediaEditGuard)
             }
+            val affectedPlans = (
+                entities.filter { it.type == "care_plan" }
+                    .mapNotNull { entity -> carePlanDao.getByClientUuid(entity.clientUuid)?.id } +
+                    entities.filter { it.type == "media" }
+                        .mapNotNull { entity ->
+                            mediaDao.getByClientUuid(entity.clientUuid)?.carePlanId
+                        }
+                )
+                .distinct()
+            affectedPlans.forEach {
+                refreshCarePlanPhotoPaths(it, mediaEditGuard)
+            }
             (
                 entities.filter { it.type == "baby" }
                     .mapNotNull { entity -> babyDao.getByClientUuid(entity.clientUuid)?.id } +
@@ -663,7 +1006,251 @@ class RealSyncPort @Inject constructor(
                 }
         }
         deletedLocalUris.forEach { mediaFiles.delete(it) }
+        // Side effects only after full package apply — never during partial download.
+        if (appliedCarePlanUuids.isNotEmpty()) {
+            carePlanAppliedListener.onFamilyCarePlansApplied(appliedCarePlanUuids.distinct())
+        }
         check(session.isJoined)
+    }
+
+    /**
+     * Apply a remote care plan. Custom-item plans wait until the definition is
+     * local (return false → page retries, plan stays invisible). Concurrent local
+     * dirty revisions are not clobbered.
+     *
+     * Completed plans that link a fulfilled record require that record to already
+     * be local (same-page records are applied first) so receivers never see
+     * completed-without-Record partial state.
+     */
+    private suspend fun applyCarePlan(entity: SyncEntity): Boolean {
+        val existing = carePlanDao.getByClientUuid(entity.clientUuid)
+        // Match server LWW: existing wins on equal updatedAt (>= skip).
+        if (existing != null && existing.updatedAt >= entity.updatedAt) return true
+        // Keep in-flight local create/edit until push commits.
+        if (existing != null && existing.syncDirty) return true
+        val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
+        val babyUuid = payload.string("baby_client_uuid") ?: return false
+        val baby = babyDao.getByClientUuid(babyUuid) ?: return false
+        val customItemUuid = payload.string("custom_item_client_uuid")
+        val customItemId = if (customItemUuid != null) {
+            val def = customItemDao.getByClientUuid(customItemUuid) ?: return false
+            def.id
+        } else {
+            null
+        }
+        val status = payload.string("status") ?: existing?.status ?: "pending"
+        val fulfilledRecordUuid = if ("fulfilled_record_client_uuid" in payload) {
+            payload.string("fulfilled_record_client_uuid")
+        } else {
+            existing?.fulfilledRecordClientUuid
+        }
+        // Full-set co-gate: completed + linked record must not appear without the fact.
+        if (
+            entity.deletedAt == null &&
+            status == "completed" &&
+            !fulfilledRecordUuid.isNullOrBlank()
+        ) {
+            if (recordDao.getByClientUuid(fulfilledRecordUuid) == null) return false
+        }
+        carePlanDao.upsert(
+            CarePlanEntity(
+                id = existing?.id ?: 0,
+                clientUuid = entity.clientUuid,
+                babyId = baby.id,
+                type = payload.string("type") ?: existing?.type ?: "other",
+                customItemId = customItemId ?: existing?.customItemId,
+                scheduledAt = payload.long("scheduled_at") ?: existing?.scheduledAt
+                    ?: entity.updatedAt,
+                scheduledZoneId = payload.string("scheduled_zone_id")
+                    ?: existing?.scheduledZoneId
+                    ?: "UTC",
+                note = if ("note" in payload) payload.string("note") else existing?.note,
+                payloadJson = preserveDeviceLocalPhotos(
+                    remotePayloadJson = SyncWireMapper.carePlanPayloadJson(payload),
+                    existingPayloadJson = existing?.payloadJson,
+                ),
+                schemaVersion = SyncWireMapper.carePlanSchemaVersion(payload),
+                status = status,
+                createdByMembershipId = payload.string("created_by_membership_id")
+                    ?: existing?.createdByMembershipId
+                    ?: "",
+                fulfilledRecordClientUuid = fulfilledRecordUuid,
+                fulfilledAt = if ("fulfilled_at" in payload) {
+                    payload.long("fulfilled_at")
+                } else {
+                    existing?.fulfilledAt
+                },
+                sourceRecordClientUuid = existing?.sourceRecordClientUuid,
+                updatedAt = entity.updatedAt,
+                deletedAt = entity.deletedAt,
+                syncDirty = false,
+            ),
+        )
+        return true
+    }
+
+    /**
+     * Apply a remote fulfillment candidate. Requires plan + record to already be
+     * local so the candidate is never the sole visible half of a fulfill result.
+     * Winner selection runs after the full page apply via [resolveFulfillmentAuthority].
+     */
+    private suspend fun applyFulfillmentCandidate(entity: SyncEntity): Boolean {
+        val existing = fulfillmentCandidateDao.getByClientUuid(entity.clientUuid)
+        // Keep in-flight local dirty until push commits (then markSynced clears dirty).
+        if (existing != null && existing.syncDirty) return true
+        val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
+        val planUuid = payload.string("care_plan_client_uuid") ?: return false
+        val recordUuid = payload.string("record_client_uuid") ?: return false
+        // Full-set: plan and record must already be applied (or present).
+        if (carePlanDao.getByClientUuid(planUuid) == null) return false
+        if (recordDao.getByClientUuid(recordUuid) == null) return false
+        val remoteMembership = payload.string("submitter_membership_id").orEmpty()
+        val remoteRole = payload.string("submitter_role").orEmpty()
+        val remoteConfirmed = payload.long("confirmed_at")
+        // Ticket 26 multi-device convergence: originators keep equal/higher updatedAt
+        // after markSynced, but must still adopt server-frozen stamps (role/membership/
+        // confirmed_at) so every device adjudicates with the same evidence.
+        if (existing != null && existing.updatedAt >= entity.updatedAt) {
+            val needsStampMerge =
+                (existing.submitterRole.isBlank() && remoteRole.isNotBlank()) ||
+                    (existing.submitterMembershipId.isBlank() && remoteMembership.isNotBlank()) ||
+                    (
+                        remoteConfirmed != null &&
+                            remoteConfirmed != existing.confirmedAt &&
+                            remoteRole.isNotBlank()
+                        )
+            if (!needsStampMerge) return true
+            fulfillmentCandidateDao.update(
+                existing.copy(
+                    confirmedAt = remoteConfirmed ?: existing.confirmedAt,
+                    submitterMembershipId = remoteMembership.ifBlank {
+                        existing.submitterMembershipId
+                    },
+                    submitterRole = remoteRole.ifBlank { existing.submitterRole },
+                    updatedAt = maxOf(existing.updatedAt, entity.updatedAt),
+                    deletedAt = entity.deletedAt ?: existing.deletedAt,
+                    syncDirty = false,
+                ),
+            )
+            return true
+        }
+        fulfillmentCandidateDao.upsert(
+            FulfillmentCandidateEntity(
+                id = existing?.id ?: 0,
+                clientUuid = entity.clientUuid,
+                carePlanClientUuid = planUuid,
+                recordClientUuid = recordUuid,
+                actualTimestamp = if ("actual_timestamp" in payload) {
+                    payload.long("actual_timestamp")
+                } else {
+                    existing?.actualTimestamp
+                },
+                confirmedAt = remoteConfirmed
+                    ?: existing?.confirmedAt
+                    ?: entity.updatedAt,
+                submitterMembershipId = remoteMembership.ifBlank {
+                    existing?.submitterMembershipId.orEmpty()
+                },
+                submitterRole = remoteRole.ifBlank {
+                    existing?.submitterRole.orEmpty()
+                },
+                // Preserve local adoption until resolve re-marks the full set.
+                adoptionStatus = existing?.adoptionStatus.orEmpty(),
+                // Device-local convert pointer (ticket 27); never overwrite from wire.
+                convertedRecordClientUuid = existing?.convertedRecordClientUuid.orEmpty(),
+                updatedAt = entity.updatedAt,
+                deletedAt = entity.deletedAt,
+                syncDirty = false,
+            ),
+        )
+        return true
+    }
+
+    /**
+     * Re-link [CarePlanEntity.fulfilledRecordClientUuid] to the deterministic winner
+     * among local candidates and mark losers conflict-not-adopted. Does not delete
+     * records or photos. Local-only (no syncDirty) so plan LWW push order cannot
+     * permanently pin a non-winner on any device.
+     */
+    private suspend fun resolveFulfillmentAuthority(carePlanClientUuid: String) {
+        val live = fulfillmentCandidateDao.listForCarePlan(carePlanClientUuid)
+            .filter { it.deletedAt == null }
+        if (live.isEmpty()) return
+        val resolution = FulfillmentAuthority.resolve(
+            live.map {
+                FulfillmentCandidateEvidence(
+                    clientUuid = it.clientUuid,
+                    recordClientUuid = it.recordClientUuid,
+                    confirmedAt = it.confirmedAt,
+                    submitterRole = it.submitterRole,
+                )
+            },
+        ) ?: return
+        for (candidate in live) {
+            val status = resolution.adoptionByCandidateUuid[candidate.clientUuid] ?: continue
+            if (candidate.adoptionStatus != status) {
+                fulfillmentCandidateDao.update(candidate.copy(adoptionStatus = status))
+            }
+        }
+        val plan = carePlanDao.getByClientUuid(carePlanClientUuid) ?: return
+        if (plan.deletedAt != null) return
+        val needsRelink =
+            plan.status != "completed" ||
+                plan.fulfilledRecordClientUuid != resolution.winnerRecordClientUuid ||
+                plan.fulfilledAt != resolution.winnerConfirmedAt
+        if (needsRelink) {
+            carePlanDao.update(
+                plan.copy(
+                    status = "completed",
+                    fulfilledRecordClientUuid = resolution.winnerRecordClientUuid,
+                    fulfilledAt = resolution.winnerConfirmedAt,
+                    // Keep updatedAt/syncDirty — resolution is device-local convergence.
+                    updatedAt = plan.updatedAt,
+                    syncDirty = plan.syncDirty,
+                ),
+            )
+        }
+    }
+
+    /**
+     * Apply a remote custom item definition with pure updated_at LWW.
+     * Preserves local sortOrder (layout). Does not resurrect local layout prefs.
+     */
+    private suspend fun applyCustomItem(entity: SyncEntity): Boolean {
+        val existing = customItemDao.getByClientUuid(entity.clientUuid)
+        // Match server LWW: existing wins on equal updatedAt (>= skip).
+        if (existing != null && existing.updatedAt >= entity.updatedAt) return true
+        // Keep in-flight local rename/delete until push commits.
+        if (existing != null && existing.syncDirty) return true
+        val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
+        val name = payload.string("name")?.trim().orEmpty()
+        if (name.isEmpty() && entity.deletedAt == null) return false
+        val iconSlot = payload["icon_slot"]?.jsonPrimitive?.longOrNull?.toInt()
+            ?: existing?.iconSlot
+            ?: 0
+        val creator = payload.string("created_by_membership_id")
+            ?: existing?.createdByMembershipId
+            ?: ""
+        val familyId = existing?.familyId
+            ?: familyDao.listAll().firstOrNull()?.id
+            ?: return false
+        customItemDao.upsert(
+            CustomItemEntity(
+                id = existing?.id ?: 0,
+                clientUuid = entity.clientUuid,
+                familyId = familyId,
+                name = name.ifBlank { existing?.name.orEmpty() },
+                iconSlot = iconSlot.coerceIn(0, 7),
+                // Device layout: keep local order; new remote items append.
+                sortOrder = existing?.sortOrder
+                    ?: customItemDao.listAllIncludingDeleted().size,
+                updatedAt = entity.updatedAt,
+                deletedAt = entity.deletedAt,
+                createdByMembershipId = creator,
+                syncDirty = false,
+            ),
+        )
+        return true
     }
 
     private suspend fun applyBaby(session: SyncSession, entity: SyncEntity): Boolean {
@@ -732,6 +1319,10 @@ class RealSyncPort @Inject constructor(
         val existing = recordDao.getByClientUuid(entity.clientUuid)
         // Match server LWW: existing wins on equal updatedAt (>= skip).
         if (existing != null && existing.updatedAt >= entity.updatedAt) return true
+        // Concurrent local dirty mutation: never clobber the in-flight package or
+        // clear syncDirty mid-edit. Creator keeps the local complete revision until
+        // push commits; receivers still see the prior published package.
+        if (existing != null && existing.syncDirty) return true
         val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
         val babyUuid = payload.string("baby_client_uuid") ?: return false
         val baby = babyDao.getByClientUuid(babyUuid) ?: return false
@@ -815,33 +1406,90 @@ class RealSyncPort @Inject constructor(
         return RecordPayloadCodec.encode(normalized) to CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
     }
 
+    /**
+     * Download every non-deleted log media blob referenced in this pull page into
+     * durable local files first. Any failure aborts the page so cursor stays put
+     * and no placeholder media rows are written.
+     */
+    private suspend fun stageLogMediaDownloads(
+        session: SyncSession,
+        entities: List<SyncEntity>,
+    ): Map<String, String> {
+        val staged = linkedMapOf<String, String>()
+        val logMedia = entities.filter { entity ->
+            if (entity.type != "media" || entity.deletedAt != null) return@filter false
+            val kind = runCatching {
+                Json.parseToJsonElement(entity.payloadJson).jsonObject.string("kind")
+            }.getOrNull()
+            kind == "log"
+        }
+        for (entity in logMedia) {
+            val existing = mediaDao.getByClientUuid(entity.clientUuid)
+            if (existing != null && existing.updatedAt >= entity.updatedAt &&
+                existing.localUri.isNotBlank()
+            ) {
+                staged[entity.clientUuid] = existing.localUri
+                continue
+            }
+            requireAllowed(policy.evaluate(session.homeLanConfig, foregroundState.isForeground()))
+            val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
+            val bytes = backend.getMedia(session, entity.clientUuid)
+            val localUri = mediaFiles.saveDownloaded(
+                entity.clientUuid,
+                "log",
+                bytes,
+                payload.string("mime") ?: existing?.mime,
+            )
+            staged[entity.clientUuid] = localUri
+        }
+        return staged
+    }
+
     private suspend fun applyMedia(
         session: SyncSession,
         entity: SyncEntity,
         deletedLocalUris: MutableList<String>,
+        stagedLogMediaBytes: Map<String, String> = emptyMap(),
     ): Boolean {
         val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
         val existing = mediaDao.getByClientUuid(entity.clientUuid)
         // Match server LWW: existing wins on equal updatedAt (>= skip).
         if (existing != null && existing.updatedAt >= entity.updatedAt) return true
         val kind = payload.string("kind") ?: existing?.kind ?: return false
-        val recordId = payload.string("record_client_uuid")
+        val recordClientUuid = payload.string("record_client_uuid")
+        val carePlanClientUuid = payload.string("care_plan_client_uuid")
+        // Wire XOR: log media must not claim both owners.
+        if (kind == "log" && recordClientUuid != null && carePlanClientUuid != null) {
+            return false
+        }
+        val recordId = recordClientUuid
             ?.let { recordDao.getByClientUuid(it)?.id }
-            ?: existing?.recordId
+            ?: existing?.recordId?.takeIf { carePlanClientUuid == null }
+        val carePlanId = carePlanClientUuid
+            ?.let { carePlanDao.getByClientUuid(it)?.id }
+            ?: existing?.carePlanId?.takeIf { recordClientUuid == null }
         val referencedBabyId = payload.string("baby_client_uuid")
             ?.let { babyDao.getByClientUuid(it)?.id }
             ?: existing?.babyId
         val babyId = if (kind == "log") null else referencedBabyId
-        if (kind == "log" && recordId == null) return false
+        if (kind == "log" && recordId == null && carePlanId == null) return false
         if (kind == "avatar" && babyId == null) return false
+        val stagedLocal = stagedLogMediaBytes[entity.clientUuid]
+        // Log media without staged local bytes would be a placeholder — refuse.
+        if (kind == "log" && entity.deletedAt == null && stagedLocal.isNullOrBlank() &&
+            existing?.localUri.isNullOrBlank()
+        ) {
+            return false
+        }
         mediaDao.upsert(
             MediaAssetEntity(
                 id = existing?.id ?: 0,
                 recordId = recordId,
+                carePlanId = carePlanId,
                 clientUuid = entity.clientUuid,
                 kind = kind,
                 babyId = babyId,
-                localUri = existing?.localUri.orEmpty(),
+                localUri = stagedLocal ?: existing?.localUri.orEmpty(),
                 remoteUri = session.receiptFor(entity.clientUuid),
                 mime = payload.string("mime"),
                 width = payload.long("width")?.toInt(),
@@ -885,6 +1533,8 @@ class RealSyncPort @Inject constructor(
             serverScheme = if (config.host.isNotBlank()) config.scheme else previous.serverScheme,
             // Cached from create/join/rename; cold start has no GET family-name path.
             familyName = joined.familyName?.trim()?.takeIf { it.isNotEmpty() },
+            // Server-minted identity; empty when legacy NAS omitted membership_id.
+            membershipId = joined.membershipId?.trim().orEmpty(),
         )
         // Upload receipts only prove that bytes exist in the previous
         // server/family namespace. A new family must reconcile them again.
@@ -904,6 +1554,7 @@ class RealSyncPort @Inject constructor(
     ) {
         babyDao.markAllPendingSync()
         recordDao.markAllPendingSync()
+        carePlanDao.markAllPendingSync()
         mediaDao.listAllIncludingDeleted().forEach { media ->
             val hasCurrentReceipt = previous.isJoined && media.hasReceiptFor(previous)
             val preserveCurrentReceipt = !invalidateCurrentReceipts ||
@@ -1099,6 +1750,9 @@ class RealSyncPort @Inject constructor(
     private suspend fun captureLocalChanges(session: SyncSession) {
         val babies = babyDao.listPendingSync()
         val records = recordDao.listPendingSync()
+        val carePlans = carePlanDao.listPendingSync()
+        val customItems = customItemDao.listPendingSync()
+        val fulfillmentCandidates = fulfillmentCandidateDao.listPendingSync()
         materializeLocalMedia(
             includeAvatars = session.role != FamilyRole.Member,
             babies = babies,
@@ -1111,6 +1765,9 @@ class RealSyncPort @Inject constructor(
             }
             records.forEach { record ->
                 addAll(mediaDao.listForRecord(record.id))
+            }
+            carePlans.forEach { plan ->
+                addAll(mediaDao.listForCarePlan(plan.id))
             }
         }
         val media = ensurePortableMediaUuids(
@@ -1144,6 +1801,11 @@ class RealSyncPort @Inject constructor(
                 ),
             )
         }
+        customItems.forEach { item ->
+            enqueue(session, SyncWireMapper.customItem(item))
+        }
+        // Outbox materialization only; atomic commit order is care_plan packages →
+        // record packages → fulfillment_candidate residual (see pushOutboxBatch).
         records.forEach { record ->
             val babyUuid = babyDao.getIncludingDeleted(record.babyId)?.clientUuid
                 ?: return@forEach
@@ -1156,21 +1818,52 @@ class RealSyncPort @Inject constructor(
                 ),
             )
         }
+        carePlans.forEach { plan ->
+            val babyUuid = babyDao.getIncludingDeleted(plan.babyId)?.clientUuid
+                ?: return@forEach
+            val customItemUuid = plan.customItemId
+                ?.let { customItemDao.getById(it)?.clientUuid }
+            // Custom-item plans need a definition on the wire path; if the def is
+            // still local-only, capture it via customItems dirty (dependency expand).
+            enqueue(
+                session,
+                SyncWireMapper.carePlan(
+                    plan,
+                    babyUuid,
+                    customItemUuid,
+                ),
+            )
+        }
+        fulfillmentCandidates.forEach { candidate ->
+            enqueue(session, SyncWireMapper.fulfillmentCandidate(candidate))
+        }
         media.forEach { asset ->
             if (session.role == FamilyRole.Member && asset.kind == "avatar") {
                 return@forEach
             }
             val recordUuid = asset.recordId
                 ?.let { recordDao.getIncludingDeleted(it)?.clientUuid }
+            val carePlanUuid = asset.carePlanId
+                ?.let { carePlanDao.get(it)?.clientUuid }
             val babyUuid = asset.babyId
                 ?.let { babyDao.getIncludingDeleted(it)?.clientUuid }
-            if (
-                (asset.kind == "log" && recordUuid == null) ||
-                (asset.kind == "avatar" && babyUuid == null)
-            ) {
+            if (asset.kind == "log") {
+                // XOR ownership: record OR care_plan, never both, never neither.
+                if (recordUuid == null && carePlanUuid == null) return@forEach
+                if (recordUuid != null && carePlanUuid != null) return@forEach
+            }
+            if (asset.kind == "avatar" && babyUuid == null) {
                 return@forEach
             }
-            enqueue(session, SyncWireMapper.media(asset, recordUuid, babyUuid))
+            enqueue(
+                session,
+                SyncWireMapper.media(
+                    asset,
+                    recordClientUuid = recordUuid,
+                    babyClientUuid = babyUuid,
+                    carePlanClientUuid = carePlanUuid,
+                ),
+            )
         }
     }
 
@@ -1395,6 +2088,9 @@ class RealSyncPort @Inject constructor(
                     current.recordId?.let { recordId ->
                         refreshRecordPhotoPaths(recordId, mediaEditGuard)
                     }
+                    current.carePlanId?.let { planId ->
+                        refreshCarePlanPhotoPaths(planId, mediaEditGuard)
+                    }
                     current.babyId?.let { babyId ->
                         refreshBabyAvatar(babyId, mediaEditGuard)
                     }
@@ -1432,6 +2128,36 @@ class RealSyncPort @Inject constructor(
         mediaEditGuard?.recordRefreshed(record.clientUuid, photos.toSet())
     }
 
+    private suspend fun refreshCarePlanPhotoPaths(
+        carePlanId: Long,
+        mediaEditGuard: LocalMediaEditGuard? = null,
+    ) {
+        val plan = carePlanDao.get(carePlanId) ?: return
+        if (mediaEditGuard?.canRefreshCarePlan(plan) == false) return
+        val photos = mediaDao.listActiveForCarePlan(carePlanId)
+            .map(MediaAssetEntity::localUri)
+            .filter(String::isNotBlank)
+        val payload = runCatching { Json.parseToJsonElement(plan.payloadJson).jsonObject }
+            .getOrDefault(JsonObject(emptyMap()))
+        val next = JsonObject(
+            if (photos.isEmpty()) {
+                payload - "photos"
+            } else {
+                payload + (
+                    "photos" to JsonArray(photos.map(::JsonPrimitive))
+                )
+            },
+        ).toString()
+        if (next != plan.payloadJson) {
+            carePlanDao.updatePayloadReplica(
+                id = plan.id,
+                expectedPayloadJson = plan.payloadJson,
+                payloadJson = next,
+            )
+        }
+        mediaEditGuard?.carePlanRefreshed(plan.clientUuid, photos.toSet())
+    }
+
     private suspend fun refreshBabyAvatar(
         babyId: Long,
         mediaEditGuard: LocalMediaEditGuard? = null,
@@ -1460,6 +2186,9 @@ class RealSyncPort @Inject constructor(
     private suspend fun captureLocalMediaEditGuard(): LocalMediaEditGuard =
         LocalMediaEditGuard(
             recordPhotos = recordDao.listAllIncludingDeleted()
+                .associate { it.clientUuid to localPhotoPaths(it.payloadJson) }
+                .toMutableMap(),
+            carePlanPhotos = carePlanDao.listAllIncludingDeleted()
                 .associate { it.clientUuid to localPhotoPaths(it.payloadJson) }
                 .toMutableMap(),
             babyAvatarPaths = babyDao.listAllIncludingDeleted()
@@ -1539,11 +2268,16 @@ private fun MediaAssetEntity.hasReceiptFor(session: SyncSession): Boolean =
 
 private class LocalMediaEditGuard(
     private val recordPhotos: MutableMap<String, Set<String>>,
+    private val carePlanPhotos: MutableMap<String, Set<String>> = mutableMapOf(),
     private val babyAvatarPaths: MutableMap<String, String?>,
 ) {
     fun canRefresh(record: RecordEntity): Boolean =
         record.clientUuid !in recordPhotos ||
             recordPhotos[record.clientUuid] == localPhotoPaths(record.payloadJson)
+
+    fun canRefreshCarePlan(plan: CarePlanEntity): Boolean =
+        plan.clientUuid !in carePlanPhotos ||
+            carePlanPhotos[plan.clientUuid] == localPhotoPaths(plan.payloadJson)
 
     fun canRefresh(baby: BabyEntity): Boolean =
         baby.clientUuid !in babyAvatarPaths ||
@@ -1551,6 +2285,10 @@ private class LocalMediaEditGuard(
 
     fun recordRefreshed(clientUuid: String, photos: Set<String>) {
         recordPhotos[clientUuid] = photos
+    }
+
+    fun carePlanRefreshed(clientUuid: String, photos: Set<String>) {
+        carePlanPhotos[clientUuid] = photos
     }
 
     fun babyRefreshed(clientUuid: String, avatarPath: String?) {
@@ -1584,7 +2322,14 @@ private fun localPhotoPaths(raw: String): Set<String> =
             .toSet()
     }.getOrDefault(emptySet())
 
-private val ENTITY_ORDER = listOf("baby", "record", "media")
+private val ENTITY_ORDER = listOf(
+    "baby",
+    "custom_item",
+    "record",
+    "care_plan",
+    "media",
+    "fulfillment_candidate",
+)
 private const val PUSH_ROOT_BATCH_SIZE = 200
 private const val MAX_PUSH_BATCH_SIZE = 1_000
 /** Normal home libraries are far smaller; reaching this many pages is anomalous. */
@@ -1592,3 +2337,76 @@ private const val MAX_PULL_PAGE_COUNT = 500
 private const val SYNC_PULL_PAGE_ENTITY_LIMIT = 200
 private const val OUTBOX_DELETE_CHUNK_SIZE = 400
 private const val RECEIPT_PREFIX = "lezi-sync:"
+
+/**
+ * Creator-local publish chrome for a care record that is still waiting on an
+ * atomic package commit (or failed to publish). Never shown for remote-applied
+ * (syncDirty=false) rows.
+ *
+ * [hasPriorFamilyRevision] distinguishes first publish (create) from a mutation
+ * re-publish: receivers keep the prior complete version until the new package
+ * commits, so mutation copy must not say "暂不可见" as if the row never existed.
+ */
+fun localRecordPublishLabel(
+    syncDirty: Boolean,
+    familyJoined: Boolean,
+    lastSyncFailed: Boolean,
+    hasPriorFamilyRevision: Boolean = false,
+): String? {
+    if (!familyJoined || !syncDirty) return null
+    return when {
+        lastSyncFailed && hasPriorFamilyRevision -> "仅本机 · 更新同步失败"
+        lastSyncFailed -> "仅本机 · 同步失败"
+        hasPriorFamilyRevision -> "仅本机 · 等待更新同步"
+        else -> "仅本机 · 等待照片同步"
+    }
+}
+
+/** Detail copy when the user taps the local-only chrome. */
+fun localRecordPublishDetail(
+    lastSyncFailed: Boolean,
+    hasPriorFamilyRevision: Boolean,
+): String = when {
+    hasPriorFamilyRevision && lastSyncFailed ->
+        "其他成员仍看到上一完整版本；可手动重试，或下次前台同步时自动重试。"
+    hasPriorFamilyRevision ->
+        "其他成员仍看到上一完整版本，更新发布成功后才会替换。"
+    lastSyncFailed ->
+        "其他成员暂不可见；可手动重试，或下次前台同步时自动重试。"
+    else ->
+        "其他成员暂不可见，照片与记录发布成功后才会出现。"
+}
+
+/**
+ * Creator-local publish chrome for a care plan still waiting on an atomic
+ * package commit. Copy mentions that other members neither see nor remind.
+ */
+fun localCarePlanPublishLabel(
+    syncDirty: Boolean,
+    familyJoined: Boolean,
+    lastSyncFailed: Boolean,
+    hasPriorFamilyRevision: Boolean = false,
+): String? {
+    if (!familyJoined || !syncDirty) return null
+    return when {
+        lastSyncFailed && hasPriorFamilyRevision -> "仅本机 · 更新同步失败"
+        lastSyncFailed -> "仅本机 · 同步失败"
+        hasPriorFamilyRevision -> "仅本机 · 等待更新同步"
+        else -> "仅本机 · 等待照片同步"
+    }
+}
+
+/** Detail copy for plan local-only chrome (visibility + family reminders). */
+fun localCarePlanPublishDetail(
+    lastSyncFailed: Boolean,
+    hasPriorFamilyRevision: Boolean,
+): String = when {
+    hasPriorFamilyRevision && lastSyncFailed ->
+        "其他成员仍看到上一完整版本且不会收到新提醒；可手动重试，或下次前台同步时自动重试。"
+    hasPriorFamilyRevision ->
+        "其他成员仍看到上一完整版本，更新发布成功后才会替换并安排提醒。"
+    lastSyncFailed ->
+        "其他成员暂不可见、不会提醒；可手动重试，或下次前台同步时自动重试。"
+    else ->
+        "其他成员暂不可见、不会提醒，计划与照片发布成功后才会出现。"
+}

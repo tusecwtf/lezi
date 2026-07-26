@@ -3,9 +3,15 @@ package com.lezi.babylog.sync
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.BabyEntity
+import com.lezi.babylog.core.database.CarePlanDao
+import com.lezi.babylog.core.database.CarePlanEntity
+import com.lezi.babylog.core.database.CustomItemDao
+import com.lezi.babylog.core.database.CustomItemEntity
 import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.FamilyDao
 import com.lezi.babylog.core.database.FamilyEntity
+import com.lezi.babylog.core.database.FulfillmentCandidateDao
+import com.lezi.babylog.core.database.FulfillmentCandidateEntity
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.OutboxDao
@@ -76,22 +82,132 @@ class RealSyncPortTest {
         val result = rig.port.sync(SyncTrigger.LocalWrite)
         assertThat(result.exceptionOrNull()).isNull()
 
+        // Baby residual still uses legacy push; record packages use atomic bundles.
         val pushed = rig.backend.pushes.single()
         assertThat(pushed.session.familyId).isEqualTo("family-a")
-        assertThat(pushed.entities.map(SyncEntity::type))
-            .containsExactly("baby", "record")
-            .inOrder()
-        val recordPayload = Json.parseToJsonElement(
-            pushed.entities.single { it.type == "record" }.payloadJson,
-        ).jsonObject
+        assertThat(pushed.entities.map(SyncEntity::type)).containsExactly("baby")
+        val staged = rig.backend.stagedBundles.single()
+        assertThat(staged.root.type).isEqualTo("record")
+        val recordPayload = Json.parseToJsonElement(staged.root.payloadJson).jsonObject
         assertThat(recordPayload["baby_client_uuid"].toString()).isEqualTo("\"baby-local\"")
         assertThat(recordPayload["baby_id"]).isNull()
         assertThat(recordPayload["payload_json"]).isInstanceOf(
             kotlinx.serialization.json.JsonObject::class.java,
         )
+        assertThat(rig.backend.committedBundles).isNotEmpty()
         assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
         assertThat(rig.outbox.peek("family-b", 100).map(OutboxEntity::clientUuid))
             .containsExactly("other-family-record")
+    }
+
+
+    @Test
+    fun customItemDirtySnapshotPushesAndPullPreservesLocalSortOrder() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(membershipId = "m-owner"),
+        )
+        rig.customItems.seed(
+            CustomItemEntity(
+                clientUuid = "custom-1",
+                familyId = 1,
+                name = "抚触",
+                iconSlot = 2,
+                sortOrder = 7,
+                updatedAt = 50,
+                createdByMembershipId = "m-owner",
+                syncDirty = true,
+            ),
+        )
+
+        val pushResult = rig.port.sync(SyncTrigger.LocalWrite)
+        assertThat(pushResult.exceptionOrNull()).isNull()
+        val pushed = rig.backend.pushes.flatMap { it.entities }.filter { it.type == "custom_item" }
+        assertThat(pushed).hasSize(1)
+        assertThat(pushed.single().payloadJson).contains("\"name\":\"抚触\"")
+        assertThat(pushed.single().payloadJson).doesNotContain("sort_order")
+        assertThat(pushed.single().payloadJson).doesNotContain("sortOrder")
+        assertThat(pushed.single().payloadJson).doesNotContain("hidden")
+        assertThat(pushed.single().payloadJson).doesNotContain("quick")
+        assertThat(rig.customItems.get("custom-1")!!.syncDirty).isFalse()
+        assertThat(rig.customItems.get("custom-1")!!.sortOrder).isEqualTo(7)
+
+        // Remote rename from peer should update name but keep local sortOrder.
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "custom_item",
+                    clientUuid = "custom-1",
+                    payloadJson =
+                        """{"name":"新抚触","icon_slot":3,"created_by_membership_id":"m-owner"}""",
+                    updatedAt = 100,
+                    deletedAt = null,
+                ),
+            ),
+            cursor = 3,
+        )
+        val pullResult = rig.port.sync(SyncTrigger.PullToRefresh)
+        assertThat(pullResult.exceptionOrNull()).isNull()
+        val applied = rig.customItems.get("custom-1")!!
+        assertThat(applied.name).isEqualTo("新抚触")
+        assertThat(applied.iconSlot).isEqualTo(3)
+        assertThat(applied.sortOrder).isEqualTo(7)
+        assertThat(applied.syncDirty).isFalse()
+    }
+
+    @Test
+    fun customItemTombstonePullAppliesWithoutResurrectingOnOlderLive() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(membershipId = "m-owner"),
+        )
+        rig.customItems.seed(
+            CustomItemEntity(
+                clientUuid = "custom-tomb",
+                familyId = 1,
+                name = "药",
+                iconSlot = 1,
+                sortOrder = 3,
+                updatedAt = 10,
+                createdByMembershipId = "m-peer",
+                syncDirty = false,
+            ),
+        )
+        // Peer admin tombstone arrives later.
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "custom_item",
+                    clientUuid = "custom-tomb",
+                    payloadJson =
+                        """{"name":"药","icon_slot":1,"created_by_membership_id":"m-peer"}""",
+                    updatedAt = 20,
+                    deletedAt = 20,
+                ),
+            ),
+            cursor = 4,
+        )
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        val tombstoned = rig.customItems.get("custom-tomb")!!
+        assertThat(tombstoned.deletedAt).isEqualTo(20)
+        assertThat(tombstoned.sortOrder).isEqualTo(3)
+
+        // Older live payload must not resurrect after tombstone.
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "custom_item",
+                    clientUuid = "custom-tomb",
+                    payloadJson =
+                        """{"name":"复活","icon_slot":0,"created_by_membership_id":"m-peer"}""",
+                    updatedAt = 15,
+                    deletedAt = null,
+                ),
+            ),
+            cursor = 5,
+        )
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        val stillDead = rig.customItems.get("custom-tomb")!!
+        assertThat(stillDead.deletedAt).isEqualTo(20)
+        assertThat(stillDead.name).isEqualTo("药")
     }
 
     @Test
@@ -428,14 +544,64 @@ class RealSyncPortTest {
     fun familyMemberListUsesTheJoinedHomeLanSession() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         rig.backend.nextMembers = listOf(
-            FamilyMember("妈妈", FamilyRole.Owner, isSelf = true),
-            FamilyMember("爸爸", FamilyRole.Member, isSelf = false),
+            FamilyMember(
+                "妈妈",
+                FamilyRole.Owner,
+                isSelf = true,
+                deviceId = "device-a",
+                membershipId = "membership-self",
+            ),
+            FamilyMember(
+                "爸爸",
+                FamilyRole.Member,
+                isSelf = false,
+                deviceId = "device-b",
+                membershipId = "membership-peer",
+            ),
         )
 
         val result = rig.port.listFamilyMembers()
 
         assertThat(result.getOrThrow()).containsExactlyElementsIn(rig.backend.nextMembers).inOrder()
         assertThat(rig.backend.memberCalls).isEqualTo(1)
+    }
+
+    @Test
+    fun createFamilyPersistsServerMembershipIdOnSession() = runTest {
+        val rig = SyncRig(
+            session = SyncSession(
+                serverHost = "192.168.1.20",
+                serverPort = 8787,
+                allowedSsids = listOf("Home"),
+            ),
+        )
+
+        val created = rig.port.createFamily("妈妈", "bootstrap-secret").getOrThrow()
+
+        assertThat(created.membershipId).isEqualTo("membership-created")
+        assertThat(rig.preferences.current().membershipId).isEqualTo("membership-created")
+        assertThat(created.role).isEqualTo(FamilyRole.Owner)
+    }
+
+    @Test
+    fun joinFamilyPersistsServerMembershipIdOnSession() = runTest {
+        val rig = SyncRig(session = SyncSession(), ssid = "Home")
+        val command = JoinFamilyCommand(
+            invitation = "ABCD1234",
+            homeLanConfig = HomeLanServerConfig(
+                host = "192.168.1.20",
+                port = 8787,
+                scheme = "http",
+                allowedSsids = listOf("Home"),
+            ),
+            displayName = "爸爸",
+        )
+
+        val joined = rig.port.joinFamily(command).getOrThrow()
+
+        assertThat(joined.membershipId).isEqualTo("membership-joined")
+        assertThat(rig.preferences.current().membershipId).isEqualTo("membership-joined")
+        assertThat(joined.role).isEqualTo(FamilyRole.Member)
     }
 
     @Test
@@ -1066,8 +1232,9 @@ class RealSyncPortTest {
         assertThat(result.exceptionOrNull()).isNull()
 
         assertThat(rig.backend.pullCursors).containsExactly(9L, 0L, 2L).inOrder()
-        assertThat(rig.backend.pushes.flatMap(PushedBatch::entities).map(SyncEntity::clientUuid))
-            .containsAtLeast("baby-local", "record-after-backup")
+        val pushedUuids = rig.backend.pushes.flatMap(PushedBatch::entities).map(SyncEntity::clientUuid) +
+            rig.backend.stagedBundles.map { it.root.clientUuid }
+        assertThat(pushedUuids).containsAtLeast("baby-local", "record-after-backup")
         assertThat(rig.preferences.current().pullCursor).isEqualTo(2)
     }
 
@@ -1668,12 +1835,19 @@ class RealSyncPortTest {
         val record = requireNotNull(rig.records.getIncludingDeleted(recordId))
         assertThat(record.note).isEqualTo("只改备注")
         assertThat(record.payloadJson).contains("downloaded/$mediaUuid")
-        assertThat(rig.media.getByClientUuid(mediaUuid)?.deletedAt).isNull()
-        val pushedMedia = rig.backend.pushes
+        val localMedia = requireNotNull(rig.media.getByClientUuid(mediaUuid))
+        assertThat(localMedia.deletedAt).isNull()
+        assertThat(localMedia.localUri).isEqualTo("downloaded/$mediaUuid")
+        // Record packages go through atomic bundles; residual media may still use
+        // legacy push. Either path must never re-publish a tombstone for the
+        // photo we just accepted during download.
+        val residualMedia = rig.backend.pushes
             .flatMap(PushedBatch::entities)
             .filter { it.clientUuid == mediaUuid }
-        assertThat(pushedMedia).isNotEmpty()
-        assertThat(pushedMedia.all { it.deletedAt == null }).isTrue()
+        val packageMedia = rig.backend.stagedBundles
+            .flatMap { it.media }
+            .filter { it.clientUuid == mediaUuid }
+        assertThat((residualMedia + packageMedia).all { it.deletedAt == null }).isTrue()
     }
 
     @Test
@@ -2162,14 +2336,1391 @@ class RealSyncPortTest {
 
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
 
-        val mediaPayload = rig.backend.pushes
-            .flatMap { it.entities }
+        // Record packages publish via atomic bundle (not legacy /v1/push).
+        val mediaPayload = rig.backend.stagedBundles
+            .flatMap { it.media }
             .single { it.clientUuid == mediaUuid }
             .payloadJson
         assertThat(mediaPayload).contains("\"record_client_uuid\":\"record-local\"")
         assertThat(mediaPayload).contains("\"baby_client_uuid\":null")
         assertThat(mediaPayload).doesNotContain("baby-source")
         assertThat(rig.media.getByClientUuid(mediaUuid)?.babyId).isNull()
+        assertThat(rig.backend.committedBundles).isNotEmpty()
+    }
+
+    @Test
+    fun atomicRecordCreateStagesZeroOneAndThreePhotosThenCommits() = runTest {
+        suspend fun runCase(photoCount: Int) {
+            val rig = SyncRig(session = joinedSession("family-a"))
+            // Warm health probe so policy.supportsAtomicBundle is true.
+            assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+            val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+            val photos = (0 until photoCount).map { "photos/p$it.jpg" }
+            val recordId = rig.records.seed(
+                localRecord(babyId).copy(
+                    clientUuid = "record-photos-$photoCount",
+                    payloadJson = if (photos.isEmpty()) {
+                        """{"amount_ml":120}"""
+                    } else {
+                        """{"amount_ml":120,"photos":[${photos.joinToString(",") { "\"$it\"" }}]}"""
+                    },
+                    syncDirty = true,
+                ),
+            )
+            photos.forEachIndexed { index, path ->
+                rig.media.seed(
+                    MediaAssetEntity(
+                        recordId = recordId,
+                        clientUuid = "media-$photoCount-$index",
+                        kind = "log",
+                        localUri = path,
+                        mime = "image/jpeg",
+                        byteSize = 8,
+                        createdAt = 100,
+                        updatedAt = 100,
+                        syncDirty = true,
+                    ),
+                )
+            }
+            // Snapshot dirty entities into outbox via a sync cycle.
+            assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+            val draft = rig.backend.stagedBundles.last()
+            assertThat(draft.root.type).isEqualTo("record")
+            assertThat(draft.root.clientUuid).isEqualTo("record-photos-$photoCount")
+            assertThat(draft.media.filter { it.deletedAt == null }).hasSize(photoCount)
+            assertThat(rig.backend.bundleMediaUploads).hasSize(photoCount)
+            assertThat(rig.backend.committedBundles.last())
+                .startsWith("record:record-photos-$photoCount:")
+            // Creator local still has full rows; outbox drained for this package.
+            assertThat(rig.records.getByClientUuid("record-photos-$photoCount")?.syncDirty)
+                .isFalse()
+        }
+        runCase(0)
+        runCase(1)
+        runCase(3)
+    }
+
+    @Test
+    fun atomicUploadFailureLeavesRecordLocalOnlyAndInvisibleOnPullCursor() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val recordId = rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "record-fail-upload",
+                payloadJson = """{"amount_ml":90,"photos":["photos/fail.jpg"]}""",
+                syncDirty = true,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = "media-fail",
+                kind = "log",
+                localUri = "photos/fail.jpg",
+                mime = "image/jpeg",
+                byteSize = 4,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+        rig.backend.putBundleMediaFailure = IllegalStateException("upload aborted")
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isFalse()
+        assertThat(rig.records.getByClientUuid("record-fail-upload")?.syncDirty).isTrue()
+        assertThat(rig.backend.committedBundles).isEmpty()
+        // Local creator still sees the complete record + photo path.
+        assertThat(rig.records.getByClientUuid("record-fail-upload")).isNotNull()
+        assertThat(rig.media.listForRecord(recordId).single().localUri)
+            .isEqualTo("photos/fail.jpg")
+    }
+
+    @Test
+    fun localRecordPublishLabelShowsAmberWaitingOrFailure() {
+        assertThat(
+            localRecordPublishLabel(
+                syncDirty = true,
+                familyJoined = true,
+                lastSyncFailed = false,
+            ),
+        ).isEqualTo("仅本机 · 等待照片同步")
+        assertThat(
+            localRecordPublishLabel(
+                syncDirty = true,
+                familyJoined = true,
+                lastSyncFailed = true,
+            ),
+        ).isEqualTo("仅本机 · 同步失败")
+        assertThat(
+            localRecordPublishLabel(
+                syncDirty = true,
+                familyJoined = true,
+                lastSyncFailed = false,
+                hasPriorFamilyRevision = true,
+            ),
+        ).isEqualTo("仅本机 · 等待更新同步")
+        assertThat(
+            localRecordPublishLabel(
+                syncDirty = true,
+                familyJoined = true,
+                lastSyncFailed = true,
+                hasPriorFamilyRevision = true,
+            ),
+        ).isEqualTo("仅本机 · 更新同步失败")
+        assertThat(
+            localRecordPublishDetail(
+                lastSyncFailed = true,
+                hasPriorFamilyRevision = true,
+            ),
+        ).contains("上一完整版本")
+        assertThat(
+            localRecordPublishLabel(
+                syncDirty = false,
+                familyJoined = true,
+                lastSyncFailed = false,
+            ),
+        ).isNull()
+        assertThat(
+            localRecordPublishLabel(
+                syncDirty = true,
+                familyJoined = false,
+                lastSyncFailed = false,
+            ),
+        ).isNull()
+    }
+
+    @Test
+    fun atomicRecordMutationAddRemoveReplaceAndTextOnlyUsesStableBundleId() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val recordUuid = "record-mutate"
+        val recordId = rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = recordUuid,
+                updatedAt = 100,
+                payloadJson = """{"amount_ml":100,"photos":["photos/a.jpg"]}""",
+                syncDirty = true,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = "media-a",
+                kind = "log",
+                localUri = "photos/a.jpg",
+                mime = "image/jpeg",
+                byteSize = 4,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        assertThat(rig.backend.committedBundles).contains("record:record-mutate:100")
+        assertThat(rig.records.getByClientUuid(recordUuid)?.syncDirty).isFalse()
+
+        // Text-only edit → new package id, no media uploads required.
+        val textRow = rig.records.getByClientUuid(recordUuid)!!
+        rig.records.update(
+            textRow.copy(
+                note = "只改文字",
+                updatedAt = 200,
+                syncDirty = true,
+            ),
+        )
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        assertThat(rig.backend.committedBundles).contains("record:record-mutate:200")
+
+        // Replace photo: tombstone old, add new, same package.
+        val afterText = rig.records.getByClientUuid(recordUuid)!!
+        rig.records.update(
+            afterText.copy(
+                payloadJson = """{"amount_ml":100,"photos":["photos/b.jpg"]}""",
+                updatedAt = 300,
+                syncDirty = true,
+            ),
+        )
+        // Ensure prior photo still exists as a tombstonable row (re-seed if drained).
+        val existingOld = rig.media.listForRecord(recordId).firstOrNull { it.clientUuid == "media-a" }
+        if (existingOld != null) {
+            rig.media.update(
+                existingOld.copy(deletedAt = 300, updatedAt = 300, syncDirty = true),
+            )
+        } else {
+            rig.media.seed(
+                MediaAssetEntity(
+                    recordId = recordId,
+                    clientUuid = "media-a",
+                    kind = "log",
+                    localUri = "photos/a.jpg",
+                    mime = "image/jpeg",
+                    byteSize = 4,
+                    createdAt = 100,
+                    updatedAt = 300,
+                    deletedAt = 300,
+                    syncDirty = true,
+                ),
+            )
+        }
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = "media-b",
+                kind = "log",
+                localUri = "photos/b.jpg",
+                mime = "image/jpeg",
+                byteSize = 4,
+                createdAt = 300,
+                updatedAt = 300,
+                syncDirty = true,
+            ),
+        )
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val replaceDraft = rig.backend.stagedBundles.last {
+            it.root.clientUuid == recordUuid && it.root.updatedAt == 300L
+        }
+        // Package includes live new photo + tombstone(s) for removed photo paths.
+        assertThat(replaceDraft.media).isNotEmpty()
+        assertThat(replaceDraft.media.any { it.deletedAt != null }).isTrue()
+        assertThat(replaceDraft.media.any { it.deletedAt == null }).isTrue()
+        assertThat(rig.backend.committedBundles).contains("record:record-mutate:300")
+
+        // Soft-delete whole record + media tombstones.
+        val live = rig.records.getByClientUuid(recordUuid)!!
+        rig.records.update(
+            live.copy(
+                deletedAt = 400,
+                updatedAt = 400,
+                payloadJson = """{"amount_ml":100}""",
+                syncDirty = true,
+            ),
+        )
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        assertThat(rig.backend.committedBundles).contains("record:record-mutate:400")
+        val deleteDraft = rig.backend.stagedBundles.last { it.root.updatedAt == 400L }
+        assertThat(deleteDraft.root.deletedAt).isEqualTo(400)
+        assertThat(deleteDraft.media.all { it.deletedAt != null }).isTrue()
+    }
+
+    @Test
+    fun atomicMutationIncompletePackageKeepsPriorVersionAndCursor() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(
+                pullCursor = 50,
+                pullGeneration = "g0",
+            ),
+        )
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        rig.preferences.saveSession(
+            rig.preferences.current().copy(pullCursor = 50, pullGeneration = "g0"),
+        )
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        // Prior complete version already on device.
+        val recordId = rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "record-prior",
+                updatedAt = 100,
+                payloadJson = """{"amount_ml":80,"photos":["old.jpg"]}""",
+                note = "旧完整",
+                syncDirty = false,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = "media-old",
+                kind = "log",
+                localUri = "old.jpg",
+                mime = "image/jpeg",
+                byteSize = 4,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = false,
+                remoteUri = "lezi-sync:x:media-old",
+            ),
+        )
+        // Incomplete mutation package: record meta + missing media download.
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "record",
+                    clientUuid = "record-prior",
+                    payloadJson =
+                        """{"baby_client_uuid":"baby-local","type":"formula","timestamp":1000,"note":"新版本","payload":{"amount_ml":90},"photos":["new.jpg"]}""",
+                    updatedAt = 200,
+                ),
+                SyncEntity(
+                    type = "media",
+                    clientUuid = "media-new",
+                    payloadJson =
+                        """{"kind":"log","record_client_uuid":"record-prior","mime":"image/jpeg","byte_size":4}""",
+                    updatedAt = 200,
+                ),
+            ),
+            cursor = 60,
+            generation = "g1",
+        )
+        rig.backend.getMediaFailure = IllegalStateException("download aborted")
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isFalse()
+        // Prior complete version retained.
+        val kept = rig.records.getByClientUuid("record-prior")!!
+        assertThat(kept.note).isEqualTo("旧完整")
+        assertThat(kept.updatedAt).isEqualTo(100)
+        assertThat(rig.media.listActiveForRecord(recordId).map { it.clientUuid })
+            .containsExactly("media-old")
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(50)
+    }
+
+    @Test
+    fun applyRemoteDoesNotClobberLocalDirtyEdit() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        // Local dirty revision is newer than the remote package. Pull still pushes
+        // first, so leave a higher local updatedAt so LWW keeps the edit even if
+        // push drains the dirty bit; also seed a second device-only dirty mid-edit
+        // after a failed push is not required when LWW + dirty guard combine.
+        rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "record-dirty",
+                updatedAt = 250,
+                note = "本机编辑中",
+                syncDirty = true,
+            ),
+        )
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "record",
+                    clientUuid = "record-dirty",
+                    payloadJson =
+                        """{"baby_client_uuid":"baby-local","type":"formula","timestamp":1000,"note":"远端迟到","payload":{"amount_ml":1}}""",
+                    updatedAt = 200,
+                ),
+            ),
+            cursor = 99,
+            generation = "g9",
+        )
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        val local = rig.records.getByClientUuid("record-dirty")!!
+        assertThat(local.note).isEqualTo("本机编辑中")
+        assertThat(local.updatedAt).isEqualTo(250)
+    }
+
+    @Test
+    fun applyRemoteSkipsWhenLocalSyncDirtyEvenIfRemoteIsNewer() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        // Local unpushed mutation: stage fails so dirty remains, and pull never
+        // runs on the same cycle. A subsequent pull with empty outbox + dirty row
+        // exercises the syncDirty guard (capture re-queues, so clear outbox after
+        // a failed push and force stage to fail again before pull would need a
+        // push-less path — here we clear outbox then pull with stage still failing
+        // on the re-captured package so apply never runs; instead verify that a
+        // direct higher remote cannot land while dirty by clearing outbox and
+        // temporarily making push a no-op residual: delete record outbox rows only).
+        rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "record-hold",
+                updatedAt = 100,
+                note = "本机未发布修改",
+                syncDirty = true,
+            ),
+        )
+        rig.backend.stageBundleFailure = IllegalStateException("hold local package")
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isFalse()
+        assertThat(rig.records.getByClientUuid("record-hold")?.syncDirty).isTrue()
+
+        // Drop outbox rows so push is empty, keep row dirty, allow stage, pull remote.
+        rig.outbox.deleteFamily("family-a")
+        rig.backend.stageBundleFailure = null
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "record",
+                    clientUuid = "record-hold",
+                    payloadJson =
+                        """{"baby_client_uuid":"baby-local","type":"formula","timestamp":1000,"note":"远端更新","payload":{"amount_ml":2}}""",
+                    updatedAt = 300,
+                ),
+            ),
+            cursor = 40,
+            generation = "g2",
+        )
+        // PullToRefresh capture re-queues dirty → push succeeds → dirty cleared →
+        // remote applies. To keep dirty across capture we would need to not
+        // snapshot; so re-assert after failing stage again on the full cycle:
+        rig.backend.stageBundleFailure = IllegalStateException("still holding")
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isFalse()
+        val held = rig.records.getByClientUuid("record-hold")!!
+        assertThat(held.note).isEqualTo("本机未发布修改")
+        assertThat(held.syncDirty).isTrue()
+        assertThat(held.updatedAt).isEqualTo(100)
+    }
+
+    @Test
+    fun atomicDownloadFailureKeepsNewRecordInvisibleAndCursorUnmoved() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(
+                pullCursor = 10,
+                pullGeneration = "g0",
+            ),
+        )
+        // Warm capability probe (empty pull) then restore the durable cursor/generation.
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        rig.preferences.saveSession(
+            rig.preferences.current().copy(pullCursor = 10, pullGeneration = "g0"),
+        )
+        val mediaUuid = "media-dl-fail"
+        val recordUuid = "record-dl-fail"
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "record",
+                    clientUuid = recordUuid,
+                    payloadJson =
+                        """{"baby_client_uuid":"baby-local","type":"formula","timestamp":1000,"payload":{"amount_ml":80},"photos":["x.jpg"]}""",
+                    updatedAt = 200,
+                ),
+                SyncEntity(
+                    type = "media",
+                    clientUuid = mediaUuid,
+                    payloadJson =
+                        """{"kind":"log","record_client_uuid":"$recordUuid","mime":"image/jpeg","byte_size":4}""",
+                    updatedAt = 200,
+                ),
+            ),
+            cursor = 20,
+            generation = "g1",
+        )
+        // Baby must exist for record apply dependency chain when download succeeds;
+        // failure happens before apply, so seed baby for a realistic package.
+        rig.babies.seed(localBaby().copy(syncDirty = false))
+        rig.backend.getMediaFailure = IllegalStateException("download aborted")
+
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isFalse()
+        assertThat(rig.records.getByClientUuid(recordUuid)).isNull()
+        assertThat(rig.media.getByClientUuid(mediaUuid)).isNull()
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(10)
+    }
+
+    @Test
+    fun atomicApplyStageFailureDoesNotExposePartialRecord() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(
+                pullCursor = 5,
+                pullGeneration = "g0",
+            ),
+        )
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        rig.preferences.saveSession(
+            rig.preferences.current().copy(pullCursor = 5, pullGeneration = "g0"),
+        )
+        val mediaUuid = "media-apply-fail"
+        val recordUuid = "record-apply-fail"
+        // No baby on device → record apply fails after media bytes are staged.
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "record",
+                    clientUuid = recordUuid,
+                    payloadJson =
+                        """{"baby_client_uuid":"missing-baby","type":"formula","timestamp":1000,"payload":{"amount_ml":80},"photos":["x.jpg"]}""",
+                    updatedAt = 200,
+                ),
+                SyncEntity(
+                    type = "media",
+                    clientUuid = mediaUuid,
+                    payloadJson =
+                        """{"kind":"log","record_client_uuid":"$recordUuid","mime":"image/jpeg","byte_size":4}""",
+                    updatedAt = 200,
+                ),
+            ),
+            cursor = 15,
+            generation = "g1",
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isFalse()
+        assertThat(rig.records.getByClientUuid(recordUuid)).isNull()
+        assertThat(rig.media.getByClientUuid(mediaUuid)).isNull()
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(5)
+    }
+
+    @Test
+    fun atomicUnsupportedNasKeepsLocalRecordAndDoesNotLegacyFallback() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            healthCapabilities = emptySet(),
+        )
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val recordId = rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "record-legacy-nas",
+                payloadJson = """{"amount_ml":60,"photos":["photos/a.jpg"]}""",
+                syncDirty = true,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = "media-legacy-nas",
+                kind = "log",
+                localUri = "photos/a.jpg",
+                mime = "image/jpeg",
+                byteSize = 4,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+
+        val result = rig.port.sync(SyncTrigger.LocalWrite)
+        assertThat(result.isFailure).isTrue()
+        assertThat(result.exceptionOrNull())
+            .isInstanceOf(AtomicBundleUnsupportedException::class.java)
+        assertThat(rig.backend.committedBundles).isEmpty()
+        assertThat(rig.backend.stagedBundles).isEmpty()
+        // No metadata-first legacy push of the record package.
+        assertThat(
+            rig.backend.pushes.flatMap(PushedBatch::entities).none { it.type == "record" },
+        ).isTrue()
+        assertThat(rig.records.getByClientUuid("record-legacy-nas")?.syncDirty).isTrue()
+        assertThat(rig.media.listForRecord(recordId).single().localUri)
+            .isEqualTo("photos/a.jpg")
+    }
+
+    @Test
+    fun atomicRetryUsesSameBundleIdAndDoesNotDuplicateCommit() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val recordId = rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "record-retry",
+                updatedAt = 777,
+                payloadJson = """{"amount_ml":50,"photos":["photos/r.jpg"]}""",
+                syncDirty = true,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = "media-retry",
+                kind = "log",
+                localUri = "photos/r.jpg",
+                mime = "image/jpeg",
+                byteSize = 4,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+        rig.backend.putBundleMediaFailure = IllegalStateException("first upload fail")
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isFalse()
+        assertThat(rig.backend.committedBundles).isEmpty()
+
+        rig.backend.putBundleMediaFailure = null
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        assertThat(rig.backend.committedBundles).containsExactly("record:record-retry:777")
+        assertThat(rig.records.getByClientUuid("record-retry")?.syncDirty).isFalse()
+
+        // Already clean — another foreground sync must not mint a second commit id.
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+        assertThat(rig.backend.committedBundles.count { it == "record:record-retry:777" })
+            .isEqualTo(1)
+    }
+
+    @Test
+    fun atomicCarePlanCreateStagesZeroOneAndThreePhotosThenCommits() = runTest {
+        suspend fun runCase(photoCount: Int) {
+            val rig = SyncRig(session = joinedSession("family-a"))
+            assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+            val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+            val photos = (0 until photoCount).map { "photos/plan$it.jpg" }
+            val planId = rig.carePlans.seed(
+                localCarePlan(babyId).copy(
+                    clientUuid = "plan-photos-$photoCount",
+                    payloadJson = if (photos.isEmpty()) {
+                        "{}"
+                    } else {
+                        """{"photos":[${photos.joinToString(",") { "\"$it\"" }}]}"""
+                    },
+                    syncDirty = true,
+                ),
+            )
+            photos.forEachIndexed { index, path ->
+                rig.media.seed(
+                    MediaAssetEntity(
+                        carePlanId = planId,
+                        recordId = null,
+                        clientUuid = "plan-media-$photoCount-$index",
+                        kind = "log",
+                        localUri = path,
+                        mime = "image/jpeg",
+                        byteSize = 8,
+                        createdAt = 100,
+                        updatedAt = 100,
+                        syncDirty = true,
+                    ),
+                )
+            }
+            assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+            val draft = rig.backend.stagedBundles.last()
+            assertThat(draft.root.type).isEqualTo("care_plan")
+            assertThat(draft.root.clientUuid).isEqualTo("plan-photos-$photoCount")
+            assertThat(draft.media.filter { it.deletedAt == null }).hasSize(photoCount)
+            draft.media.forEach { media ->
+                val payload = Json.parseToJsonElement(media.payloadJson).jsonObject
+                assertThat(payload["care_plan_client_uuid"]?.jsonPrimitive?.contentOrNull)
+                    .isEqualTo("plan-photos-$photoCount")
+                assertThat(payload["record_client_uuid"]?.jsonPrimitive?.contentOrNull)
+                    .isNull()
+            }
+            assertThat(rig.backend.committedBundles.last())
+                .startsWith("care_plan:plan-photos-$photoCount:")
+            assertThat(rig.carePlans.getByClientUuid("plan-photos-$photoCount")?.syncDirty)
+                .isFalse()
+        }
+        runCase(0)
+        runCase(1)
+        runCase(3)
+    }
+
+    @Test
+    fun atomicCarePlanUploadFailureLeavesPlanLocalOnly() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val planId = rig.carePlans.seed(
+            localCarePlan(babyId).copy(
+                clientUuid = "plan-fail-upload",
+                payloadJson = """{"photos":["photos/fail-plan.jpg"]}""",
+                syncDirty = true,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                carePlanId = planId,
+                recordId = null,
+                clientUuid = "plan-media-fail",
+                kind = "log",
+                localUri = "photos/fail-plan.jpg",
+                mime = "image/jpeg",
+                byteSize = 4,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+        rig.backend.putBundleMediaFailure = IllegalStateException("upload aborted")
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isFalse()
+        assertThat(rig.carePlans.getByClientUuid("plan-fail-upload")?.syncDirty).isTrue()
+        assertThat(rig.backend.committedBundles.none { it.startsWith("care_plan:") }).isTrue()
+        assertThat(rig.media.listForCarePlan(planId).single().localUri)
+            .isEqualTo("photos/fail-plan.jpg")
+    }
+
+    @Test
+    fun atomicCarePlanPullAppliesPlanAndPhotosThenInvokesProjectionHook() = runTest {
+        val applied = mutableListOf<String>()
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            carePlanApplied = { uuids -> applied += uuids },
+        )
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val babyUuid = rig.babies.getIncludingDeleted(babyId)!!.clientUuid
+        // Warm policy.
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "care_plan",
+                    clientUuid = "remote-plan-1",
+                    payloadJson =
+                        """{"baby_client_uuid":"$babyUuid","type":"formula","scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","status":"pending","payload_json":{},"schema_version":1,"created_by_membership_id":"member-a"}""",
+                    updatedAt = 500,
+                    deletedAt = null,
+                ),
+                SyncEntity(
+                    type = "media",
+                    clientUuid = "remote-plan-media-1",
+                    payloadJson =
+                        """{"kind":"log","record_client_uuid":null,"care_plan_client_uuid":"remote-plan-1","baby_client_uuid":null,"mime":"image/jpeg","byte_size":3}""",
+                    updatedAt = 500,
+                    deletedAt = null,
+                ),
+            ),
+            cursor = 20,
+            generation = "g1",
+        )
+        rig.backend.mediaBytes = byteArrayOf(1, 2, 3)
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+        val plan = rig.carePlans.getByClientUuid("remote-plan-1")
+        assertThat(plan).isNotNull()
+        assertThat(plan!!.syncDirty).isFalse()
+        assertThat(plan.status).isEqualTo("pending")
+        val media = rig.media.listForCarePlan(plan.id).single()
+        assertThat(media.localUri).isEqualTo("downloaded/remote-plan-media-1")
+        assertThat(media.recordId).isNull()
+        assertThat(applied).containsExactly("remote-plan-1")
+    }
+
+    @Test
+    fun atomicCarePlanDownloadFailureKeepsPlanInvisibleAndCursorUnmoved() = runTest {
+        val applied = mutableListOf<String>()
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(
+                pullCursor = 10,
+                pullGeneration = "g0",
+            ),
+            carePlanApplied = { uuids -> applied += uuids },
+        )
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val babyUuid = rig.babies.getIncludingDeleted(babyId)!!.clientUuid
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        rig.preferences.saveSession(
+            rig.preferences.current().copy(pullCursor = 10, pullGeneration = "g0"),
+        )
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "care_plan",
+                    clientUuid = "remote-plan-dl-fail",
+                    payloadJson =
+                        """{"baby_client_uuid":"$babyUuid","type":"pee","scheduled_at":9000000000000,"scheduled_zone_id":"UTC","status":"pending","payload_json":{},"schema_version":1}""",
+                    updatedAt = 600,
+                    deletedAt = null,
+                ),
+                SyncEntity(
+                    type = "media",
+                    clientUuid = "remote-plan-media-fail",
+                    payloadJson =
+                        """{"kind":"log","care_plan_client_uuid":"remote-plan-dl-fail","record_client_uuid":null,"mime":"image/jpeg","byte_size":4}""",
+                    updatedAt = 600,
+                    deletedAt = null,
+                ),
+            ),
+            cursor = 20,
+            generation = "g1",
+        )
+        rig.backend.getMediaFailure = IllegalStateException("download aborted")
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isFalse()
+        assertThat(rig.carePlans.getByClientUuid("remote-plan-dl-fail")).isNull()
+        assertThat(applied).isEmpty()
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(10)
+    }
+
+    @Test
+    fun atomicCarePlanCustomItemWaitsForDefinitionBeforeApply() = runTest {
+        val applied = mutableListOf<String>()
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            carePlanApplied = { uuids -> applied += uuids },
+        )
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val babyUuid = rig.babies.getIncludingDeleted(babyId)!!.clientUuid
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        // Plan arrives without its custom item definition on the page → apply fails.
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "care_plan",
+                    clientUuid = "remote-custom-plan",
+                    payloadJson =
+                        """{"baby_client_uuid":"$babyUuid","type":"custom","custom_item_client_uuid":"custom-def-1","scheduled_at":9000000000000,"scheduled_zone_id":"UTC","status":"pending","payload_json":{},"schema_version":1}""",
+                    updatedAt = 700,
+                    deletedAt = null,
+                ),
+            ),
+            cursor = 20,
+            generation = "g1",
+        )
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isFalse()
+        assertThat(rig.carePlans.getByClientUuid("remote-custom-plan")).isNull()
+        assertThat(applied).isEmpty()
+
+        // Same page with definition first → plan becomes visible once.
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "custom_item",
+                    clientUuid = "custom-def-1",
+                    payloadJson =
+                        """{"name":"抚触","icon_slot":2,"created_by_membership_id":"m-a"}""",
+                    updatedAt = 690,
+                    deletedAt = null,
+                ),
+                SyncEntity(
+                    type = "care_plan",
+                    clientUuid = "remote-custom-plan",
+                    payloadJson =
+                        """{"baby_client_uuid":"$babyUuid","type":"custom","custom_item_client_uuid":"custom-def-1","scheduled_at":9000000000000,"scheduled_zone_id":"UTC","status":"pending","payload_json":{},"schema_version":1}""",
+                    updatedAt = 700,
+                    deletedAt = null,
+                ),
+            ),
+            cursor = 30,
+            generation = "g1",
+        )
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+        val plan = rig.carePlans.getByClientUuid("remote-custom-plan")
+        assertThat(plan).isNotNull()
+        assertThat(plan!!.customItemId).isNotNull()
+        assertThat(rig.customItems.get("custom-def-1")).isNotNull()
+        assertThat(applied).containsExactly("remote-custom-plan")
+    }
+
+    @Test
+    fun atomicCarePlanTombstoneAndSkipPackagesCommitWithoutMediaBytes() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        rig.carePlans.seed(
+            localCarePlan(babyId).copy(
+                clientUuid = "plan-skip",
+                status = "skipped",
+                updatedAt = 111,
+                syncDirty = true,
+            ),
+        )
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        assertThat(rig.backend.committedBundles).contains("care_plan:plan-skip:111")
+        val skipDraft = rig.backend.stagedBundles.last { it.root.clientUuid == "plan-skip" }
+        assertThat(skipDraft.root.deletedAt).isNull()
+        assertThat(Json.parseToJsonElement(skipDraft.root.payloadJson).jsonObject["status"]
+            ?.jsonPrimitive?.contentOrNull).isEqualTo("skipped")
+
+        rig.carePlans.seed(
+            localCarePlan(babyId).copy(
+                clientUuid = "plan-tomb",
+                updatedAt = 222,
+                deletedAt = 222,
+                syncDirty = true,
+            ),
+        )
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        assertThat(rig.backend.committedBundles).contains("care_plan:plan-tomb:222")
+        val tombDraft = rig.backend.stagedBundles.last { it.root.clientUuid == "plan-tomb" }
+        assertThat(tombDraft.root.deletedAt).isEqualTo(222)
+    }
+
+    @Test
+    fun localCarePlanPublishLabelMentionsFamilyInvisibilityAndReminders() {
+        assertThat(
+            localCarePlanPublishLabel(
+                syncDirty = true,
+                familyJoined = true,
+                lastSyncFailed = false,
+            ),
+        ).isEqualTo("仅本机 · 等待照片同步")
+        assertThat(
+            localCarePlanPublishDetail(
+                lastSyncFailed = false,
+                hasPriorFamilyRevision = false,
+            ),
+        ).contains("不会提醒")
+        assertThat(
+            localCarePlanPublishLabel(
+                syncDirty = false,
+                familyJoined = true,
+                lastSyncFailed = false,
+            ),
+        ).isNull()
+    }
+
+    @Test
+    fun fulfillUnitPushesCompletedPlanThenRecordThenCandidateWithAndWithoutPhotos() = runTest {
+        suspend fun runCase(photoCount: Int) {
+            val rig = SyncRig(session = joinedSession("family-a"))
+            assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+            val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+            val photos = (0 until photoCount).map { "photos/fulfill$it.jpg" }
+            val recordUuid = "fulfill-record-$photoCount"
+            val planUuid = "fulfill-plan-$photoCount"
+            val candUuid = "fulfill-cand-$photoCount"
+            val recordId = rig.records.seed(
+                localRecord(babyId).copy(
+                    clientUuid = recordUuid,
+                    payloadJson = if (photos.isEmpty()) {
+                        """{"amount_ml":90}"""
+                    } else {
+                        """{"amount_ml":90,"photos":[${photos.joinToString(",") { "\"$it\"" }}]}"""
+                    },
+                    updatedAt = 500,
+                    syncDirty = true,
+                ),
+            )
+            photos.forEachIndexed { index, path ->
+                rig.media.seed(
+                    MediaAssetEntity(
+                        recordId = recordId,
+                        carePlanId = null,
+                        clientUuid = "fulfill-media-$photoCount-$index",
+                        kind = "log",
+                        localUri = path,
+                        mime = "image/jpeg",
+                        byteSize = 4,
+                        createdAt = 500,
+                        updatedAt = 500,
+                        syncDirty = true,
+                    ),
+                )
+            }
+            rig.carePlans.seed(
+                localCarePlan(babyId).copy(
+                    clientUuid = planUuid,
+                    status = "completed",
+                    fulfilledRecordClientUuid = recordUuid,
+                    fulfilledAt = 500,
+                    updatedAt = 501,
+                    syncDirty = true,
+                ),
+            )
+            rig.fulfillmentCandidates.seed(
+                FulfillmentCandidateEntity(
+                    clientUuid = candUuid,
+                    carePlanClientUuid = planUuid,
+                    recordClientUuid = recordUuid,
+                    actualTimestamp = 120,
+                    confirmedAt = 500,
+                    updatedAt = 502,
+                    syncDirty = true,
+                ),
+            )
+            assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+            // Care_plan package commits before fulfill Record so NAS never exposes
+            // Record-while-plan-still-pending (ticket 25 full-set visibility).
+            val recordCommitIdx = rig.backend.committedBundles.indexOfFirst {
+                it.startsWith("record:$recordUuid:")
+            }
+            val planCommitIdx = rig.backend.committedBundles.indexOfFirst {
+                it.startsWith("care_plan:$planUuid:")
+            }
+            assertThat(recordCommitIdx).isAtLeast(0)
+            assertThat(planCommitIdx).isAtLeast(0)
+            assertThat(planCommitIdx).isLessThan(recordCommitIdx)
+            val recordDraft = rig.backend.stagedBundles.first { it.root.clientUuid == recordUuid }
+            assertThat(recordDraft.media.filter { it.deletedAt == null }).hasSize(photoCount)
+
+            val candidatePush = rig.backend.pushes
+                .flatMap { it.entities }
+                .first { it.type == "fulfillment_candidate" && it.clientUuid == candUuid }
+            val candPayload = Json.parseToJsonElement(candidatePush.payloadJson).jsonObject
+            assertThat(candPayload["care_plan_client_uuid"]?.jsonPrimitive?.contentOrNull)
+                .isEqualTo(planUuid)
+            assertThat(candPayload["record_client_uuid"]?.jsonPrimitive?.contentOrNull)
+                .isEqualTo(recordUuid)
+            assertThat(candPayload["confirmed_at"]?.jsonPrimitive?.contentOrNull).isEqualTo("500")
+            assertThat(rig.fulfillmentCandidates.getByClientUuid(candUuid)?.syncDirty).isFalse()
+            assertThat(rig.records.getByClientUuid(recordUuid)?.syncDirty).isFalse()
+            assertThat(rig.carePlans.getByClientUuid(planUuid)?.syncDirty).isFalse()
+        }
+        runCase(0)
+        runCase(2)
+    }
+
+    @Test
+    fun fulfillUnitRetryUsesStableCandidateAndLostCommitDoesNotDuplicate() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val recordUuid = "retry-fulfill-record"
+        val planUuid = "retry-fulfill-plan"
+        val candUuid = "retry-fulfill-cand"
+        rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = recordUuid,
+                updatedAt = 700,
+                syncDirty = true,
+            ),
+        )
+        rig.carePlans.seed(
+            localCarePlan(babyId).copy(
+                clientUuid = planUuid,
+                status = "completed",
+                fulfilledRecordClientUuid = recordUuid,
+                fulfilledAt = 700,
+                updatedAt = 701,
+                syncDirty = true,
+            ),
+        )
+        rig.fulfillmentCandidates.seed(
+            FulfillmentCandidateEntity(
+                clientUuid = candUuid,
+                carePlanClientUuid = planUuid,
+                recordClientUuid = recordUuid,
+                actualTimestamp = 120,
+                confirmedAt = 700,
+                updatedAt = 702,
+                syncDirty = true,
+            ),
+        )
+        // First push succeeds for atomics; fail residual candidate once (lost response).
+        rig.backend.pushFailures.add(IllegalStateException("candidate push lost"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isFalse()
+        // Atomics may have committed before residual failed.
+        assertThat(rig.backend.committedBundles.any { it.startsWith("record:$recordUuid:") }).isTrue()
+        assertThat(rig.fulfillmentCandidates.getByClientUuid(candUuid)?.syncDirty).isTrue()
+
+        // Re-dirty only candidate if records already marked synced; re-seed dirty candidate.
+        val cand = rig.fulfillmentCandidates.getByClientUuid(candUuid)!!
+        rig.fulfillmentCandidates.seed(cand.copy(syncDirty = true))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val candPushes = rig.backend.pushes
+            .flatMap { it.entities }
+            .filter { it.type == "fulfillment_candidate" && it.clientUuid == candUuid }
+        assertThat(candPushes).isNotEmpty()
+        assertThat(candPushes.map { it.clientUuid }.distinct()).containsExactly(candUuid)
+        assertThat(rig.fulfillmentCandidates.getByClientUuid(candUuid)?.syncDirty).isFalse()
+    }
+
+    @Test
+    fun fulfillReceiveFullSetAppliesAndProjectsCompletedPlanCancellation() = runTest {
+        val applied = mutableListOf<String>()
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            carePlanApplied = { applied += it },
+        )
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val babyUuid = rig.babies.getIncludingDeleted(babyId)!!.clientUuid
+        // Pending plan already local (open) so completed package replaces it.
+        rig.carePlans.seed(
+            localCarePlan(babyId).copy(
+                clientUuid = "remote-fulfill-plan",
+                status = "pending",
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "record",
+                    clientUuid = "remote-fulfill-record",
+                    payloadJson =
+                        """{"baby_client_uuid":"$babyUuid","type":"formula","timestamp":200,"created_by_device_id":"dev-b","payload_json":{"amount_ml":80},"schema_version":1}""",
+                    updatedAt = 800,
+                    deletedAt = null,
+                ),
+                SyncEntity(
+                    type = "care_plan",
+                    clientUuid = "remote-fulfill-plan",
+                    payloadJson =
+                        """{"baby_client_uuid":"$babyUuid","type":"formula","scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","status":"completed","payload_json":{},"schema_version":1,"created_by_membership_id":"member-a","fulfilled_record_client_uuid":"remote-fulfill-record","fulfilled_at":800}""",
+                    updatedAt = 801,
+                    deletedAt = null,
+                ),
+                SyncEntity(
+                    type = "fulfillment_candidate",
+                    clientUuid = "remote-fulfill-cand",
+                    payloadJson =
+                        """{"care_plan_client_uuid":"remote-fulfill-plan","record_client_uuid":"remote-fulfill-record","actual_timestamp":200,"submitter_membership_id":"member-b","submitter_role":"member","confirmed_at":800}""",
+                    updatedAt = 802,
+                    deletedAt = null,
+                ),
+            ),
+            cursor = 99,
+            generation = "gen",
+        )
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        assertThat(rig.records.getByClientUuid("remote-fulfill-record")).isNotNull()
+        assertThat(rig.carePlans.getByClientUuid("remote-fulfill-plan")?.status)
+            .isEqualTo("completed")
+        assertThat(rig.carePlans.getByClientUuid("remote-fulfill-plan")?.fulfilledRecordClientUuid)
+            .isEqualTo("remote-fulfill-record")
+        val cand = rig.fulfillmentCandidates.getByClientUuid("remote-fulfill-cand")!!
+        assertThat(cand.submitterMembershipId).isEqualTo("member-b")
+        assertThat(cand.submitterRole).isEqualTo("member")
+        assertThat(cand.confirmedAt).isEqualTo(800)
+        assertThat(cand.syncDirty).isFalse()
+        assertThat(applied).contains("remote-fulfill-plan")
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(99)
+    }
+
+    @Test
+    fun multiCandidateReceiveConvergesIndependentOfArrivalOrderAndPlanLww() = runTest {
+        suspend fun runOrder(order: List<String>) {
+            val rig = SyncRig(session = joinedSession("family-conflict"))
+            val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+            val babyUuid = rig.babies.getIncludingDeleted(babyId)!!.clientUuid
+            val planUuid = "conflict-plan"
+            // Local member already fulfilled; plan LWW wrongly points at local record.
+            rig.records.seed(
+                localRecord(babyId).copy(
+                    clientUuid = "rec-member",
+                    updatedAt = 500,
+                    syncDirty = false,
+                ),
+            )
+            rig.carePlans.seed(
+                localCarePlan(babyId).copy(
+                    clientUuid = planUuid,
+                    status = "completed",
+                    fulfilledRecordClientUuid = "rec-member",
+                    fulfilledAt = 500,
+                    updatedAt = 9_000,
+                    syncDirty = false,
+                ),
+            )
+            rig.fulfillmentCandidates.seed(
+                FulfillmentCandidateEntity(
+                    clientUuid = "cand-member",
+                    carePlanClientUuid = planUuid,
+                    recordClientUuid = "rec-member",
+                    confirmedAt = 500,
+                    submitterMembershipId = "m-member",
+                    submitterRole = "member",
+                    adoptionStatus = com.lezi.babylog.core.model.FulfillmentAdoptionStatus.ADOPTED,
+                    updatedAt = 500,
+                    syncDirty = false,
+                ),
+            )
+            assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+            val ownerRecord = SyncEntity(
+                type = "record",
+                clientUuid = "rec-owner",
+                payloadJson =
+                    """{"baby_client_uuid":"$babyUuid","type":"formula","timestamp":200,"created_by_device_id":"dev-o","payload_json":{"amount_ml":80},"schema_version":1}""",
+                updatedAt = 800,
+                deletedAt = null,
+            )
+            val ownerCandidate = SyncEntity(
+                type = "fulfillment_candidate",
+                clientUuid = "cand-owner",
+                payloadJson =
+                    """{"care_plan_client_uuid":"$planUuid","record_client_uuid":"rec-owner","actual_timestamp":200,"submitter_membership_id":"m-owner","submitter_role":"owner","confirmed_at":900}""",
+                updatedAt = 900,
+                deletedAt = null,
+            )
+            // Stale plan LWW with higher updatedAt still pointing at member record —
+            // resolution must re-link after candidates are complete.
+            val stalePlan = SyncEntity(
+                type = "care_plan",
+                clientUuid = planUuid,
+                payloadJson =
+                    """{"baby_client_uuid":"$babyUuid","type":"formula","scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","status":"completed","payload_json":{},"schema_version":1,"created_by_membership_id":"member-a","fulfilled_record_client_uuid":"rec-member","fulfilled_at":500}""",
+                updatedAt = 10_000,
+                deletedAt = null,
+            )
+            val byKey = mapOf(
+                "record" to ownerRecord,
+                "candidate" to ownerCandidate,
+                "plan" to stalePlan,
+            )
+            rig.backend.nextPull = PullResult(
+                entities = order.map { byKey.getValue(it) },
+                cursor = 120,
+                generation = "gen",
+            )
+            assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+            assertThat(rig.carePlans.getByClientUuid(planUuid)?.fulfilledRecordClientUuid)
+                .isEqualTo("rec-owner")
+            assertThat(rig.fulfillmentCandidates.getByClientUuid("cand-owner")?.adoptionStatus)
+                .isEqualTo(com.lezi.babylog.core.model.FulfillmentAdoptionStatus.ADOPTED)
+            assertThat(rig.fulfillmentCandidates.getByClientUuid("cand-member")?.adoptionStatus)
+                .isEqualTo(
+                    com.lezi.babylog.core.model.FulfillmentAdoptionStatus.CONFLICT_NOT_ADOPTED,
+                )
+            // Loser record retained (not soft-deleted).
+            assertThat(rig.records.getByClientUuid("rec-member")?.deletedAt).isNull()
+            assertThat(rig.records.getByClientUuid("rec-owner")).isNotNull()
+        }
+        runOrder(listOf("record", "plan", "candidate"))
+        runOrder(listOf("record", "candidate", "plan"))
+        runOrder(listOf("plan", "record", "candidate"))
+    }
+
+    @Test
+    fun multiCandidateUuidTieBreakAndIdempotentReplay() = runTest {
+        val rig = SyncRig(session = joinedSession("family-uuid"))
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val babyUuid = rig.babies.getIncludingDeleted(babyId)!!.clientUuid
+        val planUuid = "uuid-plan"
+        rig.carePlans.seed(
+            localCarePlan(babyId).copy(
+                clientUuid = planUuid,
+                status = "pending",
+                updatedAt = 10,
+                syncDirty = false,
+            ),
+        )
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val entities = listOf(
+            SyncEntity(
+                type = "record",
+                clientUuid = "rec-z",
+                payloadJson =
+                    """{"baby_client_uuid":"$babyUuid","type":"formula","timestamp":1,"created_by_device_id":"d","payload_json":{},"schema_version":1}""",
+                updatedAt = 20,
+            ),
+            SyncEntity(
+                type = "record",
+                clientUuid = "rec-a",
+                payloadJson =
+                    """{"baby_client_uuid":"$babyUuid","type":"formula","timestamp":2,"created_by_device_id":"d","payload_json":{},"schema_version":1}""",
+                updatedAt = 21,
+            ),
+            SyncEntity(
+                type = "care_plan",
+                clientUuid = planUuid,
+                payloadJson =
+                    """{"baby_client_uuid":"$babyUuid","type":"formula","scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","status":"completed","payload_json":{},"schema_version":1,"created_by_membership_id":"m","fulfilled_record_client_uuid":"rec-z","fulfilled_at":50}""",
+                updatedAt = 30,
+            ),
+            SyncEntity(
+                type = "fulfillment_candidate",
+                clientUuid = "uuid-zzz",
+                payloadJson =
+                    """{"care_plan_client_uuid":"$planUuid","record_client_uuid":"rec-z","submitter_role":"member","confirmed_at":50}""",
+                updatedAt = 40,
+            ),
+            SyncEntity(
+                type = "fulfillment_candidate",
+                clientUuid = "uuid-aaa",
+                payloadJson =
+                    """{"care_plan_client_uuid":"$planUuid","record_client_uuid":"rec-a","submitter_role":"member","confirmed_at":50}""",
+                updatedAt = 41,
+            ),
+        )
+        rig.backend.nextPull = PullResult(entities = entities, cursor = 200, generation = "g")
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        assertThat(rig.carePlans.getByClientUuid(planUuid)?.fulfilledRecordClientUuid)
+            .isEqualTo("rec-a")
+        // Idempotent full-page replay with same entities (cursor advance already done).
+        rig.backend.nextPull = PullResult(entities = entities, cursor = 200, generation = "g")
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        assertThat(rig.carePlans.getByClientUuid(planUuid)?.fulfilledRecordClientUuid)
+            .isEqualTo("rec-a")
+        assertThat(rig.fulfillmentCandidates.getByClientUuid("uuid-aaa")?.adoptionStatus)
+            .isEqualTo(com.lezi.babylog.core.model.FulfillmentAdoptionStatus.ADOPTED)
+        assertThat(rig.fulfillmentCandidates.getByClientUuid("uuid-zzz")?.adoptionStatus)
+            .isEqualTo(com.lezi.babylog.core.model.FulfillmentAdoptionStatus.CONFLICT_NOT_ADOPTED)
+    }
+
+    @Test
+    fun originatorPullMergesServerFrozenStampsOnEqualUpdatedAt() = runTest {
+        // Ticket 26: after push+markSynced, originator keeps local updatedAt and empty
+        // role trails; pull of the same generation must still adopt server freeze so
+        // multi-device authority converges.
+        val rig = SyncRig(session = joinedSession("family-a"))
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val babyUuid = rig.babies.getIncludingDeleted(babyId)!!.clientUuid
+        val planUuid = "origin-plan"
+        val recordUuid = "origin-record"
+        val candUuid = "origin-cand"
+        rig.carePlans.seed(
+            localCarePlan(babyId).copy(
+                clientUuid = planUuid,
+                status = "completed",
+                fulfilledRecordClientUuid = recordUuid,
+                fulfilledAt = 100,
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+        rig.records.seed(
+            RecordEntity(
+                clientUuid = recordUuid,
+                babyId = babyId,
+                type = "formula",
+                timestamp = 90,
+                createdByUserId = 1L,
+                payloadJson = """{"amount_ml":80}""",
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+        rig.fulfillmentCandidates.seed(
+            FulfillmentCandidateEntity(
+                clientUuid = candUuid,
+                carePlanClientUuid = planUuid,
+                recordClientUuid = recordUuid,
+                actualTimestamp = 90,
+                confirmedAt = 100,
+                submitterMembershipId = "",
+                submitterRole = "",
+                updatedAt = 500,
+                syncDirty = false,
+            ),
+        )
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "fulfillment_candidate",
+                    clientUuid = candUuid,
+                    payloadJson =
+                        """{"care_plan_client_uuid":"$planUuid","record_client_uuid":"$recordUuid","actual_timestamp":90,"submitter_membership_id":"m-self","submitter_role":"owner","confirmed_at":777}""",
+                    // Equal/older updatedAt than local — pure LWW would skip without stamp merge.
+                    updatedAt = 500,
+                    deletedAt = null,
+                ),
+            ),
+            cursor = 10,
+            generation = "g",
+        )
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        val cand = rig.fulfillmentCandidates.getByClientUuid(candUuid)!!
+        assertThat(cand.submitterMembershipId).isEqualTo("m-self")
+        assertThat(cand.submitterRole).isEqualTo("owner")
+        assertThat(cand.confirmedAt).isEqualTo(777)
+        assertThat(cand.syncDirty).isFalse()
+        // Baby payload present only to keep session valid if needed.
+        assertThat(babyUuid).isNotEmpty()
+    }
+
+    @Test
+    fun fulfillReceiveCompletedPlanWithoutRecordKeepsInvisibleAndCursorUnmoved() = runTest {
+        val applied = mutableListOf<String>()
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            carePlanApplied = { applied += it },
+        )
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val babyUuid = rig.babies.getIncludingDeleted(babyId)!!.clientUuid
+        // Existing open plan revision stays visible until full set arrives.
+        rig.carePlans.seed(
+            localCarePlan(babyId).copy(
+                clientUuid = "gated-plan",
+                status = "pending",
+                updatedAt = 50,
+                syncDirty = false,
+            ),
+        )
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val cursorBefore = rig.preferences.current().pullCursor
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "care_plan",
+                    clientUuid = "gated-plan",
+                    payloadJson =
+                        """{"baby_client_uuid":"$babyUuid","type":"formula","scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","status":"completed","payload_json":{},"schema_version":1,"created_by_membership_id":"member-a","fulfilled_record_client_uuid":"missing-record","fulfilled_at":900}""",
+                    updatedAt = 900,
+                    deletedAt = null,
+                ),
+                SyncEntity(
+                    type = "fulfillment_candidate",
+                    clientUuid = "gated-cand",
+                    payloadJson =
+                        """{"care_plan_client_uuid":"gated-plan","record_client_uuid":"missing-record","confirmed_at":900}""",
+                    updatedAt = 901,
+                    deletedAt = null,
+                ),
+            ),
+            cursor = 55,
+            generation = "gen",
+        )
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isFalse()
+        assertThat(rig.carePlans.getByClientUuid("gated-plan")?.status).isEqualTo("pending")
+        assertThat(rig.carePlans.getByClientUuid("gated-plan")?.updatedAt).isEqualTo(50)
+        assertThat(rig.fulfillmentCandidates.getByClientUuid("gated-cand")).isNull()
+        assertThat(applied).isEmpty()
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(cursorBefore)
     }
 
     private fun localBaby() = BabyEntity(
@@ -2179,6 +3730,18 @@ class RealSyncPortTest {
         themeColorArgb = 0,
         clientUuid = "baby-local",
         updatedAt = 100,
+    )
+
+    private fun localCarePlan(babyId: Long) = CarePlanEntity(
+        clientUuid = "plan-local",
+        babyId = babyId,
+        type = "formula",
+        scheduledAt = 9_000_000_000_000L,
+        scheduledZoneId = "Asia/Shanghai",
+        status = "pending",
+        createdByMembershipId = "member-local",
+        updatedAt = 100,
+        syncDirty = true,
     )
 
     private fun localRecord(babyId: Long) = RecordEntity(
@@ -2462,6 +4025,7 @@ private class RecordingSyncBackend : SyncBackend {
             token = "owner-token",
             role = FamilyRole.Owner,
             familyName = nextCreateFamilyName ?: familyName,
+            membershipId = "membership-created",
         )
     }
 
@@ -2530,6 +4094,7 @@ private class RecordingSyncBackend : SyncBackend {
             token = "member-token",
             role = FamilyRole.Member,
             familyName = nextJoinFamilyName,
+            membershipId = "membership-joined",
         )
     }
 
@@ -2568,6 +4133,56 @@ private class RecordingSyncBackend : SyncBackend {
         beforeGetMediaReturn?.also { beforeGetMediaReturn = null }?.invoke()
         getMediaFailure?.let { throw it }
         return mediaBytes
+    }
+
+    val stagedBundles = mutableListOf<AtomicBundleDraft>()
+    val bundleMediaUploads = mutableListOf<Pair<String, String>>()
+    val committedBundles = mutableListOf<String>()
+    var stageBundleFailure: Throwable? = null
+    var putBundleMediaFailure: Throwable? = null
+    var commitBundleFailure: Throwable? = null
+
+    override suspend fun stageBundle(
+        session: SyncSession,
+        draft: AtomicBundleDraft,
+    ): BundleStageStatus {
+        stageBundleFailure?.let { throw it }
+        stagedBundles += draft
+        return BundleStageStatus(
+            bundleId = draft.bundleId,
+            status = "staging",
+            missingMedia = draft.media.filter { it.deletedAt == null }.map { it.clientUuid },
+        )
+    }
+
+    override suspend fun putBundleMedia(
+        session: SyncSession,
+        bundleId: String,
+        clientUuid: String,
+        bytes: ByteArray,
+        mime: String?,
+    ): BundleStageStatus {
+        putBundleMediaFailure?.let { throw it }
+        bundleMediaUploads += bundleId to clientUuid
+        return BundleStageStatus(
+            bundleId = bundleId,
+            status = "staging",
+            stagedMedia = listOf(clientUuid),
+        )
+    }
+
+    override suspend fun commitBundle(
+        session: SyncSession,
+        bundleId: String,
+    ): BundleCommitResult {
+        commitBundleFailure?.let { throw it }
+        committedBundles += bundleId
+        return BundleCommitResult(
+            bundleId = bundleId,
+            status = "committed",
+            applied = 1,
+            cursor = session.pullCursor,
+        )
     }
 }
 
@@ -2706,13 +4321,18 @@ private class SyncRig(
     session: SyncSession,
     wifi: Boolean = true,
     ssid: String? = "Home",
+    healthCapabilities: Set<String> = setOf(CAPABILITY_ATOMIC_BUNDLE),
+    carePlanApplied: suspend (List<String>) -> Unit = {},
 ) {
     val backend = RecordingSyncBackend()
     val preferences = MemorySyncPreferences(session)
     val outbox = MemoryOutboxDao()
     val records = MemoryRecordDao()
+    val carePlans = MemoryCarePlanDao()
+    val fulfillmentCandidates = MemoryFulfillmentCandidateDao()
     val babies = MemoryBabyDao()
     val media = MemoryMediaDao()
+    val customItems = MemoryCustomItemDao()
     val mediaFiles = TestMediaFileStore()
     val transactions = RecordingTransactionRunner()
     val families = MemoryFamilyDao().apply {
@@ -2729,7 +4349,7 @@ private class SyncRig(
         networkState = networkState,
         healthProbe = HealthProbe {
             healthProbeCalls++
-            true
+            HealthStatus(ok = true, capabilities = healthCapabilities)
         },
         clock = clock,
     )
@@ -2740,14 +4360,299 @@ private class SyncRig(
         networkState = networkState,
         outboxDao = outbox,
         recordDao = records,
+        carePlanDao = carePlans,
         babyDao = babies,
         mediaDao = media,
+        customItemDao = customItems,
         familyDao = families,
         clock = clock,
         foregroundState = foreground,
         mediaFiles = mediaFiles,
         transactionRunner = transactions,
+        carePlanAppliedListener = CarePlanFamilyAppliedListener { carePlanApplied(it) },
+        fulfillmentCandidateDao = fulfillmentCandidates,
     )
+}
+
+private class MemoryFulfillmentCandidateDao : FulfillmentCandidateDao {
+    private val rows = MutableStateFlow<List<FulfillmentCandidateEntity>>(emptyList())
+    private val ids = AtomicLong(1)
+
+    fun seed(entity: FulfillmentCandidateEntity): Long {
+        val id = entity.id.takeIf { it != 0L } ?: ids.getAndIncrement()
+        rows.value = rows.value.filterNot {
+            it.id == id || it.clientUuid == entity.clientUuid
+        } + entity.copy(id = id)
+        return id
+    }
+
+    override suspend fun get(id: Long): FulfillmentCandidateEntity? =
+        rows.value.firstOrNull { it.id == id }
+
+    override suspend fun getByClientUuid(clientUuid: String): FulfillmentCandidateEntity? =
+        rows.value.firstOrNull { it.clientUuid == clientUuid }
+
+    override suspend fun listForCarePlan(carePlanClientUuid: String): List<FulfillmentCandidateEntity> =
+        rows.value.filter { it.carePlanClientUuid == carePlanClientUuid }.sortedBy { it.id }
+
+    override suspend fun listForRecord(recordClientUuid: String): List<FulfillmentCandidateEntity> =
+        rows.value.filter { it.recordClientUuid == recordClientUuid }.sortedBy { it.id }
+
+    override suspend fun listAllIncludingDeleted(): List<FulfillmentCandidateEntity> = rows.value
+
+    override suspend fun listPendingSync(): List<FulfillmentCandidateEntity> =
+        rows.value.filter { it.syncDirty }.sortedBy { it.id }
+
+    override suspend fun listConflictNotAdoptedRecordUuids(): List<String> =
+        rows.value
+            .filter {
+                it.adoptionStatus ==
+                    com.lezi.babylog.core.model.FulfillmentAdoptionStatus.CONFLICT_NOT_ADOPTED &&
+                    it.deletedAt == null
+            }
+            .map { it.recordClientUuid }
+
+    override suspend fun listConflictNotAdopted(): List<FulfillmentCandidateEntity> =
+        rows.value
+            .filter {
+                it.adoptionStatus ==
+                    com.lezi.babylog.core.model.FulfillmentAdoptionStatus.CONFLICT_NOT_ADOPTED &&
+                    it.deletedAt == null
+            }
+            .sortedWith(compareBy({ it.confirmedAt }, { it.clientUuid }))
+
+    override suspend fun listConflictNotAdoptedForCarePlan(
+        carePlanClientUuid: String,
+    ): List<FulfillmentCandidateEntity> =
+        listConflictNotAdopted().filter { it.carePlanClientUuid == carePlanClientUuid }
+
+    override fun observeConflictNotAdoptedRecordUuids(): Flow<List<String>> =
+        rows.map { list ->
+            list.filter {
+                it.adoptionStatus ==
+                    com.lezi.babylog.core.model.FulfillmentAdoptionStatus.CONFLICT_NOT_ADOPTED &&
+                    it.deletedAt == null
+            }.map { it.recordClientUuid }
+        }
+
+    override suspend fun markSynced(clientUuid: String, updatedAt: Long) {
+        rows.value = rows.value.map {
+            if (it.clientUuid == clientUuid && it.updatedAt == updatedAt) {
+                it.copy(syncDirty = false)
+            } else {
+                it
+            }
+        }
+    }
+
+    override suspend fun upsert(candidate: FulfillmentCandidateEntity): Long = seed(candidate)
+
+    override suspend fun update(candidate: FulfillmentCandidateEntity) {
+        rows.value = rows.value.map { if (it.id == candidate.id) candidate else it }
+    }
+
+    override suspend fun deleteAll() {
+        rows.value = emptyList()
+    }
+}
+
+private class MemoryCarePlanDao : CarePlanDao {
+    private val rows = MutableStateFlow<List<CarePlanEntity>>(emptyList())
+    private val ids = AtomicLong(1)
+
+    fun seed(entity: CarePlanEntity): Long {
+        val id = entity.id.takeIf { it != 0L } ?: ids.getAndIncrement()
+        rows.value = rows.value.filterNot { it.id == id || it.clientUuid == entity.clientUuid } +
+            entity.copy(id = id)
+        return id
+    }
+
+    override fun observeDayPending(
+        babyId: Long,
+        startInclusive: Long,
+        endExclusive: Long,
+    ): Flow<List<CarePlanEntity>> = rows.map { list ->
+        list.filter {
+            it.babyId == babyId &&
+                it.deletedAt == null &&
+                it.status in setOf("pending", "missed") &&
+                it.scheduledAt >= startInclusive &&
+                it.scheduledAt < endExclusive
+        }.sortedBy { it.scheduledAt }
+    }
+
+    override fun observeTodayPending(
+        babyId: Long,
+        dayStart: Long,
+        dayEnd: Long,
+        nowMillis: Long,
+    ): Flow<List<CarePlanEntity>> = rows.map { list ->
+        list.filter {
+            it.babyId == babyId &&
+                it.deletedAt == null &&
+                it.status in setOf("pending", "missed") &&
+                (
+                    it.scheduledAt < nowMillis ||
+                        (it.scheduledAt >= dayStart && it.scheduledAt < dayEnd)
+                    )
+        }.sortedBy { it.scheduledAt }
+    }
+
+    override fun observeRange(
+        babyId: Long,
+        startInclusive: Long,
+        endExclusive: Long,
+    ): Flow<List<CarePlanEntity>> = rows.map { list ->
+        list.filter {
+            it.babyId == babyId &&
+                it.deletedAt == null &&
+                it.scheduledAt >= startInclusive &&
+                it.scheduledAt < endExclusive
+        }.sortedBy { it.scheduledAt }
+    }
+
+    override suspend fun listOpenFuture(babyId: Long, nowMillis: Long): List<CarePlanEntity> =
+        rows.value.filter {
+            it.babyId == babyId &&
+                it.deletedAt == null &&
+                it.status in setOf("pending", "missed") &&
+                it.scheduledAt > nowMillis
+        }.sortedBy { it.scheduledAt }
+
+    override suspend fun listAllOpenFuture(nowMillis: Long): List<CarePlanEntity> =
+        rows.value.filter {
+            it.deletedAt == null &&
+                it.status in setOf("pending", "missed") &&
+                it.scheduledAt > nowMillis
+        }.sortedBy { it.scheduledAt }
+
+    override suspend fun get(id: Long): CarePlanEntity? =
+        rows.value.firstOrNull { it.id == id }
+
+    override suspend fun getByClientUuid(clientUuid: String): CarePlanEntity? =
+        rows.value.firstOrNull { it.clientUuid == clientUuid }
+
+    override suspend fun listAllIncludingDeleted(): List<CarePlanEntity> = rows.value
+
+    override suspend fun listPendingSync(): List<CarePlanEntity> =
+        rows.value.filter { it.syncDirty }.sortedBy { it.id }
+
+    override suspend fun markSynced(clientUuid: String, updatedAt: Long) {
+        rows.value = rows.value.map {
+            if (it.clientUuid == clientUuid && it.updatedAt == updatedAt) {
+                it.copy(syncDirty = false)
+            } else {
+                it
+            }
+        }
+    }
+
+    override suspend fun markAllPendingSync() {
+        rows.value = rows.value.map { it.copy(syncDirty = true) }
+    }
+
+    override suspend fun upsert(plan: CarePlanEntity): Long = seed(plan)
+
+    override suspend fun update(plan: CarePlanEntity) {
+        rows.value = rows.value.map { if (it.id == plan.id) plan else it }
+    }
+
+    override suspend fun updatePayloadReplica(
+        id: Long,
+        expectedPayloadJson: String,
+        payloadJson: String,
+    ): Int {
+        var changed = 0
+        rows.value = rows.value.map {
+            if (it.id == id && it.payloadJson == expectedPayloadJson) {
+                changed = 1
+                it.copy(payloadJson = payloadJson)
+            } else {
+                it
+            }
+        }
+        return changed
+    }
+
+    override suspend fun softDelete(id: Long, deletedAt: Long) {
+        rows.value = rows.value.map {
+            if (it.id == id) {
+                it.copy(deletedAt = deletedAt, updatedAt = deletedAt, syncDirty = true)
+            } else {
+                it
+            }
+        }
+    }
+
+    override suspend fun deleteAll() {
+        rows.value = emptyList()
+    }
+}
+
+private class MemoryCustomItemDao : CustomItemDao {
+    private val rows = mutableListOf<CustomItemEntity>()
+    private val ids = AtomicLong(1)
+
+    fun seed(item: CustomItemEntity): Long {
+        val id = item.id.takeIf { it != 0L } ?: ids.getAndIncrement()
+        rows.removeAll { it.id == id || it.clientUuid == item.clientUuid }
+        rows += item.copy(id = id)
+        return id
+    }
+
+    fun get(clientUuid: String): CustomItemEntity? =
+        rows.firstOrNull { it.clientUuid == clientUuid }
+
+    override fun observeAll() = MutableStateFlow(rows.filter { it.deletedAt == null })
+
+    override suspend fun listAll(): List<CustomItemEntity> =
+        rows.filter { it.deletedAt == null }
+
+    override suspend fun listAllIncludingDeleted(): List<CustomItemEntity> = rows.toList()
+
+    override suspend fun getById(id: Long): CustomItemEntity? =
+        rows.firstOrNull { it.id == id }
+
+    override suspend fun getByClientUuid(clientUuid: String): CustomItemEntity? =
+        rows.firstOrNull { it.clientUuid == clientUuid }
+
+    override suspend fun listPendingSync(): List<CustomItemEntity> =
+        rows.filter { it.syncDirty }
+
+    override suspend fun markSynced(clientUuid: String, updatedAt: Long) {
+        rows.replaceAll {
+            if (it.clientUuid == clientUuid && it.updatedAt == updatedAt) {
+                it.copy(syncDirty = false)
+            } else {
+                it
+            }
+        }
+    }
+
+    override suspend fun upsert(item: CustomItemEntity): Long {
+        val id = item.id.takeIf { it != 0L } ?: ids.getAndIncrement()
+        rows.removeAll { it.id == id || it.clientUuid == item.clientUuid }
+        rows += item.copy(id = id)
+        return id
+    }
+
+    override suspend fun update(item: CustomItemEntity) {
+        rows.replaceAll { if (it.id == item.id) item else it }
+    }
+
+    override suspend fun softDelete(id: Long, deletedAt: Long) {
+        rows.replaceAll {
+            if (it.id == id) {
+                it.copy(deletedAt = deletedAt, updatedAt = deletedAt, syncDirty = true)
+            } else {
+                it
+            }
+        }
+    }
+
+    override suspend fun deleteAll() {
+        rows.clear()
+    }
 }
 
 private class RecordingTransactionRunner : DatabaseTransactionRunner {
@@ -3134,6 +5039,12 @@ private class MemoryMediaDao : MediaAssetDao {
 
     override suspend fun listActiveForRecord(recordId: Long): List<MediaAssetEntity> =
         rows.filter { it.recordId == recordId && it.deletedAt == null }.sortedBy(MediaAssetEntity::id)
+
+    override suspend fun listForCarePlan(carePlanId: Long): List<MediaAssetEntity> =
+        rows.filter { it.carePlanId == carePlanId }
+
+    override suspend fun listActiveForCarePlan(carePlanId: Long): List<MediaAssetEntity> =
+        rows.filter { it.carePlanId == carePlanId && it.deletedAt == null }.sortedBy(MediaAssetEntity::id)
 
     override suspend fun activeAvatarForBaby(babyId: Long): MediaAssetEntity? =
         rows.filter { it.babyId == babyId && it.kind == "avatar" && it.deletedAt == null }

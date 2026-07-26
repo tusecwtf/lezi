@@ -99,6 +99,49 @@ class TimerStateRestorationTest {
     }
 
     @Test
+    fun roundTrip_preservesCarePlanIdBinding() {
+        val state = TimerState(
+            babyId = 7L,
+            completionClientUuid = "uuid-1",
+            carePlanId = 42L,
+            leftAccumMs = 1_000L,
+            sessionStartedAt = 1_700_000_000_000L,
+            order = "L",
+        )
+        val raw = state.toJson(
+            savedElapsed = 10_000L,
+            savedWall = 1_700_000_000_000L,
+            savedBootCount = 3L,
+        )
+        val restored = TimerState.fromJson(
+            raw = raw,
+            nowElapsed = 10_000L,
+            nowWall = 1_700_000_000_000L,
+            nowBootCount = 3L,
+        )
+        assertEquals(42L, restored.carePlanId)
+        assertEquals(7L, restored.babyId)
+        assertEquals("uuid-1", restored.completionClientUuid)
+        assertTrue(restored.hasTimerData())
+    }
+
+    @Test
+    fun roundTrip_missingCarePlanIdStaysNull() {
+        val state = TimerState(babyId = 1L, leftAccumMs = 500L)
+        val restored = TimerState.fromJson(
+            state.toJson(
+                savedElapsed = 1_000L,
+                savedWall = 1_700_000_000_000L,
+                savedBootCount = 1L,
+            ),
+            nowElapsed = 1_000L,
+            nowWall = 1_700_000_000_000L,
+            nowBootCount = 1L,
+        )
+        assertNull(restored.carePlanId)
+    }
+
+    @Test
     fun bootCountRead_isSafeAndRejectsInvalidValues() {
         assertEquals(12L, safeBootCount { 12 })
         assertNull(safeBootCount { -1 })

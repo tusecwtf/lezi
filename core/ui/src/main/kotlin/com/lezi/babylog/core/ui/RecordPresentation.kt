@@ -40,6 +40,11 @@ enum class RecordSection(val title: String) {
     Routine("日常"),
     Health("健康"),
     Growth("成长"),
+    /** Concrete custom definitions (not the retired bare CUSTOM type). */
+    Custom("自定义"),
+    ;
+
+    companion object
 }
 
 enum class RecordChartMark {
@@ -182,7 +187,7 @@ val RecordType.presentation: RecordTypePresentation
         )
         RecordType.CUSTOM -> RecordTypePresentation(
             "自定义", "最多10项", LeziRecordGlyph.Other,
-            LeziRecordColorRole.Care, RecordSection.Health, RecordChartMark.Circle,
+            LeziRecordColorRole.Care, RecordSection.Custom, RecordChartMark.Circle,
         )
     }
 

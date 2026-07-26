@@ -1,5 +1,6 @@
 package com.lezi.babylog.feature.log
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -17,6 +18,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -40,10 +43,13 @@ internal fun TimeFields(
     onToggleRecordWake: ((Boolean) -> Unit)? = null,
     accentColor: Color? = null,
     intervalPreview: IntervalDurationPreview? = null,
+    highlightedField: ComposerInvalidField? = null,
 ) {
     val container = accentColor?.copy(alpha = 0.18f)
         ?: MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
     val accent = accentColor ?: MaterialTheme.colorScheme.primary
+    val startHighlighted = highlightedField == ComposerInvalidField.StartTime
+    val endHighlighted = highlightedField == ComposerInvalidField.EndTime
     SectionLabel(
         when (draft.sleepAction) {
             SleepDraftAction.SleepDown -> "睡下时间"
@@ -57,7 +63,11 @@ internal fun TimeFields(
             TimeReadOnly("睡下", draft.timestamp, zone)
             val end = draft.endTimestamp
             if (end == null) {
-                EmptyTimeButton("选择醒来时刻", onOpenEnd)
+                EmptyTimeButton(
+                    prompt = "选择醒来时刻",
+                    onClick = onOpenEnd,
+                    highlighted = endHighlighted,
+                )
             } else {
                 TimeButton(
                     label = "醒来",
@@ -66,6 +76,7 @@ internal fun TimeFields(
                     onClick = onOpenEnd,
                     containerColor = container,
                     accentColor = accent,
+                    highlighted = endHighlighted,
                 )
             }
         }
@@ -77,6 +88,7 @@ internal fun TimeFields(
                 onClick = onOpenStart,
                 containerColor = container,
                 accentColor = accent,
+                highlighted = startHighlighted,
             )
             val recordWake = draft.endTimestamp != null
             Row(
@@ -106,6 +118,7 @@ internal fun TimeFields(
                     onClick = onOpenEnd,
                     containerColor = container,
                     accentColor = accent,
+                    highlighted = endHighlighted,
                 )
             }
         }
@@ -117,6 +130,7 @@ internal fun TimeFields(
                 onClick = onOpenStart,
                 containerColor = container,
                 accentColor = accent,
+                highlighted = startHighlighted,
             )
             if (draft.endTimestamp == null) {
                 EmptyTimeButton(
@@ -126,6 +140,7 @@ internal fun TimeFields(
                         "选择结束时刻"
                     },
                     onClick = onOpenEnd,
+                    highlighted = endHighlighted,
                 )
             } else {
                 TimeButton(
@@ -135,6 +150,7 @@ internal fun TimeFields(
                     onClick = onOpenEnd,
                     containerColor = container,
                     accentColor = accent,
+                    highlighted = endHighlighted,
                 )
             }
         }
@@ -145,6 +161,7 @@ internal fun TimeFields(
             onClick = onOpenStart,
             containerColor = container,
             accentColor = accent,
+            highlighted = startHighlighted,
         )
     }
     intervalPreview?.let { preview ->
@@ -163,17 +180,31 @@ internal fun TimeFields(
 }
 
 @Composable
-private fun EmptyTimeButton(prompt: String, onClick: () -> Unit) {
+private fun EmptyTimeButton(
+    prompt: String,
+    onClick: () -> Unit,
+    highlighted: Boolean = false,
+) {
     Surface(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
         shape = LeziShapes.Sm,
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        border = if (highlighted) {
+            BorderStroke(2.dp, MaterialTheme.colorScheme.error)
+        } else {
+            null
+        },
     ) {
         Text(
             prompt,
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 13.dp),
             style = LeziTypography.BodyStrong,
+            color = if (highlighted) {
+                MaterialTheme.colorScheme.error
+            } else {
+                Color.Unspecified
+            },
         )
     }
 }
@@ -186,6 +217,7 @@ private fun TimeButton(
     onClick: () -> Unit,
     containerColor: Color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
     accentColor: Color = MaterialTheme.colorScheme.primary,
+    highlighted: Boolean = false,
 ) {
     Surface(
         onClick = onClick,
@@ -194,6 +226,11 @@ private fun TimeButton(
             .semantics { contentDescription = "$label，${formatRecordTime(millis, zone)}，选择时间" },
         shape = LeziShapes.Sm,
         color = containerColor,
+        border = if (highlighted) {
+            BorderStroke(2.dp, MaterialTheme.colorScheme.error)
+        } else {
+            null
+        },
     ) {
         Row(
             Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
@@ -254,13 +291,18 @@ internal fun IntegerField(
     value: String,
     label: String,
     modifier: Modifier = Modifier,
+    isError: Boolean = false,
+    focusRequester: FocusRequester? = null,
     onValueChange: (String) -> Unit,
 ) {
     OutlinedTextField(
         value = value,
         onValueChange = { onValueChange(it.filter(Char::isDigit).take(4)) },
-        modifier = modifier,
+        modifier = modifier.then(
+            if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier,
+        ),
         label = { Text(label) },
+        isError = isError,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
         singleLine = true,
     )
@@ -271,6 +313,8 @@ internal fun DecimalField(
     value: String,
     label: String,
     modifier: Modifier = Modifier,
+    isError: Boolean = false,
+    focusRequester: FocusRequester? = null,
     onValueChange: (String) -> Unit,
 ) {
     OutlinedTextField(
@@ -281,8 +325,11 @@ internal fun DecimalField(
                 onValueChange(filtered.take(7))
             }
         },
-        modifier = modifier,
+        modifier = modifier.then(
+            if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier,
+        ),
         label = { Text(label) },
+        isError = isError,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
         singleLine = true,
     )
@@ -297,18 +344,29 @@ internal fun SectionLabel(label: String) {
     )
 }
 
-internal fun sheetKicker(draft: QuickRecordDraft): String = when {
+internal fun sheetKicker(
+    draft: QuickRecordDraft,
+    nowMillis: Long = com.lezi.babylog.core.model.RecordTime.currentTimeMillis(),
+): String = when {
+    draft.carePlanId != null && draft.editCarePlan -> "编辑护理计划"
+    draft.carePlanId != null -> "完成护理计划"
+    draft.needsConvertToCarePlan(nowMillis) -> "转为护理计划"
+    draft.workMode(nowMillis) == ComposerWorkMode.ScheduleCare -> "安排护理"
     draft.isEditing -> "编辑记录"
     draft.sleepAction == SleepDraftAction.SleepDown -> "准备休息"
     draft.sleepAction == SleepDraftAction.WakeUp -> "睡眠进行中"
     draft.sleepAction == SleepDraftAction.Manual -> "补记睡眠"
-    else -> "补充信息后确认保存"
+    // Product: current/past create is "记录事实" (not a future plan).
+    else -> "记录事实"
 }
 
 internal fun sheetTitle(draft: QuickRecordDraft): String = when {
-    draft.isEditing -> draft.type.presentation.label
     draft.sleepAction == SleepDraftAction.SleepDown -> "睡下"
     draft.sleepAction == SleepDraftAction.WakeUp -> "醒来"
+    draft.type == RecordType.CUSTOM ->
+        draft.customTitle.trim().ifBlank { draft.type.presentation.label }
+    draft.type == RecordType.OTHER ->
+        draft.customTitle.trim().ifBlank { draft.type.presentation.label }
     else -> draft.type.presentation.label
 }
 

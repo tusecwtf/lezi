@@ -194,7 +194,7 @@ lezi-sync healthcheck
 
 | 方法 | 路径 | 摘要 |
 |---|---|---|
-| GET | `/health` | 廉价进程存活检查，正常 `{ok, version}`，不访问 DB/文件系统 |
+| GET | `/health` | 廉价进程存活检查，正常 `{ok, version, capabilities:["atomic_bundle"]}`，不访问 DB/文件系统 |
 | GET | `/ready` | DB 与数据目录就绪检查；结果缓存 5 秒，异常返回 `503 {ok:false,status:"degraded",version}` |
 | POST | `/v1/family/create` | 幂等创建家庭并返回 owner token；可选 `family_name` |
 | GET | `/v1/family/members` | 当前家庭的 active 成员安全视图；owner/member 均可读 |
@@ -204,9 +204,13 @@ lezi-sync healthcheck
 | POST | `/v1/join` | 邀请码换 member token（响应含 `family_name`） |
 | POST | `/v1/leave` | member 吊销自身 token |
 | POST | `/v1/family/delete` | owner 删除家庭及媒体 |
-| POST | `/v1/push` | Baby、Record、Media 的严格 LWW push |
+| POST | `/v1/push` | Baby、Record、Media、CustomItem 的严格 LWW push（兼容路径） |
 | GET | `/v1/pull?cursor=&generation=` | 有界分页、单调 cursor 增量 pull |
-| PUT/GET | `/v1/media/{client_uuid}` | 上传或下载媒体字节 |
+| PUT/GET | `/v1/media/{client_uuid}` | 上传或下载媒体字节（兼容路径） |
+| POST | `/v1/bundles` | 原子包暂存：根实体 + 媒体清单（commit 前不可 pull） |
+| PUT | `/v1/bundles/{id}/media/{uuid}` | 原子包媒体字节暂存 |
+| POST | `/v1/bundles/{id}/commit` | 单事务发布完整包（幂等） |
+| GET | `/v1/bundles/{id}` | 查询 staging/committed 与 missing_media |
 
 服务每次启动生成新的 `generation`。客户端在发现 generation 变化或 cursor
 领先时执行既有 `full_resync` 契约。Record 使用 `baby_client_uuid` 跨设备关联；
@@ -214,14 +218,16 @@ Media 的 kind 与关联创建后不可改变；member 可以写日志媒体，�
 和字节只允许 owner 修改。
 
 `GET /v1/family/members` 返回 owner-first 的稳定列表：
-`{"members":[{"display_name":"妈妈","role":"owner","is_self":true,"device_id":"…"}]}`。
+`{"members":[{"display_name":"妈妈","role":"owner","is_self":true,"device_id":"…","membership_id":"…"}]}`。
 服务端只按 Bearer principal 的 `family_id` 查询 active memberships，并由当前
 token 计算 `is_self`；响应绝不包含 token、`token_hash` 或 `family_id`。
-`device_id` 仅作客户端把记录 `created_by_device_id` 解析为当前家庭称呼的**链路键**，
-产品 UI 不得展示。建家/加入时 `display_name`（家庭称呼）**必填**：trim 后空白、
-省略字段、或本机 UI 占位名“我（本机）”均返回 `422`，不再静默收成 null；最长
-128 个 Unicode 字符，并拒绝控制符与双向文本格式控制符。历史库中的空名或不安全
-名字在读取时降级为 `null`，客户端按角色/「家人」兜底。
+`membership_id` 是服务端生成的**不可变** membership 公开身份（UUID），创建/加入时
+写入，token 轮换、地址变化或进程重启均不改变；供计划作者、自定义定义与履行冲突
+等 ACL 引用。`device_id` 仅作客户端把记录 `created_by_device_id` 解析为当前家庭
+称呼的**链路键**，产品 UI 不得展示。建家/加入时 `display_name`（家庭称呼）**必填**：
+trim 后空白、省略字段、或本机 UI 占位名“我（本机）”均返回 `422`，不再静默收成
+null；最长 128 个 Unicode 字符，并拒绝控制符与双向文本格式控制符。历史库中的空名
+或不安全名字在读取时降级为 `null`，客户端按角色/「家人」兜底。
 
 `POST /v1/family/display-name`（Auth：任一有效家庭 token）允许成员**仅更新自己的**
 `display_name`；body `{"display_name":"…"}`，校验规则同建家/加入；响应
@@ -237,10 +243,17 @@ token 计算 `is_self`；响应绝不包含 token、`token_hash` 或 `family_id`
 `{"ok":true,"family_name":…}`。客户端冷启动依赖本机会话缓存（create/join/rename
 回写），无独立 GET。
 
-为兼容旧库且不引入 schema migration，同一 role + device 的多条 active token
-在列表中合并。不同 role 不合并，因为 `device_id` 是客户端声明而非鉴权证据，不能
+为兼容旧库，同一 role + device 的多条 active token 在列表中合并为**一行**；合并时
+若含当前 principal 则投影其 `membership_id`，否则取字典序最小的 `membership_id`
+以保持稳定。不同 role 不合并，因为 `device_id` 是客户端声明而非鉴权证据，不能
 据此把 member 提升成 owner；退出也只吊销当前 Bearer token，无法安全地按
-`device_id` 批量吊销其它历史 token。管理员删除家庭会统一清除全部 memberships。
+`device_id` 批量吊销其它历史 token。旧库缺 `membership_id` 时加法回填 UUID，从不
+重写已有 id。管理员删除家庭会统一清除全部 memberships。
+
+`POST /v1/family/create` 与 `POST /v1/join` 响应均含 `membership_id`；同一
+`create_request_id` / 同一邀请码幂等重试返回**相同** `membership_id`。角色与写者
+身份只来自 Bearer principal：member 不能冒充 owner 调用邀请/改名等接口；push 中
+与 token 不符的 `device_id` 返回 `403`。
 
 pull 响应新增兼容字段 `has_more`。每页最多扫描 200 个实体，并以约 8 MiB
 序列化实体为体积目标；响应 `cursor` 只前进到本页已扫描的 revision。客户端在
@@ -271,6 +284,31 @@ pull 响应新增兼容字段 `has_more`。每页最多扫描 200 个实体，�
   已进入文件系统持久化边界。
 
 线协议字段形状不变，旧客户端只需不再收到不完整 media 即可前进 cursor。
+
+### 原子同步包（`atomic_bundle`）
+
+`GET /health` 广告 `capabilities: ["atomic_bundle"]`。新客户端在发布带照片的
+记录/计划前必须确认该能力；**不得**对旧 NAS 静默回退到 metadata-first push。
+
+典型发送流程：
+
+1. `POST /v1/bundles` — body
+   `{ "bundle_id", "root": {type: record|care_plan, ...}, "media": [...], "generation"? }`
+   live media 须带正 `byte_size`；响应
+   `{bundle_id, status:"staging", missing_media, staged_media}`
+2. 对每个 missing media：`PUT /v1/bundles/{bundle_id}/media/{uuid}`（原始字节）
+3. `POST /v1/bundles/{bundle_id}/commit` — 单事务写入 entities + 提升 rev，再把
+   暂存字节安装到 `media/{family}/{uuid}`；重复 commit 安全幂等
+
+规则：
+
+- commit 前普通 `GET /v1/pull` **看不到**包内任何实体
+- 编辑新版本：另开 `bundle_id` 暂存；commit 前 pull 仍返回旧完整版本
+- 根 `updated_at` 落后于已发布版本 → commit `409`
+- tombstone 包（root/media 带 `deleted_at`）不需上传字节即可 commit
+- 每包最多 8 个 media；每家庭最多 64 个 open staging bundle
+- `care_plan` 根类型与 `record` 共用契约；完整 CarePlan 字段/ACL 在后续票单扩展
+- 既有 `/v1/push` 与 `/v1/media` 保持兼容（头像与旧客户端）
 
 ## 备份与恢复
 

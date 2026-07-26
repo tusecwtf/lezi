@@ -179,6 +179,10 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
                 isSelf = (member["is_self"] as? JsonPrimitive)?.booleanOrNull ?: false,
                 // Link key for created_by_device_id → 称呼; never shown in UI.
                 deviceId = (member["device_id"] as? JsonPrimitive)?.contentOrNull,
+                // Soft-parse: legacy NAS may omit membership_id before upgrade.
+                membershipId = (member["membership_id"] as? JsonPrimitive)?.contentOrNull
+                    ?.trim()
+                    ?.takeIf { it.isNotEmpty() },
             )
         }
     }
@@ -207,6 +211,62 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
 
     override suspend fun getMedia(session: SyncSession, clientUuid: String): ByteArray =
         requestBytes(session.baseUrl, "/v1/media/$clientUuid", "GET", session.familyToken)
+
+    override suspend fun stageBundle(
+        session: SyncSession,
+        draft: AtomicBundleDraft,
+    ): BundleStageStatus {
+        val body = buildJsonObject {
+            put("bundle_id", draft.bundleId)
+            put("root", draft.root.toJson())
+            put("media", buildJsonArray { draft.media.forEach { add(it.toJson()) } })
+            session.pullGeneration.takeIf(String::isNotBlank)?.let {
+                put("generation", it)
+            }
+        }
+        return post(session.baseUrl, "/v1/bundles", session.familyToken, body).toBundleStageStatus()
+    }
+
+    override suspend fun putBundleMedia(
+        session: SyncSession,
+        bundleId: String,
+        clientUuid: String,
+        bytes: ByteArray,
+        mime: String?,
+    ): BundleStageStatus {
+        val json = requestJsonBytes(
+            session.baseUrl,
+            "/v1/bundles/$bundleId/media/$clientUuid",
+            "PUT",
+            session.familyToken,
+            bytes,
+            mime,
+        )
+        return json.toBundleStageStatus()
+    }
+
+    override suspend fun commitBundle(
+        session: SyncSession,
+        bundleId: String,
+    ): BundleCommitResult {
+        val body = buildJsonObject {
+            session.pullGeneration.takeIf(String::isNotBlank)?.let {
+                put("generation", it)
+            }
+        }
+        val json = post(
+            session.baseUrl,
+            "/v1/bundles/$bundleId/commit",
+            session.familyToken,
+            body,
+        )
+        return BundleCommitResult(
+            bundleId = json["bundle_id"]?.jsonPrimitive?.contentOrNull ?: bundleId,
+            status = json["status"]?.jsonPrimitive?.contentOrNull ?: "committed",
+            applied = json["applied"]?.jsonPrimitive?.longOrNull?.toInt() ?: 0,
+            cursor = json["cursor"]?.jsonPrimitive?.longOrNull ?: 0L,
+        )
+    }
 
     private suspend fun post(
         base: String,
@@ -266,6 +326,33 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
                 throw SyncHttpException(code, bytes.toString(Charsets.UTF_8))
             }
             bytes
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    /** PUT binary body, parse JSON success response (bundle stage status). */
+    private suspend fun requestJsonBytes(
+        base: String,
+        path: String,
+        method: String,
+        token: String,
+        body: ByteArray,
+        mime: String?,
+    ): JsonObject = withContext(Dispatchers.IO) {
+        val connection = open(base, path, method, token)
+        try {
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Type", mime ?: "application/octet-stream")
+            connection.outputStream.use { it.write(body) }
+            val (code, bytes) = readBoundedBody(
+                connection = connection,
+                successLimitBytes = MAX_SYNC_JSON_RESPONSE_BYTES,
+                successResponseKind = "JSON",
+            )
+            val text = bytes.toString(Charsets.UTF_8)
+            if (code !in 200..299) throw SyncHttpException(code, text)
+            Json.parseToJsonElement(text.ifBlank { "{}" }).jsonObject
         } finally {
             connection.disconnect()
         }
@@ -384,6 +471,17 @@ private fun JsonObject.entities(): List<SyncEntity> =
         )
     }
 
+private fun JsonObject.toBundleStageStatus(): BundleStageStatus = BundleStageStatus(
+    bundleId = get("bundle_id")?.jsonPrimitive?.contentOrNull.orEmpty(),
+    status = get("status")?.jsonPrimitive?.contentOrNull.orEmpty(),
+    missingMedia = (get("missing_media") as? JsonArray).orEmpty().mapNotNull {
+        (it as? JsonPrimitive)?.contentOrNull
+    },
+    stagedMedia = (get("staged_media") as? JsonArray).orEmpty().mapNotNull {
+        (it as? JsonPrimitive)?.contentOrNull
+    },
+)
+
 private fun JsonObject.toJoinResult(): JoinResult = JoinResult(
     familyId = get("family_id")!!.jsonPrimitive.content,
     token = get("token")!!.jsonPrimitive.content,
@@ -397,6 +495,10 @@ private fun JsonObject.toJoinResult(): JoinResult = JoinResult(
     generation = get("generation")?.jsonPrimitive?.contentOrNull.orEmpty(),
     // Legacy NAS may omit the field or send null; treat blank as null for client fallbacks.
     familyName = (get("family_name") as? JsonPrimitive)?.contentOrNull
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() },
+    // Soft-parse: older NAS without membership_id must not crash mixed upgrade paths.
+    membershipId = (get("membership_id") as? JsonPrimitive)?.contentOrNull
         ?.trim()
         ?.takeIf { it.isNotEmpty() },
 )

@@ -1,0 +1,243 @@
+package com.lezi.babylog.core.ui
+
+import com.lezi.babylog.core.model.RecordItemIdentity
+import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.availableForNewEntry
+
+/**
+ * Device-local catalog layout policy shared by “所有记录项目” and the more-sheet.
+ *
+ * - [categoryOrderJson]: ordered section storage keys (see [RecordSection.storageKey])
+ * - [itemOrderJson]: ordered catalog keys including built-in type keys and `custom:{id}`
+ *
+ * Items never cross categories. Hide/show keeps keys in the order list so re-enable
+ * restores the previous position.
+ *
+ * JSON helpers are pure-Kotlin (no org.json) so JVM unit tests and Android share one path.
+ */
+fun parseJsonStringArray(json: String): List<String> {
+    val trimmed = json.trim()
+    if (trimmed.isEmpty() || trimmed == "[]") return emptyList()
+    if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return emptyList()
+    val body = trimmed.substring(1, trimmed.length - 1).trim()
+    if (body.isEmpty()) return emptyList()
+    val result = mutableListOf<String>()
+    var i = 0
+    while (i < body.length) {
+        while (i < body.length && (body[i].isWhitespace() || body[i] == ',')) i++
+        if (i >= body.length) break
+        if (body[i] != '"') {
+            // Unquoted token until comma (legacy / tolerant).
+            val start = i
+            while (i < body.length && body[i] != ',') i++
+            val token = body.substring(start, i).trim()
+            if (token.isNotEmpty()) result += token
+            continue
+        }
+        i++ // opening quote
+        val sb = StringBuilder()
+        while (i < body.length) {
+            val c = body[i]
+            when {
+                c == '\\' && i + 1 < body.length -> {
+                    sb.append(body[i + 1])
+                    i += 2
+                }
+                c == '"' -> {
+                    i++
+                    break
+                }
+                else -> {
+                    sb.append(c)
+                    i++
+                }
+            }
+        }
+        val value = sb.toString().trim()
+        if (value.isNotEmpty()) result += value
+    }
+    return result
+}
+
+fun encodeJsonStringArray(items: List<String>): String =
+    items.joinToString(prefix = "[", postfix = "]") { item ->
+        "\"${item.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+    }
+
+val RecordSection.storageKey: String
+    get() = when (this) {
+        RecordSection.Feeding -> "feeding"
+        RecordSection.Excretion -> "excretion"
+        RecordSection.Routine -> "routine"
+        RecordSection.Health -> "health"
+        RecordSection.Growth -> "growth"
+        RecordSection.Custom -> "custom"
+    }
+
+fun recordSectionFromStorageKey(raw: String): RecordSection? =
+    RecordSection.entries.firstOrNull {
+        it.storageKey == raw.lowercase() || it.name.equals(raw, ignoreCase = true)
+    }
+
+/** Default category order when preference is empty/missing. */
+fun defaultCategoryOrder(): List<RecordSection> = RecordSection.entries.toList()
+
+/**
+ * Resolve category display order. Unknown keys are dropped; missing sections are
+ * appended in enum order so upgrades that add sections stay complete.
+ */
+fun orderedRecordSections(categoryOrderJson: String): List<RecordSection> {
+    val configured = parseJsonStringArray(categoryOrderJson)
+        .mapNotNull { recordSectionFromStorageKey(it) }
+    val missing = RecordSection.entries.filterNot { it in configured }
+    return (configured + missing).distinct()
+}
+
+fun encodeCategoryOrder(sections: List<RecordSection>): String =
+    encodeJsonStringArray(sections.map { it.storageKey })
+
+/**
+ * Move a category by [delta] (−1 up / +1 down). No-op when out of bounds.
+ * Returns the new [categoryOrderJson].
+ */
+fun moveCategoryOrder(
+    categoryOrderJson: String,
+    section: RecordSection,
+    delta: Int,
+): String {
+    val order = orderedRecordSections(categoryOrderJson).toMutableList()
+    val from = order.indexOf(section)
+    if (from < 0) return encodeCategoryOrder(order)
+    val to = from + delta
+    if (to !in order.indices) return encodeCategoryOrder(order)
+    val moved = order.removeAt(from)
+    order.add(to, moved)
+    return encodeCategoryOrder(order)
+}
+
+/**
+ * All catalog keys known for layout (built-ins available for new entry + concrete customs).
+ * Includes currently hidden keys so order survives disable/re-enable.
+ */
+fun knownCatalogKeys(
+    customItemIds: Collection<Long>,
+    builtIns: List<RecordType> = RecordType.availableForNewEntry(),
+): List<String> {
+    val builtInKeys = builtIns.map { it.key }
+    val customKeys = customItemIds
+        .filter { it > 0L }
+        .distinct()
+        .map { RecordItemIdentity.customCatalogKey(it) }
+    return builtInKeys + customKeys
+}
+
+/**
+ * Merge stored order with known keys:
+ * - keep relative order of known keys that appear in storage
+ * - drop retired/unknown keys that are not in [knownKeys]
+ * - append newly known keys not yet present (stable tail)
+ * - preserve keys that are only hidden (still in knownKeys)
+ */
+fun mergeItemOrder(
+    itemOrderJson: String,
+    knownKeys: Collection<String>,
+): List<String> {
+    val known = knownKeys.toSet()
+    val configured = parseJsonStringArray(itemOrderJson).filter { it in known }
+    val missing = knownKeys.filterNot { it in configured.toSet() }
+    return (configured + missing).distinct()
+}
+
+fun encodeItemOrder(keys: List<String>): String = encodeJsonStringArray(keys)
+
+fun catalogSectionForKey(catalogKey: String): RecordSection? {
+    val identity = RecordItemIdentity.parseCatalogKey(catalogKey) ?: return null
+    return when (identity) {
+        is RecordItemIdentity.BuiltIn -> identity.type.presentation.section
+        is RecordItemIdentity.Custom -> RecordSection.Custom
+    }
+}
+
+/**
+ * Keys belonging to [section], ordered by [itemOrderJson] policy.
+ * Includes hidden keys when they are still in [knownKeysForSection].
+ */
+fun orderedKeysInSection(
+    section: RecordSection,
+    itemOrderJson: String,
+    knownKeysForSection: Collection<String>,
+): List<String> {
+    val known = knownKeysForSection.filter { catalogSectionForKey(it) == section }.toSet()
+    val configured = parseJsonStringArray(itemOrderJson).filter { it in known }
+    val missing = known.filterNot { it in configured.toSet() }
+    return (configured + missing).distinct()
+}
+
+/**
+ * Move a catalog key within its section only. Cross-section moves are rejected
+ * (order unchanged). Returns new item-order JSON covering all [allKnownKeys].
+ */
+fun moveCatalogKeyWithinSection(
+    itemOrderJson: String,
+    catalogKey: String,
+    delta: Int,
+    allKnownKeys: Collection<String>,
+): String {
+    val section = catalogSectionForKey(catalogKey) ?: return mergeItemOrder(itemOrderJson, allKnownKeys)
+        .let(::encodeItemOrder)
+    val full = mergeItemOrder(itemOrderJson, allKnownKeys).toMutableList()
+    val sectionKeys = orderedKeysInSection(section, encodeItemOrder(full), allKnownKeys).toMutableList()
+    val from = sectionKeys.indexOf(catalogKey)
+    if (from < 0) return encodeItemOrder(full)
+    val to = from + delta
+    if (to !in sectionKeys.indices) return encodeItemOrder(full)
+    val moved = sectionKeys.removeAt(from)
+    sectionKeys.add(to, moved)
+
+    // Rebuild full order: walk sections in enum/default order, but keep non-section
+    // keys' relative positions by rewriting only the keys of this section in place
+    // of their previous section subsequence.
+    val sectionKeySet = sectionKeys.toSet()
+    val result = mutableListOf<String>()
+    var sectionWritten = false
+    for (key in full) {
+        if (key in sectionKeySet) {
+            if (!sectionWritten) {
+                result += sectionKeys
+                sectionWritten = true
+            }
+        } else {
+            result += key
+        }
+    }
+    if (!sectionWritten) result += sectionKeys
+    // Append any known keys that somehow dropped out.
+    for (key in allKnownKeys) {
+        if (key !in result) result += key
+    }
+    return encodeItemOrder(result)
+}
+
+/**
+ * Sort catalog entries for the more-sheet / settings lists.
+ * Section order comes from [categoryOrderJson]; within a section from [itemOrderJson].
+ */
+fun <T> sortCatalogByLocalOrder(
+    entries: List<T>,
+    sectionOf: (T) -> RecordSection,
+    catalogKeyOf: (T) -> String,
+    categoryOrderJson: String,
+    itemOrderJson: String,
+): List<T> {
+    val sectionRank = orderedRecordSections(categoryOrderJson)
+        .withIndex()
+        .associate { it.value to it.index }
+    val itemRank = parseJsonStringArray(itemOrderJson)
+        .withIndex()
+        .associate { it.value to it.index }
+    return entries.sortedWith(
+        compareBy<T> { sectionRank[sectionOf(it)] ?: Int.MAX_VALUE }
+            .thenBy { itemRank[catalogKeyOf(it)] ?: Int.MAX_VALUE }
+            .thenBy { catalogKeyOf(it) },
+    )
+}

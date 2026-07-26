@@ -5,14 +5,16 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.heightIn
@@ -20,14 +22,19 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,20 +42,30 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.Image
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import com.lezi.babylog.core.model.MAX_RECORD_PHOTOS
 import com.lezi.babylog.core.ui.CameraCapture
 import com.lezi.babylog.core.ui.RecordTypeIcon
 import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.designsystem.LeziClockDialDialog
 import com.lezi.babylog.designsystem.LeziPrimaryButton
+import com.lezi.babylog.designsystem.LeziPrimaryButtonMode
 import com.lezi.babylog.designsystem.LeziSecondaryButton
+import com.lezi.babylog.designsystem.LeziShapes
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
@@ -78,6 +95,8 @@ internal fun QuickRecordSheet(
     deleting: Boolean,
     saveError: String?,
     canStartNursingTimer: Boolean,
+    systemCalendarConfigured: Boolean = false,
+    onConfigureSystemCalendar: (() -> Unit)? = null,
     onDraftChange: (QuickRecordDraft) -> Unit,
     onDismiss: () -> Unit,
     onDelete: (() -> Unit)?,
@@ -89,9 +108,12 @@ internal fun QuickRecordSheet(
     val zone = ZoneId.systemDefault()
     val typeColor = leziRecordColor(draft.type.presentation.colorRole)
     val actionsEnabled = !saving && !deleting
+    val busy = saving || deleting
     val nowMillis = RecordTime.currentTimeMillis()
     val intervalPreview = draft.intervalDurationPreview(nowMillis)
-    val confirmEnabled = actionsEnabled && draft.canConfirm(nowMillis)
+    val validation = draft.validationResult(nowMillis)
+    val canConfirm = validation == null
+    val appearance = confirmAppearance(busy = busy, canConfirm = canConfirm)
     val dismissKeyboard = rememberDismissKeyboard()
     var clockTarget by remember(interactionKey) {
         mutableStateOf<QuickClockTarget?>(null)
@@ -103,11 +125,16 @@ internal fun QuickRecordSheet(
     var attemptedConfirm by remember(interactionKey) {
         mutableStateOf(false)
     }
+    var confirmChrome by remember(interactionKey) {
+        mutableStateOf(ComposerConfirmChromeState())
+    }
+    val fieldFocusRequester = remember(interactionKey) { FocusRequester() }
     val context = LocalContext.current
     var photoActionError by remember(interactionKey) { mutableStateOf<String?>(null) }
     var pendingCameraUri by remember(interactionKey) { mutableStateOf<Uri?>(null) }
+    var previewPhotoIndex by remember(interactionKey) { mutableStateOf<Int?>(null) }
     val photoPicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.PickMultipleVisualMedia(9),
+        ActivityResultContracts.PickMultipleVisualMedia(MAX_RECORD_PHOTOS),
         onImportPhotos,
     )
     val takePicture = rememberLauncherForActivityResult(
@@ -168,18 +195,29 @@ internal fun QuickRecordSheet(
     } else {
         visibleIntervalPreview
     }
-    val footerValidation = draft.footerValidationError(
-        nowMillis = nowMillis,
-        isDirty = isDirty,
-        attemptedConfirm = attemptedConfirm,
-    )
+    // Persist / clock errors stay in the scroll footer; draft validation uses the reason card.
     val footerError = clockError.takeUnless { isIntervalMode }
         ?: saveError?.takeUnless { it == intervalWarning }
-        ?: footerValidation
+
+    LaunchedEffect(busy) {
+        confirmChrome = reduceConfirmChrome(
+            confirmChrome,
+            ComposerConfirmChromeEvent.BusyChanged(busy),
+        )
+    }
+    LaunchedEffect(confirmChrome.reasonVisible, confirmChrome.focusField) {
+        if (confirmChrome.reasonVisible && confirmChrome.focusField != null) {
+            runCatching { fieldFocusRequester.requestFocus() }
+        }
+    }
 
     fun update(value: QuickRecordDraft) {
         clockError = null
         isDirty = true
+        confirmChrome = reduceConfirmChrome(
+            confirmChrome,
+            ComposerConfirmChromeEvent.DraftEdited,
+        )
         onDraftChange(value)
     }
 
@@ -253,6 +291,8 @@ internal fun QuickRecordSheet(
                 actionsEnabled = actionsEnabled,
                 onDraftChange = ::update,
                 onStartNursingTimer = onStartNursingTimer,
+                highlightedField = confirmChrome.focusField,
+                fieldFocusRequester = fieldFocusRequester,
             )
 
             TimeFields(
@@ -286,15 +326,25 @@ internal fun QuickRecordSheet(
                 },
                 accentColor = if (draft.mode == QuickRecordMode.Sleep) typeColor else null,
                 intervalPreview = timeFeedback,
+                highlightedField = confirmChrome.focusField,
             )
 
             SectionLabel("备注")
             OutlinedTextField(
                 value = draft.note,
                 onValueChange = { update(draft.copy(note = it.take(200))) },
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .then(
+                        if (confirmChrome.focusField == ComposerInvalidField.Note) {
+                            Modifier.focusRequester(fieldFocusRequester)
+                        } else {
+                            Modifier
+                        },
+                    ),
                 label = { Text("备注（可选）") },
                 placeholder = { Text(notePlaceholder(draft.type)) },
+                isError = confirmChrome.focusField == ComposerInvalidField.Note,
                 minLines = 2,
                 maxLines = 4,
                 supportingText = { Text("${draft.note.length}/200") },
@@ -313,60 +363,65 @@ internal fun QuickRecordSheet(
                     }
                 }
             }
-            if (draft.mode == QuickRecordMode.Text) {
-                Text("记录图片（最多 9 张）", style = LeziTypography.Label)
-                if (draft.photos.isNotEmpty()) {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                    ) {
-                        draft.photos.forEach { path ->
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                remember(path) {
-                                    BitmapFactory.decodeFile(path)?.asImageBitmap()
-                                }?.let { bitmap ->
-                                    Image(
-                                        bitmap = bitmap,
-                                        contentDescription = "记录图片",
-                                        modifier = Modifier
-                                            .size(72.dp)
-                                            .clip(MaterialTheme.shapes.small),
-                                        contentScale = ContentScale.Crop,
-                                    )
-                                }
-                                TextButton(
-                                    onClick = { onRemovePhoto(path) },
-                                ) { Text("移除") }
+            // Shared note-area photo chrome for every record type (max 3).
+            Text("记录图片（最多 $MAX_RECORD_PHOTOS 张）", style = LeziTypography.Label)
+            if (draft.photos.isNotEmpty()) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    draft.photos.forEachIndexed { index, path ->
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            remember(path) {
+                                BitmapFactory.decodeFile(path)?.asImageBitmap()
+                            }?.let { bitmap ->
+                                Image(
+                                    bitmap = bitmap,
+                                    contentDescription = "记录图片，点击预览",
+                                    modifier = Modifier
+                                        .size(72.dp)
+                                        .clip(MaterialTheme.shapes.small)
+                                        .clickable(
+                                            enabled = actionsEnabled,
+                                            onClick = { previewPhotoIndex = index },
+                                        ),
+                                    contentScale = ContentScale.Crop,
+                                )
                             }
+                            TextButton(
+                                enabled = actionsEnabled,
+                                onClick = { onRemovePhoto(path) },
+                            ) { Text("移除") }
                         }
                     }
                 }
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    TextButton(
-                        enabled = draft.photos.size < 9,
-                        onClick = {
-                            photoActionError = null
-                            photoPicker.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                            )
-                        },
-                    ) { Text("相册") }
-                    TextButton(
-                        enabled = draft.photos.size < 9,
-                        onClick = { launchCameraCapture() },
-                    ) { Text("拍照") }
-                }
-                photoActionError?.let {
-                    Text(
-                        it,
-                        color = MaterialTheme.colorScheme.error,
-                        style = LeziTypography.Meta,
-                    )
-                }
+            }
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                TextButton(
+                    enabled = actionsEnabled && RecordPhotoChrome.canAddPhoto(draft.photos.size),
+                    onClick = {
+                        photoActionError = null
+                        photoPicker.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                        )
+                    },
+                ) { Text("相册") }
+                TextButton(
+                    enabled = actionsEnabled && RecordPhotoChrome.canAddPhoto(draft.photos.size),
+                    onClick = { launchCameraCapture() },
+                ) { Text("拍照") }
+            }
+            photoActionError?.let {
+                Text(
+                    it,
+                    color = MaterialTheme.colorScheme.error,
+                    style = LeziTypography.Meta,
+                )
             }
 
             footerError?.let {
@@ -378,7 +433,7 @@ internal fun QuickRecordSheet(
             }
         }
 
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(
@@ -387,49 +442,142 @@ internal fun QuickRecordSheet(
                     end = LeziSpacing.Lg,
                     bottom = LeziSpacing.Lg,
                 ),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            LeziSecondaryButton(
-                label = "取消",
-                onClick = {
-                    dismissKeyboard()
-                    onDismiss()
-                },
-                enabled = actionsEnabled,
-                modifier = Modifier
-                    .weight(1f),
-            )
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .pointerInput(interactionKey, actionsEnabled, confirmEnabled) {
-                        if (actionsEnabled && !confirmEnabled) {
-                            // Keep save disabled; an attempted tap only reveals deferred validation.
-                            detectTapGestures {
+            confirmChrome.reasonMessage?.let { reason ->
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics {
+                            contentDescription = reason
+                            liveRegion = LiveRegionMode.Polite
+                        },
+                    shape = LeziShapes.Sm,
+                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.92f),
+                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                ) {
+                    Text(
+                        reason,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        style = LeziTypography.BodyStrong,
+                    )
+                }
+            }
+            // Ticket 21: schedule-care seam — default-on projection; setup is optional and
+            // cancel/skip never blocks plan save (CareLog falls back to Lezi reminders).
+            if (draft.workMode(nowMillis) == ComposerWorkMode.ScheduleCare ||
+                draft.workMode(nowMillis) == ComposerWorkMode.EditPlan
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("同步到系统日历", style = LeziTypography.BodyStrong)
+                        Text(
+                            if (systemCalendarConfigured) {
+                                "本机投影 · 不上传家庭"
+                            } else {
+                                "未配置时仍可保存计划，使用乐记提醒"
+                            },
+                            style = LeziTypography.Meta,
+                        )
+                    }
+                    Switch(
+                        checked = draft.projectToSystemCalendar,
+                        onCheckedChange = { on ->
+                            isDirty = true
+                            onDraftChange(draft.copy(projectToSystemCalendar = on))
+                        },
+                        enabled = actionsEnabled,
+                    )
+                }
+                if (draft.projectToSystemCalendar && !systemCalendarConfigured &&
+                    onConfigureSystemCalendar != null
+                ) {
+                    TextButton(
+                        onClick = onConfigureSystemCalendar,
+                        enabled = actionsEnabled,
+                    ) {
+                        Text("去配置系统日历")
+                    }
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                LeziSecondaryButton(
+                    label = "取消",
+                    onClick = {
+                        dismissKeyboard()
+                        confirmChrome = reduceConfirmChrome(
+                            confirmChrome,
+                            ComposerConfirmChromeEvent.Dismissed,
+                        )
+                        onDismiss()
+                    },
+                    enabled = actionsEnabled,
+                    modifier = Modifier.weight(1f),
+                )
+                val confirmLabel = when {
+                    saving -> "保存中…"
+                    deleting -> "删除中…"
+                    else -> draft.confirmLabel()
+                }
+                val buttonMode = when (appearance) {
+                    ComposerConfirmAppearance.Enabled -> LeziPrimaryButtonMode.Enabled
+                    ComposerConfirmAppearance.ExplainedDisabled ->
+                        LeziPrimaryButtonMode.ExplainedDisabled
+                    ComposerConfirmAppearance.BusyDisabled -> LeziPrimaryButtonMode.Disabled
+                }
+                // TalkBack: concrete reason only when explained-disabled — never a fixed prompt.
+                val confirmSemantics = when (appearance) {
+                    ComposerConfirmAppearance.ExplainedDisabled ->
+                        validation?.message ?: confirmLabel
+                    else -> confirmLabel
+                }
+                LeziPrimaryButton(
+                    label = confirmLabel,
+                    onClick = {
+                        when (appearance) {
+                            ComposerConfirmAppearance.BusyDisabled -> Unit
+                            ComposerConfirmAppearance.Enabled -> {
                                 attemptedConfirm = true
                                 dismissKeyboard()
+                                // Hard-block persist when invalid even if appearance races.
+                                if (draft.canConfirm()) {
+                                    onConfirm(draft)
+                                }
+                            }
+                            ComposerConfirmAppearance.ExplainedDisabled -> {
+                                attemptedConfirm = true
+                                dismissKeyboard()
+                                confirmChrome = reduceConfirmChrome(
+                                    confirmChrome,
+                                    ComposerConfirmChromeEvent.GreyConfirmTapped(validation),
+                                )
                             }
                         }
                     },
-            ) {
-                LeziPrimaryButton(
-                    label = when {
-                        saving -> "保存中…"
-                        deleting -> "删除中…"
-                        else -> draft.confirmLabel()
-                    },
-                    onClick = {
-                        if (!actionsEnabled) return@LeziPrimaryButton
-                        attemptedConfirm = true
-                        dismissKeyboard()
-                        if (draft.canConfirm()) {
-                            onConfirm(draft)
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = confirmEnabled,
+                    modifier = Modifier
+                        .weight(1f)
+                        .semantics { contentDescription = confirmSemantics },
+                    mode = buttonMode,
                 )
             }
+        }
+    }
+
+    previewPhotoIndex?.let { startIndex ->
+        val previewStart = RecordPhotoChrome.previewStartIndex(startIndex, draft.photos.size)
+        if (previewStart != null) {
+            RecordPhotoPreviewDialog(
+                photos = draft.photos,
+                startIndex = previewStart,
+                onDismiss = { previewPhotoIndex = null },
+            )
         }
     }
 
@@ -469,10 +617,18 @@ internal fun QuickRecordSheet(
                             pickedMillis > nowMillis -> {
                                 isDirty = true
                                 clockError = FUTURE_TIME_WARNING
+                                confirmChrome = reduceConfirmChrome(
+                                    confirmChrome,
+                                    ComposerConfirmChromeEvent.DraftEdited,
+                                )
                             }
                             shiftedEnd != null && shiftedEnd > nowMillis -> {
                                 isDirty = true
                                 clockError = FUTURE_TIME_WARNING
+                                confirmChrome = reduceConfirmChrome(
+                                    confirmChrome,
+                                    ComposerConfirmChromeEvent.DraftEdited,
+                                )
                             }
                             else -> update(
                                 draft.copy(
@@ -493,6 +649,10 @@ internal fun QuickRecordSheet(
                         } else {
                             isDirty = true
                             clockError = rejection
+                            confirmChrome = reduceConfirmChrome(
+                                confirmChrome,
+                                ComposerConfirmChromeEvent.DraftEdited,
+                            )
                         }
                     }
                 }
@@ -500,5 +660,76 @@ internal fun QuickRecordSheet(
             },
             onDismiss = { clockTarget = null },
         )
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun RecordPhotoPreviewDialog(
+    photos: List<String>,
+    startIndex: Int,
+    onDismiss: () -> Unit,
+) {
+    val pagerState = rememberPagerState(
+        initialPage = startIndex,
+        pageCount = { photos.size },
+    )
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = Color.Black,
+        ) {
+            Box(Modifier.fillMaxSize()) {
+                HorizontalPager(
+                    state = pagerState,
+                    modifier = Modifier.fillMaxSize(),
+                ) { page ->
+                    val path = photos[page]
+                    val bitmap = remember(path) {
+                        BitmapFactory.decodeFile(path)?.asImageBitmap()
+                    }
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        if (bitmap != null) {
+                            Image(
+                                bitmap = bitmap,
+                                contentDescription = "记录图片预览 ${page + 1}/${photos.size}",
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Fit,
+                            )
+                        } else {
+                            Text(
+                                "无法预览图片",
+                                color = Color.White,
+                                style = LeziTypography.Body,
+                            )
+                        }
+                    }
+                }
+                TextButton(
+                    onClick = onDismiss,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(LeziSpacing.Md),
+                ) {
+                    Text("关闭", color = Color.White)
+                }
+                if (photos.size > 1) {
+                    Text(
+                        "${pagerState.currentPage + 1}/${photos.size}",
+                        color = Color.White,
+                        style = LeziTypography.Meta,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(LeziSpacing.Md),
+                    )
+                }
+            }
+        }
     }
 }

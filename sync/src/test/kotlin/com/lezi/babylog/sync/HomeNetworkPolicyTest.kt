@@ -115,7 +115,9 @@ class HomeNetworkPolicyTest {
                 server.accept().use { socket ->
                     val reader = socket.getInputStream().bufferedReader()
                     while (!reader.readLine().isNullOrEmpty()) Unit
-                    val body = """{"status":"ok"}""".toByteArray(Charsets.UTF_8)
+                    val body =
+                        """{"ok":true,"version":"0.2.4","capabilities":["atomic_bundle"]}"""
+                            .toByteArray(Charsets.UTF_8)
                     socket.getOutputStream().use { output ->
                         output.write(
                             (
@@ -132,15 +134,68 @@ class HomeNetworkPolicyTest {
         }
 
         try {
-            assertThat(
-                HttpHealthProbe().isHealthy(
-                    "http://${server.inetAddress.hostAddress}:${server.localPort}",
-                ),
-            ).isTrue()
+            val status = HttpHealthProbe().probe(
+                "http://${server.inetAddress.hostAddress}:${server.localPort}",
+            )
+            assertThat(status.ok).isTrue()
+            assertThat(status.supportsAtomicBundle).isTrue()
+            assertThat(status.version).isEqualTo("0.2.4")
         } finally {
             server.close()
             responder.join(2_000)
         }
+    }
+
+    @Test
+    fun httpHealthProbeTreatsLegacyBodyWithoutCapabilitiesAsHealthyButUnsupported() = runTest {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val responder = thread(name = "lezi-health-legacy-test-server") {
+            runCatching {
+                server.accept().use { socket ->
+                    val reader = socket.getInputStream().bufferedReader()
+                    while (!reader.readLine().isNullOrEmpty()) Unit
+                    val body = """{"ok":true,"version":"0.2.3"}""".toByteArray(Charsets.UTF_8)
+                    socket.getOutputStream().use { output ->
+                        output.write(
+                            (
+                                "HTTP/1.1 200 OK\r\n" +
+                                    "Content-Type: application/json\r\n" +
+                                    "Content-Length: ${body.size}\r\n" +
+                                    "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                        )
+                        output.write(body)
+                    }
+                }
+            }
+        }
+
+        try {
+            val status = HttpHealthProbe().probe(
+                "http://${server.inetAddress.hostAddress}:${server.localPort}",
+            )
+            assertThat(status.ok).isTrue()
+            assertThat(status.supportsAtomicBundle).isFalse()
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
+    fun policyCachesAtomicBundleCapabilityFromSuccessfulProbe() = runTest {
+        val probe = RecordingHealthProbe(
+            result = true,
+            capabilities = setOf(CAPABILITY_ATOMIC_BUNDLE),
+        )
+        val policy = HomeNetworkPolicy(
+            networkState = FakeNetworkState(isWifi = true, ssid = "Home"),
+            healthProbe = probe,
+            clock = FakePolicyClock(),
+        )
+        assertThat(policy.evaluate(config(), isForeground = true))
+            .isEqualTo(HomeNetworkDecision.Allowed)
+        assertThat(policy.supportsAtomicBundle).isTrue()
     }
 
     @Test
@@ -373,11 +428,17 @@ private class FakeNetworkState(
     override fun currentWifiSsid(): String? = ssid
 }
 
-private class RecordingHealthProbe(var result: Boolean) : HealthProbe {
+private class RecordingHealthProbe(
+    var result: Boolean,
+    var capabilities: Set<String> = setOf(CAPABILITY_ATOMIC_BUNDLE),
+) : HealthProbe {
     val calls = mutableListOf<String>()
-    override suspend fun isHealthy(baseUrl: String): Boolean {
+    override suspend fun probe(baseUrl: String): HealthStatus {
         calls += baseUrl
-        return result
+        return HealthStatus(
+            ok = result,
+            capabilities = if (result) capabilities else emptySet(),
+        )
     }
 }
 

@@ -188,6 +188,7 @@ class TimerViewModel @Inject constructor(
                         endedAt = command.endedAt,
                         recordMode = recordMode,
                         completionClientUuid = completionClientUuid,
+                        carePlanId = stableState.carePlanId,
                     )
                     // Await the DataStore clear. If the process dies before it commits, replay uses
                     // the same completionClientUuid and CareLog returns the existing record.
@@ -214,6 +215,40 @@ class TimerViewModel @Inject constructor(
         viewModelScope.launch {
             toggleMutex.withLock { persist(TimerState()) }
             onCleared()
+        }
+    }
+
+    /**
+     * Bind an open nursing care plan to the next/current timer session.
+     * No-op when an active unrelated timer already owns a different plan or
+     * has timer data for another baby; re-open with the same plan is idempotent.
+     */
+    fun bindCarePlanIfIdle(carePlanId: Long?, babyId: Long?) {
+        if (carePlanId == null || carePlanId <= 0L) return
+        viewModelScope.launch {
+            toggleMutex.withLock {
+                val cur = _state.value
+                when {
+                    cur.carePlanId == carePlanId -> {
+                        // Same plan re-open: keep association, do not double-start.
+                        if (babyId != null && cur.babyId == null) {
+                            persist(cur.copy(babyId = babyId))
+                        }
+                    }
+                    cur.hasTimerData() || cur.carePlanId != null -> {
+                        // Active unrelated session — leave it alone (fail closed).
+                    }
+                    else -> {
+                        persist(
+                            cur.copy(
+                                carePlanId = carePlanId,
+                                babyId = babyId ?: cur.babyId,
+                                completionClientUuid = cur.completionClientUuid ?: newClientUuid(),
+                            ),
+                        )
+                    }
+                }
+            }
         }
     }
 }

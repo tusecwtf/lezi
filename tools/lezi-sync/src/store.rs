@@ -9,10 +9,13 @@ use rusqlite::{
 };
 use serde::Serialize;
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::model::Entity;
+use crate::model::{
+    Entity, MAX_BUNDLE_MEDIA_ENTITIES, MAX_OPEN_STAGING_BUNDLES_PER_FAMILY,
+};
 use crate::{PULL_ENTITY_TARGET_BYTES, PULL_PAGE_ENTITY_LIMIT, PULL_PAGE_TARGET_BYTES};
 
 const ENTITY_QUERY_CHUNK_SIZE: usize = 400;
@@ -23,6 +26,8 @@ pub struct Principal {
     pub role: String,
     pub token_hash: String,
     pub device_id: String,
+    /// Server-minted immutable membership identity (UUID). Safe to expose to clients.
+    pub membership_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -31,6 +36,8 @@ pub struct ActiveMembership {
     pub role: String,
     pub device_id: String,
     pub display_name: Option<String>,
+    /// Server-minted immutable membership identity (UUID).
+    pub membership_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -84,6 +91,14 @@ pub enum StoreError {
     CursorAhead(i64),
     #[error("only owner may change avatar")]
     ForbiddenAvatar,
+    #[error("custom item change forbidden for this membership")]
+    ForbiddenCustomItem,
+    #[error("care plan change forbidden for this membership")]
+    ForbiddenCarePlan,
+    #[error("deleted custom item cannot be resurrected")]
+    CustomItemTombstoneResurrection,
+    #[error("deleted care plan cannot be resurrected")]
+    CarePlanTombstoneResurrection,
     #[error("media kind and association are immutable")]
     ImmutableMediaAssociation,
     #[error("entity updated_at is outside the accepted time range")]
@@ -94,6 +109,40 @@ pub enum StoreError {
     UnresolvedReference(String),
     #[error("stored entity payload is invalid")]
     InvalidStoredPayload,
+    #[error("atomic bundle not found")]
+    BundleNotFound,
+    #[error("atomic bundle already committed with different content")]
+    BundleContentConflict,
+    #[error("too many open staging bundles for this family")]
+    BundleStagingLimit,
+    #[error("media is not listed in the bundle manifest")]
+    BundleMediaNotInManifest,
+    #[error("bundle media bytes are incomplete")]
+    BundleMediaIncomplete,
+    #[error("bundle root is not newer than the published version")]
+    BundleRootNotNewer,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BundleStageStatus {
+    pub bundle_id: String,
+    pub status: String,
+    pub missing_media: Vec<String>,
+    pub staged_media: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BundleCommitResult {
+    pub bundle_id: String,
+    pub status: String,
+    pub applied: usize,
+    pub cursor: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredBundle {
+    pub media: Vec<Entity>,
+    pub required_media: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -109,7 +158,8 @@ struct ExistingEntity {
 }
 
 type EntityKey = (String, String);
-type MediaAssociation = (String, Option<String>, Option<String>);
+/// (kind, record_client_uuid, baby_client_uuid, care_plan_client_uuid)
+type MediaAssociation = (String, Option<String>, Option<String>, Option<String>);
 
 impl Store {
     pub fn open(database_path: impl Into<PathBuf>) -> Result<Self, StoreError> {
@@ -174,7 +224,8 @@ impl Store {
                 role TEXT NOT NULL CHECK(role IN ('owner', 'member')),
                 device_id TEXT NOT NULL,
                 display_name TEXT,
-                revoked_at INTEGER
+                revoked_at INTEGER,
+                membership_id TEXT
             );
             CREATE INDEX IF NOT EXISTS memberships_family
                 ON memberships(family_id);
@@ -194,7 +245,7 @@ impl Store {
 
             CREATE TABLE IF NOT EXISTS entities (
                 family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
-                entity_type TEXT NOT NULL CHECK(entity_type IN ('baby', 'record', 'media')),
+                entity_type TEXT NOT NULL CHECK(entity_type IN ('baby', 'record', 'media', 'care_plan', 'custom_item', 'fulfillment_candidate')),
                 client_uuid TEXT NOT NULL,
                 updated_at INTEGER NOT NULL,
                 deleted_at INTEGER,
@@ -204,6 +255,39 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS entities_family_rev
                 ON entities(family_id, rev);
+
+            CREATE TABLE IF NOT EXISTS sync_bundles (
+                family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+                bundle_id TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('staging', 'committed')),
+                root_type TEXT NOT NULL,
+                root_client_uuid TEXT NOT NULL,
+                root_updated_at INTEGER NOT NULL,
+                root_deleted_at INTEGER,
+                root_payload_json TEXT NOT NULL,
+                media_entities_json TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                committed_at INTEGER,
+                committed_cursor INTEGER,
+                committed_applied INTEGER,
+                PRIMARY KEY (family_id, bundle_id)
+            );
+            CREATE INDEX IF NOT EXISTS sync_bundles_family_status
+                ON sync_bundles(family_id, status);
+
+            CREATE TABLE IF NOT EXISTS sync_bundle_media (
+                family_id TEXT NOT NULL,
+                bundle_id TEXT NOT NULL,
+                media_uuid TEXT NOT NULL,
+                declared_byte_size INTEGER,
+                staged_byte_size INTEGER,
+                staged_at INTEGER,
+                PRIMARY KEY (family_id, bundle_id, media_uuid),
+                FOREIGN KEY (family_id, bundle_id)
+                    REFERENCES sync_bundles(family_id, bundle_id) ON DELETE CASCADE
+            );
             ",
         )?;
 
@@ -221,6 +305,26 @@ impl Store {
         if !family_columns.contains("name") {
             connection.execute("ALTER TABLE families ADD COLUMN name TEXT", [])?;
         }
+        let membership_columns = table_columns(&connection, "memberships")?;
+        if !membership_columns.contains("membership_id") {
+            connection.execute(
+                "ALTER TABLE memberships ADD COLUMN membership_id TEXT",
+                [],
+            )?;
+        }
+        // Additive upgrade: mint stable UUIDs for rows created before this column.
+        // Never regenerate an existing membership_id (author ACL depends on immutability).
+        backfill_membership_ids(&connection)?;
+        // Expand entities CHECK for care_plan, custom_item, fulfillment_candidate.
+        ensure_entities_allow_care_plan_and_custom_item(&connection)?;
+        connection.execute(
+            "
+            CREATE UNIQUE INDEX IF NOT EXISTS memberships_membership_id
+            ON memberships(membership_id)
+            WHERE membership_id IS NOT NULL
+            ",
+            [],
+        )?;
         connection.execute(
             "
             CREATE UNIQUE INDEX IF NOT EXISTS families_create_request
@@ -234,7 +338,7 @@ impl Store {
 
     /// Creates a family (or returns the same credentials on matching idempotent retry).
     ///
-    /// Returns `(family_id, token, family_name)`.
+    /// Returns `(family_id, token, membership_id, family_name)`.
     pub fn create_family<F>(
         &self,
         now: i64,
@@ -243,7 +347,7 @@ impl Store {
         display_name: &str,
         family_name: Option<&str>,
         derive_token: F,
-    ) -> Result<(String, String, Option<String>), StoreError>
+    ) -> Result<(String, String, String, Option<String>), StoreError>
     where
         F: Fn(&str, &str) -> String,
     {
@@ -254,7 +358,8 @@ impl Store {
             .query_row(
                 "
                 SELECT families.id, families.name, memberships.device_id,
-                       memberships.display_name, memberships.revoked_at
+                       memberships.display_name, memberships.revoked_at,
+                       memberships.membership_id, memberships.token_hash
                 FROM families
                 JOIN memberships
                   ON memberships.family_id = families.id
@@ -269,11 +374,22 @@ impl Store {
                         row.get::<_, String>(2)?,
                         row.get::<_, Option<String>>(3)?,
                         row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, String>(6)?,
                     ))
                 },
             )
             .optional()?;
-        if let Some((family_id, stored_family_name, stored_device, stored_name, revoked_at)) = retry {
+        if let Some((
+            family_id,
+            stored_family_name,
+            stored_device,
+            stored_name,
+            revoked_at,
+            stored_membership_id,
+            token_hash,
+        )) = retry
+        {
             if stored_device != device_id
                 || stored_name.as_deref() != Some(display_name)
                 || stored_family_name.as_deref() != family_name
@@ -281,9 +397,12 @@ impl Store {
             {
                 return Err(StoreError::FamilyAlreadyExists);
             }
+            let membership_id =
+                ensure_membership_id_in_tx(&transaction, &token_hash, stored_membership_id)?;
             return Ok((
                 family_id.clone(),
                 derive_token(&create_request_hash, &family_id),
+                membership_id,
                 stored_family_name,
             ));
         }
@@ -296,6 +415,7 @@ impl Store {
         }
 
         let family_id = Uuid::new_v4().to_string();
+        let membership_id = Uuid::new_v4().to_string();
         let token = derive_token(&create_request_hash, &family_id);
         transaction.execute(
             "
@@ -311,20 +431,22 @@ impl Store {
         transaction.execute(
             "
             INSERT INTO memberships(
-                token_hash, family_id, role, device_id, display_name
-            ) VALUES (?1, ?2, 'owner', ?3, ?4)
+                token_hash, family_id, role, device_id, display_name, membership_id
+            ) VALUES (?1, ?2, 'owner', ?3, ?4, ?5)
             ",
             params![
                 crate::hash_secret(&token),
                 family_id,
                 device_id,
-                display_name
+                display_name,
+                membership_id
             ],
         )?;
         transaction.commit()?;
         Ok((
             family_id,
             token,
+            membership_id,
             family_name.map(str::to_owned),
         ))
     }
@@ -345,32 +467,44 @@ impl Store {
 
     pub fn authenticate(&self, token: &str) -> Result<Option<Principal>, StoreError> {
         let connection = self.connect()?;
-        let principal = connection
+        let token_hash = crate::hash_secret(token);
+        let row = connection
             .query_row(
                 "
-                SELECT token_hash, family_id, role, device_id
+                SELECT token_hash, family_id, role, device_id, membership_id
                 FROM memberships
                 WHERE token_hash = ?1 AND revoked_at IS NULL
                 ",
-                params![crate::hash_secret(token)],
+                params![token_hash],
                 |row| {
-                    Ok(Principal {
-                        token_hash: row.get(0)?,
-                        family_id: row.get(1)?,
-                        role: row.get(2)?,
-                        device_id: row.get(3)?,
-                    })
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
                 },
             )
             .optional()?;
-        Ok(principal)
+        let Some((token_hash, family_id, role, device_id, membership_id)) = row else {
+            return Ok(None);
+        };
+        let membership_id = ensure_membership_id(&connection, &token_hash, membership_id)?;
+        Ok(Some(Principal {
+            token_hash,
+            family_id,
+            role,
+            device_id,
+            membership_id,
+        }))
     }
 
     pub fn active_memberships(&self, family_id: &str) -> Result<Vec<ActiveMembership>, StoreError> {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
             "
-            SELECT token_hash, role, device_id, display_name
+            SELECT token_hash, role, device_id, display_name, membership_id
             FROM memberships
             WHERE family_id = ?1 AND revoked_at IS NULL
             ORDER BY
@@ -379,15 +513,29 @@ impl Store {
                 token_hash COLLATE BINARY
             ",
         )?;
-        let rows = statement.query_map(params![family_id], |row| {
-            Ok(ActiveMembership {
-                token_hash: row.get(0)?,
-                role: row.get(1)?,
-                device_id: row.get(2)?,
-                display_name: row.get(3)?,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        let rows = statement
+            .query_map(params![family_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut memberships = Vec::with_capacity(rows.len());
+        for (token_hash, role, device_id, display_name, membership_id) in rows {
+            let membership_id = ensure_membership_id(&connection, &token_hash, membership_id)?;
+            memberships.push(ActiveMembership {
+                token_hash,
+                role,
+                device_id,
+                display_name,
+                membership_id,
+            });
+        }
+        Ok(memberships)
     }
 
     pub fn create_invite(
@@ -427,7 +575,7 @@ impl Store {
         Ok(())
     }
 
-    /// Returns `(family_id, token, family_name)`.
+    /// Returns `(family_id, token, membership_id, family_name)`.
     pub fn join_family<F>(
         &self,
         code: &str,
@@ -435,7 +583,7 @@ impl Store {
         display_name: &str,
         now: i64,
         derive_token: F,
-    ) -> Result<(String, String, Option<String>), StoreError>
+    ) -> Result<(String, String, String, Option<String>), StoreError>
     where
         F: Fn(&str, &str) -> String,
     {
@@ -471,31 +619,40 @@ impl Store {
             if joined_device_id.as_deref() != Some(device_id) {
                 return Err(StoreError::InviteAlreadyUsed);
             }
-            let active = transaction
+            let stored_membership_id = transaction
                 .query_row(
                     "
-                    SELECT 1 FROM memberships
+                    SELECT membership_id FROM memberships
                     WHERE token_hash = ?1 AND family_id = ?2 AND revoked_at IS NULL
                     ",
                     params![token_hash, family_id],
-                    |_| Ok(()),
+                    |row| row.get::<_, Option<String>>(0),
                 )
                 .optional()?;
-            if active.is_none() {
+            let Some(stored_membership_id) = stored_membership_id else {
                 return Err(StoreError::InviteNotFound);
-            }
-            return Ok((family_id, token, family_name));
+            };
+            let membership_id =
+                ensure_membership_id_in_tx(&transaction, &token_hash, stored_membership_id)?;
+            return Ok((family_id, token, membership_id, family_name));
         }
         if expires_at <= now {
             return Err(StoreError::InviteExpired);
         }
+        let membership_id = Uuid::new_v4().to_string();
         transaction.execute(
             "
             INSERT INTO memberships(
-                token_hash, family_id, role, device_id, display_name
-            ) VALUES (?1, ?2, 'member', ?3, ?4)
+                token_hash, family_id, role, device_id, display_name, membership_id
+            ) VALUES (?1, ?2, 'member', ?3, ?4, ?5)
             ",
-            params![token_hash, family_id, device_id, display_name],
+            params![
+                token_hash,
+                family_id,
+                device_id,
+                display_name,
+                membership_id
+            ],
         )?;
         transaction.execute(
             "
@@ -506,7 +663,7 @@ impl Store {
             params![now, device_id, code_hash],
         )?;
         transaction.commit()?;
-        Ok((family_id, token, family_name))
+        Ok((family_id, token, membership_id, family_name))
     }
 
     pub fn revoke(&self, token_hash: &str, now: i64) -> Result<(), StoreError> {
@@ -528,8 +685,11 @@ impl Store {
         &self,
         family_id: &str,
         role: &str,
+        membership_id: &str,
         entities: Vec<Entity>,
         max_updated_at: i64,
+        // Server wall clock (seconds or millis — stored as-is for confirmed_at).
+        now: i64,
     ) -> Result<PushResult, StoreError> {
         if entities
             .iter()
@@ -543,6 +703,21 @@ impl Store {
         let incoming_keys = entities.iter().map(entity_key).collect::<BTreeSet<_>>();
         let mut existing = load_existing_entities(&transaction, family_id, &incoming_keys)?;
         let mut effective = effective_lww_winners(entities, &existing);
+        stamp_and_authorize_custom_items(role, membership_id, &mut effective, &existing)?;
+        stamp_and_authorize_care_plans(role, membership_id, &mut effective, &existing)?;
+        // confirmed_at is millis-like; prefer entity.updated_at when already ms-scale.
+        let confirmed_at = if now > 1_000_000_000_000 {
+            now
+        } else {
+            now.saturating_mul(1_000)
+        };
+        stamp_fulfillment_candidates(
+            role,
+            membership_id,
+            confirmed_at,
+            &mut effective,
+            &existing,
+        )?;
         for entity in &effective {
             let payload_bytes = serde_json::to_vec(&entity.payload)?.len();
             // Leave room for the entity envelope and the page response fields.
@@ -573,8 +748,10 @@ impl Store {
         )?;
         effective.sort_by_key(|entity| match entity.entity_type.as_str() {
             "baby" => 0,
-            "record" => 1,
-            _ => 2,
+            "custom_item" => 1,
+            "record" | "care_plan" => 2,
+            "fulfillment_candidate" => 3,
+            _ => 4,
         });
         for entity in &effective {
             cursor += 1;
@@ -792,6 +969,741 @@ impl Store {
         self.secure_database_files()?;
         Ok(true)
     }
+
+    /// Stage (or refresh) an atomic bundle: root + media metadata only.
+    /// Nothing is visible to ordinary pull until [Self::commit_bundle].
+    ///
+    /// [membership_id] is required so CarePlan creator ACL can be stamped and
+    /// authorize manage operations on the real publish path (not only legacy push).
+    pub fn stage_bundle(
+        &self,
+        family_id: &str,
+        device_id: &str,
+        role: &str,
+        membership_id: &str,
+        bundle_id: &str,
+        root: Entity,
+        media: Vec<Entity>,
+        now: i64,
+    ) -> Result<BundleStageStatus, StoreError> {
+        if media.len() > MAX_BUNDLE_MEDIA_ENTITIES {
+            return Err(StoreError::UnresolvedReference(format!(
+                "bundle media must contain at most {MAX_BUNDLE_MEDIA_ENTITIES} items"
+            )));
+        }
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        // Stamp CarePlan creator / ACL before hashing so forged membership is never
+        // part of the durable package identity.
+        let mut package = Vec::with_capacity(1 + media.len());
+        package.push(root);
+        package.extend(media);
+        let incoming_keys = package.iter().map(entity_key).collect::<BTreeSet<_>>();
+        let mut existing = load_existing_entities(&transaction, family_id, &incoming_keys)?;
+        stamp_and_authorize_care_plans(role, membership_id, &mut package, &existing)?;
+        let reference_keys = validation_reference_keys(&package);
+        let missing_references = reference_keys
+            .difference(&incoming_keys)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        existing.extend(load_existing_entities(
+            &transaction,
+            family_id,
+            &missing_references,
+        )?);
+        for entity in &package {
+            existing.insert(
+                entity_key(entity),
+                ExistingEntity {
+                    updated_at: entity.updated_at,
+                    deleted_at: entity.deleted_at,
+                    payload: entity.payload.clone(),
+                },
+            );
+        }
+        validate_push(role, &package, &existing)?;
+        let root = package
+            .iter()
+            .find(|entity| entity.entity_type != "media")
+            .cloned()
+            .ok_or(StoreError::InvalidStoredPayload)?;
+        let media: Vec<Entity> = package
+            .into_iter()
+            .filter(|entity| entity.entity_type == "media")
+            .collect();
+        let content_hash = bundle_content_hash(&root, &media)?;
+
+        if let Some(existing_bundle) = load_bundle_row(&transaction, family_id, bundle_id)? {
+            if existing_bundle.status == "committed" {
+                if existing_bundle.content_hash != content_hash {
+                    return Err(StoreError::BundleContentConflict);
+                }
+                return Ok(bundle_stage_status_from_row(
+                    &transaction,
+                    family_id,
+                    &existing_bundle,
+                )?);
+            }
+            // Replace open staging with the new package (same bundle_id retry/refine).
+            transaction.execute(
+                "DELETE FROM sync_bundle_media WHERE family_id = ?1 AND bundle_id = ?2",
+                params![family_id, bundle_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM sync_bundles WHERE family_id = ?1 AND bundle_id = ?2",
+                params![family_id, bundle_id],
+            )?;
+        } else {
+            let open_count: i64 = transaction.query_row(
+                "
+                SELECT COUNT(*) FROM sync_bundles
+                WHERE family_id = ?1 AND status = 'staging'
+                ",
+                params![family_id],
+                |row| row.get(0),
+            )?;
+            if open_count >= MAX_OPEN_STAGING_BUNDLES_PER_FAMILY as i64 {
+                return Err(StoreError::BundleStagingLimit);
+            }
+        }
+
+        let media_entities_json = serde_json::to_string(&media)?;
+        transaction.execute(
+            "
+            INSERT INTO sync_bundles(
+                family_id, bundle_id, device_id, status,
+                root_type, root_client_uuid, root_updated_at, root_deleted_at,
+                root_payload_json, media_entities_json, content_hash, created_at
+            ) VALUES (?1, ?2, ?3, 'staging', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            ",
+            params![
+                family_id,
+                bundle_id,
+                device_id,
+                root.entity_type,
+                root.client_uuid,
+                root.updated_at,
+                root.deleted_at,
+                serde_json::to_string(&root.payload)?,
+                media_entities_json,
+                content_hash,
+                now,
+            ],
+        )?;
+        for entity in &media {
+            let declared = entity
+                .payload
+                .get("byte_size")
+                .and_then(Value::as_i64)
+                .filter(|_| entity.deleted_at.is_none());
+            transaction.execute(
+                "
+                INSERT INTO sync_bundle_media(
+                    family_id, bundle_id, media_uuid, declared_byte_size
+                ) VALUES (?1, ?2, ?3, ?4)
+                ",
+                params![family_id, bundle_id, entity.client_uuid, declared],
+            )?;
+        }
+        transaction.commit()?;
+        self.secure_database_files()?;
+        self.bundle_status(family_id, bundle_id)?
+            .ok_or(StoreError::BundleNotFound)
+    }
+
+    pub fn bundle_status(
+        &self,
+        family_id: &str,
+        bundle_id: &str,
+    ) -> Result<Option<BundleStageStatus>, StoreError> {
+        let connection = self.connect()?;
+        let Some(row) = load_bundle_row(&connection, family_id, bundle_id)? else {
+            return Ok(None);
+        };
+        Ok(Some(bundle_stage_status_from_row(
+            &connection,
+            family_id,
+            &row,
+        )?))
+    }
+
+    pub fn load_bundle(
+        &self,
+        family_id: &str,
+        bundle_id: &str,
+    ) -> Result<Option<StoredBundle>, StoreError> {
+        let connection = self.connect()?;
+        let Some(row) = load_bundle_row(&connection, family_id, bundle_id)? else {
+            return Ok(None);
+        };
+        let media: Vec<Entity> = serde_json::from_str(&row.media_entities_json)?;
+        let required = required_live_media_uuids(&media);
+        Ok(Some(StoredBundle {
+            media,
+            required_media: required,
+        }))
+    }
+
+    /// Record that staged bytes for a manifest media UUID are durable.
+    pub fn mark_bundle_media_staged(
+        &self,
+        family_id: &str,
+        bundle_id: &str,
+        media_uuid: &str,
+        staged_byte_size: usize,
+        now: i64,
+    ) -> Result<BundleStageStatus, StoreError> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row = load_bundle_row(&transaction, family_id, bundle_id)?
+            .ok_or(StoreError::BundleNotFound)?;
+        if row.status == "committed" {
+            return bundle_stage_status_from_row(&transaction, family_id, &row).map_err(Into::into);
+        }
+        let updated = transaction.execute(
+            "
+            UPDATE sync_bundle_media
+            SET staged_byte_size = ?1, staged_at = ?2
+            WHERE family_id = ?3 AND bundle_id = ?4 AND media_uuid = ?5
+            ",
+            params![
+                staged_byte_size as i64,
+                now,
+                family_id,
+                bundle_id,
+                media_uuid
+            ],
+        )?;
+        if updated == 0 {
+            return Err(StoreError::BundleMediaNotInManifest);
+        }
+        // Size must match declared byte_size for live media.
+        let declared: Option<i64> = transaction.query_row(
+            "
+            SELECT declared_byte_size FROM sync_bundle_media
+            WHERE family_id = ?1 AND bundle_id = ?2 AND media_uuid = ?3
+            ",
+            params![family_id, bundle_id, media_uuid],
+            |r| r.get(0),
+        )?;
+        if let Some(declared) = declared {
+            if declared != staged_byte_size as i64 {
+                // Clear the bad staging mark so commit still sees it missing.
+                transaction.execute(
+                    "
+                    UPDATE sync_bundle_media
+                    SET staged_byte_size = NULL, staged_at = NULL
+                    WHERE family_id = ?1 AND bundle_id = ?2 AND media_uuid = ?3
+                    ",
+                    params![family_id, bundle_id, media_uuid],
+                )?;
+                transaction.commit()?;
+                return Err(StoreError::BundleMediaIncomplete);
+            }
+        }
+        transaction.commit()?;
+        self.secure_database_files()?;
+        self.bundle_status(family_id, bundle_id)?
+            .ok_or(StoreError::BundleNotFound)
+    }
+
+    /// Publish a complete package in one transaction. Idempotent after success.
+    ///
+    /// `media_ready` maps media_uuid → whether durable staged bytes match declared size.
+    /// Caller installs final media files after a successful first commit (or re-installs
+    /// on idempotent retry).
+    pub fn commit_bundle(
+        &self,
+        family_id: &str,
+        role: &str,
+        membership_id: &str,
+        bundle_id: &str,
+        media_ready: &BTreeMap<String, bool>,
+        max_updated_at: i64,
+        now: i64,
+    ) -> Result<(BundleCommitResult, Vec<Entity>), StoreError> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row = load_bundle_row(&transaction, family_id, bundle_id)?
+            .ok_or(StoreError::BundleNotFound)?;
+
+        if row.status == "committed" {
+            let cursor = row.committed_cursor.unwrap_or(0);
+            let applied = row.committed_applied.unwrap_or(0) as usize;
+            let media: Vec<Entity> = serde_json::from_str(&row.media_entities_json)?;
+            let root = Entity {
+                entity_type: row.root_type,
+                client_uuid: row.root_client_uuid,
+                updated_at: row.root_updated_at,
+                deleted_at: row.root_deleted_at,
+                payload: parse_payload(&row.root_payload_json)?,
+            };
+            let mut package = vec![root];
+            package.extend(media);
+            return Ok((
+                BundleCommitResult {
+                    bundle_id: bundle_id.to_owned(),
+                    status: "committed".to_owned(),
+                    applied,
+                    cursor,
+                },
+                package,
+            ));
+        }
+
+        let media: Vec<Entity> = serde_json::from_str(&row.media_entities_json)?;
+        let root = Entity {
+            entity_type: row.root_type.clone(),
+            client_uuid: row.root_client_uuid.clone(),
+            updated_at: row.root_updated_at,
+            deleted_at: row.root_deleted_at,
+            payload: parse_payload(&row.root_payload_json)?,
+        };
+
+        // All live media must have ready bytes before any publish.
+        for entity in &media {
+            if entity.deleted_at.is_some() {
+                continue;
+            }
+            if !media_ready.get(&entity.client_uuid).copied().unwrap_or(false) {
+                return Err(StoreError::BundleMediaIncomplete);
+            }
+        }
+
+        if root.updated_at > max_updated_at
+            || media.iter().any(|entity| entity.updated_at > max_updated_at)
+        {
+            return Err(StoreError::TimestampOutOfRange);
+        }
+
+        // Reject stale packages that would not update the published root (except
+        // identical re-publish of a never-committed package that lost the race
+        // to an equal/newer legacy write of the same root).
+        let root_key = entity_key(&root);
+        let existing_root = load_existing_entities(
+            &transaction,
+            family_id,
+            &BTreeSet::from([root_key.clone()]),
+        )?;
+        if let Some(published) = existing_root.get(&root_key) {
+            if published.updated_at > root.updated_at {
+                return Err(StoreError::BundleRootNotNewer);
+            }
+            // Equal updated_at: allow commit so lost-response retries and
+            // same-version media repair can finish; LWW will skip the root row.
+        }
+
+        let mut package = Vec::with_capacity(1 + media.len());
+        package.push(root);
+        package.extend(media.iter().cloned());
+
+        let original_count = package.len();
+        let incoming_keys = package.iter().map(entity_key).collect::<BTreeSet<_>>();
+        let mut existing = load_existing_entities(&transaction, family_id, &incoming_keys)?;
+        let mut effective = effective_lww_winners(package.clone(), &existing);
+        // Re-stamp/authorize on commit so a staged package cannot bypass ACL after
+        // membership role changes, and creator freezes against published rows.
+        stamp_and_authorize_care_plans(role, membership_id, &mut effective, &existing)?;
+        for entity in &effective {
+            let payload_bytes = serde_json::to_vec(&entity.payload)?.len();
+            if payload_bytes.saturating_add(512) > PULL_ENTITY_TARGET_BYTES {
+                return Err(StoreError::PullEntityTooLarge);
+            }
+        }
+        let reference_keys = validation_reference_keys(&effective);
+        let missing_references = reference_keys
+            .difference(&incoming_keys)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        existing.extend(load_existing_entities(
+            &transaction,
+            family_id,
+            &missing_references,
+        )?);
+        // Intra-package references: treat full package (not only LWW winners) as present.
+        for entity in &package {
+            existing
+                .entry(entity_key(entity))
+                .or_insert_with(|| ExistingEntity {
+                    updated_at: entity.updated_at,
+                    deleted_at: entity.deleted_at,
+                    payload: entity.payload.clone(),
+                });
+        }
+        validate_push(role, &effective, &existing)?;
+
+        let mut cursor: i64 = transaction.query_row(
+            "SELECT rev FROM family_meta WHERE family_id = ?1",
+            params![family_id],
+            |row| row.get(0),
+        )?;
+        effective.sort_by_key(|entity| match entity.entity_type.as_str() {
+            "baby" => 0,
+            "record" | "care_plan" => 1,
+            "fulfillment_candidate" => 2,
+            _ => 3,
+        });
+        let entity_count = effective.len();
+        for entity in &effective {
+            cursor += 1;
+            transaction.execute(
+                "
+                INSERT INTO entities(
+                    family_id, entity_type, client_uuid, updated_at,
+                    deleted_at, payload_json, rev
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                ON CONFLICT(family_id, entity_type, client_uuid) DO UPDATE SET
+                    updated_at = excluded.updated_at,
+                    deleted_at = excluded.deleted_at,
+                    payload_json = excluded.payload_json,
+                    rev = excluded.rev
+                ",
+                params![
+                    family_id,
+                    entity.entity_type,
+                    entity.client_uuid,
+                    entity.updated_at,
+                    entity.deleted_at,
+                    serde_json::to_string(&entity.payload)?,
+                    cursor
+                ],
+            )?;
+        }
+        transaction.execute(
+            "UPDATE family_meta SET rev = ?1 WHERE family_id = ?2",
+            params![cursor, family_id],
+        )?;
+        transaction.execute(
+            "
+            UPDATE sync_bundles
+            SET status = 'committed',
+                committed_at = ?1,
+                committed_cursor = ?2,
+                committed_applied = ?3
+            WHERE family_id = ?4 AND bundle_id = ?5
+            ",
+            params![now, cursor, entity_count as i64, family_id, bundle_id],
+        )?;
+        transaction.commit()?;
+        self.secure_database_files()?;
+        let _ = original_count;
+        Ok((
+            BundleCommitResult {
+                bundle_id: bundle_id.to_owned(),
+                status: "committed".to_owned(),
+                applied: entity_count,
+                cursor,
+            },
+            package,
+        ))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BundleRow {
+    bundle_id: String,
+    device_id: String,
+    status: String,
+    root_type: String,
+    root_client_uuid: String,
+    root_updated_at: i64,
+    root_deleted_at: Option<i64>,
+    root_payload_json: String,
+    media_entities_json: String,
+    content_hash: String,
+    committed_cursor: Option<i64>,
+    committed_applied: Option<i64>,
+}
+
+fn load_bundle_row(
+    connection: &Connection,
+    family_id: &str,
+    bundle_id: &str,
+) -> Result<Option<BundleRow>, StoreError> {
+    connection
+        .query_row(
+            "
+            SELECT bundle_id, device_id, status, root_type, root_client_uuid,
+                   root_updated_at, root_deleted_at, root_payload_json,
+                   media_entities_json, content_hash,
+                   committed_cursor, committed_applied
+            FROM sync_bundles
+            WHERE family_id = ?1 AND bundle_id = ?2
+            ",
+            params![family_id, bundle_id],
+            |row| {
+                Ok(BundleRow {
+                    bundle_id: row.get(0)?,
+                    device_id: row.get(1)?,
+                    status: row.get(2)?,
+                    root_type: row.get(3)?,
+                    root_client_uuid: row.get(4)?,
+                    root_updated_at: row.get(5)?,
+                    root_deleted_at: row.get(6)?,
+                    root_payload_json: row.get(7)?,
+                    media_entities_json: row.get(8)?,
+                    content_hash: row.get(9)?,
+                    committed_cursor: row.get(10)?,
+                    committed_applied: row.get(11)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(StoreError::from)
+}
+
+fn bundle_stage_status_from_row(
+    connection: &Connection,
+    family_id: &str,
+    row: &BundleRow,
+) -> Result<BundleStageStatus, StoreError> {
+    let media: Vec<Entity> = serde_json::from_str(&row.media_entities_json)?;
+    let required = required_live_media_uuids(&media);
+    let staged = staged_media_uuids(connection, family_id, &row.bundle_id)?;
+    let staged_set = staged.iter().cloned().collect::<BTreeSet<_>>();
+    let missing = required
+        .into_iter()
+        .filter(|id| !staged_set.contains(id))
+        .collect::<Vec<_>>();
+    Ok(BundleStageStatus {
+        bundle_id: row.bundle_id.clone(),
+        status: row.status.clone(),
+        missing_media: missing,
+        staged_media: staged,
+    })
+}
+
+fn staged_media_uuids(
+    connection: &Connection,
+    family_id: &str,
+    bundle_id: &str,
+) -> Result<Vec<String>, StoreError> {
+    let mut statement = connection.prepare(
+        "
+        SELECT media_uuid FROM sync_bundle_media
+        WHERE family_id = ?1 AND bundle_id = ?2
+          AND staged_byte_size IS NOT NULL
+          AND (declared_byte_size IS NULL OR staged_byte_size = declared_byte_size)
+        ORDER BY media_uuid
+        ",
+    )?;
+    let rows = statement.query_map(params![family_id, bundle_id], |row| row.get(0))?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+}
+
+fn required_live_media_uuids(media: &[Entity]) -> Vec<String> {
+    media
+        .iter()
+        .filter(|entity| entity.deleted_at.is_none())
+        .map(|entity| entity.client_uuid.clone())
+        .collect()
+}
+
+fn bundle_content_hash(root: &Entity, media: &[Entity]) -> Result<String, StoreError> {
+    let payload = serde_json::json!({
+        "root": root,
+        "media": media,
+    });
+    let bytes = serde_json::to_vec(&payload)?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+/// Rebuild entities table when an older schema lacked care_plan / custom_item /
+/// fulfillment_candidate types. Additive CHECK expansion only.
+fn ensure_entities_allow_care_plan_and_custom_item(
+    connection: &Connection,
+) -> Result<(), StoreError> {
+    let sql: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'entities'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(sql) = sql else {
+        return Ok(());
+    };
+    if sql.contains("care_plan")
+        && sql.contains("custom_item")
+        && sql.contains("fulfillment_candidate")
+    {
+        return Ok(());
+    }
+    connection.execute_batch(
+        "
+        CREATE TABLE entities_new (
+            family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+            entity_type TEXT NOT NULL CHECK(entity_type IN ('baby', 'record', 'media', 'care_plan', 'custom_item', 'fulfillment_candidate')),
+            client_uuid TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            deleted_at INTEGER,
+            payload_json TEXT NOT NULL,
+            rev INTEGER NOT NULL,
+            PRIMARY KEY (family_id, entity_type, client_uuid)
+        );
+        INSERT INTO entities_new(
+            family_id, entity_type, client_uuid, updated_at, deleted_at, payload_json, rev
+        )
+        SELECT family_id, entity_type, client_uuid, updated_at, deleted_at, payload_json, rev
+        FROM entities;
+        DROP TABLE entities;
+        ALTER TABLE entities_new RENAME TO entities;
+        CREATE INDEX IF NOT EXISTS entities_family_rev ON entities(family_id, rev);
+        ",
+    )?;
+    Ok(())
+}
+
+/// Stamp creator membership on first insert; freeze creator; enforce member-own /
+/// owner-all ACL; refuse clearing deleted_at on tombstones.
+fn stamp_and_authorize_custom_items(
+    role: &str,
+    membership_id: &str,
+    entities: &mut [Entity],
+    existing: &HashMap<EntityKey, ExistingEntity>,
+) -> Result<(), StoreError> {
+    for entity in entities.iter_mut() {
+        if entity.entity_type != "custom_item" {
+            continue;
+        }
+        let key = ("custom_item".to_owned(), entity.client_uuid.clone());
+        let current = existing.get(&key);
+        if let Some(current) = current {
+            if current.deleted_at.is_some() && entity.deleted_at.is_none() {
+                return Err(StoreError::CustomItemTombstoneResurrection);
+            }
+            let creator = current
+                .payload
+                .get("created_by_membership_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            // Creator is immutable after first write.
+            entity
+                .payload
+                .insert("created_by_membership_id".to_owned(), Value::String(creator.clone()));
+            if role != "owner" {
+                if creator.is_empty() || creator != membership_id {
+                    return Err(StoreError::ForbiddenCustomItem);
+                }
+            }
+        } else {
+            // First insert: server stamps authenticated membership (ignore client guess).
+            entity.payload.insert(
+                "created_by_membership_id".to_owned(),
+                Value::String(membership_id.to_owned()),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// CarePlan ACL mirrors custom items: any member may create; only creator or
+/// owner may edit/skip/delete. Creator membership is server-stamped and frozen.
+/// Left authors keep their membership_id; ordinary members do not gain rights.
+fn stamp_and_authorize_care_plans(
+    role: &str,
+    membership_id: &str,
+    entities: &mut [Entity],
+    existing: &HashMap<EntityKey, ExistingEntity>,
+) -> Result<(), StoreError> {
+    for entity in entities.iter_mut() {
+        if entity.entity_type != "care_plan" {
+            continue;
+        }
+        let key = ("care_plan".to_owned(), entity.client_uuid.clone());
+        let current = existing.get(&key);
+        if let Some(current) = current {
+            if current.deleted_at.is_some() && entity.deleted_at.is_none() {
+                return Err(StoreError::CarePlanTombstoneResurrection);
+            }
+            let creator = current
+                .payload
+                .get("created_by_membership_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            entity.payload.insert(
+                "created_by_membership_id".to_owned(),
+                Value::String(creator.clone()),
+            );
+            // Manage ACL (edit/skip/delete/status): creator or owner only.
+            // Fulfillment is not a care_plan rewrite path here (separate candidate).
+            if role != "owner" && (creator.is_empty() || creator != membership_id) {
+                return Err(StoreError::ForbiddenCarePlan);
+            }
+        } else {
+            entity.payload.insert(
+                "created_by_membership_id".to_owned(),
+                Value::String(membership_id.to_owned()),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Any active member may submit a fulfillment candidate for any plan. Server
+/// freezes submitter membership, role, and confirmed_at; clients cannot forge.
+fn stamp_fulfillment_candidates(
+    role: &str,
+    membership_id: &str,
+    confirmed_at: i64,
+    entities: &mut [Entity],
+    existing: &HashMap<EntityKey, ExistingEntity>,
+) -> Result<(), StoreError> {
+    // Any active principal may submit; role is frozen only as conflict evidence.
+    for entity in entities.iter_mut() {
+        if entity.entity_type != "fulfillment_candidate" {
+            continue;
+        }
+        let key = (
+            "fulfillment_candidate".to_owned(),
+            entity.client_uuid.clone(),
+        );
+        if let Some(current) = existing.get(&key) {
+            // Freeze submitter evidence after first write.
+            let submitter = current
+                .payload
+                .get("submitter_membership_id")
+                .and_then(Value::as_str)
+                .unwrap_or(membership_id)
+                .to_owned();
+            let submitter_role = current
+                .payload
+                .get("submitter_role")
+                .and_then(Value::as_str)
+                .unwrap_or(role)
+                .to_owned();
+            let frozen_at = current
+                .payload
+                .get("confirmed_at")
+                .and_then(Value::as_i64)
+                .unwrap_or(confirmed_at);
+            entity.payload.insert(
+                "submitter_membership_id".to_owned(),
+                Value::String(submitter),
+            );
+            entity
+                .payload
+                .insert("submitter_role".to_owned(), Value::String(submitter_role));
+            entity
+                .payload
+                .insert("confirmed_at".to_owned(), Value::Number(frozen_at.into()));
+        } else {
+            entity.payload.insert(
+                "submitter_membership_id".to_owned(),
+                Value::String(membership_id.to_owned()),
+            );
+            entity
+                .payload
+                .insert("submitter_role".to_owned(), Value::String(role.to_owned()));
+            entity
+                .payload
+                .insert("confirmed_at".to_owned(), Value::Number(confirmed_at.into()));
+        }
+    }
+    Ok(())
 }
 
 fn pulled_entity_from_row(row: &rusqlite::Row<'_>) -> Result<PulledEntity, StoreError> {
@@ -872,7 +1784,7 @@ fn collect_pull_entity_with_dependencies(
     }
     if entity.deleted_at.is_none() {
         match entity.entity_type.as_str() {
-            "record" => append_pull_dependency(
+            "record" | "care_plan" => append_pull_dependency(
                 connection,
                 family_id,
                 cursor,
@@ -893,16 +1805,35 @@ fn collect_pull_entity_with_dependencies(
                     group_keys,
                     group,
                 )?,
-                Some("log") => append_pull_dependency(
-                    connection,
-                    family_id,
-                    cursor,
-                    "record",
-                    required_payload_reference(&entity.payload, "record_client_uuid")?,
-                    included_keys,
-                    group_keys,
-                    group,
-                )?,
+                Some("log") => {
+                    if let Some(care_plan_id) = entity
+                        .payload
+                        .get("care_plan_client_uuid")
+                        .and_then(Value::as_str)
+                    {
+                        append_pull_dependency(
+                            connection,
+                            family_id,
+                            cursor,
+                            "care_plan",
+                            care_plan_id,
+                            included_keys,
+                            group_keys,
+                            group,
+                        )?;
+                    } else {
+                        append_pull_dependency(
+                            connection,
+                            family_id,
+                            cursor,
+                            "record",
+                            required_payload_reference(&entity.payload, "record_client_uuid")?,
+                            included_keys,
+                            group_keys,
+                            group,
+                        )?;
+                    }
+                }
                 _ => return Err(StoreError::InvalidStoredPayload),
             },
             _ => {}
@@ -968,6 +1899,59 @@ fn table_columns(connection: &Connection, table: &str) -> Result<BTreeSet<String
     let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
     rows.collect::<Result<BTreeSet<_>, _>>()
         .map_err(StoreError::from)
+}
+
+/// Assigns UUIDs to memberships missing `membership_id` (legacy rows / additive upgrade).
+fn backfill_membership_ids(connection: &Connection) -> Result<(), StoreError> {
+    let mut statement = connection.prepare(
+        "
+        SELECT token_hash FROM memberships
+        WHERE membership_id IS NULL OR membership_id = ''
+        ",
+    )?;
+    let token_hashes = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for token_hash in token_hashes {
+        connection.execute(
+            "UPDATE memberships SET membership_id = ?1 WHERE token_hash = ?2",
+            params![Uuid::new_v4().to_string(), token_hash],
+        )?;
+    }
+    Ok(())
+}
+
+/// Ensures a non-empty membership_id is stored for the row (lazy mint for test/legacy inserts).
+fn ensure_membership_id(
+    connection: &Connection,
+    token_hash: &str,
+    membership_id: Option<String>,
+) -> Result<String, StoreError> {
+    if let Some(id) = membership_id.filter(|value| !value.is_empty()) {
+        return Ok(id);
+    }
+    let id = Uuid::new_v4().to_string();
+    connection.execute(
+        "UPDATE memberships SET membership_id = ?1 WHERE token_hash = ?2",
+        params![id, token_hash],
+    )?;
+    Ok(id)
+}
+
+fn ensure_membership_id_in_tx(
+    transaction: &Transaction<'_>,
+    token_hash: &str,
+    membership_id: Option<String>,
+) -> Result<String, StoreError> {
+    if let Some(id) = membership_id.filter(|value| !value.is_empty()) {
+        return Ok(id);
+    }
+    let id = Uuid::new_v4().to_string();
+    transaction.execute(
+        "UPDATE memberships SET membership_id = ?1 WHERE token_hash = ?2",
+        params![id, token_hash],
+    )?;
+    Ok(id)
 }
 
 fn entity_key(entity: &Entity) -> EntityKey {
@@ -1070,9 +2054,31 @@ fn validation_reference_keys(entities: &[Entity]) -> BTreeSet<EntityKey> {
     let mut references = BTreeSet::new();
     for entity in entities {
         match entity.entity_type.as_str() {
-            "record" => {
+            "record" | "care_plan" => {
                 if let Some(id) = entity.payload["baby_client_uuid"].as_str() {
                     references.insert(("baby".to_owned(), id.to_owned()));
+                }
+                if let Some(id) = entity
+                    .payload
+                    .get("custom_item_client_uuid")
+                    .and_then(Value::as_str)
+                {
+                    references.insert(("custom_item".to_owned(), id.to_owned()));
+                }
+                if let Some(id) = entity
+                    .payload
+                    .get("fulfilled_record_client_uuid")
+                    .and_then(Value::as_str)
+                {
+                    references.insert(("record".to_owned(), id.to_owned()));
+                }
+            }
+            "fulfillment_candidate" => {
+                if let Some(id) = entity.payload["care_plan_client_uuid"].as_str() {
+                    references.insert(("care_plan".to_owned(), id.to_owned()));
+                }
+                if let Some(id) = entity.payload["record_client_uuid"].as_str() {
+                    references.insert(("record".to_owned(), id.to_owned()));
                 }
             }
             "media" => {
@@ -1080,6 +2086,12 @@ fn validation_reference_keys(entities: &[Entity]) -> BTreeSet<EntityKey> {
                     if let Some(id) = entity.payload["baby_client_uuid"].as_str() {
                         references.insert(("baby".to_owned(), id.to_owned()));
                     }
+                } else if let Some(id) = entity
+                    .payload
+                    .get("care_plan_client_uuid")
+                    .and_then(Value::as_str)
+                {
+                    references.insert(("care_plan".to_owned(), id.to_owned()));
                 } else if let Some(id) = entity.payload["record_client_uuid"].as_str() {
                     references.insert(("record".to_owned(), id.to_owned()));
                 }
@@ -1132,6 +2144,64 @@ fn validate_push(
         effective_records.insert(entity.client_uuid.clone(), entity.payload.clone());
     }
     let record_ids = effective_records.keys().cloned().collect::<BTreeSet<_>>();
+
+    let mut effective_care_plans = existing
+        .iter()
+        .filter(|((entity_type, _), _)| entity_type == "care_plan")
+        .map(|((_, id), entity)| (id.clone(), entity.payload.clone()))
+        .collect::<HashMap<_, _>>();
+    for entity in entities
+        .iter()
+        .filter(|entity| entity.entity_type == "care_plan")
+    {
+        let baby_id = entity.payload["baby_client_uuid"]
+            .as_str()
+            .ok_or(StoreError::InvalidStoredPayload)?;
+        if !baby_ids.contains(baby_id) {
+            return Err(StoreError::UnresolvedReference(
+                "care_plan baby_client_uuid does not exist".to_owned(),
+            ));
+        }
+        effective_care_plans.insert(entity.client_uuid.clone(), entity.payload.clone());
+    }
+    let care_plan_ids = effective_care_plans
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    // Fulfillment candidates must reference live care_plan + record in-family.
+    for entity in entities
+        .iter()
+        .filter(|entity| entity.entity_type == "fulfillment_candidate")
+    {
+        let plan_id = entity.payload["care_plan_client_uuid"]
+            .as_str()
+            .ok_or(StoreError::InvalidStoredPayload)?;
+        if !care_plan_ids.contains(plan_id) {
+            return Err(StoreError::UnresolvedReference(
+                "fulfillment_candidate care_plan_client_uuid does not exist".to_owned(),
+            ));
+        }
+        let record_id = entity.payload["record_client_uuid"]
+            .as_str()
+            .ok_or(StoreError::InvalidStoredPayload)?;
+        if !record_ids.contains(record_id) {
+            return Err(StoreError::UnresolvedReference(
+                "fulfillment_candidate record_client_uuid does not exist".to_owned(),
+            ));
+        }
+        let plan_baby = effective_care_plans[plan_id]["baby_client_uuid"]
+            .as_str()
+            .ok_or(StoreError::InvalidStoredPayload)?;
+        let record_baby = effective_records[record_id]["baby_client_uuid"]
+            .as_str()
+            .ok_or(StoreError::InvalidStoredPayload)?;
+        if plan_baby != record_baby {
+            return Err(StoreError::UnresolvedReference(
+                "fulfillment_candidate record baby does not match care_plan baby".to_owned(),
+            ));
+        }
+    }
 
     let mut effective_media = existing
         .iter()
@@ -1190,6 +2260,24 @@ fn validate_push(
             {
                 return Err(StoreError::UnresolvedReference(
                     "avatar baby_client_uuid does not exist".to_owned(),
+                ));
+            }
+        } else if let Some(care_plan_id) = incoming.3.as_ref() {
+            if !care_plan_ids.contains(care_plan_id) {
+                return Err(StoreError::UnresolvedReference(
+                    "log media care_plan_client_uuid does not exist".to_owned(),
+                ));
+            }
+            let plan_baby_id = effective_care_plans[care_plan_id]["baby_client_uuid"]
+                .as_str()
+                .ok_or(StoreError::InvalidStoredPayload)?;
+            if incoming
+                .2
+                .as_ref()
+                .is_some_and(|baby_id| baby_id != plan_baby_id)
+            {
+                return Err(StoreError::UnresolvedReference(
+                    "log media baby does not match care_plan baby".to_owned(),
                 ));
             }
         } else {
@@ -1266,7 +2354,11 @@ fn media_association(payload: &Map<String, Value>) -> Result<MediaAssociation, S
         .get("baby_client_uuid")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    Ok((kind, record, baby))
+    let care_plan = payload
+        .get("care_plan_client_uuid")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    Ok((kind, record, baby, care_plan))
 }
 
 #[cfg(test)]
@@ -1320,11 +2412,13 @@ mod tests {
                 .push(
                     &family_id,
                     "owner",
+                    "m-owner",
                     vec![
                         entity("record", record_id, 1, record),
                         entity("baby", baby_id, 1, baby.clone()),
                     ],
                     10,
+            1_700_000_000_000,
                 )
                 .unwrap()
                 .applied,
@@ -1335,8 +2429,10 @@ mod tests {
                 .push(
                     &family_id,
                     "owner",
+                    "m-owner",
                     vec![entity("baby", baby_id, 1, baby)],
                     10,
+            1_700_000_000_000,
                 )
                 .unwrap()
                 .skipped,
@@ -1358,8 +2454,10 @@ mod tests {
         let result = store.push(
             &family_id,
             "owner",
+            "m-owner",
             vec![entity("baby", Uuid::new_v4(), 11, baby)],
             10,
+            1_700_000_000_000,
         );
 
         assert!(matches!(result, Err(StoreError::TimestampOutOfRange)));
@@ -1390,7 +2488,9 @@ mod tests {
                 }),
             )
         }));
-        store.push(&family_id, "owner", entities, 100).unwrap();
+        store
+            .push(&family_id, "owner", "m-owner", entities, 100, 1_700_000_000_000)
+            .unwrap();
 
         let first = store.pull(&family_id, 0).unwrap();
         let serialized_bytes = first
@@ -1414,6 +2514,7 @@ mod tests {
             .push(
                 &family_id,
                 "owner",
+                "m-owner",
                 vec![entity(
                     "baby",
                     baby_id,
@@ -1424,12 +2525,14 @@ mod tests {
                     }),
                 )],
                 100,
+            1_700_000_000_000,
             )
             .unwrap();
         let record_id = Uuid::new_v4();
         let result = store.push(
             &family_id,
             "owner",
+            "m-owner",
             vec![entity(
                 "record",
                 record_id,
@@ -1442,6 +2545,7 @@ mod tests {
                 }),
             )],
             100,
+            1_700_000_000_000,
         );
 
         assert!(matches!(result, Err(StoreError::PullEntityTooLarge)));

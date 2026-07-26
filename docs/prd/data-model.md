@@ -68,21 +68,26 @@ NAS 家庭记录须持久化共享 `name`（或等价字段），并在成员可
 | `status` | `active` \| `revoked` |
 | `joined_at` | |
 
-NAS 实现以 `token_hash` 为 membership 主键，同时保存 `device_id` 与
-`display_name`（**家庭称呼**）。`display_name` 在产品层于建家/加入时**必填**；
-服务端 trim，拒绝控制字符与双向文本格式控制符，最长 128 个 Unicode 字符；
-空白、省略字段与本机占位名「我（本机）」均返回 `422`，不得静默收成 null。
-家庭成员视图返回规范化后的 `display_name`、`role`、`is_self`，以及客户端链路键
-`device_id`（用于把记录 `created_by_device_id` 解析为当前称呼；**UI 永不展示
-device id**）。服务端按当前 Bearer principal 计算 `is_self`，不返回 token、
-`token_hash` 或 `family_id`。本人可通过 `POST /v1/family/display-name` 更新自己的
-称呼，不能改他人。客户端不得把本机 UI 占位名“我（本机）”当成真实成员名上传。
-历史 null/空/不安全名称由客户端按角色兜底（如「家庭管理员」「家庭成员」或
-「家人」），且不得把「我（本机）」展示给其他成员。管理员在 UI 上以 ★ 标出。
+NAS 实现以 `token_hash` 为 membership 主键，同时保存 `device_id`、
+`display_name`（**家庭称呼**）与 `membership_id`（服务端生成的不可变 UUID 公开
+身份）。`membership_id` 在建家/加入时分配，加法升级旧库时回填，且**永不重写**；
+token 更新或服务器重启不得改变它。角色与写者身份只由认证 principal 决定，客户端
+payload 不得冒充管理员或其他成员。
+
+`display_name` 在产品层于建家/加入时**必填**；服务端 trim，拒绝控制字符与双向文本
+格式控制符，最长 128 个 Unicode 字符；空白、省略字段与本机占位名「我（本机）」均
+返回 `422`，不得静默收成 null。家庭成员视图返回规范化后的 `display_name`、`role`、
+`is_self`、`membership_id`，以及客户端链路键 `device_id`（用于把记录
+`created_by_device_id` 解析为当前称呼；**UI 永不展示 device id**）。服务端按当前
+Bearer principal 计算 `is_self`，不返回 token、`token_hash` 或 `family_id`。本人可
+通过 `POST /v1/family/display-name` 更新自己的称呼，不能改他人。客户端不得把本机
+UI 占位名“我（本机）”当成真实成员名上传。历史 null/空/不安全名称由客户端按角色
+兜底（如「家庭管理员」「家庭成员」或「家人」），且不得把「我（本机）」展示给其他
+成员。管理员在 UI 上以 ★ 标出。
 
 旧库没有 `(family_id, device_id, role)` 唯一约束。服务端读取时合并同 role +
-device 的重复 active token 行，不跨 role 合并，也不凭客户端声明的 `device_id`
-批量吊销；退出严格吊销当前 token。这样无需 schema migration，且不会把 member
+device 的重复 active token 行（一行投影一个稳定 `membership_id`），不跨 role 合并，
+也不凭客户端声明的 `device_id` 批量吊销；退出严格吊销当前 token。不会把 member
 误呈现为 owner。管理员删除家庭时由外键级联清除全部 membership。
 
 权限（V2）：
@@ -221,22 +226,53 @@ device 的重复 active token 行，不跨 role 合并，也不凭客户端声�
 ### 3.10 CustomItemDef（V2）
 
 最多 10：`id`, `family_id`, `name`, `icon_slot` (0–7), `client_uuid`,
-`created_by_membership_uuid`, `updated_at`, `deleted_at`。图标固定模板，不支持
-自定义图标资源；排序、显隐和常用槽位属于 SettingsLocal，不进入共享定义。
-删除目录项不级联删除或改写历史 `custom` 记录。
+`created_by_membership_id`, `updated_at`, `deleted_at`，本机 `syncDirty`。
+图标固定模板，不支持自定义图标资源；排序、显隐和常用槽位属于 SettingsLocal，
+不进入共享定义。家庭同步实体类型为 `custom_item`（legacy push），服务端在首次
+写入时从认证 membership 盖章创建者，普通成员仅可改自己的定义，管理员可改全部，
+tombstone 不可复活。删除目录项不级联删除或改写历史 `custom` 记录。
 
-### 3.11 CarePlan（已批准扩展、待实现）
+### 3.11 CarePlan（本机 tracer 已落地；NAS wire/ACL 已落地；客户端家庭 apply 待后续票）
 
-护理计划与已发生 Record 分离。逻辑字段包括：`client_uuid`,
-`baby_client_uuid`, `record_type`, `custom_item_uuid?`, `scheduled_at`,
-`scheduled_zone_id`, `note`, `payload_json`, `status`,
-`created_by_membership_uuid`, `fulfilled_record_uuid?`, `fulfilled_at?`,
-`updated_at`, `deleted_at`。计划照片使用 `kind=plan` MediaAsset；计划及全部照片
-构成原子计划同步包。
+护理计划与已发生 Record 分离。Room 表 `care_plans` 字段包括：`client_uuid`,
+`baby_id`, `type`, `custom_item_id?`, `scheduled_at`, `scheduled_zone_id`,
+`note`, `payload_json`, `schema_version`, `status`,
+`created_by_membership_id`, `fulfilled_record_client_uuid?`, `fulfilled_at?`,
+`updated_at`, `deleted_at`。
+
+NAS 原子包根类型 `care_plan` 的 wire payload 为：
+`baby_client_uuid`, `type`, `custom_item_client_uuid?`, `scheduled_at`,
+`scheduled_zone_id`, `note?`, `payload_json`（object）, `schema_version?`,
+`status`（pending|missed|completed|skipped）,
+`created_by_membership_id`（服务端盖章）, `fulfilled_record_client_uuid?`,
+`fulfilled_at?`。计划媒体为 bundle 内 `media` 且 `care_plan_client_uuid` 指向根。
 
 首版状态为 `pending`, `missed`, `completed`, `skipped`，且只支持单次计划。
-多个履行结果由服务端按管理员身份、履行确认时间、UUID 顺序选出唯一事实；
-落选结果保留为冲突未采纳审计项，不进入正常 Record 查询。
+`missed` 可由当前绝对时刻超过计划时刻且仍未完成/跳过派生。本机履行在同一事务
+中写入关联 Record 并将计划标为 `completed`。多候选时各设备用盖章证据稳定裁决
+唯一权威记录，并本地重链 `fulfilled_record_client_uuid`（不依赖计划 LWW 到达序）。
+
+### 3.11b FulfillmentCandidate（NAS 契约 + 本机）
+
+`entity_type = fulfillment_candidate`：`care_plan_client_uuid`,
+`record_client_uuid`, `actual_timestamp?`, 以及服务端首次接受时盖章且不可改写的
+`submitter_membership_id`, `submitter_role`, `confirmed_at`。任意活动成员可提交；
+跨家庭/缺失引用以冲突拒绝。权威裁决键（客户端纯函数，与到达序无关）：
+1) 提交者是否管理员（`owner`/`admin`）；2) 较早的不可编辑 `confirmed_at`；
+3) 候选 `client_uuid` 升序。NAS 到达时间、可编辑实际发生时间、设备 `updated_at`
+与后续角色变化不参与比较。
+
+Android 本机表 `fulfillment_candidates` 在履行事务中写入稳定 `clientUuid` 与
+不可变本地 `confirmedAt`，并与 Record 原子包 + completed CarePlan 原子包一起出站
+（legacy push 候选）；接收端 completed 计划须已有关联 Record，候选须 plan+record
+均已落地后才应用。全量候选就绪后裁决：赢家 `adoptionStatus=adopted` 并写入计划
+关联；落选 `conflict_not_adopted`，**不**软删除 Record/照片；落选记录不进入普通
+时间轴、汇总、搜索或普通导出。管理员可在本机审计落选并「转为独立记录」：创建**新的**
+`clientUuid` 与新 media 所有权的普通 Record，**不**翻转落选 `adoptionStatus`、**不**
+重链 `CarePlan.fulfilled_record_client_uuid`。幂等靠本机
+`fulfillment_candidates.convertedRecordClientUuid` 指针（不进家庭 wire）；双管理员在
+两台设备上各转一次且未共享指针时，产品接受两条独立普通记录。`adoptionStatus` 与
+`convertedRecordClientUuid` 均为本机派生字段，不进家庭 wire。
 
 ### 3.11a CalendarEvent（历史兼容）
 
@@ -249,7 +285,7 @@ device 的重复 active token 行，不跨 role 合并，也不凭客户端声�
 | 字段 | 说明 |
 |------|------|
 | `family_id` | 队列所属家庭，防止跨家庭 ACK |
-| `entity_type` | 现行 `baby` \| `record` \| `media`；已批准扩展增加 `custom_item` \| `care_plan` 及原子媒体包提交 |
+| `entity_type` | `baby` \| `record` \| `media` \| `custom_item` \| `care_plan`（atomic bundle 根）\| `fulfillment_candidate` |
 | `client_uuid` | portable 实体键 |
 | `payload_json` | 不含本机自增 id / 文件绝对路径 |
 | `updated_at` / `deleted_at` | LWW 与 tombstone |

@@ -39,6 +39,57 @@ fun RecordType.businessLabel(): String = when (this) {
     RecordType.CUSTOM -> "自定义"
 }
 
+/**
+ * User-visible project title for timeline, search, and export.
+ * Concrete custom (and free-title other) rows prefer their saved snapshot so
+ * renamed/deleted definitions do not rewrite history.
+ */
+fun Record.displayLabel(): String = when (val value = payload.payload) {
+    is CustomPayload -> value.titleSnapshot.trim().ifBlank { type.businessLabel() }
+    is OtherPayload -> value.title.trim().ifBlank { type.businessLabel() }
+    else -> type.businessLabel()
+}
+
+/** Care plan list/calendar title; prefers custom name/icon snapshot in payload. */
+fun CarePlan.displayLabel(): String {
+    if (type != RecordType.CUSTOM) return type.businessLabel()
+    val doc = RecordPayloadCodec.decode(type, payloadJson, schemaVersion)
+    val title = (doc.payload as? CustomPayload)?.titleSnapshot?.trim().orEmpty()
+    return title.ifBlank { type.businessLabel() }
+}
+
+/**
+ * Built-in types that start timers / open intervals on fulfill, not on schedule.
+ * Plans for these types are intent-only until the caregiver confirms.
+ */
+val RecordType.isStatefulCarePlanType: Boolean
+    get() = this == RecordType.SLEEP || this == RecordType.NURSING
+
+/** Concrete types eligible for non-stateful local care plans. */
+val RecordType.isPlanableNonStateful: Boolean
+    get() = isAvailableForNewEntry && !isStatefulCarePlanType
+
+/**
+ * Concrete built-in types that may be scheduled as a CarePlan.
+ * Includes intent-only nursing/sleep; excludes retired memo/other/bare custom.
+ */
+val RecordType.isPlanableCarePlanType: Boolean
+    get() = isAvailableForNewEntry
+
+/**
+ * Concrete item identity recovered from a saved row when present.
+ * Title-only historical custom rows (no custom_item_id) return null.
+ * Memo/other keep a built-in identity for edit/display even though they are
+ * retired from new-entry catalogs.
+ */
+fun Record.itemIdentity(): RecordItemIdentity? = when (type) {
+    RecordType.CUSTOM -> {
+        val id = (payload.payload as? CustomPayload)?.customItemId
+        if (id != null && id > 0L) RecordItemIdentity.custom(id) else null
+    }
+    else -> RecordItemIdentity.BuiltIn(type)
+}
+
 fun Record.payloadSummary(): String = when (val value = payload.payload) {
     is MilkPayload -> "${value.amountMl}ml"
     is NursingPayload -> listOf(

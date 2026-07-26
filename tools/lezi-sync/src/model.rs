@@ -224,7 +224,7 @@ pub struct RawEntity {
     pub payload: Map<String, Value>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Entity {
     pub entity_type: String,
     pub client_uuid: String,
@@ -234,19 +234,54 @@ pub struct Entity {
 }
 
 impl RawEntity {
-    fn validate(mut self, max_media_bytes: usize) -> Result<Entity, ApiError> {
+    fn validate(self, max_media_bytes: usize) -> Result<Entity, ApiError> {
+        self.validate_as(max_media_bytes, EntityValidationContext::LegacyPush)
+    }
+
+    /// Validate an entity for either legacy push or atomic-bundle roots/media.
+    pub fn validate_as(
+        mut self,
+        max_media_bytes: usize,
+        context: EntityValidationContext,
+    ) -> Result<Entity, ApiError> {
         if self.updated_at < 0 || self.deleted_at.is_some_and(|value| value < 0) {
             return Err(ApiError::unprocessable(
                 "updated_at and deleted_at must be non-negative",
             ));
         }
-        match self.entity_type.as_str() {
-            "baby" => validate_baby(&mut self.payload)?,
-            "record" => validate_record(&self.payload)?,
-            "media" => validate_media(&self.payload, max_media_bytes)?,
-            _ => {
+        match (context, self.entity_type.as_str()) {
+            (_, "baby") => validate_baby(&mut self.payload)?,
+            (_, "record") => validate_record(&self.payload)?,
+            (_, "media") => validate_media(&self.payload, max_media_bytes)?,
+            (EntityValidationContext::LegacyPush, "custom_item") => {
+                validate_custom_item(&mut self.payload)?
+            }
+            (EntityValidationContext::LegacyPush, "fulfillment_candidate") => {
+                validate_fulfillment_candidate(&mut self.payload)?
+            }
+            (EntityValidationContext::AtomicBundleRoot, "care_plan") => {
+                validate_care_plan(&mut self.payload)?
+            }
+            (EntityValidationContext::LegacyPush, "care_plan") => {
+                // Care plans should use atomic bundles; reject on classic push so
+                // old half-clients cannot forge plans without media package semantics.
                 return Err(ApiError::unprocessable(
-                    "entity type must be baby, record, or media",
+                    "care_plan must be published via atomic bundle",
+                ));
+            }
+            (EntityValidationContext::LegacyPush, _) => {
+                return Err(ApiError::unprocessable(
+                    "entity type must be baby, record, media, custom_item, or fulfillment_candidate",
+                ))
+            }
+            (EntityValidationContext::AtomicBundleRoot, _) => {
+                return Err(ApiError::unprocessable(
+                    "bundle root type must be record or care_plan",
+                ))
+            }
+            (EntityValidationContext::AtomicBundleMedia, _) => {
+                return Err(ApiError::unprocessable(
+                    "bundle media entities must have type media",
                 ))
             }
         }
@@ -257,6 +292,110 @@ impl RawEntity {
             deleted_at: self.deleted_at,
             payload: self.payload,
         })
+    }
+}
+
+/// Where an entity is being accepted on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntityValidationContext {
+    /// Classic `/v1/push` (baby | record | media | custom_item | fulfillment_candidate).
+    LegacyPush,
+    /// Root of an atomic bundle (`record` | `care_plan`).
+    AtomicBundleRoot,
+    /// Media row inside an atomic bundle (must be `media`).
+    AtomicBundleMedia,
+}
+
+/// Max media entities per atomic bundle (product uses ≤3; protocol headroom).
+pub const MAX_BUNDLE_MEDIA_ENTITIES: usize = 8;
+
+/// Max concurrent staging bundles per family (failed/abandoned bound).
+pub const MAX_OPEN_STAGING_BUNDLES_PER_FAMILY: usize = 64;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BundleStageRequest {
+    pub bundle_id: Uuid,
+    pub root: RawEntity,
+    #[serde(default)]
+    pub media: Vec<RawEntity>,
+    #[serde(default)]
+    pub generation: Option<String>,
+}
+
+pub struct ValidatedBundleStage {
+    pub bundle_id: String,
+    pub root: Entity,
+    pub media: Vec<Entity>,
+    pub generation: Option<String>,
+}
+
+impl BundleStageRequest {
+    pub fn validate(self, max_media_bytes: usize) -> Result<ValidatedBundleStage, ApiError> {
+        validate_optional_nonempty_string(&self.generation, 128, "generation")?;
+        if self.media.len() > MAX_BUNDLE_MEDIA_ENTITIES {
+            return Err(ApiError::unprocessable(format!(
+                "bundle media must contain at most {MAX_BUNDLE_MEDIA_ENTITIES} items"
+            )));
+        }
+        let root = self
+            .root
+            .validate_as(max_media_bytes, EntityValidationContext::AtomicBundleRoot)?;
+        if root.entity_type != "record" && root.entity_type != "care_plan" {
+            return Err(ApiError::unprocessable(
+                "bundle root type must be record or care_plan",
+            ));
+        }
+        let mut media = Vec::with_capacity(self.media.len());
+        let mut seen = BTreeSet::new();
+        for raw in self.media {
+            let entity = raw.validate_as(max_media_bytes, EntityValidationContext::AtomicBundleMedia)?;
+            if entity.entity_type != "media" {
+                return Err(ApiError::unprocessable(
+                    "bundle media entities must have type media",
+                ));
+            }
+            if !seen.insert(entity.client_uuid.clone()) {
+                return Err(ApiError::unprocessable(
+                    "bundle media client_uuid values must be unique",
+                ));
+            }
+            media.push(entity);
+        }
+        // Live media must declare a positive byte_size so commit can size-check.
+        for entity in &media {
+            if entity.deleted_at.is_none() {
+                let size = entity
+                    .payload
+                    .get("byte_size")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                if size == 0 {
+                    return Err(ApiError::unprocessable(
+                        "live bundle media requires positive byte_size",
+                    ));
+                }
+            }
+        }
+        Ok(ValidatedBundleStage {
+            bundle_id: self.bundle_id.to_string(),
+            root,
+            media,
+            generation: self.generation,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BundleCommitRequest {
+    #[serde(default)]
+    pub generation: Option<String>,
+}
+
+impl BundleCommitRequest {
+    pub fn validate(&self) -> Result<(), ApiError> {
+        validate_optional_nonempty_string(&self.generation, 128, "generation")
     }
 }
 
@@ -333,6 +472,7 @@ fn validate_media(payload: &Map<String, Value>, max_media_bytes: usize) -> Resul
             "kind",
             "record_client_uuid",
             "baby_client_uuid",
+            "care_plan_client_uuid",
             "mime",
             "width",
             "height",
@@ -345,6 +485,7 @@ fn validate_media(payload: &Map<String, Value>, max_media_bytes: usize) -> Resul
     }
     optional_nullable_uuid(payload, "record_client_uuid")?;
     optional_nullable_uuid(payload, "baby_client_uuid")?;
+    optional_nullable_uuid(payload, "care_plan_client_uuid")?;
     optional_nullable_string(payload, "mime", 0, 255)?;
     let max_dimension = i64::from(i32::MAX);
     let max_byte_size = i64::try_from(max_media_bytes).unwrap_or(i64::MAX);
@@ -354,9 +495,15 @@ fn validate_media(payload: &Map<String, Value>, max_media_bytes: usize) -> Resul
 
     let record = optional_string_value(payload, "record_client_uuid")?;
     let baby = optional_string_value(payload, "baby_client_uuid")?;
-    if kind == "log" && record.is_none() {
+    let care_plan = optional_string_value(payload, "care_plan_client_uuid")?;
+    if kind == "log" && record.is_none() && care_plan.is_none() {
         return Err(ApiError::unprocessable(
-            "log media requires record_client_uuid",
+            "log media requires record_client_uuid or care_plan_client_uuid",
+        ));
+    }
+    if kind == "log" && record.is_some() && care_plan.is_some() {
+        return Err(ApiError::unprocessable(
+            "log media must not reference both record and care_plan",
         ));
     }
     if kind == "avatar" && baby.is_none() {
@@ -364,11 +511,113 @@ fn validate_media(payload: &Map<String, Value>, max_media_bytes: usize) -> Resul
             "avatar media requires baby_client_uuid",
         ));
     }
-    if kind == "avatar" && record.is_some() {
+    if kind == "avatar" && (record.is_some() || care_plan.is_some()) {
         return Err(ApiError::unprocessable(
-            "avatar media must not reference a record",
+            "avatar media must not reference a record or care_plan",
         ));
     }
+    Ok(())
+}
+
+/// Shared custom item definition (family catalog). Layout/order/slots are device-local
+/// and must not appear here. Creator membership is stamped by the server on first insert.
+fn validate_custom_item(payload: &mut Map<String, Value>) -> Result<(), ApiError> {
+    require_keys(payload, &["name", "icon_slot"])?;
+    allow_keys(
+        payload,
+        &["name", "icon_slot", "created_by_membership_id"],
+    )?;
+    string(payload, "name", 1, 40)?;
+    integer(payload, "icon_slot", 0, 7)?;
+    // Client may omit or send a guess; server overwrites on insert and freezes later.
+    optional_nullable_string(payload, "created_by_membership_id", 1, 64)?;
+    Ok(())
+}
+
+/// Closed CarePlan wire schema for atomic-bundle roots.
+/// Creator membership is stamped by the server on first insert (ACL); clients
+/// may omit or send a guess that is overwritten.
+fn validate_care_plan(payload: &mut Map<String, Value>) -> Result<(), ApiError> {
+    require_keys(
+        payload,
+        &[
+            "baby_client_uuid",
+            "type",
+            "scheduled_at",
+            "scheduled_zone_id",
+            "status",
+            "payload_json",
+        ],
+    )?;
+    allow_keys(
+        payload,
+        &[
+            "baby_client_uuid",
+            "type",
+            "custom_item_client_uuid",
+            "scheduled_at",
+            "scheduled_zone_id",
+            "note",
+            "payload_json",
+            "schema_version",
+            "status",
+            "created_by_membership_id",
+            "fulfilled_record_client_uuid",
+            "fulfilled_at",
+        ],
+    )?;
+    uuid(payload, "baby_client_uuid")?;
+    string(payload, "type", 1, 64)?;
+    optional_nullable_uuid(payload, "custom_item_client_uuid")?;
+    integer(payload, "scheduled_at", 0, i64::MAX)?;
+    string(payload, "scheduled_zone_id", 1, 64)?;
+    optional_nullable_string(payload, "note", 0, 20_000)?;
+    if !payload.get("payload_json").is_some_and(Value::is_object) {
+        return Err(ApiError::unprocessable("payload_json must be an object"));
+    }
+    optional_integer(payload, "schema_version", 1, i64::MAX)?;
+    let status = string_value(payload, "status")?;
+    if status != "pending"
+        && status != "missed"
+        && status != "completed"
+        && status != "skipped"
+    {
+        return Err(ApiError::unprocessable(
+            "status must be pending, missed, completed, or skipped",
+        ));
+    }
+    // Client may omit or forge; server freezes on insert and ignores later spoofs.
+    optional_nullable_string(payload, "created_by_membership_id", 1, 64)?;
+    optional_nullable_uuid(payload, "fulfilled_record_client_uuid")?;
+    optional_integer(payload, "fulfilled_at", 0, i64::MAX)?;
+    Ok(())
+}
+
+/// Fulfillment candidate for multi-member offline fulfills (ticket 23 freeze).
+/// Submitter membership/role/confirmed_at are server-stamped; clients cannot
+/// forge evidence. Winner selection is a later ticket — this only stores candidates.
+fn validate_fulfillment_candidate(payload: &mut Map<String, Value>) -> Result<(), ApiError> {
+    require_keys(
+        payload,
+        &["care_plan_client_uuid", "record_client_uuid"],
+    )?;
+    allow_keys(
+        payload,
+        &[
+            "care_plan_client_uuid",
+            "record_client_uuid",
+            "actual_timestamp",
+            "submitter_membership_id",
+            "submitter_role",
+            "confirmed_at",
+        ],
+    )?;
+    uuid(payload, "care_plan_client_uuid")?;
+    uuid(payload, "record_client_uuid")?;
+    optional_integer(payload, "actual_timestamp", 0, i64::MAX)?;
+    optional_nullable_string(payload, "submitter_membership_id", 1, 64)?;
+    optional_nullable_string(payload, "submitter_role", 1, 32)?;
+    optional_integer(payload, "confirmed_at", 0, i64::MAX)?;
     Ok(())
 }
 

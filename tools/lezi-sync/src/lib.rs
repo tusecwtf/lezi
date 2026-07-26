@@ -27,7 +27,8 @@ use futures_util::StreamExt;
 use hmac::{Hmac, Mac};
 use members::{list_family_members, update_my_display_name};
 use model::{
-    EmptyRequest, FamilyCreateRequest, InviteRequest, JoinRequest, PushRequest, RenameFamilyRequest,
+    BundleCommitRequest, BundleStageRequest, EmptyRequest, FamilyCreateRequest, InviteRequest,
+    JoinRequest, PushRequest, RenameFamilyRequest,
 };
 use rand::distributions::{Distribution, Uniform};
 use rand::rngs::OsRng;
@@ -49,6 +50,8 @@ pub const DEFAULT_MAX_MEDIA_BYTES: usize = 10 * 1024 * 1024;
 pub const DEFAULT_CREATE_RATE_LIMIT: u32 = 20;
 pub const DEFAULT_JOIN_RATE_LIMIT: u32 = 60;
 pub const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: i64 = 60;
+/// Advertised on `/health` so clients can refuse metadata-first fallbacks.
+pub const CAPABILITY_ATOMIC_BUNDLE: &str = "atomic_bundle";
 const MAX_ENTITY_FUTURE_SKEW_MILLIS: i64 = 24 * 60 * 60 * 1_000;
 pub(crate) const PULL_PAGE_ENTITY_LIMIT: usize = 200;
 pub(crate) const PULL_PAGE_TARGET_BYTES: usize = 8 * 1024 * 1024;
@@ -232,6 +235,32 @@ impl AppState {
             .join(family_id)
             .join(client_uuid.to_string()))
     }
+
+    fn safe_family_id(&self, family_id: &str) -> Result<String, ApiError> {
+        Uuid::parse_str(family_id)
+            .map(|id| id.to_string())
+            .map_err(|_| ApiError::internal("stored family id is invalid"))
+    }
+
+    fn bundle_stage_dir(&self, family_id: &str, bundle_id: &Uuid) -> Result<PathBuf, ApiError> {
+        let family_id = self.safe_family_id(family_id)?;
+        Ok(self
+            .media_root
+            .join(family_id)
+            .join(".stage")
+            .join(bundle_id.to_string()))
+    }
+
+    fn bundle_media_path(
+        &self,
+        family_id: &str,
+        bundle_id: &Uuid,
+        media_uuid: &Uuid,
+    ) -> Result<PathBuf, ApiError> {
+        Ok(self
+            .bundle_stage_dir(family_id, bundle_id)?
+            .join(media_uuid.to_string()))
+    }
 }
 
 pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
@@ -289,13 +318,26 @@ pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
         .route("/v1/push", post(push_entities))
         .route("/v1/pull", get(pull_entities))
         .route("/v1/media/{client_uuid}", put(put_media).get(get_media))
+        .route("/v1/bundles", post(stage_bundle))
+        .route("/v1/bundles/{bundle_id}", get(get_bundle))
+        .route(
+            "/v1/bundles/{bundle_id}/media/{client_uuid}",
+            put(put_bundle_media),
+        )
+        .route("/v1/bundles/{bundle_id}/commit", post(commit_bundle))
         .layer(DefaultBodyLimit::max(body_limit))
         .layer(TraceLayer::new_for_http())
         .with_state(Arc::new(state)))
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
-    Json(json!({"ok": true, "version": state.version}))
+    // Additive capabilities keep the body small so client health probes
+    // (64 KiB bound) and redirect rejection assumptions stay valid.
+    Json(json!({
+        "ok": true,
+        "version": state.version,
+        "capabilities": [CAPABILITY_ATOMIC_BUNDLE],
+    }))
 }
 
 async fn create_family(
@@ -323,7 +365,7 @@ async fn create_family(
         family_name.as_deref(),
         move |request_hash, family_id| signing_state.owner_token(request_hash, family_id),
     );
-    let (family_id, token, stored_family_name) = match result {
+    let (family_id, token, membership_id, stored_family_name) = match result {
         Ok(value) => value,
         Err(StoreError::FamilyAlreadyExists) => {
             return Err(ApiError::conflict("Family already exists"))
@@ -336,6 +378,7 @@ async fn create_family(
             "family_id": family_id,
             "token": token,
             "role": "owner",
+            "membership_id": membership_id,
             "generation": state.generation,
             "family_name": stored_family_name,
         })),
@@ -418,7 +461,7 @@ async fn join(
         state.now(),
         move |code_hash, device_id| signing_state.member_token(code_hash, device_id),
     );
-    let (family_id, token, family_name) = match result {
+    let (family_id, token, membership_id, family_name) = match result {
         Ok(value) => value,
         Err(StoreError::InviteNotFound) => return Err(ApiError::not_found("Invitation not found")),
         Err(StoreError::InviteExpired) => return Err(ApiError::gone("Invitation expired")),
@@ -433,6 +476,7 @@ async fn join(
         "family_id": family_id,
         "token": token,
         "role": "member",
+        "membership_id": membership_id,
         "entities": [],
         "cursor": 0,
         "generation": state.generation,
@@ -505,12 +549,34 @@ async fn push_entities(
     let result = match state.store.push(
         &principal.family_id,
         &principal.role,
+        &principal.membership_id,
         request.entities,
         max_updated_at,
+        state.now(),
     ) {
         Ok(value) => value,
         Err(StoreError::ForbiddenAvatar) => {
             return Err(ApiError::forbidden("Only owner may change avatar"))
+        }
+        Err(StoreError::ForbiddenCustomItem) => {
+            return Err(ApiError::forbidden(
+                "Only the creator or family owner may change this custom item",
+            ))
+        }
+        Err(StoreError::ForbiddenCarePlan) => {
+            return Err(ApiError::forbidden(
+                "Only the creator or family owner may change this care plan",
+            ))
+        }
+        Err(StoreError::CustomItemTombstoneResurrection) => {
+            return Err(ApiError::conflict(
+                "Deleted custom item cannot be resurrected",
+            ))
+        }
+        Err(StoreError::CarePlanTombstoneResurrection) => {
+            return Err(ApiError::conflict(
+                "Deleted care plan cannot be resurrected",
+            ))
         }
         Err(StoreError::ImmutableMediaAssociation) => {
             return Err(ApiError::conflict(
@@ -677,6 +743,321 @@ async fn get_media(
         HeaderValue::from_static("application/octet-stream"),
     );
     Ok(response)
+}
+
+async fn stage_bundle(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<BundleStageRequest>, JsonRejection>,
+) -> Result<impl IntoResponse, ApiError> {
+    let principal = authenticate(&state, &headers)?;
+    let request = json_body(body)?.validate(state.max_media_bytes)?;
+    if request
+        .generation
+        .as_deref()
+        .is_some_and(|generation| generation != state.generation)
+    {
+        return Err(ApiError::conflict_value(
+            state.recovery_detail(&principal.family_id, "generation_changed")?,
+        ));
+    }
+    let family_lock = state.family_lock(&principal.family_id).await;
+    let _guard = family_lock.lock().await;
+    let status = match state.store.stage_bundle(
+        &principal.family_id,
+        &principal.device_id,
+        &principal.role,
+        &principal.membership_id,
+        &request.bundle_id,
+        request.root,
+        request.media,
+        state.now(),
+    ) {
+        Ok(value) => value,
+        Err(StoreError::ForbiddenAvatar) => {
+            return Err(ApiError::forbidden("Only owner may change avatar"))
+        }
+        Err(StoreError::ForbiddenCarePlan) => {
+            return Err(ApiError::forbidden(
+                "Only the creator or family owner may change this care plan",
+            ))
+        }
+        Err(StoreError::CarePlanTombstoneResurrection) => {
+            return Err(ApiError::conflict(
+                "Deleted care plan cannot be resurrected",
+            ))
+        }
+        Err(StoreError::ImmutableMediaAssociation) => {
+            return Err(ApiError::conflict(
+                "Media kind and association are immutable",
+            ))
+        }
+        Err(StoreError::BundleContentConflict) => {
+            return Err(ApiError::conflict(
+                "bundle_id already committed with different content",
+            ))
+        }
+        Err(StoreError::BundleStagingLimit) => {
+            return Err(ApiError::unprocessable(
+                "too many open staging bundles; commit or wait for cleanup",
+            ))
+        }
+        Err(StoreError::UnresolvedReference(message)) => return Err(ApiError::conflict(message)),
+        Err(StoreError::PullEntityTooLarge) => {
+            return Err(ApiError::unprocessable(
+                "entity payload is too large for bounded sync pull",
+            ))
+        }
+        Err(error) => return Err(error.into()),
+    };
+    Ok(Json(status))
+}
+
+async fn get_bundle(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(bundle_id): AxumPath<Uuid>,
+) -> Result<Json<store::BundleStageStatus>, ApiError> {
+    let principal = authenticate(&state, &headers)?;
+    let family_lock = state.family_lock(&principal.family_id).await;
+    let _guard = family_lock.lock().await;
+    state
+        .store
+        .bundle_status(&principal.family_id, &bundle_id.to_string())?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("Bundle not found"))
+}
+
+async fn put_bundle_media(
+    State(state): State<Arc<AppState>>,
+    AxumPath((bundle_id, client_uuid)): AxumPath<(Uuid, Uuid)>,
+    request: Request,
+) -> Result<Json<store::BundleStageStatus>, ApiError> {
+    let principal = authenticate(&state, request.headers())?;
+    let family_lock = state.family_lock(&principal.family_id).await;
+    let _guard = family_lock.lock().await;
+    let bundle = state
+        .store
+        .load_bundle(&principal.family_id, &bundle_id.to_string())?
+        .ok_or_else(|| ApiError::not_found("Bundle not found"))?;
+    if !bundle
+        .media
+        .iter()
+        .any(|entity| entity.client_uuid == client_uuid.to_string())
+    {
+        return Err(ApiError::unprocessable(
+            "media is not listed in the bundle manifest",
+        ));
+    }
+    let media_entity = bundle
+        .media
+        .iter()
+        .find(|entity| entity.client_uuid == client_uuid.to_string())
+        .expect("checked above");
+    if media_entity.deleted_at.is_some() {
+        return Err(ApiError::unprocessable(
+            "tombstone media does not accept bytes",
+        ));
+    }
+    if let Some(kind) = media_entity.payload.get("kind").and_then(|v| v.as_str()) {
+        if kind == "avatar" && principal.role != "owner" {
+            return Err(ApiError::forbidden("Only owner may change avatar"));
+        }
+    }
+    if let Some(length) = request.headers().get(CONTENT_LENGTH) {
+        let length = length
+            .to_str()
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .ok_or_else(|| ApiError::bad_request("Invalid Content-Length"))?;
+        if length > state.max_media_bytes {
+            return Err(ApiError::payload_too_large("Media is too large"));
+        }
+    }
+
+    let mut content = Vec::new();
+    let mut stream = request.into_body().into_data_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| ApiError::bad_request(error.to_string()))?;
+        if content.len() + chunk.len() > state.max_media_bytes {
+            return Err(ApiError::payload_too_large("Media is too large"));
+        }
+        content.extend_from_slice(&chunk);
+    }
+    if content.is_empty() {
+        return Err(ApiError::unprocessable("Media body must not be empty"));
+    }
+    if let Some(declared) = media_entity
+        .payload
+        .get("byte_size")
+        .and_then(|value| value.as_u64())
+        .and_then(|size| usize::try_from(size).ok())
+    {
+        if declared != content.len() {
+            return Err(ApiError::unprocessable(
+                "Media body size does not match declared byte_size",
+            ));
+        }
+    }
+
+    let path = state.bundle_media_path(&principal.family_id, &bundle_id, &client_uuid)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+        secure_directory(parent)?;
+    }
+    write_private_file(&path, &content)?;
+
+    let status = match state.store.mark_bundle_media_staged(
+        &principal.family_id,
+        &bundle_id.to_string(),
+        &client_uuid.to_string(),
+        content.len(),
+        state.now(),
+    ) {
+        Ok(value) => value,
+        Err(StoreError::BundleMediaNotInManifest) => {
+            return Err(ApiError::unprocessable(
+                "media is not listed in the bundle manifest",
+            ))
+        }
+        Err(StoreError::BundleMediaIncomplete) => {
+            return Err(ApiError::unprocessable(
+                "Media body size does not match declared byte_size",
+            ))
+        }
+        Err(StoreError::BundleNotFound) => return Err(ApiError::not_found("Bundle not found")),
+        Err(error) => return Err(error.into()),
+    };
+    Ok(Json(status))
+}
+
+async fn commit_bundle(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(bundle_id): AxumPath<Uuid>,
+    body: Result<Json<BundleCommitRequest>, JsonRejection>,
+) -> Result<Json<store::BundleCommitResult>, ApiError> {
+    let principal = authenticate(&state, &headers)?;
+    // Empty `{}` or omitted optional generation; soft-default when body is empty.
+    let request = match body {
+        Ok(Json(value)) => value,
+        Err(_) => BundleCommitRequest { generation: None },
+    };
+    request.validate()?;
+    if request
+        .generation
+        .as_deref()
+        .is_some_and(|generation| generation != state.generation)
+    {
+        return Err(ApiError::conflict_value(
+            state.recovery_detail(&principal.family_id, "generation_changed")?,
+        ));
+    }
+    let family_lock = state.family_lock(&principal.family_id).await;
+    let _guard = family_lock.lock().await;
+    let bundle = state
+        .store
+        .load_bundle(&principal.family_id, &bundle_id.to_string())?
+        .ok_or_else(|| ApiError::not_found("Bundle not found"))?;
+
+    let mut media_ready = std::collections::BTreeMap::new();
+    for media_uuid in &bundle.required_media {
+        let media_id = Uuid::parse_str(media_uuid)
+            .map_err(|_| ApiError::internal("stored media uuid is invalid"))?;
+        let path = state.bundle_media_path(&principal.family_id, &bundle_id, &media_id)?;
+        let entity = bundle
+            .media
+            .iter()
+            .find(|entity| entity.client_uuid == *media_uuid);
+        let declared = entity
+            .and_then(|entity| entity.payload.get("byte_size"))
+            .and_then(|value| value.as_u64())
+            .and_then(|size| usize::try_from(size).ok());
+        let ready = media_file_is_ready(&path, declared, media_uuid);
+        media_ready.insert(media_uuid.clone(), ready);
+    }
+
+    let max_updated_at = state
+        .now()
+        .saturating_mul(1_000)
+        .saturating_add(MAX_ENTITY_FUTURE_SKEW_MILLIS);
+    let (result, package) = match state.store.commit_bundle(
+        &principal.family_id,
+        &principal.role,
+        &principal.membership_id,
+        &bundle_id.to_string(),
+        &media_ready,
+        max_updated_at,
+        state.now(),
+    ) {
+        Ok(value) => value,
+        Err(StoreError::BundleMediaIncomplete) => {
+            return Err(ApiError::unprocessable(
+                "bundle media bytes are incomplete",
+            ))
+        }
+        Err(StoreError::BundleRootNotNewer) => {
+            return Err(ApiError::conflict(
+                "bundle root is not newer than the published version",
+            ))
+        }
+        Err(StoreError::ForbiddenAvatar) => {
+            return Err(ApiError::forbidden("Only owner may change avatar"))
+        }
+        Err(StoreError::ForbiddenCarePlan) => {
+            return Err(ApiError::forbidden(
+                "Only the creator or family owner may change this care plan",
+            ))
+        }
+        Err(StoreError::CarePlanTombstoneResurrection) => {
+            return Err(ApiError::conflict(
+                "Deleted care plan cannot be resurrected",
+            ))
+        }
+        Err(StoreError::ImmutableMediaAssociation) => {
+            return Err(ApiError::conflict(
+                "Media kind and association are immutable",
+            ))
+        }
+        Err(StoreError::TimestampOutOfRange) => {
+            return Err(ApiError::unprocessable(
+                "updated_at is outside the accepted server time window",
+            ))
+        }
+        Err(StoreError::PullEntityTooLarge) => {
+            return Err(ApiError::unprocessable(
+                "entity payload is too large for bounded sync pull",
+            ))
+        }
+        Err(StoreError::UnresolvedReference(message)) => return Err(ApiError::conflict(message)),
+        Err(StoreError::BundleNotFound) => return Err(ApiError::not_found("Bundle not found")),
+        Err(error) => return Err(error.into()),
+    };
+
+    // Install staged bytes into the published media tree after entities are visible.
+    // Idempotent retries re-copy so a crash between commit and install heals.
+    for entity in package
+        .iter()
+        .filter(|entity| entity.entity_type == "media" && entity.deleted_at.is_none())
+    {
+        let media_id = Uuid::parse_str(&entity.client_uuid)
+            .map_err(|_| ApiError::internal("stored media uuid is invalid"))?;
+        let staged = state.bundle_media_path(&principal.family_id, &bundle_id, &media_id)?;
+        if !staged.is_file() {
+            continue;
+        }
+        let final_path = state.media_path(&principal.family_id, media_id)?;
+        if let Some(parent) = final_path.parent() {
+            fs::create_dir_all(parent)?;
+            secure_directory(parent)?;
+        }
+        let bytes = fs::read(&staged)?;
+        write_private_file(&final_path, &bytes)?;
+    }
+    // Best-effort staging cleanup; failed/abandoned dirs are bounded by open-bundle limits.
+    let _ = fs::remove_dir_all(state.bundle_stage_dir(&principal.family_id, &bundle_id)?);
+
+    Ok(Json(result))
 }
 
 fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Principal, ApiError> {

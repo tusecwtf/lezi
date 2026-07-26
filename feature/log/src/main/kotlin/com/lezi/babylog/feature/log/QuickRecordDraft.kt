@@ -2,6 +2,7 @@ package com.lezi.babylog.feature.log
 
 import com.lezi.babylog.core.model.BothDiaperPayload
 import com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
+import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.core.model.CustomPayload
 import com.lezi.babylog.core.model.EmptyPayload
 import com.lezi.babylog.core.model.FoodPayload
@@ -26,6 +27,8 @@ import com.lezi.babylog.core.model.TemperaturePayload
 import com.lezi.babylog.core.model.TextPayload
 import com.lezi.babylog.core.model.UnknownPayload
 import com.lezi.babylog.core.model.VaccinePayload
+import com.lezi.babylog.core.model.isPlanableCarePlanType
+import com.lezi.babylog.core.model.localPhotoPaths
 import com.lezi.babylog.core.ui.formatRecordDuration
 
 internal const val FUTURE_TIME_WARNING = "不能选未来时刻"
@@ -117,11 +120,29 @@ internal data class QuickRecordSaveCommand(
  * [timestamp] is captured when the user taps a record button. It is never
  * recomputed at confirmation time, which keeps delayed confirmations honest.
  */
+/** Visible Composer mode driven by request + draft time. */
+internal enum class ComposerWorkMode {
+    /** Current/past time → save a fact [Record]. */
+    RecordFact,
+    /** Future time on create → save a local [CarePlan]. */
+    ScheduleCare,
+    /** Edit an existing open plan (may become missed if time is past). */
+    EditPlan,
+    /** Fulfill an existing plan → confirm actual time and write linked Record. */
+    FulfillPlan,
+}
+
 internal data class QuickRecordDraft(
     val type: RecordType,
     val timestamp: Long,
     val endTimestamp: Long? = null,
     val existingRecordId: Long? = null,
+    /**
+     * When set with [editCarePlan]=false, Composer is fulfilling this plan.
+     * When set with [editCarePlan]=true, Composer is editing the plan (no Record).
+     */
+    val carePlanId: Long? = null,
+    val editCarePlan: Boolean = false,
     val sourcePayloadJson: String = "{}",
     val sourceSchemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
     val note: String = "",
@@ -155,6 +176,11 @@ internal data class QuickRecordDraft(
     val customDetail: String = "",
     val customItemId: Long? = null,
     val customIconSlot: Int? = null,
+    /**
+     * Per-plan “同步到系统日历” default on (ticket 21). Unconfigured setup does not
+     * block save; CareLog falls back to Lezi reminders.
+     */
+    val projectToSystemCalendar: Boolean = true,
     val measurementValue: String = "",
     val foodContent: String = "",
     val foodAmount: String = "",
@@ -163,6 +189,45 @@ internal data class QuickRecordDraft(
 ) : java.io.Serializable {
     val mode: QuickRecordMode
         get() = type.quickRecordMode
+
+    /**
+     * Derived work mode. Future timestamps on a brand-new draft schedule a plan;
+     * fulfill always rejects future actual times via [validationResult].
+     * Editing an existing fact into the future stays [RecordFact] until the user
+     * explicitly confirms convert ([needsConvertToCarePlan]).
+     */
+    fun workMode(nowMillis: Long = RecordTime.currentTimeMillis()): ComposerWorkMode = when {
+        carePlanId != null && editCarePlan -> ComposerWorkMode.EditPlan
+        carePlanId != null -> ComposerWorkMode.FulfillPlan
+        existingRecordId != null -> ComposerWorkMode.RecordFact
+        timestamp > nowMillis -> ComposerWorkMode.ScheduleCare
+        else -> ComposerWorkMode.RecordFact
+    }
+
+    /**
+     * True when an existing fact record's main time is in the future and the type
+     * can become a care plan. Ordinary [updateRecord] is blocked; save requires an
+     * explicit 「转为护理计划」confirm that calls convert.
+     */
+    fun needsConvertToCarePlan(nowMillis: Long = RecordTime.currentTimeMillis()): Boolean {
+        if (existingRecordId == null || carePlanId != null) return false
+        if (timestamp <= nowMillis) return false
+        return when {
+            type == RecordType.CUSTOM -> customItemId != null && customItemId > 0L
+            type == RecordType.MEMO || type == RecordType.OTHER -> false
+            else -> type.isPlanableCarePlanType
+        }
+    }
+
+    fun workModeTitle(nowMillis: Long = RecordTime.currentTimeMillis()): String = when {
+        needsConvertToCarePlan(nowMillis) -> "转为护理计划"
+        else -> when (workMode(nowMillis)) {
+            ComposerWorkMode.RecordFact -> "记录事实"
+            ComposerWorkMode.ScheduleCare -> "安排护理"
+            ComposerWorkMode.EditPlan -> "编辑护理计划"
+            ComposerWorkMode.FulfillPlan -> "完成护理计划"
+        }
+    }
 
     /**
      * User-facing state rendered directly below start/end controls.
@@ -175,6 +240,15 @@ internal data class QuickRecordDraft(
         nowMillis: Long = RecordTime.currentTimeMillis(),
     ): IntervalDurationPreview? {
         if (mode != QuickRecordMode.Sleep) return null
+        val work = workMode(nowMillis)
+        // Schedule/edit/convert plan is intent-only: no open/closed interval chrome.
+        if (
+            work == ComposerWorkMode.ScheduleCare ||
+            work == ComposerWorkMode.EditPlan ||
+            needsConvertToCarePlan(nowMillis)
+        ) {
+            return null
+        }
         RecordTime.pointError(timestamp, nowMillis)?.let {
             return IntervalDurationPreview.Warning(it)
         }
@@ -213,7 +287,7 @@ internal data class QuickRecordDraft(
     }
 
     fun canConfirm(nowMillis: Long = RecordTime.currentTimeMillis()): Boolean =
-        validationError(nowMillis) == null
+        validationResult(nowMillis) == null
 
     /**
      * Validates a clock-dialog end selection without mutating this draft.
@@ -239,6 +313,7 @@ internal data class QuickRecordDraft(
     /**
      * Footer copy is deferred until the user interacts, and interval warnings
      * stay at the time controls instead of being repeated at the bottom.
+     * Prefer the reason card ([ComposerConfirmChromeState]) for confirm-time explanation.
      */
     fun footerValidationError(
         nowMillis: Long = RecordTime.currentTimeMillis(),
@@ -246,42 +321,98 @@ internal data class QuickRecordDraft(
         attemptedConfirm: Boolean,
     ): String? {
         if (!shouldShowValidation(isDirty, attemptedConfirm)) return null
-        val validation = validationError(nowMillis) ?: return null
+        val validation = validationResult(nowMillis) ?: return null
         val intervalWarning = intervalDurationPreview(nowMillis)
             as? IntervalDurationPreview.Warning
-        return validation.takeUnless { it == intervalWarning?.text }
+        return validation.message.takeUnless { it == intervalWarning?.text }
     }
 
-    fun validationError(nowMillis: Long = RecordTime.currentTimeMillis()): String? {
-        RecordTime.pointError(timestamp, nowMillis)?.let { return it }
-        if (note.length > 200) return "备注最多 200 字"
-        if (existingRecordId != null && sourcePayloadDocument().isUnknown) {
-            return "此记录格式暂不支持安全编辑，原始数据已保留"
+    fun validationError(nowMillis: Long = RecordTime.currentTimeMillis()): String? =
+        validationResult(nowMillis)?.message
+
+    /**
+     * First blocking validation failure with a concrete message and target field.
+     * Priority must stay stable so focus/highlight matches the reason card text.
+     */
+    fun validationResult(
+        nowMillis: Long = RecordTime.currentTimeMillis(),
+    ): ComposerValidationResult? {
+        val work = workMode(nowMillis)
+        val converting = needsConvertToCarePlan(nowMillis)
+        // Schedule/edit plan (and explicit record→plan convert) allow future plan time.
+        // Fact + fulfill still reject future actual times — unless convert is the path.
+        if (
+            work != ComposerWorkMode.ScheduleCare &&
+            work != ComposerWorkMode.EditPlan &&
+            !converting
+        ) {
+            RecordTime.pointError(timestamp, nowMillis)?.let {
+                return ComposerValidationResult(it, ComposerInvalidField.StartTime)
+            }
         }
-        val draftFormatError = when (mode) {
+        if (note.length > 200) {
+            return ComposerValidationResult("备注最多 200 字", ComposerInvalidField.Note)
+        }
+        if (existingRecordId != null && sourcePayloadDocument().isUnknown) {
+            return ComposerValidationResult(
+                "此记录格式暂不支持安全编辑，原始数据已保留",
+                ComposerInvalidField.Unsupported,
+            )
+        }
+        // Convert uses schedule intent semantics (no timer / open-interval requirements).
+        val scheduleOrEditPlan =
+            work == ComposerWorkMode.ScheduleCare ||
+                work == ComposerWorkMode.EditPlan ||
+                converting
+        when (mode) {
             QuickRecordMode.Nursing -> {
-                val left = leftMin.toIntOrNull()
-                val right = rightMin.toIntOrNull()
-                "左右时长请输入非负整数".takeIf {
-                    left == null || right == null || left < 0 || right < 0
+                // Intent-only schedule/edit: durations are optional (fulfill fills them in).
+                if (!scheduleOrEditPlan) {
+                    val left = leftMin.toIntOrNull()
+                    val right = rightMin.toIntOrNull()
+                    if (left == null || right == null || left < 0 || right < 0) {
+                        return ComposerValidationResult(
+                            "左右时长请输入非负整数",
+                            ComposerInvalidField.NursingDuration,
+                        )
+                    }
                 }
             }
             QuickRecordMode.Milk -> when {
                 preparedMl.isNotBlank() && preparedMl.toIntOrNull() == null ->
-                    "冲调量需在 0–999 ml 之间"
+                    return ComposerValidationResult(
+                        "冲调量需在 0–999 ml 之间",
+                        ComposerInvalidField.MilkPrepared,
+                    )
                 durationMin.isNotBlank() && durationMin.toIntOrNull() == null ->
-                    "时长需在 0–1440 分钟之间"
-                else -> null
+                    return ComposerValidationResult(
+                        "时长需在 0–1440 分钟之间",
+                        ComposerInvalidField.MilkDuration,
+                    )
             }
-            QuickRecordMode.Sleep -> intervalValidationError(nowMillis)
+            QuickRecordMode.Sleep -> {
+                // Schedule/edit/convert plan is intent-only — no open interval and no end required.
+                if (!scheduleOrEditPlan) {
+                    intervalValidationResult(nowMillis)?.let { return it }
+                }
+            }
             QuickRecordMode.Temperature -> {
-                "请输入合理的体温".takeIf { temperature.toDoubleOrNull() == null }
+                if (temperature.toDoubleOrNull() == null) {
+                    return ComposerValidationResult(
+                        "请输入合理的体温",
+                        ComposerInvalidField.Temperature,
+                    )
+                }
             }
-            else -> null
+            else -> Unit
         }
-        if (draftFormatError != null) return draftFormatError
+        // Nursing fact/fulfill still require at least one side; schedule/edit/convert skips.
+        if (scheduleOrEditPlan && mode == QuickRecordMode.Nursing) {
+            return null
+        }
         val payloadError = RecordPayloadCodec.validate(payloadDocument().payload).firstOrNull()
-        return payloadError?.let(::payloadValidationMessage)
+            ?: return null
+        return payloadValidationResult(payloadError)
     }
 
     fun toSaveCommand(): QuickRecordSaveCommand = QuickRecordSaveCommand(
@@ -294,7 +425,11 @@ internal data class QuickRecordDraft(
         schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
     )
 
-    fun confirmLabel(): String = when {
+    fun confirmLabel(nowMillis: Long = RecordTime.currentTimeMillis()): String = when {
+        carePlanId != null && editCarePlan -> "保存计划"
+        carePlanId != null -> "确认完成"
+        needsConvertToCarePlan(nowMillis) -> "转为护理计划"
+        workMode(nowMillis) == ComposerWorkMode.ScheduleCare -> "确认安排"
         sleepAction == SleepDraftAction.WakeUp -> "确认醒来"
         existingRecordId != null -> "保存修改"
         sleepAction == SleepDraftAction.SleepDown && endTimestamp != null -> "确认记录"
@@ -306,23 +441,70 @@ internal data class QuickRecordDraft(
         get() = existingRecordId != null && sleepAction != SleepDraftAction.WakeUp
 
     private fun intervalValidationError(nowMillis: Long): String? =
-        (intervalDurationPreview(nowMillis) as? IntervalDurationPreview.Warning)?.text
+        intervalValidationResult(nowMillis)?.message
 
-    private fun payloadValidationMessage(error: String): String = when (error) {
-        "至少记录一侧时长" -> "请填写左侧或右侧喂养时长"
-        "尿量必须是 1–3" -> "请选择尿量"
-        "便量必须是 1–4" -> "请选择便量"
-        "软硬必须是 1–4" -> "请选择软硬"
-        "颜色必须是 0–7" -> "请选择颜色"
-        "体温超出可记录范围" -> "请输入合理的体温"
-        "正文不能为空" -> if (type == RecordType.DIARY) "请填写日记正文" else "请填写内容"
-        "症状程度必须是 1–3" -> "请选择程度"
-        "药品名称不能为空" -> "请填写药品名称"
-        "就诊原因不能为空" -> "请填写就诊原因"
-        "标题不能为空", "自定义标题不能为空" -> "请填写标题"
-        "内容不能为空" -> "请填写内容"
-        "疫苗名称不能为空" -> "请填写疫苗名称"
-        else -> error
+    private fun intervalValidationResult(nowMillis: Long): ComposerValidationResult? {
+        val warning = intervalDurationPreview(nowMillis) as? IntervalDurationPreview.Warning
+            ?: return null
+        val field = when (warning.text) {
+            FUTURE_TIME_WARNING -> {
+                val end = endTimestamp
+                when {
+                    RecordTime.pointError(timestamp, nowMillis) != null ->
+                        ComposerInvalidField.StartTime
+                    end != null && end > nowMillis -> ComposerInvalidField.EndTime
+                    else -> ComposerInvalidField.StartTime
+                }
+            }
+            SLEEP_END_MISSING_WARNING, SLEEP_END_ORDER_WARNING -> ComposerInvalidField.EndTime
+            else -> ComposerInvalidField.EndTime
+        }
+        return ComposerValidationResult(warning.text, field)
+    }
+
+    private fun payloadValidationResult(error: String): ComposerValidationResult {
+        val message = when (error) {
+            "至少记录一侧时长" -> "请填写左侧或右侧喂养时长"
+            "尿量必须是 1–3" -> "请选择尿量"
+            "便量必须是 1–4" -> "请选择便量"
+            "软硬必须是 1–4" -> "请选择软硬"
+            "颜色必须是 0–7" -> "请选择颜色"
+            "体温超出可记录范围" -> "请输入合理的体温"
+            "正文不能为空" -> if (type == RecordType.DIARY) "请填写日记正文" else "请填写内容"
+            "症状程度必须是 1–3" -> "请选择程度"
+            "药品名称不能为空" -> "请填写药品名称"
+            "就诊原因不能为空" -> "请填写就诊原因"
+            "标题不能为空", "自定义标题不能为空" -> "请填写标题"
+            "内容不能为空" -> "请填写内容"
+            "疫苗名称不能为空" -> "请填写疫苗名称"
+            else -> error
+        }
+        val field = when (error) {
+            "至少记录一侧时长", "喂养时长不能为负数" -> ComposerInvalidField.NursingDuration
+            "奶量需在 1–999 ml 之间" -> ComposerInvalidField.MilkAmount
+            "冲调量需在 0–999 ml 之间" -> ComposerInvalidField.MilkPrepared
+            "时长需在 0–1440 分钟之间" -> ComposerInvalidField.MilkDuration
+            "尿量必须是 1–3" -> ComposerInvalidField.PeeAmount
+            "便量必须是 1–4" -> ComposerInvalidField.StoolAmount
+            "软硬必须是 1–4" -> ComposerInvalidField.StoolConsistency
+            "颜色必须是 0–7" -> ComposerInvalidField.StoolColor
+            "体温超出可记录范围" -> ComposerInvalidField.Temperature
+            "正文不能为空" -> ComposerInvalidField.Body
+            "症状程度必须是 1–3" -> ComposerInvalidField.Severity
+            "药品名称不能为空" -> ComposerInvalidField.MedicineName
+            "就诊原因不能为空" -> ComposerInvalidField.HospitalReason
+            "标题不能为空", "自定义标题不能为空" -> ComposerInvalidField.CustomTitle
+            "内容不能为空" -> ComposerInvalidField.FoodContent
+            "疫苗名称不能为空" -> ComposerInvalidField.VaccineName
+            "请填写有效数值", "体重需在 0–100 kg 之间", "测量值需在 0–250 cm 之间" ->
+                ComposerInvalidField.MeasurementValue
+            else -> when {
+                error.contains("数值") || error.contains("测量") || error.contains("体重") ->
+                    ComposerInvalidField.MeasurementValue
+                else -> ComposerInvalidField.Unsupported
+            }
+        }
+        return ComposerValidationResult(message, field)
     }
 
     private fun shouldShowValidation(isDirty: Boolean, attemptedConfirm: Boolean): Boolean =
@@ -434,6 +616,9 @@ internal data class QuickRecordDraft(
             recentAmountMl: List<Int> = emptyList(),
             recentNotes: List<String> = emptyList(),
             historical: Boolean = false,
+            customItemId: Long? = null,
+            customTitle: String = "",
+            customIconSlot: Int? = null,
         ): QuickRecordDraft = QuickRecordDraft(
             type = type,
             timestamp = timestamp,
@@ -447,20 +632,34 @@ internal data class QuickRecordDraft(
             } else {
                 null
             },
-            customTitle = if (type == RecordType.CUSTOM) "自定义项目" else "",
+            customTitle = when {
+                customTitle.isNotBlank() -> customTitle
+                // No generic default label: concrete custom opens with definition name.
+                type == RecordType.CUSTOM -> ""
+                else -> ""
+            },
+            customItemId = customItemId,
+            customIconSlot = customIconSlot,
         )
 
-        fun wakeSleep(openSleep: Record, clickedAt: Long): QuickRecordDraft = QuickRecordDraft(
-            type = RecordType.SLEEP,
-            timestamp = openSleep.timestamp,
-            endTimestamp = clickedAt,
-            existingRecordId = openSleep.id,
-            sourcePayloadJson = openSleep.payloadJson,
-            sourceSchemaVersion = openSleep.schemaVersion,
-            note = openSleep.note.orEmpty(),
-            sleepAction = SleepDraftAction.WakeUp,
-            isNap = (openSleep.payload.payload as? SleepPayload)?.isNap ?: false,
-        )
+        fun wakeSleep(openSleep: Record, clickedAt: Long): QuickRecordDraft {
+            // Preserve common record photos attached when sleep started so confirming
+            // wake does not tombstone them via empty photoLocalPaths.
+            val photoPaths = localPhotoPaths(openSleep.payloadJson)
+            return QuickRecordDraft(
+                type = RecordType.SLEEP,
+                timestamp = openSleep.timestamp,
+                endTimestamp = clickedAt,
+                existingRecordId = openSleep.id,
+                sourcePayloadJson = openSleep.payloadJson,
+                sourceSchemaVersion = openSleep.schemaVersion,
+                note = openSleep.note.orEmpty(),
+                sleepAction = SleepDraftAction.WakeUp,
+                isNap = (openSleep.payload.payload as? SleepPayload)?.isNap ?: false,
+                photos = photoPaths,
+                sourcePhotos = photoPaths,
+            )
+        }
 
         fun fromRecord(record: Record): QuickRecordDraft {
             val document = record.payload
@@ -528,8 +727,12 @@ internal data class QuickRecordDraft(
                     ?.let(::trimNumber)?.toString()
                     ?: "36.5",
                 body = text?.body.orEmpty(),
-                photos = text?.photos.orEmpty(),
-                sourcePhotos = text?.photos.orEmpty(),
+                // Prefer typed TextPayload.photos; otherwise the shared payload replica
+                // (extensions or raw JSON) so non-diary types and legacy rows load too.
+                photos = text?.photos?.takeIf { it.isNotEmpty() }
+                    ?: localPhotoPaths(record.payloadJson),
+                sourcePhotos = text?.photos?.takeIf { it.isNotEmpty() }
+                    ?: localPhotoPaths(record.payloadJson),
                 severity = symptom?.severity?.takeIf { it in 1..3 } ?: 2,
                 description = symptom?.description.orEmpty(),
                 medicineName = medicine?.name.orEmpty(),
@@ -545,6 +748,64 @@ internal data class QuickRecordDraft(
                 foodAmount = food?.amount.orEmpty(),
                 vaccineName = vaccine?.name.orEmpty(),
                 vaccineBatch = vaccine?.batch.orEmpty(),
+            )
+        }
+
+        /**
+         * Prefill fulfill Composer from the plan field snapshot; actual time defaults to now.
+         * Plan photos land in a later ticket — field payload + note are the tracer surface.
+         */
+        fun fromCarePlan(
+            plan: CarePlan,
+            actualTimestamp: Long = RecordTime.currentTimeMillis(),
+        ): QuickRecordDraft {
+            val synthetic = Record(
+                id = 0L,
+                clientUuid = plan.clientUuid,
+                babyId = plan.babyId,
+                type = plan.type,
+                timestamp = plan.scheduledAt,
+                note = plan.note,
+                createdByUserId = 0L,
+                payloadJson = plan.payloadJson,
+                schemaVersion = plan.schemaVersion,
+                updatedAt = plan.updatedAt,
+            )
+            val base = fromRecord(synthetic)
+            return base.copy(
+                existingRecordId = null,
+                carePlanId = plan.id,
+                editCarePlan = false,
+                timestamp = actualTimestamp,
+                endTimestamp = null,
+                // Fulfill sleep defaults to “确认睡下” (open interval); user may set end.
+                sleepAction = if (plan.type == RecordType.SLEEP) {
+                    SleepDraftAction.SleepDown
+                } else {
+                    null
+                },
+                // Intent-only nursing plan may carry zero durations; fulfill fills them.
+                leftMin = if (plan.type == RecordType.NURSING) {
+                    base.leftMin.ifBlank { "0" }
+                } else {
+                    base.leftMin
+                },
+                rightMin = if (plan.type == RecordType.NURSING) {
+                    base.rightMin.ifBlank { "0" }
+                } else {
+                    base.rightMin
+                },
+                customItemId = plan.customItemId ?: base.customItemId,
+            )
+        }
+
+        /** Prefill edit-plan Composer; timestamp stays on the plan's scheduledAt. */
+        fun fromCarePlanForEdit(plan: CarePlan): QuickRecordDraft {
+            val base = fromCarePlan(plan, actualTimestamp = plan.scheduledAt)
+            return base.copy(
+                editCarePlan = true,
+                // Edit plan is pure intent — no sleep-down action chrome.
+                sleepAction = null,
             )
         }
     }

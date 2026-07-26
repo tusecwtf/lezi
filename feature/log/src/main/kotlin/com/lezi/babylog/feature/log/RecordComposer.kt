@@ -36,6 +36,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.datastore.SettingsStore
+import com.lezi.babylog.core.model.MAX_RECORD_PHOTOS
+import com.lezi.babylog.core.model.RecordItemIdentity
+import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.designsystem.LeziSpacing
@@ -53,11 +56,20 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 sealed interface RecordComposerRequest : java.io.Serializable {
+    /**
+     * Create a new fact for a concrete record item.
+     *
+     * [type] remains the storage [RecordType]. When [type] is [RecordType.CUSTOM],
+     * [customItemId] identifies the specific custom definition (required for new
+     * catalog picks). Bare CUSTOM without an id is no longer offered as a create
+     * path; historical edit still uses [Edit].
+     */
     data class New(
         val babyId: Long,
         val type: RecordType,
@@ -65,9 +77,26 @@ sealed interface RecordComposerRequest : java.io.Serializable {
         val historical: Boolean,
         val openSleepId: Long? = null,
         val lastAmountMl: Int? = null,
-    ) : RecordComposerRequest
+        /** Concrete custom definition when [type] is CUSTOM; null for built-ins. */
+        val customItemId: Long? = null,
+    ) : RecordComposerRequest {
+        fun itemIdentity(): RecordItemIdentity? =
+            when {
+                type == RecordType.CUSTOM && customItemId != null && customItemId > 0L ->
+                    RecordItemIdentity.custom(customItemId)
+                type != RecordType.CUSTOM ->
+                    RecordItemIdentity.BuiltIn(type)
+                else -> null
+            }
+    }
 
     data class Edit(val recordId: Long) : RecordComposerRequest
+
+    /** Open Composer in fulfill mode for a local care plan. */
+    data class Fulfill(val carePlanId: Long) : RecordComposerRequest
+
+    /** Open Composer to edit an open local care plan (not fulfill). */
+    data class EditPlan(val carePlanId: Long) : RecordComposerRequest
 }
 
 /** SavedStateHandle adapter for the restorable Composer request/draft pair. */
@@ -111,6 +140,10 @@ internal data class RecordComposerUiState(
     val infantFeverAdviceEnabled: Boolean = true,
     val customItems: List<CustomRecordItem> = emptyList(),
     val canStartNursingTimer: Boolean = false,
+    /** Settings.timerEnabled snapshot for the open session (ticket 16 workMode gating). */
+    val timerEnabledSetting: Boolean = false,
+    /** Device has enabled system calendar + chosen writable target (ticket 21). */
+    val systemCalendarConfigured: Boolean = false,
     val saving: Boolean = false,
     val deleting: Boolean = false,
     val error: String? = null,
@@ -130,6 +163,7 @@ class RecordComposerViewModel @Inject constructor(
     private val savedState = RecordComposerSavedState(savedStateHandle)
     private var loadJob: Job? = null
     private var actionJob: Job? = null
+    private var settingsObserveJob: Job? = null
 
     internal fun open(request: RecordComposerRequest) {
         val current = _state.value
@@ -138,6 +172,7 @@ class RecordComposerViewModel @Inject constructor(
         val session = sessionGate.open()
         loadJob?.cancel()
         actionJob?.cancel()
+        settingsObserveJob?.cancel()
         _state.value = RecordComposerUiState(activeRequest = request, loading = true)
         loadJob = viewModelScope.launch {
             val settings = try {
@@ -176,7 +211,12 @@ class RecordComposerViewModel @Inject constructor(
                             ) {
                                 "睡眠状态已变化，请关闭后重试"
                             }
-                            QuickRecordDraft.wakeSleep(openSleep, request.timestamp)
+                            // Prefer MediaAsset paths over payload replica (same as Edit).
+                            val photoPaths = careLog.listRecordPhotoPaths(openSleep.id)
+                            QuickRecordDraft.wakeSleep(openSleep, request.timestamp).copy(
+                                photos = photoPaths,
+                                sourcePhotos = photoPaths,
+                            )
                         } else {
                             val recentAmounts = if (
                                 request.type in setOf(
@@ -199,15 +239,24 @@ class RecordComposerViewModel @Inject constructor(
                                     request.type,
                                 ),
                                 historical = request.historical,
+                                customItemId = request.customItemId,
                             ).let { created ->
+                                // Bind the concrete custom definition from the request;
+                                // never fall back to "first custom item" for bare CUSTOM.
                                 if (request.type == RecordType.CUSTOM) {
-                                    customItems.firstOrNull()?.let { item ->
+                                    val requestedId = request.customItemId
+                                    val item = requestedId?.let { id ->
+                                        customItems.firstOrNull { it.id == id }
+                                    }
+                                    if (item != null) {
                                         created.copy(
                                             customTitle = item.name,
                                             customItemId = item.id,
                                             customIconSlot = item.iconSlot,
                                         )
-                                    } ?: created
+                                    } else {
+                                        created
+                                    }
                                 } else {
                                     created
                                 }
@@ -215,13 +264,46 @@ class RecordComposerViewModel @Inject constructor(
                         }
                         Triple(request.babyId, baby.birthdayEpochDay, draft)
                     }
+                    is RecordComposerRequest.Fulfill -> {
+                        val plan = careLog.getCarePlan(request.carePlanId)
+                            ?: error("护理计划不存在，请返回后重试")
+                        val birthday = careLog.listBabies()
+                            .firstOrNull { it.id == plan.babyId }
+                            ?.birthdayEpochDay
+                        val planPhotos = careLog.listCarePlanPhotoPaths(plan.id)
+                        // Hydrate plan field snapshot + plan photos into fulfill form.
+                        // sourcePhotos empty so fulfill save does not delete plan-owned files.
+                        val draft = QuickRecordDraft.fromCarePlan(plan).copy(
+                            photos = planPhotos,
+                            sourcePhotos = emptyList(),
+                        )
+                        Triple(plan.babyId, birthday, draft)
+                    }
+                    is RecordComposerRequest.EditPlan -> {
+                        val plan = careLog.getCarePlan(request.carePlanId)
+                            ?: error("护理计划不存在，请返回后重试")
+                        val birthday = careLog.listBabies()
+                            .firstOrNull { it.id == plan.babyId }
+                            ?.birthdayEpochDay
+                        val planPhotos = careLog.listCarePlanPhotoPaths(plan.id)
+                        val draft = QuickRecordDraft.fromCarePlanForEdit(plan).copy(
+                            photos = planPhotos,
+                            sourcePhotos = planPhotos,
+                        )
+                        Triple(plan.babyId, birthday, draft)
+                    }
                     is RecordComposerRequest.Edit -> {
                         val record = careLog.getRecord(request.recordId)
                             ?: error("这条记录不存在或已被删除")
                         val birthday = careLog.listBabies()
                             .firstOrNull { it.id == record.babyId }
                             ?.birthdayEpochDay
-                        Triple(record.babyId, birthday, QuickRecordDraft.fromRecord(record))
+                        val photoPaths = careLog.listRecordPhotoPaths(record.id)
+                        val draft = QuickRecordDraft.fromRecord(record).copy(
+                            photos = photoPaths,
+                            sourcePhotos = photoPaths,
+                        )
+                        Triple(record.babyId, birthday, draft)
                     }
                 }
             } catch (cancelled: CancellationException) {
@@ -245,6 +327,8 @@ class RecordComposerViewModel @Inject constructor(
             val (babyId, birthdayEpochDay, draft) = loaded
             sessionGate.deliver(session) {
                 val activeDraft = restoredDraft ?: draft
+                val systemCalConfigured = settings.systemCalendarEnabled &&
+                    !settings.systemCalendarId.isNullOrBlank()
                 _state.value = RecordComposerUiState(
                     activeRequest = request,
                     draft = activeDraft,
@@ -256,12 +340,28 @@ class RecordComposerViewModel @Inject constructor(
                     preferredHand = settings.preferredHand,
                     infantFeverAdviceEnabled = settings.infantFeverAdviceEnabled,
                     customItems = customItems,
-                    canStartNursingTimer = request is RecordComposerRequest.New &&
-                        !request.historical &&
-                        request.type == RecordType.NURSING &&
-                        settings.timerEnabled,
+                    timerEnabledSetting = settings.timerEnabled,
+                    canStartNursingTimer = computeCanStartNursingTimer(
+                        request = request,
+                        draft = activeDraft,
+                        timerEnabled = settings.timerEnabled,
+                    ),
+                    systemCalendarConfigured = systemCalConfigured,
                 )
                 savedState.save(request, activeDraft)
+                // Keep projection chrome in sync if user completes setup mid-sheet.
+                settingsObserveJob?.cancel()
+                settingsObserveJob = viewModelScope.launch {
+                    settingsStore.settings.collect { live ->
+                        if (sessionGate.current() != session) return@collect
+                        val configured = live.systemCalendarEnabled &&
+                            !live.systemCalendarId.isNullOrBlank()
+                        _state.update { cur ->
+                            if (cur.activeRequest != request) cur
+                            else cur.copy(systemCalendarConfigured = configured)
+                        }
+                    }
+                }
             }
         }
     }
@@ -272,24 +372,40 @@ class RecordComposerViewModel @Inject constructor(
         sessionGate.close()
         loadJob?.cancel()
         actionJob?.cancel()
+        settingsObserveJob?.cancel()
         loadJob = null
         actionJob = null
+        settingsObserveJob = null
         _state.value = RecordComposerUiState()
     }
 
     internal fun updateDraft(draft: QuickRecordDraft) {
-        _state.update { it.copy(draft = draft, error = null) }
-        _state.value.activeRequest?.let { request -> savedState.save(request, draft) }
+        _state.update { cur ->
+            val request = cur.activeRequest
+            val nextCan = if (request == null) {
+                false
+            } else {
+                computeCanStartNursingTimer(
+                    request = request,
+                    draft = draft,
+                    timerEnabled = cur.timerEnabledSetting,
+                )
+            }
+            cur.copy(draft = draft, error = null, canStartNursingTimer = nextCan)
+        }
+        _state.value.activeRequest?.let { request ->
+            savedState.save(request, draft)
+        }
     }
 
     internal fun importPhotos(uris: List<Uri>) {
         val draft = _state.value.draft ?: return
-        if (draft.mode != QuickRecordMode.Text || uris.isEmpty()) return
+        if (uris.isEmpty()) return
         val session = sessionGate.current() ?: return
         actionJob = viewModelScope.launch {
             val imported = try {
                 photoStore.import(
-                    uris.take((MAX_RECORD_PHOTOS - draft.photos.size).coerceAtLeast(0)),
+                    uris.take(RecordPhotoChrome.remainingSlots(draft.photos.size)),
                 )
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -345,7 +461,37 @@ class RecordComposerViewModel @Inject constructor(
                         SleepDraftAction.SleepDown,
                         SleepDraftAction.WakeUp,
                     )
+                val converting = draft.needsConvertToCarePlan()
                 when {
+                    draft.carePlanId != null && draft.editCarePlan -> careLog.updateCarePlan(
+                        carePlanId = draft.carePlanId,
+                        scheduledAt = command.timestamp,
+                        note = command.note,
+                        payloadJson = command.payloadJson,
+                        schemaVersion = command.schemaVersion,
+                        photoLocalPaths = draft.photos,
+                    )
+                    draft.carePlanId != null -> careLog.fulfillCarePlan(
+                        carePlanId = draft.carePlanId,
+                        actualTimestamp = command.timestamp,
+                        endTimestamp = command.endTimestamp.takeIf {
+                            command.type == RecordType.SLEEP
+                        },
+                        note = command.note,
+                        payloadJson = command.payloadJson,
+                        schemaVersion = command.schemaVersion,
+                        photoLocalPaths = draft.photos,
+                    )
+                    converting && command.existingRecordId != null ->
+                        careLog.convertRecordToCarePlan(
+                            recordId = command.existingRecordId,
+                            scheduledAt = command.timestamp,
+                            note = command.note,
+                            payloadJson = command.payloadJson,
+                            schemaVersion = command.schemaVersion,
+                            photoLocalPaths = draft.photos,
+                            projectToSystemCalendar = draft.projectToSystemCalendar,
+                        )
                     statefulSleep -> careLog.confirmSleep(
                         babyId = babyId,
                         expectedOpenSleepId = command.existingRecordId,
@@ -354,6 +500,7 @@ class RecordComposerViewModel @Inject constructor(
                         note = command.note,
                         payloadJson = command.payloadJson,
                         schemaVersion = command.schemaVersion,
+                        photoLocalPaths = draft.photos,
                     )
                     command.existingRecordId != null -> careLog.updateRecord(
                         id = command.existingRecordId,
@@ -362,6 +509,18 @@ class RecordComposerViewModel @Inject constructor(
                         note = command.note,
                         payloadJson = command.payloadJson,
                         schemaVersion = command.schemaVersion,
+                        photoLocalPaths = draft.photos,
+                    )
+                    draft.workMode() == ComposerWorkMode.ScheduleCare -> careLog.createCarePlan(
+                        babyId = babyId,
+                        type = command.type,
+                        scheduledAt = command.timestamp,
+                        note = command.note,
+                        payloadJson = command.payloadJson,
+                        schemaVersion = command.schemaVersion,
+                        customItemId = draft.customItemId,
+                        photoLocalPaths = draft.photos,
+                        projectToSystemCalendar = draft.projectToSystemCalendar,
                     )
                     else -> careLog.addRecord(
                         babyId = babyId,
@@ -371,16 +530,51 @@ class RecordComposerViewModel @Inject constructor(
                         note = command.note,
                         payloadJson = command.payloadJson,
                         schemaVersion = command.schemaVersion,
+                        photoLocalPaths = draft.photos,
                     )
                 }
+                // Physical cleanup only after the domain transaction committed.
+                // Never delete plan-owned paths on fulfill (sourcePhotos empty);
+                // edit-plan, convert, and edit-record only drop discarded paths.
                 photoStore.delete(draft.sourcePhotos - draft.photos.toSet())
                 val message = when {
+                    draft.carePlanId != null && draft.editCarePlan -> "已保存护理计划"
+                    draft.carePlanId != null -> "已完成护理计划"
+                    converting -> {
+                        val label = if (command.type == RecordType.CUSTOM) {
+                            draft.customTitle.trim().ifBlank {
+                                command.type.presentation.label
+                            }
+                        } else {
+                            command.type.presentation.label
+                        }
+                        "已转为护理计划 · $label"
+                    }
+                    draft.workMode() == ComposerWorkMode.ScheduleCare -> {
+                        val label = if (command.type == RecordType.CUSTOM) {
+                            draft.customTitle.trim().ifBlank {
+                                command.type.presentation.label
+                            }
+                        } else {
+                            command.type.presentation.label
+                        }
+                        "已安排$label"
+                    }
                     draft.sleepAction == SleepDraftAction.SleepDown &&
                         draft.endTimestamp == null -> "已开始睡眠"
                     draft.sleepAction == SleepDraftAction.SleepDown -> "已记录睡眠"
                     draft.sleepAction == SleepDraftAction.WakeUp -> "已记录醒来"
                     draft.isEditing -> "已保存修改"
-                    else -> "已记录${command.type.presentation.label}"
+                    else -> {
+                        val label = if (command.type == RecordType.CUSTOM) {
+                            draft.customTitle.trim().ifBlank {
+                                command.type.presentation.label
+                            }
+                        } else {
+                            command.type.presentation.label
+                        }
+                        "已记录$label"
+                    }
                 }
                 message to (
                     command.existingRecordId == null &&
@@ -425,14 +619,22 @@ class RecordComposerViewModel @Inject constructor(
     internal fun delete(onDeleted: (String) -> Unit) {
         val snapshot = _state.value
         val draft = snapshot.draft ?: return
-        val recordId = draft.existingRecordId ?: return
+        val editPlanId = draft.carePlanId?.takeIf { draft.editCarePlan }
+        val recordId = draft.existingRecordId
+        if (editPlanId == null && recordId == null) return
         if (snapshot.saving || snapshot.deleting) return
         val session = sessionGate.current() ?: return
         _state.update { it.copy(deleting = true, error = null) }
         actionJob = viewModelScope.launch {
             try {
-                careLog.deleteRecord(recordId)
-                photoStore.delete(draft.photos)
+                if (editPlanId != null) {
+                    // Soft-delete plan + media tombstones in domain; physical GC deferred.
+                    careLog.deleteCarePlan(editPlanId)
+                } else {
+                    careLog.deleteRecord(recordId!!)
+                    // Tombstones are domain-owned; drop local bytes only after commit.
+                    photoStore.delete(draft.photos)
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
@@ -450,7 +652,7 @@ class RecordComposerViewModel @Inject constructor(
             currentCoroutineContext().ensureActive()
             sessionGate.deliver(session) {
                 savedState.clear()
-                onDeleted("已删除记录")
+                onDeleted(if (editPlanId != null) "已删除护理计划" else "已删除记录")
             }
         }
     }
@@ -475,7 +677,6 @@ class RecordComposerViewModel @Inject constructor(
             RecordType.FORMULA,
             RecordType.PUMPED_FEED,
         )
-        const val MAX_RECORD_PHOTOS = 9
     }
 }
 
@@ -487,11 +688,15 @@ fun RecordComposerHost(
     /** Consumes the restorable root request as soon as a database write succeeds. */
     onPersisted: () -> Unit,
     onSaved: (String) -> Unit,
-    onStartNursingTimer: (note: String, amountMl: String) -> Unit,
+    onStartNursingTimer: (note: String, amountMl: String, carePlanId: Long?, babyId: Long?) -> Unit,
+    /** Optional: open device-local system calendar setup (ticket 21). Cancel still saves plan. */
+    onConfigureSystemCalendar: (() -> Unit)? = null,
     vm: RecordComposerViewModel = hiltViewModel(),
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
     var confirmDelete by remember(request) { mutableStateOf(false) }
+    /** Explicit convert confirm; cancel keeps the draft and original record untouched. */
+    var confirmConvert by remember(request) { mutableStateOf(false) }
     // These outlive request=null so a saved record can finish its optional reminder flow after
     // the restorable root request has already been consumed. rememberSaveable also preserves the
     // prompt across process recreation without ever reopening the persisted New request.
@@ -592,29 +797,52 @@ fun RecordComposerHost(
                     saveError = state.error,
                     canStartNursingTimer =
                         state.canStartNursingTimer,
+                    systemCalendarConfigured = state.systemCalendarConfigured,
+                    onConfigureSystemCalendar = onConfigureSystemCalendar,
                     onDraftChange = vm::updateDraft,
                     onDismiss = {
                         vm.close()
                         onDismiss()
                     },
-                    onDelete = if (draft.isEditing) {
+                    onDelete = if (draft.isEditing || (draft.carePlanId != null && draft.editCarePlan)) {
                         { confirmDelete = true }
                     } else {
                         null
                     },
                     onConfirm = {
-                        vm.save { message, offerReminder ->
-                            dispatchRecordSaveCompletion(
-                                message = message,
-                                offerReminder = offerReminder,
-                                onOfferReminder = { pendingSavedMessage = it },
-                                onPersisted = onPersisted,
-                                onFinished = onSaved,
-                            )
+                        // Convert is not ExplainedDisabled alone — require an explicit dialog.
+                        if (draft.needsConvertToCarePlan()) {
+                            confirmConvert = true
+                        } else {
+                            vm.save { message, offerReminder ->
+                                val hasNotificationPermission =
+                                    Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                                        ContextCompat.checkSelfPermission(
+                                            context,
+                                            Manifest.permission.POST_NOTIFICATIONS,
+                                        ) == PackageManager.PERMISSION_GRANTED
+                                val finishedMessage = carePlanSaveMessageWithPermission(
+                                    baseMessage = message,
+                                    notificationPermissionGranted = hasNotificationPermission,
+                                    isCarePlanWrite = isCarePlanSaveMessage(message),
+                                )
+                                dispatchRecordSaveCompletion(
+                                    message = finishedMessage,
+                                    offerReminder = offerReminder,
+                                    onOfferReminder = { pendingSavedMessage = it },
+                                    onPersisted = onPersisted,
+                                    onFinished = onSaved,
+                                )
+                            }
                         }
                     },
                     onStartNursingTimer = {
-                        onStartNursingTimer(draft.note, draft.nursingAmountMl)
+                        onStartNursingTimer(
+                            draft.note,
+                            draft.nursingAmountMl,
+                            draft.carePlanId?.takeUnless { draft.editCarePlan },
+                            state.babyId,
+                        )
                     },
                     onImportPhotos = vm::importPhotos,
                     onRemovePhoto = vm::removePhoto,
@@ -624,12 +852,23 @@ fun RecordComposerHost(
     }
 
     if (confirmDelete) {
+        val deletingPlan = state.draft?.let { it.carePlanId != null && it.editCarePlan } == true
         AlertDialog(
             onDismissRequest = {
                 if (!state.deleting) confirmDelete = false
             },
-            title = { Text("删除这条记录？") },
-            text = { Text("删除后会从时间轴和汇总中移除，无法撤销。") },
+            title = {
+                Text(if (deletingPlan) "删除这条护理计划？" else "删除这条记录？")
+            },
+            text = {
+                Text(
+                    if (deletingPlan) {
+                        "删除后计划会从待履行列表移除，不会生成护理记录。"
+                    } else {
+                        "删除后会从时间轴和汇总中移除，无法撤销。"
+                    },
+                )
+            },
             confirmButton = {
                 TextButton(
                     enabled = !state.deleting,
@@ -651,6 +890,58 @@ fun RecordComposerHost(
                 TextButton(
                     enabled = !state.deleting,
                     onClick = { confirmDelete = false },
+                ) {
+                    Text("取消")
+                }
+            },
+        )
+    }
+
+    if (confirmConvert) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!state.saving) confirmConvert = false
+            },
+            title = { Text("转为护理计划？") },
+            text = {
+                Text(
+                    "原记录会从时间轴和汇总中移除，字段、备注和照片会保存为待履行的护理计划。",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !state.saving,
+                    onClick = {
+                        confirmConvert = false
+                        vm.save { message, offerReminder ->
+                            val hasNotificationPermission =
+                                Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                                    ContextCompat.checkSelfPermission(
+                                        context,
+                                        Manifest.permission.POST_NOTIFICATIONS,
+                                    ) == PackageManager.PERMISSION_GRANTED
+                            val finishedMessage = carePlanSaveMessageWithPermission(
+                                baseMessage = message,
+                                notificationPermissionGranted = hasNotificationPermission,
+                                isCarePlanWrite = isCarePlanSaveMessage(message),
+                            )
+                            dispatchRecordSaveCompletion(
+                                message = finishedMessage,
+                                offerReminder = offerReminder,
+                                onOfferReminder = { pendingSavedMessage = it },
+                                onPersisted = onPersisted,
+                                onFinished = onSaved,
+                            )
+                        }
+                    },
+                ) {
+                    Text(if (state.saving) "保存中…" else "转为护理计划")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !state.saving,
+                    onClick = { confirmConvert = false },
                 ) {
                     Text("取消")
                 }
@@ -721,6 +1012,30 @@ internal fun dispatchRecordSaveCompletion(
     if (!offerReminder) onFinished(message)
 }
 
+/** Care-plan create/edit/convert success snackbars (not feed-fact or fulfill). */
+internal fun isCarePlanSaveMessage(message: String): Boolean =
+    message.startsWith("已安排") ||
+        message.startsWith("已转为护理计划") ||
+        message == "已保存护理计划"
+
+/**
+ * Permission denial never blocks plan persistence; surface a clear local-reminder
+ * degradation so users know why they may not get a notification.
+ * Keeps parity with [com.lezi.babylog.feature.settings.carePlanReminderPermissionDeniedStatus].
+ */
+internal fun carePlanSaveMessageWithPermission(
+    baseMessage: String,
+    notificationPermissionGranted: Boolean,
+    isCarePlanWrite: Boolean,
+): String {
+    if (!isCarePlanWrite || notificationPermissionGranted) return baseMessage
+    return if (baseMessage == "已保存护理计划") {
+        "护理计划已保存；通知权限未开启，本机提醒已降级"
+    } else {
+        "$baseMessage；通知权限未开启，本机提醒已降级"
+    }
+}
+
 @Composable
 private fun ComposerState(
     kind: StateKind,
@@ -743,5 +1058,30 @@ private fun ComposerState(
             actionLabel = actionLabel,
             onAction = onAction,
         )
+    }
+}
+
+/**
+ * Ticket 16 / Composer S2: nursing timer is a stateful action — only for live
+ * New (non-historical) or Fulfill (not edit-plan). ScheduleCare / EditPlan never
+ * enable start-timer even if the draft type is nursing.
+ */
+internal fun computeCanStartNursingTimer(
+    request: RecordComposerRequest,
+    draft: QuickRecordDraft,
+    timerEnabled: Boolean,
+    nowMillis: Long = RecordTime.currentTimeMillis(),
+): Boolean {
+    if (!timerEnabled || draft.type != RecordType.NURSING) return false
+    // Convert / schedule / edit-plan are intent-only — never expose start-timer.
+    if (draft.needsConvertToCarePlan(nowMillis)) return false
+    val mode = draft.workMode(nowMillis)
+    if (mode == ComposerWorkMode.ScheduleCare || mode == ComposerWorkMode.EditPlan) {
+        return false
+    }
+    return when (request) {
+        is RecordComposerRequest.New -> !request.historical
+        is RecordComposerRequest.Fulfill -> !draft.editCarePlan
+        else -> false
     }
 }

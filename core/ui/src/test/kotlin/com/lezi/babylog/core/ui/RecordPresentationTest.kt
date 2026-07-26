@@ -2,6 +2,8 @@ package com.lezi.babylog.core.ui
 
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.displayLabel
+import com.lezi.babylog.core.model.isAvailableForNewEntry
 import com.lezi.babylog.designsystem.LeziRecordGlyph
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -37,6 +39,8 @@ class RecordPresentationTest {
         )
         assertEquals(RecordSection.Feeding, RecordType.SNACK.presentation.section)
         assertEquals(RecordSection.Feeding, RecordType.DRINK.presentation.section)
+        // Retired bare CUSTOM presentation lives under the 自定义 section.
+        assertEquals(RecordSection.Custom, RecordType.CUSTOM.presentation.section)
     }
 
     @Test
@@ -69,6 +73,26 @@ class RecordPresentationTest {
     fun emptySpecializedPayloadUsesHelpfulCopy() {
         assertEquals("自由文本", record(RecordType.OTHER).presentationSummary())
         assertEquals("正文/照片", record(RecordType.DIARY).presentationSummary())
+    }
+
+    @Test
+    fun presentationStillCoversRetiredGenericTypesForHistoricalRows() {
+        assertTrue(RecordType.MEMO.presentation.label.isNotBlank())
+        assertTrue(RecordType.OTHER.presentation.label.isNotBlank())
+        assertTrue(RecordType.CUSTOM.presentation.label.isNotBlank())
+        assertFalse(RecordType.MEMO.isAvailableForNewEntry)
+        assertFalse(RecordType.OTHER.isAvailableForNewEntry)
+        assertFalse(RecordType.CUSTOM.isAvailableForNewEntry)
+    }
+
+    @Test
+    fun customDisplayLabelUsesTitleSnapshotNotGenericLabel() {
+        val record = record(
+            type = RecordType.CUSTOM,
+            payload = """{"title":"抚触","custom_item_id":4,"icon_slot":1}""",
+        )
+        assertEquals("抚触", record.displayLabel())
+        assertEquals("抚触", record.presentationSummary())
     }
 
     @Test

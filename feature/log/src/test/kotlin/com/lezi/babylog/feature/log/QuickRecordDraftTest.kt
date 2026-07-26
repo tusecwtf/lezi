@@ -246,11 +246,10 @@ class QuickRecordDraftTest {
             type = RecordType.SLEEP,
             timestamp = now + 1L,
         )
-        assertEquals(
-            IntervalDurationPreview.Warning("不能选未来时刻"),
-            futureSleepDown.intervalDurationPreview(nowMillis = now),
-        )
-        assertFalse(futureSleepDown.canConfirm(nowMillis = now))
+        // Future sleep is schedule-care intent (ticket 17), not a fact open interval.
+        assertEquals(ComposerWorkMode.ScheduleCare, futureSleepDown.workMode(nowMillis = now))
+        assertNull(futureSleepDown.intervalDurationPreview(nowMillis = now))
+        assertTrue(futureSleepDown.canConfirm(nowMillis = now))
     }
 
     @Test
@@ -288,9 +287,10 @@ class QuickRecordDraftTest {
             ),
         )
 
+        // Future start is schedule-care intent — interval end rejection does not apply.
         val futureStart = sleep.copy(timestamp = now + 2L)
-        assertEquals(
-            "不能选未来时刻",
+        assertEquals(ComposerWorkMode.ScheduleCare, futureStart.workMode(nowMillis = now))
+        assertNull(
             futureStart.endTimeRejectionMessage(
                 candidateEndTimestamp = now + 1L,
                 nowMillis = now,
@@ -366,6 +366,31 @@ class QuickRecordDraftTest {
     }
 
     @Test
+    fun wakeSleepKeepsCommonRecordPhotosFromOpenInterval() {
+        val open = Record(
+            id = 42L,
+            clientUuid = "sleep-42",
+            babyId = 7L,
+            type = RecordType.SLEEP,
+            timestamp = tappedAt - 3_600_000L,
+            endTimestamp = null,
+            note = "带图小睡",
+            createdByUserId = 1L,
+            payloadJson = """{"is_nap":true,"photos":["sleep-a.jpg","sleep-b.jpg"]}""",
+            updatedAt = tappedAt,
+        )
+
+        val draft = QuickRecordDraft.wakeSleep(open, tappedAt)
+
+        assertEquals(listOf("sleep-a.jpg", "sleep-b.jpg"), draft.photos)
+        assertEquals(listOf("sleep-a.jpg", "sleep-b.jpg"), draft.sourcePhotos)
+        // Save command keeps the shared photos[] replica so CareLog does not
+        // tombstone MediaAsset rows when confirming wake with unchanged photos.
+        assertTrue(draft.toSaveCommand().payloadJson.contains("\"photos\""))
+        assertTrue(draft.toSaveCommand().payloadJson.contains("sleep-a.jpg"))
+    }
+
+    @Test
     fun historicalSleepUsesCompletedIntervalValidation() {
         val draft = QuickRecordDraft.create(
             type = RecordType.SLEEP,
@@ -407,6 +432,28 @@ class QuickRecordDraftTest {
         assertTrue(command.payloadJson.contains("\"photos\":[\"a.jpg\"]"))
         assertTrue(command.payloadJson.contains("\"anomaly_flag\":true"))
         assertTrue(command.payloadJson.contains("\"future\":{\"v\":2}"))
+        assertEquals(listOf("a.jpg"), draft.photos)
+        assertEquals(listOf("a.jpg"), draft.sourcePhotos)
+    }
+
+    @Test
+    fun nonTextRecordLoadsSharedPhotoReplicaFromPayload() {
+        val source = Record(
+            id = 12L,
+            clientUuid = "pee-12",
+            babyId = 7L,
+            type = RecordType.PEE,
+            timestamp = tappedAt,
+            endTimestamp = null,
+            note = null,
+            createdByUserId = 1L,
+            payloadJson = """{"pee_amount":2,"photos":["pee.jpg"]}""",
+            updatedAt = tappedAt,
+        )
+
+        val draft = QuickRecordDraft.fromRecord(source)
+        assertEquals(listOf("pee.jpg"), draft.photos)
+        assertEquals(listOf("pee.jpg"), draft.sourcePhotos)
     }
 
     @Test
@@ -601,15 +648,107 @@ class QuickRecordDraftTest {
     }
 
     @Test
-    fun futurePointInTimeRecordUsesTheSharedShortWarning() {
+    fun futurePointInTimeCreateBecomesScheduleCareWhileFulfillRejectsFuture() {
         val now = tappedAt
         val draft = QuickRecordDraft.create(
             type = RecordType.BATH,
             timestamp = now + 1L,
         )
 
-        assertEquals("不能选未来时刻", draft.validationError(nowMillis = now))
-        assertFalse(draft.canConfirm(nowMillis = now))
+        assertEquals(ComposerWorkMode.ScheduleCare, draft.workMode(nowMillis = now))
+        assertEquals("安排护理", draft.workModeTitle(nowMillis = now))
+        assertEquals("安排护理", sheetKicker(draft, nowMillis = now))
+        assertEquals("确认安排", draft.confirmLabel(nowMillis = now))
+        assertNull(draft.validationError(nowMillis = now))
+        assertTrue(draft.canConfirm(nowMillis = now))
+
+        val fact = QuickRecordDraft.create(type = RecordType.BATH, timestamp = now - 1L)
+        assertEquals(ComposerWorkMode.RecordFact, fact.workMode(nowMillis = now))
+        assertEquals("记录事实", sheetKicker(fact, nowMillis = now))
+
+        val fulfill = draft.copy(carePlanId = 42L)
+        assertEquals(ComposerWorkMode.FulfillPlan, fulfill.workMode(nowMillis = now))
+        assertEquals("完成护理计划", sheetKicker(fulfill, nowMillis = now))
+        assertEquals("确认完成", fulfill.confirmLabel(nowMillis = now))
+        assertEquals("不能选未来时刻", fulfill.validationError(nowMillis = now))
+        assertFalse(fulfill.canConfirm(nowMillis = now))
+    }
+
+    @Test
+    fun fromCarePlanHydratesPlanFieldSnapshotIntoFulfillDraft() {
+        val plan = com.lezi.babylog.core.model.CarePlan(
+            id = 9L,
+            clientUuid = "plan-uuid",
+            babyId = 1L,
+            type = RecordType.PEE,
+            scheduledAt = tappedAt + 60_000L,
+            scheduledZoneId = "Asia/Shanghai",
+            note = "换尿布",
+            payloadJson = """{"pee_amount":1}""",
+            schemaVersion = 1,
+            updatedAt = tappedAt,
+        )
+        val draft = QuickRecordDraft.fromCarePlan(plan, actualTimestamp = tappedAt)
+        assertEquals(9L, draft.carePlanId)
+        assertNull(draft.existingRecordId)
+        assertEquals(tappedAt, draft.timestamp)
+        assertEquals(1, draft.peeAmount)
+        assertEquals("换尿布", draft.note)
+        assertEquals(ComposerWorkMode.FulfillPlan, draft.workMode(nowMillis = tappedAt))
+        assertEquals("完成护理计划", sheetKicker(draft))
+    }
+
+    @Test
+    fun fulfillDraftCarriesPlanPhotosWithoutOwningPlanSourcePaths() {
+        val plan = com.lezi.babylog.core.model.CarePlan(
+            id = 15L,
+            clientUuid = "plan-photos",
+            babyId = 1L,
+            type = RecordType.DIARY,
+            scheduledAt = tappedAt + 60_000L,
+            scheduledZoneId = "UTC",
+            note = "记",
+            payloadJson = """{"body":"x","photos":["p1.jpg","p2.jpg"]}""",
+            schemaVersion = 1,
+            updatedAt = tappedAt,
+        )
+        // Composer fulfill path sets photos from listCarePlanPhotoPaths and sourcePhotos empty.
+        val draft = QuickRecordDraft.fromCarePlan(plan, actualTimestamp = tappedAt).copy(
+            photos = listOf("p1.jpg", "p2.jpg"),
+            sourcePhotos = emptyList(),
+        )
+        assertEquals(listOf("p1.jpg", "p2.jpg"), draft.photos)
+        assertTrue(draft.sourcePhotos.isEmpty())
+        assertEquals(ComposerWorkMode.FulfillPlan, draft.workMode(nowMillis = tappedAt))
+    }
+
+    @Test
+    fun editPlanModeDoesNotFulfillAndAllowsPastScheduledTime() {
+        val plan = com.lezi.babylog.core.model.CarePlan(
+            id = 11L,
+            clientUuid = "plan-edit",
+            babyId = 1L,
+            type = RecordType.BATH,
+            scheduledAt = tappedAt + 60_000L,
+            scheduledZoneId = "UTC",
+            note = "洗澡",
+            payloadJson = "{}",
+            schemaVersion = 1,
+            updatedAt = tappedAt,
+        )
+        val draft = QuickRecordDraft.fromCarePlanForEdit(plan)
+            .copy(timestamp = tappedAt - 5_000L)
+        assertTrue(draft.editCarePlan)
+        assertEquals(ComposerWorkMode.EditPlan, draft.workMode(nowMillis = tappedAt))
+        assertEquals("编辑护理计划", draft.workModeTitle(nowMillis = tappedAt))
+        assertEquals("编辑护理计划", sheetKicker(draft, nowMillis = tappedAt))
+        assertEquals("保存计划", draft.confirmLabel(nowMillis = tappedAt))
+        assertNull(draft.validationError(nowMillis = tappedAt))
+        assertTrue(draft.canConfirm(nowMillis = tappedAt))
+        // Fulfill path still blocks future actual times.
+        val fulfill = draft.copy(editCarePlan = false, timestamp = tappedAt + 1L)
+        assertEquals(ComposerWorkMode.FulfillPlan, fulfill.workMode(nowMillis = tappedAt))
+        assertEquals("不能选未来时刻", fulfill.validationError(nowMillis = tappedAt))
     }
 
     @Test
@@ -629,6 +768,209 @@ class QuickRecordDraftTest {
             QuickRecordDraft.create(RecordType.NURSING, tappedAt)
                 .validationError(nowMillis = tappedAt + 1L),
         )
+    }
+
+    @Test
+    fun nursingAndSleepScheduleAllowEmptyIntentPayload() {
+        val now = tappedAt
+        val nursingSchedule = QuickRecordDraft.create(
+            type = RecordType.NURSING,
+            timestamp = now + 60_000L,
+        )
+        assertEquals(ComposerWorkMode.ScheduleCare, nursingSchedule.workMode(nowMillis = now))
+        assertNull(nursingSchedule.validationError(nowMillis = now))
+        assertTrue(nursingSchedule.canConfirm(nowMillis = now))
+
+        val sleepSchedule = QuickRecordDraft.create(
+            type = RecordType.SLEEP,
+            timestamp = now + 60_000L,
+        )
+        assertEquals(ComposerWorkMode.ScheduleCare, sleepSchedule.workMode(nowMillis = now))
+        assertNull(sleepSchedule.validationError(nowMillis = now))
+        assertTrue(sleepSchedule.canConfirm(nowMillis = now))
+    }
+
+    @Test
+    fun sleepFulfillDefaultsToOpenSleepDownAction() {
+        val plan = com.lezi.babylog.core.model.CarePlan(
+            id = 21L,
+            clientUuid = "sleep-plan",
+            babyId = 1L,
+            type = RecordType.SLEEP,
+            scheduledAt = tappedAt + 60_000L,
+            scheduledZoneId = "UTC",
+            payloadJson = "{}",
+            schemaVersion = 1,
+            updatedAt = tappedAt,
+        )
+        val draft = QuickRecordDraft.fromCarePlan(plan, actualTimestamp = tappedAt)
+        assertEquals(SleepDraftAction.SleepDown, draft.sleepAction)
+        assertNull(draft.endTimestamp)
+        assertNull(draft.validationError(nowMillis = tappedAt))
+        assertTrue(draft.canConfirm(nowMillis = tappedAt))
+    }
+
+    @Test
+    fun concreteCustomItemRoundTripsIdentityAndSnapshot() {
+        val draft = QuickRecordDraft.create(
+            type = RecordType.CUSTOM,
+            timestamp = tappedAt,
+            customItemId = 42L,
+            customTitle = "抚触",
+            customIconSlot = 3,
+        ).copy(customDetail = "睡前")
+
+        val command = draft.toSaveCommand()
+
+        assertEquals(RecordType.CUSTOM, command.type)
+        assertTrue(command.payloadJson.contains("\"title\":\"抚触\""))
+        assertTrue(command.payloadJson.contains("\"detail\":\"睡前\""))
+        assertTrue(command.payloadJson.contains("\"custom_item_id\":42"))
+        assertTrue(command.payloadJson.contains("\"icon_slot\":3"))
+        assertEquals("抚触", sheetTitle(draft))
+    }
+
+    @Test
+    fun historicalMemoAndBareCustomRemainEditable() {
+        val memo = Record(
+            id = 11L,
+            clientUuid = "memo-11",
+            babyId = 1L,
+            type = RecordType.MEMO,
+            timestamp = tappedAt,
+            createdByUserId = 1L,
+            payloadJson = """{"body":"旧备注"}""",
+            updatedAt = tappedAt,
+        )
+        val bareCustom = Record(
+            id = 12L,
+            clientUuid = "custom-12",
+            babyId = 1L,
+            type = RecordType.CUSTOM,
+            timestamp = tappedAt,
+            createdByUserId = 1L,
+            payloadJson = """{"title":"历史自定义"}""",
+            updatedAt = tappedAt,
+        )
+
+        val memoDraft = QuickRecordDraft.fromRecord(memo).copy(body = "改过的备注")
+        val customDraft = QuickRecordDraft.fromRecord(bareCustom).copy(customDetail = "补细节")
+
+        assertEquals(RecordType.MEMO, memoDraft.type)
+        assertTrue(memoDraft.isEditing)
+        assertTrue(memoDraft.toSaveCommand().payloadJson.contains("\"body\":\"改过的备注\""))
+
+        assertEquals(RecordType.CUSTOM, customDraft.type)
+        assertEquals("历史自定义", customDraft.customTitle)
+        assertNull(customDraft.customItemId)
+        assertTrue(customDraft.toSaveCommand().payloadJson.contains("\"title\":\"历史自定义\""))
+        assertTrue(customDraft.toSaveCommand().payloadJson.contains("\"detail\":\"补细节\""))
+    }
+
+    @Test
+    fun bareCustomCreateDoesNotInventADefaultTitle() {
+        val draft = QuickRecordDraft.create(RecordType.CUSTOM, tappedAt)
+        assertEquals("", draft.customTitle)
+        assertNull(draft.customItemId)
+        assertEquals(
+            "请填写标题",
+            draft.validationError(nowMillis = tappedAt + 1L),
+        )
+    }
+
+    @Test
+    fun scheduleCareDefaultsProjectToSystemCalendarOn() {
+        val now = 1_700_000_000_000L
+        val draft = QuickRecordDraft.create(RecordType.FORMULA, now + 60_000L)
+        assertEquals(ComposerWorkMode.ScheduleCare, draft.workMode(nowMillis = now))
+        assertTrue(draft.projectToSystemCalendar)
+        val off = draft.copy(projectToSystemCalendar = false)
+        assertFalse(off.projectToSystemCalendar)
+    }
+
+    @Test
+    fun editingRecordToFutureRequiresConvertNotOrdinarySave() {
+        val now = tappedAt
+        val source = Record(
+            id = 55L,
+            clientUuid = "formula-55",
+            babyId = 1L,
+            type = RecordType.FORMULA,
+            timestamp = now - 60_000L,
+            note = "原备注",
+            createdByUserId = 1L,
+            payloadJson = """{"amount_ml":120}""",
+            updatedAt = now - 60_000L,
+        )
+        val draft = QuickRecordDraft.fromRecord(source).copy(timestamp = now + 90_000L)
+
+        assertTrue(draft.needsConvertToCarePlan(nowMillis = now))
+        // Still RecordFact work mode — convert is an explicit action, not silent schedule.
+        assertEquals(ComposerWorkMode.RecordFact, draft.workMode(nowMillis = now))
+        assertEquals("转为护理计划", draft.workModeTitle(nowMillis = now))
+        assertEquals("转为护理计划", sheetKicker(draft, nowMillis = now))
+        assertEquals("转为护理计划", draft.confirmLabel(nowMillis = now))
+        assertNull(draft.validationError(nowMillis = now))
+        assertTrue(draft.canConfirm(nowMillis = now))
+
+        // Cancel path: putting time back to past removes convert need and restores save.
+        val cancelled = draft.copy(timestamp = now - 1_000L)
+        assertFalse(cancelled.needsConvertToCarePlan(nowMillis = now))
+        assertEquals("保存修改", cancelled.confirmLabel(nowMillis = now))
+        assertTrue(cancelled.canConfirm(nowMillis = now))
+
+        // Historical memo cannot convert even if time is future.
+        val memo = QuickRecordDraft.fromRecord(
+            source.copy(
+                id = 56L,
+                type = RecordType.MEMO,
+                payloadJson = """{"body":"旧"}""",
+            ),
+        ).copy(timestamp = now + 1L)
+        assertFalse(memo.needsConvertToCarePlan(nowMillis = now))
+        assertEquals("不能选未来时刻", memo.validationError(nowMillis = now))
+        assertFalse(memo.canConfirm(nowMillis = now))
+    }
+
+    @Test
+    fun convertSleepAndNursingUseIntentOnlyValidation() {
+        val now = tappedAt
+        val openSleep = Record(
+            id = 70L,
+            clientUuid = "sleep-70",
+            babyId = 1L,
+            type = RecordType.SLEEP,
+            timestamp = now - 30_000L,
+            endTimestamp = null,
+            note = null,
+            createdByUserId = 1L,
+            payloadJson = """{"is_nap":true}""",
+            updatedAt = now - 30_000L,
+        )
+        val sleepDraft = QuickRecordDraft.fromRecord(openSleep).copy(timestamp = now + 60_000L)
+        assertTrue(sleepDraft.needsConvertToCarePlan(nowMillis = now))
+        assertNull(sleepDraft.intervalDurationPreview(nowMillis = now))
+        assertNull(sleepDraft.validationError(nowMillis = now))
+        assertTrue(sleepDraft.canConfirm(nowMillis = now))
+
+        val nursing = Record(
+            id = 71L,
+            clientUuid = "nursing-71",
+            babyId = 1L,
+            type = RecordType.NURSING,
+            timestamp = now - 10_000L,
+            createdByUserId = 1L,
+            payloadJson = """{"left_min":0,"right_min":0,"order":"LR"}""",
+            updatedAt = now - 10_000L,
+        )
+        val nursingDraft = QuickRecordDraft.fromRecord(nursing).copy(
+            timestamp = now + 120_000L,
+            leftMin = "0",
+            rightMin = "0",
+        )
+        assertTrue(nursingDraft.needsConvertToCarePlan(nowMillis = now))
+        assertNull(nursingDraft.validationError(nowMillis = now))
+        assertTrue(nursingDraft.canConfirm(nowMillis = now))
     }
 
     private fun record(

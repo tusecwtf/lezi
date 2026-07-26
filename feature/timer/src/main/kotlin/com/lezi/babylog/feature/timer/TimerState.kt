@@ -19,6 +19,12 @@ data class TimerState(
     val babyId: Long? = null,
     /** Stable idempotency key retained until this timer session is cleared. */
     val completionClientUuid: String? = null,
+    /**
+     * Optional open nursing CarePlan bound to this timer session. Survives
+     * process death via DataStore JSON; cleared with the session. Plan stays
+     * pending until [com.lezi.babylog.domain.CareLog.completeNursing] succeeds.
+     */
+    val carePlanId: Long? = null,
     val leftRunning: Boolean = false,
     val rightRunning: Boolean = false,
     val leftAccumMs: Long = 0L,
@@ -46,6 +52,7 @@ data class TimerState(
         } else {
             put("completionClientUuid", completionClientUuid)
         }
+        putNullableLong("carePlanId", carePlanId)
         put("leftRunning", leftRunning)
         put("rightRunning", rightRunning)
         put("leftAccumMs", leftAccumMs)
@@ -92,6 +99,7 @@ data class TimerState(
                     babyId = o.optionalLong("babyId"),
                     completionClientUuid = o.optionalString("completionClientUuid")
                         ?.takeIf { it.isNotBlank() },
+                    carePlanId = o.optionalLong("carePlanId")?.takeIf { it > 0L },
                     leftRunning = false,
                     rightRunning = false,
                     leftAccumMs = leftAccum,

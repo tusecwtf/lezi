@@ -13,12 +13,16 @@ data class Invite(val code: String, val expiresAt: Long)
  *
  * [deviceId] is a client-only link key for mapping record `created_by_device_id`
  * to the current 家庭称呼. Product UI must never display [deviceId].
+ *
+ * [membershipId] is the server-minted immutable membership identity (UUID). Soft-
+ * parsed as null when talking to a legacy NAS that omits the field.
  */
 data class FamilyMember(
     val displayName: String?,
     val role: FamilyRole,
     val isSelf: Boolean,
     val deviceId: String? = null,
+    val membershipId: String? = null,
 )
 
 enum class SyncTrigger { Foreground, PullToRefresh, LocalWrite }

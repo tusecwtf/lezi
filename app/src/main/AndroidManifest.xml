@@ -17,6 +17,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- System calendar projection (ticket 21); requested only on explicit enable. -->
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="android.permission.WRITE_CALENDAR" />
 
     <!-- Android 11+ package visibility: resolve system camera for TakePicture / QR scan. -->
     <queries>
@@ -43,11 +46,21 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.Lezi">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- L3 system-calendar deep link → fulfill care plan (ticket 22). -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="lezi"
+                    android:host="care-plan" />
             </intent-filter>
         </activity>
 
@@ -82,6 +95,9 @@
         </receiver>
         <receiver
             android:name="com.lezi.babylog.feature.settings.CalendarReminderReceiver"
+            android:exported="false" />
+        <receiver
+            android:name="com.lezi.babylog.feature.settings.CarePlanReminderReceiver"
             android:exported="false" />
         <receiver
             android:name="com.lezi.babylog.feature.widget.CareWidgetReceiver"

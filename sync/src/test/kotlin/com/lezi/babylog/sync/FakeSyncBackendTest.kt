@@ -13,6 +13,216 @@ import org.junit.Test
 
 class FakeSyncBackendTest {
     @Test
+    fun atomicBundleIsInvisibleUntilCommitAndIsIdempotent() = runBlocking {
+        val backend = FakeSyncBackend()
+        val family = backend.create(
+            baseUrl = "http://127.0.0.1:8765",
+            deviceId = "owner",
+            displayName = "妈妈",
+            createRequestId = "create-request-id-atomic-000000001",
+            bootstrapSecret = null,
+        )
+        val session = SyncSession(
+            familyId = family.familyId,
+            familyToken = family.token,
+            deviceId = "owner",
+            role = FamilyRole.Owner,
+            membershipId = family.membershipId.orEmpty(),
+            serverHost = "127.0.0.1",
+            serverPort = 8765,
+        )
+        val baby = SyncEntity(
+            type = "baby",
+            clientUuid = "baby-a",
+            payloadJson = """{"nickname":"年年"}""",
+            updatedAt = 1,
+        )
+        backend.push(session, listOf(baby))
+        val record = SyncEntity(
+            type = "record",
+            clientUuid = "record-a",
+            payloadJson = """{"baby_client_uuid":"baby-a","type":"formula","timestamp":1,"payload_json":{}}""",
+            updatedAt = 10,
+        )
+        val media = SyncEntity(
+            type = "media",
+            clientUuid = "media-a",
+            payloadJson =
+                """{"kind":"log","record_client_uuid":"record-a","byte_size":3,"mime":"image/jpeg"}""",
+            updatedAt = 10,
+        )
+        val draft = AtomicBundleDraft(
+            bundleId = "bundle-1",
+            root = record,
+            media = listOf(media),
+        )
+        val staged = backend.stageBundle(session, draft)
+        assertThat(staged.status).isEqualTo("staging")
+        assertThat(staged.missingMedia).containsExactly("media-a")
+        assertThat(backend.pull(session).entities.map { it.clientUuid }).containsExactly("baby-a")
+
+        backend.putBundleMedia(session, "bundle-1", "media-a", byteArrayOf(1, 2, 3), "image/jpeg")
+        val committed = backend.commitBundle(session, "bundle-1")
+        assertThat(committed.status).isEqualTo("committed")
+        assertThat(committed.applied).isEqualTo(2)
+        val again = backend.commitBundle(session, "bundle-1")
+        assertThat(again.cursor).isEqualTo(committed.cursor)
+        val pulled = backend.pull(session).entities.map { it.clientUuid }
+        assertThat(pulled).containsAtLeast("baby-a", "record-a", "media-a")
+        assertThat(backend.getMedia(session, "media-a")).isEqualTo(byteArrayOf(1, 2, 3))
+    }
+
+    @Test
+    fun atomicBundleCapabilityFlagBlocksLegacyFallback() = runBlocking {
+        val backend = FakeSyncBackend().apply { supportsAtomicBundle = false }
+        val session = SyncSession(
+            familyId = "fam",
+            familyToken = "t",
+            deviceId = "d",
+            role = FamilyRole.Owner,
+            serverHost = "127.0.0.1",
+            serverPort = 8765,
+        )
+        val draft = AtomicBundleDraft(
+            bundleId = "b",
+            root = SyncEntity("record", "r", "{}", 1),
+        )
+        val error = runCatching { backend.stageBundle(session, draft) }.exceptionOrNull()
+        assertThat(error).isInstanceOf(AtomicBundleUnsupportedException::class.java)
+    }
+
+    @Test
+    fun dualClientRecordAndCarePlanPhotoPackagesInvisibleUntilCommit() = runBlocking<Unit> {
+        // Two-device simulation on shared FakeSyncBackend: peer pull never sees
+        // partial photo packages across stage/upload failure windows.
+        val backend = FakeSyncBackend()
+        val ownerJoin = backend.create(
+            baseUrl = "http://127.0.0.1:8765",
+            deviceId = "device-a",
+            displayName = "妈妈",
+            createRequestId = "create-request-id-dual-device-0000001",
+            bootstrapSecret = null,
+        )
+        val owner = SyncSession(
+            familyId = ownerJoin.familyId,
+            familyToken = ownerJoin.token,
+            deviceId = "device-a",
+            role = FamilyRole.Owner,
+            membershipId = ownerJoin.membershipId.orEmpty(),
+            serverHost = "127.0.0.1",
+            serverPort = 8765,
+        )
+        val invite = backend.invite(owner)
+        val memberJoin = backend.join(
+            baseUrl = "http://127.0.0.1:8765",
+            code = invite.code,
+            deviceId = "device-b",
+            displayName = "爸爸",
+        )
+        val member = SyncSession(
+            familyId = memberJoin.familyId,
+            familyToken = memberJoin.token,
+            deviceId = "device-b",
+            role = FamilyRole.Member,
+            membershipId = memberJoin.membershipId.orEmpty(),
+            serverHost = "127.0.0.1",
+            serverPort = 8765,
+            pullCursor = 0,
+        )
+        backend.push(
+            owner,
+            listOf(
+                SyncEntity(
+                    type = "baby",
+                    clientUuid = "baby-dual",
+                    payloadJson = """{"nickname":"年年"}""",
+                    updatedAt = 1,
+                ),
+            ),
+        )
+
+        suspend fun assertPeerDoesNotSee(vararg clientUuids: String) {
+            val visible = backend.pull(member).entities.map { it.clientUuid }.toSet()
+            clientUuids.forEach { uuid ->
+                assertThat(visible).doesNotContain(uuid)
+            }
+        }
+
+        // Record package: staged without media → invisible to peer.
+        val record = SyncEntity(
+            type = "record",
+            clientUuid = "record-dual",
+            payloadJson =
+                """{"baby_client_uuid":"baby-dual","type":"formula","timestamp":10,"payload_json":{"amount_ml":90}}""",
+            updatedAt = 10,
+        )
+        val recordMedia = SyncEntity(
+            type = "media",
+            clientUuid = "media-record-dual",
+            payloadJson =
+                """{"kind":"log","record_client_uuid":"record-dual","byte_size":4,"mime":"image/jpeg"}""",
+            updatedAt = 10,
+        )
+        backend.stageBundle(
+            owner,
+            AtomicBundleDraft(
+                bundleId = "bundle-record-dual",
+                root = record,
+                media = listOf(recordMedia),
+            ),
+        )
+        assertPeerDoesNotSee("record-dual", "media-record-dual")
+        // Upload one photo but do not commit → still invisible.
+        backend.putBundleMedia(
+            owner,
+            "bundle-record-dual",
+            "media-record-dual",
+            byteArrayOf(9, 9, 9, 9),
+            "image/jpeg",
+        )
+        assertPeerDoesNotSee("record-dual", "media-record-dual")
+        backend.commitBundle(owner, "bundle-record-dual")
+        val afterRecord = backend.pull(member).entities.map { it.clientUuid }.toSet()
+        assertThat(afterRecord).containsAtLeast("record-dual", "media-record-dual")
+
+        // CarePlan package: incomplete → invisible; full commit → visible.
+        val plan = SyncEntity(
+            type = "care_plan",
+            clientUuid = "plan-dual",
+            payloadJson =
+                """{"baby_client_uuid":"baby-dual","type":"formula","scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","status":"pending","payload_json":{},"schema_version":1,"created_by_membership_id":"${owner.membershipId}"}""",
+            updatedAt = 20,
+        )
+        val planMedia = SyncEntity(
+            type = "media",
+            clientUuid = "media-plan-dual",
+            payloadJson =
+                """{"kind":"log","care_plan_client_uuid":"plan-dual","byte_size":2,"mime":"image/jpeg"}""",
+            updatedAt = 20,
+        )
+        backend.stageBundle(
+            owner,
+            AtomicBundleDraft(
+                bundleId = "bundle-plan-dual",
+                root = plan,
+                media = listOf(planMedia),
+            ),
+        )
+        assertPeerDoesNotSee("plan-dual", "media-plan-dual")
+        backend.putBundleMedia(
+            owner,
+            "bundle-plan-dual",
+            "media-plan-dual",
+            byteArrayOf(1, 2),
+            "image/jpeg",
+        )
+        assertPeerDoesNotSee("plan-dual", "media-plan-dual")
+        backend.commitBundle(owner, "bundle-plan-dual")
+        val afterPlan = backend.pull(member).entities.map { it.clientUuid }.toSet()
+        assertThat(afterPlan).containsAtLeast("plan-dual", "media-plan-dual")
+    }
+
+    @Test
     fun serverInviteEpochSecondsBecomeAndroidEpochMillis() {
         val invite = inviteFromWire(
             buildJsonObject {
@@ -94,10 +304,158 @@ class FakeSyncBackendTest {
         assertThat(invite.code).isNotEmpty()
         val join = backend.join(invite.code, "C").getOrThrow()
         assertThat(join.familyId).isEqualTo(family)
+        assertThat(join.membershipId).isNotEmpty()
         assertThat(join.entities.map(SyncEntity::clientUuid))
             .containsExactly("baby-a", "record-a")
         assertThat(join.cursor).isEqualTo(3)
+        // Idempotent membership identity for the same family+device.
+        assertThat(backend.join(invite.code, "C").getOrThrow().membershipId)
+            .isEqualTo(join.membershipId)
         assertThat(backend.pull("another-family", 0).getOrThrow().entities).isEmpty()
+    }
+
+    @Test
+    fun createAndMembersProjectStableMembershipIdentity() = runBlocking {
+        val backend = FakeSyncBackend()
+        val created = backend.create(
+            baseUrl = "http://127.0.0.1:8765",
+            deviceId = "device-owner",
+            displayName = "妈妈",
+            createRequestId = "create-request-id-0000000000000001",
+            bootstrapSecret = null,
+            familyName = "乐乐一家",
+        )
+        assertThat(created.membershipId).isNotEmpty()
+        assertThat(created.role).isEqualTo(FamilyRole.Owner)
+
+        val session = SyncSession(
+            familyId = created.familyId,
+            familyToken = created.token,
+            deviceId = "device-owner",
+            role = created.role,
+            membershipId = created.membershipId.orEmpty(),
+            serverHost = "127.0.0.1",
+            serverPort = 8765,
+        )
+        val members = backend.members(session)
+        assertThat(members).hasSize(1)
+        assertThat(members.single().membershipId).isEqualTo(created.membershipId)
+        assertThat(members.single().isSelf).isTrue()
+        assertThat(members.single().deviceId).isEqualTo("device-owner")
+    }
+
+    @Test
+    fun fulfillmentCandidateFreezeIsIdempotentAndIgnoresClientForgedStamps() = runBlocking {
+        // Ticket 26: Fake mirrors lezi-sync — first accept freezes membership/role/
+        // confirmed_at; later pushes cannot rewrite those fields.
+        val backend = FakeSyncBackend()
+        val ownerJoin = backend.create(
+            baseUrl = "http://127.0.0.1:8765",
+            deviceId = "owner-dev",
+            displayName = "妈妈",
+            createRequestId = "create-request-id-fulfill-freeze-01",
+            bootstrapSecret = null,
+        )
+        val owner = SyncSession(
+            familyId = ownerJoin.familyId,
+            familyToken = ownerJoin.token,
+            deviceId = "owner-dev",
+            role = FamilyRole.Owner,
+            membershipId = ownerJoin.membershipId.orEmpty(),
+            serverHost = "127.0.0.1",
+            serverPort = 8765,
+        )
+        val invite = backend.invite(owner)
+        val memberJoin = backend.join(
+            baseUrl = "http://127.0.0.1:8765",
+            code = invite.code,
+            deviceId = "member-dev",
+            displayName = "爸爸",
+        )
+        val member = SyncSession(
+            familyId = memberJoin.familyId,
+            familyToken = memberJoin.token,
+            deviceId = "member-dev",
+            role = FamilyRole.Member,
+            membershipId = memberJoin.membershipId.orEmpty(),
+            serverHost = "127.0.0.1",
+            serverPort = 8765,
+        )
+        backend.push(
+            owner,
+            listOf(
+                SyncEntity(
+                    type = "baby",
+                    clientUuid = "baby-f",
+                    payloadJson = """{"nickname":"年年"}""",
+                    updatedAt = 1,
+                ),
+                SyncEntity(
+                    type = "care_plan",
+                    clientUuid = "plan-f",
+                    payloadJson =
+                        """{"baby_client_uuid":"baby-f","type":"bath","scheduled_at":9000000000000,"scheduled_zone_id":"UTC","status":"pending","payload_json":{},"schema_version":1,"created_by_membership_id":"${owner.membershipId}"}""",
+                    updatedAt = 2,
+                ),
+            ),
+        )
+        backend.push(
+            member,
+            listOf(
+                SyncEntity(
+                    type = "record",
+                    clientUuid = "rec-member-f",
+                    payloadJson =
+                        """{"baby_client_uuid":"baby-f","type":"bath","timestamp":10,"created_by_device_id":"member-dev","payload_json":{},"schema_version":1}""",
+                    updatedAt = 3,
+                ),
+            ),
+        )
+        // Member forges admin role + tiny confirmed_at — server freezes real stamps.
+        backend.push(
+            member,
+            listOf(
+                SyncEntity(
+                    type = "fulfillment_candidate",
+                    clientUuid = "cand-member-f",
+                    payloadJson =
+                        """{"care_plan_client_uuid":"plan-f","record_client_uuid":"rec-member-f","submitter_membership_id":"forged","submitter_role":"owner","confirmed_at":1}""",
+                    updatedAt = 10,
+                ),
+            ),
+        )
+        val afterAccept = backend.pull(member.copy(pullCursor = 0))
+        val frozen = afterAccept.entities.single { it.clientUuid == "cand-member-f" }
+        val frozenPayload = Json.parseToJsonElement(frozen.payloadJson).jsonObject
+        assertThat(frozenPayload["submitter_membership_id"]?.jsonPrimitive?.content)
+            .isEqualTo(member.membershipId)
+        assertThat(frozenPayload["submitter_role"]?.jsonPrimitive?.content).isEqualTo("member")
+        val frozenConfirmed = frozenPayload["confirmed_at"]?.jsonPrimitive?.content?.toLong()
+        assertThat(frozenConfirmed).isNotEqualTo(1L)
+        assertThat(frozenConfirmed).isEqualTo(10L) // Fake freezes to entity.updatedAt
+
+        // Idempotent replay with higher updatedAt and forged stamps must not rewrite.
+        backend.push(
+            member,
+            listOf(
+                SyncEntity(
+                    type = "fulfillment_candidate",
+                    clientUuid = "cand-member-f",
+                    payloadJson =
+                        """{"care_plan_client_uuid":"plan-f","record_client_uuid":"rec-member-f","submitter_membership_id":"replay-forged","submitter_role":"owner","confirmed_at":999999}""",
+                    updatedAt = 99,
+                ),
+            ),
+        )
+        val afterReplay = backend.pull(owner.copy(pullCursor = 0))
+        val replayed = afterReplay.entities.single { it.clientUuid == "cand-member-f" }
+        val replayPayload = Json.parseToJsonElement(replayed.payloadJson).jsonObject
+        assertThat(replayPayload["submitter_membership_id"]?.jsonPrimitive?.content)
+            .isEqualTo(member.membershipId)
+        assertThat(replayPayload["submitter_role"]?.jsonPrimitive?.content).isEqualTo("member")
+        assertThat(replayPayload["confirmed_at"]?.jsonPrimitive?.content?.toLong())
+            .isEqualTo(frozenConfirmed)
+        assertThat(replayed.updatedAt).isEqualTo(99L)
     }
 
     @Test

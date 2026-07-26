@@ -19,6 +19,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.unit.dp
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.ui.presentation
@@ -31,8 +33,20 @@ internal fun CustomTextFields(
     draft: QuickRecordDraft,
     customItems: List<CustomRecordItem>,
     onDraftChange: (QuickRecordDraft) -> Unit,
+    highlightedField: ComposerInvalidField? = null,
+    fieldFocusRequester: FocusRequester? = null,
 ) {
-    if (draft.type == RecordType.CUSTOM && customItems.isNotEmpty()) {
+    val titleError = highlightedField == ComposerInvalidField.CustomTitle
+    // New-entry paths open a concrete custom definition; keep identity fixed and
+    // only allow free reassignment when editing a historical bare-custom row.
+    val lockedToDefinition = draft.type == RecordType.CUSTOM &&
+        draft.customItemId != null &&
+        draft.existingRecordId == null
+    val showDefinitionPicker = draft.type == RecordType.CUSTOM &&
+        !lockedToDefinition &&
+        customItems.isNotEmpty() &&
+        (draft.existingRecordId == null || draft.customItemId == null)
+    if (showDefinitionPicker) {
         Text("选择自定义项目", style = LeziTypography.Label)
         Row(
             Modifier
@@ -60,9 +74,27 @@ internal fun CustomTextFields(
     OutlinedTextField(
         value = draft.customTitle,
         onValueChange = { onDraftChange(draft.copy(customTitle = it.take(30))) },
-        modifier = Modifier.fillMaxWidth(),
-        label = { Text(if (draft.type == RecordType.CUSTOM) "自定义项目名称" else "标题") },
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (titleError && fieldFocusRequester != null) {
+                    Modifier.focusRequester(fieldFocusRequester)
+                } else {
+                    Modifier
+                },
+            ),
+        label = {
+            Text(
+                when {
+                    draft.type == RecordType.CUSTOM && lockedToDefinition -> "项目名称"
+                    draft.type == RecordType.CUSTOM -> "自定义项目名称"
+                    else -> "标题"
+                },
+            )
+        },
+        isError = titleError,
         singleLine = true,
+        // Snapshot title remains editable so history can be corrected; identity stays fixed.
     )
     OutlinedTextField(
         value = draft.customDetail,
@@ -77,12 +109,17 @@ internal fun CustomTextFields(
 internal fun MeasurementFields(
     draft: QuickRecordDraft,
     onDraftChange: (QuickRecordDraft) -> Unit,
+    highlightedField: ComposerInvalidField? = null,
+    fieldFocusRequester: FocusRequester? = null,
 ) {
     val unit = if (draft.type == RecordType.WEIGHT) "kg" else "cm"
+    val measurementError = highlightedField == ComposerInvalidField.MeasurementValue
     DecimalField(
         value = draft.measurementValue,
         label = "${draft.type.presentation.label}（$unit）",
         modifier = Modifier.fillMaxWidth(),
+        isError = measurementError,
+        focusRequester = fieldFocusRequester.takeIf { measurementError },
     ) { onDraftChange(draft.copy(measurementValue = it)) }
 }
 
@@ -91,7 +128,10 @@ internal fun FoodFields(
     draft: QuickRecordDraft,
     birthdayEpochDay: Long?,
     onDraftChange: (QuickRecordDraft) -> Unit,
+    highlightedField: ComposerInvalidField? = null,
+    fieldFocusRequester: FocusRequester? = null,
 ) {
+    val contentError = highlightedField == ComposerInvalidField.FoodContent
     if (draft.type == RecordType.BABY_FOOD && birthdayEpochDay != null) {
         BabyFoodGuidancePanel(
             birthdayEpochDay = birthdayEpochDay,
@@ -105,9 +145,18 @@ internal fun FoodFields(
     OutlinedTextField(
         value = draft.foodContent,
         onValueChange = { onDraftChange(draft.copy(foodContent = it.take(80))) },
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (contentError && fieldFocusRequester != null) {
+                    Modifier.focusRequester(fieldFocusRequester)
+                } else {
+                    Modifier
+                },
+            ),
         label = { Text("内容") },
         placeholder = { Text(if (draft.type == RecordType.DRINK) "例如 温水" else "例如 南瓜米糊") },
+        isError = contentError,
         singleLine = true,
     )
     OutlinedTextField(
@@ -195,12 +244,24 @@ private fun BabyFoodGuidancePanel(
 internal fun VaccineFields(
     draft: QuickRecordDraft,
     onDraftChange: (QuickRecordDraft) -> Unit,
+    highlightedField: ComposerInvalidField? = null,
+    fieldFocusRequester: FocusRequester? = null,
 ) {
+    val nameError = highlightedField == ComposerInvalidField.VaccineName
     OutlinedTextField(
         value = draft.vaccineName,
         onValueChange = { onDraftChange(draft.copy(vaccineName = it.take(80))) },
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (nameError && fieldFocusRequester != null) {
+                    Modifier.focusRequester(fieldFocusRequester)
+                } else {
+                    Modifier
+                },
+            ),
         label = { Text("疫苗名称") },
+        isError = nameError,
         singleLine = true,
     )
     OutlinedTextField(

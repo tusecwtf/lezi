@@ -11,6 +11,7 @@ val DEFAULT_WIDGET_QUICK_TYPES: List<RecordType> = listOf(
     RecordType.PEE,
 )
 
+/** Built-in types selectable as widget quick actions (no memo/other/bare custom). */
 val CONFIGURABLE_WIDGET_QUICK_TYPES: List<RecordType> = listOf(
     RecordType.NURSING,
     RecordType.FORMULA,
@@ -21,7 +22,6 @@ val CONFIGURABLE_WIDGET_QUICK_TYPES: List<RecordType> = listOf(
     RecordType.BOTH_DIAPER,
     RecordType.SLEEP,
     RecordType.TEMPERATURE,
-    RecordType.MEMO,
     RecordType.DIARY,
     RecordType.BATH,
     RecordType.WALK,

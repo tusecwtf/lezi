@@ -19,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SettingsLocal
+import com.lezi.babylog.core.model.availableForNewEntry
 import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.designsystem.LeziTypography
 
@@ -29,13 +30,15 @@ internal fun RecordItemSettingsDialog(
     onMove: (String, Int) -> Unit,
     onToggleVisible: (String) -> Unit,
 ) {
+    // Memo / other / bare custom are retired from new-entry catalogs; manage
+    // concrete custom definitions in the separate custom-item settings dialog.
     val orderedTypes = remember(settings.itemOrderJson) {
         val configured = runCatching {
             org.json.JSONArray(settings.itemOrderJson).let { array ->
                 List(array.length()) { index -> array.optString(index) }
             }
         }.getOrDefault(emptyList())
-        RecordType.entries.sortedWith(
+        RecordType.availableForNewEntry().sortedWith(
             compareBy<RecordType> {
                 configured.indexOf(it.key).takeIf { index -> index >= 0 } ?: Int.MAX_VALUE
             }.thenBy { it.ordinal },

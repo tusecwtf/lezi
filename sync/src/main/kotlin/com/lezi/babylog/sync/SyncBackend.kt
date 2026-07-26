@@ -26,7 +26,40 @@ data class JoinResult(
     val generation: String = "",
     /** Shared family name from create/join; null when empty or legacy NAS omits it. */
     val familyName: String? = null,
+    /**
+     * Server-minted immutable membership identity.
+     * Null when a legacy NAS omits the field (client soft-parses).
+     */
+    val membershipId: String? = null,
 )
+
+/** Client-generated atomic package for record/care_plan + full media manifest. */
+data class AtomicBundleDraft(
+    val bundleId: String,
+    val root: SyncEntity,
+    val media: List<SyncEntity> = emptyList(),
+)
+
+data class BundleStageStatus(
+    val bundleId: String,
+    val status: String,
+    val missingMedia: List<String> = emptyList(),
+    val stagedMedia: List<String> = emptyList(),
+) {
+    val isCommitted: Boolean get() = status == "committed"
+}
+
+data class BundleCommitResult(
+    val bundleId: String,
+    val status: String,
+    val applied: Int,
+    val cursor: Long,
+)
+
+/** Thrown when a client that requires atomic packages hits a legacy NAS. */
+class AtomicBundleUnsupportedException(
+    message: String = "家庭服务器不支持原子同步包，请升级 NAS 上的 lezi-sync",
+) : IllegalStateException(message)
 
 interface SyncBackend {
     suspend fun create(
@@ -64,4 +97,22 @@ interface SyncBackend {
     )
 
     suspend fun getMedia(session: SyncSession, clientUuid: String): ByteArray
+
+    /**
+     * Stage root entity + media metadata for an atomic package.
+     * Nothing is visible on ordinary pull until [commitBundle].
+     */
+    suspend fun stageBundle(session: SyncSession, draft: AtomicBundleDraft): BundleStageStatus
+
+    /** Upload one media blob into a staged bundle manifest slot. */
+    suspend fun putBundleMedia(
+        session: SyncSession,
+        bundleId: String,
+        clientUuid: String,
+        bytes: ByteArray,
+        mime: String?,
+    ): BundleStageStatus
+
+    /** Publish a complete package in one server transaction (idempotent). */
+    suspend fun commitBundle(session: SyncSession, bundleId: String): BundleCommitResult
 }

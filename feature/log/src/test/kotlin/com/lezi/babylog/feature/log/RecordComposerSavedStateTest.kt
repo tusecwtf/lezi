@@ -16,6 +16,7 @@ class RecordComposerSavedStateTest {
             type = RecordType.DIARY,
             timestamp = 1_000L,
             historical = false,
+            customItemId = null,
         )
         val draft = QuickRecordDraft.create(RecordType.DIARY, 1_000L).copy(
             body = "已输入的正文",
@@ -85,5 +86,47 @@ class RecordComposerSavedStateTest {
         )
 
         assertEquals(listOf("root-consumed", "finished:已记录笔记"), events)
+    }
+
+    @Test
+    fun carePlanSaveMessageSurfacesPermissionDegradationWithoutBlockingCopy() {
+        assertTrue(isCarePlanSaveMessage("已安排配方奶"))
+        assertTrue(isCarePlanSaveMessage("已保存护理计划"))
+        assertTrue(!isCarePlanSaveMessage("已记录配方奶"))
+        assertTrue(!isCarePlanSaveMessage("已完成护理计划"))
+
+        assertEquals(
+            "已安排配方奶",
+            carePlanSaveMessageWithPermission(
+                baseMessage = "已安排配方奶",
+                notificationPermissionGranted = true,
+                isCarePlanWrite = true,
+            ),
+        )
+        assertEquals(
+            "已安排配方奶；通知权限未开启，本机提醒已降级",
+            carePlanSaveMessageWithPermission(
+                baseMessage = "已安排配方奶",
+                notificationPermissionGranted = false,
+                isCarePlanWrite = true,
+            ),
+        )
+        assertEquals(
+            "护理计划已保存；通知权限未开启，本机提醒已降级",
+            carePlanSaveMessageWithPermission(
+                baseMessage = "已保存护理计划",
+                notificationPermissionGranted = false,
+                isCarePlanWrite = true,
+            ),
+        )
+        // Non-care-plan paths must not be rewritten.
+        assertEquals(
+            "已记录配方奶",
+            carePlanSaveMessageWithPermission(
+                baseMessage = "已记录配方奶",
+                notificationPermissionGranted = false,
+                isCarePlanWrite = false,
+            ),
+        )
     }
 }

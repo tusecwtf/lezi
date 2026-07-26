@@ -1,6 +1,9 @@
 package com.lezi.babylog.sync
 
 import com.lezi.babylog.core.database.BabyEntity
+import com.lezi.babylog.core.database.CarePlanEntity
+import com.lezi.babylog.core.database.CustomItemEntity
+import com.lezi.babylog.core.database.FulfillmentCandidateEntity
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.RecordEntity
 import java.time.LocalDate
@@ -79,10 +82,114 @@ object SyncWireMapper {
         deletedAt = entity.deletedAt,
     )
 
+    /**
+     * Shared custom definition wire payload. Device layout (sortOrder / hide / slots)
+     * must never leave this mapper.
+     */
+    fun customItem(entity: CustomItemEntity): SyncEntity = SyncEntity(
+        type = "custom_item",
+        clientUuid = entity.clientUuid,
+        payloadJson = buildJsonObject {
+            put("name", entity.name)
+            put("icon_slot", entity.iconSlot)
+            // Server re-stamps on first insert; send local membership for offline trails.
+            if (entity.createdByMembershipId.isBlank()) {
+                put("created_by_membership_id", JsonNull)
+            } else {
+                put("created_by_membership_id", entity.createdByMembershipId)
+            }
+        }.toString(),
+        updatedAt = entity.updatedAt,
+        deletedAt = entity.deletedAt,
+    )
+
+    /**
+     * Care plan wire root for atomic bundles. Local reminder/calendar prefs and
+     * [CarePlanEntity.sourceRecordClientUuid] stay device-local (not in allowlist).
+     */
+    fun carePlan(
+        entity: CarePlanEntity,
+        babyClientUuid: String,
+        customItemClientUuid: String?,
+    ): SyncEntity = SyncEntity(
+        type = "care_plan",
+        clientUuid = entity.clientUuid,
+        payloadJson = buildJsonObject {
+            put("baby_client_uuid", babyClientUuid)
+            put("type", entity.type)
+            if (customItemClientUuid == null) {
+                put("custom_item_client_uuid", JsonNull)
+            } else {
+                put("custom_item_client_uuid", customItemClientUuid)
+            }
+            put("scheduled_at", entity.scheduledAt)
+            put("scheduled_zone_id", entity.scheduledZoneId)
+            if (entity.note == null) put("note", JsonNull) else put("note", entity.note)
+            put("payload_json", localPayloadForWire(entity.payloadJson))
+            put("schema_version", entity.schemaVersion)
+            put("status", entity.status)
+            if (entity.createdByMembershipId.isBlank()) {
+                put("created_by_membership_id", JsonNull)
+            } else {
+                put("created_by_membership_id", entity.createdByMembershipId)
+            }
+            if (entity.fulfilledRecordClientUuid == null) {
+                put("fulfilled_record_client_uuid", JsonNull)
+            } else {
+                put("fulfilled_record_client_uuid", entity.fulfilledRecordClientUuid)
+            }
+            if (entity.fulfilledAt == null) {
+                put("fulfilled_at", JsonNull)
+            } else {
+                put("fulfilled_at", entity.fulfilledAt)
+            }
+        }.toString(),
+        updatedAt = entity.updatedAt,
+        deletedAt = entity.deletedAt,
+    )
+
+    /**
+     * Fulfillment candidate legacy-push payload. Server re-stamps submitter
+     * membership/role and confirmed_at; client sends plan/record links and the
+     * local confirm trail (ignored as authority after first server accept).
+     */
+    fun fulfillmentCandidate(entity: FulfillmentCandidateEntity): SyncEntity = SyncEntity(
+        type = "fulfillment_candidate",
+        clientUuid = entity.clientUuid,
+        payloadJson = buildJsonObject {
+            put("care_plan_client_uuid", entity.carePlanClientUuid)
+            put("record_client_uuid", entity.recordClientUuid)
+            if (entity.actualTimestamp == null) {
+                put("actual_timestamp", JsonNull)
+            } else {
+                put("actual_timestamp", entity.actualTimestamp)
+            }
+            // Server freezes these; send local values only as offline trails.
+            if (entity.submitterMembershipId.isBlank()) {
+                put("submitter_membership_id", JsonNull)
+            } else {
+                put("submitter_membership_id", entity.submitterMembershipId)
+            }
+            if (entity.submitterRole.isBlank()) {
+                put("submitter_role", JsonNull)
+            } else {
+                put("submitter_role", entity.submitterRole)
+            }
+            put("confirmed_at", entity.confirmedAt)
+        }.toString(),
+        updatedAt = entity.updatedAt,
+        deletedAt = entity.deletedAt,
+    )
+
+    /**
+     * Media wire payload. Log media owns exactly one of [recordClientUuid] or
+     * [carePlanClientUuid] (XOR); avatar uses [babyClientUuid] only.
+     */
     fun media(
         entity: MediaAssetEntity,
         recordClientUuid: String?,
         babyClientUuid: String?,
+        carePlanClientUuid: String? = null,
     ): SyncEntity = SyncEntity(
         type = "media",
         clientUuid = entity.clientUuid,
@@ -93,9 +200,13 @@ object SyncWireMapper {
             } else {
                 put("record_client_uuid", recordClientUuid)
             }
-            // A log media row is associated through its portable Record id.
-            // Sending a second baby reference would duplicate that ownership
-            // and can become stale after an explicit profile merge.
+            if (carePlanClientUuid == null) {
+                put("care_plan_client_uuid", JsonNull)
+            } else {
+                put("care_plan_client_uuid", carePlanClientUuid)
+            }
+            // Log media associates through portable record or care_plan id.
+            // Avatar only carries baby_client_uuid.
             if (entity.kind != "avatar" || babyClientUuid == null) {
                 put("baby_client_uuid", JsonNull)
             } else {
@@ -109,6 +220,22 @@ object SyncWireMapper {
         updatedAt = entity.updatedAt,
         deletedAt = entity.deletedAt,
     )
+
+    fun carePlanPayloadJson(payload: JsonObject): String {
+        val value = payload["payload_json"] ?: return "{}"
+        return when (value) {
+            is JsonObject -> value.toString()
+            is JsonPrimitive -> {
+                val raw = value.contentOrNull ?: return "{}"
+                runCatching { Json.parseToJsonElement(raw).jsonObject.toString() }
+                    .getOrDefault(raw)
+            }
+            else -> value.toString()
+        }
+    }
+
+    fun carePlanSchemaVersion(payload: JsonObject): Int =
+        payload["schema_version"]?.jsonPrimitive?.intOrNull ?: 1
 
     fun recordPayloadJson(payload: JsonObject): String {
         val value = payload["payload_json"] ?: return "{}"

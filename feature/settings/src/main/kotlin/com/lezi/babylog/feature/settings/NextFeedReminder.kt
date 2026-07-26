@@ -142,6 +142,7 @@ class NextFeedReceiver : BroadcastReceiver() {
 class BootReceiver : BroadcastReceiver() {
     @Inject lateinit var scheduler: NextFeedScheduler
     @Inject lateinit var calendarScheduler: CalendarReminderScheduler
+    @Inject lateinit var carePlanScheduler: CarePlanReminderScheduler
 
     override fun onReceive(context: Context, intent: Intent?) {
         if (intent?.action != Intent.ACTION_BOOT_COMPLETED) return
@@ -150,6 +151,7 @@ class BootReceiver : BroadcastReceiver() {
             try {
                 scheduler.rescheduleFromStore()
                 calendarScheduler.rescheduleAll()
+                carePlanScheduler.rescheduleAll()
             } finally {
                 pending.finish()
             }

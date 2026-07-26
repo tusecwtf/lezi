@@ -57,6 +57,24 @@ class TimelineUploaderLabelTest {
         assertEquals("", timelineRecordSummary("", null))
     }
 
+    @Test
+    fun timelineSummaryAppendsMutationPublishChromeWhenPresent() {
+        assertEquals(
+            "120ml · 仅本机 · 等待更新同步",
+            timelineRecordSummary("120ml", null, "仅本机 · 等待更新同步"),
+        )
+        assertEquals(
+            "120ml · 爸爸 · 仅本机 · 更新同步失败",
+            timelineRecordSummary("120ml", "爸爸", "仅本机 · 更新同步失败"),
+        )
+        assertEquals(
+            "仅本机 · 等待照片同步",
+            timelineRecordSummary("", null, "仅本机 · 等待照片同步"),
+        )
+        // Blank publish chrome does not pad the summary.
+        assertEquals("120ml · 爸爸", timelineRecordSummary("120ml", "爸爸", "  "))
+    }
+
     private fun record(id: Long, deviceId: String?) = Record(
         id = id,
         clientUuid = "uuid-$id",

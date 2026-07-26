@@ -7,6 +7,8 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import com.lezi.babylog.core.model.DEFAULT_QUICK_RECORD_SLOTS
+import com.lezi.babylog.core.model.QUICK_RECORD_SLOT_COUNT
 import com.lezi.babylog.core.model.SettingsLocal
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -20,11 +22,13 @@ class SettingsDataSource @Inject constructor(
     override val settings: Flow<SettingsLocal> = dataStore.data.map { prefs ->
         SettingsLocal(
             itemOrderJson = prefs[Keys.ITEM_ORDER] ?: "[]",
+            categoryOrderJson = prefs[Keys.CATEGORY_ORDER] ?: "[]",
             hiddenItems = prefs[Keys.HIDDEN_ITEMS]
                 ?.split(',')
                 ?.filter { it.isNotBlank() }
                 ?.toSet()
                 ?: emptySet(),
+            quickRecordSlots = parseQuickRecordSlots(prefs[Keys.QUICK_RECORD_SLOTS]),
             timerEnabled = prefs[Keys.TIMER_ENABLED] ?: true,
             recordAtStartOrEnd = prefs[Keys.RECORD_AT] ?: "end",
             nursingIntervalMin = prefs[Keys.NURSING_INTERVAL] ?: 180,
@@ -43,6 +47,12 @@ class SettingsDataSource @Inject constructor(
             infantFeverAdviceEnabled = prefs[Keys.INFANT_FEVER_ADVICE] ?: true,
             curveDataset = prefs[Keys.CURVE_DATASET] ?: "default",
             timelineOrder = prefs[Keys.TIMELINE_ORDER] ?: "newest_first",
+            carePlanLocalRemindersEnabled = prefs[Keys.CARE_PLAN_LOCAL_REMINDERS] ?: true,
+            systemCalendarEnabled = prefs[Keys.SYSTEM_CALENDAR_ENABLED] ?: false,
+            systemCalendarId = prefs[Keys.SYSTEM_CALENDAR_ID],
+            systemCalendarDisclosureLevel = (prefs[Keys.SYSTEM_CALENDAR_DISCLOSURE] ?: 2)
+                .coerceIn(1, 3),
+            systemCalendarEventMapJson = prefs[Keys.SYSTEM_CALENDAR_EVENT_MAP] ?: "{}",
         )
     }
 
@@ -120,8 +130,17 @@ class SettingsDataSource @Inject constructor(
         dataStore.edit { it[Keys.ITEM_ORDER] = json }
     }
 
+    override suspend fun setCategoryOrderJson(json: String) {
+        dataStore.edit { it[Keys.CATEGORY_ORDER] = json }
+    }
+
     override suspend fun setHiddenItems(items: Set<String>) {
         dataStore.edit { it[Keys.HIDDEN_ITEMS] = items.joinToString(",") }
+    }
+
+    override suspend fun setQuickRecordSlots(slots: List<String>) {
+        val normalized = normalizeQuickRecordSlots(slots)
+        dataStore.edit { it[Keys.QUICK_RECORD_SLOTS] = encodeQuickRecordSlots(normalized) }
     }
 
     override suspend fun setTimelineOrder(order: String) {
@@ -156,9 +175,35 @@ class SettingsDataSource @Inject constructor(
         dataStore.edit { it[Keys.COMPARE_PREV_WEEK] = enabled }
     }
 
+    override suspend fun setCarePlanLocalRemindersEnabled(enabled: Boolean) {
+        dataStore.edit { it[Keys.CARE_PLAN_LOCAL_REMINDERS] = enabled }
+    }
+
+    override suspend fun setSystemCalendarEnabled(enabled: Boolean) {
+        dataStore.edit { it[Keys.SYSTEM_CALENDAR_ENABLED] = enabled }
+    }
+
+    override suspend fun setSystemCalendarId(calendarId: String?) {
+        dataStore.edit { prefs ->
+            if (calendarId.isNullOrBlank()) prefs.remove(Keys.SYSTEM_CALENDAR_ID)
+            else prefs[Keys.SYSTEM_CALENDAR_ID] = calendarId
+        }
+    }
+
+    override suspend fun setSystemCalendarDisclosureLevel(level: Int) {
+        dataStore.edit { it[Keys.SYSTEM_CALENDAR_DISCLOSURE] = level.coerceIn(1, 3) }
+    }
+
+    override suspend fun setSystemCalendarEventMapJson(json: String) {
+        dataStore.edit { it[Keys.SYSTEM_CALENDAR_EVENT_MAP] = json.ifBlank { "{}" } }
+    }
+
     private object Keys {
         val ITEM_ORDER = stringPreferencesKey("item_order_json")
+        val CATEGORY_ORDER = stringPreferencesKey("category_order_json")
         val HIDDEN_ITEMS = stringPreferencesKey("hidden_items")
+        /** Comma-separated catalog keys; empty segments keep empty slots. Absent → defaults. */
+        val QUICK_RECORD_SLOTS = stringPreferencesKey("quick_record_slots")
         val TIMER_ENABLED = booleanPreferencesKey("timer_enabled")
         val RECORD_AT = stringPreferencesKey("record_at")
         val NURSING_INTERVAL = intPreferencesKey("nursing_interval_min")
@@ -179,5 +224,31 @@ class SettingsDataSource @Inject constructor(
         val NURSING_TIMER_JSON = stringPreferencesKey("nursing_timer_json")
         val SHOW_AVG_SLEEP = booleanPreferencesKey("show_avg_sleep")
         val COMPARE_PREV_WEEK = booleanPreferencesKey("compare_prev_week")
+        val CARE_PLAN_LOCAL_REMINDERS = booleanPreferencesKey("care_plan_local_reminders")
+        val SYSTEM_CALENDAR_ENABLED = booleanPreferencesKey("system_calendar_enabled")
+        val SYSTEM_CALENDAR_ID = stringPreferencesKey("system_calendar_id")
+        val SYSTEM_CALENDAR_DISCLOSURE = intPreferencesKey("system_calendar_disclosure")
+        val SYSTEM_CALENDAR_EVENT_MAP = stringPreferencesKey("system_calendar_event_map")
     }
 }
+
+/**
+ * Missing preference → first-run defaults (pee/sleep/nursing/formula).
+ * Present value is padded/truncated to exactly [QUICK_RECORD_SLOT_COUNT] slots.
+ */
+internal fun parseQuickRecordSlots(raw: String?): List<String> {
+    if (raw == null) return DEFAULT_QUICK_RECORD_SLOTS
+    // Empty stored string still means "user cleared all" once written; only null is migrate.
+    val parts = raw.split(',')
+    return normalizeQuickRecordSlots(parts)
+}
+
+internal fun normalizeQuickRecordSlots(slots: List<String>): List<String> {
+    val padded = slots.map { it.trim() }.toMutableList()
+    while (padded.size < QUICK_RECORD_SLOT_COUNT) padded += ""
+    return padded.take(QUICK_RECORD_SLOT_COUNT)
+}
+
+internal fun encodeQuickRecordSlots(slots: List<String>): String =
+    normalizeQuickRecordSlots(slots).joinToString(",")
+

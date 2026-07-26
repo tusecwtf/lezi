@@ -31,6 +31,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -70,6 +72,8 @@ internal fun PurposeFields(
     actionsEnabled: Boolean,
     onDraftChange: (QuickRecordDraft) -> Unit,
     onStartNursingTimer: () -> Unit,
+    highlightedField: ComposerInvalidField? = null,
+    fieldFocusRequester: FocusRequester? = null,
 ) {
     when (draft.mode) {
         QuickRecordMode.Nursing -> NursingFields(
@@ -78,13 +82,29 @@ internal fun PurposeFields(
             actionsEnabled,
             onDraftChange,
             onStartNursingTimer,
+            highlightedField = highlightedField,
+            fieldFocusRequester = fieldFocusRequester,
         )
-        QuickRecordMode.Milk -> MilkFields(draft, amountStepMl, onDraftChange)
-        QuickRecordMode.Pee -> PeeFields(draft, onDraftChange)
-        QuickRecordMode.Poop -> StoolFields(draft, onDraftChange)
+        QuickRecordMode.Milk -> MilkFields(
+            draft,
+            amountStepMl,
+            onDraftChange,
+            highlightedField = highlightedField,
+            fieldFocusRequester = fieldFocusRequester,
+        )
+        QuickRecordMode.Pee -> PeeFields(
+            draft,
+            onDraftChange,
+            highlightedField = highlightedField,
+        )
+        QuickRecordMode.Poop -> StoolFields(
+            draft,
+            onDraftChange,
+            highlightedField = highlightedField,
+        )
         QuickRecordMode.BothDiaper -> {
-            PeeFields(draft, onDraftChange)
-            StoolFields(draft, onDraftChange)
+            PeeFields(draft, onDraftChange, highlightedField = highlightedField)
+            StoolFields(draft, onDraftChange, highlightedField = highlightedField)
         }
         QuickRecordMode.Sleep -> SleepFields(draft)
         QuickRecordMode.Temperature -> TemperatureFields(
@@ -92,16 +112,59 @@ internal fun PurposeFields(
             birthdayEpochDay = birthdayEpochDay,
             adviceEnabled = infantFeverAdviceEnabled,
             onDraftChange = onDraftChange,
+            highlightedField = highlightedField,
+            fieldFocusRequester = fieldFocusRequester,
         )
-        QuickRecordMode.Text -> TextFields(draft, onDraftChange)
+        QuickRecordMode.Text -> TextFields(
+            draft,
+            onDraftChange,
+            highlightedField = highlightedField,
+            fieldFocusRequester = fieldFocusRequester,
+        )
         QuickRecordMode.Simple -> Unit
-        QuickRecordMode.Symptom -> SymptomFields(draft, onDraftChange)
-        QuickRecordMode.Medicine -> MedicineFields(draft, onDraftChange)
-        QuickRecordMode.Hospital -> HospitalFields(draft, onDraftChange)
-        QuickRecordMode.CustomText -> CustomTextFields(draft, customItems, onDraftChange)
-        QuickRecordMode.Measurement -> MeasurementFields(draft, onDraftChange)
-        QuickRecordMode.Food -> FoodFields(draft, birthdayEpochDay, onDraftChange)
-        QuickRecordMode.Vaccine -> VaccineFields(draft, onDraftChange)
+        QuickRecordMode.Symptom -> SymptomFields(
+            draft,
+            onDraftChange,
+            highlightedField = highlightedField,
+        )
+        QuickRecordMode.Medicine -> MedicineFields(
+            draft,
+            onDraftChange,
+            highlightedField = highlightedField,
+            fieldFocusRequester = fieldFocusRequester,
+        )
+        QuickRecordMode.Hospital -> HospitalFields(
+            draft,
+            onDraftChange,
+            highlightedField = highlightedField,
+            fieldFocusRequester = fieldFocusRequester,
+        )
+        QuickRecordMode.CustomText -> CustomTextFields(
+            draft,
+            customItems,
+            onDraftChange,
+            highlightedField = highlightedField,
+            fieldFocusRequester = fieldFocusRequester,
+        )
+        QuickRecordMode.Measurement -> MeasurementFields(
+            draft,
+            onDraftChange,
+            highlightedField = highlightedField,
+            fieldFocusRequester = fieldFocusRequester,
+        )
+        QuickRecordMode.Food -> FoodFields(
+            draft,
+            birthdayEpochDay,
+            onDraftChange,
+            highlightedField = highlightedField,
+            fieldFocusRequester = fieldFocusRequester,
+        )
+        QuickRecordMode.Vaccine -> VaccineFields(
+            draft,
+            onDraftChange,
+            highlightedField = highlightedField,
+            fieldFocusRequester = fieldFocusRequester,
+        )
     }
 }
 
@@ -112,17 +175,23 @@ private fun NursingFields(
     actionsEnabled: Boolean,
     onDraftChange: (QuickRecordDraft) -> Unit,
     onStartNursingTimer: () -> Unit,
+    highlightedField: ComposerInvalidField? = null,
+    fieldFocusRequester: FocusRequester? = null,
 ) {
+    val nursingError = highlightedField == ComposerInvalidField.NursingDuration
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         IntegerField(
             value = draft.leftMin,
             label = "左侧（分）",
             modifier = Modifier.weight(1f),
+            isError = nursingError,
+            focusRequester = fieldFocusRequester.takeIf { nursingError },
         ) { onDraftChange(draft.copy(leftMin = it)) }
         IntegerField(
             value = draft.rightMin,
             label = "右侧（分）",
             modifier = Modifier.weight(1f),
+            isError = nursingError,
         ) { onDraftChange(draft.copy(rightMin = it)) }
     }
     ChoiceStrip(
@@ -169,8 +238,13 @@ private fun MilkFields(
     draft: QuickRecordDraft,
     requestedStep: Int,
     onDraftChange: (QuickRecordDraft) -> Unit,
+    highlightedField: ComposerInvalidField? = null,
+    fieldFocusRequester: FocusRequester? = null,
 ) {
     val step = requestedStep.takeIf { it in setOf(5, 10, 15) } ?: 5
+    val amountError = highlightedField == ComposerInvalidField.MilkAmount
+    val preparedError = highlightedField == ComposerInvalidField.MilkPrepared
+    val durationError = highlightedField == ComposerInvalidField.MilkDuration
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.Center,
@@ -185,6 +259,7 @@ private fun MilkFields(
             "${draft.amountMl} ml",
             style = LeziTypography.Display,
             modifier = Modifier.padding(horizontal = 22.dp),
+            color = if (amountError) MaterialTheme.colorScheme.error else Color.Unspecified,
         )
         TextButton(onClick = {
             onDraftChange(draft.copy(amountMl = (draft.amountMl + step).coerceAtMost(999)))
@@ -209,6 +284,8 @@ private fun MilkFields(
         value = draft.amountMl.toString(),
         label = "任意奶量 ml（1–999）",
         modifier = Modifier.fillMaxWidth(),
+        isError = amountError,
+        focusRequester = fieldFocusRequester.takeIf { amountError },
     ) { raw ->
         raw.toIntOrNull()?.takeIf { it in 1..999 }?.let {
             onDraftChange(draft.copy(amountMl = it))
@@ -220,11 +297,15 @@ private fun MilkFields(
                 value = draft.preparedMl,
                 label = "冲调量 ml（可选）",
                 modifier = Modifier.weight(1f),
+                isError = preparedError,
+                focusRequester = fieldFocusRequester.takeIf { preparedError },
             ) { onDraftChange(draft.copy(preparedMl = it)) }
             IntegerField(
                 value = draft.durationMin,
                 label = "耗时（分，可选）",
                 modifier = Modifier.weight(1f),
+                isError = durationError,
+                focusRequester = fieldFocusRequester.takeIf { durationError },
             ) { onDraftChange(draft.copy(durationMin = it)) }
         }
     }
@@ -234,8 +315,14 @@ private fun MilkFields(
 private fun PeeFields(
     draft: QuickRecordDraft,
     onDraftChange: (QuickRecordDraft) -> Unit,
+    highlightedField: ComposerInvalidField? = null,
 ) {
-    Text("尿量", style = LeziTypography.Label)
+    val peeError = highlightedField == ComposerInvalidField.PeeAmount
+    Text(
+        "尿量",
+        style = LeziTypography.Label,
+        color = if (peeError) MaterialTheme.colorScheme.error else Color.Unspecified,
+    )
     Row(
         Modifier
             .fillMaxWidth()
@@ -261,8 +348,16 @@ private fun PeeFields(
 private fun StoolFields(
     draft: QuickRecordDraft,
     onDraftChange: (QuickRecordDraft) -> Unit,
+    highlightedField: ComposerInvalidField? = null,
 ) {
-    Text("便量", style = LeziTypography.Label)
+    val amountError = highlightedField == ComposerInvalidField.StoolAmount
+    val consistencyError = highlightedField == ComposerInvalidField.StoolConsistency
+    val colorError = highlightedField == ComposerInvalidField.StoolColor
+    Text(
+        "便量",
+        style = LeziTypography.Label,
+        color = if (amountError) MaterialTheme.colorScheme.error else Color.Unspecified,
+    )
     Row(
         Modifier.fillMaxWidth().selectableGroup(),
         horizontalArrangement = Arrangement.spacedBy(5.dp),
@@ -280,7 +375,11 @@ private fun StoolFields(
             }
         }
     }
-    Text("软硬", style = LeziTypography.Label)
+    Text(
+        "软硬",
+        style = LeziTypography.Label,
+        color = if (consistencyError) MaterialTheme.colorScheme.error else Color.Unspecified,
+    )
     Row(
         Modifier.fillMaxWidth().selectableGroup(),
         horizontalArrangement = Arrangement.spacedBy(5.dp),
@@ -298,7 +397,11 @@ private fun StoolFields(
             }
         }
     }
-    Text("颜色", style = LeziTypography.Label)
+    Text(
+        "颜色",
+        style = LeziTypography.Label,
+        color = if (colorError) MaterialTheme.colorScheme.error else Color.Unspecified,
+    )
     Column(
         Modifier.selectableGroup(),
         verticalArrangement = Arrangement.spacedBy(5.dp),
@@ -474,12 +577,17 @@ private fun TemperatureFields(
     birthdayEpochDay: Long?,
     adviceEnabled: Boolean,
     onDraftChange: (QuickRecordDraft) -> Unit,
+    highlightedField: ComposerInvalidField? = null,
+    fieldFocusRequester: FocusRequester? = null,
 ) {
+    val temperatureError = highlightedField == ComposerInvalidField.Temperature
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         DecimalField(
             value = draft.temperature,
             label = "体温",
             modifier = Modifier.weight(1f),
+            isError = temperatureError,
+            focusRequester = fieldFocusRequester.takeIf { temperatureError },
         ) { onDraftChange(draft.copy(temperature = it)) }
         Column(Modifier.weight(1f)) {
             ChoiceStrip(
@@ -553,12 +661,24 @@ internal fun shouldShowInfantFeverAdvice(
 private fun TextFields(
     draft: QuickRecordDraft,
     onDraftChange: (QuickRecordDraft) -> Unit,
+    highlightedField: ComposerInvalidField? = null,
+    fieldFocusRequester: FocusRequester? = null,
 ) {
+    val bodyError = highlightedField == ComposerInvalidField.Body
     OutlinedTextField(
         value = draft.body,
         onValueChange = { onDraftChange(draft.copy(body = it.take(800))) },
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (bodyError && fieldFocusRequester != null) {
+                    Modifier.focusRequester(fieldFocusRequester)
+                } else {
+                    Modifier
+                },
+            ),
         label = { Text(if (draft.type == RecordType.DIARY) "日记正文" else "内容") },
+        isError = bodyError,
         minLines = if (draft.type == RecordType.DIARY) 4 else 2,
         maxLines = 7,
         supportingText = { Text("${draft.body.length}/800") },
@@ -569,9 +689,11 @@ private fun TextFields(
 private fun SymptomFields(
     draft: QuickRecordDraft,
     onDraftChange: (QuickRecordDraft) -> Unit,
+    highlightedField: ComposerInvalidField? = null,
 ) {
+    val severityError = highlightedField == ComposerInvalidField.Severity
     ChoiceStrip(
-        label = "程度",
+        label = if (severityError) "程度（请选择）" else "程度",
         choices = listOf(1 to "轻微", 2 to "一般", 3 to "明显"),
         selected = draft.severity,
     ) { onDraftChange(draft.copy(severity = it)) }
@@ -588,12 +710,24 @@ private fun SymptomFields(
 private fun MedicineFields(
     draft: QuickRecordDraft,
     onDraftChange: (QuickRecordDraft) -> Unit,
+    highlightedField: ComposerInvalidField? = null,
+    fieldFocusRequester: FocusRequester? = null,
 ) {
+    val nameError = highlightedField == ComposerInvalidField.MedicineName
     OutlinedTextField(
         value = draft.medicineName,
         onValueChange = { onDraftChange(draft.copy(medicineName = it.take(50))) },
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (nameError && fieldFocusRequester != null) {
+                    Modifier.focusRequester(fieldFocusRequester)
+                } else {
+                    Modifier
+                },
+            ),
         label = { Text("药品名称") },
+        isError = nameError,
         singleLine = true,
     )
     OutlinedTextField(
@@ -610,12 +744,24 @@ private fun MedicineFields(
 private fun HospitalFields(
     draft: QuickRecordDraft,
     onDraftChange: (QuickRecordDraft) -> Unit,
+    highlightedField: ComposerInvalidField? = null,
+    fieldFocusRequester: FocusRequester? = null,
 ) {
+    val reasonError = highlightedField == ComposerInvalidField.HospitalReason
     OutlinedTextField(
         value = draft.hospitalReason,
         onValueChange = { onDraftChange(draft.copy(hospitalReason = it.take(100))) },
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (reasonError && fieldFocusRequester != null) {
+                    Modifier.focusRequester(fieldFocusRequester)
+                } else {
+                    Modifier
+                },
+            ),
         label = { Text("就诊原因") },
+        isError = reasonError,
         singleLine = true,
     )
     OutlinedTextField(

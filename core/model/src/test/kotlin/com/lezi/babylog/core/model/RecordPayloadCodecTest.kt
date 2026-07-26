@@ -99,6 +99,23 @@ class RecordPayloadCodecTest {
     }
 
     @Test
+    fun localPhotoPathsReplicaRoundTripsAndClears() {
+        assertThat(localPhotoPaths("""{"body":"x","photos":["a.jpg","b.jpg"]}"""))
+            .containsExactly("a.jpg", "b.jpg")
+            .inOrder()
+        assertThat(localPhotoPaths("""{"amount_ml":120}""")).isEmpty()
+        assertThat(MAX_RECORD_PHOTOS).isEqualTo(3)
+
+        val withPhotos = withLocalPhotoPaths("""{"pee_amount":2}""", listOf("p1.jpg", "p1.jpg", ""))
+        assertThat(withPhotos).contains("\"photos\"")
+        assertThat(localPhotoPaths(withPhotos)).containsExactly("p1.jpg")
+
+        val cleared = withLocalPhotoPaths(withPhotos, emptyList())
+        assertThat(cleared).doesNotContain("photos")
+        assertThat(cleared).contains("\"pee_amount\":2")
+    }
+
+    @Test
     fun typedValidationOwnsMilkAndMeasurementBounds() {
         assertThat(
             RecordPayloadCodec.validate(

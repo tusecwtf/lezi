@@ -37,6 +37,12 @@ data class SyncSession(
      * Cold start relies on this local cache (no GET family-name path in this ticket).
      */
     val familyName: String? = null,
+    /**
+     * Server-minted immutable membership identity for this device's family session.
+     * Empty when not joined or when a legacy NAS omitted `membership_id` on create/join.
+     * Prefer members list projection to refresh after upgrade.
+     */
+    val membershipId: String = "",
 ) {
     val baseUrl: String
         get() = homeLanConfig.baseUrl
@@ -111,6 +117,7 @@ class DataStoreSyncPreferences @Inject constructor(
             allowedSsids = ssids,
             serverScheme = scheme,
             familyName = prefs[Keys.FAMILY_NAME]?.trim()?.takeIf { it.isNotEmpty() },
+            membershipId = prefs[Keys.MEMBERSHIP_ID].orEmpty(),
         )
     }
 
@@ -198,6 +205,12 @@ class DataStoreSyncPreferences @Inject constructor(
                 prefs.remove(Keys.FAMILY_NAME)
             } else {
                 prefs[Keys.FAMILY_NAME] = sharedName
+            }
+            val membershipId = session.membershipId.trim()
+            if (membershipId.isEmpty()) {
+                prefs.remove(Keys.MEMBERSHIP_ID)
+            } else {
+                prefs[Keys.MEMBERSHIP_ID] = membershipId
             }
         }
     }
@@ -311,6 +324,7 @@ class DataStoreSyncPreferences @Inject constructor(
         prefs.remove(Keys.LAST_SUCCESS_AT)
         prefs.remove(Keys.CREATE_REQUEST_ID)
         prefs.remove(Keys.FAMILY_NAME)
+        prefs.remove(Keys.MEMBERSHIP_ID)
         secureTokenStore.clearToken()
     }
 
@@ -337,5 +351,6 @@ class DataStoreSyncPreferences @Inject constructor(
         val LAST_SUCCESS_AT = longPreferencesKey("sync_last_success_at")
         val CREATE_REQUEST_ID = stringPreferencesKey("sync_create_request_id")
         val FAMILY_NAME = stringPreferencesKey("sync_family_name")
+        val MEMBERSHIP_ID = stringPreferencesKey("sync_membership_id")
     }
 }

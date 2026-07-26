@@ -13,6 +13,82 @@ import org.junit.Test
 
 class HttpSyncBackendTest {
     @Test
+    fun stagePutAndCommitBundleFollowAtomicEndpoints() = runTest {
+        val server = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
+        val seen = mutableListOf<String>()
+        val responder = thread(name = "lezi-bundle-test-server") {
+            repeat(3) {
+                runCatching {
+                    server.accept().use { socket ->
+                        val request = readRequest(socket)
+                        seen += request.lineSequence().first()
+                        val body = when {
+                            request.startsWith("POST /v1/bundles ") ->
+                                """{"bundle_id":"b1","status":"staging","missing_media":["m1"],"staged_media":[]}"""
+                            request.startsWith("PUT /v1/bundles/b1/media/m1 ") ->
+                                """{"bundle_id":"b1","status":"staging","missing_media":[],"staged_media":["m1"]}"""
+                            else ->
+                                """{"bundle_id":"b1","status":"committed","applied":2,"cursor":9}"""
+                        }.toByteArray(Charsets.UTF_8)
+                        socket.getOutputStream().use { output ->
+                            output.write(
+                                (
+                                    "HTTP/1.1 200 OK\r\n" +
+                                        "Content-Type: application/json\r\n" +
+                                        "Content-Length: ${body.size}\r\n" +
+                                        "Connection: close\r\n\r\n"
+                                    ).toByteArray(Charsets.US_ASCII),
+                            )
+                            output.write(body)
+                        }
+                    }
+                }
+            }
+        }
+
+        try {
+            val backend = HttpSyncBackend()
+            val session = testSession(server)
+            val draft = AtomicBundleDraft(
+                bundleId = "b1",
+                root = SyncEntity(
+                    type = "record",
+                    clientUuid = "r1",
+                    payloadJson = """{"baby_client_uuid":"baby"}""",
+                    updatedAt = 1,
+                ),
+                media = listOf(
+                    SyncEntity(
+                        type = "media",
+                        clientUuid = "m1",
+                        payloadJson = """{"kind":"log","record_client_uuid":"r1","byte_size":2}""",
+                        updatedAt = 1,
+                    ),
+                ),
+            )
+            val staged = backend.stageBundle(session, draft)
+            assertThat(staged.missingMedia).containsExactly("m1")
+            val afterPut = backend.putBundleMedia(
+                session,
+                "b1",
+                "m1",
+                byteArrayOf(1, 2),
+                "image/jpeg",
+            )
+            assertThat(afterPut.missingMedia).isEmpty()
+            val committed = backend.commitBundle(session, "b1")
+            assertThat(committed.status).isEqualTo("committed")
+            assertThat(committed.cursor).isEqualTo(9)
+            assertThat(seen[0]).startsWith("POST /v1/bundles ")
+            assertThat(seen[1]).startsWith("PUT /v1/bundles/b1/media/m1 ")
+            assertThat(seen[2]).startsWith("POST /v1/bundles/b1/commit ")
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
     fun pullPreservesAnAbsentContinuationFlag() = runTest {
         val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
         val responder = thread(name = "lezi-legacy-pull-test-server") {
@@ -300,9 +376,11 @@ class HttpSyncBackendTest {
                     val body = (
                         "{\"members\":[" +
                             "{\"display_name\":\"妈妈\",\"role\":\"owner\",\"is_self\":true," +
-                            "\"device_id\":\"device-owner\"}," +
+                            "\"device_id\":\"device-owner\"," +
+                            "\"membership_id\":\"membership-owner-uuid\"}," +
                             "{\"display_name\":null,\"role\":\"member\",\"is_self\":false," +
-                            "\"device_id\":\"device-member\"}]}"
+                            "\"device_id\":\"device-member\"," +
+                            "\"membership_id\":\"membership-member-uuid\"}]}"
                         ).toByteArray(Charsets.UTF_8)
                     socket.getOutputStream().use { output ->
                         output.write(
@@ -329,12 +407,14 @@ class HttpSyncBackendTest {
                     FamilyRole.Owner,
                     isSelf = true,
                     deviceId = "device-owner",
+                    membershipId = "membership-owner-uuid",
                 ),
                 FamilyMember(
                     null,
                     FamilyRole.Member,
                     isSelf = false,
                     deviceId = "device-member",
+                    membershipId = "membership-member-uuid",
                 ),
             ).inOrder()
             assertThat(request.lineSequence().first())
@@ -378,8 +458,15 @@ class HttpSyncBackendTest {
         }
 
         try {
+            // Legacy rows without membership_id soft-parse to null (no crash).
             assertThat(HttpSyncBackend().members(testSession(server))).containsExactly(
-                FamilyMember("旧客户端", FamilyRole.Member, isSelf = false),
+                FamilyMember(
+                    "旧客户端",
+                    FamilyRole.Member,
+                    isSelf = false,
+                    deviceId = null,
+                    membershipId = null,
+                ),
             )
         } finally {
             server.close()
@@ -413,8 +500,10 @@ class HttpSyncBackendTest {
                 server.accept().use { socket ->
                     captured.complete(readRequest(socket))
                     val body =
-                        """{"family_id":"family","token":"member-token","role":"member"}"""
-                            .toByteArray(Charsets.UTF_8)
+                        (
+                            """{"family_id":"family","token":"member-token","role":"member",""" +
+                                """"membership_id":"membership-join-uuid"}"""
+                            ).toByteArray(Charsets.UTF_8)
                     socket.getOutputStream().use { output ->
                         output.write(
                             (
@@ -440,7 +529,48 @@ class HttpSyncBackendTest {
             val request = captured.get(2, TimeUnit.SECONDS)
 
             assertThat(result.role).isEqualTo(FamilyRole.Member)
+            assertThat(result.membershipId).isEqualTo("membership-join-uuid")
             assertThat(request.substringAfter("\n\n")).contains("\"display_name\":\"Dad\"")
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
+    fun joinSoftParsesMissingMembershipIdFromLegacyNas() = runTest {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val responder = thread(name = "lezi-join-legacy-membership-test-server") {
+            runCatching {
+                server.accept().use { socket ->
+                    readRequest(socket)
+                    val body =
+                        """{"family_id":"family","token":"member-token","role":"member"}"""
+                            .toByteArray(Charsets.UTF_8)
+                    socket.getOutputStream().use { output ->
+                        output.write(
+                            (
+                                "HTTP/1.1 200 OK\r\n" +
+                                    "Content-Type: application/json\r\n" +
+                                    "Content-Length: ${body.size}\r\n" +
+                                    "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                        )
+                        output.write(body)
+                    }
+                }
+            }
+        }
+
+        try {
+            val result = HttpSyncBackend().join(
+                baseUrl = "http://${server.inetAddress.hostAddress}:${server.localPort}",
+                code = "ABCD1234",
+                deviceId = "device-a",
+                displayName = "Dad",
+            )
+            assertThat(result.membershipId).isNull()
+            assertThat(result.role).isEqualTo(FamilyRole.Member)
         } finally {
             server.close()
             responder.join(2_000)
@@ -457,8 +587,11 @@ class HttpSyncBackendTest {
                 server.accept().use { socket ->
                     captured.complete(readRequest(socket))
                     val body =
-                        """{"family_id":"family","token":"owner-token","role":"owner","family_name":"Happy Home"}"""
-                            .toByteArray(Charsets.UTF_8)
+                        (
+                            """{"family_id":"family","token":"owner-token","role":"owner",""" +
+                                """"membership_id":"membership-create-uuid",""" +
+                                """"family_name":"Happy Home"}"""
+                            ).toByteArray(Charsets.UTF_8)
                     socket.getOutputStream().use { output ->
                         output.write(
                             (
@@ -486,6 +619,7 @@ class HttpSyncBackendTest {
             val request = captured.get(2, TimeUnit.SECONDS)
 
             assertThat(result.familyName).isEqualTo("Happy Home")
+            assertThat(result.membershipId).isEqualTo("membership-create-uuid")
             assertThat(request.substringAfter("\n\n")).contains("\"family_name\":\"Happy Home\"")
             assertThat(request.substringAfter("\n\n")).contains("\"display_name\":\"Mom\"")
         } finally {

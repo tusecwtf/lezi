@@ -253,7 +253,9 @@ async fn liveness_and_readiness_initialize_private_single_data_root() {
     let rig = Rig::new();
     let (status, body) = get_json(&rig.app, "/health", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, json!({"ok": true, "version": VERSION}));
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["version"], VERSION);
+    assert_eq!(body["capabilities"], json!(["atomic_bundle"]));
     let (ready_status, ready_body) = get_json(&rig.app, "/ready", None).await;
     assert_eq!(ready_status, StatusCode::OK);
     assert_eq!(ready_body, json!({"ok": true, "version": VERSION}));
@@ -366,10 +368,12 @@ async fn family_create_is_strict_idempotent_and_restart_safe() {
 
     let request_id = "Qk7Uj6hTH1xbqa9nYs8FQ2c4e5w7r9tB";
     let first = create_family(&rig.app, "owner-device", request_id).await;
+    assert!(first["membership_id"].as_str().unwrap().len() >= 32);
     let restarted = rig.restart("generation-b");
     let retry = create_family(&restarted, "owner-device", request_id).await;
     assert_eq!(retry["family_id"], first["family_id"]);
     assert_eq!(retry["token"], first["token"]);
+    assert_eq!(retry["membership_id"], first["membership_id"]);
     assert_eq!(retry["generation"], "generation-b");
     let (conflict, _) = json_request(
         &restarted,
@@ -432,6 +436,8 @@ async fn invite_join_roles_expiry_restart_and_leave_match_contract() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(member["role"], "member");
+    assert!(member["membership_id"].as_str().unwrap().len() >= 32);
+    assert_ne!(member["membership_id"], owner["membership_id"]);
     let restarted = rig.restart("generation-b");
     let (retry_status, retry) = json_request(
         &restarted,
@@ -443,6 +449,7 @@ async fn invite_join_roles_expiry_restart_and_leave_match_contract() {
     .await;
     assert_eq!(retry_status, StatusCode::OK);
     assert_eq!(retry["token"], member["token"]);
+    assert_eq!(retry["membership_id"], member["membership_id"]);
     assert_eq!(retry["generation"], "generation-b");
     let (replay_status, _) = json_request(
         &restarted,
@@ -558,6 +565,8 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
     assert_eq!(join_status, StatusCode::OK, "{member}");
     let member_token = member["token"].as_str().unwrap();
 
+    let owner_membership_id = owner["membership_id"].as_str().unwrap();
+    let member_membership_id = member["membership_id"].as_str().unwrap();
     let (owner_status, owner_view) =
         get_json(&rig.app, "/v1/family/members", Some(owner_token)).await;
     assert_eq!(owner_status, StatusCode::OK);
@@ -569,12 +578,14 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
                 "role":"owner",
                 "is_self":true,
                 "device_id":"owner-sensitive-device-id",
+                "membership_id": owner_membership_id,
             },
             {
                 "display_name":"陈爸爸 🌿",
                 "role":"member",
                 "is_self":false,
                 "device_id":"member-sensitive-device-id",
+                "membership_id": member_membership_id,
             },
         ]})
     );
@@ -589,12 +600,14 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
                 "role":"owner",
                 "is_self":false,
                 "device_id":"owner-sensitive-device-id",
+                "membership_id": owner_membership_id,
             },
             {
                 "display_name":"陈爸爸 🌿",
                 "role":"member",
                 "is_self":true,
                 "device_id":"member-sensitive-device-id",
+                "membership_id": member_membership_id,
             },
         ]})
     );
@@ -603,7 +616,13 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
             .as_array()
             .unwrap()
             .iter()
-            .map(|member| (member["display_name"].clone(), member["role"].clone()))
+            .map(|member| {
+                (
+                    member["display_name"].clone(),
+                    member["role"].clone(),
+                    member["membership_id"].clone(),
+                )
+            })
             .collect::<Vec<_>>()
     };
     assert_eq!(visible_members(&owner_view), visible_members(&member_view));
@@ -611,6 +630,7 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
     let serialized = owner_view.to_string();
     // Tokens / token hashes must never appear; device_id is the intentional
     // client link key for created_by_device_id → 称呼 resolution.
+    // membership_id is a public stable identity and may appear.
     for secret in [owner_token, member_token, &token_hash(owner_token), &token_hash(member_token)] {
         assert!(
             !serialized.contains(secret),
@@ -619,8 +639,9 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
     }
     for row in owner_view["members"].as_array().unwrap() {
         let fields = row.as_object().unwrap();
-        assert_eq!(fields.len(), 4);
+        assert_eq!(fields.len(), 5);
         assert!(fields.contains_key("device_id"));
+        assert!(fields.contains_key("membership_id"));
         assert!(!fields.contains_key("token_hash"));
         assert!(!fields.contains_key("token"));
         assert!(!fields.contains_key("family_id"));
@@ -653,16 +674,21 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
     drop(connection);
 
     let (_, isolated_view) = get_json(&rig.app, "/v1/family/members", Some(isolated_token)).await;
+    assert_eq!(isolated_view["members"].as_array().unwrap().len(), 1);
+    assert_eq!(isolated_view["members"][0]["display_name"], "隔离家庭");
+    assert_eq!(isolated_view["members"][0]["role"], "owner");
+    assert_eq!(isolated_view["members"][0]["is_self"], true);
     assert_eq!(
-        isolated_view,
-        json!({"members":[
-            {
-                "display_name":"隔离家庭",
-                "role":"owner",
-                "is_self":true,
-                "device_id":"isolated-raw-device-id",
-            },
-        ]})
+        isolated_view["members"][0]["device_id"],
+        "isolated-raw-device-id"
+    );
+    // Legacy rows without membership_id receive an additive backfill/lazy mint.
+    assert!(
+        isolated_view["members"][0]["membership_id"]
+            .as_str()
+            .unwrap()
+            .len()
+            >= 32
     );
     let (_, owner_after_isolated_insert) =
         get_json(&rig.app, "/v1/family/members", Some(owner_token)).await;
@@ -695,6 +721,150 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
         after_leave["members"][0]["device_id"],
         "owner-sensitive-device-id"
     );
+    assert_eq!(
+        after_leave["members"][0]["membership_id"],
+        owner_membership_id
+    );
+}
+
+#[tokio::test]
+async fn membership_id_is_stable_across_restart_and_rejects_role_forgery() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "stable-owner-device",
+        "stable-membership-owner-request-001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let owner_membership_id = owner["membership_id"].as_str().unwrap().to_owned();
+    assert_eq!(owner["role"], "owner");
+
+    let (invite_status, invitation) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/invite",
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(invite_status, StatusCode::CREATED);
+    let (join_status, member) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/join",
+        None,
+        json!({
+            "code": invitation["code"],
+            "device_id": "stable-member-device",
+            "display_name": "成员",
+        }),
+    )
+    .await;
+    assert_eq!(join_status, StatusCode::OK, "{member}");
+    let member_token = member["token"].as_str().unwrap();
+    let member_membership_id = member["membership_id"].as_str().unwrap().to_owned();
+    assert_eq!(member["role"], "member");
+    assert_ne!(member_membership_id, owner_membership_id);
+
+    // Restart must not remint membership identities.
+    let restarted = rig.restart("generation-membership-stable");
+    let (_, owner_members) = get_json(&restarted, "/v1/family/members", Some(owner_token)).await;
+    let (_, member_members) = get_json(&restarted, "/v1/family/members", Some(member_token)).await;
+    assert_eq!(
+        owner_members["members"][0]["membership_id"],
+        owner_membership_id
+    );
+    assert_eq!(
+        owner_members["members"][1]["membership_id"],
+        member_membership_id
+    );
+    assert_eq!(
+        member_members["members"][0]["membership_id"],
+        owner_membership_id
+    );
+    assert_eq!(
+        member_members["members"][1]["membership_id"],
+        member_membership_id
+    );
+
+    // Role and writer authority come only from the authenticated principal.
+    // A member cannot mint invites (owner-only) even if a client claims owner.
+    let (forged_invite, forged_body) = json_request(
+        &restarted,
+        Method::POST,
+        "/v1/invite",
+        Some(member_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(forged_invite, StatusCode::FORBIDDEN);
+    assert_eq!(
+        forged_body,
+        json!({"detail":"Owner role required"})
+    );
+    let (forged_rename, _) = json_request(
+        &restarted,
+        Method::POST,
+        "/v1/family/name",
+        Some(member_token),
+        json!({"family_name": "伪造家庭"}),
+    )
+    .await;
+    assert_eq!(forged_rename, StatusCode::FORBIDDEN);
+
+    // Push with a forged device_id (impersonating another membership) is rejected.
+    let (forged_device_status, forged_device_body) = json_request(
+        &restarted,
+        Method::POST,
+        "/v1/push",
+        Some(member_token),
+        json!({
+            "device_id": "stable-owner-device",
+            "entities": [],
+        }),
+    )
+    .await;
+    assert_eq!(forged_device_status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        forged_device_body,
+        json!({"detail":"device_id does not match token"})
+    );
+
+    // Legacy rows without membership_id backfill on open and stay stable.
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute(
+            "
+            INSERT INTO memberships(token_hash, family_id, role, device_id, display_name)
+            VALUES (?1, ?2, 'member', 'legacy-device', '旧成员')
+            ",
+            rusqlite::params![
+                token_hash("legacy-member-token"),
+                owner["family_id"].as_str().unwrap()
+            ],
+        )
+        .unwrap();
+    drop(connection);
+    let reopened = rig.restart("generation-membership-backfill");
+    let (_, with_legacy) = get_json(&reopened, "/v1/family/members", Some(owner_token)).await;
+    let legacy = with_legacy["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["device_id"] == "legacy-device")
+        .expect("legacy member projected");
+    let first_legacy_id = legacy["membership_id"].as_str().unwrap().to_owned();
+    assert!(first_legacy_id.len() >= 32);
+    let (_, with_legacy_again) =
+        get_json(&reopened, "/v1/family/members", Some(owner_token)).await;
+    let legacy_again = with_legacy_again["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["device_id"] == "legacy-device")
+        .unwrap();
+    assert_eq!(legacy_again["membership_id"], first_legacy_id);
 }
 
 #[tokio::test]
@@ -1200,47 +1370,79 @@ async fn family_members_coalesce_legacy_duplicate_member_tokens_without_role_pro
     drop(connection);
 
     let (_, members) = get_json(&rig.app, "/v1/family/members", Some(owner_token)).await;
+    let rows = members["members"].as_array().unwrap();
+    assert_eq!(rows.len(), 6);
+    // Structural projection without hard-coding minted membership_ids.
+    let projection: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            json!({
+                "display_name": row["display_name"],
+                "role": row["role"],
+                "is_self": row["is_self"],
+                "device_id": row["device_id"],
+            })
+        })
+        .collect();
     assert_eq!(
-        members,
-        json!({"members":[
-            {
+        projection,
+        vec![
+            json!({
                 "display_name":"妈妈",
                 "role":"owner",
                 "is_self":true,
                 "device_id":"duplicate-owner-device",
-            },
-            {
+            }),
+            json!({
                 "display_name":"伪装管理员",
                 "role":"member",
                 "is_self":false,
                 "device_id":"duplicate-owner-device",
-            },
-            {
+            }),
+            json!({
                 "display_name":"历史成员",
                 "role":"member",
                 "is_self":false,
                 "device_id":"same-legacy-device",
-            },
-            {
+            }),
+            json!({
                 "display_name":null,
                 "role":"member",
                 "is_self":false,
                 "device_id":"legacy-empty-device",
-            },
-            {
+            }),
+            json!({
                 "display_name":null,
                 "role":"member",
                 "is_self":false,
                 "device_id":"legacy-local-placeholder-device",
-            },
-            {
+            }),
+            json!({
                 "display_name":null,
                 "role":"member",
                 "is_self":false,
                 "device_id":"legacy-null-device",
-            },
-        ]})
+            }),
+        ]
     );
+    // Self uses create-time membership_id; duplicate role+device coalesces to one id.
+    assert_eq!(rows[0]["membership_id"], owner["membership_id"]);
+    let same_device_rows: Vec<_> = rows
+        .iter()
+        .filter(|row| row["device_id"] == "same-legacy-device")
+        .collect();
+    assert_eq!(same_device_rows.len(), 1);
+    assert!(
+        same_device_rows[0]["membership_id"]
+            .as_str()
+            .unwrap()
+            .len()
+            >= 32
+    );
+    for row in rows {
+        assert!(row["membership_id"].as_str().unwrap().len() >= 32);
+        assert_eq!(row.as_object().unwrap().len(), 5);
+    }
     let serialized = members.to_string();
     assert!(!serialized.contains("我（本机）"));
     assert!(!serialized.contains("legacy-member-token"));
@@ -2687,4 +2889,1718 @@ async fn corrupt_ready_media_is_removed_and_not_advertised_until_reuploaded() {
     assert_eq!(ready["cursor"], 5);
     assert_eq!(ready["entities"].as_array().unwrap().len(), 1);
     assert_eq!(ready["entities"][0]["client_uuid"], zero_media_id);
+}
+
+// ---------------------------------------------------------------------------
+// Atomic bundle protocol
+// ---------------------------------------------------------------------------
+
+fn entity_wire(
+    entity_type: &str,
+    client_uuid: &str,
+    updated_at: i64,
+    payload: Value,
+    deleted_at: Option<i64>,
+) -> Value {
+    let mut value = json!({
+        "type": entity_type,
+        "client_uuid": client_uuid,
+        "updated_at": updated_at,
+        "payload": payload,
+    });
+    if let Some(deleted_at) = deleted_at {
+        value["deleted_at"] = json!(deleted_at);
+    }
+    value
+}
+
+async fn seed_baby(app: &Router, token: &str) -> String {
+    let baby_id = Uuid::new_v4().to_string();
+    let (status, body) = json_request(
+        app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({
+            "entities": [entity_wire("baby", &baby_id, 1, baby_payload("年年", None), None)]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    baby_id
+}
+
+#[tokio::test]
+async fn health_advertises_atomic_bundle_capability() {
+    let rig = Rig::new();
+    let (status, body) = get_json(&rig.app, "/health", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], true);
+    assert!(body["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c == "atomic_bundle"));
+}
+
+#[tokio::test]
+async fn atomic_bundle_is_invisible_until_commit_and_publishes_atomically() {
+    let rig = Rig::new();
+    let created = create_family(
+        &rig.app,
+        "bundle-owner",
+        "bundle-owner-request-000000000001",
+    )
+    .await;
+    let token = created["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let media_a = Uuid::new_v4().to_string();
+    let media_b = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+
+    let mut media_a_payload = log_media_payload(&record_id);
+    media_a_payload["byte_size"] = json!(3);
+    let mut media_b_payload = log_media_payload(&record_id);
+    media_b_payload["byte_size"] = json!(4);
+
+    let (status, staged) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire(
+                "record",
+                &record_id,
+                10,
+                record_payload(&baby_id),
+                None
+            ),
+            "media": [
+                entity_wire("media", &media_a, 10, media_a_payload, None),
+                entity_wire("media", &media_b, 10, media_b_payload, None),
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{staged}");
+    assert_eq!(staged["status"], "staging");
+    assert_eq!(
+        staged["missing_media"].as_array().unwrap().len(),
+        2,
+        "{staged}"
+    );
+
+    // Pre-commit: root and media must not appear on ordinary pull.
+    let (_, pull_before) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    let types_before: Vec<_> = pull_before["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["type"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(types_before, vec!["baby"]);
+    assert!(!pull_before["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["client_uuid"] == record_id));
+
+    // Interrupt after first photo: still invisible; commit rejected.
+    let upload_a = request(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/bundles/{bundle_id}/media/{media_a}"),
+        Some(token),
+        Body::from("img"),
+        Some("image/jpeg"),
+    )
+    .await;
+    assert_eq!(upload_a.status(), StatusCode::OK);
+    let (commit_early, early_body) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(commit_early, StatusCode::UNPROCESSABLE_ENTITY, "{early_body}");
+    let (_, still_hidden) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    assert!(!still_hidden["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["client_uuid"] == record_id));
+
+    let upload_b = request(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/bundles/{bundle_id}/media/{media_b}"),
+        Some(token),
+        Body::from("jpeg"),
+        Some("image/jpeg"),
+    )
+    .await;
+    assert_eq!(upload_b.status(), StatusCode::OK);
+
+    let (commit_status, committed) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(commit_status, StatusCode::OK, "{committed}");
+    assert_eq!(committed["status"], "committed");
+    assert_eq!(committed["applied"], 3);
+
+    // Duplicate commit is idempotent (lost response safe).
+    let (retry_status, retry) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(retry_status, StatusCode::OK, "{retry}");
+    assert_eq!(retry["status"], "committed");
+    assert_eq!(retry["cursor"], committed["cursor"]);
+
+    let (_, pull_after) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    let uuids: std::collections::BTreeSet<_> = pull_after["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["client_uuid"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(uuids.contains(&record_id));
+    assert!(uuids.contains(&media_a));
+    assert!(uuids.contains(&media_b));
+
+    for media_id in [&media_a, &media_b] {
+        let response = request(
+            &rig.app,
+            Method::GET,
+            &format!("/v1/media/{media_id}"),
+            Some(token),
+            Body::empty(),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "{media_id}");
+    }
+}
+
+#[tokio::test]
+async fn atomic_bundle_rejects_manifest_mismatch_and_oversized_media() {
+    let rig = Rig::new();
+    let created = create_family(
+        &rig.app,
+        "bundle-mismatch-owner",
+        "bundle-mismatch-request-00000001",
+    )
+    .await;
+    let token = created["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let media_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+    let mut media_payload = log_media_payload(&record_id);
+    media_payload["byte_size"] = json!(3);
+
+    let (status, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
+            "media": [entity_wire("media", &media_id, 2, media_payload, None)],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let unknown = Uuid::new_v4();
+    let mismatch = request(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/bundles/{bundle_id}/media/{unknown}"),
+        Some(token),
+        Body::from("img"),
+        Some("image/jpeg"),
+    )
+    .await;
+    assert_eq!(mismatch.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let wrong_size = request(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
+        Some(token),
+        Body::from("toolong"),
+        Some("image/jpeg"),
+    )
+    .await;
+    assert_eq!(wrong_size.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Live media without byte_size is rejected at stage time.
+    let (no_size_status, no_size_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": Uuid::new_v4(),
+            "root": entity_wire(
+                "record",
+                &Uuid::new_v4().to_string(),
+                3,
+                record_payload(&baby_id),
+                None
+            ),
+            "media": [entity_wire(
+                "media",
+                &Uuid::new_v4().to_string(),
+                3,
+                json!({
+                    "kind": "log",
+                    "record_client_uuid": record_id,
+                    "mime": "image/jpeg"
+                }),
+                None
+            )],
+        }),
+    )
+    .await;
+    assert_eq!(no_size_status, StatusCode::UNPROCESSABLE_ENTITY, "{no_size_body}");
+}
+
+#[tokio::test]
+async fn atomic_bundle_edit_keeps_old_published_version_until_commit() {
+    let rig = Rig::new();
+    let created = create_family(
+        &rig.app,
+        "bundle-edit-owner",
+        "bundle-edit-request-000000000001",
+    )
+    .await;
+    let token = created["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let media_v1 = Uuid::new_v4().to_string();
+    let bundle_v1 = Uuid::new_v4().to_string();
+    let mut media_payload = log_media_payload(&record_id);
+    media_payload["byte_size"] = json!(3);
+
+    let (status, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": bundle_v1,
+            "root": entity_wire("record", &record_id, 5, record_payload(&baby_id), None),
+            "media": [entity_wire("media", &media_v1, 5, media_payload.clone(), None)],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        request(
+            &rig.app,
+            Method::PUT,
+            &format!("/v1/bundles/{bundle_v1}/media/{media_v1}"),
+            Some(token),
+            Body::from("old"),
+            Some("image/jpeg"),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let (commit_status, _) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_v1}/commit"),
+        Some(token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(commit_status, StatusCode::OK);
+
+    // Stage a newer version with different media; until commit, pull keeps v1.
+    let media_v2 = Uuid::new_v4().to_string();
+    let bundle_v2 = Uuid::new_v4().to_string();
+    let mut media_v2_payload = log_media_payload(&record_id);
+    media_v2_payload["byte_size"] = json!(4);
+    let mut record_v2 = record_payload(&baby_id);
+    record_v2["note"] = json!("edited");
+    let (status, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": bundle_v2,
+            "root": entity_wire("record", &record_id, 20, record_v2, None),
+            "media": [entity_wire("media", &media_v2, 20, media_v2_payload, None)],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, mid) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    let record = mid["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["client_uuid"] == record_id)
+        .unwrap();
+    assert_eq!(record["updated_at"], 5);
+    assert_eq!(record["payload"]["note"], Value::Null);
+    assert!(mid["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["client_uuid"] == media_v1));
+    assert!(!mid["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["client_uuid"] == media_v2));
+
+    assert_eq!(
+        request(
+            &rig.app,
+            Method::PUT,
+            &format!("/v1/bundles/{bundle_v2}/media/{media_v2}"),
+            Some(token),
+            Body::from("new!"),
+            Some("image/jpeg"),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let (commit2, _) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_v2}/commit"),
+        Some(token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(commit2, StatusCode::OK);
+
+    let (_, after) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    let record = after["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["client_uuid"] == record_id)
+        .unwrap();
+    assert_eq!(record["updated_at"], 20);
+    assert_eq!(record["payload"]["note"], "edited");
+}
+
+#[tokio::test]
+async fn atomic_bundle_tombstone_publishes_without_media_bytes() {
+    let rig = Rig::new();
+    let created = create_family(
+        &rig.app,
+        "bundle-tomb-owner",
+        "bundle-tomb-request-000000000001",
+    )
+    .await;
+    let token = created["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let media_id = Uuid::new_v4().to_string();
+    let create_bundle = Uuid::new_v4().to_string();
+    let mut media_payload = log_media_payload(&record_id);
+    media_payload["byte_size"] = json!(3);
+
+    let (status, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": create_bundle,
+            "root": entity_wire("record", &record_id, 1, record_payload(&baby_id), None),
+            "media": [entity_wire("media", &media_id, 1, media_payload.clone(), None)],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        request(
+            &rig.app,
+            Method::PUT,
+            &format!("/v1/bundles/{create_bundle}/media/{media_id}"),
+            Some(token),
+            Body::from("img"),
+            Some("image/jpeg"),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/bundles/{create_bundle}/commit"),
+            Some(token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    let tomb_bundle = Uuid::new_v4().to_string();
+    let (status, staged) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": tomb_bundle,
+            "root": entity_wire("record", &record_id, 50, record_payload(&baby_id), Some(50)),
+            "media": [entity_wire("media", &media_id, 50, media_payload, Some(50))],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{staged}");
+    assert_eq!(staged["missing_media"].as_array().unwrap().len(), 0);
+    let (commit_status, committed) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{tomb_bundle}/commit"),
+        Some(token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(commit_status, StatusCode::OK, "{committed}");
+
+    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    let record = pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["client_uuid"] == record_id)
+        .unwrap();
+    assert_eq!(record["deleted_at"], 50);
+    let media = pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["client_uuid"] == media_id)
+        .unwrap();
+    assert_eq!(media["deleted_at"], 50);
+}
+
+fn care_plan_payload(baby_id: &str, plan_type: &str) -> Value {
+    json!({
+        "baby_client_uuid": baby_id,
+        "type": plan_type,
+        "scheduled_at": 1_700_000_000_000i64,
+        "scheduled_zone_id": "Asia/Shanghai",
+        "status": "pending",
+        "payload_json": {},
+        "schema_version": 1,
+        "note": null,
+        // Forgery attempt — server must overwrite with authenticated membership.
+        "created_by_membership_id": "spoofed-membership",
+    })
+}
+
+#[tokio::test]
+async fn atomic_bundle_supports_generic_care_plan_root() {
+    let rig = Rig::new();
+    let created = create_family(
+        &rig.app,
+        "bundle-plan-owner",
+        "bundle-plan-request-000000000001",
+    )
+    .await;
+    let token = created["token"].as_str().unwrap();
+    let owner_membership = created["membership_id"].as_str().unwrap().to_owned();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let plan_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+
+    let (status, staged) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire(
+                "care_plan",
+                &plan_id,
+                7,
+                care_plan_payload(&baby_id, "formula"),
+                None
+            ),
+            "media": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{staged}");
+    assert_eq!(staged["missing_media"], json!([]));
+
+    let (_, hidden) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    assert!(!hidden["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["client_uuid"] == plan_id));
+
+    let (commit_status, committed) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(commit_status, StatusCode::OK, "{committed}");
+    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    let plan = pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["client_uuid"] == plan_id)
+        .expect("care_plan visible after commit");
+    assert_eq!(plan["type"], "care_plan");
+    assert_eq!(
+        plan["payload"]["created_by_membership_id"],
+        owner_membership
+    );
+    assert_ne!(
+        plan["payload"]["created_by_membership_id"],
+        "spoofed-membership"
+    );
+}
+
+#[tokio::test]
+async fn care_plan_member_acl_and_owner_override() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "care-plan-acl-owner",
+        "care-plan-acl-request-00000000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let member_a = invite_and_join(&rig.app, owner_token, "care-plan-member-a").await;
+    let member_a_token = member_a["token"].as_str().unwrap();
+    let member_b = invite_and_join(&rig.app, owner_token, "care-plan-member-b").await;
+    let member_b_token = member_b["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let plan_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+
+    // Member A creates a plan via atomic bundle.
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/bundles",
+            Some(member_a_token),
+            json!({
+                "bundle_id": bundle_id,
+                "root": entity_wire(
+                    "care_plan",
+                    &plan_id,
+                    1,
+                    care_plan_payload(&baby_id, "pee"),
+                    None
+                ),
+                "media": []
+            }),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/bundles/{bundle_id}/commit"),
+            Some(member_a_token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    // Member B cannot edit A's plan.
+    let bundle_b = Uuid::new_v4().to_string();
+    let mut payload = care_plan_payload(&baby_id, "pee");
+    payload["note"] = json!("篡改");
+    let (forbid, body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(member_b_token),
+        json!({
+            "bundle_id": bundle_b,
+            "root": entity_wire("care_plan", &plan_id, 2, payload.clone(), None),
+            "media": []
+        }),
+    )
+    .await;
+    assert_eq!(forbid, StatusCode::FORBIDDEN, "{body}");
+
+    // Owner may edit any plan.
+    let bundle_o = Uuid::new_v4().to_string();
+    payload["note"] = json!("管理员改");
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/bundles",
+            Some(owner_token),
+            json!({
+                "bundle_id": bundle_o,
+                "root": entity_wire("care_plan", &plan_id, 3, payload, None),
+                "media": []
+            }),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/bundles/{bundle_o}/commit"),
+            Some(owner_token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
+    let plan = pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["client_uuid"] == plan_id)
+        .unwrap();
+    assert_eq!(plan["payload"]["note"], "管理员改");
+    // Creator frozen to member A even after owner edit.
+    assert_eq!(
+        plan["payload"]["created_by_membership_id"],
+        member_a["membership_id"]
+    );
+}
+
+#[tokio::test]
+async fn care_plan_rejected_on_legacy_push() {
+    let rig = Rig::new();
+    let created = create_family(
+        &rig.app,
+        "legacy-plan-device",
+        "legacy-plan-request-0000000000001",
+    )
+    .await;
+    let token = created["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let plan_id = Uuid::new_v4().to_string();
+    let (status, body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({
+            "entities": [entity_wire(
+                "care_plan",
+                &plan_id,
+                1,
+                care_plan_payload(&baby_id, "formula"),
+                None
+            )]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+}
+
+#[tokio::test]
+async fn fulfillment_candidate_stamps_submitter_and_rejects_bad_refs() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "fulfill-owner",
+        "fulfill-cand-request-000000000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let member = invite_and_join(&rig.app, owner_token, "fulfill-member").await;
+    let member_token = member["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let plan_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/bundles",
+            Some(owner_token),
+            json!({
+                "bundle_id": bundle_id,
+                "root": entity_wire(
+                    "care_plan",
+                    &plan_id,
+                    1,
+                    care_plan_payload(&baby_id, "bath"),
+                    None
+                ),
+                "media": []
+            }),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/bundles/{bundle_id}/commit"),
+            Some(owner_token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    let record_id = Uuid::new_v4().to_string();
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/push",
+            Some(member_token),
+            json!({
+                "entities": [entity_wire(
+                    "record",
+                    &record_id,
+                    2,
+                    record_payload(&baby_id),
+                    None
+                )]
+            }),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    let cand_id = Uuid::new_v4().to_string();
+    let (ok, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(member_token),
+        json!({
+            "entities": [entity_wire(
+                "fulfillment_candidate",
+                &cand_id,
+                3,
+                json!({
+                    "care_plan_client_uuid": plan_id,
+                    "record_client_uuid": record_id,
+                    "actual_timestamp": 1_700_000_000_100i64,
+                    "submitter_membership_id": "forged",
+                    "submitter_role": "owner",
+                    "confirmed_at": 1,
+                }),
+                None
+            )]
+        }),
+    )
+    .await;
+    assert_eq!(ok, StatusCode::OK);
+    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
+    let cand = pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["client_uuid"] == cand_id)
+        .expect("fulfillment_candidate visible");
+    assert_eq!(
+        cand["payload"]["submitter_membership_id"],
+        member["membership_id"]
+    );
+    assert_eq!(cand["payload"]["submitter_role"], "member");
+    assert_ne!(cand["payload"]["confirmed_at"], 1);
+
+    // Bad plan ref is rejected atomically.
+    let bad_id = Uuid::new_v4().to_string();
+    let (bad, body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(member_token),
+        json!({
+            "entities": [entity_wire(
+                "fulfillment_candidate",
+                &bad_id,
+                4,
+                json!({
+                    "care_plan_client_uuid": Uuid::new_v4().to_string(),
+                    "record_client_uuid": record_id,
+                }),
+                None
+            )]
+        }),
+    )
+    .await;
+    assert_eq!(bad, StatusCode::CONFLICT, "{body}");
+}
+
+#[tokio::test]
+async fn fulfillment_candidate_freeze_is_idempotent_and_arrival_order_independent() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "fulfill-freeze-owner",
+        "fulfill-freeze-request-00000000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let member = invite_and_join(&rig.app, owner_token, "fulfill-freeze-member").await;
+    let member_token = member["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let plan_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/bundles",
+            Some(owner_token),
+            json!({
+                "bundle_id": bundle_id,
+                "root": entity_wire(
+                    "care_plan",
+                    &plan_id,
+                    1,
+                    care_plan_payload(&baby_id, "bath"),
+                    None
+                ),
+                "media": []
+            }),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/bundles/{bundle_id}/commit"),
+            Some(owner_token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    let member_record = Uuid::new_v4().to_string();
+    let owner_record = Uuid::new_v4().to_string();
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/push",
+            Some(member_token),
+            json!({
+                "entities": [entity_wire(
+                    "record",
+                    &member_record,
+                    2,
+                    record_payload(&baby_id),
+                    None
+                )]
+            }),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/push",
+            Some(owner_token),
+            json!({
+                "entities": [entity_wire(
+                    "record",
+                    &owner_record,
+                    3,
+                    record_payload(&baby_id),
+                    None
+                )]
+            }),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    let member_cand = Uuid::new_v4().to_string();
+    let owner_cand = Uuid::new_v4().to_string();
+    // Member first, owner second — both accepted; stamps frozen per first accept.
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/push",
+            Some(member_token),
+            json!({
+                "entities": [entity_wire(
+                    "fulfillment_candidate",
+                    &member_cand,
+                    10,
+                    json!({
+                        "care_plan_client_uuid": plan_id,
+                        "record_client_uuid": member_record,
+                        "submitter_membership_id": "forged-member",
+                        "submitter_role": "owner",
+                        "confirmed_at": 1,
+                    }),
+                    None
+                )]
+            }),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/push",
+            Some(owner_token),
+            json!({
+                "entities": [entity_wire(
+                    "fulfillment_candidate",
+                    &owner_cand,
+                    11,
+                    json!({
+                        "care_plan_client_uuid": plan_id,
+                        "record_client_uuid": owner_record,
+                        "submitter_membership_id": "forged-owner",
+                        "submitter_role": "member",
+                        "confirmed_at": 2,
+                    }),
+                    None
+                )]
+            }),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    let (_, pull1) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
+    let entities1 = pull1["entities"].as_array().unwrap();
+    let m1 = entities1
+        .iter()
+        .find(|e| e["client_uuid"] == member_cand)
+        .expect("member candidate");
+    let o1 = entities1
+        .iter()
+        .find(|e| e["client_uuid"] == owner_cand)
+        .expect("owner candidate");
+    assert_eq!(
+        m1["payload"]["submitter_membership_id"],
+        member["membership_id"]
+    );
+    assert_eq!(m1["payload"]["submitter_role"], "member");
+    assert_ne!(m1["payload"]["confirmed_at"], 1);
+    assert_eq!(
+        o1["payload"]["submitter_membership_id"],
+        owner["membership_id"]
+    );
+    assert_eq!(o1["payload"]["submitter_role"], "owner");
+    assert_ne!(o1["payload"]["confirmed_at"], 2);
+    let frozen_member_at = m1["payload"]["confirmed_at"].clone();
+    let frozen_owner_at = o1["payload"]["confirmed_at"].clone();
+
+    // Idempotent replay with higher updated_at and forged stamps must not rewrite.
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/push",
+            Some(member_token),
+            json!({
+                "entities": [entity_wire(
+                    "fulfillment_candidate",
+                    &member_cand,
+                    99,
+                    json!({
+                        "care_plan_client_uuid": plan_id,
+                        "record_client_uuid": member_record,
+                        "submitter_membership_id": "replay-forged",
+                        "submitter_role": "owner",
+                        "confirmed_at": 999_999,
+                    }),
+                    None
+                )]
+            }),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, pull2) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
+    let m2 = pull2["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["client_uuid"] == member_cand)
+        .expect("member candidate after replay");
+    assert_eq!(
+        m2["payload"]["submitter_membership_id"],
+        member["membership_id"]
+    );
+    assert_eq!(m2["payload"]["submitter_role"], "member");
+    assert_eq!(m2["payload"]["confirmed_at"], frozen_member_at);
+    assert_eq!(
+        pull2["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["client_uuid"] == owner_cand)
+            .unwrap()["payload"]["confirmed_at"],
+        frozen_owner_at
+    );
+}
+
+#[tokio::test]
+async fn care_plan_creator_leave_admin_still_manages_member_does_not() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "care-plan-leave-owner",
+        "care-plan-leave-request-000000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let creator = invite_and_join(&rig.app, owner_token, "care-plan-leave-creator").await;
+    let creator_token = creator["token"].as_str().unwrap();
+    let peer = invite_and_join(&rig.app, owner_token, "care-plan-leave-peer").await;
+    let peer_token = peer["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let plan_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/bundles",
+            Some(creator_token),
+            json!({
+                "bundle_id": bundle_id,
+                "root": entity_wire(
+                    "care_plan",
+                    &plan_id,
+                    1,
+                    care_plan_payload(&baby_id, "formula"),
+                    None
+                ),
+                "media": []
+            }),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/bundles/{bundle_id}/commit"),
+            Some(creator_token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    // Creator leaves the family.
+    let (leave_status, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/leave",
+        Some(creator_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(leave_status, StatusCode::OK);
+
+    // Peer member still cannot manage the departed creator's plan.
+    let mut payload = care_plan_payload(&baby_id, "formula");
+    payload["note"] = json!("peer-edit");
+    let (forbid, body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(peer_token),
+        json!({
+            "bundle_id": Uuid::new_v4().to_string(),
+            "root": entity_wire("care_plan", &plan_id, 2, payload.clone(), None),
+            "media": []
+        }),
+    )
+    .await;
+    assert_eq!(forbid, StatusCode::FORBIDDEN, "{body}");
+
+    // Owner/admin can still manage after creator leave.
+    payload["note"] = json!("owner-after-leave");
+    let owner_bundle = Uuid::new_v4().to_string();
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/bundles",
+            Some(owner_token),
+            json!({
+                "bundle_id": owner_bundle,
+                "root": entity_wire("care_plan", &plan_id, 3, payload, None),
+                "media": []
+            }),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/bundles/{owner_bundle}/commit"),
+            Some(owner_token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
+    let plan = pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["client_uuid"] == plan_id)
+        .expect("care_plan still visible");
+    assert_eq!(plan["payload"]["note"], "owner-after-leave");
+    assert_eq!(
+        plan["payload"]["created_by_membership_id"],
+        creator["membership_id"]
+    );
+}
+
+#[tokio::test]
+async fn care_plan_media_integrity_rejects_bad_refs_and_baby_mismatch() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "care-plan-media-owner",
+        "care-plan-media-request-00000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let other_baby = seed_baby(&rig.app, owner_token).await;
+    let plan_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/bundles",
+            Some(owner_token),
+            json!({
+                "bundle_id": bundle_id,
+                "root": entity_wire(
+                    "care_plan",
+                    &plan_id,
+                    1,
+                    care_plan_payload(&baby_id, "bath"),
+                    None
+                ),
+                "media": []
+            }),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/bundles/{bundle_id}/commit"),
+            Some(owner_token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    // Happy path: plan media with matching baby.
+    let media_ok = Uuid::new_v4().to_string();
+    let (ok, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(owner_token),
+        json!({
+            "entities": [entity_wire(
+                "media",
+                &media_ok,
+                2,
+                json!({
+                    "kind": "log",
+                    "care_plan_client_uuid": plan_id,
+                    "baby_client_uuid": baby_id,
+                    "mime": "image/jpeg",
+                    "byte_size": 3,
+                }),
+                None
+            )]
+        }),
+    )
+    .await;
+    assert_eq!(ok, StatusCode::OK);
+
+    // Unknown care_plan_client_uuid is rejected.
+    let media_bad_plan = Uuid::new_v4().to_string();
+    let (bad_plan, body_plan) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(owner_token),
+        json!({
+            "entities": [entity_wire(
+                "media",
+                &media_bad_plan,
+                3,
+                json!({
+                    "kind": "log",
+                    "care_plan_client_uuid": Uuid::new_v4().to_string(),
+                    "mime": "image/jpeg",
+                    "byte_size": 3,
+                }),
+                None
+            )]
+        }),
+    )
+    .await;
+    assert_eq!(bad_plan, StatusCode::CONFLICT, "{body_plan}");
+
+    // Baby mismatch vs care_plan baby is rejected.
+    let media_bad_baby = Uuid::new_v4().to_string();
+    let (bad_baby, body_baby) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(owner_token),
+        json!({
+            "entities": [entity_wire(
+                "media",
+                &media_bad_baby,
+                4,
+                json!({
+                    "kind": "log",
+                    "care_plan_client_uuid": plan_id,
+                    "baby_client_uuid": other_baby,
+                    "mime": "image/jpeg",
+                    "byte_size": 3,
+                }),
+                None
+            )]
+        }),
+    )
+    .await;
+    assert_eq!(bad_baby, StatusCode::CONFLICT, "{body_baby}");
+}
+
+#[tokio::test]
+async fn atomic_bundle_rejects_stale_root_when_published_is_newer() {
+    let rig = Rig::new();
+    let created = create_family(
+        &rig.app,
+        "bundle-stale-owner",
+        "bundle-stale-request-00000000001",
+    )
+    .await;
+    let token = created["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4().to_string();
+
+    // Legacy path publishes a newer record.
+    let (status, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({
+            "entities": [entity_wire(
+                "record",
+                &record_id,
+                100,
+                record_payload(&baby_id),
+                None
+            )]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let bundle_id = Uuid::new_v4().to_string();
+    let (status, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire("record", &record_id, 50, record_payload(&baby_id), None),
+            "media": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (commit_status, body) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(commit_status, StatusCode::CONFLICT, "{body}");
+}
+
+#[tokio::test]
+async fn legacy_push_pull_media_remain_available_alongside_bundles() {
+    let rig = Rig::new();
+    let created = create_family(
+        &rig.app,
+        "bundle-legacy-owner",
+        "bundle-legacy-request-0000000001",
+    )
+    .await;
+    let token = created["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let media_id = Uuid::new_v4().to_string();
+    let (status, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({
+            "entities": [
+                entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
+                entity_wire("media", &media_id, 2, log_media_payload(&record_id), None),
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        request(
+            &rig.app,
+            Method::PUT,
+            &format!("/v1/media/{media_id}"),
+            Some(token),
+            Body::from("log"),
+            Some("image/jpeg"),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    assert!(pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["client_uuid"] == media_id));
+}
+
+// ---------------------------------------------------------------------------
+// Custom item family definitions (legacy push + ACL)
+// ---------------------------------------------------------------------------
+
+fn custom_item_payload(name: &str, icon_slot: i64) -> Value {
+    json!({
+        "name": name,
+        "icon_slot": icon_slot,
+    })
+}
+
+#[tokio::test]
+async fn custom_item_create_stamps_creator_and_syncs_to_peer() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "owner-device",
+        "custom-item-owner-request-00000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let owner_membership = owner["membership_id"].as_str().unwrap().to_owned();
+    let member = invite_and_join(&rig.app, owner_token, "member-device").await;
+    let member_token = member["token"].as_str().unwrap();
+    let member_membership = member["membership_id"].as_str().unwrap().to_owned();
+    let item_id = Uuid::new_v4().to_string();
+
+    let (status, body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(member_token),
+        json!({
+            "entities": [entity_wire(
+                "custom_item",
+                &item_id,
+                10,
+                // Client-supplied creator must be ignored in favor of principal.
+                json!({
+                    "name": "抚触",
+                    "icon_slot": 2,
+                    "created_by_membership_id": "spoofed-id",
+                }),
+                None,
+            )]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["applied"], 1);
+
+    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
+    let entities = pull["entities"].as_array().unwrap();
+    let item = entities
+        .iter()
+        .find(|e| e["client_uuid"] == item_id)
+        .expect("custom_item visible to owner");
+    assert_eq!(item["type"], "custom_item");
+    assert_eq!(item["payload"]["name"], "抚触");
+    assert_eq!(item["payload"]["icon_slot"], 2);
+    assert_eq!(
+        item["payload"]["created_by_membership_id"],
+        member_membership
+    );
+    assert_ne!(
+        item["payload"]["created_by_membership_id"],
+        owner_membership
+    );
+    // Layout fields must never be accepted on the wire.
+    assert!(item["payload"].get("sort_order").is_none());
+    assert!(item["payload"].get("hidden").is_none());
+}
+
+#[tokio::test]
+async fn custom_item_member_acl_rename_delete_and_owner_override() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "owner-device",
+        "custom-item-acl-request-0000000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let member_a = invite_and_join(&rig.app, owner_token, "member-a").await;
+    let member_a_token = member_a["token"].as_str().unwrap();
+    let member_b = invite_and_join(&rig.app, owner_token, "member-b").await;
+    let member_b_token = member_b["token"].as_str().unwrap();
+    let item_id = Uuid::new_v4().to_string();
+
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/push",
+            Some(member_a_token),
+            json!({
+                "entities": [entity_wire(
+                    "custom_item",
+                    &item_id,
+                    1,
+                    custom_item_payload("药", 1),
+                    None,
+                )]
+            }),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    // Creator may rename.
+    let (ok_rename, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(member_a_token),
+        json!({
+            "entities": [entity_wire(
+                "custom_item",
+                &item_id,
+                2,
+                custom_item_payload("用药", 1),
+                None,
+            )]
+        }),
+    )
+    .await;
+    assert_eq!(ok_rename, StatusCode::OK);
+
+    // Peer member cannot rename.
+    let (denied, body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(member_b_token),
+        json!({
+            "entities": [entity_wire(
+                "custom_item",
+                &item_id,
+                3,
+                custom_item_payload("篡改", 0),
+                None,
+            )]
+        }),
+    )
+    .await;
+    assert_eq!(denied, StatusCode::FORBIDDEN, "{body}");
+
+    // Owner may rename and soft-delete.
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/push",
+            Some(owner_token),
+            json!({
+                "entities": [entity_wire(
+                    "custom_item",
+                    &item_id,
+                    4,
+                    custom_item_payload("管理员改名", 3),
+                    None,
+                )]
+            }),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/push",
+            Some(owner_token),
+            json!({
+                "entities": [entity_wire(
+                    "custom_item",
+                    &item_id,
+                    5,
+                    custom_item_payload("管理员改名", 3),
+                    Some(5),
+                )]
+            }),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    // Tombstone cannot be resurrected (even by owner).
+    let (resurrect, resurrect_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(owner_token),
+        json!({
+            "entities": [entity_wire(
+                "custom_item",
+                &item_id,
+                6,
+                custom_item_payload("管理员改名", 3),
+                None,
+            )]
+        }),
+    )
+    .await;
+    assert_eq!(resurrect, StatusCode::CONFLICT, "{resurrect_body}");
+}
+
+#[tokio::test]
+async fn custom_item_rejects_layout_fields_on_wire() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "owner-device",
+        "custom-item-layout-request-0000001",
+    )
+    .await;
+    let token = owner["token"].as_str().unwrap();
+    let item_id = Uuid::new_v4().to_string();
+    let (status, body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({
+            "entities": [entity_wire(
+                "custom_item",
+                &item_id,
+                1,
+                json!({
+                    "name": "抚触",
+                    "icon_slot": 0,
+                    "sort_order": 3,
+                }),
+                None,
+            )]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
 }

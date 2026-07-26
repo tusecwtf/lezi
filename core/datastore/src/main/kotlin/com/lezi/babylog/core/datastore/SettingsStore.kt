@@ -26,7 +26,10 @@ interface SettingsStore {
     suspend fun setNextFeedAt(epochMs: Long?)
     suspend fun clearNextFeedAt()
     suspend fun setItemOrderJson(json: String)
+    suspend fun setCategoryOrderJson(json: String)
     suspend fun setHiddenItems(items: Set<String>)
+    /** Exactly four catalog keys (or empty strings). Values are normalized on write. */
+    suspend fun setQuickRecordSlots(slots: List<String>)
     suspend fun setTimelineOrder(order: String)
     suspend fun setNursingTimerJson(json: String?)
     suspend fun setShowAvgSleep(enabled: Boolean)
@@ -34,4 +37,12 @@ interface SettingsStore {
     val showAvgSleep: kotlinx.coroutines.flow.Flow<Boolean>
     val comparePrevWeek: kotlinx.coroutines.flow.Flow<Boolean>
     suspend fun setWeekStart(day: Int)
+    /** Device-local care-plan reminder toggle (default on). */
+    suspend fun setCarePlanLocalRemindersEnabled(enabled: Boolean)
+
+    /** Device-local system calendar projection (never family-synced). */
+    suspend fun setSystemCalendarEnabled(enabled: Boolean)
+    suspend fun setSystemCalendarId(calendarId: String?)
+    suspend fun setSystemCalendarDisclosureLevel(level: Int)
+    suspend fun setSystemCalendarEventMapJson(json: String)
 }

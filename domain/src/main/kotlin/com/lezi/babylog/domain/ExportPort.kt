@@ -2,7 +2,6 @@ package com.lezi.babylog.domain
 
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.model.RecordType
-import com.lezi.babylog.core.model.TextPayload
 import com.lezi.babylog.core.model.visibleBusinessText
 import java.time.Instant
 import java.time.LocalDate
@@ -42,6 +41,9 @@ class TxtExportPort @Inject constructor(
         val start = from.atStartOfDay(zone).toInstant().toEpochMilli()
         val end = to.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
         val rows = recordDao.listRange(babyId, start, end)
+        // Ordinary export only: conflict-not-adopted fulfillment facts stay out.
+        val ordinary = careLog.filterOrdinaryRecords(rows.map { it.toModel() })
+            .associateBy { it.clientUuid }
         val baby = careLog.listBabies().find { it.id == babyId }
         val dt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(zone)
         val sb = StringBuilder()
@@ -51,11 +53,12 @@ class TxtExportPort @Inject constructor(
         sb.appendLine("---")
         val photoPaths = mutableListOf<String>()
         for (r in rows) {
+            val model = ordinary[r.clientUuid] ?: continue
             val type = RecordType.fromKey(r.type)?.let { labelType(it) } ?: r.type
             val whenStr = dt.format(Instant.ofEpochMilli(r.timestamp))
-            val summary = r.toModel().visibleBusinessText().ifBlank { "-" }
+            val summary = model.visibleBusinessText().ifBlank { "-" }
             sb.appendLine("$whenStr\t$type\t$summary")
-            photoPaths += (r.toModel().payload.payload as? TextPayload)?.photos.orEmpty()
+            photoPaths += careLog.listRecordPhotoPaths(r.id)
         }
         return ExportDocument(sb.toString(), photoPaths.distinct())
     }

@@ -92,11 +92,121 @@ data class RecordEntity(
     val syncDirty: Boolean = true,
 )
 
+/**
+ * Local care plan entity. Family packages publish via atomic care_plan bundles
+ * (plan metadata + 0–3 plan photos), same contract as record packages.
+ */
+@Entity(
+    tableName = "care_plans",
+    indices = [
+        Index(value = ["clientUuid"], unique = true),
+        Index("babyId", "scheduledAt"),
+        Index("status"),
+        Index("updatedAt"),
+        Index("syncDirty"),
+    ],
+)
+data class CarePlanEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val clientUuid: String,
+    val babyId: Long,
+    val type: String,
+    val customItemId: Long? = null,
+    val scheduledAt: Long,
+    val scheduledZoneId: String,
+    val note: String? = null,
+    val payloadJson: String = "{}",
+    val schemaVersion: Int = 1,
+    /** Storage: pending | missed | completed | skipped */
+    val status: String = "pending",
+    val createdByMembershipId: String = "",
+    val fulfilledRecordClientUuid: String? = null,
+    val fulfilledAt: Long? = null,
+    /**
+     * When this plan was created by converting a fact Record, the soft-deleted
+     * record's [RecordEntity.clientUuid] for later family-sync provenance/idempotency.
+     */
+    val sourceRecordClientUuid: String? = null,
+    val updatedAt: Long,
+    val deletedAt: Long? = null,
+    /**
+     * True while this device still needs to publish the atomic plan package.
+     * Creator keeps full local plan + projection; receivers stay invisible until commit.
+     */
+    @ColumnInfo(defaultValue = "1")
+    val syncDirty: Boolean = true,
+)
+
+/**
+ * Local durable fulfillment attempt for family sync.
+ *
+ * One fulfill creates a stable [clientUuid] linked to the completed care plan and
+ * the fact [recordClientUuid]. Multiple candidates per plan are allowed;
+ * [FulfillmentAuthority] picks one winner and marks losers via [adoptionStatus]
+ * without deleting Record/photos.
+ */
+@Entity(
+    tableName = "fulfillment_candidates",
+    indices = [
+        Index(value = ["clientUuid"], unique = true),
+        Index("carePlanClientUuid"),
+        Index("recordClientUuid"),
+        Index("adoptionStatus"),
+        Index("syncDirty"),
+        Index("updatedAt"),
+    ],
+)
+data class FulfillmentCandidateEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val clientUuid: String,
+    val carePlanClientUuid: String,
+    val recordClientUuid: String,
+    /** Actual care time from the linked Record (not used for conflict adjudication). */
+    val actualTimestamp: Long? = null,
+    /**
+     * Immutable confirm instant for this local attempt. Server re-stamps
+     * authoritative [confirmedAt] / submitter evidence on first push; after pull
+     * we store the server values for winner selection.
+     */
+    val confirmedAt: Long,
+    /**
+     * Submitter membership for multi-candidate authority. Local offline trail is
+     * filled from the joined session on fulfill; server freeze overwrites on first
+     * accept and subsequent pulls must merge those stamps.
+     */
+    @ColumnInfo(defaultValue = "''")
+    val submitterMembershipId: String = "",
+    /**
+     * Submitter role evidence (`owner` / `member`). Local offline trail from the
+     * joined session; server freeze is authoritative after pull.
+     */
+    @ColumnInfo(defaultValue = "''")
+    val submitterRole: String = "",
+    /**
+     * Device-local adoption mark after [FulfillmentAuthority] resolution.
+     * Empty until resolved; then `adopted` or `conflict_not_adopted`. Not synced.
+     */
+    @ColumnInfo(defaultValue = "''")
+    val adoptionStatus: String = "",
+    /**
+     * Device-local pointer to the independent Record created by admin
+     * “转为独立记录”. Empty until convert succeeds. Not a family wire field —
+     * keeps convert idempotent without flipping [adoptionStatus] or plan authority.
+     */
+    @ColumnInfo(defaultValue = "''")
+    val convertedRecordClientUuid: String = "",
+    val updatedAt: Long,
+    val deletedAt: Long? = null,
+    @ColumnInfo(defaultValue = "1")
+    val syncDirty: Boolean = true,
+)
+
 @Entity(
     tableName = "media_assets",
     indices = [
         Index(value = ["clientUuid"], unique = true),
         Index("recordId"),
+        Index("carePlanId"),
         Index("babyId", "kind", "deletedAt"),
         Index("updatedAt"),
         Index("syncDirty"),
@@ -105,6 +215,8 @@ data class RecordEntity(
 data class MediaAssetEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val recordId: Long? = null,
+    /** Owner care plan when this is a plan photo (mutually exclusive with log [recordId]). */
+    val carePlanId: Long? = null,
     @ColumnInfo(defaultValue = "''")
     val clientUuid: String = "",
     @ColumnInfo(defaultValue = "'log'")

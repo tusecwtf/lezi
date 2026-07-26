@@ -183,6 +183,183 @@ internal val MIGRATION_7_8 = object : Migration(7, 8) {
     }
 }
 
+/**
+ * Additive ownership stamp for shared custom item definitions.
+ * Existing rows keep empty creator membership (local-only / pre-family) without
+ * rewriting custom_item_id references on records.
+ */
+internal val MIGRATION_8_9 = object : Migration(8, 9) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "ALTER TABLE custom_items ADD COLUMN createdByMembershipId TEXT NOT NULL DEFAULT ''",
+        )
+    }
+}
+
+/** Local care plan table for schedule → fulfill tracer (family sync later). */
+internal val MIGRATION_9_10 = object : Migration(9, 10) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `care_plans` (
+                `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                `clientUuid` TEXT NOT NULL,
+                `babyId` INTEGER NOT NULL,
+                `type` TEXT NOT NULL,
+                `customItemId` INTEGER,
+                `scheduledAt` INTEGER NOT NULL,
+                `scheduledZoneId` TEXT NOT NULL,
+                `note` TEXT,
+                `payloadJson` TEXT NOT NULL,
+                `schemaVersion` INTEGER NOT NULL,
+                `status` TEXT NOT NULL,
+                `createdByMembershipId` TEXT NOT NULL,
+                `fulfilledRecordClientUuid` TEXT,
+                `fulfilledAt` INTEGER,
+                `updatedAt` INTEGER NOT NULL,
+                `deletedAt` INTEGER
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_care_plans_clientUuid` ON `care_plans` (`clientUuid`)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_care_plans_babyId_scheduledAt` ON `care_plans` (`babyId`, `scheduledAt`)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_care_plans_status` ON `care_plans` (`status`)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_care_plans_updatedAt` ON `care_plans` (`updatedAt`)",
+        )
+    }
+}
+
+/** Plan photos: additive carePlanId owner column on media_assets. */
+internal val MIGRATION_10_11 = object : Migration(10, 11) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE media_assets ADD COLUMN carePlanId INTEGER")
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_media_assets_carePlanId` ON `media_assets` (`carePlanId`)",
+        )
+    }
+}
+
+/** Family-sync dirty flag for shared custom item definitions. */
+internal val MIGRATION_11_12 = object : Migration(11, 12) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "ALTER TABLE custom_items ADD COLUMN syncDirty INTEGER NOT NULL DEFAULT 1",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_custom_items_syncDirty` ON `custom_items` (`syncDirty`)",
+        )
+    }
+}
+
+/**
+ * Provenance link when a fact Record is explicitly converted to a CarePlan.
+ * Additive nullable column; existing plans keep null (created directly).
+ */
+internal val MIGRATION_12_13 = object : Migration(12, 13) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "ALTER TABLE care_plans ADD COLUMN sourceRecordClientUuid TEXT",
+        )
+    }
+}
+
+/**
+ * Family-sync dirty flag for care plans. Existing local plans need a first
+ * publish after upgrade (DEFAULT 1); server LWW/ACL stamps creators on commit.
+ */
+internal val MIGRATION_13_14 = object : Migration(13, 14) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "ALTER TABLE care_plans ADD COLUMN syncDirty INTEGER NOT NULL DEFAULT 1",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_care_plans_syncDirty` ON `care_plans` (`syncDirty`)",
+        )
+    }
+}
+
+/**
+ * Durable fulfillment candidates for cross-member fulfill family publish.
+ * Empty on upgrade; new fulfills write rows going forward.
+ */
+internal val MIGRATION_14_15 = object : Migration(14, 15) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `fulfillment_candidates` (
+                `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                `clientUuid` TEXT NOT NULL,
+                `carePlanClientUuid` TEXT NOT NULL,
+                `recordClientUuid` TEXT NOT NULL,
+                `actualTimestamp` INTEGER,
+                `confirmedAt` INTEGER NOT NULL,
+                `submitterMembershipId` TEXT NOT NULL DEFAULT '',
+                `submitterRole` TEXT NOT NULL DEFAULT '',
+                `updatedAt` INTEGER NOT NULL,
+                `deletedAt` INTEGER,
+                `syncDirty` INTEGER NOT NULL DEFAULT 1
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS `index_fulfillment_candidates_clientUuid` " +
+                "ON `fulfillment_candidates` (`clientUuid`)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_fulfillment_candidates_carePlanClientUuid` " +
+                "ON `fulfillment_candidates` (`carePlanClientUuid`)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_fulfillment_candidates_recordClientUuid` " +
+                "ON `fulfillment_candidates` (`recordClientUuid`)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_fulfillment_candidates_syncDirty` " +
+                "ON `fulfillment_candidates` (`syncDirty`)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_fulfillment_candidates_updatedAt` " +
+                "ON `fulfillment_candidates` (`updatedAt`)",
+        )
+    }
+}
+
+/**
+ * Local adoptionStatus for multi-candidate fulfillment authority (ticket 26).
+ * Existing candidates stay empty until the next resolve pass.
+ */
+internal val MIGRATION_15_16 = object : Migration(15, 16) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "ALTER TABLE fulfillment_candidates ADD COLUMN `adoptionStatus` TEXT NOT NULL DEFAULT ''",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_fulfillment_candidates_adoptionStatus` " +
+                "ON `fulfillment_candidates` (`adoptionStatus`)",
+        )
+    }
+}
+
+/**
+ * Local convert pointer for admin conflict-not-adopted → independent Record (ticket 27).
+ * Keeps convert idempotent without flipping adoption or plan authority.
+ */
+internal val MIGRATION_16_17 = object : Migration(16, 17) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "ALTER TABLE fulfillment_candidates ADD COLUMN " +
+                "`convertedRecordClientUuid` TEXT NOT NULL DEFAULT ''",
+        )
+    }
+}
+
 @Module
 @InstallIn(SingletonComponent::class)
 object DatabaseModule {
@@ -198,6 +375,15 @@ object DatabaseModule {
                 MIGRATION_5_6,
                 MIGRATION_6_7,
                 MIGRATION_7_8,
+                MIGRATION_8_9,
+                MIGRATION_9_10,
+                MIGRATION_10_11,
+                MIGRATION_11_12,
+                MIGRATION_12_13,
+                MIGRATION_13_14,
+                MIGRATION_14_15,
+                MIGRATION_15_16,
+                MIGRATION_16_17,
             )
             .build()
 
@@ -206,6 +392,9 @@ object DatabaseModule {
     @Provides fun membershipDao(db: LeziDatabase): MembershipDao = db.membershipDao()
     @Provides fun babyDao(db: LeziDatabase): BabyDao = db.babyDao()
     @Provides fun recordDao(db: LeziDatabase): RecordDao = db.recordDao()
+    @Provides fun carePlanDao(db: LeziDatabase): CarePlanDao = db.carePlanDao()
+    @Provides fun fulfillmentCandidateDao(db: LeziDatabase): FulfillmentCandidateDao =
+        db.fulfillmentCandidateDao()
     @Provides fun mediaAssetDao(db: LeziDatabase): MediaAssetDao = db.mediaAssetDao()
     @Provides fun outboxDao(db: LeziDatabase): OutboxDao = db.outboxDao()
     @Provides fun customItemDao(db: LeziDatabase): CustomItemDao = db.customItemDao()

@@ -2,10 +2,13 @@ package com.lezi.babylog.sync
 
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.BabyEntity
+import com.lezi.babylog.core.database.FulfillmentCandidateEntity
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.RecordEntity
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Test
 
 class SyncWireMapperTest {
@@ -93,5 +96,31 @@ class SyncWireMapperTest {
         assertThat(babyPayload).contains("\"due_date\":null")
         assertThat(mediaPayload).contains("\"record_client_uuid\":\"record-uuid\"")
         assertThat(mediaPayload).doesNotContain("/private/photo.jpg")
+    }
+
+    @Test
+    fun fulfillmentCandidateWireCarriesPlanRecordLinksAndConfirmTime() {
+        val entity = FulfillmentCandidateEntity(
+            clientUuid = "cand-uuid",
+            carePlanClientUuid = "plan-uuid",
+            recordClientUuid = "record-uuid",
+            actualTimestamp = 1_700_000_000_100L,
+            confirmedAt = 1_700_000_000_200L,
+            updatedAt = 1_700_000_000_200L,
+        )
+        val wire = SyncWireMapper.fulfillmentCandidate(entity)
+        assertThat(wire.type).isEqualTo("fulfillment_candidate")
+        assertThat(wire.clientUuid).isEqualTo("cand-uuid")
+        val payload = Json.parseToJsonElement(wire.payloadJson).jsonObject
+        assertThat(payload["care_plan_client_uuid"]?.jsonPrimitive?.contentOrNull)
+            .isEqualTo("plan-uuid")
+        assertThat(payload["record_client_uuid"]?.jsonPrimitive?.contentOrNull)
+            .isEqualTo("record-uuid")
+        assertThat(payload["actual_timestamp"]?.jsonPrimitive?.contentOrNull)
+            .isEqualTo("1700000000100")
+        assertThat(payload["confirmed_at"]?.jsonPrimitive?.contentOrNull)
+            .isEqualTo("1700000000200")
+        assertThat(payload["submitter_membership_id"]?.toString()).isEqualTo("null")
+        assertThat(payload["submitter_role"]?.toString()).isEqualTo("null")
     }
 }

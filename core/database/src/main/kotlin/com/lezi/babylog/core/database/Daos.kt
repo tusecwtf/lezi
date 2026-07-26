@@ -154,11 +154,21 @@ interface BabyDao {
 
 @Dao
 interface RecordDao {
+    /**
+     * Ordinary timeline window. Excludes records that lost multi-candidate
+     * fulfillment ([fulfillment_candidates.adoptionStatus] = conflict_not_adopted)
+     * without soft-deleting them — audit rows remain via getByClientUuid.
+     */
     @Query(
         """
         SELECT * FROM records
         WHERE babyId = :babyId
           AND deletedAt IS NULL
+          AND clientUuid NOT IN (
+              SELECT recordClientUuid FROM fulfillment_candidates
+              WHERE adoptionStatus = 'conflict_not_adopted'
+                AND deletedAt IS NULL
+          )
           AND timestamp < :endExclusive
           AND (
               timestamp >= :startInclusive
@@ -181,6 +191,11 @@ interface RecordDao {
         SELECT * FROM records
         WHERE babyId = :babyId
           AND deletedAt IS NULL
+          AND clientUuid NOT IN (
+              SELECT recordClientUuid FROM fulfillment_candidates
+              WHERE adoptionStatus = 'conflict_not_adopted'
+                AND deletedAt IS NULL
+          )
           AND timestamp < :endExclusive
           AND (
               timestamp >= :startInclusive
@@ -199,6 +214,11 @@ interface RecordDao {
         SELECT * FROM records
         WHERE babyId = :babyId
           AND deletedAt IS NULL
+          AND clientUuid NOT IN (
+              SELECT recordClientUuid FROM fulfillment_candidates
+              WHERE adoptionStatus = 'conflict_not_adopted'
+                AND deletedAt IS NULL
+          )
           AND timestamp < :endExclusive
           AND (
               timestamp >= :startInclusive
@@ -281,6 +301,11 @@ interface RecordDao {
         SELECT * FROM records
         WHERE babyId = :babyId
           AND deletedAt IS NULL
+          AND clientUuid NOT IN (
+              SELECT recordClientUuid FROM fulfillment_candidates
+              WHERE adoptionStatus = 'conflict_not_adopted'
+                AND deletedAt IS NULL
+          )
         ORDER BY timestamp DESC
         """,
     )
@@ -296,6 +321,11 @@ interface RecordDao {
         SELECT * FROM records
         WHERE babyId = :babyId
           AND deletedAt IS NULL
+          AND clientUuid NOT IN (
+              SELECT recordClientUuid FROM fulfillment_candidates
+              WHERE adoptionStatus = 'conflict_not_adopted'
+                AND deletedAt IS NULL
+          )
           AND (
               LOWER(COALESCE(note, '')) LIKE :escapedPattern ESCAPE '\'
               OR LOWER(payloadJson) LIKE :escapedPattern ESCAPE '\'
@@ -315,6 +345,11 @@ interface RecordDao {
         SELECT * FROM records
         WHERE babyId = :babyId
           AND deletedAt IS NULL
+          AND clientUuid NOT IN (
+              SELECT recordClientUuid FROM fulfillment_candidates
+              WHERE adoptionStatus = 'conflict_not_adopted'
+                AND deletedAt IS NULL
+          )
           AND timestamp < :endExclusive
           AND (
               timestamp >= :startInclusive
@@ -333,6 +368,11 @@ interface RecordDao {
         SELECT * FROM records
         WHERE babyId = :babyId
           AND deletedAt IS NULL
+          AND clientUuid NOT IN (
+              SELECT recordClientUuid FROM fulfillment_candidates
+              WHERE adoptionStatus = 'conflict_not_adopted'
+                AND deletedAt IS NULL
+          )
           AND type = :type
         ORDER BY timestamp ASC
         """,
@@ -372,6 +412,247 @@ interface RecordDao {
 }
 
 @Dao
+interface CarePlanDao {
+    @Query(
+        """
+        SELECT * FROM care_plans
+        WHERE babyId = :babyId
+          AND deletedAt IS NULL
+          AND status IN ('pending', 'missed')
+          AND scheduledAt >= :startInclusive
+          AND scheduledAt < :endExclusive
+        ORDER BY scheduledAt ASC
+        """,
+    )
+    fun observeDayPending(
+        babyId: Long,
+        startInclusive: Long,
+        endExclusive: Long,
+    ): Flow<List<CarePlanEntity>>
+
+    /**
+     * Today view: all still-open plans that are overdue (missed) for this baby,
+     * plus pending plans scheduled in the local day window (caller supplies bounds).
+     */
+    @Query(
+        """
+        SELECT * FROM care_plans
+        WHERE babyId = :babyId
+          AND deletedAt IS NULL
+          AND status IN ('pending', 'missed')
+          AND (
+              scheduledAt < :nowMillis
+              OR (scheduledAt >= :dayStart AND scheduledAt < :dayEnd)
+          )
+        ORDER BY scheduledAt ASC
+        """,
+    )
+    fun observeTodayPending(
+        babyId: Long,
+        dayStart: Long,
+        dayEnd: Long,
+        nowMillis: Long,
+    ): Flow<List<CarePlanEntity>>
+
+    /**
+     * Calendar surface: every non-deleted plan in the absolute time window,
+     * regardless of status (pending/missed/completed/skipped).
+     */
+    @Query(
+        """
+        SELECT * FROM care_plans
+        WHERE babyId = :babyId
+          AND deletedAt IS NULL
+          AND scheduledAt >= :startInclusive
+          AND scheduledAt < :endExclusive
+        ORDER BY scheduledAt ASC
+        """,
+    )
+    fun observeRange(
+        babyId: Long,
+        startInclusive: Long,
+        endExclusive: Long,
+    ): Flow<List<CarePlanEntity>>
+
+    @Query(
+        """
+        SELECT * FROM care_plans
+        WHERE babyId = :babyId
+          AND deletedAt IS NULL
+          AND status IN ('pending', 'missed')
+          AND scheduledAt > :nowMillis
+        ORDER BY scheduledAt ASC
+        """,
+    )
+    suspend fun listOpenFuture(babyId: Long, nowMillis: Long): List<CarePlanEntity>
+
+    @Query(
+        """
+        SELECT * FROM care_plans
+        WHERE deletedAt IS NULL
+          AND status IN ('pending', 'missed')
+          AND scheduledAt > :nowMillis
+        ORDER BY scheduledAt ASC
+        """,
+    )
+    suspend fun listAllOpenFuture(nowMillis: Long): List<CarePlanEntity>
+
+    @Query("SELECT * FROM care_plans WHERE id = :id LIMIT 1")
+    suspend fun get(id: Long): CarePlanEntity?
+
+    @Query("SELECT * FROM care_plans WHERE clientUuid = :clientUuid LIMIT 1")
+    suspend fun getByClientUuid(clientUuid: String): CarePlanEntity?
+
+    @Query("SELECT * FROM care_plans ORDER BY id ASC")
+    suspend fun listAllIncludingDeleted(): List<CarePlanEntity>
+
+    @Query("SELECT * FROM care_plans WHERE syncDirty = 1 ORDER BY id ASC")
+    suspend fun listPendingSync(): List<CarePlanEntity>
+
+    @Query(
+        """
+        UPDATE care_plans SET syncDirty = 0
+        WHERE clientUuid = :clientUuid AND updatedAt = :updatedAt
+        """,
+    )
+    suspend fun markSynced(clientUuid: String, updatedAt: Long)
+
+    @Query("UPDATE care_plans SET syncDirty = 1")
+    suspend fun markAllPendingSync()
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(plan: CarePlanEntity): Long
+
+    @Update
+    suspend fun update(plan: CarePlanEntity)
+
+    /**
+     * Device-local payload replica (e.g. photos[] paths) without advancing
+     * [CarePlanEntity.updatedAt] or [CarePlanEntity.syncDirty].
+     */
+    @Query(
+        """
+        UPDATE care_plans
+        SET payloadJson = :payloadJson
+        WHERE id = :id AND payloadJson = :expectedPayloadJson
+        """,
+    )
+    suspend fun updatePayloadReplica(
+        id: Long,
+        expectedPayloadJson: String,
+        payloadJson: String,
+    ): Int
+
+    @Query(
+        """
+        UPDATE care_plans
+        SET deletedAt = :deletedAt, updatedAt = :deletedAt, syncDirty = 1
+        WHERE id = :id
+        """,
+    )
+    suspend fun softDelete(id: Long, deletedAt: Long)
+
+    @Query("DELETE FROM care_plans")
+    suspend fun deleteAll()
+}
+
+@Dao
+interface FulfillmentCandidateDao {
+    @Query("SELECT * FROM fulfillment_candidates WHERE id = :id LIMIT 1")
+    suspend fun get(id: Long): FulfillmentCandidateEntity?
+
+    @Query("SELECT * FROM fulfillment_candidates WHERE clientUuid = :clientUuid LIMIT 1")
+    suspend fun getByClientUuid(clientUuid: String): FulfillmentCandidateEntity?
+
+    @Query(
+        """
+        SELECT * FROM fulfillment_candidates
+        WHERE carePlanClientUuid = :carePlanClientUuid
+        ORDER BY id ASC
+        """,
+    )
+    suspend fun listForCarePlan(carePlanClientUuid: String): List<FulfillmentCandidateEntity>
+
+    @Query(
+        """
+        SELECT * FROM fulfillment_candidates
+        WHERE recordClientUuid = :recordClientUuid
+        ORDER BY id ASC
+        """,
+    )
+    suspend fun listForRecord(recordClientUuid: String): List<FulfillmentCandidateEntity>
+
+    @Query("SELECT * FROM fulfillment_candidates ORDER BY id ASC")
+    suspend fun listAllIncludingDeleted(): List<FulfillmentCandidateEntity>
+
+    @Query("SELECT * FROM fulfillment_candidates WHERE syncDirty = 1 ORDER BY id ASC")
+    suspend fun listPendingSync(): List<FulfillmentCandidateEntity>
+
+    /**
+     * Record client UUIDs linked to conflict-not-adopted candidates. Ordinary
+     * timeline/summary/search/export must exclude these without soft-deleting
+     * the underlying Record or photos.
+     */
+    @Query(
+        """
+        SELECT recordClientUuid FROM fulfillment_candidates
+        WHERE adoptionStatus = 'conflict_not_adopted'
+          AND deletedAt IS NULL
+        """,
+    )
+    suspend fun listConflictNotAdoptedRecordUuids(): List<String>
+
+    @Query(
+        """
+        SELECT * FROM fulfillment_candidates
+        WHERE adoptionStatus = 'conflict_not_adopted'
+          AND deletedAt IS NULL
+        ORDER BY confirmedAt ASC, clientUuid ASC
+        """,
+    )
+    suspend fun listConflictNotAdopted(): List<FulfillmentCandidateEntity>
+
+    @Query(
+        """
+        SELECT * FROM fulfillment_candidates
+        WHERE carePlanClientUuid = :carePlanClientUuid
+          AND adoptionStatus = 'conflict_not_adopted'
+          AND deletedAt IS NULL
+        ORDER BY confirmedAt ASC, clientUuid ASC
+        """,
+    )
+    suspend fun listConflictNotAdoptedForCarePlan(
+        carePlanClientUuid: String,
+    ): List<FulfillmentCandidateEntity>
+
+    @Query(
+        """
+        SELECT recordClientUuid FROM fulfillment_candidates
+        WHERE adoptionStatus = 'conflict_not_adopted'
+          AND deletedAt IS NULL
+        """,
+    )
+    fun observeConflictNotAdoptedRecordUuids(): Flow<List<String>>
+
+    @Query(
+        """
+        UPDATE fulfillment_candidates SET syncDirty = 0
+        WHERE clientUuid = :clientUuid AND updatedAt = :updatedAt
+        """,
+    )
+    suspend fun markSynced(clientUuid: String, updatedAt: Long)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(candidate: FulfillmentCandidateEntity): Long
+
+    @Update
+    suspend fun update(candidate: FulfillmentCandidateEntity)
+
+    @Query("DELETE FROM fulfillment_candidates")
+    suspend fun deleteAll()
+}
+
+@Dao
 interface MediaAssetDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(asset: MediaAssetEntity): Long
@@ -387,6 +668,18 @@ interface MediaAssetDao {
         """,
     )
     suspend fun listActiveForRecord(recordId: Long): List<MediaAssetEntity>
+
+    @Query("SELECT * FROM media_assets WHERE carePlanId = :carePlanId")
+    suspend fun listForCarePlan(carePlanId: Long): List<MediaAssetEntity>
+
+    @Query(
+        """
+        SELECT * FROM media_assets
+        WHERE carePlanId = :carePlanId AND deletedAt IS NULL
+        ORDER BY id ASC
+        """,
+    )
+    suspend fun listActiveForCarePlan(carePlanId: Long): List<MediaAssetEntity>
 
     @Query(
         """

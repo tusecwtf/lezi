@@ -83,6 +83,7 @@ import com.lezi.babylog.feature.onboarding.OnboardingRoute
 import com.lezi.babylog.feature.search.SearchRoute
 import com.lezi.babylog.feature.settings.CalendarRoute
 import com.lezi.babylog.feature.settings.SettingsRoute
+import com.lezi.babylog.feature.settings.SystemCalendarSetupDialog
 import com.lezi.babylog.feature.summary.SummaryRoute
 import com.lezi.babylog.feature.timer.TimerRoute
 import com.lezi.babylog.feature.widget.CareWidgetRefreshController
@@ -102,6 +103,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -112,6 +114,7 @@ import kotlinx.coroutines.launch
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
     private val pendingWidgetComposer = mutableStateOf<WidgetComposerTarget?>(null)
+    private val pendingFulfillPlan = mutableStateOf<PendingFulfillPlan?>(null)
 
     override fun attachBaseContext(newBase: Context) {
         val chineseLocale = Locale.forLanguageTag("zh-CN")
@@ -125,6 +128,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         pendingWidgetComposer.value = WidgetComposerContract.parse(intent)
+        pendingFulfillPlan.value = parseFulfillPlanIntent(intent)
         enableEdgeToEdge()
         setContent {
             val vm: RootViewModel = hiltViewModel()
@@ -161,6 +165,8 @@ class MainActivity : ComponentActivity() {
                     dark = dark,
                     widgetComposerTarget = pendingWidgetComposer.value,
                     onWidgetComposerConsumed = { pendingWidgetComposer.value = null },
+                    fulfillPlanTarget = pendingFulfillPlan.value,
+                    onFulfillPlanConsumed = { pendingFulfillPlan.value = null },
                 )
             }
         }
@@ -170,8 +176,38 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         pendingWidgetComposer.value = WidgetComposerContract.parse(intent)
+        pendingFulfillPlan.value = parseFulfillPlanIntent(intent)
+    }
+
+    private fun parseFulfillPlanIntent(intent: Intent?): PendingFulfillPlan? {
+        if (intent == null) return null
+        // System-calendar L3 deep link: lezi://care-plan/{clientUuid}
+        val data = intent.data
+        if (data != null &&
+            data.scheme == "lezi" &&
+            data.host == "care-plan"
+        ) {
+            val uuid = data.pathSegments?.firstOrNull().orEmpty()
+            if (uuid.isNotBlank()) {
+                return PendingFulfillPlan(planId = null, clientUuid = uuid)
+            }
+        }
+        val id = intent.getLongExtra(
+            com.lezi.babylog.feature.settings.CarePlanReminderReceiver.EXTRA_FULFILL_PLAN_ID,
+            0L,
+        )
+        val uuid = intent.getStringExtra(
+            com.lezi.babylog.feature.settings.CarePlanReminderReceiver.EXTRA_FULFILL_PLAN_UUID,
+        ).orEmpty()
+        if (id <= 0L && uuid.isBlank()) return null
+        return PendingFulfillPlan(planId = id.takeIf { it > 0L }, clientUuid = uuid)
     }
 }
+
+data class PendingFulfillPlan(
+    val planId: Long?,
+    val clientUuid: String,
+)
 
 data class RootUi(
     val hasBaby: Boolean = false,
@@ -280,6 +316,40 @@ class RootViewModel @Inject constructor(
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), RootUi())
 
+    /** Device-local system calendar target id (ticket 21); not family-synced. */
+    val systemCalendarId = settings.settings
+        .map { it.systemCalendarId }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    val systemCalendarDisclosureLevel = settings.settings
+        .map { it.systemCalendarDisclosureLevel }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 2)
+
+    fun setSystemCalendarId(calendarId: String?) {
+        viewModelScope.launch {
+            val prefs = settings.settings.first()
+            val wasConfigured = prefs.systemCalendarEnabled &&
+                !prefs.systemCalendarId.isNullOrBlank()
+            settings.setSystemCalendarId(calendarId)
+            if (calendarId != null) {
+                settings.setSystemCalendarEnabled(true)
+                if (!wasConfigured) {
+                    settings.setSystemCalendarDisclosureLevel(2)
+                }
+                careLog.reprojectOpenFutureSystemCalendarCopies()
+            } else {
+                settings.setSystemCalendarEnabled(false)
+            }
+        }
+    }
+
+    fun setSystemCalendarDisclosureLevel(level: Int) {
+        viewModelScope.launch {
+            settings.setSystemCalendarDisclosureLevel(level)
+            careLog.reprojectOpenFutureSystemCalendarCopies()
+        }
+    }
+
     fun cycleBaby() {
         viewModelScope.launch {
             val state = ui.value
@@ -336,6 +406,13 @@ class RootViewModel @Inject constructor(
         savedStateHandle[COMPOSER_REQUEST_KEY] = null
     }
 
+    /** Resolve a stable plan UUID from a notification deep link; null if missing/terminal. */
+    suspend fun resolveCarePlanId(clientUuid: String): Long? {
+        val plan = careLog.getCarePlanByClientUuid(clientUuid) ?: return null
+        if (plan.deletedAt != null) return null
+        return plan.id
+    }
+
     fun refreshWidgets() {
         viewModelScope.launch { widgetRefreshController.refreshAll() }
     }
@@ -380,6 +457,8 @@ fun LeziRoot(
     vm: RootViewModel = hiltViewModel(),
     dark: Boolean = false,
     widgetComposerTarget: WidgetComposerTarget? = null,
+    fulfillPlanTarget: PendingFulfillPlan? = null,
+    onFulfillPlanConsumed: () -> Unit = {},
     onWidgetComposerConsumed: () -> Unit = {},
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
@@ -395,7 +474,10 @@ fun LeziRoot(
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     val composerRequest = ui.composerRequest
+    val systemCalendarId by vm.systemCalendarId.collectAsStateWithLifecycle()
+    val systemCalendarDisclosureLevel by vm.systemCalendarDisclosureLevel.collectAsStateWithLifecycle()
     var showHeaderCalendar by remember { mutableStateOf(false) }
+    var showSystemCalendarSetup by remember { mutableStateOf(false) }
     var displayedMonth by remember { mutableStateOf(YearMonth.from(ui.selectedDate)) }
 
     LaunchedEffect(widgetComposerTarget) {
@@ -419,6 +501,22 @@ fun LeziRoot(
             ),
         )
         onWidgetComposerConsumed()
+    }
+
+    LaunchedEffect(fulfillPlanTarget) {
+        val target = fulfillPlanTarget ?: return@LaunchedEffect
+        if (composerRequest != null) {
+            onFulfillPlanConsumed()
+            return@LaunchedEffect
+        }
+        val planId = target.planId
+            ?: target.clientUuid.takeIf { it.isNotBlank() }?.let { uuid ->
+                vm.resolveCarePlanId(uuid)
+            }
+        if (planId != null && planId > 0L) {
+            vm.openComposer(RecordComposerRequest.Fulfill(planId))
+        }
+        onFulfillPlanConsumed()
     }
     val hideChrome = current?.startsWith("timer") == true ||
         current == "search" ||
@@ -614,6 +712,24 @@ fun LeziRoot(
                 CalendarRoute(
                     onBack = { nav.popBackStack() },
                     initialDate = ui.selectedDate,
+                    onScheduleCare = { type, scheduledAt, customItemId ->
+                        val babyId = ui.baby?.id ?: return@CalendarRoute
+                        vm.openComposer(
+                            RecordComposerRequest.New(
+                                babyId = babyId,
+                                type = type,
+                                timestamp = scheduledAt,
+                                historical = false,
+                                customItemId = customItemId,
+                            ),
+                        )
+                    },
+                    onFulfillPlan = { planId ->
+                        vm.openComposer(RecordComposerRequest.Fulfill(planId))
+                    },
+                    onEditPlan = { planId ->
+                        vm.openComposer(RecordComposerRequest.EditPlan(planId))
+                    },
                 )
             }
             composable("timer") {
@@ -621,6 +737,8 @@ fun LeziRoot(
                 TimerRoute(
                     initialNote = source?.get<String>(TIMER_SEED_NOTE_KEY).orEmpty(),
                     initialAmountMl = source?.get<String>(TIMER_SEED_AMOUNT_KEY).orEmpty(),
+                    carePlanId = source?.get<Long>(TIMER_SEED_CARE_PLAN_ID_KEY),
+                    babyId = source?.get<Long>(TIMER_SEED_BABY_ID_KEY),
                     onDone = { nav.popBackStack() },
                 )
             }
@@ -637,15 +755,36 @@ fun LeziRoot(
         onSaved = { message ->
             scope.launch { snackbar.showSnackbar(message) }
         },
-        onStartNursingTimer = { note, amountMl ->
+        onStartNursingTimer = { note, amountMl, carePlanId, babyId ->
             vm.closeComposer()
             nav.currentBackStackEntry?.savedStateHandle?.apply {
                 set(TIMER_SEED_NOTE_KEY, note)
                 set(TIMER_SEED_AMOUNT_KEY, amountMl)
+                set(TIMER_SEED_CARE_PLAN_ID_KEY, carePlanId)
+                set(TIMER_SEED_BABY_ID_KEY, babyId)
             }
             nav.navigate("timer")
         },
+        // Ticket 21: unconfigured plan switch → explicit setup; dismiss still allows save.
+        onConfigureSystemCalendar = { showSystemCalendarSetup = true },
     )
+
+    if (showSystemCalendarSetup) {
+        SystemCalendarSetupDialog(
+            currentCalendarId = systemCalendarId,
+            currentDisclosureLevel = systemCalendarDisclosureLevel,
+            onPick = { calendarId ->
+                vm.setSystemCalendarId(calendarId)
+                showSystemCalendarSetup = false
+            },
+            onDisclosureLevel = vm::setSystemCalendarDisclosureLevel,
+            onDisable = {
+                vm.setSystemCalendarId(null)
+                showSystemCalendarSetup = false
+            },
+            onDismiss = { showSystemCalendarSetup = false },
+        )
+    }
 
     if (showHeaderCalendar) {
         HeaderCalendarDialog(
@@ -672,3 +811,5 @@ fun LeziRoot(
 
 private const val TIMER_SEED_NOTE_KEY = "timer_seed_note"
 private const val TIMER_SEED_AMOUNT_KEY = "timer_seed_amount_ml"
+private const val TIMER_SEED_CARE_PLAN_ID_KEY = "timer_seed_care_plan_id"
+private const val TIMER_SEED_BABY_ID_KEY = "timer_seed_baby_id"

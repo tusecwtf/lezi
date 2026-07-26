@@ -33,6 +33,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -55,6 +56,7 @@ import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.Baby
+import com.lezi.babylog.core.model.RecordItemIdentity
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SettingsLocal
 import com.lezi.babylog.core.model.limitBabyNicknameInput
@@ -79,6 +81,7 @@ import java.time.format.DateTimeFormatter
 import javax.inject.Inject
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -170,30 +173,73 @@ class SettingsViewModel @Inject constructor(
     fun setTimelineOrder(order: String) =
         viewModelScope.launch { settingsStore.setTimelineOrder(order) }
     fun setWeekStart(day: Int) = viewModelScope.launch { settingsStore.setWeekStart(day) }
+    fun setCarePlanLocalReminders(enabled: Boolean) =
+        viewModelScope.launch { settingsStore.setCarePlanLocalRemindersEnabled(enabled) }
+
+    fun setSystemCalendarEnabled(enabled: Boolean) =
+        viewModelScope.launch { settingsStore.setSystemCalendarEnabled(enabled) }
+
+    fun setSystemCalendarId(calendarId: String?) =
+        viewModelScope.launch {
+            val prefs = settingsStore.settings.first()
+            val wasConfigured = prefs.systemCalendarEnabled &&
+                !prefs.systemCalendarId.isNullOrBlank()
+            settingsStore.setSystemCalendarId(calendarId)
+            if (!calendarId.isNullOrBlank()) {
+                settingsStore.setSystemCalendarEnabled(true)
+                // First enable defaults to L2; later target changes keep user disclosure.
+                if (!wasConfigured) {
+                    settingsStore.setSystemCalendarDisclosureLevel(2)
+                }
+                // Best-effort: project open-future plans to the (new) target.
+                careLog.reprojectOpenFutureSystemCalendarCopies()
+            } else {
+                settingsStore.setSystemCalendarEnabled(false)
+            }
+        }
+
+    /**
+     * Device-local disclosure grade. Reprojects only open-future plans so
+     * historical calendar copies are not bulk-expanded.
+     */
+    fun setSystemCalendarDisclosureLevel(level: Int) =
+        viewModelScope.launch {
+            settingsStore.setSystemCalendarDisclosureLevel(level)
+            careLog.reprojectOpenFutureSystemCalendarCopies()
+        }
     fun setShowAvgSleep(enabled: Boolean) =
         viewModelScope.launch { settingsStore.setShowAvgSleep(enabled) }
     fun setComparePrevWeek(enabled: Boolean) =
         viewModelScope.launch { settingsStore.setComparePrevWeek(enabled) }
     fun moveRecordType(typeKey: String, delta: Int) = viewModelScope.launch {
-        val configured = runCatching {
-            org.json.JSONArray(ui.value.settings.itemOrderJson).let { array ->
-                List(array.length()) { index -> array.optString(index) }
-            }
-        }.getOrDefault(emptyList())
-        val order = (configured + RecordType.entries.map(RecordType::key)).distinct().toMutableList()
-        val from = order.indexOf(typeKey)
-        val to = (from + delta).coerceIn(0, order.lastIndex)
-        if (from >= 0 && from != to) {
-            val moved = order.removeAt(from)
-            order.add(to, moved)
-            settingsStore.setItemOrderJson(org.json.JSONArray(order).toString())
-        }
+        val customs = ui.value.customItems.map { it.id }
+        val known = com.lezi.babylog.core.ui.knownCatalogKeys(customs)
+        val next = com.lezi.babylog.core.ui.moveCatalogKeyWithinSection(
+            itemOrderJson = ui.value.settings.itemOrderJson,
+            catalogKey = typeKey,
+            delta = delta,
+            allKnownKeys = known,
+        )
+        settingsStore.setItemOrderJson(next)
     }
+
+    fun setItemOrderJson(json: String) = viewModelScope.launch {
+        settingsStore.setItemOrderJson(json)
+    }
+
+    fun setCategoryOrderJson(json: String) = viewModelScope.launch {
+        settingsStore.setCategoryOrderJson(json)
+    }
+
     fun toggleHiddenItem(typeKey: String) = viewModelScope.launch {
         val current = ui.value.settings.hiddenItems
         settingsStore.setHiddenItems(
             if (typeKey in current) current - typeKey else current + typeKey,
         )
+    }
+
+    fun setQuickRecordSlots(slots: List<String>) = viewModelScope.launch {
+        settingsStore.setQuickRecordSlots(slots)
     }
 
     fun addBaby(
@@ -239,10 +285,20 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun moveCustomItem(id: Long, delta: Int) =
-        viewModelScope.launch { careLog.moveCustomItem(id, delta) }
+        viewModelScope.launch {
+            runCatching { careLog.moveCustomItem(id, delta) }
+        }
 
-    fun deleteCustomItem(id: Long) =
-        viewModelScope.launch { careLog.deleteCustomItem(id) }
+    fun deleteCustomItem(id: Long, onDone: (String?) -> Unit = {}) {
+        viewModelScope.launch {
+            val result = runCatching { careLog.deleteCustomItem(id) }
+            onDone(result.exceptionOrNull()?.let { productUiError(it, "删除失败") })
+        }
+    }
+
+    /** Domain ACL: owner/admin manage all; members only their own definitions. */
+    suspend fun canManageCustomItem(item: CustomRecordItem): Boolean =
+        careLog.canManageCustomItem(item)
 
     /** Clears records only — babies are never deleted from settings. */
     fun clearRecords(onDone: (String?) -> Unit) {
@@ -275,10 +331,14 @@ fun SettingsRoute(
     var newThemeIndex by remember { mutableIntStateOf(0) }
     var addError by remember { mutableStateOf<String?>(null) }
     var showAddDate by remember { mutableStateOf(false) }
-    var showFeed by remember { mutableStateOf(false) }
     var showDisplay by remember { mutableStateOf(false) }
+    var showRecordHub by remember { mutableStateOf(false) }
     var showRecordItems by remember { mutableStateOf(false) }
     var showCustomItems by remember { mutableStateOf(false) }
+    var showQuickSlots by remember { mutableStateOf(false) }
+    var showPerItem by remember { mutableStateOf(false) }
+    var showPlanCalendar by remember { mutableStateOf(false) }
+    var showSystemCalendarSetup by remember { mutableStateOf(false) }
     fun finishAddBabyDialog() {
         showAdd = false
         addError = null
@@ -319,18 +379,11 @@ fun SettingsRoute(
                     )
                 },
             )
-            MenuRow("记录设置", "计时、步进、喂奶间隔", icon = "☰", onClick = { showFeed = true })
             MenuRow(
-                "自定义项目",
-                "${ui.customItems.size}/10 · 改名、图标、排序与删除",
-                icon = "◇",
-                onClick = { showCustomItems = true },
-            )
-            MenuRow(
-                "记录项目",
-                "排序、隐藏与快捷坞顺序",
-                icon = "↕",
-                onClick = { showRecordItems = true },
+                "记录与快捷设置",
+                "常用槽位、项目排序、分项目与计划日历",
+                icon = "☰",
+                onClick = { showRecordHub = true },
             )
             MenuRow("显示设置", "界面模板与主题", icon = "◐", onClick = { showDisplay = true })
 
@@ -391,130 +444,66 @@ fun SettingsRoute(
         }
     }
 
-    if (showFeed) {
-        AlertDialog(
-            onDismissRequest = { showFeed = false },
-            title = { Text("记录设置") },
-            text = {
-                ScrollableDialogColumn {
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text("喂奶计时入口")
-                        Switch(checked = ui.settings.timerEnabled, onCheckedChange = vm::setTimer)
-                    }
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text("低月龄发热提示")
-                            Text(
-                                "仅记录时不足 3 个月且体温 ≥38℃",
-                                style = LeziTypography.Meta,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        Switch(
-                            checked = ui.settings.infantFeverAdviceEnabled,
-                            onCheckedChange = vm::setInfantFeverAdvice,
-                        )
-                    }
-                    Text("记录时刻", style = LeziTypography.Label)
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        FilterChip(
-                            selected = ui.settings.recordAtStartOrEnd == "start",
-                            onClick = { vm.setRecordAt("start") },
-                            label = { Text("开始") },
-                        )
-                        FilterChip(
-                            selected = ui.settings.recordAtStartOrEnd == "end",
-                            onClick = { vm.setRecordAt("end") },
-                            label = { Text("结束") },
-                        )
-                    }
-                    Text("下次喂奶间隔（分钟）", style = LeziTypography.Label)
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        listOf(120, 150, 180, 210, 240).forEach { m ->
-                            FilterChip(
-                                selected = ui.settings.nursingIntervalMin == m,
-                                onClick = { vm.setInterval(m) },
-                                label = { Text("$m") },
-                            )
-                        }
-                    }
-                    Text("奶量步进 ml", style = LeziTypography.Label)
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        listOf(5, 10, 15).forEach { s ->
-                            FilterChip(
-                                selected = ui.settings.amountStepMl == s,
-                                onClick = { vm.setStep(s) },
-                                label = { Text("$s") },
-                            )
-                        }
-                    }
-                    Text("时间选择分钟步进", style = LeziTypography.Label)
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        listOf(1 to "1 分钟", 5 to "5 分钟").forEach { (step, label) ->
-                            FilterChip(
-                                selected = ui.settings.timeStepMin == step,
-                                onClick = { vm.setTimeStep(step) },
-                                label = { Text(label) },
-                            )
-                        }
-                    }
-                    Text("时间轴顺序", style = LeziTypography.Label)
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        listOf(
-                            "newest_first" to "新→旧",
-                            "oldest_first" to "旧→新",
-                        ).forEach { (key, label) ->
-                            FilterChip(
-                                selected = ui.settings.timelineOrder == key,
-                                onClick = { vm.setTimelineOrder(key) },
-                                label = { Text(label) },
-                            )
-                        }
-                    }
-                    Text("快捷记录显隐", style = LeziTypography.Label)
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        listOf(
-                            "nursing" to "母乳",
-                            "formula" to "配方奶",
-                            "pee" to "尿尿",
-                            "sleep" to "睡眠",
-                        ).forEach { (key, label) ->
-                            FilterChip(
-                                selected = key !in ui.settings.hiddenItems,
-                                onClick = { vm.toggleHiddenItem(key) },
-                                label = { Text(label) },
-                            )
-                        }
-                    }
+    if (showRecordHub) {
+        RecordAndShortcutSettingsHubDialog(
+            onDismiss = { showRecordHub = false },
+            onOpen = { dest ->
+                showRecordHub = false
+                when (dest) {
+                    RecordShortcutHubDestination.QuickSlots -> showQuickSlots = true
+                    RecordShortcutHubDestination.AllItems -> showRecordItems = true
+                    RecordShortcutHubDestination.PerItem -> showPerItem = true
+                    RecordShortcutHubDestination.PlanCalendar -> showPlanCalendar = true
                 }
             },
-            confirmButton = { TextButton(onClick = { showFeed = false }) { Text("完成") } },
+        )
+    }
+
+    if (showPerItem) {
+        PerItemSettingsDialog(
+            settings = ui.settings,
+            onDismiss = { showPerItem = false },
+            onTimerEnabled = vm::setTimer,
+            onRecordAt = vm::setRecordAt,
+            onInterval = vm::setInterval,
+            onAmountStep = vm::setStep,
+            onFeverAdvice = vm::setInfantFeverAdvice,
+        )
+    }
+
+    if (showPlanCalendar) {
+        PlanCalendarSettingsDialog(
+            carePlanRemindersEnabled = ui.settings.carePlanLocalRemindersEnabled,
+            onCarePlanRemindersEnabled = vm::setCarePlanLocalReminders,
+            systemCalendarEnabled = ui.settings.systemCalendarEnabled &&
+                !ui.settings.systemCalendarId.isNullOrBlank(),
+            systemCalendarSummary = ui.settings.systemCalendarId?.let { "日历 $it" } ?: "未配置",
+            systemCalendarDisclosureSummary = systemCalendarDisclosureLabel(
+                ui.settings.systemCalendarDisclosureLevel,
+            ),
+            onConfigureSystemCalendar = {
+                // Explicit user action only — opens device-local target pick flow.
+                // Permission request is deferred to the configure surface (no passive prompt).
+                showSystemCalendarSetup = true
+            },
+            onDismiss = { showPlanCalendar = false },
+        )
+    }
+
+    if (showSystemCalendarSetup) {
+        SystemCalendarSetupDialog(
+            currentCalendarId = ui.settings.systemCalendarId,
+            currentDisclosureLevel = ui.settings.systemCalendarDisclosureLevel,
+            onPick = { calendarId ->
+                vm.setSystemCalendarId(calendarId)
+                showSystemCalendarSetup = false
+            },
+            onDisclosureLevel = vm::setSystemCalendarDisclosureLevel,
+            onDisable = {
+                vm.setSystemCalendarId(null)
+                showSystemCalendarSetup = false
+            },
+            onDismiss = { showSystemCalendarSetup = false },
         )
     }
 
@@ -589,6 +578,35 @@ fun SettingsRoute(
                         style = LeziTypography.Meta,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    Text("时间选择分钟步进", style = LeziTypography.Label)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        listOf(1 to "1 分钟", 5 to "5 分钟").forEach { (step, label) ->
+                            FilterChip(
+                                selected = ui.settings.timeStepMin == step,
+                                onClick = { vm.setTimeStep(step) },
+                                label = { Text(label) },
+                            )
+                        }
+                    }
+                    Text("时间轴顺序", style = LeziTypography.Label)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        listOf(
+                            "newest_first" to "新→旧",
+                            "oldest_first" to "旧→新",
+                        ).forEach { (key, label) ->
+                            FilterChip(
+                                selected = ui.settings.timelineOrder == key,
+                                onClick = { vm.setTimelineOrder(key) },
+                                label = { Text(label) },
+                            )
+                        }
+                    }
                     Text("汇总周起始日", style = LeziTypography.Label)
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -782,22 +800,50 @@ fun SettingsRoute(
     }
 
     if (showCustomItems) {
+        var manageableIds by remember { mutableStateOf<Set<Long>>(emptySet()) }
+        LaunchedEffect(ui.customItems) {
+            val allowed = mutableSetOf<Long>()
+            for (item in ui.customItems) {
+                if (vm.canManageCustomItem(item)) allowed += item.id
+            }
+            manageableIds = allowed
+        }
         CustomItemSettingsDialog(
             items = ui.customItems,
+            hiddenItems = ui.settings.hiddenItems,
             onDismiss = { showCustomItems = false },
             onAdd = vm::addCustomItem,
             onUpdate = vm::updateCustomItem,
             onMove = vm::moveCustomItem,
             onDelete = vm::deleteCustomItem,
+            onToggleLocalHidden = { id ->
+                vm.toggleHiddenItem(RecordItemIdentity.customCatalogKey(id))
+            },
+            canManage = { item -> item.id in manageableIds },
         )
     }
 
     if (showRecordItems) {
-        RecordItemSettingsDialog(
+        AllRecordItemsSettingsDialog(
             settings = ui.settings,
+            customItems = ui.customItems,
             onDismiss = { showRecordItems = false },
-            onMove = vm::moveRecordType,
+            onItemOrderChanged = vm::setItemOrderJson,
+            onCategoryOrderChanged = vm::setCategoryOrderJson,
             onToggleVisible = vm::toggleHiddenItem,
+            onOpenCustomManage = {
+                showRecordItems = false
+                showCustomItems = true
+            },
+        )
+    }
+
+    if (showQuickSlots) {
+        QuickRecordSlotsSettingsDialog(
+            settings = ui.settings,
+            customItems = ui.customItems,
+            onDismiss = { showQuickSlots = false },
+            onSlotsChanged = vm::setQuickRecordSlots,
         )
     }
 

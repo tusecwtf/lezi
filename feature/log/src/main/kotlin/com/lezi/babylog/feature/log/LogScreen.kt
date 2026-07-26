@@ -47,21 +47,28 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.Baby
+import com.lezi.babylog.core.model.CarePlan
+import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.MilkPayload
 import com.lezi.babylog.core.model.NursingPayload
 import com.lezi.babylog.core.model.Record
+import com.lezi.babylog.core.model.RecordItemIdentity
 import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SettingsLocal
 import com.lezi.babylog.core.model.SleepPayload
+import com.lezi.babylog.core.model.availableForNewEntry
+import com.lezi.babylog.core.model.displayLabel
 import com.lezi.babylog.core.ui.RecordSection
 import com.lezi.babylog.core.ui.RecordSummaryStrip
 import com.lezi.babylog.core.ui.RecordSummaryValue
 import com.lezi.babylog.core.ui.RecordTypeIcon
 import com.lezi.babylog.core.ui.UiTags
+import com.lezi.babylog.core.ui.orderedRecordSections
 import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.core.ui.presentationSummary
 import com.lezi.babylog.core.ui.presentationTone
+import com.lezi.babylog.core.ui.sortCatalogByLocalOrder
 import com.lezi.babylog.designsystem.LeziCard
 import com.lezi.babylog.designsystem.LeziRecordGlyph
 import com.lezi.babylog.designsystem.LeziRecordGlyphIcon
@@ -83,17 +90,24 @@ import com.lezi.babylog.designsystem.TimelineRailCard
 import com.lezi.babylog.designsystem.leziRecordColor
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CareAggregation
+import com.lezi.babylog.domain.CustomRecordItem
 import com.lezi.babylog.domain.DailySummary
 import com.lezi.babylog.domain.DayChartCategories
 import com.lezi.babylog.domain.DayChartCategory
 import com.lezi.babylog.domain.formatClock
 import com.lezi.babylog.domain.relativeTimeLabel
+import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.sync.UploaderMemberRef
+import com.lezi.babylog.sync.localRecordPublishDetail
+import com.lezi.babylog.sync.localCarePlanPublishDetail
+import com.lezi.babylog.sync.localCarePlanPublishLabel
+import com.lezi.babylog.sync.localRecordPublishLabel
 import com.lezi.babylog.sync.resolveRecordUploaderLabel
 import com.lezi.babylog.sync.toUploaderRef
 import dagger.hilt.android.lifecycle.HiltViewModel
+import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
@@ -108,6 +122,8 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 
 data class LogUiState(
     val loading: Boolean = true,
@@ -124,6 +140,27 @@ data class LogUiState(
     val refreshing: Boolean = false,
     /** recordId → current 家庭称呼 for non-self writers when family is joined. */
     val uploaderLabels: Map<Long, String> = emptyMap(),
+    /** Concrete custom definitions for the more-sheet catalog. */
+    val customItems: List<CustomRecordItem> = emptyList(),
+    /**
+     * Pending/missed care plans for the selected day (today includes overdue).
+     * Rendered above the fact record list; never mixed into records/summary.
+     */
+    val pendingPlans: List<CarePlan> = emptyList(),
+    /** Plan ids the current actor may edit/skip/delete (UI ACL). */
+    val manageablePlanIds: Set<Long> = emptySet(),
+    /**
+     * recordId → true when a prior family-complete package exists (media receipt),
+     * so mutation chrome says "上一完整版本" rather than first-publish copy.
+     */
+    val recordPriorFamilyRevision: Map<Long, Boolean> = emptyMap(),
+    /**
+     * carePlanId → true when a prior family-complete plan package exists,
+     * for amber “仅本机” mutation chrome on creator devices.
+     */
+    val planPriorFamilyRevision: Map<Long, Boolean> = emptyMap(),
+    val familyJoined: Boolean = false,
+    val lastSyncFailed: Boolean = false,
 )
 
 @HiltViewModel
@@ -169,10 +206,11 @@ class LogViewModel @Inject constructor(
         careLog.observeBabies(),
         dayFlow,
         settingsStore.settings,
-    ) { baby, babies, day, settings ->
-        Quad(baby, babies, day, settings)
-    }.flatMapLatest { quad ->
-        val (baby, babies, day, settings) = quad
+        careLog.observeCustomItems(),
+    ) { baby, babies, day, settings, customItems ->
+        LogCombine(baby, babies, day, settings, customItems)
+    }.flatMapLatest { bundle ->
+        val (baby, babies, day, settings, customItems) = bundle
         if (baby == null) {
             flowOf(
                 LogUiState(
@@ -180,21 +218,58 @@ class LogViewModel @Inject constructor(
                     babies = babies,
                     day = day,
                     settings = settings,
+                    customItems = customItems,
                 ),
             )
         } else {
+            val today = LocalDate.now(zone)
+            val plansFlow = if (day == today) {
+                careLog.observeTodayPendingPlans(baby.id, zone)
+            } else {
+                careLog.observeDayPendingPlans(baby.id, day, zone)
+            }
             combine(
                 careLog.observeDayRecords(baby.id, day, zone),
                 careLog.observeOpenSleep(baby.id),
+                plansFlow,
                 uploaderMembers,
                 selfDeviceId,
-                familyJoined,
-            ) { records, openSleep, members, selfId, joined ->
+            ) { records, openSleep, plans, members, selfId ->
+                val joined = familyJoined.value
                 val start = day.atStartOfDay(zone).toInstant().toEpochMilli()
                 val end = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
                 val summary = CareAggregation.day(records, day, zone).toDailySummary()
                 val lanes = buildLanes(records, start, end)
                 val labels = buildUploaderLabels(records, selfId, joined, members)
+                val priorRevisions = buildMap {
+                    if (joined) {
+                        for (record in records) {
+                            if (record.syncDirty) {
+                                put(
+                                    record.id,
+                                    careLog.recordHasPriorFamilyRevision(record.id),
+                                )
+                            }
+                        }
+                    }
+                }
+                val planPriorRevisions = buildMap {
+                    if (joined) {
+                        for (plan in plans) {
+                            if (plan.syncDirty) {
+                                put(
+                                    plan.id,
+                                    careLog.carePlanHasPriorFamilyRevision(plan.id),
+                                )
+                            }
+                        }
+                    }
+                }
+                val manageablePlans = buildSet {
+                    for (plan in plans) {
+                        if (careLog.canManageCarePlan(plan)) add(plan.id)
+                    }
+                }
                 LogUiState(
                     loading = false,
                     baby = baby,
@@ -208,11 +283,19 @@ class LogViewModel @Inject constructor(
                     settings = settings,
                     openSleep = openSleep,
                     uploaderLabels = labels,
+                    customItems = customItems,
+                    pendingPlans = plans,
+                    manageablePlanIds = manageablePlans,
+                    recordPriorFamilyRevision = priorRevisions,
+                    planPriorFamilyRevision = planPriorRevisions,
+                    familyJoined = joined,
                 )
             }
         }
     }.combine(refreshing) { state, isRefreshing ->
         state.copy(refreshing = isRefreshing)
+    }.combine(syncPort.status()) { state, status ->
+        state.copy(lastSyncFailed = status == SyncStatus.Error)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), LogUiState())
 
     fun setExternalDay(day: LocalDate) {
@@ -228,6 +311,18 @@ class LogViewModel @Inject constructor(
             } finally {
                 refreshing.value = false
             }
+        }
+    }
+
+    fun skipCarePlan(planId: Long) {
+        viewModelScope.launch {
+            runCatching { careLog.skipCarePlan(planId) }
+        }
+    }
+
+    fun deleteCarePlan(planId: Long) {
+        viewModelScope.launch {
+            runCatching { careLog.deleteCarePlan(planId) }
         }
     }
 }
@@ -254,13 +349,24 @@ internal fun buildUploaderLabels(
 }
 
 /** Compose payload summary with optional uploader 称呼 for the secondary line. */
-internal fun timelineRecordSummary(payloadSummary: String, uploaderLabel: String?): String =
+internal fun timelineRecordSummary(
+    payloadSummary: String,
+    uploaderLabel: String?,
+    publishLabel: String? = null,
+): String =
     listOfNotNull(
         payloadSummary.takeIf { it.isNotBlank() },
         uploaderLabel?.takeIf { it.isNotBlank() },
+        publishLabel?.takeIf { it.isNotBlank() },
     ).joinToString(" · ")
 
-private data class Quad<A, B, C, D>(val a: A, val b: B, val c: C, val d: D)
+private data class LogCombine(
+    val baby: Baby?,
+    val babies: List<Baby>,
+    val day: LocalDate,
+    val settings: SettingsLocal,
+    val customItems: List<CustomRecordItem>,
+)
 
 private data class Lanes(
     val sleep: List<TimelineLaneSegment>,
@@ -445,6 +551,12 @@ private const val CARE_PEE = 0xFF7A9E7E
 private const val CARE_POOP = 0xFFF3B84B
 private const val CARE_OTHER = 0xFF8FB894
 
+private data class PublishChromeTarget(
+    val recordId: Long,
+    val title: String,
+    val priorRevision: Boolean,
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LogRoute(
@@ -455,6 +567,7 @@ fun LogRoute(
 ) {
     val state by vm.uiState.collectAsStateWithLifecycle()
     var showMore by remember { mutableStateOf(false) }
+    var publishChromeRecord by remember { mutableStateOf<PublishChromeTarget?>(null) }
     // Page-level day-chart filter (temporary; cleared on day change via remember key).
     var selectedDayChart by remember(state.day) {
         mutableStateOf<DayChartCategory?>(null)
@@ -496,8 +609,9 @@ fun LogRoute(
         else DayChartCategories.filterRecords(state.records, dayChartFilter).size
     }
 
-    fun openComposer(type: RecordType) {
+    fun openComposer(identity: RecordItemIdentity) {
         val babyId = state.baby?.id ?: return
+        val type = identity.recordType
         val openSleep = state.openSleep
         val wakingCurrentSleep = type == RecordType.SLEEP && openSleep != null
         val clickedAt = RecordTime.newDraftTimestamp(
@@ -516,8 +630,13 @@ fun LogRoute(
                 lastAmountMl = lastAmount,
                 historical = state.day != today,
                 openSleepId = openSleep?.id.takeIf { wakingCurrentSleep },
+                customItemId = (identity as? RecordItemIdentity.Custom)?.customItemId,
             ),
         )
+    }
+
+    fun openComposer(type: RecordType) {
+        openComposer(RecordItemIdentity.builtIn(type))
     }
 
     LaunchedEffect(externalDay) {
@@ -664,6 +783,123 @@ fun LogRoute(
                         }
                     }
 
+                    if (state.pendingPlans.isNotEmpty()) {
+                        item {
+                            Column(Modifier.padding(horizontal = LeziSpacing.Page)) {
+                                SectionHeading(
+                                    eyebrow = if (journal) null else "待履行",
+                                    title = "护理计划",
+                                    meta = "${state.pendingPlans.size}",
+                                )
+                            }
+                        }
+                        items(state.pendingPlans, key = { "plan-${it.id}" }) { plan ->
+                            val now = RecordTime.currentTimeMillis()
+                            val effective = plan.effectiveStatus(now)
+                            val isMissed = effective == CarePlanStatus.MISSED
+                            val title = plan.displayLabel()
+                            val deviceZone = ZoneId.systemDefault()
+                            val planZone = runCatching { ZoneId.of(plan.scheduledZoneId) }
+                                .getOrDefault(deviceZone)
+                            val zoneHint = if (planZone != deviceZone) {
+                                val original = Instant.ofEpochMilli(plan.scheduledAt)
+                                    .atZone(planZone)
+                                    .toLocalTime()
+                                    .toString()
+                                " · 原计划 $original (${plan.scheduledZoneId})"
+                            } else {
+                                ""
+                            }
+                            val canManagePlan = plan.id in state.manageablePlanIds
+                            val planPrior = state.planPriorFamilyRevision[plan.id] == true
+                            val planPublishLabel = localCarePlanPublishLabel(
+                                syncDirty = plan.syncDirty,
+                                familyJoined = state.familyJoined,
+                                lastSyncFailed = state.lastSyncFailed,
+                                hasPriorFamilyRevision = planPrior,
+                            )
+                            val statusLine =
+                                (if (isMissed) "已错过 · 点此完成" else "待执行 · 点此完成") + zoneHint
+                            val planSummary = if (planPublishLabel != null) {
+                                "$statusLine · $planPublishLabel"
+                            } else {
+                                statusLine
+                            }
+                            Column(
+                                Modifier
+                                    .padding(horizontal = LeziSpacing.Page)
+                                    .testTag("pending_care_plan_${plan.id}"),
+                            ) {
+                                RecordRow(
+                                    time = formatClock(plan.scheduledAt),
+                                    title = title,
+                                    summary = planSummary,
+                                    relative = relativeTimeLabel(plan.scheduledAt),
+                                    // Amber (Yellow) for missed — never danger-red anomaly bang.
+                                    // Dirty publish chrome also uses amber via Yellow tone when missed;
+                                    // first-publish waiting still Blue for pending-to-do emphasis.
+                                    tone = if (isMissed || planPublishLabel != null) {
+                                        LeziTone.Yellow
+                                    } else {
+                                        LeziTone.Blue
+                                    },
+                                    anomaly = false,
+                                    leading = {
+                                        RecordTypeIcon(plan.type)
+                                    },
+                                    onClick = {
+                                        onOpenComposer(RecordComposerRequest.Fulfill(plan.id))
+                                    },
+                                    modifier = Modifier.semantics {
+                                        val publishDetail = if (planPublishLabel != null) {
+                                            "。" + localCarePlanPublishDetail(
+                                                lastSyncFailed = state.lastSyncFailed,
+                                                hasPriorFamilyRevision = planPrior,
+                                            )
+                                        } else {
+                                            ""
+                                        }
+                                        contentDescription = "完成${title}护理计划$publishDetail"
+                                    },
+                                )
+                                if (canManagePlan) {
+                                    Row(
+                                        Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.End,
+                                    ) {
+                                        TextButton(
+                                            onClick = {
+                                                onOpenComposer(
+                                                    RecordComposerRequest.EditPlan(plan.id),
+                                                )
+                                            },
+                                            modifier = Modifier.testTag(
+                                                "care_plan_edit_${plan.id}",
+                                            ),
+                                        ) { Text("编辑") }
+                                        TextButton(
+                                            onClick = { vm.skipCarePlan(plan.id) },
+                                            modifier = Modifier.testTag(
+                                                "care_plan_skip_${plan.id}",
+                                            ),
+                                        ) { Text("跳过") }
+                                        TextButton(
+                                            onClick = { vm.deleteCarePlan(plan.id) },
+                                            modifier = Modifier.testTag(
+                                                "care_plan_delete_${plan.id}",
+                                            ),
+                                        ) {
+                                            Text(
+                                                "删除",
+                                                color = MaterialTheme.colorScheme.error,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     item {
                         Column(Modifier.padding(horizontal = LeziSpacing.Page)) {
                             SectionHeading(
@@ -692,12 +928,22 @@ fun LogRoute(
                             )
                         }
                         else -> items(filteredTimelineRecords, key = { it.id }) { r ->
+                            val title = r.displayLabel()
+                            val priorRevision =
+                                state.recordPriorFamilyRevision[r.id] == true
+                            val publishLabel = localRecordPublishLabel(
+                                syncDirty = r.syncDirty,
+                                familyJoined = state.familyJoined,
+                                lastSyncFailed = state.lastSyncFailed,
+                                hasPriorFamilyRevision = priorRevision,
+                            )
                             RecordRow(
                                 time = formatClock(r.timestamp),
-                                title = typeLabel(r.type),
+                                title = title,
                                 summary = timelineRecordSummary(
                                     recordSummaryLine(r),
                                     state.uploaderLabels[r.id],
+                                    publishLabel,
                                 ),
                                 relative = relativeTimeLabel(r.timestamp),
                                 tone = toneOf(r.type),
@@ -707,12 +953,24 @@ fun LogRoute(
                                     RecordTypeIcon(r.type)
                                 },
                                 onClick = {
-                                    onOpenComposer(RecordComposerRequest.Edit(r.id))
+                                    if (publishLabel != null) {
+                                        publishChromeRecord = PublishChromeTarget(
+                                            recordId = r.id,
+                                            title = title,
+                                            priorRevision = priorRevision,
+                                        )
+                                    } else {
+                                        onOpenComposer(RecordComposerRequest.Edit(r.id))
+                                    }
                                 },
                                 modifier = Modifier
                                     .padding(horizontal = LeziSpacing.Page)
                                     .semantics {
-                                        contentDescription = "编辑${r.type.presentation.label}"
+                                        contentDescription = if (publishLabel != null) {
+                                            "同步状态$title"
+                                        } else {
+                                            "编辑$title"
+                                        }
                                     },
                             )
                         }
@@ -722,17 +980,50 @@ fun LogRoute(
             }
             OneHandQuickDock(
                 preferredHand = state.settings.preferredHand,
-                timerEnabled = state.settings.timerEnabled,
+                storedSlots = state.settings.quickRecordSlots,
                 hiddenTypeKeys = state.settings.hiddenItems,
-                configuredTypeKeys = parseConfiguredTypeKeys(state.settings.itemOrderJson),
+                customItems = state.customItems,
                 sleepRunning = state.openSleep != null,
-                onNursing = { openComposer(RecordType.NURSING) },
-                onPee = { openComposer(RecordType.PEE) },
-                onSleep = { openComposer(RecordType.SLEEP) },
-                onFormula = { openComposer(RecordType.FORMULA) },
+                onBound = { identity -> openComposer(identity) },
+                onEmpty = { /* settings entry for slot pick is under 记录项目 / 常用记录 */ },
                 onMore = { showMore = true },
             )
         }
+    }
+
+    publishChromeRecord?.let { target ->
+        AlertDialog(
+            onDismissRequest = { publishChromeRecord = null },
+            title = { Text(target.title) },
+            text = {
+                Text(
+                    localRecordPublishDetail(
+                        lastSyncFailed = state.lastSyncFailed,
+                        hasPriorFamilyRevision = target.priorRevision,
+                    ),
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        publishChromeRecord = null
+                        vm.refresh()
+                    },
+                ) { Text("重试同步") }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(
+                        onClick = {
+                            val id = target.recordId
+                            publishChromeRecord = null
+                            onOpenComposer(RecordComposerRequest.Edit(id))
+                        },
+                    ) { Text("编辑") }
+                    TextButton(onClick = { publishChromeRecord = null }) { Text("关闭") }
+                }
+            },
+        )
     }
 
     if (showMore) {
@@ -742,87 +1033,40 @@ fun LogRoute(
         ) {
             MoreSheet(
                 settings = state.settings,
-                onPick = { type ->
+                customItems = state.customItems,
+                onPick = { identity ->
                     showMore = false
-                    openComposer(type)
+                    openComposer(identity)
                 },
             )
         }
     }
 }
 
-internal enum class OneHandQuickAction {
-    Pee,
-    Sleep,
-    Nursing,
-    Formula,
-    More,
-}
+private val CustomSlotIcons = listOf("★", "♥", "☀", "☾", "♪", "●", "▲", "◆")
 
 /**
- * The first item is placed nearest the selected thumb edge. The high-frequency
- * pee composer therefore remains the easiest target for either hand.
+ * Always renders four configurable slots plus fixed "更多", laid out by preferred hand.
+ * Hidden / deleted / invalid refs blank a cell rather than removing it.
  */
-internal fun oneHandQuickActionOrder(
-    preferredHand: String,
-    timerEnabled: Boolean,
-    configuredTypeKeys: List<String> = emptyList(),
-): List<OneHandQuickAction> {
-    val recordActions = buildList {
-        add(OneHandQuickAction.Pee)
-        add(OneHandQuickAction.Sleep)
-        if (timerEnabled) add(OneHandQuickAction.Nursing)
-        add(OneHandQuickAction.Formula)
-    }.sortedWith(
-        compareBy<OneHandQuickAction> { action ->
-            val typeKey = action.recordTypeKey()
-            configuredTypeKeys.indexOf(typeKey).takeIf { it >= 0 } ?: Int.MAX_VALUE
-        }.thenBy { it.ordinal },
-    )
-    val thumbFirst = buildList {
-        addAll(recordActions)
-        add(OneHandQuickAction.More)
-    }
-    return if (preferredHand == "left") thumbFirst else thumbFirst.reversed()
-}
-
-private fun OneHandQuickAction.recordTypeKey(): String? = when (this) {
-    OneHandQuickAction.Pee -> RecordType.PEE.key
-    OneHandQuickAction.Sleep -> RecordType.SLEEP.key
-    OneHandQuickAction.Nursing -> RecordType.NURSING.key
-    OneHandQuickAction.Formula -> RecordType.FORMULA.key
-    OneHandQuickAction.More -> null
-}
-
-private fun parseConfiguredTypeKeys(json: String): List<String> =
-    runCatching {
-        org.json.JSONArray(json).let { array ->
-            List(array.length()) { index -> array.optString(index) }
-        }
-    }.getOrDefault(emptyList())
-
 @Composable
 private fun OneHandQuickDock(
     preferredHand: String,
-    timerEnabled: Boolean,
+    storedSlots: List<String>,
     hiddenTypeKeys: Set<String>,
-    configuredTypeKeys: List<String>,
+    customItems: List<CustomRecordItem>,
     sleepRunning: Boolean,
-    onNursing: () -> Unit,
-    onPee: () -> Unit,
-    onSleep: () -> Unit,
-    onFormula: () -> Unit,
+    onBound: (RecordItemIdentity) -> Unit,
+    onEmpty: () -> Unit,
     onMore: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val journal = LeziThemeExt.isJournal
-    val actions = oneHandQuickActionOrder(
-        preferredHand = preferredHand,
-        timerEnabled = timerEnabled,
-        configuredTypeKeys = configuredTypeKeys,
-    ).filter { action ->
-        val typeKey = action.recordTypeKey()
-        typeKey == null || typeKey !in hiddenTypeKeys
+    val resolved = remember(storedSlots, hiddenTypeKeys, customItems) {
+        resolveQuickSlots(storedSlots, hiddenTypeKeys, customItems)
+    }
+    val cells = remember(preferredHand, resolved) {
+        oneHandQuickDockOrder(preferredHand, resolved)
     }
     Surface(
         modifier = modifier
@@ -840,39 +1084,47 @@ private fun OneHandQuickDock(
                 .padding(horizontal = 4.dp, vertical = 5.dp),
             horizontalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            actions.forEach { action ->
-                val label = when (action) {
-                    OneHandQuickAction.Pee -> "尿尿"
-                    OneHandQuickAction.Sleep -> if (sleepRunning) "醒来" else "睡眠"
-                    OneHandQuickAction.Nursing -> "母乳"
-                    OneHandQuickAction.Formula -> "配方奶"
-                    OneHandQuickAction.More -> "更多"
+            cells.forEachIndexed { index, cell ->
+                val label = when (cell) {
+                    is QuickDockCell.Bound ->
+                        if (cell.recordType == RecordType.SLEEP && sleepRunning) {
+                            "醒来"
+                        } else {
+                            cell.label
+                        }
+                    QuickDockCell.Empty -> "＋ 选择常用记录"
+                    QuickDockCell.More -> "更多"
                 }
-                val recordType = when (action) {
-                    OneHandQuickAction.Pee -> RecordType.PEE
-                    OneHandQuickAction.Sleep -> RecordType.SLEEP
-                    OneHandQuickAction.Nursing -> RecordType.NURSING
-                    OneHandQuickAction.Formula -> RecordType.FORMULA
-                    OneHandQuickAction.More -> null
+                val tint = when (cell) {
+                    is QuickDockCell.Bound ->
+                        if (cell.recordType == RecordType.CUSTOM) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            leziRecordColor(cell.recordType.presentation.colorRole)
+                        }
+                    QuickDockCell.Empty -> MaterialTheme.colorScheme.onSurfaceVariant
+                    QuickDockCell.More -> MaterialTheme.colorScheme.primary
                 }
-                val tint = recordType?.let { leziRecordColor(it.presentation.colorRole) }
-                    ?: MaterialTheme.colorScheme.primary
+                val tag = when (cell) {
+                    is QuickDockCell.Bound -> "one_hand_action_${cell.catalogKey}"
+                    QuickDockCell.Empty -> "one_hand_action_empty_$index"
+                    QuickDockCell.More -> "one_hand_action_more"
+                }
+                val isPee = cell is QuickDockCell.Bound && cell.recordType == RecordType.PEE
                 Surface(
                     modifier = Modifier
                         .weight(1f)
                         .heightIn(min = 64.dp)
-                        .testTag("one_hand_action_${action.name.lowercase()}")
+                        .testTag(tag)
                         .clickable {
-                            when (action) {
-                                OneHandQuickAction.Pee -> onPee()
-                                OneHandQuickAction.Sleep -> onSleep()
-                                OneHandQuickAction.Nursing -> onNursing()
-                                OneHandQuickAction.Formula -> onFormula()
-                                OneHandQuickAction.More -> onMore()
+                            when (cell) {
+                                is QuickDockCell.Bound -> onBound(cell.identity)
+                                QuickDockCell.Empty -> onEmpty()
+                                QuickDockCell.More -> onMore()
                             }
                         },
                     shape = if (journal) LeziShapes.JournalButton else LeziShapes.Sm,
-                    color = if (action == OneHandQuickAction.Pee) {
+                    color = if (isPee) {
                         MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f)
                     } else {
                         Color.Transparent
@@ -891,13 +1143,29 @@ private fun OneHandQuickDock(
                                 .background(tint.copy(alpha = 0.14f)),
                             contentAlignment = Alignment.Center,
                         ) {
-                            if (recordType == null) {
-                                LeziRecordGlyphIcon(
-                                    glyph = LeziRecordGlyph.Other,
-                                    tint = tint,
-                                )
-                            } else {
-                                RecordTypeIcon(recordType, tint = tint)
+                            when (cell) {
+                                is QuickDockCell.Bound -> {
+                                    if (cell.recordType == RecordType.CUSTOM) {
+                                        Text(
+                                            CustomSlotIcons[
+                                                (cell.customIconSlot ?: 0).coerceIn(0, 7),
+                                            ],
+                                            style = LeziTypography.Meta,
+                                            color = tint,
+                                        )
+                                    } else {
+                                        RecordTypeIcon(cell.recordType, tint = tint)
+                                    }
+                                }
+                                QuickDockCell.Empty -> {
+                                    Text("＋", style = LeziTypography.BodyStrong, color = tint)
+                                }
+                                QuickDockCell.More -> {
+                                    LeziRecordGlyphIcon(
+                                        glyph = LeziRecordGlyph.Other,
+                                        tint = tint,
+                                    )
+                                }
                             }
                         }
                         Text(
@@ -913,26 +1181,93 @@ private fun OneHandQuickDock(
     }
 }
 
+/** Catalog entry for the more sheet: built-in type or a concrete custom definition. */
+internal sealed class MoreCatalogEntry {
+    abstract val identity: RecordItemIdentity
+    abstract val label: String
+    abstract val section: RecordSection
+
+    data class BuiltIn(
+        val type: RecordType,
+    ) : MoreCatalogEntry() {
+        override val identity: RecordItemIdentity = RecordItemIdentity.builtIn(type)
+        override val label: String get() = type.presentation.label
+        override val section: RecordSection get() = type.presentation.section
+    }
+
+    data class Custom(
+        val item: CustomRecordItem,
+    ) : MoreCatalogEntry() {
+        override val identity: RecordItemIdentity = RecordItemIdentity.custom(item.id)
+        override val label: String get() = item.name
+        override val section: RecordSection = RecordSection.Custom
+    }
+}
+
+/**
+ * Pure catalog builder: built-ins available for new entry + concrete custom items.
+ * Memo / other / bare custom never appear. Order uses shared local category/item policy.
+ */
+internal fun moreSheetCatalog(
+    settings: SettingsLocal,
+    customItems: List<CustomRecordItem>,
+): List<MoreCatalogEntry> {
+    val builtIns = RecordType.availableForNewEntry()
+        .filter { it.key !in settings.hiddenItems }
+        .map { MoreCatalogEntry.BuiltIn(it) }
+    val customs = customItems
+        .filter { RecordItemIdentity.customCatalogKey(it.id) !in settings.hiddenItems }
+        .map { MoreCatalogEntry.Custom(it) }
+    return sortCatalogByLocalOrder(
+        entries = builtIns + customs,
+        sectionOf = { it.section },
+        catalogKeyOf = { it.identity.catalogKey },
+        categoryOrderJson = settings.categoryOrderJson,
+        itemOrderJson = settings.itemOrderJson,
+    )
+}
+
+internal fun moreSheetQuickSuggestions(
+    settings: SettingsLocal,
+    customItems: List<CustomRecordItem>,
+): List<MoreCatalogEntry> {
+    val preferred = listOf(
+        RecordType.POOP,
+        RecordType.TEMPERATURE,
+        RecordType.WEIGHT,
+        RecordType.DIARY,
+    )
+    val catalog = moreSheetCatalog(settings, customItems)
+    val preferredEntries = preferred.mapNotNull { type ->
+        catalog.firstOrNull { it is MoreCatalogEntry.BuiltIn && it.type == type }
+    }
+    return preferredEntries.ifEmpty { catalog.take(4) }
+}
+
 @Composable
 private fun MoreSheet(
     settings: SettingsLocal,
-    onPick: (RecordType) -> Unit,
+    customItems: List<CustomRecordItem>,
+    onPick: (RecordItemIdentity) -> Unit,
 ) {
-    val configuredOrder = remember(settings.itemOrderJson) {
-        runCatching {
-            org.json.JSONArray(settings.itemOrderJson).let { array ->
-                List(array.length()) { index -> array.optString(index) }
-            }
-        }.getOrDefault(emptyList())
+    val catalog = remember(
+        settings.itemOrderJson,
+        settings.categoryOrderJson,
+        settings.hiddenItems,
+        customItems,
+    ) {
+        moreSheetCatalog(settings, customItems)
     }
-    val groups = RecordSection.entries.map { section ->
-        section to RecordType.entries.filter {
-            it.presentation.section == section && it.key !in settings.hiddenItems
-        }.sortedWith(
-            compareBy<RecordType> {
-                configuredOrder.indexOf(it.key).takeIf { index -> index >= 0 } ?: Int.MAX_VALUE
-            }.thenBy { it.ordinal },
-        )
+    val suggestions = remember(
+        settings.itemOrderJson,
+        settings.categoryOrderJson,
+        settings.hiddenItems,
+        customItems,
+    ) {
+        moreSheetQuickSuggestions(settings, customItems)
+    }
+    val groups = orderedRecordSections(settings.categoryOrderJson).map { section ->
+        section to catalog.filter { it.section == section }
     }
     LazyColumn(
         modifier = Modifier.fillMaxWidth(),
@@ -956,22 +1291,21 @@ private fun MoreSheet(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                listOf(
-                    RecordType.POOP,
-                    RecordType.TEMPERATURE,
-                    RecordType.WEIGHT,
-                    RecordType.MEMO,
-                ).forEach { type ->
-                    MoreTypeCard(
-                        type = type,
-                        onClick = { onPick(type) },
+                suggestions.forEach { entry ->
+                    MoreCatalogCard(
+                        entry = entry,
+                        onClick = { onPick(entry.identity) },
                         modifier = Modifier.weight(1f),
                     )
+                }
+                repeat((4 - suggestions.size).coerceAtLeast(0)) {
+                    Spacer(Modifier.weight(1f))
                 }
             }
             Spacer(Modifier.height(LeziSpacing.Md))
         }
         groups.forEach { (section, items) ->
+            if (items.isEmpty()) return@forEach
             item {
                 Column {
                     Text(
@@ -985,10 +1319,10 @@ private fun MoreSheet(
                             Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            rowItems.forEach { type ->
-                                MoreTypeCard(
-                                    type = type,
-                                    onClick = { onPick(type) },
+                            rowItems.forEach { entry ->
+                                MoreCatalogCard(
+                                    entry = entry,
+                                    onClick = { onPick(entry.identity) },
                                     modifier = Modifier.weight(1f),
                                 )
                             }
@@ -1005,14 +1339,19 @@ private fun MoreSheet(
     }
 }
 
+private val CustomItemIconGlyphs = listOf("★", "♥", "☀", "☾", "♪", "●", "▲", "◆")
+
 @Composable
-private fun MoreTypeCard(
-    type: RecordType,
+private fun MoreCatalogCard(
+    entry: MoreCatalogEntry,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val item = type.presentation
-    val color = leziRecordColor(item.colorRole)
+    val colorRole = when (entry) {
+        is MoreCatalogEntry.BuiltIn -> entry.type.presentation.colorRole
+        is MoreCatalogEntry.Custom -> RecordType.CUSTOM.presentation.colorRole
+    }
+    val color = leziRecordColor(colorRole)
     LeziCard(
         modifier = modifier.heightIn(min = 64.dp),
         onClick = onClick,
@@ -1022,7 +1361,7 @@ private fun MoreTypeCard(
             Modifier
                 .fillMaxWidth()
                 .clearAndSetSemantics {
-                    contentDescription = moreRecordContentDescription(type)
+                    contentDescription = moreRecordContentDescription(entry)
                 },
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
@@ -1033,11 +1372,20 @@ private fun MoreTypeCard(
                     .background(color.copy(alpha = 0.14f)),
                 contentAlignment = Alignment.Center,
             ) {
-                RecordTypeIcon(type, size = 18.dp, tint = color)
+                when (entry) {
+                    is MoreCatalogEntry.BuiltIn ->
+                        RecordTypeIcon(entry.type, size = 18.dp, tint = color)
+                    is MoreCatalogEntry.Custom ->
+                        Text(
+                            CustomItemIconGlyphs[entry.item.iconSlot.coerceIn(0, 7)],
+                            style = LeziTypography.BodyStrong,
+                            color = color,
+                        )
+                }
             }
             Spacer(Modifier.height(3.dp))
             Text(
-                item.label,
+                entry.label,
                 style = LeziTypography.Label.copy(fontSize = 14.sp, lineHeight = 18.sp),
                 maxLines = 1,
             )
@@ -1060,5 +1408,8 @@ internal fun typeGlyph(type: RecordType): LeziRecordGlyph = type.presentation.gl
 
 internal fun moreRecordContentDescription(type: RecordType): String =
     "添加${type.presentation.label}"
+
+internal fun moreRecordContentDescription(entry: MoreCatalogEntry): String =
+    "添加${entry.label}"
 
 internal fun recordSummaryLine(record: Record): String = record.presentationSummary()

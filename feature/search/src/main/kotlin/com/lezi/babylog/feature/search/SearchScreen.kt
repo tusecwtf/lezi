@@ -25,6 +25,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.model.Record
+import com.lezi.babylog.core.model.displayLabel
 import com.lezi.babylog.core.ui.RecordTypeIcon
 import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.core.ui.presentationSummary
@@ -140,16 +141,17 @@ fun SearchRoute(
                         verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
                     ) {
                         items(ui.results, key = { it.id }) { r ->
+                            val title = r.displayLabel()
                             RecordRow(
                                 time = formatClock(r.timestamp),
-                                title = r.type.presentation.label,
+                                title = title,
                                 summary = r.presentationSummary(),
                                 relative = relativeTimeLabel(r.timestamp),
                                 tone = r.type.presentationTone(),
                                 leading = { RecordTypeIcon(r.type) },
                                 onClick = { onOpenEdit(r.id) },
                                 modifier = Modifier.semantics {
-                                    contentDescription = "编辑${r.type.presentation.label}"
+                                    contentDescription = "编辑$title"
                                 },
                             )
                         }

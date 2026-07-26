@@ -19,6 +19,7 @@ struct MemberCandidate {
     display_name: Option<String>,
     role: String,
     is_self: bool,
+    membership_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -29,6 +30,8 @@ struct MemberView {
     /// Client-only link key for mapping record `created_by_device_id` → 称呼.
     /// Never show this value in product UI (see sync-home-lan §9.5).
     device_id: String,
+    /// Server-minted immutable membership identity. Safe public key for ACL.
+    membership_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,6 +51,10 @@ pub(super) async fn list_family_members(
     // device for presentation without treating the unauthenticated device_id
     // claim as authority or rotating another token. An owner/member collision
     // remains two rows so the view never promotes a member to owner.
+    //
+    // When duplicates carry distinct membership_ids, prefer the caller's own
+    // membership_id when `is_self`, else the lexicographically smallest id so
+    // the projected identity is deterministic across restarts.
     let mut coalesced = BTreeMap::<(String, String), MemberCandidate>::new();
     for membership in memberships {
         let display_name = display_name_for_view(membership.display_name.as_deref());
@@ -55,10 +62,21 @@ pub(super) async fn list_family_members(
             membership.token_hash.as_bytes(),
             principal.token_hash.as_bytes(),
         );
+        // Self identity is always the authenticated principal's membership_id.
+        let membership_id = if is_self {
+            principal.membership_id.clone()
+        } else {
+            membership.membership_id
+        };
         let key = (membership.role.clone(), membership.device_id.clone());
         coalesced
             .entry(key)
             .and_modify(|candidate| {
+                if is_self {
+                    candidate.membership_id = membership_id.clone();
+                } else if !candidate.is_self && membership_id < candidate.membership_id {
+                    candidate.membership_id = membership_id.clone();
+                }
                 candidate.is_self |= is_self;
                 if candidate.display_name.is_none() {
                     candidate.display_name = display_name.clone();
@@ -69,6 +87,7 @@ pub(super) async fn list_family_members(
                 display_name,
                 role: membership.role,
                 is_self,
+                membership_id,
             });
     }
 
@@ -83,6 +102,7 @@ pub(super) async fn list_family_members(
             })
             .then_with(|| left.display_name.cmp(&right.display_name))
             .then_with(|| left.device_id.cmp(&right.device_id))
+            .then_with(|| left.membership_id.cmp(&right.membership_id))
     });
     Ok(Json(MembersResponse {
         members: members
@@ -92,6 +112,7 @@ pub(super) async fn list_family_members(
                 role: member.role,
                 is_self: member.is_self,
                 device_id: member.device_id,
+                membership_id: member.membership_id,
             })
             .collect(),
     }))

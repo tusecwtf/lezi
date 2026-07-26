@@ -46,9 +46,10 @@
 - 公网强制云、强制账号体系
 - 字段级部分共享
 
-**已批准的后续扩展（尚未实现）**
+**已批准的后续扩展**
 
-- 家庭同步 `CustomItemDef`、`CarePlan`、计划照片以及原子记录/计划照片包。
+- 家庭同步 `CustomItemDef`（`custom_item` legacy push）已落地：共享 UUID/名称/图标/创建者/tombstone；布局与槽位仍本机。
+- 家庭同步 `CarePlan`、计划照片以及计划原子包仍待后续票。
 - 通用 `CalendarEvent` 不进入家庭同步；护理计划与 Android 系统日历副本是不同概念。
 - 自定义项目显隐/排序/常用槽位、系统日历 ID/权限/披露级别与提醒偏好继续只存本机。
 
@@ -386,8 +387,10 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 ### 9.1 `GET /health`
 
 - 无鉴权
-- `200 {"ok": true, "version": "<semver>"}`
-- 客户端门闩探测用
+- `200 {"ok": true, "version": "<semver>", "capabilities": ["atomic_bundle"]}`
+- `capabilities` 为**加法**字段：旧客户端可忽略；新客户端用其识别 NAS 是否支持原子同步包
+- 不支持 `atomic_bundle` 的旧 NAS：客户端**不得**把带照片的记录/计划静默降级为 metadata-first 推送；应保留本机并提示升级服务端
+- 客户端门闩探测用；响应体保持小体积（健康探测上限 64 KiB）
 
 ### 9.2 `POST /v1/family/create`
 
@@ -396,7 +399,8 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
   - `display_name`：**家庭称呼**，产品层必填；校验同 join
   - `family_name`：共享家庭名，可空；trim 后空则存 null，由客户端兜底展示
   - 客户端在成功落盘会话前必须复用同一高熵 `create_request_id`
-- 响应：`{ "family_id", "token", "role": "owner", "generation", "family_name"? }`
+- 响应：`{ "family_id", "token", "role": "owner", "membership_id", "generation", "family_name"? }`
+  - `membership_id`：服务端生成的不可变 membership UUID；幂等重试返回同一值
 - 同一创建请求重试幂等恢复相同响应；一家一栈已有其它创建请求时返回 `409`
 
 ### 9.3 `POST /v1/invite`
@@ -415,16 +419,17 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 - `display_name`：**家庭称呼**，产品层必填。服务端 trim；空白返回 `422`（不再
   静默收成 null）；最长 128 个 Unicode 字符；控制字符或 Unicode 双向文本格式
   控制符返回 `422`。客户端本地占位名“我（本机）”**不得**上传
-- 响应：`{ "family_id", "token", "role":"member", "entities":[], "cursor":0, "generation", "family_name"? }`
-  （首包可空，随后 pull；或 join 时带全量，实现二选一，**须幂等**）
+- 响应：`{ "family_id", "token", "role":"member", "membership_id", "entities":[], "cursor":0, "generation", "family_name"? }`
+  （首包可空，随后 pull；或 join 时带全量，实现二选一，**须幂等**；幂等重试返回相同 `membership_id`）
 
 ### 9.5 `GET /v1/family/members`
 
 - Auth：任一有效 owner/member family token
 - 作用域：只查询 Bearer principal 所在家庭且 `revoked_at IS NULL` 的 membership
 - 响应：
-  `{"members":[{"display_name":"妈妈","role":"owner","is_self":true,"device_id":"…"}]}`
-- 返回规范化后的 `display_name`、`role`、`is_self`，以及客户端链路键
+  `{"members":[{"display_name":"妈妈","role":"owner","is_self":true,"device_id":"…","membership_id":"…"}]}`
+- 返回规范化后的 `display_name`、`role`、`is_self`、服务器生成的 `membership_id`
+  （不可变公开身份，供作者权限与冲突裁决引用），以及客户端链路键
   `device_id`（与记录 payload 的 `created_by_device_id` 对齐，供时间轴上传者
   解析为**当前**家庭称呼）。`is_self` 由服务端比较当前 principal 的 token hash
   得出；**绝不**返回 token、`token_hash` 或 `family_id`。`device_id` **不得**在
@@ -432,7 +437,8 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 - owner-first；其余按规范化名称与服务端内部稳定键排序。`display_name=null`
   表示历史 null/空/不安全名称，客户端按角色/「家人」兜底（且不得把「我（本机）」
   展示给其他成员）
-- 兼容旧库时，同 role + device 的重复 active token 只展示一行；owner/member
+- 兼容旧库时，同 role + device 的重复 active token 只展示一行；合并时优先投影
+  当前 principal 的 `membership_id`，否则取字典序最小 id。owner/member
   role 冲突不合并，因为 `device_id` 不是鉴权证据。退出只吊销当前 Bearer token；
   无法安全地凭未鉴权 `device_id` 批量吊销其它历史 token，删除家庭时才统一清除
 
@@ -513,6 +519,33 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 | `PUT` | `/v1/media/{client_uuid}` | body=bytes；需先/同时有 media 元数据 entity；鉴权 + avatar 规则 |
 | `GET` | `/v1/media/{client_uuid}` | 下载；家庭 token |
 | `DELETE` | `/v1/media/{client_uuid}` | 可选；或仅走 entity tombstone |
+
+### 9.8.1 原子同步包（`atomic_bundle`）
+
+根实体（`record` 或 `care_plan`）与完整媒体清单只能一起对其它设备可见。旧的
+`/v1/push` + `/v1/media` metadata-first 路径**继续兼容**（头像、旧客户端）；
+带照片的护理记录/计划应走本协议。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/v1/bundles` | 暂存包：`bundle_id`（客户端 UUID）、`root`、`media[]`、可选 `generation` |
+| `PUT` | `/v1/bundles/{bundle_id}/media/{client_uuid}` | 上传清单内媒体字节到暂存区 |
+| `POST` | `/v1/bundles/{bundle_id}/commit` | 单事务发布完整包；幂等 |
+| `GET` | `/v1/bundles/{bundle_id}` | 查询 `status` / `missing_media` / `staged_media` |
+
+规则摘要：
+
+- **暂存不可见**：commit 前根实体与媒体均不出现在普通 `GET /v1/pull`
+- **清单完整**：live media 必须声明正 `byte_size`；commit 前全部字节校验通过；tombstone media 不需字节
+- **幂等 commit**：重复 commit / 丢失响应可安全重试；已 commit 的 `bundle_id` 内容冲突 → `409`
+- **旧版本保留**：新版本编辑在 commit 前不覆盖已发布完整版本；根 `updated_at` 落后于已发布 → commit `409`
+- **LWW 与 legacy**：commit 与 `/v1/push` 共享实体键 LWW；不得用半套 legacy 写穿破原子可见性
+- **根类型通用**：`record` 与 `care_plan` 共用同一 HTTP/Store 契约
+- **CarePlan ACL**：创建时服务端从认证 principal 盖章 `created_by_membership_id`（忽略客户端伪造）；任意成员可创建；普通成员仅可修改/跳过/删除自己创建的计划，管理员可管理全部；作者离开后管理员仍可管理。计划媒体引用、宝宝、具体项目与家庭必须一致，跨家庭引用以冲突错误拒绝
+- **不经 legacy push**：`care_plan` 不得走 `/v1/push`，必须经 atomic bundle，避免半套包
+- **履行候选**（`fulfillment_candidate`，legacy push）：任意活动成员可提交；服务端在候选首次接受时固定认证 `submitter_membership_id`、`submitter_role` 与不可编辑 `confirmed_at`，后续请求/幂等重放不得改写；客户端用盖章字段按管理员 → 较早确认时间 → 候选 UUID 裁决唯一权威事实，落选标记 conflict-not-adopted 并排除于普通记录表面；管理员本机冲突审计与「转为独立记录」不改写候选盖章字段，也不通过 wire 同步 `adoptionStatus` / `convertedRecordClientUuid`
+- **旧客户端**：未知 `entity_type`（含 `care_plan` / `fulfillment_candidate`）应忽略整行，不得半应用
+- **暂存上限**：每包最多 8 个 media；每家庭最多 64 个 open staging bundle（防 NAS 磁盘无界）
 
 ### 9.9 `POST /v1/family/delete`
 

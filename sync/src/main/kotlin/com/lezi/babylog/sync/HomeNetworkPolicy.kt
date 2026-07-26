@@ -4,8 +4,8 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
-import android.os.Build
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.atomic.AtomicBoolean
@@ -13,8 +13,18 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 private const val MAX_HEALTH_RESPONSE_BYTES = 64 * 1024
+
+/** Capability string advertised by lezi-sync on `GET /health`. */
+const val CAPABILITY_ATOMIC_BUNDLE = "atomic_bundle"
 
 enum class HomeNetworkDecision {
     Allowed,
@@ -28,14 +38,32 @@ enum class HomeNetworkDecision {
     Background,
 }
 
+/**
+ * Result of probing NAS `/health`.
+ *
+ * [capabilities] is empty for legacy servers that omit the additive field;
+ * clients that require atomic packages must treat missing
+ * [CAPABILITY_ATOMIC_BUNDLE] as unsupported (no silent metadata-first fallback).
+ */
+data class HealthStatus(
+    val ok: Boolean,
+    val version: String? = null,
+    val capabilities: Set<String> = emptySet(),
+) {
+    val supportsAtomicBundle: Boolean
+        get() = CAPABILITY_ATOMIC_BUNDLE in capabilities
+}
+
 interface NetworkState {
     fun isWifiConnected(): Boolean
     fun currentWifiSsid(): String?
 }
 
 fun interface HealthProbe {
-    suspend fun isHealthy(baseUrl: String): Boolean
+    suspend fun probe(baseUrl: String): HealthStatus
 }
+
+suspend fun HealthProbe.isHealthy(baseUrl: String): Boolean = probe(baseUrl).ok
 
 fun interface PolicyClock {
     fun nowMillis(): Long
@@ -67,6 +95,14 @@ class HomeNetworkPolicy @Inject constructor(
     private var retryAfterMillis = 0L
     private var backoffBaseUrl = ""
 
+    /** Last successful health status (capabilities for atomic-bundle gating). */
+    @Volatile
+    var lastHealthStatus: HealthStatus = HealthStatus(ok = false)
+        private set
+
+    val supportsAtomicBundle: Boolean
+        get() = lastHealthStatus.supportsAtomicBundle
+
     /**
      * Gate for create / invite / join / push / pull.
      * @param config local home-LAN server + SSID allowlist
@@ -94,9 +130,11 @@ class HomeNetworkPolicy @Inject constructor(
             retryAfterMillis = 0
         }
         if (clock.nowMillis() < retryAfterMillis) return HomeNetworkDecision.BackingOff
-        return if (healthProbe.isHealthy(baseUrl)) {
+        val health = healthProbe.probe(baseUrl)
+        return if (health.ok) {
             consecutiveFailures = 0
             retryAfterMillis = 0
+            lastHealthStatus = health
             HomeNetworkDecision.Allowed
         } else {
             val delays = longArrayOf(30_000, 120_000, 600_000)
@@ -149,7 +187,7 @@ class AndroidNetworkState @Inject constructor(
 }
 
 class HttpHealthProbe @Inject constructor() : HealthProbe {
-    override suspend fun isHealthy(baseUrl: String): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun probe(baseUrl: String): HealthStatus = withContext(Dispatchers.IO) {
         runCatching {
             val connection = URL("${baseUrl.trimEnd('/')}/health").openConnection() as HttpURLConnection
             connection.requestMethod = "GET"
@@ -158,26 +196,46 @@ class HttpHealthProbe @Inject constructor() : HealthProbe {
             connection.useCaches = false
             connection.instanceFollowRedirects = false
             try {
-                val successful = connection.responseCode in 200..299
-                successful && connection.hasBodyWithinLimit(MAX_HEALTH_RESPONSE_BYTES)
+                val code = connection.responseCode
+                if (code !in 200..299) return@runCatching HealthStatus(ok = false)
+                val body = connection.readBodyWithinLimit(MAX_HEALTH_RESPONSE_BYTES)
+                    ?: return@runCatching HealthStatus(ok = false)
+                parseHealthStatus(body)
             } finally {
                 connection.disconnect()
             }
-        }.getOrDefault(false)
+        }.getOrDefault(HealthStatus(ok = false))
     }
 }
 
-private fun HttpURLConnection.hasBodyWithinLimit(limitBytes: Int): Boolean {
-    if (contentLengthLong > limitBytes) return false
-    inputStream.use { input ->
+internal fun parseHealthStatus(body: ByteArray): HealthStatus {
+    if (body.isEmpty()) return HealthStatus(ok = true)
+    return runCatching {
+        val json = Json.parseToJsonElement(body.toString(Charsets.UTF_8)).jsonObject
+        val ok = json["ok"]?.jsonPrimitive?.booleanOrNull ?: true
+        val version = json["version"]?.jsonPrimitive?.contentOrNull
+        val capabilities = (json["capabilities"] as? JsonArray)
+            .orEmpty()
+            .mapNotNull { element -> (element as? JsonPrimitive)?.contentOrNull }
+            .toSet()
+        HealthStatus(ok = ok, version = version, capabilities = capabilities)
+    }.getOrDefault(HealthStatus(ok = true))
+}
+
+private fun HttpURLConnection.readBodyWithinLimit(limitBytes: Int): ByteArray? {
+    if (contentLengthLong > limitBytes) return null
+    return inputStream.use { input ->
         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        val output = ByteArrayOutputStream(minOf(DEFAULT_BUFFER_SIZE, limitBytes))
         var total = 0
         while (true) {
             val read = input.read(buffer)
-            if (read < 0) return true
+            if (read < 0) break
             total += read
-            if (total > limitBytes) return false
+            if (total > limitBytes) return null
+            output.write(buffer, 0, read)
         }
+        output.toByteArray()
     }
 }
 

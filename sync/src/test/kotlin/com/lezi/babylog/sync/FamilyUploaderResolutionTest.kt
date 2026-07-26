@@ -58,9 +58,22 @@ class FamilyUploaderResolutionTest {
     @Test
     fun familyMemberMapsToUploaderRefWhenDeviceIdPresent() {
         assertThat(
-            FamilyMember("妈妈", FamilyRole.Owner, isSelf = true, deviceId = "d1")
-                .toUploaderRef(),
-        ).isEqualTo(UploaderMemberRef("d1", "妈妈", FamilyRole.Owner, isSelf = true))
+            FamilyMember(
+                "妈妈",
+                FamilyRole.Owner,
+                isSelf = true,
+                deviceId = "d1",
+                membershipId = "m1",
+            ).toUploaderRef(),
+        ).isEqualTo(
+            UploaderMemberRef(
+                "d1",
+                "妈妈",
+                FamilyRole.Owner,
+                isSelf = true,
+                membershipId = "m1",
+            ),
+        )
         assertThat(
             FamilyMember("妈妈", FamilyRole.Owner, isSelf = true, deviceId = null)
                 .toUploaderRef(),

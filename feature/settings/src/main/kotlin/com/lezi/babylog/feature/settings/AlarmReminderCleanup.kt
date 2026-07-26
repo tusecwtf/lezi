@@ -1,5 +1,6 @@
 package com.lezi.babylog.feature.settings
 
+import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.domain.CalendarEvent
 import com.lezi.babylog.domain.ReminderCleanupPort
 import dagger.Binds
@@ -14,12 +15,24 @@ import javax.inject.Singleton
 class AlarmReminderCleanup @Inject constructor(
     private val nextFeedScheduler: NextFeedScheduler,
     private val calendarAlarm: CalendarReminderAlarm,
+    private val carePlanAlarm: CarePlanReminderAlarm,
 ) : ReminderCleanupPort {
     override suspend fun scheduleCalendar(event: CalendarEvent): Boolean =
         calendarAlarm.schedule(event)
 
     override suspend fun cancelCalendar(eventId: Long) {
         calendarAlarm.cancel(eventId)
+    }
+
+    override suspend fun scheduleCarePlan(plan: CarePlan): Boolean =
+        runCatching { carePlanAlarm.schedule(plan) }.getOrDefault(false)
+
+    override suspend fun cancelCarePlan(carePlanId: Long) {
+        carePlanAlarm.cancel(carePlanId)
+    }
+
+    override suspend fun cancelCarePlanByClientUuid(clientUuid: String) {
+        carePlanAlarm.cancelByClientUuid(clientUuid)
     }
 
     override suspend fun cancelForRecordsClear(calendarEventIds: Collection<Long>) {
