@@ -44,5 +44,17 @@ interface SettingsStore {
     suspend fun setSystemCalendarEnabled(enabled: Boolean)
     suspend fun setSystemCalendarId(calendarId: String?)
     suspend fun setSystemCalendarDisclosureLevel(level: Int)
+    /**
+     * Persist the user-confirmed target, enabled state, and disclosure grade as one setting.
+     * A null/blank target disables projection while preserving the last disclosure choice.
+     */
+    suspend fun setSystemCalendarConfiguration(
+        calendarId: String?,
+        disclosureLevel: Int? = null,
+    ) {
+        setSystemCalendarId(calendarId)
+        disclosureLevel?.let { setSystemCalendarDisclosureLevel(it) }
+        setSystemCalendarEnabled(!calendarId.isNullOrBlank())
+    }
     suspend fun setSystemCalendarEventMapJson(json: String)
 }

@@ -32,6 +32,12 @@ abstract class DomainModule {
     internal abstract fun bindLocalDataClearSettings(
         impl: StoreLocalDataClearSettings,
     ): LocalDataClearSettings
+
+    @Binds
+    @Singleton
+    internal abstract fun bindSystemCalendarConfigurationCoordinator(
+        impl: DefaultSystemCalendarConfigurationCoordinator,
+    ): SystemCalendarConfigurationCoordinator
 }
 
 /**

@@ -73,6 +73,8 @@ import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
 import com.lezi.babylog.domain.CustomRecordItem
 import com.lezi.babylog.domain.LocalRecordsClearCommittedException
+import com.lezi.babylog.domain.SystemCalendarConfigurationCoordinator
+import com.lezi.babylog.domain.SystemCalendarPort
 import com.lezi.babylog.sync.SyncPort
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
@@ -83,6 +85,7 @@ import javax.inject.Inject
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -122,12 +125,14 @@ data class SettingsUi(
     val current: Baby? = null,
     val customItems: List<CustomRecordItem> = emptyList(),
     val isFamilyJoined: Boolean = false,
+    val systemCalendarTargetSummary: String = "未配置",
 )
 
 private data class LocalSettingsUi(
     val settings: SettingsLocal,
     val showAvgSleep: Boolean,
     val comparePrevWeek: Boolean,
+    val systemCalendarTargetSummary: String,
 )
 
 @HiltViewModel
@@ -135,13 +140,29 @@ class SettingsViewModel @Inject constructor(
     private val settingsStore: SettingsStore,
     private val careLog: CareLog,
     private val syncPort: SyncPort,
+    private val systemCalendarPort: SystemCalendarPort,
+    private val systemCalendarConfiguration: SystemCalendarConfigurationCoordinator,
 ) : ViewModel() {
+    private val settingsWithCalendarTarget = settingsStore.settings.map { settings ->
+        val hasPermission = systemCalendarPort.hasCalendarPermission()
+        val targets = if (hasPermission) {
+            systemCalendarPort.listWritableCalendars()
+        } else {
+            emptyList()
+        }
+        settings to systemCalendarTargetSummary(
+            calendarId = settings.systemCalendarId,
+            hasPermission = hasPermission,
+            targets = targets,
+        )
+    }
+
     private val localSettings = combine(
-        settingsStore.settings,
+        settingsWithCalendarTarget,
         settingsStore.showAvgSleep,
         settingsStore.comparePrevWeek,
-    ) { settings, showAvgSleep, comparePrevWeek ->
-        LocalSettingsUi(settings, showAvgSleep, comparePrevWeek)
+    ) { (settings, targetSummary), showAvgSleep, comparePrevWeek ->
+        LocalSettingsUi(settings, showAvgSleep, comparePrevWeek, targetSummary)
     }
 
     val ui = combine(
@@ -159,6 +180,7 @@ class SettingsViewModel @Inject constructor(
             current = cur,
             customItems = customItems,
             isFamilyJoined = session.isJoined,
+            systemCalendarTargetSummary = local.systemCalendarTargetSummary,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsUi())
 
@@ -181,37 +203,13 @@ class SettingsViewModel @Inject constructor(
     fun setCarePlanLocalReminders(enabled: Boolean) =
         viewModelScope.launch { settingsStore.setCarePlanLocalRemindersEnabled(enabled) }
 
-    fun setSystemCalendarEnabled(enabled: Boolean) =
-        viewModelScope.launch { settingsStore.setSystemCalendarEnabled(enabled) }
-
-    fun setSystemCalendarId(calendarId: String?) =
+    fun confirmSystemCalendar(calendarId: String, disclosureLevel: Int) =
         viewModelScope.launch {
-            val prefs = settingsStore.settings.first()
-            val wasConfigured = prefs.systemCalendarEnabled &&
-                !prefs.systemCalendarId.isNullOrBlank()
-            settingsStore.setSystemCalendarId(calendarId)
-            if (!calendarId.isNullOrBlank()) {
-                settingsStore.setSystemCalendarEnabled(true)
-                // First enable defaults to L2; later target changes keep user disclosure.
-                if (!wasConfigured) {
-                    settingsStore.setSystemCalendarDisclosureLevel(2)
-                }
-                // Best-effort: project open-future plans to the (new) target.
-                careLog.reprojectOpenFutureSystemCalendarCopies()
-            } else {
-                settingsStore.setSystemCalendarEnabled(false)
-            }
+            systemCalendarConfiguration.confirm(calendarId, disclosureLevel)
         }
 
-    /**
-     * Device-local disclosure grade. Reprojects only open-future plans so
-     * historical calendar copies are not bulk-expanded.
-     */
-    fun setSystemCalendarDisclosureLevel(level: Int) =
-        viewModelScope.launch {
-            settingsStore.setSystemCalendarDisclosureLevel(level)
-            careLog.reprojectOpenFutureSystemCalendarCopies()
-        }
+    fun disableSystemCalendar() =
+        viewModelScope.launch { systemCalendarConfiguration.disable() }
     fun setShowAvgSleep(enabled: Boolean) =
         viewModelScope.launch { settingsStore.setShowAvgSleep(enabled) }
     fun setComparePrevWeek(enabled: Boolean) =
@@ -483,7 +481,7 @@ fun SettingsRoute(
             onCarePlanRemindersEnabled = vm::setCarePlanLocalReminders,
             systemCalendarEnabled = ui.settings.systemCalendarEnabled &&
                 !ui.settings.systemCalendarId.isNullOrBlank(),
-            systemCalendarSummary = ui.settings.systemCalendarId?.let { "日历 $it" } ?: "未配置",
+            systemCalendarSummary = ui.systemCalendarTargetSummary,
             systemCalendarDisclosureSummary = systemCalendarDisclosureLabel(
                 ui.settings.systemCalendarDisclosureLevel,
             ),
@@ -500,13 +498,15 @@ fun SettingsRoute(
         SystemCalendarSetupDialog(
             currentCalendarId = ui.settings.systemCalendarId,
             currentDisclosureLevel = ui.settings.systemCalendarDisclosureLevel,
-            onPick = { calendarId ->
-                vm.setSystemCalendarId(calendarId)
+            onConfirm = { selection ->
+                vm.confirmSystemCalendar(
+                    selection.calendarId,
+                    selection.disclosureLevel,
+                )
                 showSystemCalendarSetup = false
             },
-            onDisclosureLevel = vm::setSystemCalendarDisclosureLevel,
             onDisable = {
-                vm.setSystemCalendarId(null)
+                vm.disableSystemCalendar()
                 showSystemCalendarSetup = false
             },
             onDismiss = { showSystemCalendarSetup = false },

@@ -72,6 +72,7 @@ import com.lezi.babylog.designsystem.AppBrandBar
 import com.lezi.babylog.designsystem.LeziColors
 import com.lezi.babylog.designsystem.LeziTheme
 import com.lezi.babylog.domain.CareLog
+import com.lezi.babylog.domain.SystemCalendarConfigurationCoordinator
 import com.lezi.babylog.domain.babyAgeLabel
 import com.lezi.babylog.feature.export.ExportRoute
 import com.lezi.babylog.feature.family.FamilyRoute
@@ -226,6 +227,7 @@ data class RootUi(
 class RootViewModel @Inject constructor(
     private val careLog: CareLog,
     private val settings: SettingsStore,
+    private val systemCalendarConfiguration: SystemCalendarConfigurationCoordinator,
     private val savedStateHandle: SavedStateHandle,
     private val widgetRefreshController: CareWidgetRefreshController,
 ) : ViewModel() {
@@ -325,30 +327,14 @@ class RootViewModel @Inject constructor(
         .map { it.systemCalendarDisclosureLevel }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 2)
 
-    fun setSystemCalendarId(calendarId: String?) {
+    fun confirmSystemCalendar(calendarId: String, disclosureLevel: Int) {
         viewModelScope.launch {
-            val prefs = settings.settings.first()
-            val wasConfigured = prefs.systemCalendarEnabled &&
-                !prefs.systemCalendarId.isNullOrBlank()
-            settings.setSystemCalendarId(calendarId)
-            if (calendarId != null) {
-                settings.setSystemCalendarEnabled(true)
-                if (!wasConfigured) {
-                    settings.setSystemCalendarDisclosureLevel(2)
-                }
-                careLog.reprojectOpenFutureSystemCalendarCopies()
-            } else {
-                settings.setSystemCalendarEnabled(false)
-            }
+            systemCalendarConfiguration.confirm(calendarId, disclosureLevel)
         }
     }
 
-    fun setSystemCalendarDisclosureLevel(level: Int) {
-        viewModelScope.launch {
-            settings.setSystemCalendarDisclosureLevel(level)
-            careLog.reprojectOpenFutureSystemCalendarCopies()
-        }
-    }
+    fun disableSystemCalendar() =
+        viewModelScope.launch { systemCalendarConfiguration.disable() }
 
     fun cycleBaby() {
         viewModelScope.launch {
@@ -773,13 +759,15 @@ fun LeziRoot(
         SystemCalendarSetupDialog(
             currentCalendarId = systemCalendarId,
             currentDisclosureLevel = systemCalendarDisclosureLevel,
-            onPick = { calendarId ->
-                vm.setSystemCalendarId(calendarId)
+            onConfirm = { selection ->
+                vm.confirmSystemCalendar(
+                    selection.calendarId,
+                    selection.disclosureLevel,
+                )
                 showSystemCalendarSetup = false
             },
-            onDisclosureLevel = vm::setSystemCalendarDisclosureLevel,
             onDisable = {
-                vm.setSystemCalendarId(null)
+                vm.disableSystemCalendar()
                 showSystemCalendarSetup = false
             },
             onDismiss = { showSystemCalendarSetup = false },

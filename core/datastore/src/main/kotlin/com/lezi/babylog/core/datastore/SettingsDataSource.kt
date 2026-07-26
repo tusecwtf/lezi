@@ -194,6 +194,25 @@ class SettingsDataSource @Inject constructor(
         dataStore.edit { it[Keys.SYSTEM_CALENDAR_DISCLOSURE] = level.coerceIn(1, 3) }
     }
 
+    override suspend fun setSystemCalendarConfiguration(
+        calendarId: String?,
+        disclosureLevel: Int?,
+    ) {
+        val normalizedId = calendarId?.trim()?.takeIf(String::isNotEmpty)
+        dataStore.edit { prefs ->
+            if (normalizedId == null) {
+                prefs.remove(Keys.SYSTEM_CALENDAR_ID)
+                prefs[Keys.SYSTEM_CALENDAR_ENABLED] = false
+            } else {
+                prefs[Keys.SYSTEM_CALENDAR_ID] = normalizedId
+                prefs[Keys.SYSTEM_CALENDAR_ENABLED] = true
+                disclosureLevel?.let {
+                    prefs[Keys.SYSTEM_CALENDAR_DISCLOSURE] = it.coerceIn(1, 3)
+                }
+            }
+        }
+    }
+
     override suspend fun setSystemCalendarEventMapJson(json: String) {
         dataStore.edit { it[Keys.SYSTEM_CALENDAR_EVENT_MAP] = json.ifBlank { "{}" } }
     }
@@ -251,4 +270,3 @@ internal fun normalizeQuickRecordSlots(slots: List<String>): List<String> {
 
 internal fun encodeQuickRecordSlots(slots: List<String>): String =
     normalizeQuickRecordSlots(slots).joinToString(",")
-

@@ -4,12 +4,17 @@ import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -19,8 +24,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.lezi.babylog.designsystem.LeziTypography
@@ -59,6 +66,58 @@ fun systemCalendarDisclosureDetail(level: Int): String = when (
         "标题同第二级；描述可含文字备注，有照片时写「照片 N 张，打开乐记查看」与深链，从不上传照片。"
 }
 
+data class SystemCalendarSetupSelection(
+    val calendarId: String,
+    val disclosureLevel: Int,
+)
+
+/** Dialog-local draft. Nothing is persisted until [confirmedOrNull] is submitted. */
+internal data class SystemCalendarSetupDraft(
+    val selectedCalendarId: String?,
+    val disclosureLevel: Int,
+) {
+    fun selectCalendar(calendarId: String): SystemCalendarSetupDraft =
+        copy(selectedCalendarId = calendarId.trim().takeIf(String::isNotEmpty))
+
+    fun selectDisclosureLevel(level: Int): SystemCalendarSetupDraft =
+        copy(disclosureLevel = level.coerceIn(1, 3))
+
+    fun reconcileWritableCalendars(calendarIds: Set<String>): SystemCalendarSetupDraft =
+        if (selectedCalendarId in calendarIds) this else copy(selectedCalendarId = null)
+
+    fun confirmedOrNull(): SystemCalendarSetupSelection? = selectedCalendarId
+        ?.takeIf(String::isNotBlank)
+        ?.let { SystemCalendarSetupSelection(it, disclosureLevel.coerceIn(1, 3)) }
+
+    companion object {
+        fun from(
+            currentCalendarId: String?,
+            currentDisclosureLevel: Int,
+        ): SystemCalendarSetupDraft = SystemCalendarSetupDraft(
+            selectedCalendarId = currentCalendarId?.trim()?.takeIf(String::isNotEmpty),
+            disclosureLevel = currentDisclosureLevel.coerceIn(1, 3),
+        )
+    }
+}
+
+internal fun systemCalendarTargetSummary(
+    calendarId: String?,
+    hasPermission: Boolean,
+    targets: List<SystemCalendarTarget>,
+): String {
+    val normalizedId = calendarId?.trim()?.takeIf(String::isNotEmpty) ?: return "未配置"
+    if (!hasPermission) return "需要日历权限以确认目标"
+    val target = targets.firstOrNull { it.calendarId == normalizedId }
+        ?: return "原日历不可用，请重新选择"
+    return buildString {
+        append(target.displayName)
+        if (target.accountName.isNotBlank()) {
+            append(" · ")
+            append(target.accountName)
+        }
+    }
+}
+
 /**
  * Explicit user enable flow: request calendar permission only when opened, then
  * list writable calendars for a deliberate pick (never silent default).
@@ -69,8 +128,7 @@ fun systemCalendarDisclosureDetail(level: Int): String = when (
 fun SystemCalendarSetupDialog(
     currentCalendarId: String?,
     currentDisclosureLevel: Int = 2,
-    onPick: (calendarId: String) -> Unit,
-    onDisclosureLevel: (level: Int) -> Unit = {},
+    onConfirm: (SystemCalendarSetupSelection) -> Unit,
     onDisable: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -83,9 +141,12 @@ fun SystemCalendarSetupDialog(
         ).systemCalendarPort()
     }
     var targets by remember { mutableStateOf<List<SystemCalendarTarget>>(emptyList()) }
+    var targetsLoaded by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
-    var selectedLevel by remember(currentDisclosureLevel) {
-        mutableStateOf(currentDisclosureLevel.coerceIn(1, 3))
+    var draft by remember(currentCalendarId, currentDisclosureLevel) {
+        mutableStateOf(
+            SystemCalendarSetupDraft.from(currentCalendarId, currentDisclosureLevel),
+        )
     }
     var hasPermission by remember {
         mutableStateOf(
@@ -108,8 +169,15 @@ fun SystemCalendarSetupDialog(
     fun refreshTargets() {
         scope.launch {
             targets = port.listWritableCalendars()
-            if (hasPermission && targets.isEmpty()) {
-                status = "未找到可写日历"
+            targetsLoaded = true
+            draft = draft.reconcileWritableCalendars(
+                targets.mapTo(linkedSetOf(), SystemCalendarTarget::calendarId),
+            )
+            status = when {
+                targets.isEmpty() -> "未找到可写日历"
+                currentCalendarId != null && draft.selectedCalendarId == null ->
+                    "原日历不可用，请重新选择"
+                else -> null
             }
         }
     }
@@ -122,7 +190,9 @@ fun SystemCalendarSetupDialog(
         onDismissRequest = onDismiss,
         title = { Text("系统日历") },
         text = {
-            Column {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+            ) {
                 Text(
                     "仅本机有效，不随家庭同步。请选择可写日历与披露级别；默认预选第二级。",
                     style = LeziTypography.Meta,
@@ -134,33 +204,42 @@ fun SystemCalendarSetupDialog(
                     modifier = Modifier.padding(top = 12.dp),
                 )
                 listOf(1, 2, 3).forEach { level ->
-                    val selected = selectedLevel == level
-                    Text(
-                        buildString {
-                            append(if (selected) "● " else "○ ")
-                            append(systemCalendarDisclosureLabel(level))
-                            if (level == 2) append("（默认）")
-                        },
+                    val selected = draft.disclosureLevel == level
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable {
-                                selectedLevel = level
-                                onDisclosureLevel(level)
-                            }
-                            .padding(vertical = 6.dp),
-                        style = LeziTypography.Body,
-                        color = if (selected) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.onSurface
-                        },
-                    )
-                    Text(
-                        systemCalendarDisclosureDetail(level),
-                        style = LeziTypography.Meta,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(start = 16.dp, bottom = 4.dp),
-                    )
+                            .heightIn(min = 48.dp)
+                            .selectable(
+                                selected = selected,
+                                role = Role.RadioButton,
+                                onClick = {
+                                    draft = draft.selectDisclosureLevel(level)
+                                },
+                            )
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = selected, onClick = null)
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                buildString {
+                                    append(systemCalendarDisclosureLabel(level))
+                                    if (level == 2) append("（默认）")
+                                },
+                                style = LeziTypography.Body,
+                                color = if (selected) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                },
+                            )
+                            Text(
+                                systemCalendarDisclosureDetail(level),
+                                style = LeziTypography.Meta,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                 }
                 Text(
                     "目标日历",
@@ -180,30 +259,43 @@ fun SystemCalendarSetupDialog(
                     ) {
                         Text("授予日历权限")
                     }
-                } else if (targets.isEmpty()) {
+                } else if (!targetsLoaded) {
                     Text(
-                        status ?: "正在加载可写日历…",
+                        "正在加载可写日历…",
                         style = LeziTypography.Meta,
                         modifier = Modifier.padding(top = 8.dp),
                     )
+                } else if (targets.isEmpty()) {
+                    Text(status ?: "未找到可写日历", style = LeziTypography.Meta)
                 } else {
                     targets.forEach { target ->
-                        val selected = target.calendarId == currentCalendarId
-                        Text(
-                            buildString {
-                                append(target.displayName)
-                                if (target.accountName.isNotBlank()) {
-                                    append(" · ")
-                                    append(target.accountName)
-                                }
-                                if (selected) append("（当前）")
-                            },
+                        val selected = target.calendarId == draft.selectedCalendarId
+                        Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable { onPick(target.calendarId) }
-                                .padding(vertical = 10.dp),
-                            style = LeziTypography.Body,
-                        )
+                                .heightIn(min = 48.dp)
+                                .selectable(
+                                    selected = selected,
+                                    role = Role.RadioButton,
+                                    onClick = {
+                                        draft = draft.selectCalendar(target.calendarId)
+                                        status = null
+                                    },
+                                ),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            RadioButton(selected = selected, onClick = null)
+                            Column(Modifier.weight(1f)) {
+                                Text(target.displayName, style = LeziTypography.Body)
+                                if (target.accountName.isNotBlank()) {
+                                    Text(
+                                        target.accountName,
+                                        style = LeziTypography.Meta,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
                 status?.let {
@@ -217,11 +309,18 @@ fun SystemCalendarSetupDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
+            val selection = draft.confirmedOrNull()
+            TextButton(
+                onClick = { selection?.let(onConfirm) },
+                enabled = selection != null,
+            ) { Text("保存") }
         },
         dismissButton = {
-            if (currentCalendarId != null) {
-                TextButton(onClick = onDisable) { Text("关闭同步") }
+            Row {
+                if (currentCalendarId != null) {
+                    TextButton(onClick = onDisable) { Text("关闭同步") }
+                }
+                TextButton(onClick = onDismiss) { Text("取消") }
             }
         },
     )
