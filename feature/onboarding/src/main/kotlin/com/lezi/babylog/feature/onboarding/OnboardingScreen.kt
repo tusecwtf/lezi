@@ -75,13 +75,10 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
-import com.lezi.babylog.sync.DEFAULT_SERVER_HOST
-import com.lezi.babylog.sync.DEFAULT_SERVER_PORT
 import com.lezi.babylog.sync.HomeLanServerConfig
 import com.lezi.babylog.sync.HomeWifiPermission
-import com.lezi.babylog.sync.JoinFamilyCommand
+import com.lezi.babylog.sync.JoinFamilyDraft
 import com.lezi.babylog.sync.HomeWifiSettingsTarget
-import com.lezi.babylog.sync.InvitePayloadCodec
 import com.lezi.babylog.sync.NetworkState
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
@@ -156,23 +153,11 @@ class OnboardingViewModel @Inject constructor(
      * and later upload an unwanted extra Baby.
      */
     fun joinFamily(
-        host: String,
-        portText: String,
-        scheme: String,
-        ssid1: String,
-        ssid2: String,
-        invitePayload: String,
+        draft: JoinFamilyDraft,
         onDone: (String?) -> Unit,
     ) {
         viewModelScope.launch {
-            val config = runCatching {
-                buildOnboardingHomeLanConfig(
-                    host = host,
-                    portText = portText,
-                    scheme = scheme,
-                    ssids = listOf(ssid1, ssid2),
-                )
-            }.getOrElse {
+            val command = runCatching { draft.toCommand() }.getOrElse {
                 onDone(it.message ?: "服务器地址无效")
                 return@launch
             }
@@ -188,11 +173,7 @@ class OnboardingViewModel @Inject constructor(
             // The edited endpoint is an in-memory join candidate. RealSyncPort persists it
             // atomically with the joined session only after the server accepts the invite.
             val join = sync.joinFamily(
-                JoinFamilyCommand(
-                    invitation = invitePayload.trim(),
-                    homeLanConfig = config,
-                    displayName = displayName,
-                ),
+                command.copy(displayName = displayName),
             )
             if (join.isFailure) {
                 onDone(productUiError(join.exceptionOrNull() ?: Exception("加入失败"), "加入家庭失败"))
@@ -301,12 +282,7 @@ fun OnboardingRoute(
             if (HomeWifiPermission.hasRequiredPermissions(context)) vm.currentWifiSsid() else null,
         )
     }
-    var joinHost by remember { mutableStateOf(novice.host) }
-    var joinPort by remember { mutableStateOf(novice.port.toString()) }
-    var joinScheme by remember { mutableStateOf(novice.scheme) }
-    var joinSsid1 by remember { mutableStateOf(novice.allowedSsids.getOrNull(0).orEmpty()) }
-    var joinSsid2 by remember { mutableStateOf("") }
-    var joinCode by remember { mutableStateOf("") }
+    var joinDraft by remember { mutableStateOf(JoinFamilyDraft.fromConfig(novice)) }
     var pendingHomeWifiAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     var showHomeWifiAccessGuide by remember { mutableStateOf(false) }
     val homeWifiPermission = rememberLauncherForActivityResult(
@@ -333,25 +309,17 @@ fun OnboardingRoute(
     }
     fun fillCurrentWifiIfBlank() {
         val currentSsid = vm.currentWifiSsid()?.trim().orEmpty()
-        if (currentSsid.isNotEmpty() && joinSsid1.isBlank()) joinSsid1 = currentSsid
+        if (currentSsid.isNotEmpty() && joinDraft.ssid1.isBlank()) {
+            joinDraft = joinDraft.copy(ssid1 = currentSsid)
+        }
     }
     fun applyScannedInvite(raw: String) {
         val payload = raw.trim()
         if (payload.isEmpty()) return
-        joinCode = payload
         formError = null
         // Prefill host, port, and optional SSIDs; persist them only after join succeeds.
-        runCatching { decodeOnboardingInvitePrefill(payload) }.getOrNull()?.let { prefill ->
-            if (prefill.host.isNotBlank()) {
-                joinHost = prefill.host
-                joinPort = prefill.portText
-                joinScheme = prefill.scheme
-            }
-            if (prefill.ssids.isNotEmpty()) {
-                joinSsid1 = prefill.ssids.getOrNull(0).orEmpty()
-                joinSsid2 = prefill.ssids.getOrNull(1).orEmpty()
-            }
-        }
+        joinDraft = runCatching { joinDraft.prefillInvitation(payload) }
+            .getOrElse { joinDraft.copy(invitation = payload) }
         showJoin = true
     }
     val scanInvite = rememberLauncherForActivityResult(ScanContract()) { result ->
@@ -393,8 +361,12 @@ fun OnboardingRoute(
     // Form defaults do not trigger runtime permission prompts; only explicit family actions do.
     LaunchedEffect(showJoin) {
         if (!showJoin) return@LaunchedEffect
-        if (joinHost.isBlank()) joinHost = DEFAULT_SERVER_HOST
-        if (joinPort.isBlank()) joinPort = DEFAULT_SERVER_PORT.toString()
+        if (joinDraft.host.isBlank() || joinDraft.portText.isBlank()) {
+            joinDraft = JoinFamilyDraft.fromConfig(novice, joinDraft.invitation).copy(
+                ssid1 = joinDraft.ssid1.ifBlank { novice.allowedSsids.getOrNull(0).orEmpty() },
+                ssid2 = joinDraft.ssid2,
+            )
+        }
     }
     val dateLabel = remember(birthday) {
         LocalDate.ofEpochDay(birthday).format(DateTimeFormatter.ofPattern("yyyy年M月d日"))
@@ -595,18 +567,18 @@ fun OnboardingRoute(
                     JoinSetupStep(
                         step = "1",
                         title = "家庭网络",
-                        status = if (joinHost.isNotBlank() && joinSsid1.isNotBlank()) {
+                        status = if (joinDraft.host.isNotBlank() && joinDraft.ssid1.isNotBlank()) {
                             "服务器与家庭 Wi‑Fi 已填写"
                         } else {
                             "填写服务器并绑定家庭 Wi‑Fi"
                         },
-                        complete = joinHost.isNotBlank() && joinSsid1.isNotBlank(),
+                        complete = joinDraft.host.isNotBlank() && joinDraft.ssid1.isNotBlank(),
                     )
                     JoinSetupStep(
                         step = "2",
                         title = "家庭邀请",
-                        status = if (joinCode.isBlank()) "扫码或粘贴邀请码" else "邀请码已填入",
-                        complete = joinCode.isNotBlank(),
+                        status = if (joinDraft.invitation.isBlank()) "扫码或粘贴邀请码" else "邀请码已填入",
+                        complete = joinDraft.invitation.isNotBlank(),
                     )
                     JoinSetupStep(
                         step = "3",
@@ -615,19 +587,21 @@ fun OnboardingRoute(
                         complete = false,
                     )
                     OutlinedTextField(
-                        value = joinHost,
-                        onValueChange = { joinHost = it },
+                        value = joinDraft.host,
+                        onValueChange = { joinDraft = joinDraft.copy(host = it) },
                         label = { Text("服务器主机（IP/域名）") },
                         placeholder = { Text("192.168.50.4") },
                         supportingText = {
-                            Text(if (joinHost.isBlank()) "待填写" else "服务器地址已填写")
+                            Text(if (joinDraft.host.isBlank()) "待填写" else "服务器地址已填写")
                         },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
                     OutlinedTextField(
-                        value = joinPort,
-                        onValueChange = { joinPort = it.filter { ch -> ch.isDigit() }.take(5) },
+                        value = joinDraft.portText,
+                        onValueChange = {
+                            joinDraft = joinDraft.copy(portText = it.filter(Char::isDigit).take(5))
+                        },
                         label = { Text("端口") },
                         placeholder = { Text("8765") },
                         singleLine = true,
@@ -635,14 +609,14 @@ fun OnboardingRoute(
                         modifier = Modifier.fillMaxWidth(),
                     )
                     OutlinedTextField(
-                        value = joinSsid1,
-                        onValueChange = { joinSsid1 = it },
+                        value = joinDraft.ssid1,
+                        onValueChange = { joinDraft = joinDraft.copy(ssid1 = it) },
                         label = { Text("家庭 Wi‑Fi 名称 1（如 2.4G）") },
                         placeholder = { Text("当前连接的 Wi‑Fi 名") },
                         supportingText = {
                             Text(
-                                if (joinSsid1.isNotBlank()) {
-                                    "已绑定：$joinSsid1"
+                                if (joinDraft.ssid1.isNotBlank()) {
+                                    "已绑定：${joinDraft.ssid1}"
                                 } else {
                                     "待填写，或读取当前 Wi‑Fi"
                                 },
@@ -652,8 +626,8 @@ fun OnboardingRoute(
                         modifier = Modifier.fillMaxWidth(),
                     )
                     OutlinedTextField(
-                        value = joinSsid2,
-                        onValueChange = { joinSsid2 = it },
+                        value = joinDraft.ssid2,
+                        onValueChange = { joinDraft = joinDraft.copy(ssid2 = it) },
                         label = { Text("家庭 Wi‑Fi 名称 2（可选，如 5G）") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
@@ -664,11 +638,11 @@ fun OnboardingRoute(
                                 val cur = vm.currentWifiSsid()?.trim().orEmpty()
                                 if (cur.isEmpty()) {
                                     showHomeWifiAccessGuide = true
-                                } else if (joinSsid1.isBlank()) {
-                                    joinSsid1 = cur
-                                } else if (joinSsid2.isBlank() && joinSsid1 != cur) {
-                                    joinSsid2 = cur
-                                } else if (joinSsid1 != cur && joinSsid2 != cur) {
+                                } else if (joinDraft.ssid1.isBlank()) {
+                                    joinDraft = joinDraft.copy(ssid1 = cur)
+                                } else if (joinDraft.ssid2.isBlank() && joinDraft.ssid1 != cur) {
+                                    joinDraft = joinDraft.copy(ssid2 = cur)
+                                } else if (joinDraft.ssid1 != cur && joinDraft.ssid2 != cur) {
                                     formError = "Wi‑Fi 名称已满 2 个，请先清空一格"
                                 } else {
                                     formError = "当前 Wi‑Fi 已在列表中"
@@ -680,8 +654,8 @@ fun OnboardingRoute(
                         Text("填入当前 Wi‑Fi 名称")
                     }
                     OutlinedTextField(
-                        value = joinCode,
-                        onValueChange = { joinCode = it },
+                        value = joinDraft.invitation,
+                        onValueChange = { joinDraft = joinDraft.copy(invitation = it) },
                         label = { Text("邀请码或 QR 载荷") },
                         singleLine = true,
                         trailingIcon = {
@@ -706,26 +680,13 @@ fun OnboardingRoute(
                     onClick = {
                         withHomeWifiAccess {
                             fillCurrentWifiIfBlank()
-                            if (joinCode.trim().isEmpty()) {
-                                formError = "请填写邀请码"
-                                return@withHomeWifiAccess
-                            }
-                            if (joinHost.trim().isEmpty()) {
-                                formError = "请填写服务器主机"
-                                return@withHomeWifiAccess
-                            }
-                            if (joinSsid1.isBlank() && joinSsid2.isBlank()) {
-                                formError = "请至少填写一个家庭 Wi‑Fi 名称"
+                            runCatching { joinDraft.toCommand() }.exceptionOrNull()?.let {
+                                formError = it.message ?: "服务器地址无效"
                                 return@withHomeWifiAccess
                             }
                             formError = null
                             vm.joinFamily(
-                                host = joinHost,
-                                portText = joinPort,
-                                scheme = joinScheme,
-                                ssid1 = joinSsid1,
-                                ssid2 = joinSsid2,
-                                invitePayload = joinCode,
+                                draft = joinDraft,
                                 onDone = { err ->
                                     if (err == null) {
                                         showJoin = false

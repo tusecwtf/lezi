@@ -13,7 +13,7 @@ import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.sync.HomeLanServerConfig
 import com.lezi.babylog.sync.InvitePayload
 import com.lezi.babylog.sync.InvitePayloadCodec
-import com.lezi.babylog.sync.JoinFamilyCommand
+import com.lezi.babylog.sync.JoinFamilyDraft
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -342,32 +342,16 @@ class FamilyViewModel @Inject constructor(
     }
 
     fun join(
-        code: String,
-        host: String,
-        portText: String,
-        ssid1: String,
-        ssid2: String,
-        fallbackScheme: String,
+        draft: JoinFamilyDraft,
         onDone: (success: Boolean, message: String) -> Unit,
     ) {
         viewModelScope.launch {
-            val config = runCatching {
-                HomeLanServerConfig.fromUserInput(
-                    rawHostOrUrl = host,
-                    explicitPort = portText.toIntOrNull(),
-                    allowedSsids = listOf(ssid1, ssid2),
-                    fallbackScheme = fallbackScheme,
-                )
-            }.getOrElse {
+            val command = runCatching { draft.toCommand(ui.value.displayName) }.getOrElse {
                 onDone(false, it.message ?: "服务器地址无效")
                 return@launch
             }
             val result = sync.joinFamily(
-                JoinFamilyCommand(
-                    invitation = code.trim(),
-                    homeLanConfig = config,
-                    displayName = ui.value.displayName,
-                ),
+                command,
             )
             onDone(
                 result.isSuccess,

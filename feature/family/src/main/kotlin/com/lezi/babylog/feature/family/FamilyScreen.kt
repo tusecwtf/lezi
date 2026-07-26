@@ -26,6 +26,7 @@ import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.sync.HomeLanServerConfig
 import com.lezi.babylog.sync.HomeWifiPermission
 import com.lezi.babylog.sync.InvitePayloadCodec
+import com.lezi.babylog.sync.JoinFamilyDraft
 
 @Composable
 fun FamilyRoute(
@@ -38,7 +39,6 @@ fun FamilyRoute(
     var pendingAfterNetworkSave by remember { mutableStateOf<FamilyDialog?>(null) }
     var pendingHomeWifiAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     var pendingHomeWifiResume by remember { mutableStateOf<FamilyDialog?>(null) }
-    var joinCode by remember { mutableStateOf("") }
     var joiningFamily by remember { mutableStateOf(false) }
     var bootstrapSecret by remember { mutableStateOf("") }
     var bootstrapSecretFeedback by remember { mutableStateOf<String?>(null) }
@@ -49,38 +49,26 @@ fun FamilyRoute(
             if (HomeWifiPermission.hasRequiredPermissions(context)) vm.currentWifiSsid() else null,
         )
     }
-    var serverHost by remember(ui.serverHost, ui.baseUrl) {
-        mutableStateOf(
-            when {
-                ui.serverHost.isNotBlank() -> ui.serverHost
-                ui.baseUrl.isNotBlank() -> HomeLanServerConfig.fromBaseUrl(ui.baseUrl).host
-                else -> novice.host
-            },
-        )
-    }
-    var serverPort by remember(ui.serverPort, ui.baseUrl) {
-        mutableStateOf(
-            when {
-                ui.serverHost.isNotBlank() || ui.serverPort != com.lezi.babylog.sync.DEFAULT_SERVER_PORT ->
-                    ui.serverPort.toString()
-                ui.baseUrl.isNotBlank() -> HomeLanServerConfig.fromBaseUrl(ui.baseUrl).port.toString()
-                else -> novice.port.toString()
-            },
-        )
-    }
-    var serverScheme by remember(ui.serverScheme, ui.baseUrl) {
-        mutableStateOf(
-            ui.baseUrl.takeIf(String::isNotBlank)
-                ?.let(HomeLanServerConfig::fromBaseUrl)
-                ?.scheme
-                ?: ui.serverScheme,
-        )
-    }
-    var ssid1 by remember(ui.allowedSsids) {
-        mutableStateOf(ui.allowedSsids.getOrNull(0) ?: novice.allowedSsids.getOrNull(0).orEmpty())
-    }
-    var ssid2 by remember(ui.allowedSsids) {
-        mutableStateOf(ui.allowedSsids.getOrNull(1).orEmpty())
+    var joinDraft by remember(
+        ui.serverHost,
+        ui.serverPort,
+        ui.serverScheme,
+        ui.baseUrl,
+        ui.allowedSsids,
+    ) {
+        val saved = when {
+            ui.serverHost.isNotBlank() -> HomeLanServerConfig(
+                host = ui.serverHost,
+                port = ui.serverPort,
+                allowedSsids = ui.allowedSsids,
+                scheme = ui.serverScheme,
+            )
+            ui.baseUrl.isNotBlank() -> HomeLanServerConfig.fromBaseUrl(ui.baseUrl).copy(
+                allowedSsids = ui.allowedSsids,
+            )
+            else -> novice
+        }
+        mutableStateOf(JoinFamilyDraft.fromConfig(saved))
     }
 
     fun showMessage(copy: String, resume: FamilyDialog? = null) {
@@ -126,18 +114,10 @@ fun FamilyRoute(
     fun applyScannedInvite(raw: String) {
         val payload = raw.trim()
         if (payload.isEmpty()) return
-        joinCode = payload
+        joinDraft = runCatching { joinDraft.prefillInvitation(payload) }
+            .getOrElse { joinDraft.copy(invitation = payload) }
         val scanCopy = runCatching { InvitePayloadCodec.decode(payload) }.getOrNull()?.let { decoded ->
             val config = decoded.homeLanConfig
-            if (config.host.isNotBlank()) {
-                serverHost = config.host
-                serverPort = config.port.toString()
-                serverScheme = config.scheme
-            }
-            if (decoded.ssids.isNotEmpty()) {
-                ssid1 = decoded.ssids.getOrNull(0).orEmpty()
-                ssid2 = decoded.ssids.getOrNull(1).orEmpty()
-            }
             buildString {
                 append("已扫入邀请")
                 if (config.host.isNotBlank()) append(" · ${config.host}:${config.port}")
@@ -202,13 +182,13 @@ fun FamilyRoute(
             else -> ""
         }
     }
-    val previewBaseUrl = remember(serverHost, serverPort, serverScheme) {
+    val previewBaseUrl = remember(joinDraft.host, joinDraft.portText, joinDraft.scheme) {
         runCatching {
             HomeLanServerConfig.fromUserInput(
-                rawHostOrUrl = serverHost,
-                explicitPort = serverPort.toIntOrNull(),
+                rawHostOrUrl = joinDraft.host,
+                explicitPort = joinDraft.portText.toIntOrNull(),
                 allowedSsids = emptyList(),
-                fallbackScheme = serverScheme,
+                fallbackScheme = joinDraft.scheme,
             ).baseUrl
         }.getOrDefault("")
     }
@@ -218,12 +198,18 @@ fun FamilyRoute(
             withHomeWifiAccess { saveNetworkThen(target) }
             return
         }
-        if (ssid1.isBlank()) {
-            vm.currentWifiSsid()?.trim()?.takeIf(String::isNotEmpty)?.let { ssid1 = it }
+        if (joinDraft.ssid1.isBlank()) {
+            vm.currentWifiSsid()?.trim()?.takeIf(String::isNotEmpty)?.let {
+                joinDraft = joinDraft.copy(ssid1 = it)
+            }
         }
-        val host = serverHost.trim()
-        val ssids = listOf(ssid1, ssid2).map(String::trim).filter(String::isNotEmpty)
-        val dirty = host != ui.serverHost.trim() || ssids != ui.allowedSsids || ui.allowedSsids.isEmpty()
+        val host = joinDraft.host.trim()
+        val ssids = joinDraft.ssids
+        val dirty = host != ui.serverHost.trim() ||
+            joinDraft.portText.toIntOrNull() != ui.serverPort ||
+            joinDraft.scheme != ui.serverScheme ||
+            ssids != ui.allowedSsids ||
+            ui.allowedSsids.isEmpty()
         if (host.isBlank() || ssids.isEmpty()) {
             pendingAfterNetworkSave = target
             showMessage(
@@ -236,7 +222,13 @@ fun FamilyRoute(
             dialog = target
             return
         }
-        vm.saveHomeLanConfig(serverHost, serverPort, ssid1, ssid2, serverScheme) { result ->
+        vm.saveHomeLanConfig(
+            joinDraft.host,
+            joinDraft.portText,
+            joinDraft.ssid1,
+            joinDraft.ssid2,
+            joinDraft.scheme,
+        ) { result ->
             deliverNetworkSaveResult(
                 result,
                 onMessage = { copy ->
@@ -307,14 +299,14 @@ fun FamilyRoute(
     when (val active = dialog) {
         FamilyDialog.NetworkSettings -> FamilyNetworkSettingsSheet(
             ui = ui,
-            host = serverHost,
-            onHostChange = { serverHost = it },
-            port = serverPort,
-            onPortChange = { serverPort = it },
-            ssid1 = ssid1,
-            onSsid1Change = { ssid1 = it },
-            ssid2 = ssid2,
-            onSsid2Change = { ssid2 = it },
+            host = joinDraft.host,
+            onHostChange = { joinDraft = joinDraft.copy(host = it) },
+            port = joinDraft.portText,
+            onPortChange = { joinDraft = joinDraft.copy(portText = it) },
+            ssid1 = joinDraft.ssid1,
+            onSsid1Change = { joinDraft = joinDraft.copy(ssid1 = it) },
+            ssid2 = joinDraft.ssid2,
+            onSsid2Change = { joinDraft = joinDraft.copy(ssid2 = it) },
             previewBaseUrl = previewBaseUrl,
             networkConfigured = networkConfigured,
             onUseCurrentWifi = {
@@ -322,16 +314,23 @@ fun FamilyRoute(
                     val current = vm.currentWifiSsid()?.trim().orEmpty()
                     when {
                         current.isEmpty() -> dialog = FamilyDialog.HomeWifiAccessGuide(active)
-                        ssid1.isBlank() -> ssid1 = current
-                        ssid2.isBlank() && ssid1 != current -> ssid2 = current
-                        ssid1 != current && ssid2 != current ->
+                        joinDraft.ssid1.isBlank() -> joinDraft = joinDraft.copy(ssid1 = current)
+                        joinDraft.ssid2.isBlank() && joinDraft.ssid1 != current ->
+                            joinDraft = joinDraft.copy(ssid2 = current)
+                        joinDraft.ssid1 != current && joinDraft.ssid2 != current ->
                             showMessage("Wi‑Fi 名称已满 2 个，请先清空一格", active)
                         else -> showMessage("当前 Wi‑Fi 已在列表中", active)
                     }
                 }
             },
             onSave = {
-                vm.saveHomeLanConfig(serverHost, serverPort, ssid1, ssid2, serverScheme) { result ->
+                vm.saveHomeLanConfig(
+                    joinDraft.host,
+                    joinDraft.portText,
+                    joinDraft.ssid1,
+                    joinDraft.ssid2,
+                    joinDraft.scheme,
+                ) { result ->
                     val next = if (result is NetworkSaveResult.Saved) pendingAfterNetworkSave else active
                     if (result is NetworkSaveResult.Saved) pendingAfterNetworkSave = null
                     showMessage(result.message, resume = next)
@@ -343,14 +342,14 @@ fun FamilyRoute(
             },
         )
         FamilyDialog.Join -> if (controls.showJoin) JoinFamilyDialog(
-            joinCode = joinCode,
-            onJoinCodeChange = { joinCode = it },
+            joinCode = joinDraft.invitation,
+            onJoinCodeChange = { joinDraft = joinDraft.copy(invitation = it) },
             joining = joiningFamily,
             onScan = ::scanWithPermission,
             onConfirm = {
                 withHomeWifiAccess {
                     joiningFamily = true
-                    vm.join(joinCode, serverHost, serverPort, ssid1, ssid2, serverScheme) { success, copy ->
+                    vm.join(joinDraft) { success, copy ->
                         joiningFamily = false
                         showMessage(copy, resume = FamilyDialog.Join.takeUnless { success })
                     }
