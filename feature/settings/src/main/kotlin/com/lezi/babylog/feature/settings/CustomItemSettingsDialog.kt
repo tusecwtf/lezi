@@ -23,6 +23,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
 import com.lezi.babylog.core.model.RecordItemIdentity
@@ -35,8 +36,8 @@ private val CustomItemIcons = listOf("★", "♥", "☀", "☾", "♪", "●", "
 /** Copy for shared definitions: local close is not family delete. */
 internal fun customItemLocalHideHint(manageable: Boolean, locallyHidden: Boolean): String =
     when {
-        manageable && locallyHidden -> "本机已关闭 · 家庭定义仍在，删才会 tombstone"
-        manageable -> "本机显示 · 删会 tombstone 共享定义"
+        manageable && locallyHidden -> "本机已关闭 · 家庭共享项目仍保留"
+        manageable -> "本机显示 · 删除会同步移除家庭共享项目"
         locallyHidden -> "本机已关闭 · 不等于删除家庭定义"
         else -> "由其他成员创建 · 可本机关闭，不删除共享定义"
     }
@@ -58,6 +59,7 @@ internal fun CustomItemSettingsDialog(
     var name by remember { mutableStateOf("") }
     var iconSlot by remember { mutableIntStateOf(0) }
     var error by remember { mutableStateOf<String?>(null) }
+    var deleteState by remember { mutableStateOf(CustomItemDeleteState()) }
 
     fun reset() {
         editing = null
@@ -66,8 +68,23 @@ internal fun CustomItemSettingsDialog(
         error = null
     }
 
+    fun dispatchDelete(action: CustomItemDeleteAction) {
+        val transition = reduceCustomItemDelete(deleteState, action)
+        deleteState = transition.state
+        transition.command?.let { command ->
+            onDelete(command.itemId) { message ->
+                deleteState = reduceCustomItemDelete(
+                    deleteState,
+                    CustomItemDeleteAction.Finished(message),
+                ).state
+            }
+        }
+    }
+
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = {
+            if (!deleteState.deleting) onDismiss()
+        },
         modifier = Modifier.imePadding(),
         properties = DialogProperties(decorFitsSystemWindows = false),
         title = { Text("自定义项目（${items.size}/10）") },
@@ -124,10 +141,9 @@ internal fun CustomItemSettingsDialog(
                                     ) { Text("改") }
                                     TextButton(
                                         onClick = {
-                                            onDelete(item.id) { message ->
-                                                if (message != null) error = message
-                                            }
+                                            dispatchDelete(CustomItemDeleteAction.Request(item))
                                         },
+                                        modifier = Modifier.testTag("custom_item_delete_${item.id}"),
                                     ) {
                                         Text("删", color = MaterialTheme.colorScheme.error)
                                     }
@@ -162,7 +178,7 @@ internal fun CustomItemSettingsDialog(
                     supportingText = error?.let { { Text(it) } },
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Text("固定图标槽", style = LeziTypography.Label)
+                Text("选择图标", style = LeziTypography.Label)
                 CustomItemIcons.chunked(4).forEachIndexed { rowIndex, icons ->
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         icons.forEachIndexed { columnIndex, icon ->
@@ -205,7 +221,50 @@ internal fun CustomItemSettingsDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("完成") }
+            TextButton(
+                enabled = !deleteState.deleting,
+                onClick = onDismiss,
+            ) { Text("完成") }
         },
     )
+
+    deleteState.target?.let { target ->
+        val confirmation = customItemDeleteConfirmation(target)
+        AlertDialog(
+            onDismissRequest = {
+                dispatchDelete(CustomItemDeleteAction.Cancel)
+            },
+            title = { Text(confirmation.title) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
+                    Text(confirmation.message)
+                    deleteState.error?.let { message ->
+                        Text(message, color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !deleteState.deleting,
+                    onClick = {
+                        dispatchDelete(CustomItemDeleteAction.Confirm)
+                    },
+                    modifier = Modifier.testTag("custom_item_delete_confirm"),
+                ) {
+                    Text(
+                        if (deleteState.deleting) "删除中…" else "确认删除",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !deleteState.deleting,
+                    onClick = {
+                        dispatchDelete(CustomItemDeleteAction.Cancel)
+                    },
+                ) { Text("取消") }
+            },
+        )
+    }
 }

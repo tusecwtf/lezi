@@ -22,8 +22,12 @@ class CustomItemLocalHideCopyTest {
             customItemLocalHideHint(manageable = false, locallyHidden = true)
                 .contains("tombstone"),
         )
-        assertTrue(
+        assertFalse(
             customItemLocalHideHint(manageable = true, locallyHidden = false)
+                .contains("tombstone"),
+        )
+        assertFalse(
+            customItemLocalHideHint(manageable = true, locallyHidden = true)
                 .contains("tombstone"),
         )
     }

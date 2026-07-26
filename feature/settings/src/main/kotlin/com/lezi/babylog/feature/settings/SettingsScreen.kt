@@ -294,8 +294,7 @@ class SettingsViewModel @Inject constructor(
 
     fun deleteCustomItem(id: Long, onDone: (String?) -> Unit = {}) {
         viewModelScope.launch {
-            val result = runCatching { careLog.deleteCustomItem(id) }
-            onDone(result.exceptionOrNull()?.let { productUiError(it, "删除失败") })
+            onDone(executeCustomItemDelete(id, careLog::deleteCustomItem))
         }
     }
 
