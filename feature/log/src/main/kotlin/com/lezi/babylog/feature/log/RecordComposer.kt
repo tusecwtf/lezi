@@ -463,8 +463,8 @@ class RecordComposerViewModel @Inject constructor(
                     )
                 val converting = draft.needsConvertToCarePlan()
                 when {
-                    draft.carePlanId != null && draft.editCarePlan -> careLog.updateCarePlan(
-                        carePlanId = draft.carePlanId,
+                    draft.isEditingCarePlan -> careLog.updateCarePlan(
+                        carePlanId = requireNotNull(draft.carePlanId),
                         scheduledAt = command.timestamp,
                         note = command.note,
                         payloadJson = command.payloadJson,
@@ -538,7 +538,7 @@ class RecordComposerViewModel @Inject constructor(
                 // edit-plan, convert, and edit-record only drop discarded paths.
                 photoStore.delete(draft.sourcePhotos - draft.photos.toSet())
                 val message = when {
-                    draft.carePlanId != null && draft.editCarePlan -> "已保存护理计划"
+                    draft.isEditingCarePlan -> "已保存护理计划"
                     draft.carePlanId != null -> "已完成护理计划"
                     converting -> {
                         val label = if (command.type == RecordType.CUSTOM) {
@@ -619,7 +619,7 @@ class RecordComposerViewModel @Inject constructor(
     internal fun delete(onDeleted: (String) -> Unit) {
         val snapshot = _state.value
         val draft = snapshot.draft ?: return
-        val editPlanId = draft.carePlanId?.takeIf { draft.editCarePlan }
+        val editPlanId = draft.carePlanId?.takeIf { draft.isEditingCarePlan }
         val recordId = draft.existingRecordId
         if (editPlanId == null && recordId == null) return
         if (snapshot.saving || snapshot.deleting) return
@@ -695,6 +695,7 @@ fun RecordComposerHost(
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
     var confirmDelete by remember(request) { mutableStateOf(false) }
+    var deleteAttempted by remember(request) { mutableStateOf(false) }
     /** Explicit convert confirm; cancel keeps the draft and original record untouched. */
     var confirmConvert by remember(request) { mutableStateOf(false) }
     // These outlive request=null so a saved record can finish its optional reminder flow after
@@ -804,8 +805,11 @@ fun RecordComposerHost(
                         vm.close()
                         onDismiss()
                     },
-                    onDelete = if (draft.isEditing || (draft.carePlanId != null && draft.editCarePlan)) {
-                        { confirmDelete = true }
+                    onDelete = if (draft.isEditing || draft.isEditingCarePlan) {
+                        {
+                            deleteAttempted = false
+                            confirmDelete = true
+                        }
                     } else {
                         null
                     },
@@ -853,26 +857,34 @@ fun RecordComposerHost(
 
     if (confirmDelete) {
         val planConfirmation = state.draft
-            ?.takeIf { it.carePlanId != null && it.editCarePlan }
+            ?.takeIf { it.isEditingCarePlan }
             ?.let(::carePlanDeleteConfirmation)
         AlertDialog(
             onDismissRequest = {
-                if (!state.deleting) confirmDelete = false
+                if (!state.deleting) {
+                    deleteAttempted = false
+                    confirmDelete = false
+                }
             },
             title = {
                 Text(planConfirmation?.title ?: "删除这条记录？")
             },
             text = {
                 Text(
-                    planConfirmation?.message
-                        ?: "删除后会从时间轴和汇总中移除，无法撤销。",
+                    deleteConfirmationMessage(
+                        impact = planConfirmation?.message
+                            ?: "删除后会从时间轴和汇总中移除，无法撤销。",
+                        error = state.error.takeIf { deleteAttempted },
+                    ),
                 )
             },
             confirmButton = {
                 TextButton(
                     enabled = !state.deleting,
                     onClick = {
+                        deleteAttempted = true
                         vm.delete { message ->
+                            deleteAttempted = false
                             confirmDelete = false
                             onPersisted()
                             onSaved(message)
@@ -888,7 +900,10 @@ fun RecordComposerHost(
             dismissButton = {
                 TextButton(
                     enabled = !state.deleting,
-                    onClick = { confirmDelete = false },
+                    onClick = {
+                        deleteAttempted = false
+                        confirmDelete = false
+                    },
                 ) {
                     Text("取消")
                 }

@@ -197,7 +197,7 @@ internal data class QuickRecordDraft(
      * explicitly confirms convert ([needsConvertToCarePlan]).
      */
     fun workMode(nowMillis: Long = RecordTime.currentTimeMillis()): ComposerWorkMode = when {
-        carePlanId != null && editCarePlan -> ComposerWorkMode.EditPlan
+        isEditingCarePlan -> ComposerWorkMode.EditPlan
         carePlanId != null -> ComposerWorkMode.FulfillPlan
         existingRecordId != null -> ComposerWorkMode.RecordFact
         timestamp > nowMillis -> ComposerWorkMode.ScheduleCare
@@ -426,7 +426,7 @@ internal data class QuickRecordDraft(
     )
 
     fun confirmLabel(nowMillis: Long = RecordTime.currentTimeMillis()): String = when {
-        carePlanId != null && editCarePlan -> "保存计划"
+        isEditingCarePlan -> "保存计划"
         carePlanId != null -> "确认完成"
         needsConvertToCarePlan(nowMillis) -> "转为护理计划"
         workMode(nowMillis) == ComposerWorkMode.ScheduleCare -> "确认安排"
@@ -439,6 +439,9 @@ internal data class QuickRecordDraft(
 
     val isEditing: Boolean
         get() = existingRecordId != null && sleepAction != SleepDraftAction.WakeUp
+
+    val isEditingCarePlan: Boolean
+        get() = carePlanId != null && editCarePlan
 
     private fun intervalValidationError(nowMillis: Long): String? =
         intervalValidationResult(nowMillis)?.message

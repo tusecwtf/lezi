@@ -348,7 +348,7 @@ internal fun sheetKicker(
     draft: QuickRecordDraft,
     nowMillis: Long = com.lezi.babylog.core.model.RecordTime.currentTimeMillis(),
 ): String = when {
-    draft.carePlanId != null && draft.editCarePlan -> "编辑护理计划"
+    draft.isEditingCarePlan -> "编辑护理计划"
     draft.carePlanId != null -> "完成护理计划"
     draft.needsConvertToCarePlan(nowMillis) -> "转为护理计划"
     draft.workMode(nowMillis) == ComposerWorkMode.ScheduleCare -> "安排护理"

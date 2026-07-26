@@ -12,6 +12,9 @@ internal data class CarePlanDeleteConfirmation(
     val message: String,
 )
 
+internal fun deleteConfirmationMessage(impact: String, error: String?): String =
+    error?.trim()?.takeIf { it.isNotEmpty() }?.let { "$impact\n\n$it" } ?: impact
+
 internal fun carePlanDeleteConfirmation(
     draft: QuickRecordDraft,
     zoneId: ZoneId = ZoneId.systemDefault(),
@@ -26,8 +29,9 @@ internal fun carePlanDeleteConfirmation(
         .format(CARE_PLAN_DELETE_TIME_FORMAT)
     return CarePlanDeleteConfirmation(
         title = "删除「$planName · $scheduledTime」？",
-        message = "确认后，这个计划会从当前宝宝及家庭共享的待办中移除，并取消乐记提醒；" +
-            "如已写入系统日历，乐记会尝试移除对应日程。不会生成护理记录，且无法撤销。",
+        message = "确认后，这个计划会从当前宝宝及家庭共享的待办中移除；" +
+            "本机会取消乐记提醒，如已写入本机系统日历，乐记会尝试移除对应日程。" +
+            "不会生成护理记录，且无法撤销。",
     )
 }
 

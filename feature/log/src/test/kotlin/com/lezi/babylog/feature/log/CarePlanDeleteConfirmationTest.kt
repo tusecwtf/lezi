@@ -50,10 +50,22 @@ class CarePlanDeleteConfirmationTest {
 
         assertTrue(copy.contains("家庭共享"))
         assertTrue(copy.contains("待办"))
-        assertTrue(copy.contains("取消乐记提醒"))
+        assertTrue(copy.contains("本机会取消乐记提醒"))
+        assertTrue(copy.contains("本机系统日历"))
         assertTrue(copy.contains("尝试移除对应日程"))
         assertTrue(copy.contains("不会生成护理记录"))
         assertTrue(copy.contains("无法撤销"))
         assertFalse(copy.contains("一定会从系统日历删除"))
+    }
+
+    @Test
+    fun deleteFailureRemainsVisibleInsideTheConfirmationForRetry() {
+        val impact = "删除后会从时间轴和汇总中移除，无法撤销。"
+
+        assertEquals(
+            "$impact\n\n删除失败，请重试",
+            deleteConfirmationMessage(impact, "删除失败，请重试"),
+        )
+        assertEquals(impact, deleteConfirmationMessage(impact, null))
     }
 }
