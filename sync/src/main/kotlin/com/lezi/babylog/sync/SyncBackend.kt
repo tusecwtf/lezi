@@ -17,6 +17,17 @@ data class PullResult(
     val hasMore: Boolean? = null,
 )
 
+/** Server-owned Record author returned after an accepted push or atomic commit. */
+data class CanonicalRecordAuthor(
+    val clientUuid: String,
+    val createdByMembershipId: String,
+)
+
+data class PushResult(
+    val applied: Int,
+    val recordAuthors: List<CanonicalRecordAuthor> = emptyList(),
+)
+
 data class JoinResult(
     val familyId: String,
     val token: String,
@@ -54,6 +65,7 @@ data class BundleCommitResult(
     val status: String,
     val applied: Int,
     val cursor: Long,
+    val recordAuthors: List<CanonicalRecordAuthor> = emptyList(),
 )
 
 /** Thrown when a client that requires atomic packages hits a legacy NAS. */
@@ -71,7 +83,7 @@ interface SyncBackend {
         familyName: String? = null,
     ): JoinResult
 
-    suspend fun push(session: SyncSession, entities: List<SyncEntity>): Int
+    suspend fun push(session: SyncSession, entities: List<SyncEntity>): PushResult
     suspend fun pull(session: SyncSession): PullResult
     suspend fun invite(session: SyncSession): Invite
 

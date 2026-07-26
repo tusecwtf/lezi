@@ -192,6 +192,42 @@ class RealSyncPortTest {
         assertThat(rig.healthProbeCalls).isAtLeast(3)
     }
 
+    @Test
+    fun atomicRecordCommitAckHydratesPreJoinAuthorWithoutChangingTheRecordRevision() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(membershipId = "membership-a"),
+            healthCapabilities = setOf(
+                CAPABILITY_ATOMIC_BUNDLE,
+                CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+            ),
+        )
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "pre-join-record",
+                createdByMembershipId = "",
+                payloadJson = """{"amount_ml":120}""",
+                updatedAt = 120,
+                syncDirty = true,
+            ),
+        )
+        rig.backend.nextCommitRecordAuthors = listOf(
+            CanonicalRecordAuthor(
+                clientUuid = "pre-join-record",
+                createdByMembershipId = "membership-a",
+            ),
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        val hydrated = requireNotNull(rig.records.getByClientUuid("pre-join-record"))
+        assertThat(hydrated.createdByMembershipId).isEqualTo("membership-a")
+        assertThat(hydrated.updatedAt).isEqualTo(120)
+        assertThat(hydrated.payloadJson).isEqualTo("""{"amount_ml":120}""")
+        assertThat(hydrated.syncDirty).isFalse()
+        assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
+    }
+
 
     @Test
     fun customItemDirtySnapshotPushesAndPullPreservesLocalSortOrder() = runTest {
@@ -2106,6 +2142,7 @@ class RealSyncPortTest {
             localRecord(babyId).copy(
                 clientUuid = "record-remote",
                 payloadJson = """{"amount_ml":120}""",
+                createdByMembershipId = "",
                 updatedAt = 210,
                 syncDirty = false,
             ),
@@ -2126,6 +2163,7 @@ class RealSyncPortTest {
                     payloadJson = """
                         {
                           "baby_client_uuid":"baby-remote",
+                          "created_by_membership_id":"membership-b",
                           "created_by_device_id":"device-b",
                           "type":"formula",
                           "timestamp":210,
@@ -2142,9 +2180,96 @@ class RealSyncPortTest {
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
 
         assertThat(rig.babies.getByClientUuid("baby-remote")?.nickname).isEqualTo("本地先到")
-        assertThat(rig.records.getByClientUuid("record-remote")?.payloadJson)
-            .isEqualTo("""{"amount_ml":120}""")
+        val record = requireNotNull(rig.records.getByClientUuid("record-remote"))
+        assertThat(record.payloadJson).isEqualTo("""{"amount_ml":120}""")
+        assertThat(record.createdByMembershipId).isEqualTo("membership-b")
+        assertThat(record.createdByDeviceId).isNull()
+        assertThat(record.updatedAt).isEqualTo(210)
+        assertThat(record.syncDirty).isFalse()
+        assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
         assertThat(rig.preferences.current().pullCursor).isEqualTo(9)
+    }
+
+    @Test
+    fun olderRemoteAuthorCannotRegressKnownCanonicalMembership() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "record-older-author",
+                createdByMembershipId = "membership-current",
+                updatedAt = 300,
+                syncDirty = false,
+            ),
+        )
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                remoteRecord().copy(
+                    clientUuid = "record-older-author",
+                    payloadJson = """
+                        {
+                          "baby_client_uuid":"baby-local",
+                          "created_by_membership_id":"membership-stale",
+                          "created_by_device_id":"device-stale",
+                          "type":"formula",
+                          "timestamp":299,
+                          "payload_json":{"amount_ml":1},
+                          "schema_version":1
+                        }
+                    """.trimIndent(),
+                    updatedAt = 299,
+                ),
+            ),
+            cursor = 10,
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+
+        val record = requireNotNull(rig.records.getByClientUuid("record-older-author"))
+        assertThat(record.createdByMembershipId).isEqualTo("membership-current")
+        assertThat(record.updatedAt).isEqualTo(300)
+        assertThat(record.payloadJson).isEqualTo("""{"amount_ml":120}""")
+    }
+
+    @Test
+    fun equalLegacyRecordWithoutMembershipAuthorKeepsKnownMetadataAndBusinessFields() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "record-legacy-equal",
+                createdByMembershipId = "membership-current",
+                updatedAt = 300,
+                syncDirty = false,
+            ),
+        )
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                remoteRecord().copy(
+                    clientUuid = "record-legacy-equal",
+                    payloadJson = """
+                        {
+                          "baby_client_uuid":"baby-local",
+                          "created_by_device_id":"legacy-device",
+                          "type":"formula",
+                          "timestamp":300,
+                          "payload_json":{"amount_ml":1},
+                          "schema_version":1
+                        }
+                    """.trimIndent(),
+                    updatedAt = 300,
+                ),
+            ),
+            cursor = 11,
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+
+        val record = requireNotNull(rig.records.getByClientUuid("record-legacy-equal"))
+        assertThat(record.createdByMembershipId).isEqualTo("membership-current")
+        assertThat(record.createdByDeviceId).isNull()
+        assertThat(record.payloadJson).isEqualTo("""{"amount_ml":120}""")
+        assertThat(record.updatedAt).isEqualTo(300)
     }
 
     @Test
@@ -4237,7 +4362,7 @@ private class RecordingSyncBackend : SyncBackend {
         )
     }
 
-    override suspend fun push(session: SyncSession, entities: List<SyncEntity>): Int {
+    override suspend fun push(session: SyncSession, entities: List<SyncEntity>): PushResult {
         pushAttempts += session
         pushFailures.removeFirstOrNull()?.let { throw it }
         val available = knownEntities + entities.map { it.type to it.clientUuid }
@@ -4273,7 +4398,7 @@ private class RecordingSyncBackend : SyncBackend {
         pushes += PushedBatch(session, entities)
         knownEntities += entities.map { it.type to it.clientUuid }
         afterPush?.invoke()
-        return entities.size
+        return PushResult(applied = entities.size)
     }
 
     override suspend fun pull(session: SyncSession): PullResult {
@@ -4349,6 +4474,7 @@ private class RecordingSyncBackend : SyncBackend {
     var stageBundleFailure: Throwable? = null
     var putBundleMediaFailure: Throwable? = null
     var commitBundleFailure: Throwable? = null
+    var nextCommitRecordAuthors: List<CanonicalRecordAuthor> = emptyList()
 
     override suspend fun stageBundle(
         session: SyncSession,
@@ -4390,6 +4516,7 @@ private class RecordingSyncBackend : SyncBackend {
             status = "committed",
             applied = 1,
             cursor = session.pullCursor,
+            recordAuthors = nextCommitRecordAuthors,
         )
     }
 }
@@ -5133,6 +5260,27 @@ private class MemoryRecordDao : RecordDao {
                 it
             }
         }
+    }
+
+    override suspend fun mergeCanonicalAuthor(
+        clientUuid: String,
+        expectedUpdatedAt: Long,
+        membershipId: String,
+    ): Int {
+        var changed = 0
+        rows.value = rows.value.map {
+            if (
+                it.clientUuid == clientUuid &&
+                it.updatedAt == expectedUpdatedAt &&
+                membershipId.isNotBlank()
+            ) {
+                changed = 1
+                it.copy(createdByMembershipId = membershipId)
+            } else {
+                it
+            }
+        }
+        return changed
     }
 
     override suspend fun markAllPendingSync() {

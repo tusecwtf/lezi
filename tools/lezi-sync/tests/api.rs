@@ -1967,10 +1967,22 @@ async fn push_lww_cursor_and_generation_recovery_are_wire_compatible() {
         }]}),
     )
     .await;
-    assert_eq!(applied, json!({"applied":1,"skipped":0,"cursor":1}));
-    assert_eq!(retry, json!({"applied":0,"skipped":1,"cursor":1}));
-    assert_eq!(older, json!({"applied":0,"skipped":1,"cursor":1}));
-    assert_eq!(newer, json!({"applied":1,"skipped":0,"cursor":2}));
+    assert_eq!(
+        applied,
+        json!({"applied":1,"skipped":0,"cursor":1,"record_authors":[]})
+    );
+    assert_eq!(
+        retry,
+        json!({"applied":0,"skipped":1,"cursor":1,"record_authors":[]})
+    );
+    assert_eq!(
+        older,
+        json!({"applied":0,"skipped":1,"cursor":1,"record_authors":[]})
+    );
+    assert_eq!(
+        newer,
+        json!({"applied":1,"skipped":0,"cursor":2,"record_authors":[]})
+    );
     let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=1", Some(token)).await;
     assert_eq!(pull["cursor"], 2);
     assert_eq!(pull["entities"][0]["rev"], 2);
@@ -2027,6 +2039,36 @@ async fn ordinary_push_stamps_record_author_from_authenticated_membership() {
     )
     .await;
     assert_eq!(push_status, StatusCode::OK, "{push_body}");
+    assert_eq!(
+        push_body["record_authors"],
+        json!([{
+            "client_uuid": record_id,
+            "created_by_membership_id": owner["membership_id"],
+        }])
+    );
+
+    let mut retry_payload = record_payload(&baby_id);
+    retry_payload["created_by_membership_id"] = member["membership_id"].clone();
+    let (retry_status, retry_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(owner_token),
+        json!({
+            "entities": [entity_wire("record", &record_id, 2, retry_payload, None)]
+        }),
+    )
+    .await;
+    assert_eq!(retry_status, StatusCode::OK, "{retry_body}");
+    assert_eq!(retry_body["applied"], 0);
+    assert_eq!(retry_body["skipped"], 1);
+    assert_eq!(
+        retry_body["record_authors"],
+        json!([{
+            "client_uuid": record_id,
+            "created_by_membership_id": owner["membership_id"],
+        }])
+    );
 
     let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
     let record = pull["entities"]
@@ -2216,6 +2258,165 @@ async fn legacy_record_without_membership_author_keeps_device_fallback_on_edit()
         "legacy-author-owner-device"
     );
     assert!(record["payload"].get("created_by_membership_id").is_none());
+}
+
+#[tokio::test]
+async fn restart_hydrates_only_unique_legacy_record_authors_and_advances_cursor_once() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "shared-legacy-device",
+        "hydrate-record-author-owner-request-000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let _same_device_member = invite_and_join(&rig.app, owner_token, "shared-legacy-device").await;
+    let _second_same_device_member =
+        invite_and_join(&rig.app, owner_token, "shared-legacy-device").await;
+    let unique_member = invite_and_join(&rig.app, owner_token, "unique-legacy-device").await;
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let unique_record_id = Uuid::new_v4().to_string();
+    let ambiguous_record_id = Uuid::new_v4().to_string();
+    let unknown_record_id = Uuid::new_v4().to_string();
+    let empty_record_id = Uuid::new_v4().to_string();
+
+    let mut unique_payload = record_payload(&baby_id);
+    unique_payload["note"] = json!("唯一映射");
+    let mut ambiguous_payload = record_payload(&baby_id);
+    ambiguous_payload["note"] = json!("重复设备");
+    let mut unknown_payload = record_payload(&baby_id);
+    unknown_payload["note"] = json!("未知设备");
+    let mut empty_payload = record_payload(&baby_id);
+    empty_payload["note"] = json!("空设备");
+    let (push_status, push_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(owner_token),
+        json!({
+            "entities": [
+                entity_wire("record", &unique_record_id, 2, unique_payload, None),
+                entity_wire("record", &ambiguous_record_id, 3, ambiguous_payload, None),
+                entity_wire("record", &unknown_record_id, 4, unknown_payload, None),
+                entity_wire("record", &empty_record_id, 5, empty_payload, None),
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(push_status, StatusCode::OK, "{push_body}");
+    let old_cursor = push_body["cursor"].as_i64().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+
+    // Simulate rows written before membership authors existed. The migration must
+    // use only the legacy device link and must not guess when that link is absent
+    // or shared by multiple historical memberships.
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    for (record_id, legacy_device_id) in [
+        (&unique_record_id, "unique-legacy-device"),
+        (&ambiguous_record_id, "shared-legacy-device"),
+        (&unknown_record_id, "unknown-legacy-device"),
+        (&empty_record_id, ""),
+    ] {
+        let stored_payload: String = connection
+            .query_row(
+                "
+                SELECT payload_json
+                FROM entities
+                WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?2
+                ",
+                rusqlite::params![family_id, record_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut legacy_payload: Value = serde_json::from_str(&stored_payload).unwrap();
+        let object = legacy_payload.as_object_mut().unwrap();
+        object.remove("created_by_membership_id");
+        object.insert("created_by_device_id".to_owned(), json!(legacy_device_id));
+        connection
+            .execute(
+                "
+                UPDATE entities
+                SET payload_json = ?1
+                WHERE family_id = ?2 AND entity_type = 'record' AND client_uuid = ?3
+                ",
+                rusqlite::params![
+                    serde_json::to_string(&legacy_payload).unwrap(),
+                    family_id,
+                    record_id
+                ],
+            )
+            .unwrap();
+    }
+    drop(connection);
+
+    let restarted = rig.restart("generation-b");
+    let (pull_status, pull_body) = get_json(
+        &restarted,
+        &format!("/v1/pull?cursor={old_cursor}"),
+        Some(owner_token),
+    )
+    .await;
+    assert_eq!(pull_status, StatusCode::OK, "{pull_body}");
+    let hydrated_cursor = pull_body["cursor"].as_i64().unwrap();
+    assert!(hydrated_cursor > old_cursor, "{pull_body}");
+    let hydrated_records = pull_body["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entity| entity["type"] == "record")
+        .collect::<Vec<_>>();
+    assert_eq!(hydrated_records.len(), 1, "{pull_body}");
+    assert_eq!(hydrated_records[0]["client_uuid"], unique_record_id);
+    assert_eq!(hydrated_records[0]["updated_at"], 2);
+    assert_eq!(hydrated_records[0]["payload"]["note"], "唯一映射");
+    assert_eq!(
+        hydrated_records[0]["payload"]["created_by_membership_id"],
+        unique_member["membership_id"]
+    );
+    assert_eq!(
+        hydrated_records[0]["payload"]["created_by_device_id"],
+        "unique-legacy-device"
+    );
+
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    for record_id in [&ambiguous_record_id, &unknown_record_id, &empty_record_id] {
+        let stored_payload: String = connection
+            .query_row(
+                "
+                SELECT payload_json
+                FROM entities
+                WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?2
+                ",
+                rusqlite::params![family_id, record_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let payload: Value = serde_json::from_str(&stored_payload).unwrap();
+        assert!(
+            payload.get("created_by_membership_id").is_none(),
+            "ambiguous/unknown author was guessed for {record_id}: {payload}"
+        );
+    }
+    let stored_family_rev: i64 = connection
+        .query_row(
+            "SELECT rev FROM family_meta WHERE family_id = ?1",
+            rusqlite::params![family_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_family_rev, hydrated_cursor);
+    drop(connection);
+
+    let restarted_again = rig.restart("generation-c");
+    let (second_pull_status, second_pull) = get_json(
+        &restarted_again,
+        &format!("/v1/pull?cursor={hydrated_cursor}"),
+        Some(owner_token),
+    )
+    .await;
+    assert_eq!(second_pull_status, StatusCode::OK, "{second_pull}");
+    assert_eq!(second_pull["cursor"], hydrated_cursor);
+    assert_eq!(second_pull["entities"], json!([]));
 }
 
 #[tokio::test]
@@ -3693,6 +3894,30 @@ async fn atomic_bundle_stamps_and_freezes_first_record_author() {
         )
         .await;
         assert_eq!(commit_status, StatusCode::OK, "{commit_body}");
+        assert_eq!(
+            commit_body["record_authors"],
+            json!([{
+                "client_uuid": record_id,
+                "created_by_membership_id": owner["membership_id"],
+            }])
+        );
+
+        let (retry_status, retry_body) = json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/bundles/{bundle_id}/commit"),
+            Some(token),
+            json!({}),
+        )
+        .await;
+        assert_eq!(retry_status, StatusCode::OK, "{retry_body}");
+        assert_eq!(
+            retry_body["record_authors"],
+            json!([{
+                "client_uuid": record_id,
+                "created_by_membership_id": owner["membership_id"],
+            }])
+        );
 
         let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
         let record = pull["entities"]
@@ -4042,6 +4267,13 @@ async fn equal_ordinary_push_before_commit_repairs_the_committed_bundle_package(
     )
     .await;
     assert_eq!(push_status, StatusCode::OK, "{push_body}");
+    assert_eq!(
+        push_body["record_authors"],
+        json!([{
+            "client_uuid": record_id,
+            "created_by_membership_id": member["membership_id"],
+        }])
+    );
 
     let (commit_status, committed) = json_request(
         &rig.app,
@@ -4052,6 +4284,13 @@ async fn equal_ordinary_push_before_commit_repairs_the_committed_bundle_package(
     )
     .await;
     assert_eq!(commit_status, StatusCode::OK, "{committed}");
+    assert_eq!(
+        committed["record_authors"],
+        json!([{
+            "client_uuid": record_id,
+            "created_by_membership_id": member["membership_id"],
+        }])
+    );
     let (retry_status, retry) = json_request(
         &rig.app,
         Method::POST,
@@ -4063,6 +4302,7 @@ async fn equal_ordinary_push_before_commit_repairs_the_committed_bundle_package(
     assert_eq!(retry_status, StatusCode::OK, "{retry}");
     assert_eq!(retry["cursor"], committed["cursor"]);
     assert_eq!(retry["applied"], committed["applied"]);
+    assert_eq!(retry["record_authors"], committed["record_authors"]);
 
     let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
     let record = pull["entities"]
@@ -4187,6 +4427,123 @@ async fn legacy_staged_root_author_is_canonicalized_before_committed_hash() {
     assert_eq!(
         record["payload"]["created_by_membership_id"],
         owner["membership_id"]
+    );
+}
+
+#[tokio::test]
+async fn legacy_committed_bundle_retry_acks_the_migrated_entity_author() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "legacy-committed-owner-device",
+        "legacy-committed-owner-request-000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+    let (stage_status, stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(owner_token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire(
+                "record",
+                &record_id,
+                2,
+                record_payload(&baby_id),
+                None,
+            ),
+            "media": [],
+        }),
+    )
+    .await;
+    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
+    let (commit_status, commit_body) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(commit_status, StatusCode::OK, "{commit_body}");
+
+    // Simulate a bundle committed before membership authors existed. Startup
+    // migration repairs the published entity, but the immutable committed
+    // snapshot intentionally remains legacy for content-hash compatibility.
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let stored_payload: String = connection
+        .query_row(
+            "
+            SELECT payload_json
+            FROM entities
+            WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?2
+            ",
+            rusqlite::params![family_id, record_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut legacy_payload: Value = serde_json::from_str(&stored_payload).unwrap();
+    legacy_payload
+        .as_object_mut()
+        .unwrap()
+        .remove("created_by_membership_id");
+    let legacy_payload_json = serde_json::to_string(&legacy_payload).unwrap();
+    connection
+        .execute(
+            "
+            UPDATE entities
+            SET payload_json = ?1
+            WHERE family_id = ?2 AND entity_type = 'record' AND client_uuid = ?3
+            ",
+            rusqlite::params![legacy_payload_json, family_id, record_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "
+            UPDATE sync_bundles
+            SET root_payload_json = ?1
+            WHERE family_id = ?2 AND bundle_id = ?3
+            ",
+            rusqlite::params![legacy_payload_json, family_id, bundle_id],
+        )
+        .unwrap();
+    drop(connection);
+
+    let restarted = rig.restart("generation-b");
+    let (_, pull) = get_json(&restarted, "/v1/pull?cursor=0", Some(owner_token)).await;
+    let migrated_record = pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entity| entity["type"] == "record" && entity["client_uuid"] == record_id)
+        .expect("migration keeps the committed record visible");
+    assert_eq!(
+        migrated_record["payload"]["created_by_membership_id"],
+        owner["membership_id"]
+    );
+
+    let (retry_status, retry_body) = json_request(
+        &restarted,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(retry_status, StatusCode::OK, "{retry_body}");
+    assert_eq!(
+        retry_body["record_authors"],
+        json!([{
+            "client_uuid": record_id,
+            "created_by_membership_id": owner["membership_id"],
+        }])
     );
 }
 

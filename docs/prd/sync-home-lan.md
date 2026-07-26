@@ -498,8 +498,13 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
   写入 `created_by_membership_id`，并保留 `created_by_device_id` 作为旧客户端回退；
   客户端伪造的 membership/device claim 不会成为作者。后续编辑、软删与恢复保留
   已存首次作者。ordinary push 与 atomic bundle 必须调用同一 canonicalization 规则
+- 旧数据只在同家庭的 legacy device 可唯一映射到一个历史 membership 时回填作者；
+  回填推进实体与家庭 revision 且重启幂等，重复/未知映射保持 unknown
 - avatar 类 media：非 owner → `403`
-- 响应：`{ "applied": N }`
+- 响应：
+  `{ "applied": N, "record_authors": [{ "client_uuid": "…", "created_by_membership_id": "…" }] }`
+  `record_authors` 是可忽略的加法字段，只列出已知 canonical 作者；equal/LWW skip 也可
+  返回已存作者，使建家前本机 Record 无需等待下一次 pull 即可完成 metadata-only 回填
 
 ### 9.7 `GET /v1/pull?cursor=&generation=`
 
@@ -551,6 +556,9 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 - **暂存不可见**：commit 前根实体与媒体均不出现在普通 `GET /v1/pull`
 - **清单完整**：live media 必须声明正 `byte_size`；commit 前全部字节校验通过；tombstone media 不需字节
 - **幂等 commit**：重复 commit / 丢失响应可安全重试；已 commit 的 `bundle_id` 内容冲突 → `409`
+- **canonical 回执**：Record 根的首次 commit 与幂等 retry 都使用与 ordinary push
+  同形的 `record_authors` 加法数组；旧客户端忽略，Android 只在请求对应的本地版本仍
+  存在时合并 membership 作者，不改护理内容、dirty 状态或 Outbox
 - **提交者绑定**：暂存包绑定 stage 时认证到的 membership；其它 membership 不得代为
   commit，从而保证 server-owned Record/CarePlan 作者、内容 hash 与幂等重试一致
 - **稳定 UUID**：Android 以命名空间、根类型、根实体 `client_uuid` 与 `updated_at` 确定性生成合法 UUID；同一版本重试复用同一 `bundle_id`，Record 与 CarePlan 不共享身份

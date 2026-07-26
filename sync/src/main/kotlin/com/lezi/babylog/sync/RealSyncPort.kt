@@ -577,7 +577,13 @@ class RealSyncPort @Inject constructor(
             }
             .sortedBy { ENTITY_ORDER.indexOf(it.type).takeIf { index -> index >= 0 } ?: Int.MAX_VALUE }
         requireAllowed(policy.evaluate(session.homeLanConfig, foregroundState.isForeground()))
-        backend.push(session, entities)
+        val pushResult = backend.push(session, entities)
+        mergeCanonicalRecordAuthors(
+            authors = pushResult.recordAuthors,
+            expectedUpdatedAt = entities
+                .filter { it.type == "record" }
+                .associate { it.clientUuid to it.updatedAt },
+        )
         uploads.forEach { media ->
             requireAllowed(policy.evaluate(session.homeLanConfig, foregroundState.isForeground()))
             // Metadata needs the compressed byte size, so preparation happens
@@ -705,7 +711,11 @@ class RealSyncPort @Inject constructor(
             mediaDao.update(media.copy(remoteUri = session.receiptFor(media.clientUuid)))
         }
         requireAllowed(policy.evaluate(session.homeLanConfig, foregroundState.isForeground()))
-        backend.commitBundle(session, bundleId)
+        val commit = backend.commitBundle(session, bundleId)
+        mergeCanonicalRecordAuthors(
+            authors = commit.recordAuthors,
+            expectedUpdatedAt = mapOf(record.clientUuid to recordRow.updatedAt),
+        )
         recordDao.markSynced(record.clientUuid, recordRow.updatedAt)
         mediaRows.forEach { mediaDao.markSynced(it.clientUuid, it.updatedAt) }
         outboxDao.deleteIds((listOf(recordRow) + mediaRows).map { it.id })
@@ -1320,8 +1330,24 @@ class RealSyncPort @Inject constructor(
 
     private suspend fun applyRecord(entity: SyncEntity): Boolean {
         val existing = recordDao.getByClientUuid(entity.clientUuid)
-        // Match server LWW: existing wins on equal updatedAt (>= skip).
-        if (existing != null && existing.updatedAt >= entity.updatedAt) return true
+        // Match server LWW for business fields. Equal revisions may still carry
+        // a server-owned author metadata acknowledgement from an upgraded NAS.
+        if (existing != null && existing.updatedAt > entity.updatedAt) return true
+        if (existing != null && existing.updatedAt == entity.updatedAt) {
+            runCatching { Json.parseToJsonElement(entity.payloadJson).jsonObject }
+                .getOrNull()
+                ?.string("created_by_membership_id")
+                ?.trim()
+                ?.takeIf(String::isNotEmpty)
+                ?.let { membershipId ->
+                    recordDao.mergeCanonicalAuthor(
+                        clientUuid = entity.clientUuid,
+                        expectedUpdatedAt = entity.updatedAt,
+                        membershipId = membershipId,
+                    )
+                }
+            return true
+        }
         // Concurrent local dirty mutation: never clobber the in-flight package or
         // clear syncDirty mid-edit. Creator keeps the local complete revision until
         // push commits; receivers still see the prior published package.
@@ -1355,6 +1381,19 @@ class RealSyncPort @Inject constructor(
             ),
         )
         return true
+    }
+
+    private suspend fun mergeCanonicalRecordAuthors(
+        authors: List<CanonicalRecordAuthor>,
+        expectedUpdatedAt: Map<String, Long>,
+    ) {
+        authors.distinctBy(CanonicalRecordAuthor::clientUuid).forEach { author ->
+            val updatedAt = expectedUpdatedAt[author.clientUuid] ?: return@forEach
+            val membershipId = author.createdByMembershipId.trim()
+            if (membershipId.isNotEmpty()) {
+                recordDao.mergeCanonicalAuthor(author.clientUuid, updatedAt, membershipId)
+            }
+        }
     }
 
     /**

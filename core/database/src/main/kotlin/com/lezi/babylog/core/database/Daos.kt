@@ -255,6 +255,21 @@ interface RecordDao {
     )
     suspend fun markSynced(clientUuid: String, updatedAt: Long)
 
+    /** Merge server-owned metadata without changing content, revision, dirty state, or outbox. */
+    @Query(
+        """
+        UPDATE records SET createdByMembershipId = :membershipId
+        WHERE clientUuid = :clientUuid
+          AND updatedAt = :expectedUpdatedAt
+          AND TRIM(:membershipId) != ''
+        """,
+    )
+    suspend fun mergeCanonicalAuthor(
+        clientUuid: String,
+        expectedUpdatedAt: Long,
+        membershipId: String,
+    ): Int
+
     @Query("UPDATE records SET syncDirty = 1")
     suspend fun markAllPendingSync()
 

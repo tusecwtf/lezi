@@ -99,14 +99,19 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
             }
         }).toJoinResult()
 
-    override suspend fun push(session: SyncSession, entities: List<SyncEntity>): Int =
-        post(session.baseUrl, "/v1/push", session.familyToken, buildJsonObject {
+    override suspend fun push(session: SyncSession, entities: List<SyncEntity>): PushResult {
+        val json = post(session.baseUrl, "/v1/push", session.familyToken, buildJsonObject {
             put("device_id", session.deviceId)
             session.pullGeneration.takeIf(String::isNotBlank)?.let {
                 put("generation", it)
             }
             put("entities", buildJsonArray { entities.forEach { add(it.toJson()) } })
-        })["applied"]?.jsonPrimitive?.longOrNull?.toInt() ?: 0
+        })
+        return PushResult(
+            applied = json["applied"]?.jsonPrimitive?.longOrNull?.toInt() ?: 0,
+            recordAuthors = json.recordAuthors(),
+        )
+    }
 
     override suspend fun pull(session: SyncSession): PullResult {
         val generation = session.pullGeneration
@@ -265,6 +270,7 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
             status = json["status"]?.jsonPrimitive?.contentOrNull ?: "committed",
             applied = json["applied"]?.jsonPrimitive?.longOrNull?.toInt() ?: 0,
             cursor = json["cursor"]?.jsonPrimitive?.longOrNull ?: 0L,
+            recordAuthors = json.recordAuthors(),
         )
     }
 
@@ -469,6 +475,22 @@ private fun JsonObject.entities(): List<SyncEntity> =
             deletedAt = value["deleted_at"]?.jsonPrimitive?.longOrNull,
             rev = value["rev"]?.jsonPrimitive?.longOrNull ?: 0,
         )
+    }
+
+private fun JsonObject.recordAuthors(): List<CanonicalRecordAuthor> =
+    (get("record_authors") as? JsonArray).orEmpty().mapNotNull { element ->
+        val value = element as? JsonObject ?: return@mapNotNull null
+        val clientUuid = (value["client_uuid"] as? JsonPrimitive)
+            ?.contentOrNull
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
+            ?: return@mapNotNull null
+        val membershipId = (value["created_by_membership_id"] as? JsonPrimitive)
+            ?.contentOrNull
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
+            ?: return@mapNotNull null
+        CanonicalRecordAuthor(clientUuid, membershipId)
     }
 
 private fun JsonObject.toBundleStageStatus(): BundleStageStatus = BundleStageStatus(

@@ -148,6 +148,17 @@ Record 会立即带当前 session membership；NAS 对 ordinary push 与 atomic 
 在 `/health` 宣告 `record_membership_author` 时才发送新 wire key；旧 NAS 继续收到
 不含该 key 的兼容 payload，并由 device 链路回退显示。
 
+NAS 升级时只回填可证明的历史作者：同家庭内一个 `created_by_device_id` 恰好对应一个
+历史 membership 时，写入该 membership 并推进 Record/family revision，使已经越过旧
+cursor 的客户端仍能重新拉到；同一 device 曾对应多个 membership、字段为空或无法映射
+时保持 unknown。迁移在重启时幂等，不为歧义数据选择排序第一项。
+
+ordinary push 与 atomic commit 都可在加法 `record_authors` 回执中返回本次请求涉及的
+canonical Record membership 作者。Android 对同 `updatedAt` 的本地行只合并这一
+server-owned metadata；不修改护理内容、照片、删除状态或业务时间，不提高
+`updatedAt`，不改变 `syncDirty`，也不生成 Outbox。更旧的远端实体不能回退已知作者；
+旧 NAS 省略回执或字段时保留本地已有值并继续使用 legacy device fallback。
+
 ### 3.6 typed payload 与兼容约定
 
 业务代码只通过 `RecordPayloadDocument` / `RecordPayloadCodec` 读取或写入

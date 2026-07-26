@@ -13,6 +13,47 @@ import org.junit.Test
 
 class HttpSyncBackendTest {
     @Test
+    fun pushParsesCanonicalRecordAuthorsAndIgnoresMalformedEntries() = runTest {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val responder = thread(name = "lezi-push-author-test-server") {
+            runCatching {
+                server.accept().use { socket ->
+                    readRequest(socket)
+                    val body =
+                        """{"applied":1,"record_authors":[{"client_uuid":"r1","created_by_membership_id":"membership-a"},{"client_uuid":"","created_by_membership_id":"forged"},{"client_uuid":"r2"}]}"""
+                            .toByteArray(Charsets.UTF_8)
+                    socket.getOutputStream().use { output ->
+                        output.write(
+                            (
+                                "HTTP/1.1 200 OK\r\n" +
+                                    "Content-Type: application/json\r\n" +
+                                    "Content-Length: ${body.size}\r\n" +
+                                    "Connection: close\r\n\r\n"
+                                ).toByteArray(Charsets.US_ASCII),
+                        )
+                        output.write(body)
+                    }
+                }
+            }
+        }
+
+        try {
+            val result = HttpSyncBackend().push(
+                testSession(server),
+                listOf(SyncEntity("record", "r1", "{}", updatedAt = 1)),
+            )
+
+            assertThat(result.applied).isEqualTo(1)
+            assertThat(result.recordAuthors).containsExactly(
+                CanonicalRecordAuthor("r1", "membership-a"),
+            )
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
     fun stagePutAndCommitBundleFollowAtomicEndpoints() = runTest {
         val server = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
         val seen = mutableListOf<String>()
@@ -28,7 +69,7 @@ class HttpSyncBackendTest {
                             request.startsWith("PUT /v1/bundles/b1/media/m1 ") ->
                                 """{"bundle_id":"b1","status":"staging","missing_media":[],"staged_media":["m1"]}"""
                             else ->
-                                """{"bundle_id":"b1","status":"committed","applied":2,"cursor":9}"""
+                                """{"bundle_id":"b1","status":"committed","applied":2,"cursor":9,"record_authors":[{"client_uuid":"r1","created_by_membership_id":"membership-a"}]}"""
                         }.toByteArray(Charsets.UTF_8)
                         socket.getOutputStream().use { output ->
                             output.write(
@@ -79,6 +120,9 @@ class HttpSyncBackendTest {
             val committed = backend.commitBundle(session, "b1")
             assertThat(committed.status).isEqualTo("committed")
             assertThat(committed.cursor).isEqualTo(9)
+            assertThat(committed.recordAuthors).containsExactly(
+                CanonicalRecordAuthor("r1", "membership-a"),
+            )
             assertThat(seen[0]).startsWith("POST /v1/bundles ")
             assertThat(seen[1]).startsWith("PUT /v1/bundles/b1/media/m1 ")
             assertThat(seen[2]).startsWith("POST /v1/bundles/b1/commit ")

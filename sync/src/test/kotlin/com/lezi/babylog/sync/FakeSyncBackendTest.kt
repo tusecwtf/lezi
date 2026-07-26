@@ -13,6 +13,54 @@ import org.junit.Test
 
 class FakeSyncBackendTest {
     @Test
+    fun ordinaryPushReturnsAndPersistsCanonicalRecordAuthor() = runBlocking {
+        val backend = FakeSyncBackend()
+        val created = backend.create(
+            baseUrl = "http://127.0.0.1:8765",
+            deviceId = "owner-device",
+            displayName = "妈妈",
+            createRequestId = "create-request-id-author-000000001",
+            bootstrapSecret = null,
+        )
+        val session = SyncSession(
+            familyId = created.familyId,
+            familyToken = created.token,
+            deviceId = "owner-device",
+            role = FamilyRole.Owner,
+            membershipId = created.membershipId.orEmpty(),
+            serverHost = "127.0.0.1",
+            serverPort = 8765,
+        )
+        backend.push(
+            session,
+            listOf(SyncEntity("baby", "baby-author", """{"nickname":"年年"}""", 1)),
+        )
+
+        val result = backend.push(
+            session,
+            listOf(
+                SyncEntity(
+                    "record",
+                    "record-author",
+                    """{"baby_client_uuid":"baby-author","created_by_membership_id":"forged","type":"formula","timestamp":2,"payload_json":{}}""",
+                    2,
+                ),
+            ),
+        )
+
+        assertThat(result.recordAuthors).containsExactly(
+            CanonicalRecordAuthor("record-author", session.membershipId),
+        )
+        val stored = backend.pull(session).entities.single { it.clientUuid == "record-author" }
+        assertThat(
+            Json.parseToJsonElement(stored.payloadJson)
+                .jsonObject["created_by_membership_id"]
+                ?.jsonPrimitive
+                ?.content,
+        ).isEqualTo(session.membershipId)
+    }
+
+    @Test
     fun atomicBundleIsInvisibleUntilCommitAndIsIdempotent() = runBlocking {
         val backend = FakeSyncBackend()
         val family = backend.create(
@@ -65,8 +113,12 @@ class FakeSyncBackendTest {
         val committed = backend.commitBundle(session, "bundle-1")
         assertThat(committed.status).isEqualTo("committed")
         assertThat(committed.applied).isEqualTo(2)
+        assertThat(committed.recordAuthors).containsExactly(
+            CanonicalRecordAuthor("record-a", session.membershipId),
+        )
         val again = backend.commitBundle(session, "bundle-1")
         assertThat(again.cursor).isEqualTo(committed.cursor)
+        assertThat(again.recordAuthors).isEqualTo(committed.recordAuthors)
         val pulled = backend.pull(session).entities.map { it.clientUuid }
         assertThat(pulled).containsAtLeast("baby-a", "record-a", "media-a")
         assertThat(backend.getMedia(session, "media-a")).isEqualTo(byteArrayOf(1, 2, 3))
@@ -476,7 +528,7 @@ class FakeSyncBackendTest {
             payloadJson = """{"nickname":"年年","birthday":"2024-01-01","sort_order":0}""",
             updatedAt = 100,
         )
-        assertThat(backend.push(owner, listOf(baby))).isEqualTo(1)
+        assertThat(backend.push(owner, listOf(baby)).applied).isEqualTo(1)
 
         val avatar = SyncEntity(
             type = "media",
@@ -488,7 +540,7 @@ class FakeSyncBackendTest {
         assertThat(denied).isInstanceOf(SyncHttpException::class.java)
         assertThat((denied as SyncHttpException).statusCode).isEqualTo(403)
 
-        assertThat(backend.push(owner, listOf(avatar))).isEqualTo(1)
+        assertThat(backend.push(owner, listOf(avatar)).applied).isEqualTo(1)
 
         val orphanRecord = SyncEntity(
             type = "record",

@@ -102,8 +102,13 @@ class FakeSyncBackend : SyncBackend {
         )
     }
 
-    override suspend fun push(session: SyncSession, entities: List<SyncEntity>) =
-        pushRows(session.familyId, entities, session.role, session.membershipId)
+    override suspend fun push(session: SyncSession, entities: List<SyncEntity>): PushResult {
+        val applied = pushRows(session.familyId, entities, session.role, session.membershipId)
+        return PushResult(
+            applied = applied,
+            recordAuthors = canonicalRecordAuthors(session.familyId, entities),
+        )
+    }
 
     override suspend fun pull(session: SyncSession) = pullRows(session.familyId, session.pullCursor)
 
@@ -228,6 +233,10 @@ class FakeSyncBackend : SyncBackend {
                 status = "committed",
                 applied = staged.committedApplied,
                 cursor = staged.committedCursor,
+                recordAuthors = canonicalRecordAuthors(
+                    session.familyId,
+                    listOf(staged.draft.root),
+                ),
             )
         }
         val missing = staged.draft.media
@@ -263,6 +272,10 @@ class FakeSyncBackend : SyncBackend {
             status = "committed",
             applied = applied,
             cursor = revision,
+            recordAuthors = canonicalRecordAuthors(
+                session.familyId,
+                listOf(staged.draft.root),
+            ),
         )
     }
 
@@ -307,7 +320,8 @@ class FakeSyncBackend : SyncBackend {
             }
         }
         val stamped = winners.values.map {
-            stampCustomItem(it, family, role, membershipId)
+            stampRecordAuthor(it, family, membershipId)
+                .let { entity -> stampCustomItem(entity, family, role, membershipId) }
                 .let { entity -> stampFulfillmentCandidate(entity, family, role, membershipId) }
         }
         validatePush(role, membershipId, family, stamped)
@@ -319,6 +333,54 @@ class FakeSyncBackend : SyncBackend {
             applied++
         }
         return applied
+    }
+
+    private fun stampRecordAuthor(
+        entity: SyncEntity,
+        family: Map<String, Row>,
+        membershipId: String,
+    ): SyncEntity {
+        if (entity.type != "record") return entity
+        val existing = family["record:${entity.clientUuid}"]?.entity
+        val payload = runCatching {
+            Json.parseToJsonElement(entity.payloadJson).jsonObject.toMutableMap()
+        }.getOrElse { linkedMapOf() }
+        val canonicalMembership = if (existing == null) {
+            membershipId
+        } else {
+            payloadString(existing, "created_by_membership_id")
+                ?.takeIf(String::isNotBlank)
+        }
+        if (canonicalMembership == null) {
+            payload.remove("created_by_membership_id")
+        } else {
+            payload["created_by_membership_id"] =
+                kotlinx.serialization.json.JsonPrimitive(canonicalMembership)
+        }
+        return entity.copy(
+            payloadJson = kotlinx.serialization.json.JsonObject(payload).toString(),
+        )
+    }
+
+    private fun canonicalRecordAuthors(
+        familyId: String,
+        requested: List<SyncEntity>,
+    ): List<CanonicalRecordAuthor> {
+        val family = rows[familyId].orEmpty()
+        return requested
+            .asSequence()
+            .filter { it.type == "record" }
+            .distinctBy(SyncEntity::clientUuid)
+            .mapNotNull { request ->
+                val stored = family["record:${request.clientUuid}"]?.entity
+                    ?: return@mapNotNull null
+                val membershipId = payloadString(stored, "created_by_membership_id")
+                    ?.trim()
+                    ?.takeIf(String::isNotEmpty)
+                    ?: return@mapNotNull null
+                CanonicalRecordAuthor(request.clientUuid, membershipId)
+            }
+            .toList()
     }
 
     private fun stampCustomItem(

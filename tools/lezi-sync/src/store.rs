@@ -59,6 +59,13 @@ pub struct PushResult {
     pub applied: usize,
     pub skipped: usize,
     pub cursor: i64,
+    pub record_authors: Vec<RecordAuthor>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RecordAuthor {
+    pub client_uuid: String,
+    pub created_by_membership_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,6 +146,7 @@ pub struct BundleCommitResult {
     pub status: String,
     pub applied: usize,
     pub cursor: i64,
+    pub record_authors: Vec<RecordAuthor>,
 }
 
 #[derive(Debug, Clone)]
@@ -370,6 +378,7 @@ impl Store {
         )?;
         // Expand entities CHECK for care_plan, custom_item, fulfillment_candidate.
         ensure_entities_allow_care_plan_and_custom_item(&connection)?;
+        hydrate_legacy_record_authors(&mut connection)?;
         connection.execute(
             "
             CREATE UNIQUE INDEX IF NOT EXISTS families_create_request
@@ -759,6 +768,11 @@ impl Store {
             return Err(StoreError::TimestampOutOfRange);
         }
         let original_count = entities.len();
+        let incoming_record_ids = entities
+            .iter()
+            .filter(|entity| entity.entity_type == "record")
+            .map(|entity| entity.client_uuid.clone())
+            .collect::<BTreeSet<_>>();
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let incoming_keys = entities.iter().map(entity_key).collect::<BTreeSet<_>>();
@@ -851,12 +865,15 @@ impl Store {
             "UPDATE family_meta SET rev = ?1 WHERE family_id = ?2",
             params![cursor, family_id],
         )?;
+        let record_authors =
+            record_author_acknowledgements(&incoming_record_ids, &effective, &existing);
         transaction.commit()?;
         self.secure_database_files()?;
         Ok(PushResult {
             applied: entity_count,
             skipped: original_count.saturating_sub(entity_count),
             cursor,
+            record_authors,
         })
     }
 
@@ -1346,6 +1363,14 @@ impl Store {
                 deleted_at: row.root_deleted_at,
                 payload: parse_payload(&row.root_payload_json)?,
             };
+            let record_authors = if root.entity_type == "record" {
+                load_persisted_record_author(&transaction, family_id, root.client_uuid.as_str())?
+                    .or_else(|| record_author_acknowledgement(&root.client_uuid, &root.payload))
+                    .into_iter()
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let mut package = vec![root];
             package.extend(media);
             return Ok((
@@ -1354,6 +1379,7 @@ impl Store {
                     status: "committed".to_owned(),
                     applied,
                     cursor,
+                    record_authors,
                 },
                 package,
             ));
@@ -1417,6 +1443,13 @@ impl Store {
             .iter()
             .find(|entity| entity.entity_type != "media")
             .ok_or(StoreError::InvalidStoredPayload)?;
+        let record_authors = if canonical_root.entity_type == "record" {
+            record_author_acknowledgement(&canonical_root.client_uuid, &canonical_root.payload)
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        };
         let canonical_media = package
             .iter()
             .filter(|entity| entity.entity_type == "media")
@@ -1539,6 +1572,7 @@ impl Store {
                 status: "committed".to_owned(),
                 applied: entity_count,
                 cursor,
+                record_authors,
             },
             package,
         ))
@@ -1779,6 +1813,70 @@ fn canonicalize_record_authors(
             );
         }
     }
+}
+
+fn record_author_acknowledgements(
+    requested_record_ids: &BTreeSet<String>,
+    effective: &[Entity],
+    existing: &HashMap<EntityKey, ExistingEntity>,
+) -> Vec<RecordAuthor> {
+    requested_record_ids
+        .iter()
+        .filter_map(|client_uuid| {
+            let payload = effective
+                .iter()
+                .find(|entity| entity.entity_type == "record" && entity.client_uuid == *client_uuid)
+                .map(|entity| &entity.payload)
+                .or_else(|| {
+                    existing
+                        .get(&("record".to_owned(), client_uuid.clone()))
+                        .map(|entity| &entity.payload)
+                })?;
+            record_author_acknowledgement(client_uuid, payload)
+        })
+        .collect()
+}
+
+fn record_author_acknowledgement(
+    client_uuid: &str,
+    payload: &Map<String, Value>,
+) -> Option<RecordAuthor> {
+    let created_by_membership_id = payload
+        .get("created_by_membership_id")
+        .and_then(Value::as_str)
+        .filter(|membership_id| !membership_id.is_empty())?
+        .to_owned();
+    Some(RecordAuthor {
+        client_uuid: client_uuid.to_owned(),
+        created_by_membership_id,
+    })
+}
+
+fn load_persisted_record_author(
+    connection: &Connection,
+    family_id: &str,
+    client_uuid: &str,
+) -> Result<Option<RecordAuthor>, StoreError> {
+    let payload_json = connection
+        .query_row(
+            "
+            SELECT payload_json
+            FROM entities
+            WHERE family_id = ?1
+              AND entity_type = 'record'
+              AND client_uuid = ?2
+            ",
+            params![family_id, client_uuid],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    payload_json
+        .map(|payload_json| {
+            let payload = parse_payload(&payload_json)?;
+            Ok(record_author_acknowledgement(client_uuid, &payload))
+        })
+        .transpose()
+        .map(Option::flatten)
 }
 
 /// Equal `updated_at` keeps the already-published LWW winner. Atomic staging and
@@ -2357,6 +2455,127 @@ fn migrate_legacy_memberships(connection: &mut Connection) -> Result<(), StoreEr
             ON membership_aliases(canonical_membership_id);
         ",
     )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// Hydrates pre-membership Record authors only when the legacy family/device
+/// link resolves to exactly one canonical membership.
+///
+/// Every changed row receives a fresh family revision so clients that already
+/// consumed the legacy version pull the canonical metadata once. Rows with an
+/// empty/unknown device or multiple historical memberships remain unknown. The
+/// persisted membership field is the idempotency marker for later restarts.
+fn hydrate_legacy_record_authors(connection: &mut Connection) -> Result<(), StoreError> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let memberships_by_device = {
+        let mut statement = transaction.prepare(
+            "
+            SELECT family_id, device_id, membership_id
+            FROM memberships
+            ORDER BY family_id COLLATE BINARY,
+                     device_id COLLATE BINARY,
+                     membership_id COLLATE BINARY
+            ",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut grouped = BTreeMap::<(String, String), BTreeSet<String>>::new();
+        for row in rows {
+            let (family_id, device_id, membership_id) = row?;
+            if device_id.is_empty() || membership_id.is_empty() {
+                continue;
+            }
+            grouped
+                .entry((family_id, device_id))
+                .or_default()
+                .insert(membership_id);
+        }
+        grouped
+            .into_iter()
+            .filter_map(|(key, memberships)| {
+                (memberships.len() == 1)
+                    .then(|| (key, memberships.into_iter().next().expect("one membership")))
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+
+    let legacy_records = {
+        let mut statement = transaction.prepare(
+            "
+            SELECT family_id, client_uuid, payload_json
+            FROM entities
+            WHERE entity_type = 'record'
+            ORDER BY family_id COLLATE BINARY, rev, client_uuid COLLATE BINARY
+            ",
+        )?;
+        let records = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        records
+    };
+
+    for (family_id, client_uuid, payload_json) in legacy_records {
+        let mut payload = parse_payload(&payload_json)?;
+        let has_membership_author = payload
+            .get("created_by_membership_id")
+            .and_then(Value::as_str)
+            .is_some_and(|membership_id| !membership_id.is_empty());
+        if has_membership_author {
+            continue;
+        }
+        let Some(device_id) = payload
+            .get("created_by_device_id")
+            .and_then(Value::as_str)
+            .filter(|device_id| !device_id.is_empty())
+        else {
+            continue;
+        };
+        let Some(membership_id) =
+            memberships_by_device.get(&(family_id.clone(), device_id.to_owned()))
+        else {
+            continue;
+        };
+        payload.insert(
+            "created_by_membership_id".to_owned(),
+            Value::String(membership_id.clone()),
+        );
+        transaction.execute(
+            "UPDATE family_meta SET rev = rev + 1 WHERE family_id = ?1",
+            params![family_id],
+        )?;
+        let rev: i64 = transaction.query_row(
+            "SELECT rev FROM family_meta WHERE family_id = ?1",
+            params![family_id],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "
+            UPDATE entities
+            SET payload_json = ?1, rev = ?2
+            WHERE family_id = ?3
+              AND entity_type = 'record'
+              AND client_uuid = ?4
+            ",
+            params![
+                serde_json::to_string(&payload)?,
+                rev,
+                family_id,
+                client_uuid
+            ],
+        )?;
+    }
     transaction.commit()?;
     Ok(())
 }
