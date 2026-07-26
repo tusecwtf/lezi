@@ -17,4 +17,14 @@
 
 ## Evidence
 
-- 2026-07-27 Release 收敛：移除重复罗列需求的长说明；常用槽位改为状态行加可换行动作行，避免四个动作与名称挤在同一行。最终候选设备验收覆盖小屏与字体放大。
+- 2026-07-27 Release 收敛：移除重复罗列需求的长说明；常用槽位改为状态行加可换行动作行，避免四个动作与名称挤在同一行。最终候选仍须在 Release 总验收中覆盖小屏与字体放大。
+- 2026-07-27 Release 复核纠正“按钮换位即拖动”的旧结论：类别和类别内项目现均提供
+  handle-only 长按拖动；释放目标使用当前可见类别标题/项目行的实测窗口中心，项目继续由
+  `moveCatalogKeyWithinSection` 保证不能跨类别。状态/开关行与无障碍移动按钮分层，避免
+  窄屏或字体放大时把项目名称挤成窄列；若相邻目标尚在视口外，超过 32dp 的边缘拖动
+  只移动一位，避免固定行高算法跳项。设备候选证据在 Release 总验收中单独记录。
+- `ANDROID_SERIAL=emulator-5554 ./gradlew :feature:settings:connectedDebugAndroidTest
+  -Pandroid.testInstrumentationRunnerArguments.class=com.lezi.babylog.feature.settings.ReorderDragHandleTest
+  --no-daemon`：Android 15 上 2/2 通过，证明长按拖动柄上报真实物理指针位移，并用渲染后
+  不等距槽位中心把第 1 槽拖到第 3 槽；最终候选的完整设置页视觉与持久化仍由 Release
+  设备验收覆盖。

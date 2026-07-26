@@ -18,9 +18,14 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.lezi.babylog.core.model.RecordItemIdentity
 import com.lezi.babylog.core.model.RecordType
@@ -43,8 +48,8 @@ import com.lezi.babylog.domain.CustomRecordItem
 
 /** Top-level hub destinations under「记录与快捷设置」. */
 internal enum class RecordShortcutHubDestination(val title: String, val subtitle: String) {
-    QuickSlots("常用记录", "四个快捷槽位选择、清空与换位"),
-    AllItems("所有记录项目", "类别与项目排序、开启/关闭、自定义"),
+    QuickSlots("常用记录", "四个快捷槽位：选择、拖动排序、清空"),
+    AllItems("所有记录项目", "拖动类别与项目，开启或关闭"),
     PerItem("分项目设置", "仅展示确有专属设置的项目"),
     PlanCalendar("护理计划与日历", "本机提醒与系统日历（后续开放）"),
 }
@@ -97,6 +102,7 @@ internal fun RecordAndShortcutSettingsHubDialog(
  * Categorized all-items editor: category reorder, in-category item reorder (no cross-category),
  * enable/disable with order retention, and custom definitions under 自定义.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun AllRecordItemsSettingsDialog(
     settings: SettingsLocal,
@@ -117,6 +123,9 @@ internal fun AllRecordItemsSettingsDialog(
         orderedRecordSections(settings.categoryOrderJson)
     }
     val customById = remember(customItems) { customItems.associateBy { it.id } }
+    val categoryCenters = remember { mutableStateMapOf<RecordSection, Float>() }
+    val itemCenters = remember { mutableStateMapOf<String, Float>() }
+    val unmeasuredEdgeThresholdPx = with(LocalDensity.current) { 32.dp.toPx() }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -124,48 +133,90 @@ internal fun AllRecordItemsSettingsDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
-                    "类别可上下调整；项目只在所属类别内排序，不可跨类别。关闭后顺序保留，再次开启恢复原位。",
+                    "长按拖动柄排序；项目不会跨类别。关闭后仍保留位置。",
                     style = LeziTypography.Meta,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 LazyColumn(Modifier.heightIn(max = 520.dp)) {
                     sections.forEachIndexed { sectionIndex, section ->
                         item(key = "section-${section.storageKey}") {
-                            Row(
-                                Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(2.dp),
-                                verticalAlignment = Alignment.CenterVertically,
+                            DisposableEffect(section) {
+                                onDispose { categoryCenters.remove(section) }
+                            }
+                            Column(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .onGloballyPositioned { coordinates ->
+                                        categoryCenters[section] =
+                                            coordinates.positionInWindow().y +
+                                            coordinates.size.height / 2f
+                                    },
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
                             ) {
-                                Text(
-                                    section.title,
-                                    style = LeziTypography.Label,
-                                    modifier = Modifier.weight(1f),
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                                TextButton(
-                                    enabled = sectionIndex > 0,
-                                    onClick = {
-                                        onCategoryOrderChanged(
-                                            moveCategoryOrder(
-                                                settings.categoryOrderJson,
-                                                section,
-                                                -1,
-                                            ),
-                                        )
-                                    },
-                                ) { Text("↑") }
-                                TextButton(
-                                    enabled = sectionIndex < sections.lastIndex,
-                                    onClick = {
-                                        onCategoryOrderChanged(
-                                            moveCategoryOrder(
-                                                settings.categoryOrderJson,
-                                                section,
-                                                1,
-                                            ),
-                                        )
-                                    },
-                                ) { Text("↓") }
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    ReorderDragHandle(
+                                        label = "${section.title}类别",
+                                        canMove = sections.size > 1,
+                                        onDragFinished = { distancePx ->
+                                            val delta = dropTargetDelta(
+                                                orderedKeys = sections,
+                                                sourceKey = section,
+                                                dragDistancePx = distancePx,
+                                                targetCentersPx = categoryCenters,
+                                                unmeasuredEdgeThresholdPx =
+                                                    unmeasuredEdgeThresholdPx,
+                                            )
+                                            if (delta != 0) {
+                                                onCategoryOrderChanged(
+                                                    moveCategoryOrder(
+                                                        settings.categoryOrderJson,
+                                                        section,
+                                                        delta,
+                                                    ),
+                                                )
+                                            }
+                                        },
+                                    )
+                                    Text(
+                                        section.title,
+                                        style = LeziTypography.Label,
+                                        modifier = Modifier.weight(1f),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                FlowRow(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.End,
+                                ) {
+                                    TextButton(
+                                        enabled = sectionIndex > 0,
+                                        onClick = {
+                                            onCategoryOrderChanged(
+                                                moveCategoryOrder(
+                                                    settings.categoryOrderJson,
+                                                    section,
+                                                    -1,
+                                                ),
+                                            )
+                                        },
+                                    ) { Text("上移") }
+                                    TextButton(
+                                        enabled = sectionIndex < sections.lastIndex,
+                                        onClick = {
+                                            onCategoryOrderChanged(
+                                                moveCategoryOrder(
+                                                    settings.categoryOrderJson,
+                                                    section,
+                                                    1,
+                                                ),
+                                            )
+                                        },
+                                    ) { Text("下移") }
+                                }
                             }
                         }
                         val sectionKeys = orderedKeysInSection(
@@ -178,42 +229,85 @@ internal fun AllRecordItemsSettingsDialog(
                             key = { _, key -> key },
                         ) { index, catalogKey ->
                             val label = catalogLabel(catalogKey, customById)
-                            Row(
-                                Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(2.dp),
-                                verticalAlignment = Alignment.CenterVertically,
+                            DisposableEffect(catalogKey) {
+                                onDispose { itemCenters.remove(catalogKey) }
+                            }
+                            Column(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .onGloballyPositioned { coordinates ->
+                                        itemCenters[catalogKey] =
+                                            coordinates.positionInWindow().y +
+                                            coordinates.size.height / 2f
+                                    },
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
                             ) {
-                                Text(label, modifier = Modifier.weight(1f))
-                                TextButton(
-                                    enabled = index > 0,
-                                    onClick = {
-                                        onItemOrderChanged(
-                                            moveCatalogKeyWithinSection(
-                                                itemOrderJson = encodeItemOrder(mergedOrder),
-                                                catalogKey = catalogKey,
-                                                delta = -1,
-                                                allKnownKeys = knownKeys,
-                                            ),
-                                        )
-                                    },
-                                ) { Text("↑") }
-                                TextButton(
-                                    enabled = index < sectionKeys.lastIndex,
-                                    onClick = {
-                                        onItemOrderChanged(
-                                            moveCatalogKeyWithinSection(
-                                                itemOrderJson = encodeItemOrder(mergedOrder),
-                                                catalogKey = catalogKey,
-                                                delta = 1,
-                                                allKnownKeys = knownKeys,
-                                            ),
-                                        )
-                                    },
-                                ) { Text("↓") }
-                                Switch(
-                                    checked = catalogKey !in settings.hiddenItems,
-                                    onCheckedChange = { onToggleVisible(catalogKey) },
-                                )
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    ReorderDragHandle(
+                                        label = label,
+                                        canMove = sectionKeys.size > 1,
+                                        onDragFinished = { distancePx ->
+                                            val delta = dropTargetDelta(
+                                                orderedKeys = sectionKeys,
+                                                sourceKey = catalogKey,
+                                                dragDistancePx = distancePx,
+                                                targetCentersPx = itemCenters,
+                                                unmeasuredEdgeThresholdPx =
+                                                    unmeasuredEdgeThresholdPx,
+                                            )
+                                            if (delta != 0) {
+                                                onItemOrderChanged(
+                                                    moveCatalogKeyWithinSection(
+                                                        itemOrderJson = encodeItemOrder(mergedOrder),
+                                                        catalogKey = catalogKey,
+                                                        delta = delta,
+                                                        allKnownKeys = knownKeys,
+                                                    ),
+                                                )
+                                            }
+                                        },
+                                    )
+                                    Text(label, modifier = Modifier.weight(1f))
+                                    Switch(
+                                        checked = catalogKey !in settings.hiddenItems,
+                                        onCheckedChange = { onToggleVisible(catalogKey) },
+                                    )
+                                }
+                                FlowRow(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.End,
+                                ) {
+                                    TextButton(
+                                        enabled = index > 0,
+                                        onClick = {
+                                            onItemOrderChanged(
+                                                moveCatalogKeyWithinSection(
+                                                    itemOrderJson = encodeItemOrder(mergedOrder),
+                                                    catalogKey = catalogKey,
+                                                    delta = -1,
+                                                    allKnownKeys = knownKeys,
+                                                ),
+                                            )
+                                        },
+                                    ) { Text("上移") }
+                                    TextButton(
+                                        enabled = index < sectionKeys.lastIndex,
+                                        onClick = {
+                                            onItemOrderChanged(
+                                                moveCatalogKeyWithinSection(
+                                                    itemOrderJson = encodeItemOrder(mergedOrder),
+                                                    catalogKey = catalogKey,
+                                                    delta = 1,
+                                                    allKnownKeys = knownKeys,
+                                                ),
+                                            )
+                                        },
+                                    ) { Text("下移") }
+                                }
                             }
                         }
                         if (section == RecordSection.Custom) {

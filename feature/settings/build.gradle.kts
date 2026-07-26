@@ -52,11 +52,13 @@ dependencies {
     ksp(libs.hilt.compiler)
     implementation(libs.kotlinx.coroutines.android)
     debugImplementation(libs.androidx.compose.ui.tooling)
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.kotlinx.coroutines.android)
     androidTestImplementation(libs.truth)
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
 
     implementation(project(":core:datastore"))
 

@@ -15,13 +15,19 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.lezi.babylog.core.model.QUICK_RECORD_SLOT_COUNT
 import com.lezi.babylog.core.model.RecordItemIdentity
@@ -49,6 +55,8 @@ internal fun QuickRecordSlotsSettingsDialog(
     val candidates = remember(settings.hiddenItems, customItems) {
         slotCandidates(settings.hiddenItems, customItems)
     }
+    val slotCenters = remember { mutableStateMapOf<Int, Float>() }
+    val unmeasuredEdgeThresholdPx = with(LocalDensity.current) { 32.dp.toPx() }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -70,20 +78,44 @@ internal fun QuickRecordSlotsSettingsDialog(
                 }
                 slots.forEachIndexed { index, key ->
                     val label = slotLabel(key, customItems)
+                    DisposableEffect(index) {
+                        onDispose { slotCenters.remove(index) }
+                    }
                     Column(
-                        Modifier.fillMaxWidth(),
+                        Modifier
+                            .fillMaxWidth()
+                            .onGloballyPositioned { coordinates ->
+                                slotCenters[index] = coordinates.positionInWindow().y +
+                                    coordinates.size.height / 2f
+                            },
                         verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
                         Row(
                             Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
+                            horizontalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text("槽位 ${index + 1}", style = LeziTypography.Label)
-                            Text(
-                                label,
-                                style = LeziTypography.BodyStrong,
+                            ReorderDragHandle(
+                                label = "槽位 ${index + 1}，$label",
+                                canMove = slots.size > 1,
+                                onDragFinished = { distancePx ->
+                                    val delta = dropTargetDelta(
+                                        orderedKeys = slots.indices.toList(),
+                                        sourceKey = index,
+                                        dragDistancePx = distancePx,
+                                        targetCentersPx = slotCenters,
+                                        unmeasuredEdgeThresholdPx = unmeasuredEdgeThresholdPx,
+                                    )
+                                    if (delta != 0) {
+                                        onSlotsChanged(moveItemBy(slots, index, delta))
+                                    }
+                                },
+                                modifier = Modifier.testTag("quick-slot-reorder-$index"),
                             )
+                            Column(Modifier.weight(1f)) {
+                                Text("槽位 ${index + 1}", style = LeziTypography.Label)
+                                Text(label, style = LeziTypography.BodyStrong)
+                            }
                         }
                         FlowRow(
                             Modifier.fillMaxWidth(),
@@ -93,13 +125,13 @@ internal fun QuickRecordSlotsSettingsDialog(
                             TextButton(
                                 enabled = index > 0,
                                 onClick = {
-                                    onSlotsChanged(swapSlots(slots, index, index - 1))
+                                    onSlotsChanged(moveItemBy(slots, index, -1))
                                 },
                             ) { Text("上移") }
                             TextButton(
                                 enabled = index < slots.lastIndex,
                                 onClick = {
-                                    onSlotsChanged(swapSlots(slots, index, index + 1))
+                                    onSlotsChanged(moveItemBy(slots, index, 1))
                                 },
                             ) { Text("下移") }
                             TextButton(onClick = { pickingIndex = index }) { Text("选择") }
@@ -158,15 +190,6 @@ private fun normalizeSlots(slots: List<String>): List<String> {
     val padded = slots.map { it.trim() }.toMutableList()
     while (padded.size < QUICK_RECORD_SLOT_COUNT) padded += ""
     return padded.take(QUICK_RECORD_SLOT_COUNT)
-}
-
-private fun swapSlots(slots: List<String>, from: Int, to: Int): List<String> {
-    val list = normalizeSlots(slots).toMutableList()
-    if (from !in list.indices || to !in list.indices) return list
-    val tmp = list[from]
-    list[from] = list[to]
-    list[to] = tmp
-    return list
 }
 
 private fun slotLabel(key: String, customItems: List<CustomRecordItem>): String {
