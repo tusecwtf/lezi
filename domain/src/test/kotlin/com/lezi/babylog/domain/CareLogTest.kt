@@ -4810,6 +4810,29 @@ private class FakeRecordDao(
         }
     }
 
+    override suspend fun mergeCanonicalAuthor(
+        clientUuid: String,
+        expectedUpdatedAt: Long,
+        membershipId: String,
+    ): Int {
+        var changed = 0
+        items.update { values ->
+            values.map {
+                if (
+                    it.clientUuid == clientUuid &&
+                    it.updatedAt == expectedUpdatedAt &&
+                    membershipId.isNotBlank()
+                ) {
+                    changed = 1
+                    it.copy(createdByMembershipId = membershipId)
+                } else {
+                    it
+                }
+            }
+        }
+        return changed
+    }
+
     override suspend fun markAllPendingSync() {
         items.update { values -> values.map { it.copy(syncDirty = true) } }
     }

@@ -446,10 +446,6 @@ fun FamilyRoute(
                         dialog = FamilyDialog.Wizard(FamilyWizardMode.Join, FamilyWizardStep.Network)
                     },
                     onConfirm = {
-                        validateFamilyDisplayNameInput(joinDisplayName)?.let {
-                            joinDisplayNameError = it
-                            return@JoinFamilyDialog
-                        }
                         withHomeWifiAccess {
                             joiningFamily = true
                             vm.join(joinDraft, joinDisplayName) { success, copy ->

@@ -75,14 +75,14 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
+import com.lezi.babylog.domain.JoinFamilyRequest
+import com.lezi.babylog.domain.JoinFamilyResult
+import com.lezi.babylog.domain.JoinFamilyUseCase
 import com.lezi.babylog.sync.HomeLanServerConfig
 import com.lezi.babylog.sync.HomeWifiPermission
 import com.lezi.babylog.sync.JoinFamilyDraft
 import com.lezi.babylog.sync.HomeWifiSettingsTarget
 import com.lezi.babylog.sync.NetworkState
-import com.lezi.babylog.sync.SyncPort
-import com.lezi.babylog.sync.SyncTrigger
-import com.lezi.babylog.sync.joinFamilyError
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate
@@ -115,7 +115,7 @@ private val ThemePaletteLabels = listOf(
 @HiltViewModel
 class OnboardingViewModel @Inject constructor(
     private val careLog: CareLog,
-    private val sync: SyncPort,
+    private val joinFamily: JoinFamilyUseCase,
     private val networkState: NetworkState,
 ) : ViewModel() {
     fun currentWifiSsid(): String? = networkState.currentWifiSsid()
@@ -159,33 +159,14 @@ class OnboardingViewModel @Inject constructor(
         onDone: (String?) -> Unit,
     ) {
         viewModelScope.launch {
-            // Same soft gate as account family wizard (shared sync validation).
-            com.lezi.babylog.sync.memberDisplayNameValidationError(displayName)?.let {
-                onDone(it)
-                return@launch
+            when (
+                val result = joinFamily.execute(
+                    JoinFamilyRequest(draft = draft, displayName = displayName),
+                )
+            ) {
+                is JoinFamilyResult.Joined -> onDone(null)
+                is JoinFamilyResult.Failed -> onDone(result.message)
             }
-            val command = runCatching { draft.toCommand(displayName) }.getOrElse {
-                onDone(joinFamilyError(it))
-                return@launch
-            }
-            try {
-                careLog.ensureFamilyScaffold()
-            } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                throw cancelled
-            } catch (error: Throwable) {
-                onDone(productUiError(error, "准备本机家庭失败"))
-                return@launch
-            }
-            // The edited endpoint is an in-memory join candidate. RealSyncPort persists it
-            // atomically with the joined session only after the server accepts the invite.
-            val join = sync.joinFamily(command)
-            if (join.isFailure) {
-                onDone(joinFamilyError(join.exceptionOrNull() ?: Exception("加入失败")))
-                return@launch
-            }
-            careLog.updateLocalDisplayName(command.displayName)
-            sync.requestSync(SyncTrigger.PullToRefresh)
-            onDone(null)
         }
     }
 }
@@ -695,18 +676,6 @@ fun OnboardingRoute(
                     onClick = {
                         withHomeWifiAccess {
                             fillCurrentWifiIfBlank()
-                            // Shared rules with account wizard / JoinFamilyDraft.toCommand.
-                            com.lezi.babylog.sync.memberDisplayNameValidationError(joinDisplayName)
-                                ?.let {
-                                    formError = it
-                                    return@withHomeWifiAccess
-                                }
-                            runCatching { joinDraft.toCommand(joinDisplayName) }
-                                .exceptionOrNull()
-                                ?.let {
-                                    formError = it.message ?: "服务器地址无效"
-                                    return@withHomeWifiAccess
-                                }
                             formError = null
                             vm.joinFamily(
                                 draft = joinDraft,

@@ -7,6 +7,9 @@ import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.domain.BabyMergePreview
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.DuplicateBabyNicknameException
+import com.lezi.babylog.domain.JoinFamilyRequest
+import com.lezi.babylog.domain.JoinFamilyResult
+import com.lezi.babylog.domain.JoinFamilyUseCase
 import com.lezi.babylog.domain.UpdateBabyInput
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.FamilyRole
@@ -16,7 +19,6 @@ import com.lezi.babylog.sync.InvitePayloadCodec
 import com.lezi.babylog.sync.JoinFamilyDraft
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
-import com.lezi.babylog.sync.joinFamilyError
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
@@ -81,6 +83,7 @@ class FamilyViewModel @Inject constructor(
     private val careLog: CareLog,
     private val avatarFileStore: BabyAvatarFileStore,
     private val networkState: com.lezi.babylog.sync.NetworkState,
+    private val joinFamily: JoinFamilyUseCase,
 ) : ViewModel() {
     private val profileSaveMutex = Mutex()
     private val memberRefreshMutex = Mutex()
@@ -355,28 +358,17 @@ class FamilyViewModel @Inject constructor(
         onDone: (success: Boolean, message: String) -> Unit,
     ) {
         viewModelScope.launch {
-            validateFamilyDisplayNameInput(displayName)?.let {
-                onDone(false, it)
-                return@launch
+            when (
+                val result = joinFamily.execute(
+                    JoinFamilyRequest(draft = draft, displayName = displayName),
+                )
+            ) {
+                is JoinFamilyResult.Joined -> {
+                    onDone(true, "已加入家庭")
+                    refreshMembersNow(showErrors = true)
+                }
+                is JoinFamilyResult.Failed -> onDone(false, result.message)
             }
-            val command = runCatching { draft.toCommand(displayName.trim()) }.getOrElse {
-                onDone(false, joinFamilyError(it))
-                return@launch
-            }
-            val result = sync.joinFamily(
-                command,
-            )
-            if (result.isSuccess) {
-                careLog.updateLocalDisplayName(displayName.trim())
-            }
-            onDone(
-                result.isSuccess,
-                result.fold(
-                    onSuccess = { "已加入家庭" },
-                    onFailure = { joinFamilyError(it) },
-                ),
-            )
-            if (result.isSuccess) refreshMembersNow(showErrors = true)
         }
     }
 

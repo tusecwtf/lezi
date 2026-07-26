@@ -233,9 +233,7 @@ class RealSyncPort @Inject constructor(
                 deviceId,
                 memberDisplayNameForWire(command.displayName),
             )
-            persistJoin(baseUrl, deviceId, joined, config).also {
-                requestSync(SyncTrigger.PullToRefresh)
-            }
+            persistJoin(baseUrl, deviceId, joined, config)
         }
     }.onFailure(::updateFailureStatus)
 

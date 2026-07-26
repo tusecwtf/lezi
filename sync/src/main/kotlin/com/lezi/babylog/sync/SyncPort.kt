@@ -62,6 +62,7 @@ interface SyncPort {
     suspend fun pull(familyId: String): Result<Unit>
     suspend fun push(familyId: String): Result<Unit>
     suspend fun createInvite(familyId: String): Result<Invite>
+    /** Persists the joined session only; the shared domain join use case owns the immediate sync request. */
     suspend fun joinFamily(command: JoinFamilyCommand): Result<SyncSession>
     suspend fun listFamilyMembers(): Result<List<FamilyMember>>
     /** Self-only rename of this device's membership 家庭称呼. */

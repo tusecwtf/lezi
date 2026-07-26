@@ -4,7 +4,7 @@
 
 **Blocked by:** `.scratch/family-identity-account-overview/issues/04-family-wizard-and-invite.md`
 
-**Status:** ready-for-agent
+**Status:** completed
 
 **Size:** M
 **Review finding:** Spec 2
@@ -28,14 +28,14 @@
 
 ## Acceptance criteria
 
-- [ ] 两个 ViewModel 均不再直接调用 `draft.toCommand(...)` 或 `sync.joinFamily(...)`。
-- [ ] scaffold、称呼缓存、join 与同步触发只有一份 implementation。
-- [ ] 成功后本地称呼与 membership 一致；失败不得提前缓存称呼或退出 onboarding。
-- [ ] 每次成功 join 至多触发一次立即同步；删除 Onboarding 现有重复 `requestSync` 路径。
-- [ ] `CancellationException` 原样传播；产品错误继续统一经 `joinFamilyError`，不暴露堆栈/路径。
-- [ ] 邀请预填和 endpoint 真源仍由共享 draft/config 规则决定，不在 use case 引入第三套优先级。
-- [ ] 用例 interface 测试覆盖：坏草稿、scaffold 失败、join 失败、成功、取消、一次同步。
-- [ ] 删除被替代的两个 ViewModel 工作流测试或改为只验证委托与 UI 结果，禁止层叠重复测试。
+- [x] 两个 ViewModel 均不再直接调用 `draft.toCommand(...)` 或 `sync.joinFamily(...)`。
+- [x] scaffold、称呼缓存、join 与同步触发只有一份 implementation。
+- [x] 成功后本地称呼与 membership 一致；失败不得提前缓存称呼或退出 onboarding。
+- [x] 每次成功 join 至多触发一次立即同步；删除 Onboarding 现有重复 `requestSync` 路径。
+- [x] `CancellationException` 原样传播；产品错误继续统一经 `joinFamilyError`，不暴露堆栈/路径。
+- [x] 邀请预填和 endpoint 真源仍由共享 draft/config 规则决定，不在 use case 引入第三套优先级。
+- [x] 用例 interface 测试覆盖：坏草稿、scaffold 失败、join 失败、成功、取消、一次同步。
+- [x] 原入口没有独立 ViewModel 工作流测试需要删除；行为测试集中在公共 use-case seam，现有 UI 配置测试只保留 draft/config 规则。
 
 ## Validation
 
@@ -55,4 +55,19 @@
 ## Comments
 
 - 来源：固定范围审查 Spec finding 2；原 Ticket 14 只共享 draft，未共享提交用例。
-
+- Implementation：domain `JoinFamilyUseCase` 是两个入口共用的小 interface；默认实现按
+  draft 校验 → 本地 scaffold → server join → 缓存规范化家庭称呼 → 一次
+  `PullToRefresh` 请求排序。Onboarding 与 Family ViewModel 只收集表单、调用 use case
+  并经 `joinFamilyError` 渲染结果。
+- TDD：先记录 `JoinFamilyUseCase` 不存在的 RED；同时发现 `62a22c1` 基线
+  `CareLogTest.FakeRecordDao` 缺少 `mergeCanonicalAuthor` 编译桩，按现有 DAO 语义补齐
+  最窄测试适配器后，公共 seam 的 7 个测试全部 GREEN。
+- Validation（2026-07-27）：
+  `./gradlew :domain:testDebugUnitTest :feature:onboarding:testDebugUnitTest :feature:family:testDebugUnitTest --rerun-tasks --no-daemon`
+  → 208 tests，0 failures，0 errors，0 skipped；生产 `rg` 无
+  `draft.toCommand` / `sync.joinFamily`；`git diff --check` 通过。
+- 主代理复核发现 `RealSyncPort.joinFamily` 原本还会自行排队一次 Pull，与 use case 的唯一
+  触发重复；已删除 Port 内部触发，使 join 只提交会话，成功后的唯一立即同步由 use case
+  请求。代码搜索同时确认 join implementation 内不再出现 `requestSync`。
+- Documentation Gate：N/A。wire、产品步骤、错误文案和触发语义未改变，只把已经批准的
+  `docs/prd/sync-home-lan.md` join 流程收进单一领域 module。
