@@ -2,6 +2,8 @@ package com.lezi.babylog.feature.settings
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -31,10 +33,8 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.domain.CustomRecordItem
 
-/**
- * Minimal settings UI to pick / clear / reorder the four home quick-record slots.
- * Drag reorder lands in ticket 06; here ↑↓ swap still satisfies 换位.
- */
+/** Settings UI to pick, clear, and reorder the four home quick-record slots. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun QuickRecordSlotsSettingsDialog(
     settings: SettingsLocal,
@@ -60,39 +60,49 @@ internal fun QuickRecordSlotsSettingsDialog(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
             ) {
-                Text(
-                    "首页固定四个常用槽位，可选择已开启的具体项目；清空后显示「＋ 选择」。关闭或删除的项目不会自动补位。",
-                    style = LeziTypography.Meta,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("首页顺序", style = LeziTypography.BodyStrong)
+                    Text(
+                        "本机设置 · 空槽保留，不会自动补位",
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 slots.forEachIndexed { index, key ->
                     val label = slotLabel(key, customItems)
-                    Row(
+                    Column(
                         Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
-                        Column(Modifier.weight(1f)) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
                             Text("槽位 ${index + 1}", style = LeziTypography.Label)
                             Text(
                                 label,
                                 style = LeziTypography.BodyStrong,
                             )
                         }
-                        Row {
+                        FlowRow(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
                             TextButton(
                                 enabled = index > 0,
                                 onClick = {
                                     onSlotsChanged(swapSlots(slots, index, index - 1))
                                 },
-                            ) { Text("↑") }
+                            ) { Text("上移") }
                             TextButton(
                                 enabled = index < slots.lastIndex,
                                 onClick = {
                                     onSlotsChanged(swapSlots(slots, index, index + 1))
                                 },
-                            ) { Text("↓") }
-                            TextButton(onClick = { pickingIndex = index }) { Text("选") }
+                            ) { Text("下移") }
+                            TextButton(onClick = { pickingIndex = index }) { Text("选择") }
                             TextButton(
                                 enabled = key.isNotEmpty(),
                                 onClick = {
@@ -100,7 +110,7 @@ internal fun QuickRecordSlotsSettingsDialog(
                                     next[index] = ""
                                     onSlotsChanged(next)
                                 },
-                            ) { Text("空") }
+                            ) { Text("清空") }
                         }
                     }
                 }

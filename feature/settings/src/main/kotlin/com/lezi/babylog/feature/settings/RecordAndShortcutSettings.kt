@@ -66,7 +66,7 @@ internal fun RecordAndShortcutSettingsHubDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
                 Text(
-                    "常用槽位、项目启用与顺序、分项目参数、护理计划与日历均在此管理；布局只保存在本机。",
+                    "以下布局只保存在本机",
                     style = LeziTypography.Meta,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
