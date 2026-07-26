@@ -1066,6 +1066,47 @@ class CareLogTest {
     }
 
     @Test
+    fun reminderFailureAfterCommitKeepsReplicaStateAndRetriesOriginalIds() = runTest {
+        val sync = RecordingSyncPort(familyServerRetained = true)
+        val fakes = Fakes(sync)
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val eventId = care.addCalendarEvent(babyId, "疫苗", 10_000L, 9_000L)
+        fakes.reminders.scheduleCalendar(eventId)
+        fakes.reminders.failRecordsClearAttempts = 1
+
+        val failure = runCatching { care.clearRecordsOnly() }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(LocalRecordsClearCommittedException::class.java)
+        assertThat((failure as LocalRecordsClearCommittedException).familyServerRetained).isTrue()
+        assertThat(fakes.calendarEvents.listForBabyIncludingDeleted(babyId)).isEmpty()
+        assertThat(fakes.reminders.scheduledCalendarIds).containsExactly(eventId)
+
+        care.clearRecordsOnly()
+
+        assertThat(fakes.reminders.scheduledCalendarIds).isEmpty()
+        assertThat(fakes.reminders.recordClearBatches)
+            .containsExactly(listOf(eventId), listOf(eventId))
+            .inOrder()
+    }
+
+    @Test
+    fun reminderFailureDoesNotReplaceAnExistingCommittedClearClassification() = runTest {
+        val sync = RecordingSyncPort().apply { failAfterLocalRecordClear = true }
+        val fakes = Fakes(sync)
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        care.addRecord(babyId, RecordType.PEE, timestamp = 1_000L)
+        fakes.reminders.failRecordsClearAttempts = 1
+
+        val failure = runCatching { care.clearRecordsOnly() }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(LocalRecordsClearCommittedException::class.java)
+        assertThat(failure!!.suppressed.map { it.message })
+            .contains("reminder cleanup failed")
+    }
+
+    @Test
     fun deleteBabyCancelsOnlyThatBabysCalendarReminders() = runTest {
         val fakes = Fakes()
         val care = fakes.careLog()
@@ -1164,6 +1205,8 @@ private class FakeReminderCleanupPort : ReminderCleanupPort {
     var nextFeedScheduled: Boolean = false
         private set
     val scheduledCalendarIds = linkedSetOf<Long>()
+    val recordClearBatches = mutableListOf<List<Long>>()
+    var failRecordsClearAttempts = 0
 
     fun scheduleNextFeed() {
         nextFeedScheduled = true
@@ -1174,6 +1217,11 @@ private class FakeReminderCleanupPort : ReminderCleanupPort {
     }
 
     override suspend fun cancelForRecordsClear(calendarEventIds: Collection<Long>) {
+        recordClearBatches += calendarEventIds.toList()
+        if (failRecordsClearAttempts > 0) {
+            failRecordsClearAttempts--
+            error("reminder cleanup failed")
+        }
         nextFeedScheduled = false
         scheduledCalendarIds.removeAll(calendarEventIds.toSet())
     }
@@ -1195,12 +1243,19 @@ private class RecordingTransactionRunner :
 
 private class RecordingSyncPort(
     delegate: com.lezi.babylog.sync.SyncPort = com.lezi.babylog.sync.NoOpSyncPort(),
+    private val familyServerRetained: Boolean = false,
 ) : com.lezi.babylog.sync.SyncPort by delegate {
     var requests = 0
     var localRecordReconciliations = 0
     var fullLocalWipes = 0
     var failBeforeLocalRecordClear = false
     var failAfterLocalRecordClear = false
+
+    override fun session(): Flow<com.lezi.babylog.sync.SyncSession> = MutableStateFlow(
+        com.lezi.babylog.sync.SyncSession(
+            familyId = if (familyServerRetained) "family-a" else "",
+        ),
+    )
 
     override fun requestSync(trigger: com.lezi.babylog.sync.SyncTrigger) {
         requests++

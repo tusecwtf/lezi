@@ -141,6 +141,10 @@ class CareLog @Inject constructor(
      * lock makes read-check-write sequences deterministic inside this process.
      */
     private val sleepMutationMutex = Mutex()
+    private val recordClearReminderMutex = Mutex()
+    private val pendingRecordClearReminderIds = linkedSetOf<Long>()
+    private var pendingRecordClearReminders = false
+    private var pendingRecordClearFamilyServerRetained = false
 
     fun observeHasBaby(): Flow<Boolean> =
         babyDao.observeAll().map { it.isNotEmpty() }
@@ -885,7 +889,9 @@ class CareLog @Inject constructor(
             .flatMap { baby -> calendarEventDao.listForBabyIncludingDeleted(baby.id) }
             .map { it.id }
             .distinct()
+        val familyServerRetained = syncPort.session().first().familyId.isNotBlank()
         var historyDeleted = false
+        var failure: Throwable? = null
         try {
             syncPort.clearLocalRecords { onCommitted ->
                 transactionRunner.run {
@@ -896,17 +902,16 @@ class CareLog @Inject constructor(
                 onCommitted()
                 settings.clearNextFeedAt()
             }.getOrThrow()
-        } catch (error: LocalClearCommittedException) {
-            throw LocalRecordsClearCommittedException(
-                familyServerRetained = error.familyServerRetained,
-                cause = error,
-            )
-        } finally {
-            // Never cancel a still-backed reminder before the authoritative Room delete commits.
-            // If later replica/DataStore cleanup fails, the records are already gone and their
-            // alarms must still be removed.
-            if (historyDeleted) reminderCleanup.cancelForRecordsClear(calendarEventIds)
+        } catch (error: Throwable) {
+            failure = error.asDomainLocalClearFailure()
         }
+        failure = finishRecordClearReminders(
+            historyDeleted = historyDeleted,
+            calendarEventIds = calendarEventIds,
+            familyServerRetained = familyServerRetained,
+            initialFailure = failure,
+        )
+        failure?.let { throw it }
     }
 
     /**
@@ -923,7 +928,9 @@ class CareLog @Inject constructor(
             .flatMap { baby -> calendarEventDao.listForBabyIncludingDeleted(baby.id) }
             .map { it.id }
             .distinct()
+        val familyServerRetained = syncPort.session().first().familyId.isNotBlank()
         var historyDeleted = false
+        var failure: Throwable? = null
         try {
             syncPort.clearAllLocalData { onCommitted ->
                 transactionRunner.run {
@@ -940,15 +947,63 @@ class CareLog @Inject constructor(
                 settings.setCurrentBabyId(null)
                 settings.clearNextFeedAt()
             }.getOrThrow()
-        } catch (error: LocalClearCommittedException) {
-            throw LocalRecordsClearCommittedException(
-                familyServerRetained = error.familyServerRetained,
-                cause = error,
-            )
-        } finally {
-            if (historyDeleted) reminderCleanup.cancelForRecordsClear(calendarEventIds)
+        } catch (error: Throwable) {
+            failure = error.asDomainLocalClearFailure()
+        }
+        failure = finishRecordClearReminders(
+            historyDeleted = historyDeleted,
+            calendarEventIds = calendarEventIds,
+            familyServerRetained = familyServerRetained,
+            initialFailure = failure,
+        )
+        failure?.let { throw it }
+    }
+
+    private suspend fun finishRecordClearReminders(
+        historyDeleted: Boolean,
+        calendarEventIds: Collection<Long>,
+        familyServerRetained: Boolean,
+        initialFailure: Throwable?,
+    ): Throwable? = recordClearReminderMutex.withLock {
+        if (historyDeleted) {
+            pendingRecordClearReminders = true
+            pendingRecordClearReminderIds += calendarEventIds
+            pendingRecordClearFamilyServerRetained =
+                pendingRecordClearFamilyServerRetained || familyServerRetained
+        }
+        if (!pendingRecordClearReminders) return@withLock initialFailure
+
+        val retryIds = pendingRecordClearReminderIds.toList()
+        return try {
+            reminderCleanup.cancelForRecordsClear(retryIds)
+            pendingRecordClearReminderIds.removeAll(retryIds.toSet())
+            pendingRecordClearReminders = false
+            pendingRecordClearFamilyServerRetained = false
+            initialFailure
+        } catch (reminderError: Throwable) {
+            when (initialFailure) {
+                is LocalRecordsClearCommittedException -> initialFailure.apply {
+                    addSuppressed(reminderError)
+                }
+                else -> LocalRecordsClearCommittedException(
+                    familyServerRetained = pendingRecordClearFamilyServerRetained,
+                    cause = initialFailure ?: reminderError,
+                ).also { classified ->
+                    if (initialFailure != null) classified.addSuppressed(reminderError)
+                }
+            }
         }
     }
+
+    private fun Throwable.asDomainLocalClearFailure(): Throwable =
+        if (this is LocalClearCommittedException) {
+            LocalRecordsClearCommittedException(
+                familyServerRetained = familyServerRetained,
+                cause = this,
+            )
+        } else {
+            this
+        }
 
     suspend fun renameBaby(babyId: Long, nickname: String) {
         val name = normalizeNickname(nickname)
