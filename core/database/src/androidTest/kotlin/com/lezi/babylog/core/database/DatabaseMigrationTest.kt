@@ -459,6 +459,48 @@ class DatabaseMigrationTest {
         }
     }
 
+    @Test
+    fun migrate8To17_preservesLegacyPendingReminderCleanupRow() {
+        helper.createDatabase(PENDING_REMINDER_DATABASE, 8).apply {
+            execSQL(
+                """
+                INSERT INTO pending_reminder_cleanup (
+                    operation, calendarEventIds, familyServerRetained
+                ) VALUES ('records_clear', '9,3,9', 1)
+                """.trimIndent(),
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            PENDING_REMINDER_DATABASE,
+            17,
+            true,
+            MIGRATION_8_9,
+            MIGRATION_9_10,
+            MIGRATION_10_11,
+            MIGRATION_11_12,
+            MIGRATION_12_13,
+            MIGRATION_13_14,
+            MIGRATION_14_15,
+            MIGRATION_15_16,
+            MIGRATION_16_17,
+        ).apply {
+            query(
+                """
+                SELECT calendarEventIds, familyServerRetained
+                FROM pending_reminder_cleanup
+                WHERE operation = 'records_clear'
+                """.trimIndent(),
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("9,3,9", cursor.getString(0))
+                assertEquals(1, cursor.getInt(1))
+            }
+            close()
+        }
+    }
+
     /**
      * Full upgrade chain from the shipped 0.2.4 Room schema (v7) through every
      * published migration to the care-plan feature head (v17).
@@ -757,6 +799,7 @@ class DatabaseMigrationTest {
         const val FULFILLMENT_DATABASE = "lezi-fulfillment-candidates-migration-test"
         const val ADOPTION_DATABASE = "lezi-fulfillment-adoption-migration-test"
         const val CONVERT_POINTER_DATABASE = "lezi-fulfillment-convert-pointer-migration-test"
+        const val PENDING_REMINDER_DATABASE = "lezi-pending-reminder-migration-test"
         /** Shipped product 0.2.4 Room head (see dist/lezi-0.2.4-release.apk + schema 7.json). */
         const val SHIPPED_024_DATABASE = "lezi-shipped-0.2.4-full-chain-migration-test"
     }

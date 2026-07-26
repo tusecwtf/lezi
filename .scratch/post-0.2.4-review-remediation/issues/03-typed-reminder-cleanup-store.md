@@ -2,9 +2,9 @@
 
 **What to build:** 用 `PendingReminderCleanupStore` 深模块封装 records-clear 提醒收尾的持久状态。调用者只接触 typed operation、去重后的 `Set<Long>` 与 `familyServerRetained`；不得再解析/拼接逗号字符串，也不得在坏值时静默丢 ID 后删除 pending 行。
 
-**Blocked by:** None — frontier；但开始前先落地当前 CareLog 身份 WIP，禁止覆盖未提交改动。
+**Blocked by:** None — completed
 
-**Status:** ready-for-agent
+**Status:** completed
 
 **Size:** M
 **Review finding:** Standards 6
@@ -27,13 +27,13 @@
 
 ## Acceptance criteria
 
-- [ ] domain/feature 调用方不再知道 Room entity、operation 字符串常量或 ID 序列化格式。
-- [ ] store 的 `load/upsert/delete`（或等价小 interface）使用 typed snapshot。
-- [ ] 合并旧/新 ID 时去重、稳定排序；`familyServerRetained` 只可从 false 升为 true。
-- [ ] 空集合行为明确且有测试；不得留下永远无法完成的空 pending。
-- [ ] legacy 合法数据可迁移/读取；损坏数据 fail closed、保留 pending、不得执行 delete-as-success。
-- [ ] migration 测试覆盖旧库 pending 行，不得依赖 destructive migration。
-- [ ] 新测试通过后删除 CareLog 中旧 encode/decode 私有函数及其实现细节测试。
+- [x] domain/feature 调用方不再知道 Room entity、operation 字符串常量或 ID 序列化格式。
+- [x] store 的 `load/upsert/delete`（或等价小 interface）使用 typed snapshot。
+- [x] 合并旧/新 ID 时去重、稳定排序；`familyServerRetained` 只可从 false 升为 true。
+- [x] 空集合行为明确且有测试；不得留下永远无法完成的空 pending。
+- [x] legacy 合法数据可迁移/读取；损坏数据 fail closed、保留 pending、不得执行 delete-as-success。
+- [x] migration 测试覆盖旧库 pending 行，不得依赖 destructive migration。
+- [x] 新测试通过后删除 CareLog 中旧 encode/decode 私有函数及其实现细节测试。
 
 ## Validation
 
@@ -53,4 +53,7 @@
 ## Comments
 
 - 来源：固定范围审查 Standards finding 6。
-
+- 2026-07-27 红灯：批准 seam 的精确测试先在 `compileDebugUnitTestKotlin` 因 typed store/operation/snapshot/corruption 类型尚不存在而失败。
+- 2026-07-27 绿灯：合法 legacy CSV 严格读取，合并后 ID 去重稳定排序，retained 单向提升；坏 token 抛出可诊断异常且不取消、不删除 pending；空集合完成后显式删除。
+- 验证：`:core:database:testDebugUnitTest :domain:testDebugUnitTest` BUILD SUCCESSFUL；`:core:database:connectedDebugAndroidTest` 在 emulator-5554 与 emulator-5556 各 15 项通过；`git diff --check` 通过。
+- Documentation Gate：Room 表结构与 schema version 未变化，只把既有 codec/DAO 封装进 typed adapter，因此 `docs/prd/data-model.md` 与导出 schema 均 N/A；v8→v17 migration 测试证明 legacy pending 行保留。

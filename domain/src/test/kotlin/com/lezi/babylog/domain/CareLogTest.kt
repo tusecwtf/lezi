@@ -19,8 +19,9 @@ import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.MembershipDao
 import com.lezi.babylog.core.database.MembershipEntity
-import com.lezi.babylog.core.database.PendingReminderCleanupDao
-import com.lezi.babylog.core.database.PendingReminderCleanupEntity
+import com.lezi.babylog.core.database.PendingReminderCleanup
+import com.lezi.babylog.core.database.PendingReminderCleanupOperation
+import com.lezi.babylog.core.database.PendingReminderCleanupStore
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.datastore.SettingsStore
@@ -2301,6 +2302,36 @@ class CareLogTest {
     }
 
     @Test
+    fun emptyReminderCleanupBatchIsCompletedAndDoesNotLeavePendingWork() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+
+        care.clearRecordsOnly()
+
+        assertThat(fakes.reminders.recordClearBatches).containsExactly(emptyList<Long>())
+        assertThat(fakes.pendingReminderCleanup.pending).isNull()
+        assertThat(fakes.pendingReminderCleanup.deleteCount).isEqualTo(1)
+    }
+
+    @Test
+    fun corruptPendingReminderCleanupFailsClosedWithoutCancellingOrDeleting() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val corruption = IllegalStateException("corrupt pending reminder cleanup")
+        fakes.pendingReminderCleanup.loadFailure = corruption
+
+        val failure = runCatching {
+            care.recoverPendingRecordClearReminders()
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(IllegalStateException::class.java)
+        assertThat(failure).hasMessageThat().isEqualTo(corruption.message)
+        assertThat(fakes.reminders.recordClearBatches).isEmpty()
+        assertThat(fakes.pendingReminderCleanup.deleteCount).isEqualTo(0)
+    }
+
+    @Test
     fun reminderCleanupCancellationAfterCommitIsRethrownAsCancellation() = runTest {
         val fakes = Fakes(RecordingSyncPort(familyServerRetained = true))
         val care = fakes.careLog()
@@ -3751,7 +3782,7 @@ private class Fakes(
     val calendarEvents = FakeCalendarEventDao()
     val customItems = FakeCustomItemDao()
     val media = FakeMediaAssetDao()
-    val pendingReminderCleanup = FakePendingReminderCleanupDao()
+    val pendingReminderCleanup = FakePendingReminderCleanupStore()
     val settings = FakeSettingsStore()
     val reminders = FakeReminderCleanupPort()
     val systemCalendar = FakeSystemCalendarPort()
@@ -3936,17 +3967,29 @@ private class FakeReminderCleanupPort : ReminderCleanupPort {
     }
 }
 
-private class FakePendingReminderCleanupDao : PendingReminderCleanupDao {
-    private var pending: PendingReminderCleanupEntity? = null
+private class FakePendingReminderCleanupStore : PendingReminderCleanupStore {
+    var pending: PendingReminderCleanup? = null
+    var loadFailure: Throwable? = null
+    var deleteCount: Int = 0
 
-    override suspend fun get(operation: String): PendingReminderCleanupEntity? =
-        pending?.takeIf { it.operation == operation }
-
-    override suspend fun upsert(pending: PendingReminderCleanupEntity) {
-        this.pending = pending
+    override suspend fun load(
+        operation: PendingReminderCleanupOperation,
+    ): PendingReminderCleanup? {
+        loadFailure?.let { throw it }
+        return pending?.takeIf { it.operation == operation }
     }
 
-    override suspend fun delete(operation: String) {
+    override suspend fun upsert(pending: PendingReminderCleanup) {
+        val existing = this.pending?.takeIf { it.operation == pending.operation }
+        this.pending = pending.copy(
+            calendarEventIds = existing?.calendarEventIds.orEmpty() + pending.calendarEventIds,
+            familyServerRetained =
+                existing?.familyServerRetained == true || pending.familyServerRetained,
+        )
+    }
+
+    override suspend fun delete(operation: PendingReminderCleanupOperation) {
+        deleteCount += 1
         if (pending?.operation == operation) pending = null
     }
 }

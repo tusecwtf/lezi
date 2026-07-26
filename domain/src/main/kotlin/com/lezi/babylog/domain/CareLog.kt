@@ -20,8 +20,9 @@ import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.MembershipDao
 import com.lezi.babylog.core.database.MembershipEntity
-import com.lezi.babylog.core.database.PendingReminderCleanupDao
-import com.lezi.babylog.core.database.PendingReminderCleanupEntity
+import com.lezi.babylog.core.database.PendingReminderCleanup
+import com.lezi.babylog.core.database.PendingReminderCleanupOperation
+import com.lezi.babylog.core.database.PendingReminderCleanupStore
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.datastore.SettingsStore
@@ -153,13 +154,6 @@ data class LocalFamilyIdentity(
     val familyId: Long,
 )
 
-private const val RECORDS_CLEAR_REMINDER_OPERATION = "records_clear"
-
-private fun decodeCalendarEventIds(encoded: String): Set<Long> =
-    encoded.split(',')
-        .mapNotNull { it.trim().toLongOrNull() }
-        .toSet()
-
 data class BabyMergePreview(
     val sourceBabyId: Long,
     val sourceNickname: String,
@@ -180,7 +174,7 @@ class CareLog @Inject constructor(
     private val familyDao: FamilyDao,
     private val membershipDao: MembershipDao,
     private val mediaAssetDao: MediaAssetDao,
-    private val pendingReminderCleanupDao: PendingReminderCleanupDao,
+    private val pendingReminderCleanupStore: PendingReminderCleanupStore,
     private val settings: SettingsStore,
     private val syncPort: SyncPort,
     private val reminderCleanup: ReminderCleanupPort,
@@ -2438,12 +2432,12 @@ class CareLog @Inject constructor(
     private suspend fun finishRecordClearReminders(
         initialFailure: Throwable?,
     ): Throwable? {
-        val pending = pendingReminderCleanupDao.get(RECORDS_CLEAR_REMINDER_OPERATION)
+        val operation = PendingReminderCleanupOperation.RECORDS_CLEAR
+        val pending = pendingReminderCleanupStore.load(operation)
             ?: return initialFailure
-        val retryIds = decodeCalendarEventIds(pending.calendarEventIds)
         return try {
-            reminderCleanup.cancelForRecordsClear(retryIds)
-            pendingReminderCleanupDao.delete(RECORDS_CLEAR_REMINDER_OPERATION)
+            reminderCleanup.cancelForRecordsClear(pending.calendarEventIds)
+            pendingReminderCleanupStore.delete(operation)
             initialFailure
         } catch (cancellation: CancellationException) {
             throw cancellation
@@ -2472,17 +2466,11 @@ class CareLog @Inject constructor(
         calendarEventIds: Collection<Long>,
         familyServerRetained: Boolean,
     ) {
-        val existing = pendingReminderCleanupDao.get(RECORDS_CLEAR_REMINDER_OPERATION)
-        val ids = buildSet {
-            existing?.calendarEventIds?.let { addAll(decodeCalendarEventIds(it)) }
-            addAll(calendarEventIds)
-        }
-        pendingReminderCleanupDao.upsert(
-            PendingReminderCleanupEntity(
-                operation = RECORDS_CLEAR_REMINDER_OPERATION,
-                calendarEventIds = ids.sorted().joinToString(","),
-                familyServerRetained =
-                    familyServerRetained || existing?.familyServerRetained == true,
+        pendingReminderCleanupStore.upsert(
+            PendingReminderCleanup(
+                operation = PendingReminderCleanupOperation.RECORDS_CLEAR,
+                calendarEventIds = calendarEventIds.toSet(),
+                familyServerRetained = familyServerRetained,
             ),
         )
     }

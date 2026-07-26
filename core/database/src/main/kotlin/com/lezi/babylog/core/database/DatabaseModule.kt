@@ -400,8 +400,9 @@ object DatabaseModule {
     @Provides fun customItemDao(db: LeziDatabase): CustomItemDao = db.customItemDao()
     @Provides fun calendarEventDao(db: LeziDatabase): CalendarEventDao = db.calendarEventDao()
     @Provides
-    fun pendingReminderCleanupDao(db: LeziDatabase): PendingReminderCleanupDao =
-        db.pendingReminderCleanupDao()
+    @Singleton
+    fun pendingReminderCleanupStore(db: LeziDatabase): PendingReminderCleanupStore =
+        RoomPendingReminderCleanupStore(db.pendingReminderCleanupDao())
 
     @Provides
     @Singleton

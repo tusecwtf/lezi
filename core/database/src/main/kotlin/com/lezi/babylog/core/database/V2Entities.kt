@@ -133,8 +133,8 @@ interface CalendarEventDao {
  * Durable hand-off from the Room clear transaction to Android alarm cleanup.
  *
  * A single records-clear row survives process death until every captured
- * PendingIntent has been cancelled. The IDs are encoded by the domain layer
- * because Room cannot persist a collection without widening the schema.
+ * PendingIntent has been cancelled. This storage entity is private to
+ * [RoomPendingReminderCleanupStore]; callers use typed snapshots.
  */
 @Entity(tableName = "pending_reminder_cleanup")
 data class PendingReminderCleanupEntity(
