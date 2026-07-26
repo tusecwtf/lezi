@@ -1,6 +1,6 @@
 # Spec: 家庭身份与账户概览
 
-Status: ready-for-agent  
+Status: partial  
 Feature: family-identity-account-overview  
 Product: 乐记 (`com.lezi.babylog`)  
 Source: grill-with-docs 决策锁定 · `/to-spec` 2026-07-26  
@@ -11,6 +11,12 @@ Related:
 - `docs/prd/ui.md` §5.7
 - `docs/prd/data-model.md` §3.1–3.3、§6.2
 - `docs/prd/sync-home-lan.md` §9.2 / §9.4 / §11
+
+实施状态：
+
+- 票 01 / 03 / 04 / 05 已实现。
+- 票 02 为 `partial`：create/join/owner rename 的持久化已实现，但 owner 改名尚不会收敛到已经加入家庭的其他设备。
+- 2026-07-26 只读 spec 审计后重开。
 
 ---
 

@@ -46,22 +46,44 @@ class RecordAndShortcutSettingsTest {
 
     @Test
     fun hideAndRestoreKeepsRelativeOrder() {
+        // Product path: Switch only toggles SettingsLocal.hiddenItems; itemOrderJson
+        // is never rewritten on hide/show (see AllRecordItemsSettingsDialog copy).
         val customKey = RecordItemIdentity.customCatalogKey(7)
         val known = knownCatalogKeys(listOf(7L))
         val base = listOf("pee", customKey, "sleep", "nursing")
         val orderJson = encodeItemOrder(base)
-        // "hide" does not rewrite order — only hiddenItems set changes in UI.
-        val stillPresent = mergeItemOrder(orderJson, known)
-        assertEquals(base.filter { it in stillPresent.toSet() }.let { kept ->
-            // all base keys that are known stay
-            base
-        }, stillPresent.filter { it in base.toSet() }.let {
-            // relative order of base keys preserved
-            stillPresent.filter { key -> key in base.toSet() }
-        })
-        val restoredPosition = stillPresent.indexOf(customKey)
-        assertTrue(restoredPosition > stillPresent.indexOf("pee"))
-        assertTrue(restoredPosition < stillPresent.indexOf("sleep") || stillPresent.indexOf("sleep") < 0)
+        val orderBeforeHide = mergeItemOrder(orderJson, known)
+
+        fun visibleKeys(order: List<String>, hidden: Set<String>): List<String> =
+            order.filter { it !in hidden }
+
+        // Hide: only the visibility set changes.
+        val hiddenWhileOff = setOf(customKey)
+        assertTrue(customKey in hiddenWhileOff)
+        val orderWhileHidden = mergeItemOrder(orderJson, known)
+        assertEquals(
+            "hide must not rewrite catalog order JSON",
+            orderBeforeHide,
+            orderWhileHidden,
+        )
+        assertEquals(
+            listOf("pee", "sleep", "nursing"),
+            visibleKeys(orderWhileHidden, hiddenWhileOff).filter { it in base.toSet() },
+        )
+        assertFalse(customKey in visibleKeys(orderWhileHidden, hiddenWhileOff))
+
+        // Restore: clear hide bit; full relative order returns without reordering.
+        val hiddenAfterRestore = emptySet<String>()
+        assertFalse(customKey in hiddenAfterRestore)
+        val orderAfterRestore = mergeItemOrder(orderJson, known)
+        assertEquals(orderBeforeHide, orderAfterRestore)
+        assertEquals(base, orderAfterRestore.filter { it in base.toSet() })
+        assertEquals(
+            base,
+            visibleKeys(orderAfterRestore, hiddenAfterRestore).filter { it in base.toSet() },
+        )
+        assertTrue(orderAfterRestore.indexOf(customKey) > orderAfterRestore.indexOf("pee"))
+        assertTrue(orderAfterRestore.indexOf(customKey) < orderAfterRestore.indexOf("sleep"))
     }
 
     @Test

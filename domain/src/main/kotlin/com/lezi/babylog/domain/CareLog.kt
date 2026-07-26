@@ -621,7 +621,7 @@ class CareLog @Inject constructor(
         item: CustomRecordItem,
         actorMembershipId: String,
         actorIsAdmin: Boolean,
-    ): Boolean = canManageCustomItemDefinition(
+    ): Boolean = canManageCreatorOwnedFamilyEntity(
         creatorMembershipId = item.createdByMembershipId,
         actorMembershipId = actorMembershipId,
         actorIsAdmin = actorIsAdmin,
@@ -638,7 +638,7 @@ class CareLog @Inject constructor(
 
     private suspend fun requireCanManageCustomItem(existing: CustomItemEntity) {
         val session = syncPort.session().first()
-        val allowed = canManageCustomItemDefinition(
+        val allowed = canManageCreatorOwnedFamilyEntity(
             creatorMembershipId = existing.createdByMembershipId,
             actorMembershipId = session.membershipId.trim(),
             actorIsAdmin = session.role == com.lezi.babylog.sync.FamilyRole.Owner,
@@ -1421,13 +1421,17 @@ class CareLog @Inject constructor(
             )
             val inserted = insertRecord(record)
             reconcileRecordPhotos(inserted, photos, now)
+            // Manager (creator/owner) may LWW-push completed plan status. Non-managers
+            // complete only locally — server forbids care_plan rewrites for them;
+            // peers re-link via fulfillment_candidate + resolveFulfillmentAuthority.
+            val publishPlanCompletion = actorCanManageCarePlan(plan)
             carePlanDao.update(
                 plan.copy(
                     status = CarePlanStatus.COMPLETED.storageKey,
                     fulfilledRecordClientUuid = recordClientUuid,
                     fulfilledAt = confirmedAt,
-                    updatedAt = now,
-                    syncDirty = true,
+                    updatedAt = nextSyncUpdatedAt(plan.updatedAt, now),
+                    syncDirty = publishPlanCompletion,
                 ),
             )
             ensureFulfillmentCandidate(
@@ -1487,13 +1491,15 @@ class CareLog @Inject constructor(
         require(status == CarePlanStatus.PENDING || status == CarePlanStatus.MISSED) {
             "该护理计划不可履行"
         }
+        // Same ACL as fulfillCarePlan: only managers publish plan completion.
+        val publishPlanCompletion = actorCanManageCarePlan(plan)
         carePlanDao.update(
             plan.copy(
                 status = CarePlanStatus.COMPLETED.storageKey,
                 fulfilledRecordClientUuid = recordClientUuid,
                 fulfilledAt = now,
-                updatedAt = now.coerceAtLeast(plan.updatedAt + 1),
-                syncDirty = true,
+                updatedAt = nextSyncUpdatedAt(plan.updatedAt, now),
+                syncDirty = publishPlanCompletion,
             ),
         )
         ensureFulfillmentCandidate(
@@ -1585,34 +1591,40 @@ class CareLog @Inject constructor(
                 )
             },
         ) ?: return
-        for (candidate in live) {
-            val status = resolution.adoptionByCandidateUuid[candidate.clientUuid]
-                ?: continue
-            if (candidate.adoptionStatus != status) {
-                // Local mark only — keep updatedAt/syncDirty so we do not republish.
-                fulfillmentCandidateDao.update(
-                    candidate.copy(adoptionStatus = status),
-                )
+        // Local marks only — keep updatedAt/syncDirty so we do not republish.
+        val patches = FulfillmentAuthority.adoptionStatusPatches(
+            liveClientUuidToStatus = live.associate { it.clientUuid to it.adoptionStatus },
+            resolution = resolution,
+        )
+        if (patches.isNotEmpty()) {
+            val byUuid = live.associateBy { it.clientUuid }
+            for ((clientUuid, status) in patches) {
+                val candidate = byUuid[clientUuid] ?: continue
+                fulfillmentCandidateDao.update(candidate.copy(adoptionStatus = status))
             }
         }
         val plan = carePlanDao.getByClientUuid(carePlanClientUuid) ?: return
         if (plan.deletedAt != null) return
-        val needsRelink =
-            plan.status != CarePlanStatus.COMPLETED.storageKey ||
-                plan.fulfilledRecordClientUuid != resolution.winnerRecordClientUuid ||
-                plan.fulfilledAt != resolution.winnerConfirmedAt
-        if (needsRelink) {
-            carePlanDao.update(
-                plan.copy(
-                    status = CarePlanStatus.COMPLETED.storageKey,
-                    fulfilledRecordClientUuid = resolution.winnerRecordClientUuid,
-                    fulfilledAt = resolution.winnerConfirmedAt,
-                    // Local re-link only; LWW plan push order must not fight resolution.
-                    updatedAt = plan.updatedAt,
-                    syncDirty = plan.syncDirty,
-                ),
+        if (
+            !FulfillmentAuthority.needsPlanRelink(
+                currentStatusStorageKey = plan.status,
+                currentFulfilledRecordClientUuid = plan.fulfilledRecordClientUuid,
+                currentFulfilledAt = plan.fulfilledAt,
+                resolution = resolution,
             )
+        ) {
+            return
         }
+        carePlanDao.update(
+            plan.copy(
+                status = CarePlanStatus.COMPLETED.storageKey,
+                fulfilledRecordClientUuid = resolution.winnerRecordClientUuid,
+                fulfilledAt = resolution.winnerConfirmedAt,
+                // Local re-link only; LWW plan push order must not fight resolution.
+                updatedAt = plan.updatedAt,
+                syncDirty = plan.syncDirty,
+            ),
+        )
     }
 
     /** Test/debug surface: candidates linked to a plan's portable id. */
@@ -1883,7 +1895,7 @@ class CareLog @Inject constructor(
         plan: CarePlan,
         actorMembershipId: String,
         actorIsAdmin: Boolean,
-    ): Boolean = canManageCustomItemDefinition(
+    ): Boolean = canManageCreatorOwnedFamilyEntity(
         creatorMembershipId = plan.createdByMembershipId,
         actorMembershipId = actorMembershipId,
         actorIsAdmin = actorIsAdmin,
@@ -1898,14 +1910,17 @@ class CareLog @Inject constructor(
         )
     }
 
-    private suspend fun requireCanManageCarePlan(plan: CarePlanEntity) {
+    private suspend fun actorCanManageCarePlan(plan: CarePlanEntity): Boolean {
         val session = syncPort.session().first()
-        val allowed = canManageCustomItemDefinition(
+        return canManageCreatorOwnedFamilyEntity(
             creatorMembershipId = plan.createdByMembershipId,
             actorMembershipId = session.membershipId.trim(),
             actorIsAdmin = session.role == com.lezi.babylog.sync.FamilyRole.Owner,
         )
-        if (!allowed) throw CarePlanPermissionException()
+    }
+
+    private suspend fun requireCanManageCarePlan(plan: CarePlanEntity) {
+        if (!actorCanManageCarePlan(plan)) throw CarePlanPermissionException()
     }
 
     /**
@@ -2298,19 +2313,26 @@ class CareLog @Inject constructor(
         .toList()
 
     /**
-     * Wipe care history on this device: records and calendar events.
-     * Baby profiles and custom items are intentionally retained.
+     * Wipe care history on this device: records, calendar events, care plans,
+     * and fulfillment candidates. Baby profiles and custom items are retained.
      * Settings cleanup is deliberately local-only (not a family tombstone).
      */
     suspend fun clearRecordsOnly() = calendarReminderMutationMutex.withLock {
         val familyServerRetained = syncPort.session().first().familyId.isNotBlank()
         var failure: Throwable? = null
+        var carePlanIdsToCancel = emptyList<Long>()
         try {
             syncPort.clearLocalRecords { onCommitted ->
                 transactionRunner.run {
                     val calendarEventIds = allCalendarEventIds()
+                    // Capture before wipe so post-commit reminder cancel still works.
+                    carePlanIdsToCancel = carePlanDao.listAllIncludingDeleted().map { it.id }
                     recordDao.deleteAll()
                     calendarEventDao.deleteAll()
+                    // History clear drops plans too so alarms/UI do not keep a schedule
+                    // after the user wiped care history (open pending included).
+                    fulfillmentCandidateDao.deleteAll()
+                    carePlanDao.deleteAll()
                     persistPendingRecordClearReminderCleanup(
                         calendarEventIds = calendarEventIds,
                         familyServerRetained = familyServerRetained,
@@ -2318,12 +2340,14 @@ class CareLog @Inject constructor(
                 }
                 onCommitted()
                 settings.clearNextFeedAt()
+                settings.setSystemCalendarEventMapJson("{}")
             }.getOrThrow()
         } catch (error: Throwable) {
             failure = error.asDomainLocalClearFailure()
         }
         failure = withContext(NonCancellable) {
-            finishRecordClearReminders(initialFailure = failure)
+            val afterReminders = finishRecordClearReminders(initialFailure = failure)
+            cancelCarePlanRemindersQuietly(carePlanIdsToCancel, afterReminders)
         }
         throwClearFailure(failure)
     }
@@ -2332,22 +2356,25 @@ class CareLog @Inject constructor(
      * Full local wipe including babies — only for "clear then join family".
      * Settings UI must not call this for ordinary data clear.
      *
-     * Clears domain tables (records, calendar, custom items, babies, family
-     * membership, local user), settings keys, and — via [SyncPort.clearAllLocalData]
-     * — outbox, media_assets, and on-disk media files under the same sync barrier
-     * as [clearRecordsOnly].
+     * Clears domain tables (records, calendar, care plans, custom items, babies,
+     * family membership, local user), settings keys, and — via
+     * [SyncPort.clearAllLocalData] — outbox, media_assets, and on-disk media files
+     * under the same sync barrier as [clearRecordsOnly].
      */
     suspend fun clearAllLocalData() = calendarReminderMutationMutex.withLock {
         val familyServerRetained = syncPort.session().first().familyId.isNotBlank()
         var failure: Throwable? = null
+        var carePlanIdsToCancel = emptyList<Long>()
         try {
             syncPort.clearAllLocalData { onCommitted ->
                 transactionRunner.run {
                     val calendarEventIds = allCalendarEventIds()
+                    carePlanIdsToCancel = carePlanDao.listAllIncludingDeleted().map { it.id }
                     recordDao.deleteAll()
                     calendarEventDao.deleteAll()
                     customItemDao.deleteAll()
                     fulfillmentCandidateDao.deleteAll()
+                    carePlanDao.deleteAll()
                     babyDao.deleteAll()
                     membershipDao.deleteAll()
                     familyDao.deleteAll()
@@ -2360,14 +2387,43 @@ class CareLog @Inject constructor(
                 onCommitted()
                 settings.setCurrentBabyId(null)
                 settings.clearNextFeedAt()
+                settings.setSystemCalendarEventMapJson("{}")
             }.getOrThrow()
         } catch (error: Throwable) {
             failure = error.asDomainLocalClearFailure()
         }
         failure = withContext(NonCancellable) {
-            finishRecordClearReminders(initialFailure = failure)
+            val afterReminders = finishRecordClearReminders(initialFailure = failure)
+            cancelCarePlanRemindersQuietly(carePlanIdsToCancel, afterReminders)
         }
         throwClearFailure(failure)
+    }
+
+    /**
+     * Best-effort cancel of care-plan alarms after a local wipe. Failures attach
+     * as suppressed causes when a domain clear already committed.
+     */
+    private suspend fun cancelCarePlanRemindersQuietly(
+        carePlanIds: List<Long>,
+        initialFailure: Throwable?,
+    ): Throwable? {
+        if (carePlanIds.isEmpty()) return initialFailure
+        return try {
+            carePlanIds.forEach { reminderCleanup.cancelCarePlan(it) }
+            initialFailure
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (reminderError: Throwable) {
+            when (initialFailure) {
+                is LocalRecordsClearCommittedException -> initialFailure.apply {
+                    addSuppressed(reminderError)
+                }
+                else -> LocalRecordsClearCommittedException(
+                    familyServerRetained = syncPort.session().first().familyId.isNotBlank(),
+                    cause = reminderError,
+                )
+            }
+        }
     }
 
     /** Retry the durable post-commit hand-off when a new app process starts. */
@@ -2819,30 +2875,6 @@ class CareLog @Inject constructor(
 
 }
 
-fun parseSystemCalendarEventMap(raw: String): Map<String, String> {
-    if (raw.isBlank() || raw == "{}") return emptyMap()
-    return runCatching {
-        val trimmed = raw.trim().removePrefix("{").removeSuffix("}")
-        if (trimmed.isBlank()) return emptyMap()
-        trimmed.split(',')
-            .mapNotNull { pair ->
-                val parts = pair.split(':', limit = 2)
-                if (parts.size != 2) return@mapNotNull null
-                val key = parts[0].trim().removeSurrounding("\"")
-                val value = parts[1].trim().removeSurrounding("\"")
-                if (key.isBlank() || value.isBlank()) null else key to value
-            }
-            .toMap()
-    }.getOrDefault(emptyMap())
-}
-
-fun encodeSystemCalendarEventMap(map: Map<String, String>): String {
-    if (map.isEmpty()) return "{}"
-    return map.entries.joinToString(prefix = "{", postfix = "}") { (k, v) ->
-        "\"$k\":\"$v\""
-    }
-}
-
 internal fun nextSyncUpdatedAt(previous: Long, candidate: Long): Long =
     if (previous == Long.MAX_VALUE) {
         Long.MAX_VALUE
@@ -2961,14 +2993,15 @@ private fun FulfillmentCandidateEntity.toModel(): FulfillmentCandidate =
     )
 
 /**
- * Pure ownership rule for custom item edit/delete (family shared definition).
+ * Pure ownership rule for creator-owned family entities (custom item definitions
+ * and care plans share the same membership ACL — ADR 0001 / 0006).
  *
  * Empty creator + empty actor → offline single-device local owner.
  * Empty creator + joined non-admin → deny (await admin takeover after upgrade).
- * Non-empty creator match → member may manage own definition.
+ * Non-empty creator match → member may manage own entity.
  * Admin always may manage (including after creator leave).
  */
-fun canManageCustomItemDefinition(
+fun canManageCreatorOwnedFamilyEntity(
     creatorMembershipId: String,
     actorMembershipId: String,
     actorIsAdmin: Boolean,
@@ -2980,6 +3013,17 @@ fun canManageCustomItemDefinition(
     if (creator.isEmpty()) return false
     return creator == actor
 }
+
+/** Historical name — same rule as [canManageCreatorOwnedFamilyEntity]. */
+fun canManageCustomItemDefinition(
+    creatorMembershipId: String,
+    actorMembershipId: String,
+    actorIsAdmin: Boolean,
+): Boolean = canManageCreatorOwnedFamilyEntity(
+    creatorMembershipId = creatorMembershipId,
+    actorMembershipId = actorMembershipId,
+    actorIsAdmin = actorIsAdmin,
+)
 
 /**
  * Merge durable custom definition snapshot fields into a plan/record payload.

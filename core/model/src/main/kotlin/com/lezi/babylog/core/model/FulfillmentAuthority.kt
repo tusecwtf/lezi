@@ -112,4 +112,36 @@ object FulfillmentAuthority {
                 "未采纳：候选身份排序后落选"
         }
     }
+
+    /**
+     * Whether local plan completion fields need re-link to match [resolution].
+     * Pure; callers must keep [CarePlan] updatedAt/syncDirty unchanged so device-local
+     * convergence never fights LWW plan push (domain + sync apply the same rule).
+     */
+    fun needsPlanRelink(
+        currentStatusStorageKey: String,
+        currentFulfilledRecordClientUuid: String?,
+        currentFulfilledAt: Long?,
+        resolution: FulfillmentResolution,
+    ): Boolean =
+        currentStatusStorageKey != CarePlanStatus.COMPLETED.storageKey ||
+            currentFulfilledRecordClientUuid != resolution.winnerRecordClientUuid ||
+            currentFulfilledAt != resolution.winnerConfirmedAt
+
+    /**
+     * Live candidates whose stored adoption mark differs from [resolution].
+     * Returns (clientUuid → desired adoption status) only for rows that need a write.
+     */
+    fun adoptionStatusPatches(
+        liveClientUuidToStatus: Map<String, String>,
+        resolution: FulfillmentResolution,
+    ): Map<String, String> {
+        if (liveClientUuidToStatus.isEmpty()) return emptyMap()
+        return buildMap {
+            for ((clientUuid, current) in liveClientUuidToStatus) {
+                val desired = resolution.adoptionByCandidateUuid[clientUuid] ?: continue
+                if (current != desired) put(clientUuid, desired)
+            }
+        }
+    }
 }

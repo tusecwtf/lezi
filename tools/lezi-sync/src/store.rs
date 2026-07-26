@@ -975,6 +975,7 @@ impl Store {
     ///
     /// [membership_id] is required so CarePlan creator ACL can be stamped and
     /// authorize manage operations on the real publish path (not only legacy push).
+    #[allow(clippy::too_many_arguments)]
     pub fn stage_bundle(
         &self,
         family_id: &str,
@@ -1039,11 +1040,11 @@ impl Store {
                 if existing_bundle.content_hash != content_hash {
                     return Err(StoreError::BundleContentConflict);
                 }
-                return Ok(bundle_stage_status_from_row(
+                return bundle_stage_status_from_row(
                     &transaction,
                     family_id,
                     &existing_bundle,
-                )?);
+                );
             }
             // Replace open staging with the new package (same bundle_id retry/refine).
             transaction.execute(
@@ -1159,7 +1160,7 @@ impl Store {
         let row = load_bundle_row(&transaction, family_id, bundle_id)?
             .ok_or(StoreError::BundleNotFound)?;
         if row.status == "committed" {
-            return bundle_stage_status_from_row(&transaction, family_id, &row).map_err(Into::into);
+            return bundle_stage_status_from_row(&transaction, family_id, &row);
         }
         let updated = transaction.execute(
             "
@@ -1213,6 +1214,7 @@ impl Store {
     /// `media_ready` maps media_uuid → whether durable staged bytes match declared size.
     /// Caller installs final media files after a successful first commit (or re-installs
     /// on idempotent retry).
+    #[allow(clippy::too_many_arguments)]
     pub fn commit_bundle(
         &self,
         family_id: &str,
@@ -1403,6 +1405,8 @@ impl Store {
 #[derive(Debug, Clone)]
 struct BundleRow {
     bundle_id: String,
+    /// Retained for staging identity / future audit; not read on the hot path.
+    #[allow(dead_code)]
     device_id: String,
     status: String,
     root_type: String,
@@ -1583,10 +1587,8 @@ fn stamp_and_authorize_custom_items(
             entity
                 .payload
                 .insert("created_by_membership_id".to_owned(), Value::String(creator.clone()));
-            if role != "owner" {
-                if creator.is_empty() || creator != membership_id {
-                    return Err(StoreError::ForbiddenCustomItem);
-                }
+            if role != "owner" && (creator.is_empty() || creator != membership_id) {
+                return Err(StoreError::ForbiddenCustomItem);
             }
         } else {
             // First insert: server stamps authenticated membership (ignore client guess).
@@ -1784,7 +1786,7 @@ fn collect_pull_entity_with_dependencies(
     }
     if entity.deleted_at.is_none() {
         match entity.entity_type.as_str() {
-            "record" | "care_plan" => append_pull_dependency(
+            "record" => append_pull_dependency(
                 connection,
                 family_id,
                 cursor,
@@ -1794,6 +1796,39 @@ fn collect_pull_entity_with_dependencies(
                 group_keys,
                 group,
             )?,
+            "care_plan" => {
+                append_pull_dependency(
+                    connection,
+                    family_id,
+                    cursor,
+                    "baby",
+                    required_payload_reference(&entity.payload, "baby_client_uuid")?,
+                    included_keys,
+                    group_keys,
+                    group,
+                )?;
+                // Completed plans co-gate on the fulfill record at the client.
+                // Pull the record (and its deps/media recursively) in the same
+                // group so pages do not stall with unresolved completed plans.
+                if let Some(record_id) = entity
+                    .payload
+                    .get("fulfilled_record_client_uuid")
+                    .and_then(Value::as_str)
+                {
+                    if !record_id.is_empty() {
+                        append_pull_dependency(
+                            connection,
+                            family_id,
+                            cursor,
+                            "record",
+                            record_id,
+                            included_keys,
+                            group_keys,
+                            group,
+                        )?;
+                    }
+                }
+            }
             "media" => match entity.payload.get("kind").and_then(Value::as_str) {
                 Some("avatar") => append_pull_dependency(
                     connection,

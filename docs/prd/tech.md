@@ -32,8 +32,8 @@
 | minSdk | 26 |
 | compileSdk | 35 |
 | targetSdk | 35 |
-| versionName | `0.2.4` |
-| versionCode | `3`（Play/安装升级单调整数；与 versionName 独立） |
+| versionName | `0.2.5` |
+| versionCode | `4`（Play/安装升级单调整数；与 versionName 独立） |
 | 应用名 | 乐记 |
 
 ---

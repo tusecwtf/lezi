@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-version="${LEZI_SYNC_VERSION:-0.2.4}"
+version="${LEZI_SYNC_VERSION:-0.2.5}"
 image="${LEZI_SYNC_IMAGE:-lezi-sync:${version}}"
 build_context="$(mktemp -d "${TMPDIR:-/tmp}/lezi-sync-build.XXXXXX")"
 

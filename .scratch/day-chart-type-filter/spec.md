@@ -1,6 +1,6 @@
 # Spec: 日视图时间条 · 日图类型筛选
 
-Status: ready-for-agent  
+Status: partial  
 Feature: day-chart-type-filter  
 Product: 乐记 (`com.lezi.babylog`)  
 Source: grill-with-docs 决策锁定 · `/to-spec` 2026-07-26  
@@ -10,6 +10,12 @@ Related:
 - `docs/prd/ui.md` §1 设计原则 3（时间条 → 日汇总 → 时间轴）、§3 一日时间条、§5.2 记录首页
 - `docs/prd/README.md` 一日时间条 / 日视图
 - 现网：记录页 `TimelineRailCard` / `JournalTimelineRail` 三轨 + 段级 tip；列表不随点选筛选
+
+实施状态：
+
+- 票 01 已实现。
+- 票 02 为 `partial`：类型筛选、图例、明细过滤、高亮与清除已实现；直接命中尚不能区分同一时刻绘制的两个 `BOTH_DIAPER` 标记。
+- 2026-07-26 只读 spec 审计后重开。
 
 ---
 

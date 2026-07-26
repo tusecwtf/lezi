@@ -10,6 +10,7 @@ import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.FamilyDao
 import com.lezi.babylog.core.database.FulfillmentCandidateDao
 import com.lezi.babylog.core.database.FulfillmentCandidateEntity
+import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.FulfillmentAuthority
 import com.lezi.babylog.core.model.FulfillmentCandidateEvidence
 import com.lezi.babylog.core.database.MediaAssetDao
@@ -441,6 +442,9 @@ class RealSyncPort @Inject constructor(
     ) {
         if (session.familyId.isNotBlank()) {
             outboxDao.deleteType(session.familyId, "record")
+            // History clear also wipes care plans + candidates locally.
+            outboxDao.deleteType(session.familyId, "care_plan")
+            outboxDao.deleteType(session.familyId, "fulfillment_candidate")
             logMedia.map(MediaAssetEntity::clientUuid)
                 .chunked(OUTBOX_DELETE_CHUNK_SIZE)
                 .forEach { chunk ->
@@ -538,15 +542,14 @@ class RealSyncPort @Inject constructor(
             if (!policy.supportsAtomicBundle) {
                 throw AtomicBundleUnsupportedException()
             }
-            // Ticket 25 full-set visibility: publish completed care_plan before the
-            // fulfill Record so NAS/receive never has a window where the Record is
-            // visible while the plan is still pending. Receivers co-gate completed
-            // plans until the linked record is present (same-page apply is one txn).
-            for (planRow in carePlanRows) {
-                pushCarePlanAtomicBundle(session, planRow, pending)
-            }
+            // Prefer fulfill Record before completed care_plan so pull pages that
+            // end mid-set still apply the fact first. Receivers apply records then
+            // co-gate completed plans until the linked record is present (same-txn).
             for (recordRow in recordRows) {
                 pushRecordAtomicBundle(session, recordRow, pending)
+            }
+            for (planRow in carePlanRows) {
+                pushCarePlanAtomicBundle(session, planRow, pending)
             }
         }
 
@@ -1186,30 +1189,40 @@ class RealSyncPort @Inject constructor(
                 )
             },
         ) ?: return
-        for (candidate in live) {
-            val status = resolution.adoptionByCandidateUuid[candidate.clientUuid] ?: continue
-            if (candidate.adoptionStatus != status) {
+        // Same pure patches as CareLog.resolveFulfillmentAuthorityForPlan.
+        val patches = FulfillmentAuthority.adoptionStatusPatches(
+            liveClientUuidToStatus = live.associate { it.clientUuid to it.adoptionStatus },
+            resolution = resolution,
+        )
+        if (patches.isNotEmpty()) {
+            val byUuid = live.associateBy { it.clientUuid }
+            for ((clientUuid, status) in patches) {
+                val candidate = byUuid[clientUuid] ?: continue
                 fulfillmentCandidateDao.update(candidate.copy(adoptionStatus = status))
             }
         }
         val plan = carePlanDao.getByClientUuid(carePlanClientUuid) ?: return
         if (plan.deletedAt != null) return
-        val needsRelink =
-            plan.status != "completed" ||
-                plan.fulfilledRecordClientUuid != resolution.winnerRecordClientUuid ||
-                plan.fulfilledAt != resolution.winnerConfirmedAt
-        if (needsRelink) {
-            carePlanDao.update(
-                plan.copy(
-                    status = "completed",
-                    fulfilledRecordClientUuid = resolution.winnerRecordClientUuid,
-                    fulfilledAt = resolution.winnerConfirmedAt,
-                    // Keep updatedAt/syncDirty — resolution is device-local convergence.
-                    updatedAt = plan.updatedAt,
-                    syncDirty = plan.syncDirty,
-                ),
+        if (
+            !FulfillmentAuthority.needsPlanRelink(
+                currentStatusStorageKey = plan.status,
+                currentFulfilledRecordClientUuid = plan.fulfilledRecordClientUuid,
+                currentFulfilledAt = plan.fulfilledAt,
+                resolution = resolution,
             )
+        ) {
+            return
         }
+        carePlanDao.update(
+            plan.copy(
+                status = CarePlanStatus.COMPLETED.storageKey,
+                fulfilledRecordClientUuid = resolution.winnerRecordClientUuid,
+                fulfilledAt = resolution.winnerConfirmedAt,
+                // Keep updatedAt/syncDirty — resolution is device-local convergence.
+                updatedAt = plan.updatedAt,
+                syncDirty = plan.syncDirty,
+            ),
+        )
     }
 
     /**
@@ -1804,8 +1817,8 @@ class RealSyncPort @Inject constructor(
         customItems.forEach { item ->
             enqueue(session, SyncWireMapper.customItem(item))
         }
-        // Outbox materialization only; atomic commit order is care_plan packages →
-        // record packages → fulfillment_candidate residual (see pushOutboxBatch).
+        // Outbox materialization only; atomic commit order is record packages →
+        // care_plan packages → fulfillment_candidate residual (see pushOutboxBatch).
         records.forEach { record ->
             val babyUuid = babyDao.getIncludingDeleted(record.babyId)?.clientUuid
                 ?: return@forEach

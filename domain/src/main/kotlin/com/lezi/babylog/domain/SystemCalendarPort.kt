@@ -202,6 +202,35 @@ fun evaluateCarePlanSystemCalendarUnsynced(
 }
 
 /**
+ * Device-local JSON map of carePlanClientUuid → platform calendar event id.
+ * Stored in settings; never family-synced. Lives next to [SystemCalendarPort]
+ * so CareLog projection paths and tests share one codec seam.
+ */
+fun parseSystemCalendarEventMap(raw: String): Map<String, String> {
+    if (raw.isBlank() || raw == "{}") return emptyMap()
+    return runCatching {
+        val trimmed = raw.trim().removePrefix("{").removeSuffix("}")
+        if (trimmed.isBlank()) return emptyMap()
+        trimmed.split(',')
+            .mapNotNull { pair ->
+                val parts = pair.split(':', limit = 2)
+                if (parts.size != 2) return@mapNotNull null
+                val key = parts[0].trim().removeSurrounding("\"")
+                val value = parts[1].trim().removeSurrounding("\"")
+                if (key.isBlank() || value.isBlank()) null else key to value
+            }
+            .toMap()
+    }.getOrDefault(emptyMap())
+}
+
+fun encodeSystemCalendarEventMap(map: Map<String, String>): String {
+    if (map.isEmpty()) return "{}"
+    return map.entries.joinToString(prefix = "{", postfix = "}") { (k, v) ->
+        "\"$k\":\"$v\""
+    }
+}
+
+/**
  * Stable CalendarContract contract used by [AndroidSystemCalendarPort].
  * Kept pure so unit tests can lock the provider decisions without Robolectric.
  */

@@ -108,6 +108,62 @@ class FulfillmentAuthorityTest {
             .isEqualTo("未采纳：候选身份排序后落选")
     }
 
+    @Test
+    fun needsPlanRelinkWhenWinnerDiffers() {
+        val resolution = FulfillmentAuthority.resolve(
+            listOf(
+                evidence("a", "rec-a", confirmedAt = 10, role = "member"),
+                evidence("b", "rec-b", confirmedAt = 5, role = "member"),
+            ),
+        )!!
+        assertThat(
+            FulfillmentAuthority.needsPlanRelink(
+                currentStatusStorageKey = "pending",
+                currentFulfilledRecordClientUuid = null,
+                currentFulfilledAt = null,
+                resolution = resolution,
+            ),
+        ).isTrue()
+        assertThat(
+            FulfillmentAuthority.needsPlanRelink(
+                currentStatusStorageKey = "completed",
+                currentFulfilledRecordClientUuid = "rec-b",
+                currentFulfilledAt = 5,
+                resolution = resolution,
+            ),
+        ).isFalse()
+        assertThat(
+            FulfillmentAuthority.needsPlanRelink(
+                currentStatusStorageKey = "completed",
+                currentFulfilledRecordClientUuid = "rec-a",
+                currentFulfilledAt = 10,
+                resolution = resolution,
+            ),
+        ).isTrue()
+    }
+
+    @Test
+    fun adoptionStatusPatchesOnlyChangedRows() {
+        val resolution = FulfillmentAuthority.resolve(
+            listOf(
+                evidence("win", "rw", confirmedAt = 1, role = "owner"),
+                evidence("lose", "rl", confirmedAt = 2, role = "member"),
+            ),
+        )!!
+        val patches = FulfillmentAuthority.adoptionStatusPatches(
+            liveClientUuidToStatus = mapOf(
+                "win" to FulfillmentAdoptionStatus.ADOPTED,
+                "lose" to "",
+                "ghost" to FulfillmentAdoptionStatus.ADOPTED,
+            ),
+            resolution = resolution,
+        )
+        assertThat(patches).containsExactly(
+            "lose",
+            FulfillmentAdoptionStatus.CONFLICT_NOT_ADOPTED,
+        )
+    }
+
     private fun evidence(
         clientUuid: String,
         recordClientUuid: String,

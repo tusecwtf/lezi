@@ -72,9 +72,9 @@ pub(super) async fn list_family_members(
         coalesced
             .entry(key)
             .and_modify(|candidate| {
-                if is_self {
-                    candidate.membership_id = membership_id.clone();
-                } else if !candidate.is_self && membership_id < candidate.membership_id {
+                // Prefer authenticated self membership_id; else keep lexicographically
+                // smaller id for stable multi-session coalescing of the same device.
+                if is_self || (!candidate.is_self && membership_id < candidate.membership_id) {
                     candidate.membership_id = membership_id.clone();
                 }
                 candidate.is_self |= is_self;

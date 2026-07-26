@@ -1,7 +1,7 @@
 # 乐记（lezi）
 
 家庭育儿日志 · Android · Kotlin + Jetpack Compose
-包名：`com.lezi.babylog` · minSdk 26 · targetSdk 35 · 显示名「乐记」 · version `0.2.4`
+包名：`com.lezi.babylog` · minSdk 26 · targetSdk 35 · 显示名「乐记」 · version `0.2.5`
 
 产品规格：[`docs/prd/`](docs/prd/)
 

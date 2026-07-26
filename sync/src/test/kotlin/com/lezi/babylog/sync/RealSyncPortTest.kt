@@ -3291,8 +3291,8 @@ class RealSyncPortTest {
             )
             assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
 
-            // Care_plan package commits before fulfill Record so NAS never exposes
-            // Record-while-plan-still-pending (ticket 25 full-set visibility).
+            // Fulfill Record commits before completed care_plan so a page that ends
+            // after the record still applies the fact before co-gating the plan.
             val recordCommitIdx = rig.backend.committedBundles.indexOfFirst {
                 it.startsWith("record:$recordUuid:")
             }
@@ -3301,7 +3301,7 @@ class RealSyncPortTest {
             }
             assertThat(recordCommitIdx).isAtLeast(0)
             assertThat(planCommitIdx).isAtLeast(0)
-            assertThat(planCommitIdx).isLessThan(recordCommitIdx)
+            assertThat(recordCommitIdx).isLessThan(planCommitIdx)
             val recordDraft = rig.backend.stagedBundles.first { it.root.clientUuid == recordUuid }
             assertThat(recordDraft.media.filter { it.deletedAt == null }).hasSize(photoCount)
 

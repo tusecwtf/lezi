@@ -1578,6 +1578,8 @@ class CareLogTest {
         val completed = foreignCare.getCarePlan(planId)!!
         assertThat(completed.status).isEqualTo(CarePlanStatus.COMPLETED)
         assertThat(completed.createdByMembershipId).isEqualTo("m-creator")
+        // Non-manager fulfill completes locally only — server rejects care_plan rewrite.
+        assertThat(completed.syncDirty).isFalse()
         val candidates = foreignCare.listFulfillmentCandidatesForPlan(completed.clientUuid)
         assertThat(candidates).hasSize(1)
         assertThat(candidates.single().recordClientUuid)
@@ -2179,13 +2181,24 @@ class CareLogTest {
             eventAt = 3_000,
             remindAt = null,
         )
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.PEE,
+            scheduledAt = now + 60_000L,
+            nowMillis = now,
+        )
+        care.fulfillCarePlan(carePlanId = planId, actualTimestamp = now, nowMillis = now + 1)
         val requestsBeforeClear = sync.requests
 
         care.clearRecordsOnly()
 
         assertThat(fakes.records.listAllIncludingDeleted()).isEmpty()
         assertThat(fakes.calendarEvents.listForBabyIncludingDeleted(babyId)).isEmpty()
+        assertThat(fakes.carePlans.listAllIncludingDeleted()).isEmpty()
+        assertThat(fakes.fulfillmentCandidates.listAllIncludingDeleted()).isEmpty()
         assertThat(fakes.babies.listAll()).hasSize(1)
+        assertThat(fakes.reminders.cancelledCarePlanIds).contains(planId)
         assertThat(sync.requests).isEqualTo(requestsBeforeClear)
         assertThat(sync.localRecordReconciliations).isEqualTo(1)
     }
@@ -2392,6 +2405,14 @@ class CareLogTest {
             eventAt = 2_000,
             remindAt = null,
         )
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.PEE,
+            scheduledAt = now + 60_000L,
+            nowMillis = now,
+        )
+        assertThat(fakes.reminders.scheduledCarePlanIds).contains(planId)
         val requestsBeforeClear = sync.requests
 
         care.clearAllLocalData()
@@ -2399,11 +2420,15 @@ class CareLogTest {
         assertThat(fakes.records.listAllIncludingDeleted()).isEmpty()
         assertThat(fakes.babies.listAllIncludingDeleted()).isEmpty()
         assertThat(fakes.customItems.listAll()).isEmpty()
+        assertThat(fakes.carePlans.listAllIncludingDeleted()).isEmpty()
+        assertThat(fakes.fulfillmentCandidates.listAllIncludingDeleted()).isEmpty()
         assertThat(fakes.calendarEvents.listForBaby(babyId)).isEmpty()
         assertThat(fakes.families.listAll()).isEmpty()
         assertThat(fakes.memberships.listForFamily(1)).isEmpty()
         assertThat(fakes.users.get()).isNull()
         assertThat(fakes.settings.currentBabyId.first()).isNull()
+        assertThat(fakes.reminders.cancelledCarePlanIds).contains(planId)
+        assertThat(fakes.reminders.scheduledCarePlanIds).doesNotContain(planId)
         assertThat(sync.requests).isEqualTo(requestsBeforeClear)
         assertThat(sync.fullLocalWipes).isEqualTo(1)
         assertThat(fakes.transactions.runCount).isAtLeast(1)
