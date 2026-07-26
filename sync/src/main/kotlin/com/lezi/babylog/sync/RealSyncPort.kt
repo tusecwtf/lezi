@@ -245,7 +245,9 @@ class RealSyncPort @Inject constructor(
     }
 
     override suspend fun listFamilyMembers(): Result<List<FamilyMember>> = withAllowedSession {
-        backend.members(it)
+        val members = backend.members(it)
+        persistAuthenticatedSelfMembershipIfMissing(it, members)
+        members
     }
 
     override suspend fun updateMyDisplayName(displayName: String): Result<Unit> =
@@ -272,6 +274,15 @@ class RealSyncPort @Inject constructor(
             currentStatus.value = SyncStatus.Syncing
             val plan = SyncPlan.forTrigger(trigger)
             var current = session
+            if (
+                current.membershipId.isBlank() &&
+                policy.supportsRecordMembershipAuthor
+            ) {
+                current = persistAuthenticatedSelfMembershipIfMissing(
+                    current,
+                    backend.members(current),
+                )
+            }
             var recovered = false
             if (current.pullCursor > 0 && current.pullGeneration.isBlank()) {
                 current = recoverFullResync(current, mediaEditGuard)
@@ -644,24 +655,36 @@ class RealSyncPort @Inject constructor(
                 deletedAt = row.deletedAt,
             )
         }
+        requireAllowed(policy.evaluate(session.homeLanConfig, foregroundState.isForeground()))
+        val preStageCapabilities = policy.lastHealthStatus.capabilities.toSet()
+        if (CAPABILITY_ATOMIC_BUNDLE !in preStageCapabilities) {
+            throw AtomicBundleUnsupportedException()
+        }
+        val includeMembershipAuthor =
+            CAPABILITY_RECORD_MEMBERSHIP_AUTHOR in preStageCapabilities
         val mapped = SyncWireMapper.record(
             entity = record,
             babyClientUuid = baby.clientUuid,
             createdByDeviceId = record.createdByDeviceId ?: session.deviceId,
+            includeMembershipAuthor = includeMembershipAuthor,
         )
         // Prefer durable outbox wire payload (includes baby_client_uuid) when valid.
         val outboxPayload = normalizeLegacyOutboxPayload("record", recordRow.payloadJson)
-        val rootPayload = runCatching {
+        val durablePayload = runCatching {
             val obj = Json.parseToJsonElement(outboxPayload).jsonObject
             if ("baby_client_uuid" in obj) outboxPayload else mapped.payloadJson
         }.getOrDefault(mapped.payloadJson)
+        val rootPayload = recordPayloadForServerCapability(
+            durablePayload = durablePayload,
+            mappedPayload = mapped.payloadJson,
+            includeMembershipAuthor = includeMembershipAuthor,
+        )
         val root = mapped.copy(
             payloadJson = rootPayload,
             updatedAt = recordRow.updatedAt,
             deletedAt = recordRow.deletedAt,
         )
         val bundleId = AtomicBundleId.forRecord(record.clientUuid, recordRow.updatedAt)
-        requireAllowed(policy.evaluate(session.homeLanConfig, foregroundState.isForeground()))
         backend.stageBundle(
             session,
             AtomicBundleDraft(
@@ -1316,6 +1339,9 @@ class RealSyncPort @Inject constructor(
                 endTimestamp = payload.long("end_timestamp"),
                 note = payload.string("note"),
                 createdByUserId = existing?.createdByUserId ?: 1,
+                createdByMembershipId = payload.string("created_by_membership_id")
+                    ?: existing?.createdByMembershipId
+                    ?: "",
                 createdByDeviceId = payload.string("created_by_device_id")
                     ?: existing?.createdByDeviceId,
                 payloadJson = preserveDeviceLocalPhotos(
@@ -1526,6 +1552,23 @@ class RealSyncPort @Inject constructor(
         cachedSession = session
         currentStatus.value = SyncStatus.Idle
         return session
+    }
+
+    private suspend fun persistAuthenticatedSelfMembershipIfMissing(
+        session: SyncSession,
+        members: List<FamilyMember>,
+    ): SyncSession {
+        if (session.membershipId.isNotBlank()) return session
+        val membershipId = members
+            .singleOrNull { it.isSelf }
+            ?.membershipId
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: return session
+        val updated = session.copy(membershipId = membershipId)
+        preferences.saveSession(updated)
+        cachedSession = updated
+        return updated
     }
 
     private suspend fun resetLocalSyncReceipts(
@@ -1795,6 +1838,7 @@ class RealSyncPort @Inject constructor(
                     record,
                     babyUuid,
                     record.createdByDeviceId ?: session.deviceId,
+                    includeMembershipAuthor = policy.supportsRecordMembershipAuthor,
                 ),
             )
         }
@@ -2192,6 +2236,23 @@ class RealSyncPort @Inject constructor(
             payload = JsonObject(payload + ("payload_json" to JsonObject(parsed - "photos")))
         }
         return payload.toString()
+    }
+
+    private fun recordPayloadForServerCapability(
+        durablePayload: String,
+        mappedPayload: String,
+        includeMembershipAuthor: Boolean,
+    ): String {
+        val durable = Json.parseToJsonElement(durablePayload).jsonObject
+        val mapped = Json.parseToJsonElement(mappedPayload).jsonObject
+        val author = mapped["created_by_membership_id"]
+        return JsonObject(
+            if (includeMembershipAuthor && author != null) {
+                durable + ("created_by_membership_id" to author)
+            } else {
+                durable - "created_by_membership_id"
+            },
+        ).toString()
     }
 }
 

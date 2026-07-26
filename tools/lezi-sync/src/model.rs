@@ -448,6 +448,7 @@ fn validate_record(payload: &Map<String, Value>) -> Result<(), ApiError> {
             "payload_json",
             "schema_version",
             "created_by_device_id",
+            "created_by_membership_id",
         ],
     )?;
     uuid(payload, "baby_client_uuid")?;
@@ -460,6 +461,7 @@ fn validate_record(payload: &Map<String, Value>) -> Result<(), ApiError> {
     }
     optional_integer(payload, "schema_version", 1, i64::MAX)?;
     optional_nullable_string(payload, "created_by_device_id", 1, 128)?;
+    optional_nullable_string(payload, "created_by_membership_id", 1, 64)?;
     Ok(())
 }
 

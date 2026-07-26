@@ -90,6 +90,8 @@ data class RecordEntity(
     val deletedAt: Long? = null,
     @ColumnInfo(defaultValue = "1")
     val syncDirty: Boolean = true,
+    @ColumnInfo(defaultValue = "''")
+    val createdByMembershipId: String = "",
 )
 
 /**

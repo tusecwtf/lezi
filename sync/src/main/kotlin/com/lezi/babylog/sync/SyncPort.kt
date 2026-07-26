@@ -11,11 +11,11 @@ data class Invite(val code: String, val expiresAt: Long)
 /**
  * Privacy-preserving family member projection from the home server.
  *
- * [deviceId] is a client-only link key for mapping record `created_by_device_id`
- * to the current 家庭称呼. Product UI must never display [deviceId].
+ * [membershipId] is the server-minted immutable membership identity (UUID) and
+ * the primary Record-author link. Soft-parsed as null for legacy NAS responses.
  *
- * [membershipId] is the server-minted immutable membership identity (UUID). Soft-
- * parsed as null when talking to a legacy NAS that omits the field.
+ * [deviceId] is retained only to resolve legacy `created_by_device_id` rows.
+ * Product UI must never display it or treat it as authority.
  */
 data class FamilyMember(
     val displayName: String?,

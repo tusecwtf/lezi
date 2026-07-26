@@ -21,6 +21,7 @@ class SyncWireMapperTest {
             timestamp = 123,
             note = "今天",
             createdByUserId = 1,
+            createdByMembershipId = "membership-a",
             payloadJson = """{"body":"好","photos":["/data/user/0/lezi/files/private.jpg"],"future":{"v":2}}""",
             schemaVersion = 2,
             updatedAt = 456,
@@ -30,11 +31,13 @@ class SyncWireMapperTest {
             entity,
             babyClientUuid = "baby-uuid",
             createdByDeviceId = "device-a",
+            includeMembershipAuthor = true,
         )
         val payload = Json.parseToJsonElement(wire.payloadJson).jsonObject
 
         assertThat(payload["baby_client_uuid"].toString()).isEqualTo("\"baby-uuid\"")
         assertThat(payload["created_by_device_id"].toString()).isEqualTo("\"device-a\"")
+        assertThat(payload["created_by_membership_id"].toString()).isEqualTo("\"membership-a\"")
         assertThat(payload["baby_id"]).isNull()
         assertThat(payload["schema_version"].toString()).isEqualTo("2")
         assertThat(payload["payload_json"]).isInstanceOf(
@@ -43,6 +46,33 @@ class SyncWireMapperTest {
         assertThat(payload["payload_json"].toString()).contains("\"body\":\"好\"")
         assertThat(payload["payload_json"].toString()).contains("\"future\":{\"v\":2}")
         assertThat(payload["payload_json"].toString()).doesNotContain("private.jpg")
+    }
+
+    @Test
+    fun recordOmitsMembershipAuthorForLegacyServerCapability() {
+        val entity = RecordEntity(
+            clientUuid = "record-uuid",
+            babyId = 7,
+            type = "pee",
+            timestamp = 123,
+            createdByUserId = 1,
+            createdByMembershipId = "membership-a",
+            createdByDeviceId = "device-a",
+            updatedAt = 456,
+        )
+
+        val payload = Json.parseToJsonElement(
+            SyncWireMapper.record(
+                entity = entity,
+                babyClientUuid = "baby-uuid",
+                createdByDeviceId = "device-a",
+                includeMembershipAuthor = false,
+            ).payloadJson,
+        ).jsonObject
+
+        assertThat(payload["created_by_membership_id"]).isNull()
+        assertThat(payload["created_by_device_id"]?.jsonPrimitive?.contentOrNull)
+            .isEqualTo("device-a")
     }
 
     @Test

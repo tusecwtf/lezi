@@ -11,10 +11,49 @@ import org.junit.Test
 
 class TimelineUploaderLabelTest {
     private val members = listOf(
-        UploaderMemberRef("device-a", "妈妈", FamilyRole.Owner, isSelf = true),
-        UploaderMemberRef("device-b", "爸爸", FamilyRole.Member, isSelf = false),
+        UploaderMemberRef(
+            "device-a",
+            "妈妈",
+            FamilyRole.Owner,
+            isSelf = true,
+            membershipId = "membership-a",
+        ),
+        UploaderMemberRef(
+            "device-b",
+            "爸爸",
+            FamilyRole.Member,
+            isSelf = false,
+            membershipId = "membership-b",
+        ),
         UploaderMemberRef("device-c", null, FamilyRole.Member, isSelf = false),
     )
+
+    @Test
+    fun membershipAuthorDrivesTimelineEvenWhenLegacyDeviceConflicts() {
+        val records = listOf(
+            record(
+                id = 1,
+                deviceId = "device-b",
+                membershipId = "membership-a",
+            ),
+            record(
+                id = 2,
+                deviceId = "device-a",
+                membershipId = "membership-b",
+            ),
+        )
+
+        val labels = buildUploaderLabels(
+            records = records,
+            selfDeviceId = "device-a",
+            isFamilyJoined = true,
+            members = members,
+            selfMembershipId = "membership-a",
+        )
+
+        assertFalse(labels.containsKey(1L))
+        assertEquals("爸爸", labels[2L])
+    }
 
     @Test
     fun hidesUploaderWhenNotJoinedOrSelf() {
@@ -75,13 +114,18 @@ class TimelineUploaderLabelTest {
         assertEquals("120ml · 爸爸", timelineRecordSummary("120ml", "爸爸", "  "))
     }
 
-    private fun record(id: Long, deviceId: String?) = Record(
+    private fun record(
+        id: Long,
+        deviceId: String?,
+        membershipId: String = "",
+    ) = Record(
         id = id,
         clientUuid = "uuid-$id",
         babyId = 1,
         type = RecordType.FORMULA,
         timestamp = id * 1_000,
         createdByUserId = 1,
+        createdByMembershipId = membershipId,
         createdByDeviceId = deviceId,
         payloadJson = """{"amount_ml":120}""",
         updatedAt = id * 1_000,

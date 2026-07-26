@@ -109,10 +109,16 @@ pub enum StoreError {
     BundleNotFound,
     #[error("atomic bundle already committed with different content")]
     BundleContentConflict,
+    #[error("atomic bundle belongs to a different staging membership")]
+    BundleMembershipMismatch,
+    #[error("legacy staging bundle has no verifiable membership")]
+    LegacyBundleMembershipUnknown,
     #[error("too many open staging bundles for this family")]
     BundleStagingLimit,
     #[error("media is not listed in the bundle manifest")]
     BundleMediaNotInManifest,
+    #[error("committed bundle does not accept staged media")]
+    BundleMediaUploadClosed,
     #[error("bundle media bytes are incomplete")]
     BundleMediaIncomplete,
     #[error("bundle root is not newer than the published version")]
@@ -139,6 +145,8 @@ pub struct BundleCommitResult {
 pub struct StoredBundle {
     pub media: Vec<Entity>,
     pub required_media: Vec<String>,
+    pub status: String,
+    pub staged_membership_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -253,6 +261,7 @@ impl Store {
                 family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
                 bundle_id TEXT NOT NULL,
                 device_id TEXT NOT NULL,
+                staged_membership_id TEXT,
                 status TEXT NOT NULL CHECK(status IN ('staging', 'committed')),
                 root_type TEXT NOT NULL,
                 root_client_uuid TEXT NOT NULL,
@@ -302,6 +311,40 @@ impl Store {
         if membership_columns.contains("token_hash") {
             migrate_legacy_memberships(&mut connection)?;
         }
+        let bundle_columns = table_columns(&connection, "sync_bundles")?;
+        if !bundle_columns.contains("staged_membership_id") {
+            connection.execute(
+                "ALTER TABLE sync_bundles ADD COLUMN staged_membership_id TEXT",
+                [],
+            )?;
+        }
+        // Legacy bundles only persisted the authenticated device. Recover the
+        // stager membership when that family/device pair is unambiguous across
+        // all historical memberships after normalization. Counting left rows
+        // prevents a same-device rejoin from taking over an older staged bundle;
+        // ambiguous rows remain null and fail closed at stage/commit.
+        connection.execute(
+            "
+            UPDATE sync_bundles
+            SET staged_membership_id = (
+                SELECT memberships.membership_id
+                FROM memberships
+                WHERE memberships.family_id = sync_bundles.family_id
+                  AND memberships.device_id = sync_bundles.device_id
+                ORDER BY memberships.membership_id COLLATE BINARY
+                LIMIT 1
+            )
+            WHERE sync_bundles.status = 'staging'
+              AND sync_bundles.staged_membership_id IS NULL
+              AND 1 = (
+                  SELECT COUNT(*)
+                  FROM memberships
+                  WHERE memberships.family_id = sync_bundles.family_id
+                    AND memberships.device_id = sync_bundles.device_id
+              )
+            ",
+            [],
+        )?;
         connection.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS membership_credentials (
@@ -697,14 +740,18 @@ impl Store {
 
     pub fn push(
         &self,
-        family_id: &str,
-        role: &str,
-        membership_id: &str,
+        principal: &Principal,
         entities: Vec<Entity>,
         max_updated_at: i64,
         // Server wall clock (seconds or millis — stored as-is for confirmed_at).
         now: i64,
     ) -> Result<PushResult, StoreError> {
+        let Principal {
+            family_id,
+            role,
+            device_id,
+            membership_id,
+        } = principal;
         if entities
             .iter()
             .any(|entity| entity.updated_at > max_updated_at)
@@ -717,6 +764,7 @@ impl Store {
         let incoming_keys = entities.iter().map(entity_key).collect::<BTreeSet<_>>();
         let mut existing = load_existing_entities(&transaction, family_id, &incoming_keys)?;
         let mut effective = effective_lww_winners(entities, &existing);
+        canonicalize_record_authors(device_id, membership_id, &mut effective, &existing);
         let equivalent_memberships = equivalent_membership_ids(&transaction, membership_id)?;
         stamp_and_authorize_custom_items(
             role,
@@ -994,20 +1042,22 @@ impl Store {
     /// Stage (or refresh) an atomic bundle: root + media metadata only.
     /// Nothing is visible to ordinary pull until [Self::commit_bundle].
     ///
-    /// [membership_id] is required so CarePlan creator ACL can be stamped and
-    /// authorize manage operations on the real publish path (not only legacy push).
-    #[allow(clippy::too_many_arguments)]
+    /// [Principal] supplies server-authenticated identity for canonical authors and
+    /// CarePlan creator ACL on the real publish path (not only legacy push).
     pub fn stage_bundle(
         &self,
-        family_id: &str,
-        device_id: &str,
-        role: &str,
-        membership_id: &str,
+        principal: &Principal,
         bundle_id: &str,
         root: Entity,
         media: Vec<Entity>,
         now: i64,
     ) -> Result<BundleStageStatus, StoreError> {
+        let Principal {
+            family_id,
+            role,
+            device_id,
+            membership_id,
+        } = principal;
         if media.len() > MAX_BUNDLE_MEDIA_ENTITIES {
             return Err(StoreError::UnresolvedReference(format!(
                 "bundle media must contain at most {MAX_BUNDLE_MEDIA_ENTITIES} items"
@@ -1016,13 +1066,15 @@ impl Store {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-        // Stamp CarePlan creator / ACL before hashing so forged membership is never
-        // part of the durable package identity.
+        // Canonicalize server-owned Record/CarePlan authors before hashing so forged
+        // membership claims never become part of the durable package identity.
         let mut package = Vec::with_capacity(1 + media.len());
         package.push(root);
         package.extend(media);
         let incoming_keys = package.iter().map(entity_key).collect::<BTreeSet<_>>();
         let mut existing = load_existing_entities(&transaction, family_id, &incoming_keys)?;
+        canonicalize_equal_lww_bundle_root(&mut package, &existing);
+        canonicalize_record_authors(device_id, membership_id, &mut package, &existing);
         let equivalent_memberships = equivalent_membership_ids(&transaction, membership_id)?;
         stamp_and_authorize_care_plans(
             role,
@@ -1070,6 +1122,11 @@ impl Store {
                 }
                 return bundle_stage_status_from_row(&transaction, family_id, &existing_bundle);
             }
+            match existing_bundle.staged_membership_id.as_deref() {
+                Some(staged_membership_id) if staged_membership_id == membership_id => {}
+                Some(_) => return Err(StoreError::BundleMembershipMismatch),
+                None => return Err(StoreError::LegacyBundleMembershipUnknown),
+            }
             // Replace open staging with the new package (same bundle_id retry/refine).
             transaction.execute(
                 "DELETE FROM sync_bundle_media WHERE family_id = ?1 AND bundle_id = ?2",
@@ -1097,15 +1154,16 @@ impl Store {
         transaction.execute(
             "
             INSERT INTO sync_bundles(
-                family_id, bundle_id, device_id, status,
+                family_id, bundle_id, device_id, staged_membership_id, status,
                 root_type, root_client_uuid, root_updated_at, root_deleted_at,
                 root_payload_json, media_entities_json, content_hash, created_at
-            ) VALUES (?1, ?2, ?3, 'staging', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            ) VALUES (?1, ?2, ?3, ?4, 'staging', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             ",
             params![
                 family_id,
                 bundle_id,
                 device_id,
+                membership_id,
                 root.entity_type,
                 root.client_uuid,
                 root.updated_at,
@@ -1167,24 +1225,33 @@ impl Store {
         Ok(Some(StoredBundle {
             media,
             required_media: required,
+            status: row.status,
+            staged_membership_id: row.staged_membership_id,
         }))
     }
 
     /// Record that staged bytes for a manifest media UUID are durable.
     pub fn mark_bundle_media_staged(
         &self,
-        family_id: &str,
+        principal: &Principal,
         bundle_id: &str,
         media_uuid: &str,
         staged_byte_size: usize,
         now: i64,
     ) -> Result<BundleStageStatus, StoreError> {
+        let family_id = &principal.family_id;
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let row = load_bundle_row(&transaction, family_id, bundle_id)?
             .ok_or(StoreError::BundleNotFound)?;
         if row.status == "committed" {
-            return bundle_stage_status_from_row(&transaction, family_id, &row);
+            return Err(StoreError::BundleMediaUploadClosed);
+        }
+        match row.staged_membership_id.as_deref() {
+            Some(staged_membership_id)
+                if staged_membership_id == principal.membership_id.as_str() => {}
+            Some(_) => return Err(StoreError::BundleMembershipMismatch),
+            None => return Err(StoreError::LegacyBundleMembershipUnknown),
         }
         let updated = transaction.execute(
             "
@@ -1238,21 +1305,35 @@ impl Store {
     /// `media_ready` maps media_uuid → whether durable staged bytes match declared size.
     /// Caller installs final media files after a successful first commit (or re-installs
     /// on idempotent retry).
-    #[allow(clippy::too_many_arguments)]
     pub fn commit_bundle(
         &self,
-        family_id: &str,
-        role: &str,
-        membership_id: &str,
+        principal: &Principal,
         bundle_id: &str,
         media_ready: &BTreeMap<String, bool>,
         max_updated_at: i64,
         now: i64,
     ) -> Result<(BundleCommitResult, Vec<Entity>), StoreError> {
+        let Principal {
+            family_id,
+            role,
+            device_id,
+            membership_id,
+        } = principal;
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let row = load_bundle_row(&transaction, family_id, bundle_id)?
             .ok_or(StoreError::BundleNotFound)?;
+
+        match row.staged_membership_id.as_deref() {
+            Some(staged_membership_id) if staged_membership_id == membership_id => {}
+            Some(_) => return Err(StoreError::BundleMembershipMismatch),
+            None if row.status == "staging" => {
+                return Err(StoreError::LegacyBundleMembershipUnknown)
+            }
+            // A legacy committed row has already published immutable content. Keep
+            // lost-response retries compatible because no author can change now.
+            None => {}
+        }
 
         if row.status == "committed" {
             let cursor = row.committed_cursor.unwrap_or(0);
@@ -1330,9 +1411,23 @@ impl Store {
         let original_count = package.len();
         let incoming_keys = package.iter().map(entity_key).collect::<BTreeSet<_>>();
         let mut existing = load_existing_entities(&transaction, family_id, &incoming_keys)?;
+        canonicalize_equal_lww_bundle_root(&mut package, &existing);
+        canonicalize_record_authors(device_id, membership_id, &mut package, &existing);
+        let canonical_root = package
+            .iter()
+            .find(|entity| entity.entity_type != "media")
+            .ok_or(StoreError::InvalidStoredPayload)?;
+        let canonical_media = package
+            .iter()
+            .filter(|entity| entity.entity_type == "media")
+            .cloned()
+            .collect::<Vec<_>>();
+        let canonical_root_payload_json = serde_json::to_string(&canonical_root.payload)?;
+        let canonical_media_entities_json = serde_json::to_string(&canonical_media)?;
+        let canonical_content_hash = bundle_content_hash(canonical_root, &canonical_media)?;
         let mut effective = effective_lww_winners(package.clone(), &existing);
-        // Re-stamp/authorize on commit so a staged package cannot bypass ACL after
-        // membership role changes, and creator freezes against published rows.
+        // Re-stamp/authorize CarePlan winners on commit so a staged package cannot
+        // bypass ACL after membership role changes.
         let equivalent_memberships = equivalent_membership_ids(&transaction, membership_id)?;
         stamp_and_authorize_care_plans(
             role,
@@ -1416,10 +1511,24 @@ impl Store {
             SET status = 'committed',
                 committed_at = ?1,
                 committed_cursor = ?2,
-                committed_applied = ?3
-            WHERE family_id = ?4 AND bundle_id = ?5
+                committed_applied = ?3,
+                root_deleted_at = ?4,
+                root_payload_json = ?5,
+                media_entities_json = ?6,
+                content_hash = ?7
+            WHERE family_id = ?8 AND bundle_id = ?9
             ",
-            params![now, cursor, entity_count as i64, family_id, bundle_id],
+            params![
+                now,
+                cursor,
+                entity_count as i64,
+                canonical_root.deleted_at,
+                canonical_root_payload_json,
+                canonical_media_entities_json,
+                canonical_content_hash,
+                family_id,
+                bundle_id
+            ],
         )?;
         transaction.commit()?;
         self.secure_database_files()?;
@@ -1439,9 +1548,7 @@ impl Store {
 #[derive(Debug, Clone)]
 struct BundleRow {
     bundle_id: String,
-    /// Retained for staging identity / future audit; not read on the hot path.
-    #[allow(dead_code)]
-    device_id: String,
+    staged_membership_id: Option<String>,
     status: String,
     root_type: String,
     root_client_uuid: String,
@@ -1462,7 +1569,8 @@ fn load_bundle_row(
     connection
         .query_row(
             "
-            SELECT bundle_id, device_id, status, root_type, root_client_uuid,
+            SELECT bundle_id, staged_membership_id, status,
+                   root_type, root_client_uuid,
                    root_updated_at, root_deleted_at, root_payload_json,
                    media_entities_json, content_hash,
                    committed_cursor, committed_applied
@@ -1473,7 +1581,7 @@ fn load_bundle_row(
             |row| {
                 Ok(BundleRow {
                     bundle_id: row.get(0)?,
-                    device_id: row.get(1)?,
+                    staged_membership_id: row.get(1)?,
                     status: row.get(2)?,
                     root_type: row.get(3)?,
                     root_client_uuid: row.get(4)?,
@@ -1638,6 +1746,61 @@ fn stamp_and_authorize_custom_items(
         }
     }
     Ok(())
+}
+
+/// Record authorship belongs to the authenticated principal, never to client claims.
+fn canonicalize_record_authors(
+    device_id: &str,
+    membership_id: &str,
+    entities: &mut [Entity],
+    existing: &HashMap<EntityKey, ExistingEntity>,
+) {
+    for entity in entities.iter_mut() {
+        if entity.entity_type != "record" {
+            continue;
+        }
+        let key = ("record".to_owned(), entity.client_uuid.clone());
+        if let Some(current) = existing.get(&key) {
+            for field in ["created_by_device_id", "created_by_membership_id"] {
+                if let Some(value) = current.payload.get(field).cloned() {
+                    entity.payload.insert(field.to_owned(), value);
+                } else {
+                    entity.payload.remove(field);
+                }
+            }
+        } else {
+            entity.payload.insert(
+                "created_by_device_id".to_owned(),
+                Value::String(device_id.to_owned()),
+            );
+            entity.payload.insert(
+                "created_by_membership_id".to_owned(),
+                Value::String(membership_id.to_owned()),
+            );
+        }
+    }
+}
+
+/// Equal `updated_at` keeps the already-published LWW winner. Atomic staging and
+/// commit must hash and persist that exact root rather than a losing same-version
+/// payload, otherwise committed bundle retries diverge from ordinary pull.
+fn canonicalize_equal_lww_bundle_root(
+    entities: &mut [Entity],
+    existing: &HashMap<EntityKey, ExistingEntity>,
+) {
+    for entity in entities.iter_mut() {
+        if entity.entity_type != "record" && entity.entity_type != "care_plan" {
+            continue;
+        }
+        let key = entity_key(entity);
+        let Some(current) = existing.get(&key) else {
+            continue;
+        };
+        if current.updated_at == entity.updated_at {
+            entity.deleted_at = current.deleted_at;
+            entity.payload = current.payload.clone();
+        }
+    }
 }
 
 /// CarePlan ACL mirrors custom items: any member may create; only creator or
@@ -2855,6 +3018,15 @@ mod tests {
             .0
     }
 
+    fn owner_principal(family_id: &str) -> Principal {
+        Principal {
+            family_id: family_id.to_owned(),
+            role: "owner".to_owned(),
+            device_id: "owner-device".to_owned(),
+            membership_id: "m-owner".to_owned(),
+        }
+    }
+
     #[test]
     fn lww_and_reference_validation_share_one_transaction() {
         let directory = TempDir::new().unwrap();
@@ -2874,9 +3046,7 @@ mod tests {
         assert_eq!(
             store
                 .push(
-                    &family_id,
-                    "owner",
-                    "m-owner",
+                    &owner_principal(&family_id),
                     vec![
                         entity("record", record_id, 1, record),
                         entity("baby", baby_id, 1, baby.clone()),
@@ -2891,9 +3061,7 @@ mod tests {
         assert_eq!(
             store
                 .push(
-                    &family_id,
-                    "owner",
-                    "m-owner",
+                    &owner_principal(&family_id),
                     vec![entity("baby", baby_id, 1, baby)],
                     10,
                     1_700_000_000_000,
@@ -2916,9 +3084,7 @@ mod tests {
         });
 
         let result = store.push(
-            &family_id,
-            "owner",
-            "m-owner",
+            &owner_principal(&family_id),
             vec![entity("baby", Uuid::new_v4(), 11, baby)],
             10,
             1_700_000_000_000,
@@ -2954,9 +3120,7 @@ mod tests {
         }));
         store
             .push(
-                &family_id,
-                "owner",
-                "m-owner",
+                &owner_principal(&family_id),
                 entities,
                 100,
                 1_700_000_000_000,
@@ -2983,9 +3147,7 @@ mod tests {
         let baby_id = Uuid::new_v4();
         store
             .push(
-                &family_id,
-                "owner",
-                "m-owner",
+                &owner_principal(&family_id),
                 vec![entity(
                     "baby",
                     baby_id,
@@ -3001,9 +3163,7 @@ mod tests {
             .unwrap();
         let record_id = Uuid::new_v4();
         let result = store.push(
-            &family_id,
-            "owner",
-            "m-owner",
+            &owner_principal(&family_id),
             vec![entity(
                 "record",
                 record_id,

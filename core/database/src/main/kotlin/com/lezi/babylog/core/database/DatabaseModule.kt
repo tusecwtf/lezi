@@ -360,6 +360,16 @@ internal val MIGRATION_16_17 = object : Migration(16, 17) {
     }
 }
 
+/** Server-owned immutable Record author identity; legacy rows remain unknown. */
+internal val MIGRATION_17_18 = object : Migration(17, 18) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "ALTER TABLE records ADD COLUMN " +
+                "`createdByMembershipId` TEXT NOT NULL DEFAULT ''",
+        )
+    }
+}
+
 @Module
 @InstallIn(SingletonComponent::class)
 object DatabaseModule {
@@ -384,6 +394,7 @@ object DatabaseModule {
                 MIGRATION_14_15,
                 MIGRATION_15_16,
                 MIGRATION_16_17,
+                MIGRATION_17_18,
             )
             .build()
 

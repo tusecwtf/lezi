@@ -460,7 +460,61 @@ class DatabaseMigrationTest {
     }
 
     @Test
-    fun migrate8To17_preservesLegacyPendingReminderCleanupRow() {
+    fun migrate17To18_addsRecordMembershipAuthorWithoutChangingLegacyRows() {
+        helper.createDatabase(RECORD_MEMBERSHIP_AUTHOR_DATABASE, 17).apply {
+            execSQL(
+                """
+                INSERT INTO records (
+                    id, clientUuid, babyId, type, timestamp, endTimestamp, note,
+                    createdByUserId, createdByDeviceId, payloadJson, schemaVersion,
+                    updatedAt, deletedAt, syncDirty
+                ) VALUES (
+                    71, 'record-legacy-author', 9, 'formula', 1000, NULL, '保留旧记录',
+                    3, 'legacy-device', '{"amount_ml":120}', 1,
+                    1100, NULL, 0
+                )
+                """.trimIndent(),
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            RECORD_MEMBERSHIP_AUTHOR_DATABASE,
+            18,
+            true,
+            MIGRATION_17_18,
+        ).apply {
+            query(
+                """
+                SELECT id, clientUuid, babyId, type, timestamp, note,
+                       createdByUserId, createdByMembershipId, createdByDeviceId,
+                       payloadJson, schemaVersion, updatedAt, deletedAt, syncDirty
+                FROM records WHERE id = 71
+                """.trimIndent(),
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(71L, cursor.getLong(0))
+                assertEquals("record-legacy-author", cursor.getString(1))
+                assertEquals(9L, cursor.getLong(2))
+                assertEquals("formula", cursor.getString(3))
+                assertEquals(1000L, cursor.getLong(4))
+                assertEquals("保留旧记录", cursor.getString(5))
+                assertEquals(3L, cursor.getLong(6))
+                assertEquals("", cursor.getString(7))
+                assertEquals("legacy-device", cursor.getString(8))
+                assertEquals("""{"amount_ml":120}""", cursor.getString(9))
+                assertEquals(1, cursor.getInt(10))
+                assertEquals(1100L, cursor.getLong(11))
+                assertTrue(cursor.isNull(12))
+                assertEquals(0, cursor.getInt(13))
+                assertTrue(!cursor.moveToNext())
+            }
+            close()
+        }
+    }
+
+    @Test
+    fun migrate8To18_preservesLegacyPendingReminderCleanupRow() {
         helper.createDatabase(PENDING_REMINDER_DATABASE, 8).apply {
             execSQL(
                 """
@@ -474,7 +528,7 @@ class DatabaseMigrationTest {
 
         helper.runMigrationsAndValidate(
             PENDING_REMINDER_DATABASE,
-            17,
+            18,
             true,
             MIGRATION_8_9,
             MIGRATION_9_10,
@@ -485,6 +539,7 @@ class DatabaseMigrationTest {
             MIGRATION_14_15,
             MIGRATION_15_16,
             MIGRATION_16_17,
+            MIGRATION_17_18,
         ).apply {
             query(
                 """
@@ -503,14 +558,14 @@ class DatabaseMigrationTest {
 
     /**
      * Full upgrade chain from the shipped 0.2.4 Room schema (v7) through every
-     * published migration to the care-plan feature head (v17).
+     * published migration to the current feature head (v18).
      *
      * Seeds a realistic pre-feature DB: facts with 1–3 log photos, free-title
      * calendar events, and a custom item. Asserts row preservation and that
      * feature tables/columns exist — does not invent missing migrations.
      */
     @Test
-    fun migrate7To17_preservesShipped024BaselineThroughCarePlanHead() {
+    fun migrate7To18_preservesShipped024BaselineThroughCurrentHead() {
         helper.createDatabase(SHIPPED_024_DATABASE, 7).apply {
             execSQL(
                 """
@@ -624,7 +679,7 @@ class DatabaseMigrationTest {
 
         helper.runMigrationsAndValidate(
             SHIPPED_024_DATABASE,
-            17,
+            18,
             true,
             MIGRATION_7_8,
             MIGRATION_8_9,
@@ -636,6 +691,7 @@ class DatabaseMigrationTest {
             MIGRATION_14_15,
             MIGRATION_15_16,
             MIGRATION_16_17,
+            MIGRATION_17_18,
         ).apply {
             // Local identity preserved.
             query(
@@ -799,6 +855,8 @@ class DatabaseMigrationTest {
         const val FULFILLMENT_DATABASE = "lezi-fulfillment-candidates-migration-test"
         const val ADOPTION_DATABASE = "lezi-fulfillment-adoption-migration-test"
         const val CONVERT_POINTER_DATABASE = "lezi-fulfillment-convert-pointer-migration-test"
+        const val RECORD_MEMBERSHIP_AUTHOR_DATABASE =
+            "lezi-record-membership-author-migration-test"
         const val PENDING_REMINDER_DATABASE = "lezi-pending-reminder-migration-test"
         /** Shipped product 0.2.4 Room head (see dist/lezi-0.2.4-release.apk + schema 7.json). */
         const val SHIPPED_024_DATABASE = "lezi-shipped-0.2.4-full-chain-migration-test"

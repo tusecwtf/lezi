@@ -255,7 +255,10 @@ async fn liveness_and_readiness_initialize_private_single_data_root() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["ok"], true);
     assert_eq!(body["version"], VERSION);
-    assert_eq!(body["capabilities"], json!(["atomic_bundle"]));
+    assert_eq!(
+        body["capabilities"],
+        json!(["atomic_bundle", "record_membership_author"])
+    );
     let (ready_status, ready_body) = get_json(&rig.app, "/ready", None).await;
     assert_eq!(ready_status, StatusCode::OK);
     assert_eq!(ready_body, json!({"ok": true, "version": VERSION}));
@@ -1997,6 +2000,225 @@ async fn push_lww_cursor_and_generation_recovery_are_wire_compatible() {
 }
 
 #[tokio::test]
+async fn ordinary_push_stamps_record_author_from_authenticated_membership() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "record-author-owner-device",
+        "record-author-owner-request-000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let member = invite_and_join(&rig.app, owner_token, "record-author-member-device").await;
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let mut forged_payload = record_payload(&baby_id);
+    forged_payload["created_by_device_id"] = json!("record-author-member-device");
+    forged_payload["created_by_membership_id"] = member["membership_id"].clone();
+
+    let (push_status, push_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(owner_token),
+        json!({
+            "entities": [entity_wire("record", &record_id, 2, forged_payload, None)]
+        }),
+    )
+    .await;
+    assert_eq!(push_status, StatusCode::OK, "{push_body}");
+
+    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
+    let record = pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entity| entity["type"] == "record" && entity["client_uuid"] == record_id)
+        .expect("record is visible after push");
+    assert_eq!(
+        record["payload"]["created_by_membership_id"],
+        owner["membership_id"]
+    );
+    assert_eq!(
+        record["payload"]["created_by_device_id"],
+        "record-author-owner-device"
+    );
+}
+
+#[tokio::test]
+async fn ordinary_push_freezes_first_record_author_across_edit_delete_and_restore() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "record-freeze-owner-device",
+        "record-freeze-owner-request-000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let member = invite_and_join(&rig.app, owner_token, "record-freeze-member-device").await;
+    let member_token = member["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4().to_string();
+
+    let (create_status, create_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(owner_token),
+        json!({
+            "entities": [entity_wire(
+                "record",
+                &record_id,
+                2,
+                record_payload(&baby_id),
+                None,
+            )]
+        }),
+    )
+    .await;
+    assert_eq!(create_status, StatusCode::OK, "{create_body}");
+
+    for (updated_at, deleted_at, note) in [
+        (3, None, "成员编辑"),
+        (4, Some(4), "成员删除"),
+        (5, None, "成员恢复"),
+    ] {
+        let mut member_payload = record_payload(&baby_id);
+        member_payload["note"] = json!(note);
+        member_payload["created_by_device_id"] = json!("record-freeze-member-device");
+        member_payload["created_by_membership_id"] = member["membership_id"].clone();
+        let (status, body) = json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/push",
+            Some(member_token),
+            json!({
+                "entities": [entity_wire(
+                    "record",
+                    &record_id,
+                    updated_at,
+                    member_payload,
+                    deleted_at,
+                )]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(member_token)).await;
+        let record = pull["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entity| entity["type"] == "record" && entity["client_uuid"] == record_id)
+            .expect("record version remains visible");
+        assert_eq!(record["payload"]["note"], note);
+        assert_eq!(
+            record["payload"]["created_by_membership_id"],
+            owner["membership_id"]
+        );
+        assert_eq!(
+            record["payload"]["created_by_device_id"],
+            "record-freeze-owner-device"
+        );
+    }
+}
+
+#[tokio::test]
+async fn legacy_record_without_membership_author_keeps_device_fallback_on_edit() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "legacy-author-owner-device",
+        "legacy-author-owner-request-000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let member = invite_and_join(&rig.app, owner_token, "legacy-author-member-device").await;
+    let member_token = member["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let (create_status, create_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(owner_token),
+        json!({
+            "entities": [entity_wire(
+                "record",
+                &record_id,
+                2,
+                record_payload(&baby_id),
+                None,
+            )]
+        }),
+    )
+    .await;
+    assert_eq!(create_status, StatusCode::OK, "{create_body}");
+
+    // Simulate a record persisted by the legacy protocol before membership authors
+    // existed. Database mutation is fixture setup; behavior is still asserted via HTTP.
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let stored_payload: String = connection
+        .query_row(
+            "
+            SELECT payload_json
+            FROM entities
+            WHERE entity_type = 'record' AND client_uuid = ?1
+            ",
+            rusqlite::params![record_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut legacy_payload: Value = serde_json::from_str(&stored_payload).unwrap();
+    legacy_payload
+        .as_object_mut()
+        .unwrap()
+        .remove("created_by_membership_id");
+    connection
+        .execute(
+            "
+            UPDATE entities
+            SET payload_json = ?1
+            WHERE entity_type = 'record' AND client_uuid = ?2
+            ",
+            rusqlite::params![serde_json::to_string(&legacy_payload).unwrap(), record_id],
+        )
+        .unwrap();
+    drop(connection);
+
+    let mut forged_edit = record_payload(&baby_id);
+    forged_edit["note"] = json!("成员编辑旧记录");
+    forged_edit["created_by_device_id"] = json!("legacy-author-member-device");
+    forged_edit["created_by_membership_id"] = member["membership_id"].clone();
+    let (edit_status, edit_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(member_token),
+        json!({
+            "entities": [entity_wire("record", &record_id, 3, forged_edit, None)]
+        }),
+    )
+    .await;
+    assert_eq!(edit_status, StatusCode::OK, "{edit_body}");
+
+    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(member_token)).await;
+    let record = pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entity| entity["type"] == "record" && entity["client_uuid"] == record_id)
+        .expect("legacy record remains visible after edit");
+    assert_eq!(record["payload"]["note"], "成员编辑旧记录");
+    assert_eq!(
+        record["payload"]["created_by_device_id"],
+        "legacy-author-owner-device"
+    );
+    assert!(record["payload"].get("created_by_membership_id").is_none());
+}
+
+#[tokio::test]
 async fn pull_pages_large_bootstrap_without_skipping_the_remaining_entities() {
     let rig = Rig::new();
     let owner = create_family(
@@ -3403,6 +3625,798 @@ async fn health_advertises_atomic_bundle_capability() {
         .unwrap()
         .iter()
         .any(|c| c == "atomic_bundle"));
+}
+
+#[tokio::test]
+async fn health_advertises_record_membership_author_capability() {
+    let rig = Rig::new();
+    let (status, body) = get_json(&rig.app, "/health", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|capability| capability == "record_membership_author"));
+}
+
+#[tokio::test]
+async fn atomic_bundle_stamps_and_freezes_first_record_author() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "bundle-author-owner-device",
+        "bundle-author-owner-request-000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let member = invite_and_join(&rig.app, owner_token, "bundle-author-member-device").await;
+    let member_token = member["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4().to_string();
+
+    for (token, updated_at, deleted_at, note) in [
+        (owner_token, 2, None, "创建"),
+        (member_token, 3, None, "成员编辑"),
+        (member_token, 4, Some(4), "成员删除"),
+        (member_token, 5, None, "成员恢复"),
+    ] {
+        let bundle_id = Uuid::new_v4().to_string();
+        let mut forged_payload = record_payload(&baby_id);
+        forged_payload["note"] = json!(note);
+        forged_payload["created_by_device_id"] = json!("bundle-author-member-device");
+        forged_payload["created_by_membership_id"] = member["membership_id"].clone();
+        let (stage_status, stage_body) = json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/bundles",
+            Some(token),
+            json!({
+                "bundle_id": bundle_id,
+                "root": entity_wire(
+                    "record",
+                    &record_id,
+                    updated_at,
+                    forged_payload,
+                    deleted_at,
+                ),
+                "media": [],
+            }),
+        )
+        .await;
+        assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
+        let (commit_status, commit_body) = json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/bundles/{bundle_id}/commit"),
+            Some(token),
+            json!({}),
+        )
+        .await;
+        assert_eq!(commit_status, StatusCode::OK, "{commit_body}");
+
+        let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+        let record = pull["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entity| entity["type"] == "record" && entity["client_uuid"] == record_id)
+            .expect("committed record version remains visible");
+        assert_eq!(record["updated_at"], updated_at);
+        assert_eq!(
+            record["deleted_at"],
+            deleted_at.map_or(Value::Null, Value::from)
+        );
+        assert_eq!(record["payload"]["note"], note);
+        assert_eq!(
+            record["payload"]["created_by_membership_id"],
+            owner["membership_id"]
+        );
+        assert_eq!(
+            record["payload"]["created_by_device_id"],
+            "bundle-author-owner-device"
+        );
+    }
+}
+
+#[tokio::test]
+async fn atomic_bundle_commit_is_bound_to_the_staging_membership() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "bundle-stager-owner-device",
+        "bundle-stager-owner-request-000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let member = invite_and_join(&rig.app, owner_token, "bundle-stager-member-device").await;
+    let member_token = member["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+    let mut forged_payload = record_payload(&baby_id);
+    forged_payload["created_by_device_id"] = json!("bundle-stager-member-device");
+    forged_payload["created_by_membership_id"] = member["membership_id"].clone();
+
+    let (stage_status, stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(owner_token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire("record", &record_id, 2, forged_payload, None),
+            "media": [],
+        }),
+    )
+    .await;
+    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
+
+    let (foreign_commit_status, foreign_commit_body) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(member_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        foreign_commit_status,
+        StatusCode::CONFLICT,
+        "{foreign_commit_body}"
+    );
+    let (_, before_owner_commit) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
+    assert!(!before_owner_commit["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entity| entity["client_uuid"] == record_id));
+
+    let (commit_status, committed) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(commit_status, StatusCode::OK, "{committed}");
+    let (retry_status, retry) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(retry_status, StatusCode::OK, "{retry}");
+    assert_eq!(retry["cursor"], committed["cursor"]);
+    assert_eq!(retry["applied"], committed["applied"]);
+
+    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
+    let record = pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entity| entity["type"] == "record" && entity["client_uuid"] == record_id)
+        .expect("owner-staged record is visible after owner commit");
+    assert_eq!(
+        record["payload"]["created_by_membership_id"],
+        owner["membership_id"]
+    );
+    assert_eq!(
+        record["payload"]["created_by_device_id"],
+        "bundle-stager-owner-device"
+    );
+}
+
+#[tokio::test]
+async fn bundle_media_upload_requires_stager_membership_and_open_status() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "media-owner-device",
+        "media-owner-request-000000000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let member = invite_and_join(&rig.app, owner_token, "media-member-device").await;
+    let member_token = member["token"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let media_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+    let (stage_status, stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(owner_token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire(
+                "record",
+                &record_id,
+                2,
+                record_payload(&baby_id),
+                None,
+            ),
+            "media": [entity_wire(
+                "media",
+                &media_id,
+                2,
+                log_media_payload(&record_id),
+                None,
+            )],
+        }),
+    )
+    .await;
+    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
+    let staged_path = rig
+        .directory
+        .path()
+        .join("media")
+        .join(family_id)
+        .join(".stage")
+        .join(&bundle_id)
+        .join(&media_id);
+
+    let foreign_upload = request(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
+        Some(member_token),
+        Body::from("bad"),
+        Some("image/jpeg"),
+    )
+    .await;
+    assert_eq!(foreign_upload.status(), StatusCode::CONFLICT);
+    assert!(!staged_path.exists());
+
+    let owner_upload = request(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
+        Some(owner_token),
+        Body::from("img"),
+        Some("image/jpeg"),
+    )
+    .await;
+    assert_eq!(owner_upload.status(), StatusCode::OK);
+    assert_eq!(fs::read(&staged_path).unwrap(), b"img");
+    let (commit_status, commit_body) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(commit_status, StatusCode::OK, "{commit_body}");
+    assert!(!staged_path.exists());
+    let published_path = rig
+        .directory
+        .path()
+        .join("media")
+        .join(family_id)
+        .join(&media_id);
+    assert_eq!(fs::read(&published_path).unwrap(), b"img");
+
+    let committed_upload = request(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
+        Some(owner_token),
+        Body::from("new"),
+        Some("image/jpeg"),
+    )
+    .await;
+    assert_eq!(committed_upload.status(), StatusCode::CONFLICT);
+    assert!(!staged_path.exists());
+    assert_eq!(fs::read(published_path).unwrap(), b"img");
+}
+
+#[tokio::test]
+async fn ambiguous_legacy_bundle_rejects_media_before_writing() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "ambiguous-media-device",
+        "ambiguous-media-owner-request-001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let member = invite_and_join(&rig.app, owner_token, "ambiguous-media-device").await;
+    let member_token = member["token"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let media_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+    let (stage_status, stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(owner_token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire(
+                "record",
+                &record_id,
+                2,
+                record_payload(&baby_id),
+                None,
+            ),
+            "media": [entity_wire(
+                "media",
+                &media_id,
+                2,
+                log_media_payload(&record_id),
+                None,
+            )],
+        }),
+    )
+    .await;
+    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute(
+            "ALTER TABLE sync_bundles DROP COLUMN staged_membership_id",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let restarted = rig.restart("generation-b");
+    let staged_path = rig
+        .directory
+        .path()
+        .join("media")
+        .join(family_id)
+        .join(".stage")
+        .join(&bundle_id)
+        .join(&media_id);
+
+    for token in [owner_token, member_token] {
+        let response = request(
+            &restarted,
+            Method::PUT,
+            &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
+            Some(token),
+            Body::from("img"),
+            Some("image/jpeg"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(!staged_path.exists());
+    }
+}
+
+#[tokio::test]
+async fn equal_ordinary_push_before_commit_repairs_the_committed_bundle_package() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "bundle-race-owner-device",
+        "bundle-race-owner-request-000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let member = invite_and_join(&rig.app, owner_token, "bundle-race-member-device").await;
+    let member_token = member["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+    let mut staged_payload = record_payload(&baby_id);
+    staged_payload["note"] = json!("A 暂存");
+    let staged_root = entity_wire("record", &record_id, 2, staged_payload, None);
+
+    let (stage_status, stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(owner_token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": staged_root.clone(),
+            "media": [],
+        }),
+    )
+    .await;
+    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
+
+    let mut ordinary_payload = record_payload(&baby_id);
+    ordinary_payload["note"] = json!("B 先发布");
+    let (push_status, push_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(member_token),
+        json!({
+            "entities": [entity_wire(
+                "record",
+                &record_id,
+                2,
+                ordinary_payload,
+                None,
+            )]
+        }),
+    )
+    .await;
+    assert_eq!(push_status, StatusCode::OK, "{push_body}");
+
+    let (commit_status, committed) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(commit_status, StatusCode::OK, "{committed}");
+    let (retry_status, retry) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(retry_status, StatusCode::OK, "{retry}");
+    assert_eq!(retry["cursor"], committed["cursor"]);
+    assert_eq!(retry["applied"], committed["applied"]);
+
+    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
+    let record = pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entity| entity["type"] == "record" && entity["client_uuid"] == record_id)
+        .expect("ordinary winner remains the published record");
+    assert_eq!(record["payload"]["note"], "B 先发布");
+    assert_eq!(
+        record["payload"]["created_by_membership_id"],
+        member["membership_id"]
+    );
+
+    let (restage_status, restaged) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(owner_token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": staged_root,
+            "media": [],
+        }),
+    )
+    .await;
+    assert_eq!(restage_status, StatusCode::OK, "{restaged}");
+    assert_eq!(restaged["status"], "committed");
+}
+
+#[tokio::test]
+async fn legacy_staged_root_author_is_canonicalized_before_committed_hash() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "legacy-root-owner-device",
+        "legacy-root-owner-request-000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+    let root = entity_wire("record", &record_id, 2, record_payload(&baby_id), None);
+    let (stage_status, stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(owner_token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": root.clone(),
+            "media": [],
+        }),
+    )
+    .await;
+    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
+
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let stored_payload: String = connection
+        .query_row(
+            "
+            SELECT root_payload_json
+            FROM sync_bundles
+            WHERE family_id = ?1 AND bundle_id = ?2
+            ",
+            rusqlite::params![owner["family_id"].as_str().unwrap(), bundle_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut legacy_payload: Value = serde_json::from_str(&stored_payload).unwrap();
+    legacy_payload
+        .as_object_mut()
+        .unwrap()
+        .remove("created_by_membership_id");
+    connection
+        .execute(
+            "
+            UPDATE sync_bundles
+            SET root_payload_json = ?1
+            WHERE family_id = ?2 AND bundle_id = ?3
+            ",
+            rusqlite::params![
+                serde_json::to_string(&legacy_payload).unwrap(),
+                owner["family_id"].as_str().unwrap(),
+                bundle_id
+            ],
+        )
+        .unwrap();
+    drop(connection);
+
+    let (commit_status, commit_body) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(commit_status, StatusCode::OK, "{commit_body}");
+    let (restage_status, restaged) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(owner_token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": root,
+            "media": [],
+        }),
+    )
+    .await;
+    assert_eq!(restage_status, StatusCode::OK, "{restaged}");
+    assert_eq!(restaged["status"], "committed");
+    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
+    let record = pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entity| entity["type"] == "record" && entity["client_uuid"] == record_id)
+        .expect("legacy staged root is published with a canonical author");
+    assert_eq!(
+        record["payload"]["created_by_membership_id"],
+        owner["membership_id"]
+    );
+}
+
+#[tokio::test]
+async fn legacy_staging_bundle_backfills_only_its_unique_membership() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "legacy-bundle-owner-device",
+        "legacy-bundle-owner-request-000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let member = invite_and_join(&rig.app, owner_token, "legacy-bundle-member-device").await;
+    let member_token = member["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+
+    let (stage_status, stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(owner_token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire(
+                "record",
+                &record_id,
+                2,
+                record_payload(&baby_id),
+                None,
+            ),
+            "media": [],
+        }),
+    )
+    .await;
+    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
+
+    // Simulate a pre-migration staging row. Restart must derive a membership only
+    // when the stored family/device pair has exactly one active membership.
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute(
+            "ALTER TABLE sync_bundles DROP COLUMN staged_membership_id",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let restarted = rig.restart("generation-b");
+
+    let (foreign_status, foreign_body) = json_request(
+        &restarted,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(member_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(foreign_status, StatusCode::CONFLICT, "{foreign_body}");
+
+    let (owner_status, owner_commit) = json_request(
+        &restarted,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(owner_status, StatusCode::OK, "{owner_commit}");
+    let (_, pull) = get_json(&restarted, "/v1/pull?cursor=0", Some(owner_token)).await;
+    let record = pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entity| entity["type"] == "record" && entity["client_uuid"] == record_id)
+        .expect("safely backfilled legacy bundle commits for its original membership");
+    assert_eq!(
+        record["payload"]["created_by_membership_id"],
+        owner["membership_id"]
+    );
+}
+
+#[tokio::test]
+async fn ambiguous_legacy_staging_membership_fails_closed() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "ambiguous-legacy-device",
+        "ambiguous-legacy-owner-request-001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let member = invite_and_join(&rig.app, owner_token, "ambiguous-legacy-device").await;
+    let member_token = member["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+
+    let (stage_status, stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(owner_token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire(
+                "record",
+                &record_id,
+                2,
+                record_payload(&baby_id),
+                None,
+            ),
+            "media": [],
+        }),
+    )
+    .await;
+    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
+
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute(
+            "ALTER TABLE sync_bundles DROP COLUMN staged_membership_id",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let restarted = rig.restart("generation-b");
+
+    for token in [owner_token, member_token] {
+        let (status, body) = json_request(
+            &restarted,
+            Method::POST,
+            &format!("/v1/bundles/{bundle_id}/commit"),
+            Some(token),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(
+            body["detail"],
+            "legacy staging bundle has no verifiable membership"
+        );
+    }
+    let (_, pull) = get_json(&restarted, "/v1/pull?cursor=0", Some(owner_token)).await;
+    assert!(!pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entity| entity["client_uuid"] == record_id));
+}
+
+#[tokio::test]
+async fn legacy_staging_backfill_counts_left_memberships_before_same_device_rejoin() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "legacy-rejoin-owner-device",
+        "legacy-rejoin-owner-request-00001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let first_member = invite_and_join(&rig.app, owner_token, "legacy-rejoin-shared-device").await;
+    let first_token = first_member["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+    let (stage_status, stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(first_token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire(
+                "record",
+                &record_id,
+                2,
+                record_payload(&baby_id),
+                None,
+            ),
+            "media": [],
+        }),
+    )
+    .await;
+    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/leave",
+            Some(first_token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let second_member = invite_and_join(&rig.app, owner_token, "legacy-rejoin-shared-device").await;
+    let second_token = second_member["token"].as_str().unwrap();
+
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute(
+            "ALTER TABLE sync_bundles DROP COLUMN staged_membership_id",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let restarted = rig.restart("generation-b");
+
+    let (status, body) = json_request(
+        &restarted,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(second_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        body["detail"],
+        "legacy staging bundle has no verifiable membership"
+    );
+    let (_, pull) = get_json(&restarted, "/v1/pull?cursor=0", Some(owner_token)).await;
+    assert!(!pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entity| entity["client_uuid"] == record_id));
 }
 
 #[tokio::test]

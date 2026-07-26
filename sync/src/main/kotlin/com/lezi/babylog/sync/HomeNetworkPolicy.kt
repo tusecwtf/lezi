@@ -23,8 +23,9 @@ import kotlinx.serialization.json.jsonPrimitive
 
 private const val MAX_HEALTH_RESPONSE_BYTES = 64 * 1024
 
-/** Capability string advertised by lezi-sync on `GET /health`. */
+/** Capability strings advertised by lezi-sync on `GET /health`. */
 const val CAPABILITY_ATOMIC_BUNDLE = "atomic_bundle"
+const val CAPABILITY_RECORD_MEMBERSHIP_AUTHOR = "record_membership_author"
 
 enum class HomeNetworkDecision {
     Allowed,
@@ -52,6 +53,9 @@ data class HealthStatus(
 ) {
     val supportsAtomicBundle: Boolean
         get() = CAPABILITY_ATOMIC_BUNDLE in capabilities
+
+    val supportsRecordMembershipAuthor: Boolean
+        get() = CAPABILITY_RECORD_MEMBERSHIP_AUTHOR in capabilities
 }
 
 interface NetworkState {
@@ -102,6 +106,9 @@ class HomeNetworkPolicy @Inject constructor(
 
     val supportsAtomicBundle: Boolean
         get() = lastHealthStatus.supportsAtomicBundle
+
+    val supportsRecordMembershipAuthor: Boolean
+        get() = lastHealthStatus.supportsRecordMembershipAuthor
 
     /**
      * Gate for create / invite / join / push / pull.

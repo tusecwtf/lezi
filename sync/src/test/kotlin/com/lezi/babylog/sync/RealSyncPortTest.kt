@@ -125,6 +125,73 @@ class RealSyncPortTest {
             .containsExactly("other-family-record")
     }
 
+    @Test
+    fun atomicRecordMembershipAuthorKeyFollowsHealthCapability() = runTest {
+        val modernRig = SyncRig(
+            session = joinedSession("family-a").copy(membershipId = "membership-a"),
+            healthCapabilities = setOf(
+                CAPABILITY_ATOMIC_BUNDLE,
+                CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+            ),
+        )
+        val modernBabyId = modernRig.babies.seed(localBaby())
+        modernRig.records.seed(
+            localRecord(modernBabyId).copy(createdByMembershipId = "membership-a"),
+        )
+
+        assertThat(modernRig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val modernPayload = Json.parseToJsonElement(
+            modernRig.backend.stagedBundles.single().root.payloadJson,
+        ).jsonObject
+        assertThat(modernPayload["created_by_membership_id"]?.jsonPrimitive?.content)
+            .isEqualTo("membership-a")
+
+        val legacyRig = SyncRig(
+            session = joinedSession("family-a").copy(membershipId = "membership-a"),
+            healthCapabilities = setOf(CAPABILITY_ATOMIC_BUNDLE),
+        )
+        val legacyBabyId = legacyRig.babies.seed(localBaby())
+        legacyRig.records.seed(
+            localRecord(legacyBabyId).copy(createdByMembershipId = "membership-a"),
+        )
+
+        assertThat(legacyRig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val legacyPayload = Json.parseToJsonElement(
+            legacyRig.backend.stagedBundles.single().root.payloadJson,
+        ).jsonObject
+        assertThat(legacyPayload["created_by_membership_id"]).isNull()
+    }
+
+    @Test
+    fun atomicRecordUsesLastPreStageCapabilitySnapshotForMembershipAuthorKey() = runTest {
+        val modernCapabilities = setOf(
+            CAPABILITY_ATOMIC_BUNDLE,
+            CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+        )
+        val legacyCapabilities = setOf(CAPABILITY_ATOMIC_BUNDLE)
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(membershipId = "membership-a"),
+            healthCapabilities = legacyCapabilities,
+            healthCapabilitiesSequence = listOf(
+                modernCapabilities,
+                modernCapabilities,
+                legacyCapabilities,
+            ),
+        )
+        val babyId = rig.babies.seed(localBaby())
+        rig.records.seed(
+            localRecord(babyId).copy(createdByMembershipId = "membership-a"),
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        val payload = Json.parseToJsonElement(
+            rig.backend.stagedBundles.single().root.payloadJson,
+        ).jsonObject
+        assertThat(payload["created_by_membership_id"]).isNull()
+        assertThat(rig.healthProbeCalls).isAtLeast(3)
+    }
+
 
     @Test
     fun customItemDirtySnapshotPushesAndPullPreservesLocalSortOrder() = runTest {
@@ -612,6 +679,62 @@ class RealSyncPortTest {
         val result = rig.port.listFamilyMembers()
 
         assertThat(result.getOrThrow()).containsExactlyElementsIn(rig.backend.nextMembers).inOrder()
+        assertThat(rig.backend.memberCalls).isEqualTo(1)
+    }
+
+    @Test
+    fun familyMemberListPersistsAuthenticatedSelfMembershipForLegacySession() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(membershipId = ""),
+        )
+        rig.backend.nextMembers = listOf(
+            FamilyMember(
+                "妈妈",
+                FamilyRole.Owner,
+                isSelf = true,
+                deviceId = "device-a",
+                membershipId = " membership-self ",
+            ),
+            FamilyMember(
+                "爸爸",
+                FamilyRole.Member,
+                isSelf = false,
+                deviceId = "device-b",
+                membershipId = "membership-peer",
+            ),
+        )
+
+        val result = rig.port.listFamilyMembers()
+
+        assertThat(result.isSuccess).isTrue()
+        assertThat(rig.preferences.current().membershipId).isEqualTo("membership-self")
+        assertThat(rig.preferences.current().familyToken).isEqualTo("token")
+        assertThat(rig.backend.memberCalls).isEqualTo(1)
+    }
+
+    @Test
+    fun normalSyncPersistsAuthenticatedSelfMembershipAfterNasUpgrade() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(membershipId = ""),
+            healthCapabilities = setOf(
+                CAPABILITY_ATOMIC_BUNDLE,
+                CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+            ),
+        )
+        rig.backend.nextMembers = listOf(
+            FamilyMember(
+                "妈妈",
+                FamilyRole.Owner,
+                isSelf = true,
+                deviceId = "device-a",
+                membershipId = "membership-self",
+            ),
+        )
+
+        val result = rig.port.sync(SyncTrigger.LocalWrite)
+
+        assertThat(result.isSuccess).isTrue()
+        assertThat(rig.preferences.current().membershipId).isEqualTo("membership-self")
         assertThat(rig.backend.memberCalls).isEqualTo(1)
     }
 
@@ -2052,6 +2175,7 @@ class RealSyncPortTest {
         val applied = rig.records.getByClientUuid("record-remote")
         assertThat(applied?.babyId).isEqualTo(rig.babies.getByClientUuid("baby-remote")?.id)
         assertThat(applied?.payloadJson).isEqualTo("""{"amount_ml":90}""")
+        assertThat(applied?.createdByMembershipId).isEqualTo("membership-b")
         assertThat(applied?.createdByDeviceId).isEqualTo("device-b")
         assertThat(rig.transactions.runCount).isEqualTo(2)
     }
@@ -3856,6 +3980,7 @@ class RealSyncPortTest {
         payloadJson = """
             {
               "baby_client_uuid":"baby-remote",
+              "created_by_membership_id":"membership-b",
               "created_by_device_id":"device-b",
               "type":"formula",
               "timestamp":210,
@@ -4405,6 +4530,7 @@ private class SyncRig(
     wifi: Boolean = true,
     ssid: String? = "Home",
     healthCapabilities: Set<String> = setOf(CAPABILITY_ATOMIC_BUNDLE),
+    healthCapabilitiesSequence: List<Set<String>> = emptyList(),
     carePlanApplied: suspend (List<String>) -> Unit = {},
 ) {
     val backend = RecordingSyncBackend()
@@ -4424,6 +4550,7 @@ private class SyncRig(
     val clock = MutablePolicyClock()
     val foreground = TestForegroundState()
     var healthProbeCalls = 0
+    private val queuedHealthCapabilities = ArrayDeque(healthCapabilitiesSequence)
     private val networkState = object : NetworkState {
         override fun isWifiConnected(): Boolean = wifi
         override fun currentWifiSsid(): String? = ssid
@@ -4432,7 +4559,11 @@ private class SyncRig(
         networkState = networkState,
         healthProbe = HealthProbe {
             healthProbeCalls++
-            HealthStatus(ok = true, capabilities = healthCapabilities)
+            HealthStatus(
+                ok = true,
+                capabilities = queuedHealthCapabilities.removeFirstOrNull()
+                    ?: healthCapabilities,
+            )
         },
         clock = clock,
     )

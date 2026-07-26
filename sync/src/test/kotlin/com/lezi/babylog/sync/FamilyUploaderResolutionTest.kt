@@ -5,11 +5,47 @@ import org.junit.Test
 
 class FamilyUploaderResolutionTest {
     private val members = listOf(
-        UploaderMemberRef("device-a", "妈妈", FamilyRole.Owner, isSelf = true),
-        UploaderMemberRef("device-b", "爸爸", FamilyRole.Member, isSelf = false),
+        UploaderMemberRef(
+            "device-a",
+            "妈妈",
+            FamilyRole.Owner,
+            isSelf = true,
+            membershipId = "membership-a",
+        ),
+        UploaderMemberRef(
+            "device-b",
+            "爸爸",
+            FamilyRole.Member,
+            isSelf = false,
+            membershipId = "membership-b",
+        ),
         UploaderMemberRef("device-c", null, FamilyRole.Member, isSelf = false),
         UploaderMemberRef("device-d", "我（本机）", FamilyRole.Owner, isSelf = false),
     )
+
+    @Test
+    fun membershipAuthorWinsOverConflictingLegacyDeviceAndIdentifiesSelf() {
+        assertThat(
+            resolveRecordUploaderLabel(
+                createdByDeviceId = "device-b",
+                selfDeviceId = "device-a",
+                isFamilyJoined = true,
+                members = members,
+                createdByMembershipId = "membership-a",
+                selfMembershipId = "membership-a",
+            ),
+        ).isNull()
+        assertThat(
+            resolveRecordUploaderLabel(
+                createdByDeviceId = "device-a",
+                selfDeviceId = "device-a",
+                isFamilyJoined = true,
+                members = members,
+                createdByMembershipId = "membership-b",
+                selfMembershipId = "membership-a",
+            ),
+        ).isEqualTo("爸爸")
+    }
 
     @Test
     fun hidesUploaderWhenNotJoinedOrSelf() {
@@ -75,8 +111,20 @@ class FamilyUploaderResolutionTest {
             ),
         )
         assertThat(
-            FamilyMember("妈妈", FamilyRole.Owner, isSelf = true, deviceId = null)
-                .toUploaderRef(),
-        ).isNull()
+            FamilyMember(
+                "爸爸",
+                FamilyRole.Member,
+                isSelf = false,
+                deviceId = null,
+                membershipId = "m2",
+            ).toUploaderRef(),
+        ).isEqualTo(
+            UploaderMemberRef(
+                deviceId = null,
+                displayName = "爸爸",
+                role = FamilyRole.Member,
+                membershipId = "m2",
+            ),
+        )
     }
 }

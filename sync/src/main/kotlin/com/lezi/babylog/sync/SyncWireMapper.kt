@@ -61,12 +61,16 @@ object SyncWireMapper {
         entity: RecordEntity,
         babyClientUuid: String,
         createdByDeviceId: String,
+        includeMembershipAuthor: Boolean = false,
     ): SyncEntity = SyncEntity(
         type = "record",
         clientUuid = entity.clientUuid,
         payloadJson = buildJsonObject {
             put("baby_client_uuid", babyClientUuid)
             put("created_by_device_id", createdByDeviceId)
+            if (includeMembershipAuthor && entity.createdByMembershipId.isNotBlank()) {
+                put("created_by_membership_id", entity.createdByMembershipId)
+            }
             put("type", entity.type)
             put("timestamp", entity.timestamp)
             if (entity.endTimestamp == null) {

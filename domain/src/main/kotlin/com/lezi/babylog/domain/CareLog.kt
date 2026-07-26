@@ -2471,7 +2471,16 @@ class CareLog @Inject constructor(
     }
 
 
-    private suspend fun insertRecord(record: RecordEntity): Long = recordDao.upsert(record)
+    private suspend fun insertRecord(record: RecordEntity): Long {
+        val membershipId = currentMembershipActorId()
+        return recordDao.upsert(
+            if (record.createdByMembershipId.isBlank() && membershipId.isNotEmpty()) {
+                record.copy(createdByMembershipId = membershipId)
+            } else {
+                record
+            },
+        )
+    }
 
     private suspend fun updateRecordEntity(record: RecordEntity) {
         val previous = recordDao.getIncludingDeleted(record.id)?.updatedAt
@@ -2721,6 +2730,7 @@ internal fun RecordEntity.toModel(): Record =
         endTimestamp = endTimestamp,
         note = note,
         createdByUserId = createdByUserId,
+        createdByMembershipId = createdByMembershipId,
         createdByDeviceId = createdByDeviceId,
         payloadJson = payloadJson,
         schemaVersion = schemaVersion,

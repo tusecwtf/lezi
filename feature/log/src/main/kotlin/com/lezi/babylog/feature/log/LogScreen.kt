@@ -173,17 +173,22 @@ class LogViewModel @Inject constructor(
     private val dayFlow = MutableStateFlow(LocalDate.now(zone))
     private val refreshing = MutableStateFlow(false)
     private val uploaderMembers = MutableStateFlow<List<UploaderMemberRef>>(emptyList())
-    private val selfDeviceId = MutableStateFlow("")
+    private val selfUploaderIdentity = MutableStateFlow(SelfUploaderIdentity())
     private val familyJoined = MutableStateFlow(false)
 
     init {
         viewModelScope.launch {
             syncPort.session()
-                .map { it.isJoined to it.deviceId }
+                .map {
+                    it.isJoined to SelfUploaderIdentity(
+                        membershipId = it.membershipId,
+                        legacyDeviceId = it.deviceId,
+                    )
+                }
                 .distinctUntilChanged()
-                .collect { (joined, deviceId) ->
+                .collect { (joined, identity) ->
                     familyJoined.value = joined
-                    selfDeviceId.value = deviceId
+                    selfUploaderIdentity.value = identity
                     if (!joined) {
                         uploaderMembers.value = emptyList()
                     } else {
@@ -233,14 +238,20 @@ class LogViewModel @Inject constructor(
                 careLog.observeOpenSleep(baby.id),
                 plansFlow,
                 uploaderMembers,
-                selfDeviceId,
-            ) { records, openSleep, plans, members, selfId ->
+                selfUploaderIdentity,
+            ) { records, openSleep, plans, members, selfIdentity ->
                 val joined = familyJoined.value
                 val start = day.atStartOfDay(zone).toInstant().toEpochMilli()
                 val end = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
                 val summary = CareAggregation.day(records, day, zone).toDailySummary()
                 val lanes = buildLanes(records, start, end)
-                val labels = buildUploaderLabels(records, selfId, joined, members)
+                val labels = buildUploaderLabels(
+                    records = records,
+                    selfDeviceId = selfIdentity.legacyDeviceId,
+                    isFamilyJoined = joined,
+                    members = members,
+                    selfMembershipId = selfIdentity.membershipId,
+                )
                 val priorRevisions = buildMap {
                     if (joined) {
                         for (record in records) {
@@ -333,6 +344,7 @@ internal fun buildUploaderLabels(
     selfDeviceId: String,
     isFamilyJoined: Boolean,
     members: List<UploaderMemberRef>,
+    selfMembershipId: String = "",
 ): Map<Long, String> {
     if (!isFamilyJoined || records.isEmpty()) return emptyMap()
     val out = LinkedHashMap<Long, String>()
@@ -342,11 +354,18 @@ internal fun buildUploaderLabels(
             selfDeviceId = selfDeviceId,
             isFamilyJoined = true,
             members = members,
+            createdByMembershipId = record.createdByMembershipId,
+            selfMembershipId = selfMembershipId,
         )
         if (label != null) out[record.id] = label
     }
     return out
 }
+
+private data class SelfUploaderIdentity(
+    val membershipId: String = "",
+    val legacyDeviceId: String = "",
+)
 
 /** Compose payload summary with optional uploader 称呼 for the secondary line. */
 internal fun timelineRecordSummary(

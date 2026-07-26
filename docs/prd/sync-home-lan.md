@@ -387,9 +387,14 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 ### 9.1 `GET /health`
 
 - 无鉴权
-- `200 {"ok": true, "version": "<semver>", "capabilities": ["atomic_bundle"]}`
-- `capabilities` 为**加法**字段：旧客户端可忽略；新客户端用其识别 NAS 是否支持原子同步包
+- `200 {"ok": true, "version": "<semver>", "capabilities": ["atomic_bundle", "record_membership_author"]}`
+- `capabilities` 为**加法**字段：旧客户端可忽略；新客户端用
+  `atomic_bundle` 识别原子同步包，用 `record_membership_author` 识别 NAS 是否接受并
+  权威化 Record 的 membership 作者字段
 - 不支持 `atomic_bundle` 的旧 NAS：客户端**不得**把带照片的记录/计划静默降级为 metadata-first 推送；应保留本机并提示升级服务端
+- 不支持 `record_membership_author` 的旧 NAS：客户端不得盲发未知
+  `created_by_membership_id` key；保留本机作者并发送旧 payload，时间轴仅在新字段
+  不可用时回退 legacy device 关联
 - 客户端门闩探测用；响应体保持小体积（健康探测上限 64 KiB）
 
 ### 9.2 `POST /v1/family/create`
@@ -431,8 +436,9 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
   `{"members":[{"display_name":"妈妈","role":"owner","is_self":true,"device_id":"…","membership_id":"…"}]}`
 - 返回规范化后的 `display_name`、`role`、`is_self`、服务器生成的 `membership_id`
   （不可变公开身份，供作者权限与冲突裁决引用），以及客户端链路键
-  `device_id`（与记录 payload 的 `created_by_device_id` 对齐，供时间轴上传者
-  解析为**当前**家庭称呼）。`is_self` 由服务端比较返回行与当前 principal 的
+  `device_id`（只为旧 NAS/旧 Record 的 `created_by_device_id` 回退保留）。时间轴
+  优先以 `membership_id` 解析 Record 作者的**当前**家庭称呼；`device_id` 不承担
+  identity authority。`is_self` 由服务端比较返回行与当前 principal 的
   `membership_id` 得出；**绝不**返回 token、`token_hash` 或 `family_id`。
   `device_id` **不得**在产品 UI 中展示给用户
 - owner-first；其余按规范化名称与服务端内部稳定键排序。`display_name=null`
@@ -488,6 +494,10 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 - `generation`：客户端已知服务代际；不匹配时服务端先返回结构化 `409`，
   不应用任何实体
 - LWW：请求 `updated_at` 小于库中则 skip
+- Record 作者是 server-owned field：首次接受新 Record 时，NAS 从认证 principal
+  写入 `created_by_membership_id`，并保留 `created_by_device_id` 作为旧客户端回退；
+  客户端伪造的 membership/device claim 不会成为作者。后续编辑、软删与恢复保留
+  已存首次作者。ordinary push 与 atomic bundle 必须调用同一 canonicalization 规则
 - avatar 类 media：非 owner → `403`
 - 响应：`{ "applied": N }`
 
@@ -541,6 +551,8 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 - **暂存不可见**：commit 前根实体与媒体均不出现在普通 `GET /v1/pull`
 - **清单完整**：live media 必须声明正 `byte_size`；commit 前全部字节校验通过；tombstone media 不需字节
 - **幂等 commit**：重复 commit / 丢失响应可安全重试；已 commit 的 `bundle_id` 内容冲突 → `409`
+- **提交者绑定**：暂存包绑定 stage 时认证到的 membership；其它 membership 不得代为
+  commit，从而保证 server-owned Record/CarePlan 作者、内容 hash 与幂等重试一致
 - **稳定 UUID**：Android 以命名空间、根类型、根实体 `client_uuid` 与 `updated_at` 确定性生成合法 UUID；同一版本重试复用同一 `bundle_id`，Record 与 CarePlan 不共享身份
 - **旧版本保留**：新版本编辑在 commit 前不覆盖已发布完整版本；根 `updated_at` 落后于已发布 → commit `409`
 - **LWW 与 legacy**：commit 与 `/v1/push` 共享实体键 LWW；不得用半套 legacy 写穿破原子可见性
@@ -595,9 +607,16 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
   "end_timestamp": null,
   "note": null,
   "payload_json": {},
+  "created_by_membership_id": "...",
   "created_by_device_id": "..."
 }
 ```
+
+- `created_by_membership_id` 是 NAS 在首次接受 Record 时从认证 principal 盖章并在
+  后续版本中冻结的作者；客户端字段只是可被忽略/改写的 claim
+- `created_by_device_id` 只为旧 NAS/旧实体回退保留，不用于 membership authority
+- Android 仅在 health capability 含 `record_membership_author` 时发送 additive
+  membership key；旧服务缺 capability 时省略该 key
 
 ### 10.3 `media`
 

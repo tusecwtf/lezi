@@ -4,7 +4,7 @@
 
 **Blocked by:** 06 — membership / credential 正规化
 
-**Status:** ready-for-agent
+**Status:** completed
 
 **Size:** L
 **Review finding:** P1 #1 — uploader identity 可由 record payload 冒充
@@ -37,16 +37,16 @@
 
 ## Acceptance criteria
 
-- [ ] NAS 新 Record 的 `created_by_membership_id` 只来自认证 principal，不来自 `created_by_device_id`、请求 `device_id` 或任意 payload claim。
-- [ ] A 以自己的 token 提交 B 的 `device_id` / `membership_id`，存储和后续 pull 都不能把作者显示成 B；契约测试覆盖 ordinary push 与 atomic bundle。
-- [ ] A 创建、B 编辑、B 删除/恢复同一 Record 后，作者仍为 A；LWW 内容语义不变。
-- [ ] Record Room/model/wire 加法支持 `createdByMembershipId`；新版本数据库 migration 保留全部旧记录，旧字段不被破坏。
-- [ ] 已加入且 NAS 提供 membership identity 时，本机新建 Record 立即带当前 session membership，NAS 仍重新校验而非信任它。
-- [ ] uploader resolver 优先 `createdByMembershipId → FamilyMember.membershipId`；self 以 membership 判断；无法使用新字段时才回退 legacy device key。
-- [ ] UI 继续只显示非本人当前家庭称呼；不显示 membership/device 原始值，不写称呼快照。
-- [ ] 新 record key 对旧 NAS 使用明确 capability gate；不得向会因 unknown field 返回 422 的旧服务盲发。
-- [ ] members 的 `device_id` 若为旧客户端暂留，必须标注 legacy-only；新解析路径不再依赖它承担 authority。
-- [ ] current dirty tree 中仅“token row 有 membership_id”的实现不得作为本票完成证据。
+- [x] NAS 新 Record 的 `created_by_membership_id` 只来自认证 principal，不来自 `created_by_device_id`、请求 `device_id` 或任意 payload claim。
+- [x] A 以自己的 token 提交 B 的 `device_id` / `membership_id`，存储和后续 pull 都不能把作者显示成 B；契约测试覆盖 ordinary push 与 atomic bundle。
+- [x] A 创建、B 编辑、B 删除/恢复同一 Record 后，作者仍为 A；LWW 内容语义不变。
+- [x] Record Room/model/wire 加法支持 `createdByMembershipId`；新版本数据库 migration 保留全部旧记录，旧字段不被破坏。
+- [x] 已加入且 NAS 提供 membership identity 时，本机新建 Record 立即带当前 session membership，NAS 仍重新校验而非信任它。
+- [x] uploader resolver 优先 `createdByMembershipId → FamilyMember.membershipId`；self 以 membership 判断；无法使用新字段时才回退 legacy device key。
+- [x] UI 继续只显示非本人当前家庭称呼；不显示 membership/device 原始值，不写称呼快照。
+- [x] 新 record key 对旧 NAS 使用明确 capability gate；不得向会因 unknown field 返回 422 的旧服务盲发。
+- [x] members 的 `device_id` 若为旧客户端暂留，必须标注 legacy-only；新解析路径不再依赖它承担 authority。
+- [x] current dirty tree 中仅“token row 有 membership_id”的实现不得作为本票完成证据。
 
 ## Validation
 
@@ -69,3 +69,7 @@
 ## Comments
 
 - Review evidence：`validate_record` 只检查 `created_by_device_id` 长度，而 `/v1/push` 只绑定 request-level device；两者不是同一个信任面。
+- 2026-07-27：Room 17→18 采用加法列且 migration instrumentation 保留旧记录；schema 17 未漂移，schema 18 SHA-256 为 `fb0c1b86968b578c5c4ae19799f9a438101664172626b6e24f6aadc1024197c3`。
+- 2026-07-27：NAS ordinary push 与 atomic bundle 共用 principal canonicalization；staging、commit、media PUT 均绑定 membership，legacy 歧义失败关闭；13 unit + 66 API tests、clippy `-D warnings`、fmt check 通过。
+- 2026-07-27：Android database/sync/domain/log targeted gate 通过；两台 API 35 模拟器的 migration/connected tests 各 16/16。旧会话 self membership hydration 与 capability 降级竞态均有回归测试。
+- 2026-07-27：两轮独立 Android/Rust 复审的 Critical/Important findings 均为 none；历史同版本作者回填仍由 Ticket 02 承接。

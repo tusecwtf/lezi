@@ -186,7 +186,10 @@ class HomeNetworkPolicyTest {
     fun policyCachesAtomicBundleCapabilityFromSuccessfulProbe() = runTest {
         val probe = RecordingHealthProbe(
             result = true,
-            capabilities = setOf(CAPABILITY_ATOMIC_BUNDLE),
+            capabilities = setOf(
+                CAPABILITY_ATOMIC_BUNDLE,
+                CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+            ),
         )
         val policy = HomeNetworkPolicy(
             networkState = FakeNetworkState(isWifi = true, ssid = "Home"),
@@ -196,6 +199,7 @@ class HomeNetworkPolicyTest {
         assertThat(policy.evaluate(config(), isForeground = true))
             .isEqualTo(HomeNetworkDecision.Allowed)
         assertThat(policy.supportsAtomicBundle).isTrue()
+        assertThat(policy.supportsRecordMembershipAuthor).isTrue()
     }
 
     @Test

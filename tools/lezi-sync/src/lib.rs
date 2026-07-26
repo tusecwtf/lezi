@@ -52,6 +52,9 @@ pub const DEFAULT_JOIN_RATE_LIMIT: u32 = 60;
 pub const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: i64 = 60;
 /// Advertised on `/health` so clients can refuse metadata-first fallbacks.
 pub const CAPABILITY_ATOMIC_BUNDLE: &str = "atomic_bundle";
+/// Advertised on `/health` so clients only send the additive server-owned author field
+/// to servers that accept and canonicalize it.
+pub const CAPABILITY_RECORD_MEMBERSHIP_AUTHOR: &str = "record_membership_author";
 const MAX_ENTITY_FUTURE_SKEW_MILLIS: i64 = 24 * 60 * 60 * 1_000;
 pub(crate) const PULL_PAGE_ENTITY_LIMIT: usize = 200;
 pub(crate) const PULL_PAGE_TARGET_BYTES: usize = 8 * 1024 * 1024;
@@ -336,7 +339,10 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({
         "ok": true,
         "version": state.version,
-        "capabilities": [CAPABILITY_ATOMIC_BUNDLE],
+        "capabilities": [
+            CAPABILITY_ATOMIC_BUNDLE,
+            CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+        ],
     }))
 }
 
@@ -548,14 +554,10 @@ async fn push_entities(
         .now()
         .saturating_mul(1_000)
         .saturating_add(MAX_ENTITY_FUTURE_SKEW_MILLIS);
-    let result = match state.store.push(
-        &principal.family_id,
-        &principal.role,
-        &principal.membership_id,
-        request.entities,
-        max_updated_at,
-        state.now(),
-    ) {
+    let result = match state
+        .store
+        .push(&principal, request.entities, max_updated_at, state.now())
+    {
         Ok(value) => value,
         Err(StoreError::ForbiddenAvatar) => {
             return Err(ApiError::forbidden("Only owner may change avatar"))
@@ -766,10 +768,7 @@ async fn stage_bundle(
     let family_lock = state.family_lock(&principal.family_id).await;
     let _guard = family_lock.lock().await;
     let status = match state.store.stage_bundle(
-        &principal.family_id,
-        &principal.device_id,
-        &principal.role,
-        &principal.membership_id,
+        &principal,
         &request.bundle_id,
         request.root,
         request.media,
@@ -797,6 +796,16 @@ async fn stage_bundle(
         Err(StoreError::BundleContentConflict) => {
             return Err(ApiError::conflict(
                 "bundle_id already committed with different content",
+            ))
+        }
+        Err(StoreError::BundleMembershipMismatch) => {
+            return Err(ApiError::conflict(
+                "bundle belongs to another family membership",
+            ))
+        }
+        Err(StoreError::LegacyBundleMembershipUnknown) => {
+            return Err(ApiError::conflict(
+                "legacy staging bundle has no verifiable membership",
             ))
         }
         Err(StoreError::BundleStagingLimit) => {
@@ -842,6 +851,24 @@ async fn put_bundle_media(
         .store
         .load_bundle(&principal.family_id, &bundle_id.to_string())?
         .ok_or_else(|| ApiError::not_found("Bundle not found"))?;
+    if bundle.status != "staging" {
+        return Err(ApiError::conflict(
+            "committed bundle does not accept staged media",
+        ));
+    }
+    match bundle.staged_membership_id.as_deref() {
+        Some(staged_membership_id) if staged_membership_id == principal.membership_id => {}
+        Some(_) => {
+            return Err(ApiError::conflict(
+                "bundle belongs to another family membership",
+            ))
+        }
+        None => {
+            return Err(ApiError::conflict(
+                "legacy staging bundle has no verifiable membership",
+            ))
+        }
+    }
     if !bundle
         .media
         .iter()
@@ -910,7 +937,7 @@ async fn put_bundle_media(
     write_private_file(&path, &content)?;
 
     let status = match state.store.mark_bundle_media_staged(
-        &principal.family_id,
+        &principal,
         &bundle_id.to_string(),
         &client_uuid.to_string(),
         content.len(),
@@ -925,6 +952,21 @@ async fn put_bundle_media(
         Err(StoreError::BundleMediaIncomplete) => {
             return Err(ApiError::unprocessable(
                 "Media body size does not match declared byte_size",
+            ))
+        }
+        Err(StoreError::BundleMediaUploadClosed) => {
+            return Err(ApiError::conflict(
+                "committed bundle does not accept staged media",
+            ))
+        }
+        Err(StoreError::BundleMembershipMismatch) => {
+            return Err(ApiError::conflict(
+                "bundle belongs to another family membership",
+            ))
+        }
+        Err(StoreError::LegacyBundleMembershipUnknown) => {
+            return Err(ApiError::conflict(
+                "legacy staging bundle has no verifiable membership",
             ))
         }
         Err(StoreError::BundleNotFound) => return Err(ApiError::not_found("Bundle not found")),
@@ -984,9 +1026,7 @@ async fn commit_bundle(
         .saturating_mul(1_000)
         .saturating_add(MAX_ENTITY_FUTURE_SKEW_MILLIS);
     let (result, package) = match state.store.commit_bundle(
-        &principal.family_id,
-        &principal.role,
-        &principal.membership_id,
+        &principal,
         &bundle_id.to_string(),
         &media_ready,
         max_updated_at,
@@ -999,6 +1039,16 @@ async fn commit_bundle(
         Err(StoreError::BundleRootNotNewer) => {
             return Err(ApiError::conflict(
                 "bundle root is not newer than the published version",
+            ))
+        }
+        Err(StoreError::BundleMembershipMismatch) => {
+            return Err(ApiError::conflict(
+                "bundle belongs to another family membership",
+            ))
+        }
+        Err(StoreError::LegacyBundleMembershipUnknown) => {
+            return Err(ApiError::conflict(
+                "legacy staging bundle has no verifiable membership",
             ))
         }
         Err(StoreError::ForbiddenAvatar) => {

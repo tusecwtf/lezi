@@ -270,11 +270,13 @@ class CareLogTest {
     }
 
     @Test
-    fun addRecordStampsSyncSessionDeviceIdAsWriterLinkKey() = runTest {
+    fun addRecordStampsMembershipAuthorAndLegacyDeviceLinkFromJoinedSession() = runTest {
         val sessionDevice = "sync-session-device-xyz"
+        val sessionMembership = "membership-session-xyz"
         val sync = RecordingSyncPort(
             deviceId = sessionDevice,
             familyId = "family-joined",
+            membershipId = sessionMembership,
         )
         val fakes = Fakes(sync)
         val care = fakes.careLog()
@@ -286,6 +288,8 @@ class CareLogTest {
             payloadJson = """{"pee_amount":2}""",
         )
         val entity = fakes.records.get(id)!!
+        assertThat(entity.createdByMembershipId).isEqualTo(sessionMembership)
+        assertThat(entity.toModel().createdByMembershipId).isEqualTo(sessionMembership)
         assertThat(entity.createdByDeviceId).isEqualTo(sessionDevice)
         assertThat(entity.toModel().createdByDeviceId).isEqualTo(sessionDevice)
         // LocalUser.deviceId is a separate UUID — must not be used as the uploader link key.

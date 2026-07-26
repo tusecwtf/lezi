@@ -79,9 +79,11 @@ membership 的访问凭证，不是成员主键。`membership_id` 在建家/加�
 `display_name` 在产品层于建家/加入时**必填**；服务端 trim，拒绝控制字符与双向文本
 格式控制符，最长 128 个 Unicode 字符；空白、省略字段与本机占位名「我（本机）」均
 返回 `422`，不得静默收成 null。家庭成员视图返回规范化后的 `display_name`、`role`、
-`is_self`、`membership_id`，以及客户端链路键 `device_id`（用于把记录
-`created_by_device_id` 解析为当前称呼；**UI 永不展示 device id**）。服务端按当前
-Bearer principal 计算 `is_self`，不返回 token、`token_hash` 或 `family_id`。本人可
+`is_self`、`membership_id`，以及只为旧实体兼容保留的客户端链路键 `device_id`。
+时间轴优先用 Record 的 `created_by_membership_id` 关联当前称呼；仅当旧 NAS 或旧实体
+没有 membership 作者时才回退 `created_by_device_id`，且 **UI 永不展示 device id**。
+服务端按当前 Bearer principal 计算 `is_self`，不返回 token、`token_hash` 或
+`family_id`。本人可
 通过 `POST /v1/family/display-name` 更新自己的称呼，不能改他人。客户端不得把本机
 UI 占位名“我（本机）”当成真实成员名上传。历史 null/空/不安全名称由客户端按角色
 兜底（如「家庭管理员」「家庭成员」或「家人」），且不得把「我（本机）」展示给其他
@@ -131,11 +133,20 @@ membership ID 为作者/ACL alias；owner/member 冲突不跨 role 合并。迁�
 | `end_timestamp` | 睡眠等区间 |
 | `note` | |
 | `created_by_user_id` | |
+| `created_by_membership_id` | NAS 认证 principal 在首次接受 Record 时盖章的不可变作者；离线/旧记录可空 |
+| `created_by_device_id` | 仅供旧 NAS/旧实体解析作者的兼容链路键，不承担身份权威 |
 | `payload_json` | 类型扩展 |
 | `schema_version` | v1 兼容读取；新增/编辑写 v2 |
 | `updated_at` / `deleted_at` | 软删 / LWW |
 
 **索引**：`(baby_id, timestamp)`、`(client_uuid)`、`(baby_id, type, timestamp)`。
+
+Room 17→18 仅为 `records` 加入默认空字符串的
+`createdByMembershipId`，保留旧记录及 `createdByDeviceId`。已加入家庭时，本机新建
+Record 会立即带当前 session membership；NAS 对 ordinary push 与 atomic bundle
+仍从已认证 principal 重新盖章。后续编辑、删除或恢复不得改写首次作者。客户端只有
+在 `/health` 宣告 `record_membership_author` 时才发送新 wire key；旧 NAS 继续收到
+不含该 key 的兼容 payload，并由 device 链路回退显示。
 
 ### 3.6 typed payload 与兼容约定
 
