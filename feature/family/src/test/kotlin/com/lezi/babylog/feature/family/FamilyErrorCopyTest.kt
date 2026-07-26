@@ -8,10 +8,49 @@ import com.lezi.babylog.sync.SyncNotEnabledException
 import com.lezi.babylog.sync.isPublicCleartextBaseUrl
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FamilyErrorCopyTest {
+    @Test
+    fun networkSaveContinuationUsesExplicitOutcomeInsteadOfMessageCopy() {
+        val messages = mutableListOf<String>()
+        var continuationCount = 0
+
+        deliverNetworkSaveResult(
+            NetworkSaveResult.Saved("文案已经换掉"),
+            onMessage = messages::add,
+            onSaved = { continuationCount += 1 },
+        )
+        deliverNetworkSaveResult(
+            NetworkSaveResult.Failed("错误说明里即使写着已保存，也仍是失败"),
+            onMessage = messages::add,
+            onSaved = { continuationCount += 1 },
+        )
+
+        assertEquals(listOf("文案已经换掉", "错误说明里即使写着已保存，也仍是失败"), messages)
+        assertEquals(1, continuationCount)
+    }
+
+    @Test
+    fun familyDialogStateIsMutuallyExclusiveAndUsesOneLocalPlaceholder() {
+        val network = FamilyDialog.NetworkSettings
+        val message = FamilyDialog.Message("保存失败", resume = network)
+
+        assertEquals(network, familyDialogAfterDismiss(message))
+        assertNull(
+            familyDialogAfterDismiss(
+                FamilyDialog.DeleteFamily(FamilyDialog.DeleteStage.Final),
+            ),
+        )
+        assertEquals("我（本机）", LOCAL_FAMILY_DISPLAY_NAME)
+        assertEquals(
+            LOCAL_FAMILY_DISPLAY_NAME,
+            familyMemberDisplayName(FamilyMember(null, FamilyRole.Owner, isSelf = true)),
+        )
+    }
+
     @Test
     fun memberListAlwaysShowsThisDeviceWithoutExposingAnIdentifier() {
         val fallback = familyMembersForDisplay(
@@ -127,11 +166,56 @@ class FamilyErrorCopyTest {
     }
 
     @Test
-    fun storageCopyReflectsWhetherFamilySyncIsActive() {
-        assertEquals("仅本机", familyStorageCopy(false))
+    fun overviewCardShowsResultSyncAndFamilyIdentityNotDeviceId() {
         assertEquals(
-            "本机 + 家庭服务器",
-            familyStorageCopy(true),
+            "还没和家人一起记" to "新建或加入家庭后即可一起记录",
+            overviewSyncStatusCopy(SyncStatus.Disabled, isJoined = false),
+        )
+        assertEquals(
+            "家人记录已对齐" to "打开应用或下拉即可更新",
+            overviewSyncStatusCopy(SyncStatus.Idle, isJoined = true),
+        )
+        assertEquals(
+            "连上家里 Wi‑Fi 后才能同步" to "出门在外时记录会先留在本机",
+            overviewSyncStatusCopy(SyncStatus.BlockedOfflineHome, isJoined = true),
+        )
+        assertEquals(
+            "同步遇到问题" to "可在网络设置中查看并重试",
+            overviewSyncStatusCopy(SyncStatus.Error, isJoined = true),
+        )
+
+        assertEquals(
+            "暂无宝宝档案" to "仅本机 · 还没有家人一起记",
+            overviewFamilyIdentityCopy(
+                isJoined = false,
+                babyNicknames = emptyList(),
+                memberCount = 0,
+                membersLoaded = false,
+                myDisplayName = "我（本机）",
+                role = FamilyRole.None,
+            ),
+        )
+        assertEquals(
+            "乐乐、豆豆" to "2 位家人 · 我是妈妈（管理员 ★）",
+            overviewFamilyIdentityCopy(
+                isJoined = true,
+                babyNicknames = listOf("乐乐", "豆豆"),
+                memberCount = 2,
+                membersLoaded = true,
+                myDisplayName = "妈妈",
+                role = FamilyRole.Owner,
+            ),
+        )
+        assertEquals(
+            "乐乐" to "家人待刷新 · 我是爸爸（成员）",
+            overviewFamilyIdentityCopy(
+                isJoined = true,
+                babyNicknames = listOf("乐乐"),
+                memberCount = 1,
+                membersLoaded = false,
+                myDisplayName = "爸爸",
+                role = FamilyRole.Member,
+            ),
         )
     }
 
@@ -139,7 +223,6 @@ class FamilyErrorCopyTest {
     fun joinedFamilyHidesServerAndJoinControlsButKeepsRoleActions() {
         assertEquals(
             FamilyControlVisibility(
-                showServerSetup = false,
                 showJoin = false,
                 showCreateFamily = false,
                 showInvite = true,
@@ -150,7 +233,6 @@ class FamilyErrorCopyTest {
         )
         assertEquals(
             FamilyControlVisibility(
-                showServerSetup = false,
                 showJoin = false,
                 showCreateFamily = false,
                 showInvite = false,
@@ -165,7 +247,6 @@ class FamilyErrorCopyTest {
     fun localFamilySetupIsAvailableOnlyBeforeJoining() {
         assertEquals(
             FamilyControlVisibility(
-                showServerSetup = false,
                 showJoin = true,
                 showCreateFamily = true,
                 showInvite = false,
@@ -188,8 +269,6 @@ class FamilyErrorCopyTest {
             networkConfigured = true,
         )
         assertTrue(joinedConfigured.compactJoined)
-        assertFalse(joinedConfigured.showNetworkEditorsOnPrimary)
-        assertTrue(joinedConfigured.showNetworkSecondaryEntry)
         assertTrue(joinedConfigured.showInvite)
         assertTrue(joinedConfigured.showJoinedActions)
         assertFalse(joinedConfigured.showCreateJoin)
@@ -205,7 +284,6 @@ class FamilyErrorCopyTest {
         assertTrue(joinedMember.compactJoined)
         assertFalse(joinedMember.showInvite)
         assertTrue(joinedMember.showLeave)
-        assertFalse(joinedMember.showNetworkEditorsOnPrimary)
 
         val unjoined = familyPrimarySurface(
             isJoined = false,
@@ -213,9 +291,7 @@ class FamilyErrorCopyTest {
             networkConfigured = false,
         )
         assertFalse(unjoined.compactJoined)
-        assertFalse(unjoined.showNetworkEditorsOnPrimary)
         assertTrue(unjoined.showCreateJoin)
-        assertTrue(unjoined.showNetworkSecondaryEntry)
     }
 
     @Test
