@@ -30,6 +30,12 @@ formula/pee UI 交叉可见均已验证；双模拟器还在严格使用
 | [tech.md](./tech.md) | Android 技术栈、模块、权限、验收 |
 | [assets-notes.md](./assets-notes.md) | 排泄图标资源约定（尿尿量档 / 便便分档） |
 
+**工程跟进（执行权威在 scratch，结论写回本目录）**
+
+| 文件 | 内容 |
+|------|------|
+| [0.2.4 后跟进 spec](../../.scratch/post-0.2.4-followup/spec.md) | 止血 · 拆骨 · 契约瘦身三阶段；Status `complete` |
+
 ---
 
 ## 1. 产品原则
