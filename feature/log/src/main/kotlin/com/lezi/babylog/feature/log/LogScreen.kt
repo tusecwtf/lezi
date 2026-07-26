@@ -615,6 +615,7 @@ private data class PublishChromeTarget(
 @Composable
 fun LogRoute(
     onOpenComposer: (RecordComposerRequest) -> Unit,
+    onOpenQuickSlotSettings: () -> Unit,
     onGoToday: () -> Unit,
     externalDay: LocalDate? = null,
     vm: LogViewModel = hiltViewModel(),
@@ -1043,7 +1044,7 @@ fun LogRoute(
                 customItems = state.customItems,
                 sleepRunning = state.openSleep != null,
                 onBound = { identity -> openComposer(identity) },
-                onEmpty = { /* settings entry for slot pick is under 记录项目 / 常用记录 */ },
+                onEmpty = onOpenQuickSlotSettings,
                 onMore = { showMore = true },
             )
         }
@@ -1174,10 +1175,10 @@ private fun OneHandQuickDock(
                         .heightIn(min = 64.dp)
                         .testTag(tag)
                         .clickable {
-                            when (cell) {
-                                is QuickDockCell.Bound -> onBound(cell.identity)
-                                QuickDockCell.Empty -> onEmpty()
-                                QuickDockCell.More -> onMore()
+                            when (val action = cell.toAction()) {
+                                is QuickDockAction.OpenComposer -> onBound(action.identity)
+                                QuickDockAction.OpenSlotSettings -> onEmpty()
+                                QuickDockAction.OpenMore -> onMore()
                             }
                         },
                     shape = if (journal) LeziShapes.JournalButton else LeziShapes.Sm,

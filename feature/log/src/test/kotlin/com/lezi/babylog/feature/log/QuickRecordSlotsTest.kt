@@ -94,6 +94,25 @@ class QuickRecordSlotsTest {
     }
 
     @Test
+    fun emptySlotOpensQuickRecordSettings() {
+        assertEquals(
+            QuickDockAction.OpenSlotSettings,
+            QuickDockCell.Empty.toAction(),
+        )
+    }
+
+    @Test
+    fun boundAndMoreSlotsKeepTheirDedicatedActions() {
+        val bound = resolveQuickSlot("sleep", emptySet(), emptyList()) as QuickDockCell.Bound
+
+        assertEquals(
+            QuickDockAction.OpenComposer(bound.identity),
+            bound.toAction(),
+        )
+        assertEquals(QuickDockAction.OpenMore, QuickDockCell.More.toAction())
+    }
+
+    @Test
     fun leftHandPutsSlotsNearLeftAndMoreOnFarSide() {
         val slots = resolveQuickSlots(
             DEFAULT_QUICK_RECORD_SLOTS,

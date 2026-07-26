@@ -28,6 +28,22 @@ internal sealed class QuickDockCell {
     data object More : QuickDockCell()
 }
 
+/** User intent emitted by a quick-dock cell; keeps empty slots actionable. */
+internal sealed interface QuickDockAction {
+    data class OpenComposer(val identity: RecordItemIdentity) : QuickDockAction
+
+    data object OpenSlotSettings : QuickDockAction
+
+    data object OpenMore : QuickDockAction
+}
+
+internal fun QuickDockCell.toAction(): QuickDockAction =
+    when (this) {
+        is QuickDockCell.Bound -> QuickDockAction.OpenComposer(identity)
+        QuickDockCell.Empty -> QuickDockAction.OpenSlotSettings
+        QuickDockCell.More -> QuickDockAction.OpenMore
+    }
+
 /** Whether an otherwise idle slot should use a selected/emphasized container. */
 internal fun quickDockIdleContainerIsEmphasized(cell: QuickDockCell): Boolean =
     when (cell) {

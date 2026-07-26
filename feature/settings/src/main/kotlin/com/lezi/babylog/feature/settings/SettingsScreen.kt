@@ -319,6 +319,8 @@ fun SettingsRoute(
     onOpenCalendar: () -> Unit = {},
     initiallyShowAddBaby: Boolean = false,
     onInitialAddBabyFinished: () -> Unit = {},
+    initiallyShowQuickSlots: Boolean = false,
+    onInitialQuickSlotsFinished: () -> Unit = {},
     vm: SettingsViewModel = hiltViewModel(),
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
@@ -338,7 +340,9 @@ fun SettingsRoute(
     var showRecordHub by remember { mutableStateOf(false) }
     var showRecordItems by remember { mutableStateOf(false) }
     var showCustomItems by remember { mutableStateOf(false) }
-    var showQuickSlots by remember { mutableStateOf(false) }
+    var showQuickSlots by remember(initiallyShowQuickSlots) {
+        mutableStateOf(initiallyShowQuickSlots)
+    }
     var showPerItem by remember { mutableStateOf(false) }
     var showPlanCalendar by remember { mutableStateOf(false) }
     var showSystemCalendarSetup by remember { mutableStateOf(false) }
@@ -346,6 +350,10 @@ fun SettingsRoute(
         showAdd = false
         addError = null
         if (initiallyShowAddBaby) onInitialAddBabyFinished()
+    }
+    fun finishQuickSlotsDialog() {
+        showQuickSlots = false
+        if (initiallyShowQuickSlots) onInitialQuickSlotsFinished()
     }
 
     PageScaffoldBackground {
@@ -847,7 +855,7 @@ fun SettingsRoute(
         QuickRecordSlotsSettingsDialog(
             settings = ui.settings,
             customItems = ui.customItems,
-            onDismiss = { showQuickSlots = false },
+            onDismiss = ::finishQuickSlotsDialog,
             onSlotsChanged = vm::setQuickRecordSlots,
         )
     }

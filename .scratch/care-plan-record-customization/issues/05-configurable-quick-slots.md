@@ -11,5 +11,11 @@
 - [x] 所有已开启内建项目和具体自定义项目都可成为槽位候选
 - [x] 睡眠槽位继续随开放睡眠状态显示睡眠或醒来动作
 - [x] 项目关闭、删除或旧泛化引用失效时不自动补位，原槽显示“＋ 选择常用记录”
+- [x] 点击“＋ 选择常用记录”直达常用记录设置，关闭设置后返回记录首页
 - [x] 空槽允许长期保留；升级默认依次为尿尿、睡眠、母乳、配方奶
 - [x] DataStore 与快捷栏测试覆盖默认迁移、空槽、改名/图标跟随、偏好手和状态型外观
+
+## Evidence
+
+- 2026-07-27：RED 先证明空槽没有可执行动作；GREEN 后空槽映射为 `OpenSlotSettings`，应用导航直达常用记录弹窗，关闭后回退到记录首页。
+- `./gradlew :feature:log:testDebugUnitTest :feature:settings:testDebugUnitTest :app:compileDebugKotlin` — BUILD SUCCESSFUL。
