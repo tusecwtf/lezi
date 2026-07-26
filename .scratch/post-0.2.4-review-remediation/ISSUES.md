@@ -4,14 +4,14 @@ Spec: [spec.md](./spec.md)
 Status: in-progress
 Source: `afb0af7..81e9610` Standards / Spec 审查
 Ticket count: 7
-Frontier count: 1
+Frontier count: 0
 
 ## 依赖图
 
 ```text
 01 Settings 清除文案（completed）
 
-03 typed reminder store（completed） ──► 04 domain clear coordinator（frontier）
+03 typed reminder store（completed） ──► 04 domain clear coordinator（completed）
 
 family-identity-account-overview/04 ──► 02 shared Join use case
 
@@ -20,7 +20,7 @@ family-identity-account-overview/05 ──► 05 sync local-clear module
 06 + family-identity-account-overview/04 ──► 07 family-session module
 ```
 
-**可立即开工（frontier）：** 04
+**可立即开工（frontier）：** 无；02 / 05 等待家庭身份外部票的最终设备验收。
 
 ## 票列表
 
@@ -29,7 +29,7 @@ family-identity-account-overview/05 ──► 05 sync local-clear module
 | [01](./issues/01-context-aware-clear-copy.md) | 未加入家庭的清除文案 | — | S | completed |
 | [02](./issues/02-shared-join-use-case.md) | 双入口共享 Join 用例 | external family-identity 04 | M | ready-for-agent |
 | [03](./issues/03-typed-reminder-cleanup-store.md) | typed 提醒收尾持久化 | — | M | completed |
-| [04](./issues/04-local-data-clear-coordinator.md) | 统一领域清除协调 | 03 | M | ready-for-agent |
+| [04](./issues/04-local-data-clear-coordinator.md) | 统一领域清除协调 | 03 | M | completed |
 | [05](./issues/05-sync-local-clear-module.md) | 同步侧本地清除深模块 | external family-identity 05 | M | ready-for-agent |
 | [06](./issues/06-replica-sync-engine.md) | Replica Engine 深模块 | 05 | L | ready-for-agent |
 | [07](./issues/07-family-session-module.md) | 家庭会话深模块与 RealSyncPort 收口 | 06 + external family-identity 04 | M–L | ready-for-agent |

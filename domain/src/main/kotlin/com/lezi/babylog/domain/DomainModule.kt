@@ -14,6 +14,24 @@ abstract class DomainModule {
     @Binds
     @Singleton
     abstract fun bindExportPort(impl: TxtExportPort): ExportPort
+
+    @Binds
+    @Singleton
+    internal abstract fun bindLocalDataClearCoordinator(
+        impl: DefaultLocalDataClearCoordinator,
+    ): LocalDataClearCoordinator
+
+    @Binds
+    @Singleton
+    internal abstract fun bindLocalDataClearPersistence(
+        impl: DaoLocalDataClearPersistence,
+    ): LocalDataClearPersistence
+
+    @Binds
+    @Singleton
+    internal abstract fun bindLocalDataClearSettings(
+        impl: StoreLocalDataClearSettings,
+    ): LocalDataClearSettings
 }
 
 /**

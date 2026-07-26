@@ -2,9 +2,9 @@
 
 **What to build:** 提取 `LocalDataClearCoordinator` 深模块，以清除范围 command 统一 `clearRecordsOnly` 与 `clearAllLocalData` 的领域事务、同步屏障回调、pending reminder hand-off、设置清理、恢复和失败分类。删除 `CareLog` 中两套重复骨架。
 
-**Blocked by:** 03 — typed 提醒收尾持久化
+**Blocked by:** 03 — typed 提醒收尾持久化（completed）
 
-**Status:** ready-for-agent
+**Status:** completed
 
 **Size:** M
 **Review findings:** Standards 4（CareLog）、Standards 5
@@ -26,14 +26,14 @@
 
 ## Acceptance criteria
 
-- [ ] 两种 clear 共用一个 orchestration implementation，不再重复 try/catch、commit callback、NonCancellable 收尾与异常转换。
-- [ ] scope 只决定需要删除的领域表/设置集合；成功后置和失败分类完全共享。
-- [ ] 领域提交前失败：本机行/提醒不变；提交后失败：pending 保留、提醒收尾可恢复、UI 得到 committed failure。
-- [ ] `CancellationException` 即使被 cause 包裹仍原样传播。
-- [ ] `CareLog` 只保留兼容 façade 或调用方全部迁移后删除旧方法；不得留两套 implementation。
-- [ ] 新测试在 coordinator interface 覆盖 records/all、成功、提交前失败、提交后失败、恢复、取消。
-- [ ] 删除被替代的 CareLog 私有 helper 与重复白盒测试；保留少量 façade 委托测试即可。
-- [ ] `CareLog.kt` 行数净下降，且不得把新功能继续加回该文件。
+- [x] 两种 clear 共用一个 orchestration implementation，不再重复 try/catch、commit callback、NonCancellable 收尾与异常转换。
+- [x] scope 只决定需要删除的领域表/设置集合；成功后置和失败分类完全共享。
+- [x] 领域提交前失败：本机行/提醒不变；提交后失败：pending 保留、提醒收尾可恢复、UI 得到 committed failure。
+- [x] `CancellationException` 即使被 cause 包裹仍原样传播。
+- [x] `CareLog` 只保留兼容 façade 或调用方全部迁移后删除旧方法；不得留两套 implementation。
+- [x] 新测试在 coordinator interface 覆盖 records/all、成功、提交前失败、提交后失败、恢复、取消。
+- [x] 删除被替代的 CareLog 私有 helper 与重复白盒测试；保留少量 façade 委托测试即可。
+- [x] `CareLog.kt` 行数净下降，且不得把新功能继续加回该文件。
 
 ## Validation
 
@@ -53,4 +53,8 @@
 ## Comments
 
 - 来源：固定范围审查 Standards findings 4/5。
-
+- 2026-07-27 红灯：先新增 coordinator interface 契约测试；首次精确运行在 `compileDebugUnitTestKotlin` 因 scope、interface、persistence/settings seam 尚不存在而失败。
+- 2026-07-27 绿灯：`RecordsOnly` / `AllLocalData` 共享同一同步屏障、事务、pending hand-off、设置清理、NonCancellable 提醒收尾与失败分类；cause 链中的原始取消异常保持原样传播。
+- `CareLog` 仅保留三个兼容 façade，并与日程写入共享同一 mutation guard；删除重复 helper 与八个内部白盒用例，保留实际 DAO façade、提醒效果、跨锁并发及全量清除测试。`CareLog.kt` 从 3148 行降至 2959 行。
+- 验证：`./gradlew :domain:testDebugUnitTest :app:testDebugUnitTest --rerun-tasks --no-daemon` BUILD SUCCESSFUL（321 tasks executed）；精确 coordinator 测试 5 项通过；两个 clear 搜索仅命中 `CareLog` façade；`git diff --check` 通过。
+- Documentation Gate：产品语义、异常文案与可观察恢复行为均未改变，因此 `docs/prd/ui.md` / `docs/prd/data-model.md` N/A。
