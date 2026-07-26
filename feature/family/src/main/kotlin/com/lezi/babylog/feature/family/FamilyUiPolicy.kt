@@ -218,9 +218,11 @@ internal fun familyMembersForDisplay(
     members: List<FamilyMember>,
     localDisplayName: String,
     localRole: FamilyRole,
+    membersLoaded: Boolean,
 ): List<FamilyMember> {
     val bounded = members.take(50)
     if (bounded.any(FamilyMember::isSelf)) return bounded
+    if (membersLoaded) return bounded
     return listOf(
         FamilyMember(
             displayName = localDisplayName.ifBlank { LOCAL_FAMILY_DISPLAY_NAME },

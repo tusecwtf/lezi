@@ -340,6 +340,54 @@ class HttpSyncBackendTest {
     }
 
     @Test
+    fun membersSoftParsesUnknownRolesAndMissingSelfFlags() = runTest {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val responder = thread(name = "lezi-members-compat-test-server") {
+            runCatching {
+                server.accept().use { socket ->
+                    readRequest(socket)
+                    val body =
+                        """{"members":[{"display_name":"旧客户端","role":"future_admin"},42]}"""
+                            .toByteArray(Charsets.UTF_8)
+                    socket.getOutputStream().use { output ->
+                        output.write(
+                            (
+                                "HTTP/1.1 200 OK\r\n" +
+                                    "Content-Type: application/json\r\n" +
+                                    "Content-Length: ${body.size}\r\n" +
+                                    "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                        )
+                        output.write(body)
+                    }
+                }
+            }
+        }
+
+        try {
+            assertThat(HttpSyncBackend().members(testSession(server))).containsExactly(
+                FamilyMember("旧客户端", FamilyRole.Member, isSelf = false),
+            )
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
+    fun createAndJoinShareSafeDisplayNameNormalization() {
+        assertThat(memberDisplayNameForWire("  爸爸  ")).isEqualTo("爸爸")
+        assertThat(memberDisplayNameForWire("我（本机）")).isNull()
+        assertThat(memberDisplayNameForWire("   ")).isNull()
+        assertThat(runCatching { memberDisplayNameForWire("爸\u202E爸") }.exceptionOrNull())
+            .isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(runCatching { memberDisplayNameForWire("爸\n爸") }.exceptionOrNull())
+            .isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(runCatching { memberDisplayNameForWire("家".repeat(129)) }.exceptionOrNull())
+            .isInstanceOf(IllegalArgumentException::class.java)
+    }
+
+    @Test
     fun joinSendsTheLocalDisplayName() = runTest {
         val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
         val captured = CompletableFuture<String>()

@@ -83,7 +83,12 @@ internal fun FamilySharingContent(
     }
 
     if (ui.enabled) {
-        val visibleMembers = familyMembersForDisplay(ui.members, ui.displayName, ui.role)
+        val visibleMembers = familyMembersForDisplay(
+            ui.members,
+            ui.displayName,
+            ui.role,
+            ui.membersLoaded,
+        )
         LeziCard(modifier = Modifier.fillMaxWidth()) {
             Row(
                 modifier = Modifier.fillMaxWidth(),

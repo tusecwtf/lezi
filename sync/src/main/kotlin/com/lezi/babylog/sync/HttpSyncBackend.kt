@@ -12,11 +12,11 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
@@ -29,10 +29,24 @@ private const val MAX_SYNC_ERROR_RESPONSE_BYTES = 64 * 1024
 private const val MILLIS_PER_SECOND = 1_000L
 
 /** Do not publish a device-local UI placeholder as another person's name. */
-internal fun memberDisplayNameForWire(displayName: String?): String? =
-    displayName
-        ?.trim()
-        ?.takeIf { it.isNotEmpty() && it != "我（本机）" }
+internal fun memberDisplayNameForWire(displayName: String?): String? {
+    if (displayName == null) return null
+    require(displayName.none { it.isISOControl() || it.isBidirectionalControl() }) {
+        "家庭称呼不能包含控制字符或双向格式控制符"
+    }
+    val normalized = displayName.trim()
+    if (normalized.isEmpty() || normalized == "我（本机）") return null
+    require(normalized.codePointCount(0, normalized.length) <= 128) {
+        "家庭称呼最多 128 个字符"
+    }
+    return normalized
+}
+
+private fun Char.isBidirectionalControl(): Boolean =
+    this == '\u061c' ||
+        this in '\u200e'..'\u200f' ||
+        this in '\u202a'..'\u202e' ||
+        this in '\u2066'..'\u206f'
 
 class HttpSyncBackend @Inject constructor() : SyncBackend {
     override suspend fun create(
@@ -98,19 +112,17 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
 
     override suspend fun members(session: SyncSession): List<FamilyMember> {
         val json = get(session.baseUrl, "/v1/family/members", session.familyToken)
-        return json["members"]?.jsonArray?.map { memberElement ->
-            val member = memberElement.jsonObject
+        return (json["members"] as? JsonArray).orEmpty().mapNotNull { memberElement ->
+            val member = memberElement as? JsonObject ?: return@mapNotNull null
             FamilyMember(
-                displayName = member["display_name"]?.jsonPrimitive?.contentOrNull,
-                role = when (member["role"]?.jsonPrimitive?.contentOrNull) {
+                displayName = (member["display_name"] as? JsonPrimitive)?.contentOrNull,
+                role = when ((member["role"] as? JsonPrimitive)?.contentOrNull) {
                     "owner" -> FamilyRole.Owner
-                    "member" -> FamilyRole.Member
-                    else -> error("成员响应包含未知身份")
+                    else -> FamilyRole.Member
                 },
-                isSelf = member["is_self"]?.jsonPrimitive?.booleanOrNull
-                    ?: error("成员响应缺少 is_self"),
+                isSelf = (member["is_self"] as? JsonPrimitive)?.booleanOrNull ?: false,
             )
-        } ?: error("成员响应缺少 members")
+        }
     }
 
     override suspend fun leave(session: SyncSession) {

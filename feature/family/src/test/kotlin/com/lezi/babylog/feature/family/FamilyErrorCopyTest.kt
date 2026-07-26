@@ -52,11 +52,12 @@ class FamilyErrorCopyTest {
     }
 
     @Test
-    fun memberListAlwaysShowsThisDeviceWithoutExposingAnIdentifier() {
+    fun memberListOnlySynthesizesThisDeviceBeforeTheServerListLoads() {
         val fallback = familyMembersForDisplay(
             members = emptyList(),
             localDisplayName = "我（本机）",
             localRole = FamilyRole.Owner,
+            membersLoaded = false,
         )
 
         assertEquals(1, fallback.size)
@@ -67,7 +68,28 @@ class FamilyErrorCopyTest {
             FamilyMember("妈妈", FamilyRole.Owner, isSelf = true),
             FamilyMember(null, FamilyRole.Member, isSelf = false),
         )
-        assertEquals(serverMembers, familyMembersForDisplay(serverMembers, "忽略", FamilyRole.Owner))
+        assertEquals(
+            serverMembers,
+            familyMembersForDisplay(serverMembers, "忽略", FamilyRole.Owner, membersLoaded = true),
+        )
+        val loadedWithoutSelf = listOf(FamilyMember("家人", FamilyRole.Member, isSelf = false))
+        assertEquals(
+            loadedWithoutSelf,
+            familyMembersForDisplay(
+                loadedWithoutSelf,
+                "不应合成",
+                FamilyRole.Owner,
+                membersLoaded = true,
+            ),
+        )
+        assertTrue(
+            familyMembersForDisplay(
+                emptyList(),
+                "不应合成",
+                FamilyRole.Owner,
+                membersLoaded = true,
+            ).isEmpty(),
+        )
         assertEquals("家庭成员", familyMemberDisplayName(serverMembers.last()))
         assertEquals(
             "家庭管理员",
