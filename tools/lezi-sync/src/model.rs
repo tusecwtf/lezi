@@ -7,6 +7,9 @@ use uuid::Uuid;
 
 use crate::ApiError;
 
+/// Device-local UI placeholder. Must never be accepted as a real family name.
+pub(crate) const LOCAL_DEVICE_DISPLAY_NAME: &str = "我（本机）";
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FamilyCreateRequest {
@@ -14,10 +17,14 @@ pub struct FamilyCreateRequest {
     pub device_id: String,
     #[serde(default)]
     pub display_name: Option<String>,
+    /// Shared family display name. Optional; blank/omitted stores null.
+    #[serde(default)]
+    pub family_name: Option<String>,
 }
 
 impl FamilyCreateRequest {
-    pub fn validate(&self) -> Result<Option<String>, ApiError> {
+    /// Returns `(display_name, family_name)` where `family_name` is `None` when empty.
+    pub fn validate(&self) -> Result<(String, Option<String>), ApiError> {
         validate_urlsafe(
             &self.create_request_id,
             32,
@@ -25,7 +32,9 @@ impl FamilyCreateRequest {
             "create_request_id must be 32-128 URL-safe characters",
         )?;
         validate_required_string(&self.device_id, 128, "device_id")?;
-        normalize_display_name(self.display_name.as_deref())
+        let display_name = require_display_name(self.display_name.as_deref())?;
+        let family_name = normalize_family_name(self.family_name.as_deref())?;
+        Ok((display_name, family_name))
     }
 }
 
@@ -50,7 +59,7 @@ pub struct JoinRequest {
 }
 
 impl JoinRequest {
-    pub fn validate(&self) -> Result<Option<String>, ApiError> {
+    pub fn validate(&self) -> Result<String, ApiError> {
         if !(8..=32).contains(&self.code.len())
             || !self
                 .code
@@ -62,15 +71,55 @@ impl JoinRequest {
             ));
         }
         validate_required_string(&self.device_id, 128, "device_id")?;
-        normalize_display_name(self.display_name.as_deref())
+        require_display_name(self.display_name.as_deref())
     }
 }
 
-/// Normalize a human-facing member name at the API boundary.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateDisplayNameRequest {
+    pub display_name: String,
+}
+
+impl UpdateDisplayNameRequest {
+    pub fn validate(&self) -> Result<String, ApiError> {
+        require_display_name(Some(self.display_name.as_str()))
+    }
+}
+
+/// Owner-only rename of the shared family name. Null/blank clears to null.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenameFamilyRequest {
+    #[serde(default)]
+    pub family_name: Option<String>,
+}
+
+impl RenameFamilyRequest {
+    pub fn validate(&self) -> Result<Option<String>, ApiError> {
+        normalize_family_name(self.family_name.as_deref())
+    }
+}
+
+/// Product-required family 称呼 for create / join / self-rename.
 ///
-/// Whitespace-only names intentionally become `None` so clients can use their
-/// local fallback label. Directional formatting and control characters are
-/// rejected because this value is rendered next to a security-sensitive role.
+/// Blank, whitespace-only, and the device-local placeholder 「我（本机）」 all
+/// return 422 — never silently stored as null.
+pub(crate) fn require_display_name(value: Option<&str>) -> Result<String, ApiError> {
+    match normalize_display_name(value)? {
+        Some(name) if name == LOCAL_DEVICE_DISPLAY_NAME => Err(ApiError::unprocessable(
+            "display_name must not be the local device placeholder",
+        )),
+        Some(name) => Ok(name),
+        None => Err(ApiError::unprocessable("display_name is required")),
+    }
+}
+
+/// Soft-normalize a human-facing member name (historical memberships / list view).
+///
+/// Whitespace-only names become `None` so clients can apply role fallbacks.
+/// Directional formatting and control characters are rejected because this
+/// value is rendered next to a security-sensitive role.
 pub(crate) fn normalize_display_name(value: Option<&str>) -> Result<Option<String>, ApiError> {
     let Some(value) = value else {
         return Ok(None);
@@ -88,6 +137,28 @@ pub(crate) fn normalize_display_name(value: Option<&str>) -> Result<Option<Strin
         return Ok(None);
     }
     validate_length(value, 1, 128, "display_name")?;
+    Ok(Some(value.to_owned()))
+}
+
+/// Shared family name: optional; blank/omitted becomes `None` for client fallbacks.
+/// Rejects control / bidirectional characters; max 64 Unicode scalars.
+pub(crate) fn normalize_family_name(value: Option<&str>) -> Result<Option<String>, ApiError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value
+        .chars()
+        .any(|character| character.is_control() || is_bidirectional_control(character))
+    {
+        return Err(ApiError::unprocessable(
+            "family_name must not contain control or bidirectional formatting characters",
+        ));
+    }
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    validate_length(value, 1, 64, "family_name")?;
     Ok(Some(value.to_owned()))
 }
 

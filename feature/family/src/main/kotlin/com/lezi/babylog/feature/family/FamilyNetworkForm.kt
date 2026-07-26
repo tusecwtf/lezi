@@ -17,15 +17,21 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
+import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.sync.DEFAULT_SERVER_PORT
+import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.sync.PUBLIC_CLEARTEXT_WARNING
 import com.lezi.babylog.sync.isPublicCleartextBaseUrl
 
+/**
+ * Network settings secondary surface: host/SSID, detailed sync status, immediate sync,
+ * leave/delete. Overview never hosts these ops (ticket 03).
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun FamilyNetworkSettingsSheet(
@@ -40,8 +46,12 @@ internal fun FamilyNetworkSettingsSheet(
     onSsid2Change: (String) -> Unit,
     previewBaseUrl: String,
     networkConfigured: Boolean,
+    controls: FamilyControlVisibility,
     onUseCurrentWifi: () -> Unit,
     onSave: () -> Unit,
+    onSync: () -> Unit,
+    onLeave: () -> Unit,
+    onDeleteFamily: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -54,6 +64,14 @@ internal fun FamilyNetworkSettingsSheet(
             (ui.serverHost.isNotBlank() && draftPort != ui.serverPort) ||
             (ui.serverHost.isBlank() && draftHost.isNotBlank()) ||
             draftSsids != ui.allowedSsids
+    val hasServer = ui.serverHost.isNotBlank() || ui.baseUrl.isNotBlank()
+    val hasSsid = ui.allowedSsids.isNotEmpty()
+    val detailStatus = syncStatusLabel(
+        status = ui.status,
+        hasServer = hasServer,
+        hasSsid = hasSsid,
+        isJoined = ui.enabled,
+    )
 
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(
@@ -130,6 +148,47 @@ internal fun FamilyNetworkSettingsSheet(
                 onClick = onSave,
                 modifier = Modifier.fillMaxWidth(),
             )
+
+            Text("同步详情", style = LeziTypography.BodyStrong)
+            Text(
+                detailStatus,
+                style = LeziTypography.Meta,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                formatLastSuccessAt(ui.lastSuccessAt),
+                style = LeziTypography.Meta,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (ui.status == SyncStatus.Error) {
+                Text(
+                    "同步遇到问题，可先确认家里 Wi‑Fi 与服务器后点立即同步",
+                    style = LeziTypography.Meta,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+
+            if (controls.showJoinedActions) {
+                LeziSecondaryButton(
+                    "立即同步",
+                    onClick = onSync,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (controls.showLeave) {
+                    LeziSecondaryButton(
+                        "离开家庭",
+                        onClick = onLeave,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                if (ui.role == FamilyRole.Owner) {
+                    LeziSecondaryButton(
+                        "删除家庭数据",
+                        onClick = onDeleteFamily,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
         }
     }
 }

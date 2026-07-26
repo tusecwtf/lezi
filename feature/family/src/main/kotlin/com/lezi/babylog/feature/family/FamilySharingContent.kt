@@ -1,5 +1,6 @@
 package com.lezi.babylog.feature.family
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -12,7 +13,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import com.lezi.babylog.core.model.SyncStatus
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import com.lezi.babylog.designsystem.LeziCard
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSecondaryButton
@@ -20,110 +22,138 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.sync.FamilyRole
-import com.lezi.babylog.sync.PUBLIC_CLEARTEXT_WARNING
-import com.lezi.babylog.sync.isPublicCleartextBaseUrl
 
+/**
+ * Account Tab family zone: overview family card + primary CTAs.
+ * Network ops (host/SSID/sync/leave/delete) live in the network settings sheet.
+ * Full member list opens from the member-count entry (secondary surface).
+ */
 @Composable
 internal fun FamilySharingContent(
     ui: FamilyUi,
     controls: FamilyControlVisibility,
     primary: FamilyPrimarySurface,
     networkConfigured: Boolean,
-    savedSummaryBaseUrl: String,
-    onRefreshMembers: () -> Unit,
+    onOpenMembers: () -> Unit,
     onOpenNetwork: () -> Unit,
     onCreateFamily: () -> Unit,
     onJoinFamily: () -> Unit,
-    onScanInvite: () -> Unit,
     onCreateInvite: () -> Unit,
-    onSync: () -> Unit,
-    onLeave: () -> Unit,
-    onDeleteFamily: () -> Unit,
+    onEditMyDisplayName: () -> Unit = {},
+    onRenameFamily: () -> Unit = {},
 ) {
-    SectionHeading(title = "家人一起记")
-    LeziCard(modifier = Modifier.fillMaxWidth()) {
-        Text("家庭同步", style = LeziTypography.BodyStrong)
-        Spacer(Modifier.height(LeziSpacing.Sm))
-        FamilyGuideRow(
-            step = "1",
-            title = "家庭网络",
-            detail = if (networkConfigured) {
-                buildString {
-                    append(ui.allowedSsids.joinToString(" / "))
-                    if (savedSummaryBaseUrl.isNotBlank()) append(" · $savedSummaryBaseUrl")
-                }
-            } else {
-                "待设置服务器与 Wi-Fi"
-            },
-            complete = networkConfigured,
-        )
-        FamilyGuideRow(
-            step = "2",
-            title = "家庭身份",
-            detail = if (ui.enabled) "已加入 · ${familyRoleLabel(ui.role)}" else "待新建或加入",
-            complete = ui.enabled,
-        )
-        FamilyGuideRow(
-            step = "3",
-            title = "同步状态",
-            detail = compactSyncStatusLabel(ui.status, ui.enabled) +
-                (ui.lastSuccessAt?.let {
-                    " · ${java.text.DateFormat.getDateTimeInstance().format(it)}"
-                } ?: ""),
-            complete = ui.enabled && ui.status == SyncStatus.Idle,
-        )
-        if (savedSummaryBaseUrl.isNotBlank() && isPublicCleartextBaseUrl(savedSummaryBaseUrl)) {
-            Spacer(Modifier.height(LeziSpacing.Xs))
-            Text(
-                PUBLIC_CLEARTEXT_WARNING,
-                style = LeziTypography.Meta,
-                color = MaterialTheme.colorScheme.error,
-            )
-        }
-    }
-
-    if (ui.enabled) {
-        val visibleMembers = familyMembersForDisplay(
+    val visibleMembers = if (ui.enabled) {
+        familyMembersForDisplay(
             ui.members,
             ui.displayName,
             ui.role,
             ui.membersLoaded,
         )
-        LeziCard(modifier = Modifier.fillMaxWidth()) {
+    } else {
+        emptyList()
+    }
+    val card = buildFamilyOverviewCard(
+        isJoined = ui.enabled,
+        role = ui.role,
+        networkConfigured = networkConfigured,
+        familyName = ui.familyName,
+        babyNickname = ui.current?.nickname,
+        localDisplayName = ui.displayName,
+        memberCount = visibleMembers.size,
+        membersLoaded = ui.membersLoaded,
+        status = ui.status,
+    )
+
+    SectionHeading(title = "我们家")
+    LeziCard(modifier = Modifier.fillMaxWidth()) {
+        if (ui.enabled) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column(Modifier.weight(1f)) {
-                    Text("共享中的成员", style = LeziTypography.BodyStrong)
                     Text(
-                        familyMemberSummary(visibleMembers.size, ui.role, ui.membersLoaded),
+                        card.familyNameLabel,
+                        style = LeziTypography.TitleSm,
+                    )
+                    Text(
+                        if (ui.role == FamilyRole.Owner) {
+                            "共享家庭名 · 管理员可改"
+                        } else {
+                            "共享家庭名"
+                        },
                         style = LeziTypography.Meta,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                TextButton(onClick = onRefreshMembers, enabled = !ui.membersLoading) {
-                    Text(if (ui.membersLoading) "刷新中…" else "刷新")
+                if (card.showRenameFamily) {
+                    TextButton(onClick = onRenameFamily) { Text("改名") }
                 }
             }
+            Spacer(Modifier.height(LeziSpacing.Sm))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        card.selfTitle,
+                        style = LeziTypography.BodyStrong,
+                    )
+                    Text(
+                        "我的家庭称呼",
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                TextButton(onClick = onEditMyDisplayName) { Text("改称呼") }
+            }
+            Spacer(Modifier.height(LeziSpacing.Sm))
+            Text(
+                card.memberCountLabel,
+                style = LeziTypography.BodyStrong,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onOpenMembers)
+                    .padding(vertical = LeziSpacing.Xs)
+                    .semantics { contentDescription = "打开家人名单" },
+            )
             Spacer(Modifier.height(LeziSpacing.Xs))
-            visibleMembers.forEach { FamilyMemberRow(it) }
-            ui.membersError?.let { error ->
-                Text(
-                    error,
-                    style = LeziTypography.Meta,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(top = LeziSpacing.Xs),
-                )
-            } ?: if (!ui.membersLoaded && !ui.membersLoading) {
-                Text(
-                    "连接家庭 Wi-Fi 后刷新完整列表",
-                    style = LeziTypography.Meta,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = LeziSpacing.Xs),
-                )
-            } else Unit
+        } else {
+            Text(
+                card.familyNameLabel,
+                style = LeziTypography.TitleSm,
+            )
+            Spacer(Modifier.height(LeziSpacing.Xs))
+            Text(
+                "和家人一起记宝宝的日常",
+                style = LeziTypography.Meta,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(LeziSpacing.Sm))
         }
+
+        Text(
+            card.syncStatusLabel,
+            style = LeziTypography.BodyStrong,
+            color = when {
+                !ui.enabled -> MaterialTheme.colorScheme.onSurfaceVariant
+                ui.status == com.lezi.babylog.core.model.SyncStatus.Error ->
+                    MaterialTheme.colorScheme.error
+                else -> MaterialTheme.colorScheme.onSurface
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onOpenNetwork)
+                .padding(vertical = LeziSpacing.Xs)
+                .semantics { contentDescription = "打开网络设置" },
+        )
+        Text(
+            "点同步状态查看网络设置",
+            style = LeziTypography.Meta,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 
     LeziSecondaryButton(
@@ -132,30 +162,29 @@ internal fun FamilySharingContent(
         modifier = Modifier.fillMaxWidth(),
     )
 
+    // Unjoined: wizard CTAs only (scan lives inside join wizard). Owner: 邀请家人 on overview.
     if (primary.showCreateJoin) {
         if (controls.showCreateFamily) {
-            LeziPrimaryButton("新建家庭", onClick = onCreateFamily, modifier = Modifier.fillMaxWidth())
-        }
-        if (controls.showJoin) {
-            LeziSecondaryButton("输入邀请码", onClick = onJoinFamily, modifier = Modifier.fillMaxWidth())
-            LeziSecondaryButton("扫码加入", onClick = onScanInvite, modifier = Modifier.fillMaxWidth())
-        }
-    }
-    if (primary.showInvite) {
-        LeziPrimaryButton("生成邀请二维码", onClick = onCreateInvite, modifier = Modifier.fillMaxWidth())
-    }
-    if (primary.showJoinedActions) {
-        LeziSecondaryButton("立即同步", onClick = onSync, modifier = Modifier.fillMaxWidth())
-        if (primary.showLeave) {
-            LeziSecondaryButton("离开家庭", onClick = onLeave, modifier = Modifier.fillMaxWidth())
-        }
-        if (ui.role == FamilyRole.Owner) {
-            LeziSecondaryButton(
-                "删除家庭数据",
-                onClick = onDeleteFamily,
+            LeziPrimaryButton(
+                primary.createLabel,
+                onClick = onCreateFamily,
                 modifier = Modifier.fillMaxWidth(),
             )
         }
+        if (controls.showJoin) {
+            LeziSecondaryButton(
+                primary.joinLabel,
+                onClick = onJoinFamily,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    }
+    if (primary.showInvite) {
+        LeziPrimaryButton(
+            primary.inviteLabel,
+            onClick = onCreateInvite,
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
     Spacer(Modifier.height(LeziSpacing.Xxl))
 }

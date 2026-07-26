@@ -103,8 +103,31 @@ class FamilyErrorCopyTest {
             "家庭管理员",
             familyMemberDisplayName(FamilyMember("我（本机）", FamilyRole.Owner, isSelf = false)),
         )
+        assertEquals(
+            "妈妈 ★",
+            familyMemberTitle(FamilyMember("妈妈", FamilyRole.Owner, isSelf = true)),
+        )
+        assertEquals(
+            "爸爸",
+            familyMemberTitle(FamilyMember("爸爸", FamilyRole.Member, isSelf = false)),
+        )
+        assertEquals("请填写家庭称呼", validateFamilyDisplayNameInput("  "))
+        assertEquals(
+            "请填写家庭称呼，不能使用本机占位名",
+            validateFamilyDisplayNameInput("我（本机）"),
+        )
+        assertEquals(null, validateFamilyDisplayNameInput("干爹"))
         assertEquals("待刷新 · 管理员", familyMemberSummary(1, FamilyRole.Owner, loaded = false))
         assertEquals("2 位 · 管理员", familyMemberSummary(2, FamilyRole.Owner, loaded = true))
+        assertEquals("我的家庭", displayFamilyName(null))
+        assertEquals("我的家庭", displayFamilyName("  "))
+        assertEquals("乐乐一家", displayFamilyName("  乐乐一家  "))
+        assertEquals("年年的家庭", displayFamilyName(null, babyNickname = "年年"))
+        assertEquals("年年的家庭", displayFamilyName("", babyNickname = "  年年  "))
+        assertEquals(null, validateFamilyNameInput(""))
+        assertEquals(null, validateFamilyNameInput("  我家  "))
+        assertEquals("家庭名最多 64 个字符", validateFamilyNameInput("家".repeat(65)))
+        assertEquals("家庭名不能包含控制字符", validateFamilyNameInput("坏\n名"))
     }
 
     @Test
@@ -154,6 +177,7 @@ class FamilyErrorCopyTest {
 
     @Test
     fun syncStatesUseProductFacingChineseLabels() {
+        // Network-sheet detail labels (may be slightly technical for troubleshooting).
         assertEquals(
             "未加入家庭（请先保存服务器与 Wi‑Fi 名称）",
             syncStatusLabel(SyncStatus.Disabled),
@@ -181,6 +205,89 @@ class FamilyErrorCopyTest {
     }
 
     @Test
+    fun overviewSyncPhrasesAreResultOrientedWithoutTechEnums() {
+        assertEquals(
+            "还没和家人一起记",
+            overviewSyncStatusLabel(SyncStatus.Disabled, isJoined = false),
+        )
+        assertEquals(
+            "家人记录已对齐",
+            overviewSyncStatusLabel(SyncStatus.Idle, isJoined = true),
+        )
+        assertEquals(
+            "连上家里 Wi‑Fi 后才能同步",
+            overviewSyncStatusLabel(SyncStatus.BlockedOfflineHome, isJoined = true),
+        )
+        assertEquals(
+            "正在同步…",
+            overviewSyncStatusLabel(SyncStatus.Syncing, isJoined = true),
+        )
+        assertEquals(
+            "同步遇到问题",
+            overviewSyncStatusLabel(SyncStatus.Error, isJoined = true),
+        )
+        for (status in SyncStatus.entries) {
+            val phrase = overviewSyncStatusLabel(status, isJoined = status != SyncStatus.Disabled)
+            assertFalse(overviewCopyLooksTechnical(phrase))
+            assertFalse(phrase.contains("Idle"))
+            assertFalse(phrase.contains("空闲"))
+            assertFalse(phrase.contains("SSID"))
+        }
+    }
+
+    @Test
+    fun overviewCardForbidsNetworkTechDetailsAndKeepsPrimaryEntries() {
+        val joined = buildFamilyOverviewCard(
+            isJoined = true,
+            role = FamilyRole.Owner,
+            networkConfigured = true,
+            familyName = "乐乐一家",
+            babyNickname = "乐乐",
+            localDisplayName = "妈妈",
+            memberCount = 3,
+            membersLoaded = true,
+            status = SyncStatus.Idle,
+        )
+        assertEquals("乐乐一家", joined.familyNameLabel)
+        assertEquals("3 位家人", joined.memberCountLabel)
+        assertEquals("妈妈 ★", joined.selfTitle)
+        assertEquals("家人记录已对齐", joined.syncStatusLabel)
+        assertTrue(joined.showInvite)
+        assertFalse(joined.showCreateJoin)
+        assertTrue(joined.showMembersEntry)
+        assertTrue(joined.showRenameFamily)
+        assertEquals(
+            FamilyPrimaryCta.INVITE,
+            familyPrimarySurface(true, FamilyRole.Owner, true).inviteLabel,
+        )
+        listOf(
+            joined.familyNameLabel,
+            joined.memberCountLabel,
+            joined.selfTitle,
+            joined.syncStatusLabel,
+        ).forEach { line ->
+            assertFalse(overviewCopyLooksTechnical(line))
+        }
+
+        val unjoined = buildFamilyOverviewCard(
+            isJoined = false,
+            role = FamilyRole.None,
+            networkConfigured = false,
+            familyName = null,
+            babyNickname = null,
+            localDisplayName = LOCAL_FAMILY_DISPLAY_NAME,
+            memberCount = 0,
+            membersLoaded = false,
+            status = SyncStatus.Disabled,
+        )
+        assertTrue(unjoined.showCreateJoin)
+        assertFalse(unjoined.showInvite)
+        assertFalse(unjoined.showMembersEntry)
+        assertEquals("还没和家人一起记", unjoined.syncStatusLabel)
+        assertFalse(overviewCopyLooksTechnical(unjoined.syncStatusLabel))
+    }
+
+    @Test
     fun onlyMembersLoseAvatarEditingCapability() {
         assertEquals(true, canEditFamilyAvatar(FamilyRole.None))
         assertEquals(true, canEditFamilyAvatar(FamilyRole.Owner))
@@ -188,56 +295,11 @@ class FamilyErrorCopyTest {
     }
 
     @Test
-    fun overviewCardShowsResultSyncAndFamilyIdentityNotDeviceId() {
+    fun storageCopyReflectsWhetherFamilySyncIsActive() {
+        assertEquals("仅本机", familyStorageCopy(false))
         assertEquals(
-            "还没和家人一起记" to "新建或加入家庭后即可一起记录",
-            overviewSyncStatusCopy(SyncStatus.Disabled, isJoined = false),
-        )
-        assertEquals(
-            "家人记录已对齐" to "打开应用或下拉即可更新",
-            overviewSyncStatusCopy(SyncStatus.Idle, isJoined = true),
-        )
-        assertEquals(
-            "连上家里 Wi‑Fi 后才能同步" to "出门在外时记录会先留在本机",
-            overviewSyncStatusCopy(SyncStatus.BlockedOfflineHome, isJoined = true),
-        )
-        assertEquals(
-            "同步遇到问题" to "可在网络设置中查看并重试",
-            overviewSyncStatusCopy(SyncStatus.Error, isJoined = true),
-        )
-
-        assertEquals(
-            "暂无宝宝档案" to "仅本机 · 还没有家人一起记",
-            overviewFamilyIdentityCopy(
-                isJoined = false,
-                babyNicknames = emptyList(),
-                memberCount = 0,
-                membersLoaded = false,
-                myDisplayName = "我（本机）",
-                role = FamilyRole.None,
-            ),
-        )
-        assertEquals(
-            "乐乐、豆豆" to "2 位家人 · 我是妈妈（管理员 ★）",
-            overviewFamilyIdentityCopy(
-                isJoined = true,
-                babyNicknames = listOf("乐乐", "豆豆"),
-                memberCount = 2,
-                membersLoaded = true,
-                myDisplayName = "妈妈",
-                role = FamilyRole.Owner,
-            ),
-        )
-        assertEquals(
-            "乐乐" to "家人待刷新 · 我是爸爸（成员）",
-            overviewFamilyIdentityCopy(
-                isJoined = true,
-                babyNicknames = listOf("乐乐"),
-                memberCount = 1,
-                membersLoaded = false,
-                myDisplayName = "爸爸",
-                role = FamilyRole.Member,
-            ),
+            "本机 + 家庭服务器",
+            familyStorageCopy(true),
         )
     }
 
@@ -285,6 +347,7 @@ class FamilyErrorCopyTest {
         assertFalse(isHomeLanNetworkConfigured("", "", emptyList()))
         assertFalse(isHomeLanNetworkConfigured("192.168.50.4", "", emptyList()))
 
+        // Overview primary: invite only for owner; sync/leave/delete live in network sheet.
         val joinedConfigured = familyPrimarySurface(
             isJoined = true,
             role = FamilyRole.Owner,
@@ -292,11 +355,8 @@ class FamilyErrorCopyTest {
         )
         assertTrue(joinedConfigured.compactJoined)
         assertTrue(joinedConfigured.showInvite)
-        assertTrue(joinedConfigured.showJoinedActions)
         assertFalse(joinedConfigured.showCreateJoin)
-        // compact owner primary = invite + sync/delete path, not create/join stack
-        assertTrue(joinedConfigured.showInvite && joinedConfigured.showJoinedActions)
-        assertFalse(joinedConfigured.showLeave)
+        assertEquals(FamilyPrimaryCta.INVITE, joinedConfigured.inviteLabel)
 
         val joinedMember = familyPrimarySurface(
             isJoined = true,
@@ -305,7 +365,6 @@ class FamilyErrorCopyTest {
         )
         assertTrue(joinedMember.compactJoined)
         assertFalse(joinedMember.showInvite)
-        assertTrue(joinedMember.showLeave)
 
         val unjoined = familyPrimarySurface(
             isJoined = false,
@@ -314,6 +373,62 @@ class FamilyErrorCopyTest {
         )
         assertFalse(unjoined.compactJoined)
         assertTrue(unjoined.showCreateJoin)
+        assertEquals(FamilyPrimaryCta.CREATE, unjoined.createLabel)
+        assertEquals(FamilyPrimaryCta.JOIN, unjoined.joinLabel)
+
+        // Network-sheet ops still available via control visibility.
+        val ownerOps = familyControlVisibility(isJoined = true, role = FamilyRole.Owner)
+        assertTrue(ownerOps.showJoinedActions)
+        assertFalse(ownerOps.showLeave)
+        val memberOps = familyControlVisibility(isJoined = true, role = FamilyRole.Member)
+        assertTrue(memberOps.showJoinedActions)
+        assertTrue(memberOps.showLeave)
+    }
+
+    @Test
+    fun familyWizardStartsAtNetworkOnlyWhenNotConfigured() {
+        assertEquals(
+            FamilyWizardStep.Network,
+            familyWizardInitialStep(networkConfigured = false),
+        )
+        assertEquals(
+            FamilyWizardStep.Identity,
+            familyWizardInitialStep(networkConfigured = true),
+        )
+        assertEquals(
+            "配置家庭网络",
+            familyWizardTitle(FamilyWizardMode.Create, FamilyWizardStep.Network),
+        )
+        assertEquals(
+            FamilyPrimaryCta.CREATE,
+            familyWizardTitle(FamilyWizardMode.Create, FamilyWizardStep.Identity),
+        )
+        assertEquals(
+            FamilyPrimaryCta.JOIN,
+            familyWizardTitle(FamilyWizardMode.Join, FamilyWizardStep.Identity),
+        )
+        // Wizard dialog is mutually exclusive; message can resume into identity step.
+        val wizard = FamilyDialog.Wizard(FamilyWizardMode.Join, FamilyWizardStep.Identity)
+        assertEquals(
+            wizard,
+            familyDialogAfterDismiss(FamilyDialog.Message("已扫入邀请", resume = wizard)),
+        )
+        assertNull(familyDialogAfterDismiss(wizard))
+    }
+
+    @Test
+    fun overviewCtasNeverExposeSplitScanOrLegacyInviteCopy() {
+        val owner = familyPrimarySurface(true, FamilyRole.Owner, networkConfigured = true)
+        assertEquals("邀请家人", owner.inviteLabel)
+        assertFalse(owner.inviteLabel.contains("生成邀请"))
+        assertFalse(owner.inviteLabel.contains("二维码"))
+
+        val unjoined = familyPrimarySurface(false, FamilyRole.None, networkConfigured = false)
+        assertEquals("新建家庭", unjoined.createLabel)
+        assertEquals("加入家庭", unjoined.joinLabel)
+        // Scan is not a primary CTA string — it lives inside the join wizard only.
+        assertFalse(unjoined.joinLabel.contains("扫码"))
+        assertFalse(unjoined.joinLabel.contains("邀请码"))
     }
 
     @Test

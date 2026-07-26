@@ -1,0 +1,34 @@
+# 家庭身份与账户概览 — 票索引
+
+Spec: [spec.md](./spec.md)  
+Status: ready-for-agent  
+Source: grill-with-docs → to-spec → to-tickets · 多 agent 审查修订（5 票）
+
+## 依赖图
+
+```text
+01 称呼可认（含解析源） ──┬──► 03 账户首屏骨架 ──► 04 向导 + 邀请主行动
+                         └──► 05 时间轴上传者
+02 共享家庭名 ────────────► 03
+```
+
+**可立即开工（frontier）：** 01 · 02  
+
+**纪律：** 01 与 02 产品上可并行，但 **create/join 请求体与 SyncPort 签名** 易撞车；落地时先合契约 expand（服务端可先收 `family_name` / 称呼校验），再开另一票客户端，或串行。**不要**裸并行双改同一 create 签名。
+
+## 票列表
+
+| ID | 标题 | Blocked by | Size | 状态 |
+|----|------|------------|------|------|
+| [01](./issues/01-member-display-name.md) | 家庭称呼可认 | — | L | done |
+| [02](./issues/02-shared-family-name.md) | 共享家庭名 | — | M | done |
+| [03](./issues/03-account-overview-shell.md) | 账户首屏骨架 | 01, 02 | M–L | done |
+| [04](./issues/04-family-wizard-and-invite.md) | 向导 + 邀请主行动 | 03 | M | done |
+| [05](./issues/05-timeline-uploader.md) | 时间轴上传者 | 01 | M | done |
+
+## 过程纪律
+
+- 一 PR 一票主题；用 `/implement` 一次一张，清 context 再开下一张。  
+- 契约/wire 变更同 PR 更新文档与测试（S2/S4）。  
+- 不改记录/汇总/成长全局顶栏；不做踢人；不引入照护者一等实体。  
+- 术语见根目录 `CONTEXT.md` 与 ADR-0002。

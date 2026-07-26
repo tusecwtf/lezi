@@ -24,6 +24,8 @@ data class JoinResult(
     val entities: List<SyncEntity> = emptyList(),
     val cursor: Long = 0,
     val generation: String = "",
+    /** Shared family name from create/join; null when empty or legacy NAS omits it. */
+    val familyName: String? = null,
 )
 
 interface SyncBackend {
@@ -33,6 +35,7 @@ interface SyncBackend {
         displayName: String?,
         createRequestId: String,
         bootstrapSecret: String?,
+        familyName: String? = null,
     ): JoinResult
 
     suspend fun push(session: SyncSession, entities: List<SyncEntity>): Int
@@ -47,6 +50,10 @@ interface SyncBackend {
     ): JoinResult
 
     suspend fun members(session: SyncSession): List<FamilyMember>
+    /** Self-only; updates the caller's membership 家庭称呼. */
+    suspend fun updateMyDisplayName(session: SyncSession, displayName: String)
+    /** Owner-only; null/blank clears the shared family name. */
+    suspend fun renameFamily(session: SyncSession, familyName: String?)
     suspend fun leave(session: SyncSession)
     suspend fun deleteFamily(session: SyncSession)
     suspend fun putMedia(

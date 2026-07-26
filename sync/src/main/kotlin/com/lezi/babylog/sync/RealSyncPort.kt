@@ -142,6 +142,7 @@ class RealSyncPort @Inject constructor(
     override suspend fun createFamily(
         displayName: String?,
         bootstrapSecret: String,
+        familyName: String?,
     ): Result<SyncSession> {
         if (bootstrapSecret.isBlank()) {
             return Result.failure<SyncSession>(
@@ -153,11 +154,12 @@ class RealSyncPort @Inject constructor(
             val createRequestId = preferences.ensureCreateRequestId()
             val joined = try {
                 backend.create(
-                    baseUrl,
-                    deviceId,
-                    memberDisplayNameForWire(displayName),
-                    createRequestId,
-                    bootstrapSecret,
+                    baseUrl = baseUrl,
+                    deviceId = deviceId,
+                    displayName = memberDisplayNameForWire(displayName),
+                    createRequestId = createRequestId,
+                    bootstrapSecret = bootstrapSecret,
+                    familyName = normalizeFamilyNameForWire(familyName),
                 )
             } catch (error: SyncHttpException) {
                 if (error.statusCode == 401 || error.statusCode == 403) {
@@ -171,6 +173,15 @@ class RealSyncPort @Inject constructor(
             }
         }
     }
+
+    override suspend fun renameFamily(familyName: String?): Result<Unit> =
+        withAllowedSession { session ->
+            require(session.role == FamilyRole.Owner) { "仅家庭管理员可修改家庭名" }
+            val normalized = normalizeFamilyNameForWire(familyName)
+            backend.renameFamily(session, normalized)
+            preferences.saveSession(session.copy(familyName = normalized))
+            cachedSession = preferences.session.first()
+        }
 
     override suspend fun joinFamily(
         command: JoinFamilyCommand,
@@ -249,6 +260,11 @@ class RealSyncPort @Inject constructor(
     override suspend fun listFamilyMembers(): Result<List<FamilyMember>> = withAllowedSession {
         backend.members(it)
     }
+
+    override suspend fun updateMyDisplayName(displayName: String): Result<Unit> =
+        withAllowedSession { session ->
+            backend.updateMyDisplayName(session, memberDisplayNameForWire(displayName))
+        }
 
     override suspend fun sync(trigger: SyncTrigger): Result<Unit> = runCatching {
         syncMutex.withLock {
@@ -867,6 +883,8 @@ class RealSyncPort @Inject constructor(
             serverPort = if (config.host.isNotBlank()) config.port else previous.serverPort,
             allowedSsids = config.allowedSsids,
             serverScheme = if (config.host.isNotBlank()) config.scheme else previous.serverScheme,
+            // Cached from create/join/rename; cold start has no GET family-name path.
+            familyName = joined.familyName?.trim()?.takeIf { it.isNotEmpty() },
         )
         // Upload receipts only prove that bytes exist in the previous
         // server/family namespace. A new family must reconcile them again.

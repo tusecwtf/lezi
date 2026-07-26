@@ -284,9 +284,23 @@ class CareLog @Inject constructor(
         val family = familyDao.listAll().firstOrNull()
         return LocalFamilyIdentity(
             deviceId = user?.deviceId ?: "—",
-            displayName = user?.displayName ?: "我（本机）",
+            // Cache of membership 家庭称呼 when joined; local-only placeholder otherwise.
+            displayName = user?.displayName?.takeIf { it.isNotBlank() } ?: "我（本机）",
             familyId = family?.id ?: 1L,
         )
+    }
+
+    /**
+     * Cache the current membership 家庭称呼 on [LocalUserEntity] after create/join/self-rename.
+     * Blank / 「我（本机）」 clear the cache so UI falls back to the local placeholder.
+     */
+    suspend fun updateLocalDisplayName(displayName: String?) {
+        val existing = localUserDao.get() ?: return
+        val normalized = displayName?.trim().orEmpty()
+        val stored = normalized.takeIf {
+            it.isNotEmpty() && it != "我（本机）"
+        }
+        localUserDao.upsert(existing.copy(displayName = stored))
     }
 
     suspend fun setCurrentBaby(babyId: Long) {
@@ -513,6 +527,7 @@ class CareLog @Inject constructor(
             endTimestamp = endTimestamp,
             note = note,
             createdByUserId = userId,
+            createdByDeviceId = writerDeviceId(),
             payloadJson = payloadJson,
             schemaVersion = schemaVersion,
             updatedAt = now,
@@ -647,6 +662,7 @@ class CareLog @Inject constructor(
                     endTimestamp = endedAt.takeIf { recordMode == "start" },
                     note = note,
                     createdByUserId = userId,
+                    createdByDeviceId = writerDeviceId(),
                     payloadJson = payload,
                     schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
                     updatedAt = now,
@@ -690,6 +706,7 @@ class CareLog @Inject constructor(
                             endTimestamp = endTimestamp,
                             note = note,
                             createdByUserId = ensureLocalUser(now),
+                            createdByDeviceId = writerDeviceId(),
                             payloadJson = payloadJson,
                             schemaVersion = schemaVersion,
                             updatedAt = now,
@@ -750,6 +767,7 @@ class CareLog @Inject constructor(
                         endTimestamp = null,
                         note = null,
                         createdByUserId = ensureLocalUser(now),
+                        createdByDeviceId = writerDeviceId(),
                         payloadJson = "{}",
                         updatedAt = now,
                     ),
@@ -791,6 +809,7 @@ class CareLog @Inject constructor(
                         endTimestamp = at,
                         note = null,
                         createdByUserId = ensureLocalUser(now),
+                        createdByDeviceId = writerDeviceId(),
                         payloadJson = RecordPayloadCodec.encode(
                             RecordPayloadDocument(
                                 type = RecordType.SLEEP,
@@ -1187,14 +1206,23 @@ class CareLog @Inject constructor(
 
     private suspend fun ensureLocalUser(now: Long): Long {
         localUserDao.get()?.id?.let { return it }
+        // displayName stays null until the user joins/creates a family with a real 称呼.
         return localUserDao.upsert(
             LocalUserEntity(
-                displayName = "我（本机）",
+                displayName = null,
                 deviceId = UUID.randomUUID().toString(),
                 createdAt = now,
             ),
         )
     }
+
+    /**
+     * Sync-session device id used as the record writer link key (`created_by_device_id`).
+     * Distinct from [LocalUserEntity.deviceId]; self detection on the timeline must use this.
+     * Null when the session has not allocated a device id yet (typically pre-join).
+     */
+    private suspend fun writerDeviceId(): String? =
+        syncPort.session().first().deviceId.trim().takeIf { it.isNotEmpty() }
 
     private suspend fun ensureFamily(userId: Long, now: Long): Long {
         val existing = familyDao.listAll().firstOrNull()
@@ -1318,6 +1346,7 @@ internal fun RecordEntity.toModel(): Record =
         endTimestamp = endTimestamp,
         note = note,
         createdByUserId = createdByUserId,
+        createdByDeviceId = createdByDeviceId,
         payloadJson = payloadJson,
         schemaVersion = schemaVersion,
         updatedAt = updatedAt,

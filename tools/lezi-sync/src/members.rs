@@ -1,17 +1,17 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::Json;
 use serde::Serialize;
+use serde_json::{json, Value};
 
-use crate::model::normalize_display_name;
-use crate::{authenticate, constant_time_eq, ApiError, AppState};
-
-/// This device-local fallback is also defined once on the Android client.
-/// It must never be projected to another family member.
-pub(crate) const LOCAL_DEVICE_DISPLAY_NAME: &str = "我（本机）";
+use crate::model::{
+    normalize_display_name, UpdateDisplayNameRequest, LOCAL_DEVICE_DISPLAY_NAME,
+};
+use crate::{authenticate, constant_time_eq, json_body, ApiError, AppState};
 
 #[derive(Debug)]
 struct MemberCandidate {
@@ -26,6 +26,9 @@ struct MemberView {
     display_name: Option<String>,
     role: String,
     is_self: bool,
+    /// Client-only link key for mapping record `created_by_device_id` → 称呼.
+    /// Never show this value in product UI (see sync-home-lan §9.5).
+    device_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -88,9 +91,28 @@ pub(super) async fn list_family_members(
                 display_name: member.display_name,
                 role: member.role,
                 is_self: member.is_self,
+                device_id: member.device_id,
             })
             .collect(),
     }))
+}
+
+/// Self-only update of the caller's membership 家庭称呼.
+pub(super) async fn update_my_display_name(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<UpdateDisplayNameRequest>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let principal = authenticate(&state, &headers)?;
+    let request = json_body(body)?;
+    let display_name = request.validate()?;
+    state
+        .store
+        .update_membership_display_name(&principal.token_hash, &display_name)?;
+    Ok(Json(json!({
+        "ok": true,
+        "display_name": display_name,
+    })))
 }
 
 /// Historical Android clients persisted their device-local fallback label as

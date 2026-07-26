@@ -31,6 +31,12 @@ data class SyncSession(
     val serverPort: Int = DEFAULT_SERVER_PORT,
     val allowedSsids: List<String> = emptyList(),
     val serverScheme: String = DEFAULT_SERVER_SCHEME,
+    /**
+     * Shared family name cached from create/join/rename responses.
+     * Null when empty, unknown, or legacy NAS omitted the field — UI applies fallback.
+     * Cold start relies on this local cache (no GET family-name path in this ticket).
+     */
+    val familyName: String? = null,
 ) {
     val baseUrl: String
         get() = homeLanConfig.baseUrl
@@ -104,6 +110,7 @@ class DataStoreSyncPreferences @Inject constructor(
             serverPort = port,
             allowedSsids = ssids,
             serverScheme = scheme,
+            familyName = prefs[Keys.FAMILY_NAME]?.trim()?.takeIf { it.isNotEmpty() },
         )
     }
 
@@ -185,6 +192,12 @@ class DataStoreSyncPreferences @Inject constructor(
                 prefs.remove(Keys.LAST_SUCCESS_AT)
             } else {
                 prefs[Keys.LAST_SUCCESS_AT] = session.lastSuccessAt
+            }
+            val sharedName = session.familyName?.trim()?.takeIf { it.isNotEmpty() }
+            if (sharedName == null) {
+                prefs.remove(Keys.FAMILY_NAME)
+            } else {
+                prefs[Keys.FAMILY_NAME] = sharedName
             }
         }
     }
@@ -297,6 +310,7 @@ class DataStoreSyncPreferences @Inject constructor(
         prefs.remove(Keys.PULL_GENERATION)
         prefs.remove(Keys.LAST_SUCCESS_AT)
         prefs.remove(Keys.CREATE_REQUEST_ID)
+        prefs.remove(Keys.FAMILY_NAME)
         secureTokenStore.clearToken()
     }
 
@@ -322,5 +336,6 @@ class DataStoreSyncPreferences @Inject constructor(
         val PULL_GENERATION = stringPreferencesKey("sync_pull_generation")
         val LAST_SUCCESS_AT = longPreferencesKey("sync_last_success_at")
         val CREATE_REQUEST_ID = stringPreferencesKey("sync_create_request_id")
+        val FAMILY_NAME = stringPreferencesKey("sync_family_name")
     }
 }

@@ -8,11 +8,17 @@ import javax.inject.Singleton
 
 data class Invite(val code: String, val expiresAt: Long)
 
-/** A privacy-preserving family member projection returned by the home server. */
+/**
+ * Privacy-preserving family member projection from the home server.
+ *
+ * [deviceId] is a client-only link key for mapping record `created_by_device_id`
+ * to the current 家庭称呼. Product UI must never display [deviceId].
+ */
 data class FamilyMember(
     val displayName: String?,
     val role: FamilyRole,
     val isSelf: Boolean,
+    val deviceId: String? = null,
 )
 
 enum class SyncTrigger { Foreground, PullToRefresh, LocalWrite }
@@ -37,10 +43,17 @@ interface SyncPort {
     suspend fun saveServer(baseUrl: String): Result<Unit>
     /** Persists the host, port, and up to two SSIDs; form defaults are not applied here. */
     suspend fun saveHomeLanConfig(config: HomeLanServerConfig): Result<Unit>
+    /**
+     * @param displayName 家庭称呼 (product-required)
+     * @param familyName shared family name (optional; blank → server null + client fallback)
+     */
     suspend fun createFamily(
         displayName: String? = null,
         bootstrapSecret: String,
+        familyName: String? = null,
     ): Result<SyncSession>
+    /** Owner-only rename of the shared family name; blank/null clears. */
+    suspend fun renameFamily(familyName: String?): Result<Unit>
     suspend fun sync(trigger: SyncTrigger): Result<Unit>
     suspend fun pull(familyId: String): Result<Unit>
     suspend fun push(familyId: String): Result<Unit>
@@ -60,6 +73,8 @@ interface SyncPort {
         displayName: String? = null,
     ): Result<SyncSession>
     suspend fun listFamilyMembers(): Result<List<FamilyMember>>
+    /** Self-only rename of this device's membership 家庭称呼. */
+    suspend fun updateMyDisplayName(displayName: String): Result<Unit>
     suspend fun leave(familyId: String): Result<Unit>
     suspend fun deleteFamily(): Result<Unit>
     /** [clearLocal] must call its marker immediately after the domain transaction commits. */
@@ -87,8 +102,13 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
     override fun requestSync(trigger: SyncTrigger) = Unit
     override suspend fun saveServer(baseUrl: String) = Result.success(Unit)
     override suspend fun saveHomeLanConfig(config: HomeLanServerConfig) = Result.success(Unit)
-    override suspend fun createFamily(displayName: String?, bootstrapSecret: String) =
-        Result.failure<SyncSession>(SyncNotEnabledException())
+    override suspend fun createFamily(
+        displayName: String?,
+        bootstrapSecret: String,
+        familyName: String?,
+    ) = Result.failure<SyncSession>(SyncNotEnabledException())
+    override suspend fun renameFamily(familyName: String?) =
+        Result.failure<Unit>(SyncNotEnabledException())
     override suspend fun sync(trigger: SyncTrigger) = Result.success(Unit)
     override suspend fun pull(familyId: String) = Result.success(Unit)
     override suspend fun push(familyId: String) = Result.success(Unit)
@@ -106,6 +126,8 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
         Result.failure<SyncSession>(SyncNotEnabledException())
     override suspend fun listFamilyMembers() =
         Result.failure<List<FamilyMember>>(SyncNotEnabledException())
+    override suspend fun updateMyDisplayName(displayName: String) =
+        Result.failure<Unit>(SyncNotEnabledException())
     override suspend fun leave(familyId: String) = Result.failure<Unit>(SyncNotEnabledException())
     override suspend fun deleteFamily() = Result.failure<Unit>(SyncNotEnabledException())
     override suspend fun clearLocalRecords(

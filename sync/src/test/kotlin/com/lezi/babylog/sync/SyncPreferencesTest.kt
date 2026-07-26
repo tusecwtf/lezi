@@ -50,6 +50,7 @@ class SyncPreferencesTest {
                 role = FamilyRole.Owner,
                 pullCursor = 41,
                 pullGeneration = "server-generation",
+                familyName = "乐乐一家",
             ),
         )
         firstScope.cancel()
@@ -64,8 +65,46 @@ class SyncPreferencesTest {
         assertThat(restored.session.first().pullCursor).isEqualTo(41)
         assertThat(restored.session.first().pullGeneration).isEqualTo("server-generation")
         assertThat(restored.session.first().familyToken).isEqualTo("secret-token")
+        assertThat(restored.session.first().familyName).isEqualTo("乐乐一家")
         assertThat(tokens.getToken()).isEqualTo("secret-token")
         secondScope.cancel()
+        file.delete()
+    }
+
+    @Test
+    fun familyNameIsClearedWithFamilySessionAndBlankBecomesNull() = runTest {
+        val file = File.createTempFile("lezi-sync-name-", ".preferences_pb").also { it.delete() }
+        val tokens = InMemorySecureFamilyTokenStore()
+        val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
+        val preferences = preferences(store, tokens)
+        preferences.saveSession(
+            SyncSession(
+                serverHost = "nas",
+                familyId = "family",
+                familyToken = "secret-token",
+                deviceId = "device",
+                role = FamilyRole.Owner,
+                familyName = "  我家  ",
+            ),
+        )
+        assertThat(preferences.session.first().familyName).isEqualTo("我家")
+
+        preferences.saveSession(
+            preferences.session.first().copy(familyName = "  "),
+        )
+        assertThat(preferences.session.first().familyName).isNull()
+        assertThat(store.data.first()[stringPreferencesKey("sync_family_name")]).isNull()
+
+        preferences.saveSession(
+            preferences.session.first().copy(
+                familyId = "family",
+                familyToken = "secret-token",
+                familyName = "恢复",
+            ),
+        )
+        preferences.clearFamilySession()
+        assertThat(preferences.session.first().familyName).isNull()
+        assertThat(preferences.session.first().familyId).isEmpty()
         file.delete()
     }
 

@@ -23,6 +23,7 @@ import com.journeyapps.barcodescanner.ScanOptions
 import com.lezi.babylog.core.ui.CameraCapture
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.PageScaffoldBackground
+import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.sync.HomeLanServerConfig
 import com.lezi.babylog.sync.HomeWifiPermission
 import com.lezi.babylog.sync.InvitePayloadCodec
@@ -36,13 +37,26 @@ fun FamilyRoute(
     val ui by vm.ui.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var dialog by remember { mutableStateOf<FamilyDialog?>(null) }
-    var pendingAfterNetworkSave by remember { mutableStateOf<FamilyDialog?>(null) }
     var pendingHomeWifiAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     var pendingHomeWifiResume by remember { mutableStateOf<FamilyDialog?>(null) }
     var joiningFamily by remember { mutableStateOf(false) }
     var bootstrapSecret by remember { mutableStateOf("") }
     var bootstrapSecretFeedback by remember { mutableStateOf<String?>(null) }
     var creatingFamily by remember { mutableStateOf(false) }
+    var createDisplayName by remember { mutableStateOf("") }
+    var createDisplayNameError by remember { mutableStateOf<String?>(null) }
+    var createFamilyName by remember { mutableStateOf("") }
+    var createFamilyNameError by remember { mutableStateOf<String?>(null) }
+    var joinDisplayName by remember { mutableStateOf("") }
+    var joinDisplayNameError by remember { mutableStateOf<String?>(null) }
+    var editDisplayName by remember { mutableStateOf("") }
+    var editDisplayNameFeedback by remember { mutableStateOf<String?>(null) }
+    var savingDisplayName by remember { mutableStateOf(false) }
+    var renameFamilyName by remember { mutableStateOf("") }
+    var renameFamilyFeedback by remember { mutableStateOf<String?>(null) }
+    var savingFamilyName by remember { mutableStateOf(false) }
+    var wizardNetworkFeedback by remember { mutableStateOf<String?>(null) }
+    var savingWizardNetwork by remember { mutableStateOf(false) }
 
     val novice = remember {
         HomeLanServerConfig.noviceUiDefaults(
@@ -111,6 +125,24 @@ fun FamilyRoute(
         }
     }
 
+    fun openWizard(mode: FamilyWizardMode) {
+        wizardNetworkFeedback = null
+        val step = familyWizardInitialStep(networkConfigured = isHomeLanNetworkConfigured(
+            ui.serverHost,
+            ui.baseUrl,
+            ui.allowedSsids,
+        ))
+        if (step == FamilyWizardStep.Network &&
+            joinDraft.ssid1.isBlank() &&
+            HomeWifiPermission.isSsidAccessReady(context)
+        ) {
+            vm.currentWifiSsid()?.trim()?.takeIf(String::isNotEmpty)?.let {
+                joinDraft = joinDraft.copy(ssid1 = it)
+            }
+        }
+        dialog = FamilyDialog.Wizard(mode, step)
+    }
+
     fun applyScannedInvite(raw: String) {
         val payload = raw.trim()
         if (payload.isEmpty()) return
@@ -124,8 +156,9 @@ fun FamilyRoute(
                 if (decoded.ssids.isNotEmpty()) append(" · Wi‑Fi ${decoded.ssids.joinToString(" / ")}")
             }
         }
-        dialog = if (scanCopy == null) FamilyDialog.Join
-        else FamilyDialog.Message(scanCopy, resume = FamilyDialog.Join)
+        val joinWizard = FamilyDialog.Wizard(FamilyWizardMode.Join, FamilyWizardStep.Identity)
+        dialog = if (scanCopy == null) joinWizard
+        else FamilyDialog.Message(scanCopy, resume = joinWizard)
     }
     val scanInvite = rememberLauncherForActivityResult(ScanContract()) { result ->
         result.contents?.let(::applyScannedInvite)
@@ -164,24 +197,6 @@ fun FamilyRoute(
     val primary = remember(ui.enabled, ui.role, networkConfigured) {
         familyPrimarySurface(ui.enabled, ui.role, networkConfigured)
     }
-    val savedSummaryBaseUrl = remember(
-        ui.serverHost,
-        ui.serverPort,
-        ui.serverScheme,
-        ui.baseUrl,
-        ui.allowedSsids,
-    ) {
-        when {
-            ui.serverHost.isNotBlank() -> HomeLanServerConfig(
-                ui.serverHost,
-                ui.serverPort,
-                ui.allowedSsids,
-                ui.serverScheme,
-            ).baseUrl
-            ui.baseUrl.isNotBlank() -> ui.baseUrl
-            else -> ""
-        }
-    }
     val previewBaseUrl = remember(joinDraft.host, joinDraft.portText, joinDraft.scheme) {
         runCatching {
             HomeLanServerConfig.fromUserInput(
@@ -193,9 +208,10 @@ fun FamilyRoute(
         }.getOrDefault("")
     }
 
-    fun saveNetworkThen(target: FamilyDialog) {
+    /** Wizard network step: save in-place and advance to identity (no NetworkSettings bounce). */
+    fun saveWizardNetworkThenAdvance(mode: FamilyWizardMode) {
         if (!HomeWifiPermission.isSsidAccessReady(context)) {
-            withHomeWifiAccess { saveNetworkThen(target) }
+            withHomeWifiAccess { saveWizardNetworkThenAdvance(mode) }
             return
         }
         if (joinDraft.ssid1.isBlank()) {
@@ -205,23 +221,23 @@ fun FamilyRoute(
         }
         val host = joinDraft.host.trim()
         val ssids = joinDraft.ssids
+        if (host.isBlank() || ssids.isEmpty()) {
+            wizardNetworkFeedback = "请填写服务器主机并至少绑定一个家庭 Wi‑Fi 名称"
+            dialog = FamilyDialog.Wizard(mode, FamilyWizardStep.Network)
+            return
+        }
         val dirty = host != ui.serverHost.trim() ||
             joinDraft.portText.toIntOrNull() != ui.serverPort ||
             joinDraft.scheme != ui.serverScheme ||
             ssids != ui.allowedSsids ||
             ui.allowedSsids.isEmpty()
-        if (host.isBlank() || ssids.isEmpty()) {
-            pendingAfterNetworkSave = target
-            showMessage(
-                "请先在「家庭网络设置」中填写并保存服务器与 Wi‑Fi 名称",
-                resume = FamilyDialog.NetworkSettings,
-            )
-            return
-        }
         if (!dirty && ui.serverHost.isNotBlank() && ui.allowedSsids.isNotEmpty()) {
-            dialog = target
+            wizardNetworkFeedback = null
+            dialog = FamilyDialog.Wizard(mode, FamilyWizardStep.Identity)
             return
         }
+        savingWizardNetwork = true
+        wizardNetworkFeedback = null
         vm.saveHomeLanConfig(
             joinDraft.host,
             joinDraft.portText,
@@ -229,12 +245,17 @@ fun FamilyRoute(
             joinDraft.ssid2,
             joinDraft.scheme,
         ) { result ->
-            deliverNetworkSaveResult(
-                result,
-                onMessage = { copy ->
-                    showMessage(copy, resume = target.takeIf { result is NetworkSaveResult.Saved })
-                },
-            )
+            savingWizardNetwork = false
+            when (result) {
+                is NetworkSaveResult.Saved -> {
+                    wizardNetworkFeedback = null
+                    dialog = FamilyDialog.Wizard(mode, FamilyWizardStep.Identity)
+                }
+                is NetworkSaveResult.Failed -> {
+                    wizardNetworkFeedback = result.message
+                    dialog = FamilyDialog.Wizard(mode, FamilyWizardStep.Network)
+                }
+            }
         }
     }
 
@@ -256,15 +277,15 @@ fun FamilyRoute(
                 controls = controls,
                 primary = primary,
                 networkConfigured = networkConfigured,
-                savedSummaryBaseUrl = savedSummaryBaseUrl,
-                onRefreshMembers = { withHomeWifiAccess { vm.refreshMembers(showErrors = true) } },
-                onOpenNetwork = {
-                    pendingAfterNetworkSave = null
-                    dialog = FamilyDialog.NetworkSettings
+                onOpenMembers = {
+                    withHomeWifiAccess {
+                        vm.refreshMembers(showErrors = true)
+                        dialog = FamilyDialog.MembersList
+                    }
                 },
-                onCreateFamily = { saveNetworkThen(FamilyDialog.CreateFamily) },
-                onJoinFamily = { saveNetworkThen(FamilyDialog.Join) },
-                onScanInvite = ::scanWithPermission,
+                onOpenNetwork = { dialog = FamilyDialog.NetworkSettings },
+                onCreateFamily = { openWizard(FamilyWizardMode.Create) },
+                onJoinFamily = { openWizard(FamilyWizardMode.Join) },
                 onCreateInvite = {
                     withHomeWifiAccess {
                         vm.createInvite { result ->
@@ -277,12 +298,17 @@ fun FamilyRoute(
                         }
                     }
                 },
-                onSync = {
-                    withHomeWifiAccess { vm.pullNow { showMessage(it) } }
+                onEditMyDisplayName = {
+                    editDisplayName = ui.displayName.takeUnless {
+                        it == LOCAL_FAMILY_DISPLAY_NAME
+                    }.orEmpty()
+                    editDisplayNameFeedback = null
+                    dialog = FamilyDialog.EditMyDisplayName
                 },
-                onLeave = { dialog = FamilyDialog.ConfirmLeave },
-                onDeleteFamily = {
-                    dialog = FamilyDialog.DeleteFamily(FamilyDialog.DeleteStage.Warning)
+                onRenameFamily = {
+                    renameFamilyName = ui.familyName.orEmpty()
+                    renameFamilyFeedback = null
+                    dialog = FamilyDialog.RenameFamily
                 },
             )
         }
@@ -301,6 +327,7 @@ fun FamilyRoute(
             onSsid2Change = { joinDraft = joinDraft.copy(ssid2 = it) },
             previewBaseUrl = previewBaseUrl,
             networkConfigured = networkConfigured,
+            controls = controls,
             onUseCurrentWifi = {
                 withHomeWifiAccess {
                     val current = vm.currentWifiSsid()?.trim().orEmpty()
@@ -323,61 +350,282 @@ fun FamilyRoute(
                     joinDraft.ssid2,
                     joinDraft.scheme,
                 ) { result ->
-                    val next = if (result is NetworkSaveResult.Saved) pendingAfterNetworkSave else active
-                    if (result is NetworkSaveResult.Saved) pendingAfterNetworkSave = null
-                    showMessage(result.message, resume = next)
+                    showMessage(result.message, resume = active)
                 }
             },
-            onDismiss = {
-                pendingAfterNetworkSave = null
-                dialog = null
+            onSync = {
+                withHomeWifiAccess { vm.pullNow { showMessage(it, resume = active) } }
             },
-        )
-        FamilyDialog.Join -> if (controls.showJoin) JoinFamilyDialog(
-            joinCode = joinDraft.invitation,
-            onJoinCodeChange = { joinDraft = joinDraft.copy(invitation = it) },
-            joining = joiningFamily,
-            onScan = ::scanWithPermission,
-            onConfirm = {
-                withHomeWifiAccess {
-                    joiningFamily = true
-                    vm.join(joinDraft) { success, copy ->
-                        joiningFamily = false
-                        showMessage(copy, resume = FamilyDialog.Join.takeUnless { success })
-                    }
-                }
+            onLeave = { dialog = FamilyDialog.ConfirmLeave },
+            onDeleteFamily = {
+                dialog = FamilyDialog.DeleteFamily(FamilyDialog.DeleteStage.Warning)
             },
             onDismiss = { dialog = null },
         )
-        FamilyDialog.CreateFamily -> if (controls.showCreateFamily) CreateFamilyDialog(
-            bootstrapSecret = bootstrapSecret,
-            onBootstrapSecretChange = {
-                bootstrapSecret = it
-                bootstrapSecretFeedback = null
+        FamilyDialog.MembersList -> if (ui.enabled) FamilyMembersListSheet(
+            ui = ui,
+            onRefreshMembers = { withHomeWifiAccess { vm.refreshMembers(showErrors = true) } },
+            onEditMyDisplayName = {
+                editDisplayName = ui.displayName.takeUnless {
+                    it == LOCAL_FAMILY_DISPLAY_NAME
+                }.orEmpty()
+                editDisplayNameFeedback = null
+                dialog = FamilyDialog.EditMyDisplayName
             },
-            feedback = bootstrapSecretFeedback,
-            creating = creatingFamily,
-            onConfirm = {
-                val secret = bootstrapSecret.trim()
-                if (secret.isEmpty()) {
-                    bootstrapSecretFeedback = "请填写服务器初始化口令"
-                } else withHomeWifiAccess {
-                    creatingFamily = true
-                    bootstrapSecretFeedback = null
-                    vm.createFamily(secret) { success, copy ->
+            onDismiss = { dialog = null },
+        )
+        is FamilyDialog.Wizard -> when (active.step) {
+            FamilyWizardStep.Network -> FamilyWizardNetworkDialog(
+                mode = active.mode,
+                host = joinDraft.host,
+                onHostChange = {
+                    joinDraft = joinDraft.copy(host = it)
+                    wizardNetworkFeedback = null
+                },
+                port = joinDraft.portText,
+                onPortChange = {
+                    joinDraft = joinDraft.copy(portText = it)
+                    wizardNetworkFeedback = null
+                },
+                ssid1 = joinDraft.ssid1,
+                onSsid1Change = {
+                    joinDraft = joinDraft.copy(ssid1 = it)
+                    wizardNetworkFeedback = null
+                },
+                ssid2 = joinDraft.ssid2,
+                onSsid2Change = {
+                    joinDraft = joinDraft.copy(ssid2 = it)
+                    wizardNetworkFeedback = null
+                },
+                networkConfigured = networkConfigured,
+                feedback = wizardNetworkFeedback,
+                saving = savingWizardNetwork,
+                onUseCurrentWifi = {
+                    withHomeWifiAccess {
+                        val current = vm.currentWifiSsid()?.trim().orEmpty()
+                        when {
+                            current.isEmpty() ->
+                                dialog = FamilyDialog.HomeWifiAccessGuide(active)
+                            joinDraft.ssid1.isBlank() ->
+                                joinDraft = joinDraft.copy(ssid1 = current)
+                            joinDraft.ssid2.isBlank() && joinDraft.ssid1 != current ->
+                                joinDraft = joinDraft.copy(ssid2 = current)
+                            joinDraft.ssid1 != current && joinDraft.ssid2 != current ->
+                                wizardNetworkFeedback = "Wi‑Fi 名称已满 2 个，请先清空一格"
+                            else -> wizardNetworkFeedback = "当前 Wi‑Fi 已在列表中"
+                        }
+                    }
+                },
+                onContinue = { saveWizardNetworkThenAdvance(active.mode) },
+                onDismiss = {
+                    // Interruptible: already-saved host/SSID stay in session prefs.
+                    wizardNetworkFeedback = null
+                    savingWizardNetwork = false
+                    dialog = null
+                },
+            )
+            FamilyWizardStep.Identity -> when (active.mode) {
+                FamilyWizardMode.Join -> if (controls.showJoin) JoinFamilyDialog(
+                    joinCode = joinDraft.invitation,
+                    onJoinCodeChange = { joinDraft = joinDraft.copy(invitation = it) },
+                    displayName = joinDisplayName,
+                    onDisplayNameChange = {
+                        joinDisplayName = it
+                        joinDisplayNameError = null
+                    },
+                    displayNameError = joinDisplayNameError,
+                    joining = joiningFamily,
+                    networkConfigured = networkConfigured ||
+                        isHomeLanNetworkConfigured(
+                            joinDraft.host,
+                            "",
+                            joinDraft.ssids,
+                        ),
+                    onScan = ::scanWithPermission,
+                    onBackToNetwork = {
+                        dialog = FamilyDialog.Wizard(FamilyWizardMode.Join, FamilyWizardStep.Network)
+                    },
+                    onConfirm = {
+                        validateFamilyDisplayNameInput(joinDisplayName)?.let {
+                            joinDisplayNameError = it
+                            return@JoinFamilyDialog
+                        }
+                        withHomeWifiAccess {
+                            joiningFamily = true
+                            vm.join(joinDraft, joinDisplayName) { success, copy ->
+                                joiningFamily = false
+                                if (success) {
+                                    joinDisplayName = ""
+                                    joinDisplayNameError = null
+                                    dialog = FamilyDialog.Message(copy)
+                                } else {
+                                    joinDisplayNameError = copy.takeIf {
+                                        it.contains("称呼") || it.contains("本机")
+                                    }
+                                    showMessage(
+                                        copy,
+                                        resume = FamilyDialog.Wizard(
+                                            FamilyWizardMode.Join,
+                                            FamilyWizardStep.Identity,
+                                        ),
+                                    )
+                                }
+                            }
+                        }
+                    },
+                    onDismiss = {
+                        joinDisplayNameError = null
+                        dialog = null
+                    },
+                )
+                FamilyWizardMode.Create -> if (controls.showCreateFamily) CreateFamilyDialog(
+                    displayName = createDisplayName,
+                    onDisplayNameChange = {
+                        createDisplayName = it
+                        createDisplayNameError = null
+                    },
+                    displayNameError = createDisplayNameError,
+                    familyName = createFamilyName,
+                    onFamilyNameChange = {
+                        createFamilyName = it
+                        createFamilyNameError = null
+                    },
+                    familyNameError = createFamilyNameError,
+                    bootstrapSecret = bootstrapSecret,
+                    onBootstrapSecretChange = {
+                        bootstrapSecret = it
+                        bootstrapSecretFeedback = null
+                    },
+                    feedback = bootstrapSecretFeedback,
+                    creating = creatingFamily,
+                    networkConfigured = networkConfigured ||
+                        isHomeLanNetworkConfigured(
+                            joinDraft.host,
+                            "",
+                            joinDraft.ssids,
+                        ),
+                    onBackToNetwork = {
+                        dialog = FamilyDialog.Wizard(
+                            FamilyWizardMode.Create,
+                            FamilyWizardStep.Network,
+                        )
+                    },
+                    onConfirm = {
+                        validateFamilyDisplayNameInput(createDisplayName)?.let {
+                            createDisplayNameError = it
+                            return@CreateFamilyDialog
+                        }
+                        validateFamilyNameInput(createFamilyName)?.let {
+                            createFamilyNameError = it
+                            return@CreateFamilyDialog
+                        }
+                        val secret = bootstrapSecret.trim()
+                        if (secret.isEmpty()) {
+                            bootstrapSecretFeedback = "请填写服务器初始化口令"
+                        } else withHomeWifiAccess {
+                            creatingFamily = true
+                            bootstrapSecretFeedback = null
+                            createDisplayNameError = null
+                            createFamilyNameError = null
+                            vm.createFamily(
+                                displayName = createDisplayName,
+                                bootstrapSecret = secret,
+                                familyName = createFamilyName,
+                            ) { success, copy ->
+                                creatingFamily = false
+                                if (success) {
+                                    bootstrapSecret = ""
+                                    createDisplayName = ""
+                                    createFamilyName = ""
+                                    dialog = FamilyDialog.Message(copy)
+                                } else {
+                                    when {
+                                        copy.contains("称呼") || copy.contains("本机") ->
+                                            createDisplayNameError = copy
+                                        copy.contains("家庭名") -> createFamilyNameError = copy
+                                        else -> bootstrapSecretFeedback = copy
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    onDismiss = {
+                        bootstrapSecret = ""
+                        bootstrapSecretFeedback = null
+                        createDisplayNameError = null
+                        createFamilyName = ""
+                        createFamilyNameError = null
                         creatingFamily = false
+                        dialog = null
+                    },
+                )
+            }
+        }
+        FamilyDialog.RenameFamily -> if (ui.enabled && ui.role == FamilyRole.Owner) {
+            RenameFamilyDialog(
+                familyName = renameFamilyName,
+                onFamilyNameChange = {
+                    renameFamilyName = it
+                    renameFamilyFeedback = null
+                },
+                feedback = renameFamilyFeedback,
+                saving = savingFamilyName,
+                onConfirm = {
+                    validateFamilyNameInput(renameFamilyName)?.let {
+                        renameFamilyFeedback = it
+                        return@RenameFamilyDialog
+                    }
+                    withHomeWifiAccess {
+                        savingFamilyName = true
+                        vm.renameFamily(renameFamilyName) { success, copy ->
+                            savingFamilyName = false
+                            if (success) {
+                                renameFamilyName = ""
+                                dialog = FamilyDialog.Message(copy)
+                            } else {
+                                renameFamilyFeedback = copy
+                            }
+                        }
+                    }
+                },
+                onDismiss = {
+                    if (!savingFamilyName) {
+                        renameFamilyFeedback = null
+                        dialog = null
+                    }
+                },
+            )
+        }
+        FamilyDialog.EditMyDisplayName -> EditMyDisplayNameDialog(
+            displayName = editDisplayName,
+            onDisplayNameChange = {
+                editDisplayName = it
+                editDisplayNameFeedback = null
+            },
+            feedback = editDisplayNameFeedback,
+            saving = savingDisplayName,
+            onConfirm = {
+                validateFamilyDisplayNameInput(editDisplayName)?.let {
+                    editDisplayNameFeedback = it
+                    return@EditMyDisplayNameDialog
+                }
+                withHomeWifiAccess {
+                    savingDisplayName = true
+                    vm.updateMyDisplayName(editDisplayName) { success, copy ->
+                        savingDisplayName = false
                         if (success) {
-                            bootstrapSecret = ""
                             dialog = FamilyDialog.Message(copy)
-                        } else bootstrapSecretFeedback = copy
+                        } else {
+                            editDisplayNameFeedback = copy
+                        }
                     }
                 }
             },
             onDismiss = {
-                bootstrapSecret = ""
-                bootstrapSecretFeedback = null
-                creatingFamily = false
-                dialog = null
+                if (!savingDisplayName) {
+                    editDisplayNameFeedback = null
+                    dialog = null
+                }
             },
         )
         is FamilyDialog.Invite -> FamilyInviteDialog(active.invite, onDismiss = { dialog = null })

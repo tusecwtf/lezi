@@ -159,6 +159,23 @@ class CareLogTest {
     }
 
     @Test
+    fun updateLocalDisplayNameCachesMembershipNameAndRejectsPlaceholder() = runTest {
+        val care = Fakes().careLog()
+        care.ensureFamilyScaffold()
+        assertThat(care.localFamilyIdentity().displayName).isEqualTo("我（本机）")
+
+        care.updateLocalDisplayName("  妈妈  ")
+        assertThat(care.localFamilyIdentity().displayName).isEqualTo("妈妈")
+
+        care.updateLocalDisplayName("我（本机）")
+        assertThat(care.localFamilyIdentity().displayName).isEqualTo("我（本机）")
+
+        care.updateLocalDisplayName("爸爸")
+        care.updateLocalDisplayName("   ")
+        assertThat(care.localFamilyIdentity().displayName).isEqualTo("我（本机）")
+    }
+
+    @Test
     fun updateBabyProfile_canSetBirthdayAndWeight() = runTest {
         val fakes = Fakes()
         val care = fakes.careLog()
@@ -239,6 +256,43 @@ class CareLogTest {
 
         assertThat(failure).isInstanceOf(IllegalArgumentException::class.java)
         assertThat(fakes.records.listForBaby(deletedBaby)).isEmpty()
+    }
+
+    @Test
+    fun addRecordStampsSyncSessionDeviceIdAsWriterLinkKey() = runTest {
+        val sessionDevice = "sync-session-device-xyz"
+        val sync = RecordingSyncPort(
+            deviceId = sessionDevice,
+            familyId = "family-joined",
+        )
+        val fakes = Fakes(sync)
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val id = care.addRecord(
+            babyId = babyId,
+            type = RecordType.PEE,
+            timestamp = 1_000L,
+            payloadJson = """{"pee_amount":2}""",
+        )
+        val entity = fakes.records.get(id)!!
+        assertThat(entity.createdByDeviceId).isEqualTo(sessionDevice)
+        assertThat(entity.toModel().createdByDeviceId).isEqualTo(sessionDevice)
+        // LocalUser.deviceId is a separate UUID — must not be used as the uploader link key.
+        assertThat(entity.createdByDeviceId).isNotEqualTo(fakes.users.get()!!.deviceId)
+    }
+
+    @Test
+    fun addRecordLeavesWriterDeviceIdNullWhenSessionHasNoDevice() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val id = care.addRecord(
+            babyId = babyId,
+            type = RecordType.PEE,
+            timestamp = 1_000L,
+            payloadJson = """{"pee_amount":2}""",
+        )
+        assertThat(fakes.records.get(id)!!.createdByDeviceId).isNull()
     }
 
     @Test
@@ -1359,6 +1413,8 @@ private class RecordingTransactionRunner :
 private class RecordingSyncPort(
     delegate: com.lezi.babylog.sync.SyncPort = com.lezi.babylog.sync.NoOpSyncPort(),
     private val familyServerRetained: Boolean = false,
+    private val deviceId: String = "",
+    private val familyId: String = if (familyServerRetained) "family-a" else "",
 ) : com.lezi.babylog.sync.SyncPort by delegate {
     var requests = 0
     var localRecordReconciliations = 0
@@ -1368,7 +1424,8 @@ private class RecordingSyncPort(
 
     override fun session(): Flow<com.lezi.babylog.sync.SyncSession> = MutableStateFlow(
         com.lezi.babylog.sync.SyncSession(
-            familyId = if (familyServerRetained) "family-a" else "",
+            familyId = familyId,
+            deviceId = deviceId,
         ),
     )
 

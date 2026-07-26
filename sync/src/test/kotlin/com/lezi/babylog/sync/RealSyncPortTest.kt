@@ -284,7 +284,7 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun defaultLocalPlaceholderIsNeverPublishedAsAnotherMembersName() = runTest {
+    fun defaultLocalPlaceholderAndBlankNamesAreRejectedOnCreateAndJoin() = runTest {
         val ownerRig = SyncRig(
             session = SyncSession(
                 serverHost = "192.168.1.20",
@@ -292,9 +292,10 @@ class RealSyncPortTest {
                 allowedSsids = listOf("Home"),
             ),
         )
-        assertThat(ownerRig.port.createFamily("我（本机）", "bootstrap-secret").isSuccess).isTrue()
-        assertThat(ownerRig.backend.createDisplayNames).hasSize(1)
-        assertThat(ownerRig.backend.createDisplayNames.single()).isNull()
+        assertThat(ownerRig.port.createFamily("我（本机）", "bootstrap-secret").isFailure).isTrue()
+        assertThat(ownerRig.port.createFamily("  ", "bootstrap-secret").isFailure).isTrue()
+        assertThat(ownerRig.port.createFamily(null, "bootstrap-secret").isFailure).isTrue()
+        assertThat(ownerRig.backend.createDisplayNames).isEmpty()
 
         val memberRig = SyncRig(session = SyncSession(), ssid = "Home")
         val config = HomeLanServerConfig(
@@ -307,10 +308,25 @@ class RealSyncPortTest {
                 payload = "ABCD1234",
                 preferredConfig = config,
                 displayName = "我（本机）",
-            ).isSuccess,
+            ).isFailure,
         ).isTrue()
-        assertThat(memberRig.backend.joinDisplayNames).hasSize(1)
-        assertThat(memberRig.backend.joinDisplayNames.single()).isNull()
+        assertThat(
+            memberRig.port.joinWithPayload(
+                payload = "ABCD1234",
+                preferredConfig = config,
+                displayName = null,
+            ).isFailure,
+        ).isTrue()
+        assertThat(memberRig.backend.joinDisplayNames).isEmpty()
+    }
+
+    @Test
+    fun updateMyDisplayNameSendsNormalizedNameToBackend() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.updateMyDisplayName("  干爹  ").isSuccess).isTrue()
+        assertThat(rig.backend.updatedDisplayNames).containsExactly("干爹")
+        assertThat(rig.port.updateMyDisplayName("我（本机）").isFailure).isTrue()
+        assertThat(rig.port.updateMyDisplayName("  ").isFailure).isTrue()
     }
 
     @Test
@@ -331,7 +347,9 @@ class RealSyncPortTest {
             ),
         )
 
-        assertThat(rig.port.joinWithPayload(staleQr).isSuccess).isTrue()
+        assertThat(
+            rig.port.joinWithPayload(staleQr, displayName = "爸爸").isSuccess,
+        ).isTrue()
 
         assertThat(rig.backend.joinBaseUrls).containsExactly("https://192.168.1.99:9443")
         assertThat(rig.preferences.current().allowedSsids).containsExactly("EditedHome")
@@ -439,7 +457,9 @@ class RealSyncPortTest {
             allowedSsids = listOf("EditedHome"),
         )
 
-        assertThat(rig.port.joinWithPayload("ABCD1234", edited).isFailure).isTrue()
+        assertThat(
+            rig.port.joinWithPayload("ABCD1234", edited, displayName = "爸爸").isFailure,
+        ).isTrue()
 
         assertThat(rig.backend.joinBaseUrls).containsExactly("https://lezi.home:443")
         val after = rig.preferences.current()
@@ -490,6 +510,52 @@ class RealSyncPortTest {
             .containsExactly("one-time-bootstrap-secret")
         assertThat(rig.preferences.current().toString())
             .doesNotContain("one-time-bootstrap-secret")
+    }
+
+    @Test
+    fun createCachesSharedFamilyNameAndOwnerCanRename() = runTest {
+        val rig = SyncRig(
+            session = SyncSession(
+                serverHost = "192.168.1.20",
+                serverPort = 8787,
+                allowedSsids = listOf("Home"),
+            ),
+        )
+        rig.backend.nextCreateFamilyName = "乐乐一家"
+
+        val created = rig.port.createFamily(
+            displayName = "妈妈",
+            bootstrapSecret = "bootstrap-secret",
+            familyName = "  乐乐一家  ",
+        )
+        assertThat(created.isSuccess).isTrue()
+        assertThat(rig.backend.createFamilyNames).containsExactly("乐乐一家")
+        assertThat(rig.preferences.current().familyName).isEqualTo("乐乐一家")
+
+        assertThat(rig.port.renameFamily("  年年的家庭  ").isSuccess).isTrue()
+        assertThat(rig.backend.renamedFamilyNames).containsExactly("年年的家庭")
+        assertThat(rig.preferences.current().familyName).isEqualTo("年年的家庭")
+    }
+
+    @Test
+    fun memberCannotRenameSharedFamilyName() = runTest {
+        val rig = SyncRig(
+            session = SyncSession(
+                serverHost = "192.168.1.20",
+                serverPort = 8787,
+                allowedSsids = listOf("Home"),
+                familyId = "family",
+                familyToken = "member-token",
+                deviceId = "device",
+                role = FamilyRole.Member,
+                familyName = "原名",
+            ),
+        )
+
+        val failure = rig.port.renameFamily("偷改").exceptionOrNull()
+        assertThat(failure).hasMessageThat().contains("管理员")
+        assertThat(rig.backend.renamedFamilyNames).isEmpty()
+        assertThat(rig.preferences.current().familyName).isEqualTo("原名")
     }
 
     @Test
@@ -550,7 +616,9 @@ class RealSyncPortTest {
 
         val creating = async { rig.port.createFamily("妈妈", "bootstrap-secret") }
         rig.backend.createStarted!!.await()
-        val joining = async { rig.port.joinWithPayload("JOIN-CODE") }
+        val joining = async {
+            rig.port.joinWithPayload("JOIN-CODE", displayName = "爸爸")
+        }
         runCurrent()
 
         rig.backend.releaseCreate!!.complete(Unit)
@@ -2358,10 +2426,15 @@ private class RecordingSyncBackend : SyncBackend {
     var mediaBytes: ByteArray = byteArrayOf(1)
     val createRequestIds = mutableListOf<String>()
     val createDisplayNames = mutableListOf<String?>()
+    val createFamilyNames = mutableListOf<String?>()
     val createBootstrapSecrets = mutableListOf<String?>()
     var joinCalls = 0
     val joinBaseUrls = mutableListOf<String>()
     val joinDisplayNames = mutableListOf<String?>()
+    val updatedDisplayNames = mutableListOf<String>()
+    val renamedFamilyNames = mutableListOf<String?>()
+    var nextCreateFamilyName: String? = null
+    var nextJoinFamilyName: String? = null
     var memberCalls = 0
     private val knownEntities = mutableSetOf<Pair<String, String>>()
 
@@ -2375,9 +2448,11 @@ private class RecordingSyncBackend : SyncBackend {
         displayName: String?,
         createRequestId: String,
         bootstrapSecret: String?,
+        familyName: String?,
     ): JoinResult {
         createRequestIds += createRequestId
         createDisplayNames += displayName
+        createFamilyNames += familyName
         createBootstrapSecrets += bootstrapSecret
         createStarted?.complete(Unit)
         releaseCreate?.await()
@@ -2386,6 +2461,7 @@ private class RecordingSyncBackend : SyncBackend {
             familyId = "family-created",
             token = "owner-token",
             role = FamilyRole.Owner,
+            familyName = nextCreateFamilyName ?: familyName,
         )
     }
 
@@ -2453,6 +2529,7 @@ private class RecordingSyncBackend : SyncBackend {
             familyId = "family-joined",
             token = "member-token",
             role = FamilyRole.Member,
+            familyName = nextJoinFamilyName,
         )
     }
 
@@ -2460,6 +2537,14 @@ private class RecordingSyncBackend : SyncBackend {
         memberCalls++
         membersFailure?.let { throw it }
         return nextMembers
+    }
+
+    override suspend fun updateMyDisplayName(session: SyncSession, displayName: String) {
+        updatedDisplayNames += displayName
+    }
+
+    override suspend fun renameFamily(session: SyncSession, familyName: String?) {
+        renamedFamilyNames += familyName
     }
 
     override suspend fun leave(session: SyncSession) {
@@ -2521,6 +2606,7 @@ private class MemorySyncPreferences(initial: SyncSession) : SyncPreferences {
                 pullCursor = 0,
                 pullGeneration = "",
                 lastSuccessAt = null,
+                familyName = null,
             )
         }
         state.value = next
@@ -2565,6 +2651,7 @@ private class MemorySyncPreferences(initial: SyncSession) : SyncPreferences {
             pullCursor = 0,
             pullGeneration = "",
             lastSuccessAt = null,
+            familyName = null,
         )
     }
 

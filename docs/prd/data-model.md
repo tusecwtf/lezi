@@ -40,19 +40,23 @@ V1 最小路径：创建默认 `Family` + 当前 `LocalUser`（匿名）+ `Baby`
 | 字段 | 说明 |
 |------|------|
 | `id` | 本地主键 |
-| `display_name` | 可选 |
+| `display_name` | 本机缓存的**家庭称呼**（与当前 membership 对齐；未加入家庭时可空） |
 | `device_id` | 本机标识 |
 | `created_at` | |
 
-无强制账号体系；V2 可增加 `auth_subject` 绑定。
+无强制账号体系；身份展示以家庭 membership 的称呼为准，不引入跨设备照护者实体。
+见 [`docs/adr/0002-family-identity-and-account-overview.md`](../adr/0002-family-identity-and-account-overview.md)。
 
 ### 3.2 Family
 
 | 字段 | 说明 |
 |------|------|
 | `id` | |
-| `owner_user_id` | 管理员 |
+| `name` | **共享家庭名**；全员一致；仅 owner 可改；可空，客户端兜底「我的家庭」/「{宝宝昵称}的家庭」 |
+| `owner_user_id` | 管理员（本地）；NAS 侧以 owner membership 为准 |
 | `created_at` | |
+
+NAS 家庭记录须持久化共享 `name`（或等价字段），并在成员可见摘要中下发。
 
 ### 3.3 Membership
 
@@ -64,15 +68,17 @@ V1 最小路径：创建默认 `Family` + 当前 `LocalUser`（匿名）+ `Baby`
 | `status` | `active` \| `revoked` |
 | `joined_at` | |
 
-NAS 实现以 `token_hash` 为 membership 主键，同时保存 `device_id` 与可选
-`display_name`；三者都不是可公开的成员标识。家庭成员视图只返回规范化后的
-`display_name`、`role`、`is_self`：服务端按当前 Bearer principal 计算
-`is_self`，不返回 token、`token_hash`、原始 `device_id` 或 `family_id`。
-客户端不得把本机 UI 占位名“我（本机）”当成真实成员名上传。create 与 join 共用
-同一 normalize：拒绝控制字符和双向文本格式控制符，再 trim；空白归一为 null，
-最长 128 个 Unicode code point。历史 null/空/不安全名称由客户端显示本地兜底。
-客户端软解析滚动升级响应：未知 role 按 member、缺 `is_self` 按 false；只有从未
-成功加载成员列表时才合成本机占位，服务端已返回空列表或无 self 列表时保持原样。
+NAS 实现以 `token_hash` 为 membership 主键，同时保存 `device_id` 与
+`display_name`（**家庭称呼**）。`display_name` 在产品层于建家/加入时**必填**；
+服务端 trim，拒绝控制字符与双向文本格式控制符，最长 128 个 Unicode 字符；
+空白、省略字段与本机占位名「我（本机）」均返回 `422`，不得静默收成 null。
+家庭成员视图返回规范化后的 `display_name`、`role`、`is_self`，以及客户端链路键
+`device_id`（用于把记录 `created_by_device_id` 解析为当前称呼；**UI 永不展示
+device id**）。服务端按当前 Bearer principal 计算 `is_self`，不返回 token、
+`token_hash` 或 `family_id`。本人可通过 `POST /v1/family/display-name` 更新自己的
+称呼，不能改他人。客户端不得把本机 UI 占位名“我（本机）”当成真实成员名上传。
+历史 null/空/不安全名称由客户端按角色兜底（如「家庭管理员」「家庭成员」或
+「家人」），且不得把「我（本机）」展示给其他成员。管理员在 UI 上以 ★ 标出。
 
 旧库没有 `(family_id, device_id, role)` 唯一约束。服务端读取时合并同 role +
 device 的重复 active token 行，不跨 role 合并，也不凭客户端声明的 `device_id`
@@ -146,7 +152,7 @@ device 的重复 active token 行，不跨 role 合并，也不凭客户端声�
 | `temperature` | `celsius` |
 | `height` / `weight` / … | `value`, `unit` |
 | `medicine` | `name`, `dose?` |
-| `diary` / `memo` | `body`, `photos[]`（应用私有文件绝对路径；最多 9 张） |
+| `diary` / `memo` | `body`；旧 `photos[]` 仅做历史兼容读取，新照片统一使用 Record 关联的 MediaAsset，最多 3 张 |
 | `cough` / `rash` / `vomit` / `injury` | `severity` 1–3, `description?` |
 | `hospital` | `reason`, `advice?` |
 | `baby_food` / `snack` / `drink` | `content`, `amount?` |
@@ -162,8 +168,8 @@ device 的重复 active token 行，不跨 role 合并，也不凭客户端声�
 |------|------|
 | `id` | |
 | `client_uuid` | 跨设备同步键，UNIQUE |
-| `kind` | `log` \| `avatar` |
-| `record_id` / `baby_id` | 日志图关联 Record；头像关联 Baby，二选一 |
+| `kind` | `log` \| `plan`（已批准扩展、待实现）\| `avatar` |
+| `record_id` / `plan_id` / `baby_id` | 记录图关联 Record；计划图关联 CarePlan；头像关联 Baby，三选一 |
 | `local_uri` | 本机私有文件路径，不进入 wire payload |
 | `remote_uri` | 当前家庭服务器已上传标记；更换服务器时清除 |
 | `mime` / `width` / `height` | |
@@ -178,7 +184,9 @@ device 的重复 active token 行，不跨 role 合并，也不凭客户端声�
 | 字段 | 说明 |
 |------|------|
 | `item_order_json` | 图标顺序 |
+| `category_order_json` | 记录类别区块顺序 |
 | `hidden_items` | 隐藏类型 |
+| `quick_record_slots` | 四个常用记录槽位；空槽允许 |
 | `action_buttons` | 计时/搜索/日历等显隐 |
 | `timer_enabled` | |
 | `record_at_start_or_end` | 母乳记录时刻 |
@@ -194,6 +202,9 @@ device 的重复 active token 行，不跨 role 合并，也不凭客户端声�
 | `infant_fever_advice_enabled` | 低月龄发热提示开关 |
 | `visual_style` / `preferred_hand` | 模板与惯用手 |
 | `timeline_order` | `newest_first` / `oldest_first` |
+| `family_plan_reminders_enabled` | 当前设备是否提醒家庭护理计划；默认开 |
+| `system_calendar_enabled` / `system_calendar_id` | 当前设备的系统日历副本开关与用户选择的可写日历 |
+| `system_calendar_disclosure` | `event_only` \| `baby_and_type`（默认）\| `details` |
 
 主题色存在 Baby 上，但 **同步策略默认：主题与排序属本机**（与参考产品一致）。若 V2 要共享主题，再单开开关。
 
@@ -209,20 +220,36 @@ device 的重复 active token 行，不跨 role 合并，也不凭客户端声�
 
 ### 3.10 CustomItemDef（V2）
 
-最多 10：`id`, `family_id`, `name`, `icon_slot` (0–7), `sort_order`,
-`client_uuid`, `updated_at`, `deleted_at`。图标固定模板，不支持自定义图标资源。
+最多 10：`id`, `family_id`, `name`, `icon_slot` (0–7), `client_uuid`,
+`created_by_membership_uuid`, `updated_at`, `deleted_at`。图标固定模板，不支持
+自定义图标资源；排序、显隐和常用槽位属于 SettingsLocal，不进入共享定义。
 删除目录项不级联删除或改写历史 `custom` 记录。
 
-### 3.11 CalendarEvent（V2）
+### 3.11 CarePlan（已批准扩展、待实现）
+
+护理计划与已发生 Record 分离。逻辑字段包括：`client_uuid`,
+`baby_client_uuid`, `record_type`, `custom_item_uuid?`, `scheduled_at`,
+`scheduled_zone_id`, `note`, `payload_json`, `status`,
+`created_by_membership_uuid`, `fulfilled_record_uuid?`, `fulfilled_at?`,
+`updated_at`, `deleted_at`。计划照片使用 `kind=plan` MediaAsset；计划及全部照片
+构成原子计划同步包。
+
+首版状态为 `pending`, `missed`, `completed`, `skipped`，且只支持单次计划。
+多个履行结果由服务端按管理员身份、履行确认时间、UUID 顺序选出唯一事实；
+落选结果保留为冲突未采纳审计项，不进入正常 Record 查询。
+
+### 3.11a CalendarEvent（历史兼容）
 
 `id`, `baby_id`, `family_id`, `title`, `start_at`, `end_at?`, `remind_at?`, `created_by`, `updated_at`, `deleted_at`
+
+不再新建自由标题 CalendarEvent，也不进入家庭同步；旧事件继续本机显示、编辑和提醒，用户确认后可转换为 CarePlan。
 
 ### 3.12 Outbox（V2）
 
 | 字段 | 说明 |
 |------|------|
 | `family_id` | 队列所属家庭，防止跨家庭 ACK |
-| `entity_type` | `baby` \| `record` \| `media` |
+| `entity_type` | 现行 `baby` \| `record` \| `media`；已批准扩展增加 `custom_item` \| `care_plan` 及原子媒体包提交 |
 | `client_uuid` | portable 实体键 |
 | `payload_json` | 不含本机自增 id / 文件绝对路径 |
 | `updated_at` / `deleted_at` | LWW 与 tombstone |
@@ -270,7 +297,7 @@ enum class SyncStatus {
 
 | 字段 | 说明 |
 |------|------|
-| `serverHost` / `serverPort` / `serverScheme` | 单一 NAS；port 默认 8765、scheme 默认 `http`；三者为真源并派生 `{scheme}://{host}:{port}` |
+| `serverHost` / `serverPort` | 单一 NAS；port 默认 8765；派生 `baseUrl=http://host:port` |
 | `allowedSsids` | 最多 2 个；trim 后精确匹配当前 Wi‑Fi 名 |
 | 会话字段 | `familyId` / token / role / cursor / generation（同前） |
 
@@ -290,8 +317,10 @@ interface SyncPort {
   fun requestSync(trigger: SyncTrigger)
 
   suspend fun saveServer(baseUrl: String): Result<Unit>
-  suspend fun saveHomeLanConfig(config: HomeLanServerConfig): Result<Unit>
-  suspend fun createFamily(displayName: String? = null, bootstrapSecret: String): Result<SyncSession>
+  /** displayName=家庭称呼（必填）；familyName=共享家庭名（可空） */
+  suspend fun createFamily(displayName: String, familyName: String?, bootstrapSecret: String?): Result<SyncSession>
+  suspend fun renameFamily(familyName: String?): Result<Unit>
+  suspend fun updateMyDisplayName(displayName: String): Result<Unit>
   suspend fun sync(trigger: SyncTrigger): Result<Unit>
 
   /** 显式触发；内部走同一前台/门闩路径 */
@@ -299,27 +328,18 @@ interface SyncPort {
   suspend fun push(familyId: String): Result<Unit>
 
   suspend fun createInvite(familyId: String): Result<Invite>
-  /** 产品入口必须显式携带邀请码与本次编辑后的 endpoint/SSID */
-  suspend fun joinFamily(command: JoinFamilyCommand): Result<SyncSession>
-  /** 仅兼容旧调用；产品 UI 不依赖保存态隐式补端点 */
-  suspend fun joinWithCode(code: String): Result<SyncSession>
-  suspend fun joinWithPayload(
-    payload: String,
-    preferredConfig: HomeLanServerConfig? = null,
-    displayName: String? = null,
-  ): Result<SyncSession>
-  suspend fun listFamilyMembers(): Result<List<FamilyMember>>
+  /** 当前 token 所在家庭的 active 成员安全视图（含称呼与 role） */
+  suspend fun listFamilyMembers(): Result<List<FamilyMemberView>>
+  /** 邀请码或完整载荷；displayName 为必填家庭称呼 */
+  suspend fun joinWithCode(code: String, displayName: String): Result<SyncSession>
+  suspend fun joinWithPayload(payload: String, displayName: String): Result<SyncSession>
   suspend fun leave(familyId: String): Result<Unit>
   suspend fun deleteFamily(): Result<Unit>
 
-  /** 回调须在领域事务提交后立刻调用 marker；随后清日志媒体/outbox，generation 保留 */
-  suspend fun clearLocalRecords(
-    clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
-  ): Result<Unit>
-  /** 全量本机 wipe（含 outbox/头像媒体/文件）；同样要求领域提交 marker */
-  suspend fun clearAllLocalData(
-    clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
-  ): Result<Unit>
+  /** 清本机记录副本 + 日志媒体/文件；保留会话 generation */
+  suspend fun clearLocalRecords(clearLocal: suspend () -> Unit): Result<Unit>
+  /** 全量 wipe（含 outbox/头像媒体），join 前用 */
+  suspend fun clearAllLocalData(clearLocal: suspend () -> Unit): Result<Unit>
 }
 ```
 
@@ -327,8 +347,7 @@ interface SyncPort {
 
 - 无会话时状态保持 `Disabled`，前台与本地写触发为安全 no-op。
 - 建家、加入、邀请前必须配置服务器；失败返回中文产品文案。
-- 只有已加入家庭的会话才会生成并上传 Outbox；已加入后变更服务器地址时保留 token/family，
-  原子清除 cursor/generation 并按 full-resync 重新拉取。
+- 只有已加入家庭的会话才会生成并上传 Outbox；服务器地址变化时原子清除旧 token/cursor。
 
 ### 6.4 V2 规则（摘要）
 
@@ -341,7 +360,8 @@ interface SyncPort {
 | 触发 | **仅前台**：回前台、下拉、前台写成功后 push；**无**后台轮询、**无**推送拉同步 |
 | 同步域（首版） | **Baby + Record + 日志 MediaAsset（含字节）** |
 | 写权限 | 宝宝**头像**仅 owner；日志媒体家庭内可同步 |
-| 后置 | CustomItemDef、CalendarEvent |
+| 已批准扩展（待实现） | CustomItemDef、CarePlan、计划 MediaAsset、Record/CarePlan 原子照片包 |
+| 继续不同步 | 通用 CalendarEvent、系统日历 ID/权限/披露级别、提醒偏好、快捷槽位与布局顺序 |
 | 不同步 | SettingsLocal、Baby `theme_color`/`sort_order`、下次喂奶时刻、Widget 配置、本机路径 |
 | 共享粒度 | **全量**（同步域内）；不做字段白名单 |
 | 冲突 | 同 `client_uuid` 幂等；否则 `updated_at` LWW；删除 tombstone |
@@ -377,4 +397,5 @@ V1 可提供「导出数据库/JSON 到文件」便于换机；与家庭实时�
 |------|--------|
 | V1 | LocalUser, Family, Membership, Baby, Record, Media, SettingsLocal；SyncPort 空实现 |
 | V1.5 | 曲线包资源只读；导出读 Record |
-| V2 | ShareInvite, Outbox, CustomItem, CalendarEvent；SyncPort 真实现 |
+| V2（现行） | ShareInvite, Outbox, CustomItem, CalendarEvent；SyncPort 真实现 |
+| V2 护理计划扩展（待实现） | 家庭共享 CustomItemDef、CarePlan、计划媒体与原子照片同步包；CalendarEvent 保持历史本机兼容 |

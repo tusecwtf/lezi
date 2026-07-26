@@ -299,8 +299,10 @@ class HttpSyncBackendTest {
                     captured.complete(readRequest(socket))
                     val body = (
                         "{\"members\":[" +
-                            "{\"display_name\":\"妈妈\",\"role\":\"owner\",\"is_self\":true}," +
-                            "{\"display_name\":null,\"role\":\"member\",\"is_self\":false}]}"
+                            "{\"display_name\":\"妈妈\",\"role\":\"owner\",\"is_self\":true," +
+                            "\"device_id\":\"device-owner\"}," +
+                            "{\"display_name\":null,\"role\":\"member\",\"is_self\":false," +
+                            "\"device_id\":\"device-member\"}]}"
                         ).toByteArray(Charsets.UTF_8)
                     socket.getOutputStream().use { output ->
                         output.write(
@@ -322,8 +324,18 @@ class HttpSyncBackendTest {
             val request = captured.get(2, TimeUnit.SECONDS)
 
             assertThat(members).containsExactly(
-                FamilyMember("妈妈", FamilyRole.Owner, isSelf = true),
-                FamilyMember(null, FamilyRole.Member, isSelf = false),
+                FamilyMember(
+                    "妈妈",
+                    FamilyRole.Owner,
+                    isSelf = true,
+                    deviceId = "device-owner",
+                ),
+                FamilyMember(
+                    null,
+                    FamilyRole.Member,
+                    isSelf = false,
+                    deviceId = "device-member",
+                ),
             ).inOrder()
             assertThat(request.lineSequence().first())
                 .isEqualTo("GET /v1/family/members HTTP/1.1")
@@ -332,7 +344,8 @@ class HttpSyncBackendTest {
                     it.equals("Authorization: Bearer family-token", ignoreCase = true)
                 },
             ).isTrue()
-            assertThat(request).doesNotContain("device")
+            // Request must not leak client device_id; response link keys are server-side.
+            assertThat(request).doesNotContain("device-owner")
         } finally {
             server.close()
             responder.join(2_000)
@@ -377,8 +390,12 @@ class HttpSyncBackendTest {
     @Test
     fun createAndJoinShareSafeDisplayNameNormalization() {
         assertThat(memberDisplayNameForWire("  爸爸  ")).isEqualTo("爸爸")
-        assertThat(memberDisplayNameForWire("我（本机）")).isNull()
-        assertThat(memberDisplayNameForWire("   ")).isNull()
+        assertThat(runCatching { memberDisplayNameForWire("我（本机）") }.exceptionOrNull())
+            .isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(runCatching { memberDisplayNameForWire("   ") }.exceptionOrNull())
+            .isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(runCatching { memberDisplayNameForWire(null) }.exceptionOrNull())
+            .isInstanceOf(IllegalArgumentException::class.java)
         assertThat(runCatching { memberDisplayNameForWire("爸\u202E爸") }.exceptionOrNull())
             .isInstanceOf(IllegalArgumentException::class.java)
         assertThat(runCatching { memberDisplayNameForWire("爸\n爸") }.exceptionOrNull())
@@ -428,6 +445,150 @@ class HttpSyncBackendTest {
             server.close()
             responder.join(2_000)
         }
+    }
+
+    @Test
+    fun createSendsOptionalFamilyNameAndParsesResponse() = runTest {
+        // Mock server reads Content-Length as chars; keep request body ASCII-only.
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val captured = CompletableFuture<String>()
+        val responder = thread(name = "lezi-create-family-name-test-server") {
+            runCatching {
+                server.accept().use { socket ->
+                    captured.complete(readRequest(socket))
+                    val body =
+                        """{"family_id":"family","token":"owner-token","role":"owner","family_name":"Happy Home"}"""
+                            .toByteArray(Charsets.UTF_8)
+                    socket.getOutputStream().use { output ->
+                        output.write(
+                            (
+                                "HTTP/1.1 201 Created\r\n" +
+                                    "Content-Type: application/json\r\n" +
+                                    "Content-Length: ${body.size}\r\n" +
+                                    "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                        )
+                        output.write(body)
+                    }
+                }
+            }.onFailure(captured::completeExceptionally)
+        }
+
+        try {
+            val result = HttpSyncBackend().create(
+                baseUrl = "http://${server.inetAddress.hostAddress}:${server.localPort}",
+                deviceId = "device",
+                displayName = "Mom",
+                createRequestId = "create-request-id-0000000000000002",
+                bootstrapSecret = null,
+                familyName = "  Happy Home  ",
+            )
+            val request = captured.get(2, TimeUnit.SECONDS)
+
+            assertThat(result.familyName).isEqualTo("Happy Home")
+            assertThat(request.substringAfter("\n\n")).contains("\"family_name\":\"Happy Home\"")
+            assertThat(request.substringAfter("\n\n")).contains("\"display_name\":\"Mom\"")
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
+    fun createOmitsBlankFamilyNameAndLegacyResponseYieldsNull() = runTest {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val captured = CompletableFuture<String>()
+        val responder = thread(name = "lezi-create-blank-family-name-test-server") {
+            runCatching {
+                server.accept().use { socket ->
+                    captured.complete(readRequest(socket))
+                    val body =
+                        """{"family_id":"family","token":"owner-token","role":"owner"}"""
+                            .toByteArray(Charsets.UTF_8)
+                    socket.getOutputStream().use { output ->
+                        output.write(
+                            (
+                                "HTTP/1.1 201 Created\r\n" +
+                                    "Content-Type: application/json\r\n" +
+                                    "Content-Length: ${body.size}\r\n" +
+                                    "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                        )
+                        output.write(body)
+                    }
+                }
+            }.onFailure(captured::completeExceptionally)
+        }
+
+        try {
+            val result = HttpSyncBackend().create(
+                baseUrl = "http://${server.inetAddress.hostAddress}:${server.localPort}",
+                deviceId = "device",
+                displayName = "Mom",
+                createRequestId = "create-request-id-0000000000000003",
+                bootstrapSecret = null,
+                familyName = "   ",
+            )
+            val request = captured.get(2, TimeUnit.SECONDS)
+
+            assertThat(result.familyName).isNull()
+            assertThat(request.substringAfter("\n\n")).doesNotContain("family_name")
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
+    fun renameFamilyPostsOwnerOnlyWireBody() = runTest {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val captured = CompletableFuture<String>()
+        val responder = thread(name = "lezi-rename-family-test-server") {
+            runCatching {
+                server.accept().use { socket ->
+                    captured.complete(readRequest(socket))
+                    val body =
+                        """{"ok":true,"family_name":"Niannian Home"}"""
+                            .toByteArray(Charsets.UTF_8)
+                    socket.getOutputStream().use { output ->
+                        output.write(
+                            (
+                                "HTTP/1.1 200 OK\r\n" +
+                                    "Content-Type: application/json\r\n" +
+                                    "Content-Length: ${body.size}\r\n" +
+                                    "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                        )
+                        output.write(body)
+                    }
+                }
+            }.onFailure(captured::completeExceptionally)
+        }
+
+        try {
+            HttpSyncBackend().renameFamily(
+                session = testSession(server),
+                familyName = "  Niannian Home  ",
+            )
+            val request = captured.get(2, TimeUnit.SECONDS)
+
+            assertThat(request.lineSequence().first()).startsWith("POST /v1/family/name")
+            assertThat(request.substringAfter("\n\n")).contains("\"family_name\":\"Niannian Home\"")
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
+    fun familyNameWireHelpersTrimAndRejectControlCharacters() {
+        assertThat(normalizeFamilyNameForWire("  Home  ")).isEqualTo("Home")
+        assertThat(normalizeFamilyNameForWire("  ")).isNull()
+        assertThat(normalizeFamilyNameForWire(null)).isNull()
+        assertThat(runCatching { normalizeFamilyNameForWire("bad\nname") }.exceptionOrNull())
+            .isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(runCatching { normalizeFamilyNameForWire("x".repeat(65)) }.exceptionOrNull())
+            .isInstanceOf(IllegalArgumentException::class.java)
     }
 
     private fun testSession(server: ServerSocket) = SyncSession(

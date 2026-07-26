@@ -196,10 +196,12 @@ lezi-sync healthcheck
 |---|---|---|
 | GET | `/health` | 廉价进程存活检查，正常 `{ok, version}`，不访问 DB/文件系统 |
 | GET | `/ready` | DB 与数据目录就绪检查；结果缓存 5 秒，异常返回 `503 {ok:false,status:"degraded",version}` |
-| POST | `/v1/family/create` | 幂等创建家庭并返回 owner token |
+| POST | `/v1/family/create` | 幂等创建家庭并返回 owner token；可选 `family_name` |
 | GET | `/v1/family/members` | 当前家庭的 active 成员安全视图；owner/member 均可读 |
+| POST | `/v1/family/display-name` | 成员更新自己的家庭称呼 |
+| POST | `/v1/family/name` | owner 改共享家庭名 |
 | POST | `/v1/invite` | owner 创建一次性邀请码 |
-| POST | `/v1/join` | 邀请码换 member token |
+| POST | `/v1/join` | 邀请码换 member token（响应含 `family_name`） |
 | POST | `/v1/leave` | member 吊销自身 token |
 | POST | `/v1/family/delete` | owner 删除家庭及媒体 |
 | POST | `/v1/push` | Baby、Record、Media 的严格 LWW push |
@@ -212,13 +214,28 @@ Media 的 kind 与关联创建后不可改变；member 可以写日志媒体，�
 和字节只允许 owner 修改。
 
 `GET /v1/family/members` 返回 owner-first 的稳定列表：
-`{"members":[{"display_name":"妈妈","role":"owner","is_self":true}]}`。
+`{"members":[{"display_name":"妈妈","role":"owner","is_self":true,"device_id":"…"}]}`。
 服务端只按 Bearer principal 的 `family_id` 查询 active memberships，并由当前
-token 计算 `is_self`；响应绝不包含 token、`token_hash`、原始 `device_id` 或
-`family_id`。加入时 `display_name` 会 trim，Unicode 空白名归一为 `null`，最长
-128 个 Unicode 字符，并拒绝控制符与双向文本格式控制符；历史库中的空名或不安全
-名字在读取时降级为 `null`，客户端应用本地兜底名称；本机 UI 占位名“我（本机）”
-不作为真实成员名上传。
+token 计算 `is_self`；响应绝不包含 token、`token_hash` 或 `family_id`。
+`device_id` 仅作客户端把记录 `created_by_device_id` 解析为当前家庭称呼的**链路键**，
+产品 UI 不得展示。建家/加入时 `display_name`（家庭称呼）**必填**：trim 后空白、
+省略字段、或本机 UI 占位名“我（本机）”均返回 `422`，不再静默收成 null；最长
+128 个 Unicode 字符，并拒绝控制符与双向文本格式控制符。历史库中的空名或不安全
+名字在读取时降级为 `null`，客户端按角色/「家人」兜底。
+
+`POST /v1/family/display-name`（Auth：任一有效家庭 token）允许成员**仅更新自己的**
+`display_name`；body `{"display_name":"…"}`，校验规则同建家/加入；响应
+`{"ok":true,"display_name":"…"}`。
+
+`POST /v1/family/create` 另接受可选 `family_name`（共享家庭名）：trim 后空则存
+`null`；最长 64 Unicode 字符；禁控制符/双向控制符。create/join 响应均含
+`family_name`（可 null）。同一 `create_request_id` 幂等重试须匹配相同
+`family_name`，否则 `409`。
+
+`POST /v1/family/name`（Auth：**仅 owner**）改共享家庭名；body
+`{"family_name":"…"}`（空/`null` 清除）；member 返回 `403`；响应
+`{"ok":true,"family_name":…}`。客户端冷启动依赖本机会话缓存（create/join/rename
+回写），无独立 GET。
 
 为兼容旧库且不引入 schema migration，同一 role + device 的多条 active token
 在列表中合并。不同 role 不合并，因为 `device_id` 是客户端声明而非鉴权证据，不能

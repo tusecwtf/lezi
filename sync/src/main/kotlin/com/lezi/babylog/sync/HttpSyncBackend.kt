@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -28,16 +29,46 @@ internal const val MAX_SYNC_MEDIA_RESPONSE_BYTES = 10 * 1024 * 1024
 private const val MAX_SYNC_ERROR_RESPONSE_BYTES = 64 * 1024
 private const val MILLIS_PER_SECOND = 1_000L
 
-/** Do not publish a device-local UI placeholder as another person's name. */
-internal fun memberDisplayNameForWire(displayName: String?): String? {
-    if (displayName == null) return null
+/** Local-only UI placeholder; must never be uploaded as a real family 称呼. */
+internal const val LOCAL_DEVICE_DISPLAY_NAME = "我（本机）"
+
+/**
+ * Product-required family 称呼 for create / join / self-rename.
+ * Blank, whitespace-only, and the device-local placeholder all fail hard.
+ */
+internal fun requireMemberDisplayName(displayName: String?): String {
+    require(!displayName.isNullOrBlank()) { "请填写家庭称呼" }
     require(displayName.none { it.isISOControl() || it.isBidirectionalControl() }) {
         "家庭称呼不能包含控制字符或双向格式控制符"
     }
     val normalized = displayName.trim()
-    if (normalized.isEmpty() || normalized == "我（本机）") return null
+    require(normalized.isNotEmpty()) { "请填写家庭称呼" }
+    require(normalized != LOCAL_DEVICE_DISPLAY_NAME) {
+        "请填写家庭称呼，不能使用本机占位名"
+    }
     require(normalized.codePointCount(0, normalized.length) <= 128) {
         "家庭称呼最多 128 个字符"
+    }
+    return normalized
+}
+
+/** @deprecated Prefer [requireMemberDisplayName]; kept name for existing call sites. */
+internal fun memberDisplayNameForWire(displayName: String?): String =
+    requireMemberDisplayName(displayName)
+
+/**
+ * Optional shared family name for create / owner rename.
+ * Blank becomes null (server stores null; client applies fallback display).
+ */
+internal fun normalizeFamilyNameForWire(familyName: String?): String? {
+    if (familyName == null) return null
+    require(familyName.none { it.isISOControl() || it.isBidirectionalControl() }) {
+        "家庭名不能包含控制字符或双向格式控制符"
+    }
+    val normalized = familyName.trim()
+    if (normalized.isEmpty()) return null
+    require(normalized.codePointCount(0, normalized.length) <= 64) {
+        "家庭名最多 64 个字符"
     }
     return normalized
 }
@@ -55,11 +86,13 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
         displayName: String?,
         createRequestId: String,
         bootstrapSecret: String?,
+        familyName: String?,
     ) =
         post(baseUrl, "/v1/family/create", null, buildJsonObject {
             put("device_id", deviceId)
             put("create_request_id", createRequestId)
-            memberDisplayNameForWire(displayName)?.let { put("display_name", it) }
+            put("display_name", memberDisplayNameForWire(displayName))
+            normalizeFamilyNameForWire(familyName)?.let { put("family_name", it) }
         }, extraHeaders = buildMap {
             bootstrapSecret?.takeIf(String::isNotBlank)?.let {
                 put(BOOTSTRAP_SECRET_HEADER, it)
@@ -107,8 +140,31 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
         post(baseUrl, "/v1/join", null, buildJsonObject {
             put("code", code)
             put("device_id", deviceId)
-            memberDisplayNameForWire(displayName)?.let { put("display_name", it) }
+            put("display_name", memberDisplayNameForWire(displayName))
         }).toJoinResult()
+
+    override suspend fun updateMyDisplayName(session: SyncSession, displayName: String) {
+        post(
+            session.baseUrl,
+            "/v1/family/display-name",
+            session.familyToken,
+            buildJsonObject {
+                put("display_name", memberDisplayNameForWire(displayName))
+            },
+        )
+    }
+
+    override suspend fun renameFamily(session: SyncSession, familyName: String?) {
+        val normalized = normalizeFamilyNameForWire(familyName)
+        post(
+            session.baseUrl,
+            "/v1/family/name",
+            session.familyToken,
+            buildJsonObject {
+                if (normalized == null) put("family_name", JsonNull) else put("family_name", normalized)
+            },
+        )
+    }
 
     override suspend fun members(session: SyncSession): List<FamilyMember> {
         val json = get(session.baseUrl, "/v1/family/members", session.familyToken)
@@ -121,6 +177,8 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
                     else -> FamilyRole.Member
                 },
                 isSelf = (member["is_self"] as? JsonPrimitive)?.booleanOrNull ?: false,
+                // Link key for created_by_device_id → 称呼; never shown in UI.
+                deviceId = (member["device_id"] as? JsonPrimitive)?.contentOrNull,
             )
         }
     }
@@ -337,6 +395,10 @@ private fun JsonObject.toJoinResult(): JoinResult = JoinResult(
     entities = entities(),
     cursor = get("cursor")?.jsonPrimitive?.longOrNull ?: 0,
     generation = get("generation")?.jsonPrimitive?.contentOrNull.orEmpty(),
+    // Legacy NAS may omit the field or send null; treat blank as null for client fallbacks.
+    familyName = (get("family_name") as? JsonPrimitive)?.contentOrNull
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() },
 )
 
 internal class SyncHttpException(

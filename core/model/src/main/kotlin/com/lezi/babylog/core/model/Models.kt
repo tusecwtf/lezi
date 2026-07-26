@@ -54,6 +54,12 @@ data class Record(
     val endTimestamp: Long? = null,
     val note: String? = null,
     val createdByUserId: Long,
+    /**
+     * Sync session device id of the writer (wire `created_by_device_id`).
+     * Used only to resolve the current membership 家庭称呼 on the timeline;
+     * never shown raw in product UI.
+     */
+    val createdByDeviceId: String? = null,
     val payloadJson: String = "{}",
     val schemaVersion: Int = 1,
     val updatedAt: Long,

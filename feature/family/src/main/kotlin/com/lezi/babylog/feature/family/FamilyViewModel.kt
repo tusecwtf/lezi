@@ -49,11 +49,17 @@ data class FamilyUi(
     val allowedSsids: List<String> = emptyList(),
     val role: FamilyRole = FamilyRole.None,
     val lastSuccessAt: Long? = null,
+    /** Raw shared family name from session cache; null when empty/unknown. */
+    val familyName: String? = null,
     val members: List<FamilyMember> = emptyList(),
     val membersLoaded: Boolean = false,
     val membersLoading: Boolean = false,
     val membersError: String? = null,
-)
+) {
+    /** Resolved label with empty/legacy fallback (not the full account-card redesign). */
+    val familyNameLabel: String
+        get() = displayFamilyName(familyName, current?.nickname)
+}
 
 private data class FamilyMembersState(
     val familyId: String = "",
@@ -109,6 +115,7 @@ class FamilyViewModel @Inject constructor(
             allowedSsids = session.allowedSsids,
             role = session.role,
             lastSuccessAt = session.lastSuccessAt,
+            familyName = session.familyName,
         )
     }
 
@@ -344,16 +351,24 @@ class FamilyViewModel @Inject constructor(
 
     fun join(
         draft: JoinFamilyDraft,
+        displayName: String,
         onDone: (success: Boolean, message: String) -> Unit,
     ) {
         viewModelScope.launch {
-            val command = runCatching { draft.toCommand(ui.value.displayName) }.getOrElse {
+            validateFamilyDisplayNameInput(displayName)?.let {
+                onDone(false, it)
+                return@launch
+            }
+            val command = runCatching { draft.toCommand(displayName.trim()) }.getOrElse {
                 onDone(false, joinFamilyError(it))
                 return@launch
             }
             val result = sync.joinFamily(
                 command,
             )
+            if (result.isSuccess) {
+                careLog.updateLocalDisplayName(displayName.trim())
+            }
             onDone(
                 result.isSuccess,
                 result.fold(
@@ -425,11 +440,28 @@ class FamilyViewModel @Inject constructor(
     }
 
     fun createFamily(
+        displayName: String,
         bootstrapSecret: String,
+        familyName: String = "",
         onDone: (success: Boolean, message: String) -> Unit,
     ) {
         viewModelScope.launch {
-            val result = sync.createFamily(ui.value.displayName, bootstrapSecret)
+            validateFamilyDisplayNameInput(displayName)?.let {
+                onDone(false, it)
+                return@launch
+            }
+            validateFamilyNameInput(familyName)?.let {
+                onDone(false, it)
+                return@launch
+            }
+            val result = sync.createFamily(
+                displayName = displayName.trim(),
+                bootstrapSecret = bootstrapSecret,
+                familyName = familyName.trim().ifEmpty { null },
+            )
+            if (result.isSuccess) {
+                careLog.updateLocalDisplayName(displayName.trim())
+            }
             onDone(
                 result.isSuccess,
                 result.fold(
@@ -438,6 +470,50 @@ class FamilyViewModel @Inject constructor(
                 ),
             )
             if (result.isSuccess) refreshMembersNow(showErrors = true)
+        }
+    }
+
+    fun renameFamily(
+        familyName: String,
+        onDone: (success: Boolean, message: String) -> Unit,
+    ) {
+        viewModelScope.launch {
+            validateFamilyNameInput(familyName)?.let {
+                onDone(false, it)
+                return@launch
+            }
+            val result = sync.renameFamily(familyName.trim().ifEmpty { null })
+            onDone(
+                result.isSuccess,
+                result.fold(
+                    onSuccess = { "家庭名已更新" },
+                    onFailure = { familySyncError(it, "修改家庭名失败") },
+                ),
+            )
+        }
+    }
+
+    fun updateMyDisplayName(
+        displayName: String,
+        onDone: (success: Boolean, message: String) -> Unit,
+    ) {
+        viewModelScope.launch {
+            validateFamilyDisplayNameInput(displayName)?.let {
+                onDone(false, it)
+                return@launch
+            }
+            val result = sync.updateMyDisplayName(displayName.trim())
+            if (result.isSuccess) {
+                careLog.updateLocalDisplayName(displayName.trim())
+                refreshMembersNow(showErrors = true)
+            }
+            onDone(
+                result.isSuccess,
+                result.fold(
+                    onSuccess = { "家庭称呼已更新" },
+                    onFailure = { familySyncError(it, "更新称呼失败") },
+                ),
+            )
         }
     }
 

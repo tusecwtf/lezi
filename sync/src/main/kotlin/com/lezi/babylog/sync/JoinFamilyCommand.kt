@@ -7,6 +7,17 @@ data class JoinFamilyCommand(
     val displayName: String? = null,
 )
 
+/**
+ * Soft UI validation for family 称呼 (create/join/self-rename).
+ * Shared by account wizard and onboarding so both reject the same inputs.
+ * Returns null when valid.
+ */
+fun memberDisplayNameValidationError(displayName: String?): String? =
+    runCatching {
+        requireMemberDisplayName(displayName)
+        null
+    }.exceptionOrNull()?.message
+
 /** Shared mutable-UI value object for onboarding and the family account flow. */
 data class JoinFamilyDraft(
     val invitation: String = "",
@@ -34,6 +45,11 @@ data class JoinFamilyDraft(
         )
     }
 
+    /**
+     * Build a join command. When [displayName] is non-null it is product-required
+     * (same rules as createFamily / updateMyDisplayName); blank / 「我（本机）」 fail.
+     * Network host + ≥1 SSID are always required so account wizard and onboarding share one path.
+     */
     fun toCommand(displayName: String? = null): JoinFamilyCommand {
         require(invitation.trim().isNotEmpty()) { "请填写邀请码" }
         val config = HomeLanServerConfig.fromUserInput(
@@ -44,10 +60,11 @@ data class JoinFamilyDraft(
         )
         require(config.isServerConfigured) { "请填写服务器主机" }
         require(config.allowedSsids.isNotEmpty()) { "请至少填写一个家庭 Wi‑Fi 名称" }
+        val normalizedName = displayName?.let { requireMemberDisplayName(it) }
         return JoinFamilyCommand(
             invitation = invitation.trim(),
             homeLanConfig = config,
-            displayName = displayName,
+            displayName = normalizedName,
         )
     }
 

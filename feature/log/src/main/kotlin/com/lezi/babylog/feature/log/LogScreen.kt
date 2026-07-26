@@ -87,6 +87,9 @@ import com.lezi.babylog.domain.formatClock
 import com.lezi.babylog.domain.relativeTimeLabel
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
+import com.lezi.babylog.sync.UploaderMemberRef
+import com.lezi.babylog.sync.resolveRecordUploaderLabel
+import com.lezi.babylog.sync.toUploaderRef
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.LocalDate
 import java.time.LocalTime
@@ -96,6 +99,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -115,6 +119,8 @@ data class LogUiState(
     val settings: SettingsLocal = SettingsLocal(),
     val openSleep: Record? = null,
     val refreshing: Boolean = false,
+    /** recordId → current 家庭称呼 for non-self writers when family is joined. */
+    val uploaderLabels: Map<Long, String> = emptyMap(),
 )
 
 @HiltViewModel
@@ -126,6 +132,33 @@ class LogViewModel @Inject constructor(
     private val zone = ZoneId.systemDefault()
     private val dayFlow = MutableStateFlow(LocalDate.now(zone))
     private val refreshing = MutableStateFlow(false)
+    private val uploaderMembers = MutableStateFlow<List<UploaderMemberRef>>(emptyList())
+    private val selfDeviceId = MutableStateFlow("")
+    private val familyJoined = MutableStateFlow(false)
+
+    init {
+        viewModelScope.launch {
+            syncPort.session()
+                .map { it.isJoined to it.deviceId }
+                .distinctUntilChanged()
+                .collect { (joined, deviceId) ->
+                    familyJoined.value = joined
+                    selfDeviceId.value = deviceId
+                    if (!joined) {
+                        uploaderMembers.value = emptyList()
+                    } else {
+                        refreshUploaderMembers()
+                    }
+                }
+        }
+    }
+
+    private suspend fun refreshUploaderMembers() {
+        val result = syncPort.listFamilyMembers()
+        uploaderMembers.value = result.getOrNull()
+            ?.mapNotNull { it.toUploaderRef() }
+            .orEmpty()
+    }
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val uiState = combine(
@@ -150,11 +183,15 @@ class LogViewModel @Inject constructor(
             combine(
                 careLog.observeDayRecords(baby.id, day, zone),
                 careLog.observeOpenSleep(baby.id),
-            ) { records, openSleep ->
+                uploaderMembers,
+                selfDeviceId,
+                familyJoined,
+            ) { records, openSleep, members, selfId, joined ->
                 val start = day.atStartOfDay(zone).toInstant().toEpochMilli()
                 val end = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
                 val summary = CareAggregation.day(records, day, zone).toDailySummary()
                 val lanes = buildLanes(records, start, end)
+                val labels = buildUploaderLabels(records, selfId, joined, members)
                 LogUiState(
                     loading = false,
                     baby = baby,
@@ -167,6 +204,7 @@ class LogViewModel @Inject constructor(
                     careLanes = lanes.care,
                     settings = settings,
                     openSleep = openSleep,
+                    uploaderLabels = labels,
                 )
             }
         }
@@ -183,12 +221,41 @@ class LogViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 syncPort.sync(SyncTrigger.PullToRefresh)
+                if (familyJoined.value) refreshUploaderMembers()
             } finally {
                 refreshing.value = false
             }
         }
     }
 }
+
+/** Pure map of record id → uploader display label (S3 seam for timeline composition). */
+internal fun buildUploaderLabels(
+    records: List<Record>,
+    selfDeviceId: String,
+    isFamilyJoined: Boolean,
+    members: List<UploaderMemberRef>,
+): Map<Long, String> {
+    if (!isFamilyJoined || records.isEmpty()) return emptyMap()
+    val out = LinkedHashMap<Long, String>()
+    for (record in records) {
+        val label = resolveRecordUploaderLabel(
+            createdByDeviceId = record.createdByDeviceId,
+            selfDeviceId = selfDeviceId,
+            isFamilyJoined = true,
+            members = members,
+        )
+        if (label != null) out[record.id] = label
+    }
+    return out
+}
+
+/** Compose payload summary with optional uploader 称呼 for the secondary line. */
+internal fun timelineRecordSummary(payloadSummary: String, uploaderLabel: String?): String =
+    listOfNotNull(
+        payloadSummary.takeIf { it.isNotBlank() },
+        uploaderLabel?.takeIf { it.isNotBlank() },
+    ).joinToString(" · ")
 
 private data class Quad<A, B, C, D>(val a: A, val b: B, val c: C, val d: D)
 
@@ -537,7 +604,10 @@ fun LogRoute(
                             RecordRow(
                                 time = formatClock(r.timestamp),
                                 title = typeLabel(r.type),
-                                summary = recordSummaryLine(r),
+                                summary = timelineRecordSummary(
+                                    recordSummaryLine(r),
+                                    state.uploaderLabels[r.id],
+                                ),
                                 relative = relativeTimeLabel(r.timestamp),
                                 tone = toneOf(r.type),
                                 anomaly = (r.payload.payload as? SleepPayload)?.anomaly == true ||

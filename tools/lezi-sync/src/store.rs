@@ -164,7 +164,8 @@ impl Store {
             CREATE TABLE IF NOT EXISTS families (
                 id TEXT PRIMARY KEY,
                 created_at INTEGER NOT NULL,
-                create_request_hash TEXT
+                create_request_hash TEXT,
+                name TEXT
             );
 
             CREATE TABLE IF NOT EXISTS memberships (
@@ -217,6 +218,9 @@ impl Store {
                 [],
             )?;
         }
+        if !family_columns.contains("name") {
+            connection.execute("ALTER TABLE families ADD COLUMN name TEXT", [])?;
+        }
         connection.execute(
             "
             CREATE UNIQUE INDEX IF NOT EXISTS families_create_request
@@ -228,14 +232,18 @@ impl Store {
         Ok(())
     }
 
+    /// Creates a family (or returns the same credentials on matching idempotent retry).
+    ///
+    /// Returns `(family_id, token, family_name)`.
     pub fn create_family<F>(
         &self,
         now: i64,
         create_request_id: &str,
         device_id: &str,
-        display_name: Option<&str>,
+        display_name: &str,
+        family_name: Option<&str>,
         derive_token: F,
-    ) -> Result<(String, String), StoreError>
+    ) -> Result<(String, String, Option<String>), StoreError>
     where
         F: Fn(&str, &str) -> String,
     {
@@ -245,7 +253,7 @@ impl Store {
         let retry = transaction
             .query_row(
                 "
-                SELECT families.id, memberships.device_id,
+                SELECT families.id, families.name, memberships.device_id,
                        memberships.display_name, memberships.revoked_at
                 FROM families
                 JOIN memberships
@@ -257,16 +265,18 @@ impl Store {
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
                     ))
                 },
             )
             .optional()?;
-        if let Some((family_id, stored_device, stored_name, revoked_at)) = retry {
+        if let Some((family_id, stored_family_name, stored_device, stored_name, revoked_at)) = retry {
             if stored_device != device_id
-                || stored_name.as_deref() != display_name
+                || stored_name.as_deref() != Some(display_name)
+                || stored_family_name.as_deref() != family_name
                 || revoked_at.is_some()
             {
                 return Err(StoreError::FamilyAlreadyExists);
@@ -274,6 +284,7 @@ impl Store {
             return Ok((
                 family_id.clone(),
                 derive_token(&create_request_hash, &family_id),
+                stored_family_name,
             ));
         }
         if transaction
@@ -288,10 +299,10 @@ impl Store {
         let token = derive_token(&create_request_hash, &family_id);
         transaction.execute(
             "
-            INSERT INTO families(id, created_at, create_request_hash)
-            VALUES (?1, ?2, ?3)
+            INSERT INTO families(id, created_at, create_request_hash, name)
+            VALUES (?1, ?2, ?3, ?4)
             ",
-            params![family_id, now, create_request_hash],
+            params![family_id, now, create_request_hash, family_name],
         )?;
         transaction.execute(
             "INSERT INTO family_meta(family_id, rev) VALUES (?1, 0)",
@@ -311,7 +322,25 @@ impl Store {
             ],
         )?;
         transaction.commit()?;
-        Ok((family_id, token))
+        Ok((
+            family_id,
+            token,
+            family_name.map(str::to_owned),
+        ))
+    }
+
+    /// Sets the shared family name (`None` clears). Caller enforces owner role.
+    pub fn rename_family(
+        &self,
+        family_id: &str,
+        family_name: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let connection = self.connect()?;
+        connection.execute(
+            "UPDATE families SET name = ?1 WHERE id = ?2",
+            params![family_name, family_id],
+        )?;
+        Ok(())
     }
 
     pub fn authenticate(&self, token: &str) -> Result<Option<Principal>, StoreError> {
@@ -380,14 +409,33 @@ impl Store {
         Ok(expires_at)
     }
 
+    /// Updates the active membership row for `token_hash` only (self-rename).
+    pub fn update_membership_display_name(
+        &self,
+        token_hash: &str,
+        display_name: &str,
+    ) -> Result<(), StoreError> {
+        let connection = self.connect()?;
+        connection.execute(
+            "
+            UPDATE memberships
+            SET display_name = ?1
+            WHERE token_hash = ?2 AND revoked_at IS NULL
+            ",
+            params![display_name, token_hash],
+        )?;
+        Ok(())
+    }
+
+    /// Returns `(family_id, token, family_name)`.
     pub fn join_family<F>(
         &self,
         code: &str,
         device_id: &str,
-        display_name: Option<&str>,
+        display_name: &str,
         now: i64,
         derive_token: F,
-    ) -> Result<(String, String), StoreError>
+    ) -> Result<(String, String, Option<String>), StoreError>
     where
         F: Fn(&str, &str) -> String,
     {
@@ -397,8 +445,11 @@ impl Store {
         let invite = transaction
             .query_row(
                 "
-                SELECT family_id, expires_at, used_at, joined_device_id
-                FROM invites WHERE code_hash = ?1
+                SELECT invites.family_id, invites.expires_at, invites.used_at,
+                       invites.joined_device_id, families.name
+                FROM invites
+                JOIN families ON families.id = invites.family_id
+                WHERE invites.code_hash = ?1
                 ",
                 params![code_hash],
                 |row| {
@@ -407,12 +458,13 @@ impl Store {
                         row.get::<_, i64>(1)?,
                         row.get::<_, Option<i64>>(2)?,
                         row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
                     ))
                 },
             )
             .optional()?
             .ok_or(StoreError::InviteNotFound)?;
-        let (family_id, expires_at, used_at, joined_device_id) = invite;
+        let (family_id, expires_at, used_at, joined_device_id, family_name) = invite;
         let token = derive_token(&code_hash, device_id);
         let token_hash = crate::hash_secret(&token);
         if used_at.is_some() {
@@ -432,7 +484,7 @@ impl Store {
             if active.is_none() {
                 return Err(StoreError::InviteNotFound);
             }
-            return Ok((family_id, token));
+            return Ok((family_id, token, family_name));
         }
         if expires_at <= now {
             return Err(StoreError::InviteExpired);
@@ -454,7 +506,7 @@ impl Store {
             params![now, device_id, code_hash],
         )?;
         transaction.commit()?;
-        Ok((family_id, token))
+        Ok((family_id, token, family_name))
     }
 
     pub fn revoke(&self, token_hash: &str, now: i64) -> Result<(), StoreError> {
@@ -1239,6 +1291,7 @@ mod tests {
                 1,
                 "bounded-push-request-id-0000000001",
                 "owner",
+                "妈妈",
                 None,
                 |_, _| "owner-token".to_owned(),
             )

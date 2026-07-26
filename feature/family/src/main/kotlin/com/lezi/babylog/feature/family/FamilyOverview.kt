@@ -29,6 +29,10 @@ import com.lezi.babylog.domain.babyAgeLabel
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 
+/**
+ * Independent baby zone on the account Tab. Device ID / storage / network
+ * summaries intentionally stay off this surface (S1 / ticket 03).
+ */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun FamilyOverview(
@@ -120,19 +124,6 @@ internal fun FamilyOverview(
                         }
                     }
                 }
-            }
-
-            LeziCard(modifier = Modifier.fillMaxWidth()) {
-                FamilyScopeRow(
-                    marker = "存储",
-                    title = if (ui.enabled) "本机 + 家庭服务器" else "仅本机",
-                    detail = if (ui.enabled) "家庭同步已开启" else "家庭同步未开启",
-                )
-                FamilyScopeRow(
-                    marker = "设备",
-                    title = "本机标识",
-                    detail = ui.deviceId.take(12).uppercase().ifBlank { "生成中" },
-                )
             }
 
             SectionHeading(

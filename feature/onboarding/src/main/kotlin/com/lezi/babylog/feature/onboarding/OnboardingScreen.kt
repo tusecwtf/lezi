@@ -155,16 +155,21 @@ class OnboardingViewModel @Inject constructor(
      */
     fun joinFamily(
         draft: JoinFamilyDraft,
+        displayName: String,
         onDone: (String?) -> Unit,
     ) {
         viewModelScope.launch {
-            val command = runCatching { draft.toCommand() }.getOrElse {
+            // Same soft gate as account family wizard (shared sync validation).
+            com.lezi.babylog.sync.memberDisplayNameValidationError(displayName)?.let {
+                onDone(it)
+                return@launch
+            }
+            val command = runCatching { draft.toCommand(displayName) }.getOrElse {
                 onDone(joinFamilyError(it))
                 return@launch
             }
-            val displayName = try {
+            try {
                 careLog.ensureFamilyScaffold()
-                careLog.localFamilyIdentity().displayName
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
@@ -173,13 +178,12 @@ class OnboardingViewModel @Inject constructor(
             }
             // The edited endpoint is an in-memory join candidate. RealSyncPort persists it
             // atomically with the joined session only after the server accepts the invite.
-            val join = sync.joinFamily(
-                command.copy(displayName = displayName),
-            )
+            val join = sync.joinFamily(command)
             if (join.isFailure) {
                 onDone(joinFamilyError(join.exceptionOrNull() ?: Exception("加入失败")))
                 return@launch
             }
+            careLog.updateLocalDisplayName(command.displayName ?: displayName.trim())
             sync.requestSync(SyncTrigger.PullToRefresh)
             onDone(null)
         }
@@ -274,6 +278,7 @@ fun OnboardingRoute(
     var themeIdx by remember { mutableIntStateOf(0) }
     var showDate by remember { mutableStateOf(false) }
     var showJoin by remember { mutableStateOf(false) }
+    var joinDisplayName by remember { mutableStateOf("") }
     var nameError by remember { mutableStateOf(false) }
     var formError by remember { mutableStateOf<String?>(null) }
     val context = LocalContext.current
@@ -655,6 +660,15 @@ fun OnboardingRoute(
                         Text("填入当前 Wi‑Fi 名称")
                     }
                     OutlinedTextField(
+                        value = joinDisplayName,
+                        onValueChange = { joinDisplayName = it },
+                        label = { Text("我是宝宝的？") },
+                        placeholder = { Text("如：妈妈、干妈、月嫂小王") },
+                        supportingText = { Text("家庭称呼，必填；家人用这个认出你") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedTextField(
                         value = joinDraft.invitation,
                         onValueChange = { joinDraft = joinDraft.copy(invitation = it) },
                         label = { Text("邀请码或 QR 载荷") },
@@ -681,13 +695,22 @@ fun OnboardingRoute(
                     onClick = {
                         withHomeWifiAccess {
                             fillCurrentWifiIfBlank()
-                            runCatching { joinDraft.toCommand() }.exceptionOrNull()?.let {
-                                formError = it.message ?: "服务器地址无效"
-                                return@withHomeWifiAccess
-                            }
+                            // Shared rules with account wizard / JoinFamilyDraft.toCommand.
+                            com.lezi.babylog.sync.memberDisplayNameValidationError(joinDisplayName)
+                                ?.let {
+                                    formError = it
+                                    return@withHomeWifiAccess
+                                }
+                            runCatching { joinDraft.toCommand(joinDisplayName) }
+                                .exceptionOrNull()
+                                ?.let {
+                                    formError = it.message ?: "服务器地址无效"
+                                    return@withHomeWifiAccess
+                                }
                             formError = null
                             vm.joinFamily(
                                 draft = joinDraft,
+                                displayName = joinDisplayName,
                                 onDone = { err ->
                                     if (err == null) {
                                         showJoin = false

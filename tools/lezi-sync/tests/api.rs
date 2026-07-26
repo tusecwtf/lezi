@@ -233,7 +233,11 @@ async fn invite_and_join(app: &Router, owner_token: &str, device_id: &str) -> Va
         Method::POST,
         "/v1/join",
         None,
-        json!({"code": invitation["code"], "device_id": device_id}),
+        json!({
+            "code": invitation["code"],
+            "device_id": device_id,
+            "display_name": "成员",
+        }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{member}");
@@ -350,7 +354,11 @@ async fn family_create_is_strict_idempotent_and_restart_safe() {
         Method::POST,
         "/v1/family/create",
         None,
-        json!({"create_request_id": "short", "device_id": "owner-device"}),
+        json!({
+            "create_request_id": "short",
+            "device_id": "owner-device",
+            "display_name": "妈妈",
+        }),
     )
     .await;
     assert_eq!(missing_status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -370,7 +378,8 @@ async fn family_create_is_strict_idempotent_and_restart_safe() {
         None,
         json!({
             "create_request_id": "Bv4Na1mK9sQ8pR7tU6wX5yZ3cD2eF0gH",
-            "device_id": "owner-device"
+            "device_id": "owner-device",
+            "display_name": "妈妈",
         }),
     )
     .await;
@@ -418,7 +427,7 @@ async fn invite_join_roles_expiry_restart_and_leave_match_contract() {
         Method::POST,
         "/v1/join",
         None,
-        json!({"code": code, "device_id": "member-device"}),
+        json!({"code": code, "device_id": "member-device", "display_name": "成员"}),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -429,7 +438,7 @@ async fn invite_join_roles_expiry_restart_and_leave_match_contract() {
         Method::POST,
         "/v1/join",
         None,
-        json!({"code": code, "device_id": "member-device"}),
+        json!({"code": code, "device_id": "member-device", "display_name": "成员"}),
     )
     .await;
     assert_eq!(retry_status, StatusCode::OK);
@@ -440,7 +449,7 @@ async fn invite_join_roles_expiry_restart_and_leave_match_contract() {
         Method::POST,
         "/v1/join",
         None,
-        json!({"code": code, "device_id": "other-device"}),
+        json!({"code": code, "device_id": "other-device", "display_name": "成员"}),
     )
     .await;
     assert_eq!(replay_status, StatusCode::CONFLICT);
@@ -498,7 +507,7 @@ async fn invite_join_roles_expiry_restart_and_leave_match_contract() {
         Method::POST,
         "/v1/join",
         None,
-        json!({"code": expiring["code"], "device_id": "late-device"}),
+        json!({"code": expiring["code"], "device_id": "late-device", "display_name": "成员"}),
     )
     .await;
     assert_eq!(expired, StatusCode::GONE);
@@ -555,8 +564,18 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
     assert_eq!(
         owner_view,
         json!({"members":[
-            {"display_name":"妈妈","role":"owner","is_self":true},
-            {"display_name":"陈爸爸 🌿","role":"member","is_self":false},
+            {
+                "display_name":"妈妈",
+                "role":"owner",
+                "is_self":true,
+                "device_id":"owner-sensitive-device-id",
+            },
+            {
+                "display_name":"陈爸爸 🌿",
+                "role":"member",
+                "is_self":false,
+                "device_id":"member-sensitive-device-id",
+            },
         ]})
     );
     let (member_status, member_view) =
@@ -565,8 +584,18 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
     assert_eq!(
         member_view,
         json!({"members":[
-            {"display_name":"妈妈","role":"owner","is_self":false},
-            {"display_name":"陈爸爸 🌿","role":"member","is_self":true},
+            {
+                "display_name":"妈妈",
+                "role":"owner",
+                "is_self":false,
+                "device_id":"owner-sensitive-device-id",
+            },
+            {
+                "display_name":"陈爸爸 🌿",
+                "role":"member",
+                "is_self":true,
+                "device_id":"member-sensitive-device-id",
+            },
         ]})
     );
     let visible_members = |body: &Value| {
@@ -580,14 +609,9 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
     assert_eq!(visible_members(&owner_view), visible_members(&member_view));
 
     let serialized = owner_view.to_string();
-    for secret in [
-        "owner-sensitive-device-id",
-        "member-sensitive-device-id",
-        owner_token,
-        member_token,
-        &token_hash(owner_token),
-        &token_hash(member_token),
-    ] {
+    // Tokens / token hashes must never appear; device_id is the intentional
+    // client link key for created_by_device_id → 称呼 resolution.
+    for secret in [owner_token, member_token, &token_hash(owner_token), &token_hash(member_token)] {
         assert!(
             !serialized.contains(secret),
             "leaked {secret}: {serialized}"
@@ -595,9 +619,11 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
     }
     for row in owner_view["members"].as_array().unwrap() {
         let fields = row.as_object().unwrap();
-        assert_eq!(fields.len(), 3);
-        assert!(!fields.contains_key("device_id"));
+        assert_eq!(fields.len(), 4);
+        assert!(fields.contains_key("device_id"));
         assert!(!fields.contains_key("token_hash"));
+        assert!(!fields.contains_key("token"));
+        assert!(!fields.contains_key("family_id"));
     }
 
     let isolated_family_id = Uuid::new_v4().to_string();
@@ -630,7 +656,12 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
     assert_eq!(
         isolated_view,
         json!({"members":[
-            {"display_name":"隔离家庭","role":"owner","is_self":true},
+            {
+                "display_name":"隔离家庭",
+                "role":"owner",
+                "is_self":true,
+                "device_id":"isolated-raw-device-id",
+            },
         ]})
     );
     let (_, owner_after_isolated_insert) =
@@ -638,7 +669,10 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
     assert_eq!(owner_after_isolated_insert, owner_view);
     assert!(!owner_after_isolated_insert.to_string().contains("隔离家庭"));
     assert!(!isolated_view.to_string().contains("妈妈"));
-    assert!(!isolated_view.to_string().contains("isolated-raw-device-id"));
+    // Cross-family isolation: owner view must not list the isolated device.
+    assert!(!owner_after_isolated_insert
+        .to_string()
+        .contains("isolated-raw-device-id"));
 
     assert_eq!(
         json_request(
@@ -653,11 +687,13 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
         StatusCode::OK
     );
     let (_, after_leave) = get_json(&rig.app, "/v1/family/members", Some(owner_token)).await;
+    assert_eq!(after_leave["members"].as_array().unwrap().len(), 1);
+    assert_eq!(after_leave["members"][0]["display_name"], "妈妈");
+    assert_eq!(after_leave["members"][0]["role"], "owner");
+    assert_eq!(after_leave["members"][0]["is_self"], true);
     assert_eq!(
-        after_leave,
-        json!({"members":[
-            {"display_name":"妈妈","role":"owner","is_self":true},
-        ]})
+        after_leave["members"][0]["device_id"],
+        "owner-sensitive-device-id"
     );
 }
 
@@ -704,35 +740,14 @@ async fn family_members_normalize_unicode_and_empty_names_and_reject_unsafe_join
         StatusCode::OK
     );
 
-    let (_, empty_invite) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/invite",
-        Some(owner_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            "/v1/join",
-            None,
-            join(
-                empty_invite["code"].clone(),
-                "empty-name-member",
-                json!("　  "),
-            ),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-
-    for (device_id, unsafe_name) in [
-        ("newline-member", "名字\n伪装".to_owned()),
-        ("bidi-member", "成员\u{202e}renwo".to_owned()),
-        ("long-member", "名".repeat(129)),
+    // Blank / placeholder / unsafe names are hard-rejected (no silent null).
+    for (device_id, bad_name) in [
+        ("empty-name-member", json!("　  ")),
+        ("missing-name-member", json!(null)),
+        ("placeholder-member", json!("我（本机）")),
+        ("newline-member", json!("名字\n伪装")),
+        ("bidi-member", json!("成员\u{202e}renwo")),
+        ("long-member", json!("名".repeat(129))),
     ] {
         let (_, invitation) = json_request(
             &rig.app,
@@ -747,23 +762,49 @@ async fn family_members_normalize_unicode_and_empty_names_and_reject_unsafe_join
             Method::POST,
             "/v1/join",
             None,
-            join(invitation["code"].clone(), device_id, json!(unsafe_name)),
+            join(invitation["code"].clone(), device_id, bad_name),
         )
         .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "expected 422 for {device_id}"
+        );
     }
 
+    // Omitted display_name field also fails.
+    let (_, omitted_invite) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/invite",
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/join",
+            None,
+            json!({
+                "code": omitted_invite["code"],
+                "device_id": "omitted-name-member",
+            }),
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+
     let (_, members) = get_json(&rig.app, "/v1/family/members", Some(owner_token)).await;
-    assert_eq!(members["members"].as_array().unwrap().len(), 3);
+    assert_eq!(members["members"].as_array().unwrap().len(), 2);
     assert_eq!(members["members"][0]["role"], "owner");
     assert!(members["members"].as_array().unwrap().iter().any(|member| {
-        member["display_name"] == "李爸爸 👨‍🍼" && member["role"] == "member"
+        member["display_name"] == "李爸爸 👨‍🍼" // placeholder replaced below
+            && member["role"] == "member"
+            && member["device_id"] == "unicode-member"
     }));
-    assert!(members["members"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|member| { member["display_name"].is_null() && member["role"] == "member" }));
 }
 
 #[tokio::test]
@@ -782,6 +823,27 @@ async fn family_create_uses_the_same_display_name_normalization_as_join() {
     )
     .await;
     assert_eq!(unsafe_status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    for (request_id, display_name) in [
+        ("blank-owner-request-000000000000001", json!("　  ")),
+        ("null-owner-request-0000000000000001", json!(null)),
+        ("placeholder-owner-request-000000001", json!("我（本机）")),
+    ] {
+        let blank_rig = Rig::new();
+        let (status, _) = json_request(
+            &blank_rig.app,
+            Method::POST,
+            "/v1/family/create",
+            None,
+            json!({
+                "create_request_id": request_id,
+                "device_id": "blank-owner-device",
+                "display_name": display_name,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
 
     let normalized_rig = Rig::new();
     let (create_status, owner) = json_request(
@@ -804,6 +866,282 @@ async fn family_create_uses_the_same_display_name_normalization_as_join() {
     )
     .await;
     assert_eq!(members["members"][0]["display_name"], "妈妈");
+    assert_eq!(members["members"][0]["device_id"], "trimmed-owner-device");
+}
+
+#[tokio::test]
+async fn member_can_update_own_display_name_only() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "rename-owner-device",
+        "rename-owner-request-00000000000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let (_, invitation) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/invite",
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    let (join_status, member) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/join",
+        None,
+        json!({
+            "code": invitation["code"],
+            "device_id": "rename-member-device",
+            "display_name": "爸爸",
+        }),
+    )
+    .await;
+    assert_eq!(join_status, StatusCode::OK, "{member}");
+    let member_token = member["token"].as_str().unwrap();
+
+    let (status, body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/display-name",
+        Some(member_token),
+        json!({"display_name": "　干爹　"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["display_name"], "干爹");
+
+    let (_, members) = get_json(&rig.app, "/v1/family/members", Some(owner_token)).await;
+    let member_row = members["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["is_self"] == false && row["role"] == "member")
+        .unwrap();
+    assert_eq!(member_row["display_name"], "干爹");
+    assert_eq!(member_row["device_id"], "rename-member-device");
+
+    // Owner rename still only touches self.
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/family/display-name",
+            Some(owner_token),
+            json!({"display_name": "妈妈新称呼"}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, after) = get_json(&rig.app, "/v1/family/members", Some(member_token)).await;
+    assert!(after["members"].as_array().unwrap().iter().any(|row| {
+        row["role"] == "owner" && row["display_name"] == "妈妈新称呼" && row["is_self"] == false
+    }));
+    assert!(after["members"].as_array().unwrap().iter().any(|row| {
+        row["role"] == "member" && row["display_name"] == "干爹" && row["is_self"] == true
+    }));
+
+    // Blank / placeholder still 422 on update.
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/family/display-name",
+            Some(member_token),
+            json!({"display_name": "我（本机）"}),
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/family/display-name",
+            Some(member_token),
+            json!({"display_name": "  "}),
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+}
+
+#[tokio::test]
+async fn shared_family_name_persists_on_create_join_and_owner_rename() {
+    let rig = Rig::new();
+    let request_id = "family-name-create-request-000000000001";
+    let (create_status, owner) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": request_id,
+            "device_id": "family-name-owner",
+            "display_name": "妈妈",
+            "family_name": "  乐乐一家  ",
+        }),
+    )
+    .await;
+    assert_eq!(create_status, StatusCode::CREATED, "{owner}");
+    assert_eq!(owner["family_name"], "乐乐一家");
+    let owner_token = owner["token"].as_str().unwrap();
+
+    // Idempotent retry must match the same family_name (like display_name).
+    let (retry_ok, retry_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": request_id,
+            "device_id": "family-name-owner",
+            "display_name": "妈妈",
+            "family_name": "乐乐一家",
+        }),
+    )
+    .await;
+    assert_eq!(retry_ok, StatusCode::CREATED, "{retry_body}");
+    assert_eq!(retry_body["family_id"], owner["family_id"]);
+    assert_eq!(retry_body["family_name"], "乐乐一家");
+
+    let (retry_conflict, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": request_id,
+            "device_id": "family-name-owner",
+            "display_name": "妈妈",
+            "family_name": "别的名字",
+        }),
+    )
+    .await;
+    assert_eq!(retry_conflict, StatusCode::CONFLICT);
+
+    // Blank/omitted family_name is accepted and stored as null.
+    let blank_rig = Rig::new();
+    let (blank_status, blank_owner) = json_request(
+        &blank_rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": "family-name-blank-request-00000000001",
+            "device_id": "blank-name-owner",
+            "display_name": "妈妈",
+            "family_name": "   ",
+        }),
+    )
+    .await;
+    assert_eq!(blank_status, StatusCode::CREATED, "{blank_owner}");
+    assert!(blank_owner["family_name"].is_null());
+
+    // Join returns the current shared name.
+    let (_, invitation) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/invite",
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    let (join_status, join_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/join",
+        None,
+        json!({
+            "code": invitation["code"],
+            "device_id": "family-name-member",
+            "display_name": "爸爸",
+        }),
+    )
+    .await;
+    assert_eq!(join_status, StatusCode::OK, "{join_body}");
+    assert_eq!(join_body["family_name"], "乐乐一家");
+    let member_token = join_body["token"].as_str().unwrap();
+
+    // Owner may rename; member may not.
+    let (rename_status, rename_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/name",
+        Some(owner_token),
+        json!({"family_name": "  年年的家庭  "}),
+    )
+    .await;
+    assert_eq!(rename_status, StatusCode::OK, "{rename_body}");
+    assert_eq!(rename_body["ok"], true);
+    assert_eq!(rename_body["family_name"], "年年的家庭");
+
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/family/name",
+            Some(member_token),
+            json!({"family_name": "偷改"}),
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+
+    // After rename, a fresh invite/join sees the new name.
+    let (_, invite2) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/invite",
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    let (_, join2) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/join",
+        None,
+        json!({
+            "code": invite2["code"],
+            "device_id": "family-name-member-2",
+            "display_name": "姥姥",
+        }),
+    )
+    .await;
+    assert_eq!(join2["family_name"], "年年的家庭");
+
+    // Control characters rejected.
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/family/name",
+            Some(owner_token),
+            json!({"family_name": "坏\n名字"}),
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+
+    // Clear name with empty string.
+    let (clear_status, clear_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/name",
+        Some(owner_token),
+        json!({"family_name": ""}),
+    )
+    .await;
+    assert_eq!(clear_status, StatusCode::OK, "{clear_body}");
+    assert!(clear_body["family_name"].is_null());
 }
 
 #[tokio::test]
@@ -865,18 +1203,48 @@ async fn family_members_coalesce_legacy_duplicate_member_tokens_without_role_pro
     assert_eq!(
         members,
         json!({"members":[
-            {"display_name":"妈妈","role":"owner","is_self":true},
-            {"display_name":"伪装管理员","role":"member","is_self":false},
-            {"display_name":"历史成员","role":"member","is_self":false},
-            {"display_name":null,"role":"member","is_self":false},
-            {"display_name":null,"role":"member","is_self":false},
-            {"display_name":null,"role":"member","is_self":false},
+            {
+                "display_name":"妈妈",
+                "role":"owner",
+                "is_self":true,
+                "device_id":"duplicate-owner-device",
+            },
+            {
+                "display_name":"伪装管理员",
+                "role":"member",
+                "is_self":false,
+                "device_id":"duplicate-owner-device",
+            },
+            {
+                "display_name":"历史成员",
+                "role":"member",
+                "is_self":false,
+                "device_id":"same-legacy-device",
+            },
+            {
+                "display_name":null,
+                "role":"member",
+                "is_self":false,
+                "device_id":"legacy-empty-device",
+            },
+            {
+                "display_name":null,
+                "role":"member",
+                "is_self":false,
+                "device_id":"legacy-local-placeholder-device",
+            },
+            {
+                "display_name":null,
+                "role":"member",
+                "is_self":false,
+                "device_id":"legacy-null-device",
+            },
         ]})
     );
     let serialized = members.to_string();
     assert!(!serialized.contains("我（本机）"));
-    assert!(!serialized.contains("same-legacy-device"));
-    assert!(!serialized.contains("duplicate-owner-device"));
+    assert!(!serialized.contains("legacy-member-token"));
+    assert!(!serialized.contains("owner-device-collision"));
 }
 
 #[tokio::test]
@@ -1983,6 +2351,7 @@ async fn bootstrap_secret_gates_family_create_when_configured() {
         json!({
             "create_request_id": "bootstrap-owner-request-000000000002",
             "device_id": "owner-device",
+            "display_name": "妈妈",
         }),
         &[("x-lezi-bootstrap-secret", secret)],
     )
@@ -2019,6 +2388,7 @@ async fn create_and_join_limits_are_scoped_without_losing_global_protection() {
         json!({
             "create_request_id": "rate-limit-owner-request-0000000002",
             "device_id": "other-device",
+            "display_name": "妈妈",
         }),
     )
     .await;
@@ -2031,6 +2401,7 @@ async fn create_and_join_limits_are_scoped_without_losing_global_protection() {
         json!({
             "create_request_id": "rate-limit-owner-request-0000000003",
             "device_id": "other-device",
+            "display_name": "妈妈",
         }),
     )
     .await;
@@ -2043,6 +2414,7 @@ async fn create_and_join_limits_are_scoped_without_losing_global_protection() {
         json!({
             "create_request_id": "rate-limit-owner-request-0000000004",
             "device_id": "other-device",
+            "display_name": "妈妈",
         }),
     )
     .await;
@@ -2063,7 +2435,7 @@ async fn create_and_join_limits_are_scoped_without_losing_global_protection() {
             Method::POST,
             "/v1/join",
             None,
-            json!({"code": "WRONGCODE001", "device_id": device}),
+            json!({"code": "WRONGCODE001", "device_id": device, "display_name": "成员"}),
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
@@ -2073,7 +2445,7 @@ async fn create_and_join_limits_are_scoped_without_losing_global_protection() {
         Method::POST,
         "/v1/join",
         None,
-        json!({"code": "WRONGCODE001", "device_id": "attacker-c"}),
+        json!({"code": "WRONGCODE001", "device_id": "attacker-c", "display_name": "成员"}),
     )
     .await;
     assert_eq!(join_limited, StatusCode::TOO_MANY_REQUESTS, "{join_body}");
@@ -2086,7 +2458,7 @@ async fn create_and_join_limits_are_scoped_without_losing_global_protection() {
         Method::POST,
         "/v1/join",
         None,
-        json!({"code": code, "device_id": "member-device"}),
+        json!({"code": code, "device_id": "member-device", "display_name": "成员"}),
     )
     .await;
     assert_eq!(joined, StatusCode::OK, "{member}");

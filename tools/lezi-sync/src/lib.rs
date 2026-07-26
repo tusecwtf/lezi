@@ -25,8 +25,10 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use futures_util::StreamExt;
 use hmac::{Hmac, Mac};
-use members::list_family_members;
-use model::{EmptyRequest, FamilyCreateRequest, InviteRequest, JoinRequest, PushRequest};
+use members::{list_family_members, update_my_display_name};
+use model::{
+    EmptyRequest, FamilyCreateRequest, InviteRequest, JoinRequest, PushRequest, RenameFamilyRequest,
+};
 use rand::distributions::{Distribution, Uniform};
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -278,6 +280,8 @@ pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
         .route("/ready", get(readiness))
         .route("/v1/family/create", post(create_family))
         .route("/v1/family/members", get(list_family_members))
+        .route("/v1/family/display-name", post(update_my_display_name))
+        .route("/v1/family/name", post(rename_family))
         .route("/v1/invite", post(create_invite))
         .route("/v1/join", post(join))
         .route("/v1/leave", post(leave))
@@ -303,7 +307,7 @@ async fn create_family(
     // allowance reserved for callers that can actually create a family.
     require_bootstrap_secret(&state, &headers)?;
     let request = json_body(body)?;
-    let display_name = request.validate()?;
+    let (display_name, family_name) = request.validate()?;
     let scope = format!("device:{}", hash_secret(&request.device_id));
     if !state.create_limiter.check_and_record(&scope, state.now()) {
         return Err(ApiError::too_many_requests(
@@ -315,10 +319,11 @@ async fn create_family(
         state.now(),
         &request.create_request_id,
         &request.device_id,
-        display_name.as_deref(),
+        &display_name,
+        family_name.as_deref(),
         move |request_hash, family_id| signing_state.owner_token(request_hash, family_id),
     );
-    let (family_id, token) = match result {
+    let (family_id, token, stored_family_name) = match result {
         Ok(value) => value,
         Err(StoreError::FamilyAlreadyExists) => {
             return Err(ApiError::conflict("Family already exists"))
@@ -332,8 +337,30 @@ async fn create_family(
             "token": token,
             "role": "owner",
             "generation": state.generation,
+            "family_name": stored_family_name,
         })),
     ))
+}
+
+/// Owner-only rename of the shared family name.
+///
+/// Body: `{"family_name": "…"}` — blank/null clears the name (client applies
+/// fallback). Response: `{"ok": true, "family_name": …}`.
+async fn rename_family(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<RenameFamilyRequest>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let principal = require_owner(&state, &headers)?;
+    let request = json_body(body)?;
+    let family_name = request.validate()?;
+    state
+        .store
+        .rename_family(&principal.family_id, family_name.as_deref())?;
+    Ok(Json(json!({
+        "ok": true,
+        "family_name": family_name,
+    })))
 }
 
 async fn create_invite(
@@ -387,11 +414,11 @@ async fn join(
     let result = state.store.join_family(
         &request.code,
         &request.device_id,
-        display_name.as_deref(),
+        &display_name,
         state.now(),
         move |code_hash, device_id| signing_state.member_token(code_hash, device_id),
     );
-    let (family_id, token) = match result {
+    let (family_id, token, family_name) = match result {
         Ok(value) => value,
         Err(StoreError::InviteNotFound) => return Err(ApiError::not_found("Invitation not found")),
         Err(StoreError::InviteExpired) => return Err(ApiError::gone("Invitation expired")),
@@ -409,6 +436,7 @@ async fn join(
         "entities": [],
         "cursor": 0,
         "generation": state.generation,
+        "family_name": family_name,
     })))
 }
 

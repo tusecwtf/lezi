@@ -18,6 +18,8 @@ class FakeSyncBackend : SyncBackend {
     private val rows = mutableMapOf<String, MutableMap<String, Row>>()
     private val mediaBytes = mutableMapOf<String, MutableMap<String, ByteArray>>()
     private val invites = mutableMapOf<String, Pair<String, Long>>()
+    private val membershipNames = mutableMapOf<String, String>()
+    private val familyNames = mutableMapOf<String, String?>()
     private var revision = 0L
 
     suspend fun push(familyId: String, deviceId: String, entities: List<SyncEntity>): Result<Int> =
@@ -36,7 +38,14 @@ class FakeSyncBackend : SyncBackend {
         val invite = invites[code.uppercase()] ?: error("invalid code")
         require(invite.second >= System.currentTimeMillis()) { "expired" }
         val pull = pullRows(invite.first, 0)
-        JoinResult(invite.first, "fake-token", FamilyRole.Member, pull.entities, pull.cursor)
+        JoinResult(
+            familyId = invite.first,
+            token = "fake-token",
+            role = FamilyRole.Member,
+            entities = pull.entities,
+            cursor = pull.cursor,
+            familyName = familyNames[invite.first],
+        )
     }
 
     override suspend fun create(
@@ -45,7 +54,20 @@ class FakeSyncBackend : SyncBackend {
         displayName: String?,
         createRequestId: String,
         bootstrapSecret: String?,
-    ) = JoinResult("family-${rows.size + 1}", "owner-token", FamilyRole.Owner)
+        familyName: String?,
+    ): JoinResult {
+        val name = requireMemberDisplayName(displayName)
+        val sharedName = normalizeFamilyNameForWire(familyName)
+        val familyId = "family-${rows.size + 1}"
+        membershipNames["$familyId:$deviceId"] = name
+        familyNames[familyId] = sharedName
+        return JoinResult(
+            familyId = familyId,
+            token = "owner-token",
+            role = FamilyRole.Owner,
+            familyName = sharedName,
+        )
+    }
 
     override suspend fun push(session: SyncSession, entities: List<SyncEntity>) =
         pushRows(session.familyId, entities, session.role)
@@ -59,15 +81,32 @@ class FakeSyncBackend : SyncBackend {
         code: String,
         deviceId: String,
         displayName: String?,
-    ) = join(code, deviceId).getOrThrow()
+    ): JoinResult {
+        val name = requireMemberDisplayName(displayName)
+        val joined = join(code, deviceId).getOrThrow()
+        membershipNames["${joined.familyId}:$deviceId"] = name
+        return joined
+    }
 
     override suspend fun members(session: SyncSession) = listOf(
         FamilyMember(
-            displayName = if (session.role == FamilyRole.Owner) "管理员" else null,
+            displayName = membershipNames["${session.familyId}:${session.deviceId}"]
+                ?: if (session.role == FamilyRole.Owner) "管理员" else null,
             role = session.role,
             isSelf = true,
+            deviceId = session.deviceId,
         ),
     )
+
+    override suspend fun updateMyDisplayName(session: SyncSession, displayName: String) {
+        membershipNames["${session.familyId}:${session.deviceId}"] =
+            requireMemberDisplayName(displayName)
+    }
+
+    override suspend fun renameFamily(session: SyncSession, familyName: String?) {
+        require(session.role == FamilyRole.Owner) { "仅家庭管理员可修改家庭名" }
+        familyNames[session.familyId] = normalizeFamilyNameForWire(familyName)
+    }
 
     override suspend fun leave(session: SyncSession) = Unit
 
