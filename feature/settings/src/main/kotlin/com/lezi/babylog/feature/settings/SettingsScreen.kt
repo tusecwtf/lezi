@@ -73,6 +73,7 @@ import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
 import com.lezi.babylog.domain.CustomRecordItem
 import com.lezi.babylog.domain.LocalRecordsClearCommittedException
+import com.lezi.babylog.sync.SyncPort
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate
@@ -120,6 +121,7 @@ data class SettingsUi(
     val babies: List<Baby> = emptyList(),
     val current: Baby? = null,
     val customItems: List<CustomRecordItem> = emptyList(),
+    val isFamilyJoined: Boolean = false,
 )
 
 private data class LocalSettingsUi(
@@ -132,6 +134,7 @@ private data class LocalSettingsUi(
 class SettingsViewModel @Inject constructor(
     private val settingsStore: SettingsStore,
     private val careLog: CareLog,
+    private val syncPort: SyncPort,
 ) : ViewModel() {
     private val localSettings = combine(
         settingsStore.settings,
@@ -146,7 +149,8 @@ class SettingsViewModel @Inject constructor(
         careLog.observeBabies(),
         careLog.observeCurrentBaby(),
         careLog.observeCustomItems(),
-    ) { local, babies, cur, customItems ->
+        syncPort.session(),
+    ) { local, babies, cur, customItems, session ->
         SettingsUi(
             settings = local.settings,
             showAvgSleep = local.showAvgSleep,
@@ -154,6 +158,7 @@ class SettingsViewModel @Inject constructor(
             babies = babies,
             current = cur,
             customItems = customItems,
+            isFamilyJoined = session.isJoined,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsUi())
 
@@ -320,6 +325,7 @@ fun SettingsRoute(
     vm: SettingsViewModel = hiltViewModel(),
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
+    val clearRecordsCopy = clearRecordsConfirmationCopy(ui.isFamilyJoined)
     var showAdd by remember(initiallyShowAddBaby) { mutableStateOf(initiallyShowAddBaby) }
     var clearStep by remember { mutableIntStateOf(0) }
     var clearingRecords by remember { mutableStateOf(false) }
@@ -852,9 +858,7 @@ fun SettingsRoute(
             onDismissRequest = { clearStep = 0 },
             title = { Text("确认清除记录？") },
             text = {
-                Text(
-                    "只删除这台设备上的喂养、睡眠等记录，宝宝档案和家庭服务器数据会保留。",
-                )
+                Text(clearRecordsCopy.firstPrompt)
             },
             confirmButton = {
                 TextButton(onClick = { clearStep = 2 }) {
@@ -873,8 +877,7 @@ fun SettingsRoute(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
                     Text(
-                        "真的要清除本机全部记录吗？宝宝不会被删除；下次家庭同步时，" +
-                            "服务器上的记录可能重新下载。",
+                        clearRecordsCopy.finalPrompt,
                     )
                     clearRecordsError?.let {
                         Text(it, color = MaterialTheme.colorScheme.error)

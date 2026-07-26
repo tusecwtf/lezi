@@ -1,10 +1,10 @@
 # Spec: post-0.2.4 固定范围审查整改
 
-Status: ready-for-agent
+Status: in-progress
 Feature: post-0.2.4-review-remediation
 Source: `$code-review` 固定范围 `afb0af7..81e9610`（20 commits / 15 tickets）
 Ticket count: 7
-Frontier count: 2
+Frontier count: 1
 
 ---
 
@@ -105,4 +105,3 @@ family-identity-account-overview/05 ──► 05 sync local-clear module
 - 引入云同步、后台轮询、P2P、踢人或照护者一等账号。
 - 抢改当前 `family-identity-account-overview` 未提交实现。
 - 为追求行数而创建无独立行为、只有一个调用转发的浅 module。
-
