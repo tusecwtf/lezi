@@ -1235,30 +1235,7 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun localRecordClearFailureBeforeDomainCommitLeavesReplicaCleanupUntouched() = runTest {
-        val rig = SyncRig(session = joinedSession("family-a"))
-        rig.outbox.enqueue(
-            OutboxEntity(
-                familyId = "family-a",
-                entityType = "record",
-                clientUuid = "record-local",
-                payloadJson = "{}",
-                updatedAt = 1,
-            ),
-        )
-
-        val failure = rig.port.clearLocalRecords { _ ->
-            error("domain transaction failed")
-        }.exceptionOrNull()
-
-        assertThat(failure).hasMessageThat().isEqualTo("domain transaction failed")
-        assertThat(rig.outbox.peek("family-a", 10).map(OutboxEntity::clientUuid))
-            .containsExactly("record-local")
-        assertThat(rig.preferences.current().pullCursor).isEqualTo(0)
-    }
-
-    @Test
-    fun committedRecordClearFailureCannotResurrectOutboxAndCanBeRetried() = runTest {
+    fun committedRecordClearFailureCannotRepublishDeletedRecordBeforeCleanupRetry() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
         rig.records.seed(localRecord(babyId).copy(syncDirty = false))
@@ -1279,95 +1256,11 @@ class RealSyncPortTest {
         }.exceptionOrNull()
 
         assertThat(failure).isInstanceOf(LocalClearCommittedException::class.java)
-        assertThat((failure as LocalClearCommittedException).familyServerRetained).isTrue()
-        assertThat(failure.cause).hasMessageThat().contains("outbox delete failed")
         assertThat(rig.records.listAllIncludingDeleted()).isEmpty()
-        assertThat(rig.outbox.peek("family-a", 10)).hasSize(1)
 
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).exceptionOrNull()).isNull()
         assertThat(rig.backend.pushes.flatMap(PushedBatch::entities).map(SyncEntity::type))
             .doesNotContain("record")
-
-        assertThat(rig.port.clearLocalRecords { it() }.isSuccess).isTrue()
-        assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
-    }
-
-    @Test
-    fun localRecordClearResetsPullAndRemovesOnlyRecordReplicaMedia() = runTest {
-        val rig = SyncRig(
-            session = joinedSession("family-a").copy(
-                pullCursor = 9,
-                pullGeneration = "known-generation",
-            ),
-        )
-        val babyId = rig.babies.seed(localBaby())
-        rig.records.seed(
-            localRecord(babyId).copy(
-                payloadJson = """{"photos":["photos/not-yet-snapshotted.jpg"]}""",
-            ),
-        )
-        val logUuid = "88888888-8888-8888-8888-888888888888"
-        val avatarUuid = "99999999-9999-9999-9999-999999999999"
-        rig.media.seed(
-            MediaAssetEntity(
-                clientUuid = logUuid,
-                kind = "log",
-                recordId = 1,
-                localUri = "photos/log.jpg",
-                createdAt = 1,
-            ),
-        )
-        rig.media.seed(
-            MediaAssetEntity(
-                clientUuid = avatarUuid,
-                kind = "avatar",
-                babyId = 1,
-                localUri = "avatars/baby.jpg",
-                createdAt = 1,
-            ),
-        )
-        listOf(
-            OutboxEntity(
-                familyId = "family-a",
-                entityType = "record",
-                clientUuid = "record-local",
-                payloadJson = "{}",
-                updatedAt = 1,
-            ),
-            OutboxEntity(
-                familyId = "family-a",
-                entityType = "media",
-                clientUuid = logUuid,
-                payloadJson = "{}",
-                updatedAt = 1,
-            ),
-            OutboxEntity(
-                familyId = "family-a",
-                entityType = "media",
-                clientUuid = avatarUuid,
-                payloadJson = "{}",
-                updatedAt = 1,
-            ),
-        ).forEach { rig.outbox.enqueue(it) }
-
-        assertThat(
-            rig.port.clearLocalRecords { committed ->
-                rig.records.deleteAll()
-                committed()
-            }.isSuccess,
-        ).isTrue()
-
-        assertThat(rig.preferences.current().pullCursor).isEqualTo(0)
-        assertThat(rig.preferences.current().pullGeneration).isEqualTo("known-generation")
-        assertThat(rig.records.listAllIncludingDeleted()).isEmpty()
-        assertThat(rig.media.getByClientUuid(logUuid)).isNull()
-        assertThat(rig.media.getByClientUuid(avatarUuid)).isNotNull()
-        assertThat(rig.mediaFiles.deleted).containsExactly(
-            "photos/log.jpg",
-            "photos/not-yet-snapshotted.jpg",
-        )
-        assertThat(rig.outbox.peek("family-a", 10).map(OutboxEntity::clientUuid))
-            .containsExactly(avatarUuid)
     }
 
     @Test
@@ -1397,122 +1290,6 @@ class RealSyncPortTest {
         assertThat(clearing.await().isSuccess).isTrue()
         assertThat(rig.records.listAllIncludingDeleted()).isEmpty()
         assertThat(rig.preferences.current().pullCursor).isEqualTo(0)
-    }
-
-    @Test
-    fun localRecordClearChunksLargeMediaOutboxDeletes() = runTest {
-        val rig = SyncRig(session = joinedSession("family-a"))
-        repeat(1_005) { index ->
-            val uuid = "log-media-$index"
-            rig.media.seed(
-                MediaAssetEntity(
-                    clientUuid = uuid,
-                    kind = "log",
-                    recordId = index.toLong() + 1,
-                    localUri = "photos/$index.jpg",
-                    createdAt = index.toLong(),
-                ),
-            )
-            rig.outbox.enqueue(
-                OutboxEntity(
-                    familyId = "family-a",
-                    entityType = "media",
-                    clientUuid = uuid,
-                    payloadJson = "{}",
-                    updatedAt = index.toLong(),
-                ),
-            )
-        }
-
-        assertThat(rig.port.clearLocalRecords { it() }.isSuccess).isTrue()
-
-        assertThat(rig.outbox.deleteEntityBatchSizes).containsExactly(400, 400, 205).inOrder()
-        assertThat(rig.outbox.peek("family-a", 2_000)).isEmpty()
-    }
-
-    @Test
-    fun clearAllLocalDataRemovesOutboxAllMediaAndFilesIncludingAvatars() = runTest {
-        val rig = SyncRig(
-            session = joinedSession("family-a").copy(
-                pullCursor = 11,
-                pullGeneration = "known-generation",
-            ),
-        )
-        val logUuid = "88888888-8888-8888-8888-888888888888"
-        val avatarUuid = "99999999-9999-9999-9999-999999999999"
-        val babyId = rig.babies.seed(
-            localBaby().copy(
-                avatarMediaUuid = avatarUuid,
-                avatarPath = "baby_avatars/stale.jpg",
-            ),
-        )
-        rig.media.seed(
-            MediaAssetEntity(
-                clientUuid = logUuid,
-                kind = "log",
-                recordId = 1,
-                localUri = "photos/log.jpg",
-                createdAt = 1,
-            ),
-        )
-        rig.media.seed(
-            MediaAssetEntity(
-                clientUuid = avatarUuid,
-                kind = "avatar",
-                babyId = babyId,
-                localUri = "baby_avatars/stale.jpg",
-                createdAt = 1,
-            ),
-        )
-        rig.records.seed(
-            localRecord(babyId).copy(
-                payloadJson = """{"photos":["photos/inline.jpg"]}""",
-            ),
-        )
-        listOf(
-            OutboxEntity(
-                familyId = "family-a",
-                entityType = "record",
-                clientUuid = "record-local",
-                payloadJson = "{}",
-                updatedAt = 1,
-            ),
-            OutboxEntity(
-                familyId = "family-a",
-                entityType = "media",
-                clientUuid = avatarUuid,
-                payloadJson = "{}",
-                updatedAt = 1,
-            ),
-            OutboxEntity(
-                familyId = "family-b",
-                entityType = "baby",
-                clientUuid = "other-family-baby",
-                payloadJson = "{}",
-                updatedAt = 1,
-            ),
-        ).forEach { rig.outbox.enqueue(it) }
-
-        assertThat(
-            rig.port.clearAllLocalData { committed ->
-                rig.records.deleteAll()
-                rig.babies.deleteAll()
-                committed()
-            }.isSuccess,
-        ).isTrue()
-
-        assertThat(rig.preferences.current().pullCursor).isEqualTo(0)
-        assertThat(rig.preferences.current().pullGeneration).isEmpty()
-        assertThat(rig.records.listAllIncludingDeleted()).isEmpty()
-        assertThat(rig.babies.listAllIncludingDeleted()).isEmpty()
-        assertThat(rig.media.listAllIncludingDeleted()).isEmpty()
-        assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
-        assertThat(rig.outbox.peek("family-b", 10)).isEmpty()
-        assertThat(rig.mediaFiles.deleted).containsExactly(
-            "photos/log.jpg",
-            "baby_avatars/stale.jpg",
-            "photos/inline.jpg",
-        )
     }
 
     @Test
@@ -4705,9 +4482,10 @@ private class RecordingSyncBackend : SyncBackend {
     }
 }
 
-private class MemorySyncPreferences(initial: SyncSession) : SyncPreferences {
+internal class MemorySyncPreferences(initial: SyncSession) : SyncPreferences {
     private val state = MutableStateFlow(initial)
     private var createRequestId: String? = null
+    var failUpdateCursorAttempts = 0
     override val session: Flow<SyncSession> = state
 
     fun current(): SyncSession = state.value
@@ -4751,6 +4529,10 @@ private class MemorySyncPreferences(initial: SyncSession) : SyncPreferences {
     }
 
     override suspend fun updateCursor(cursor: Long, generation: String) {
+        if (failUpdateCursorAttempts > 0) {
+            failUpdateCursorAttempts--
+            error("cursor update failed")
+        }
         state.value = state.value.copy(
             pullCursor = cursor,
             pullGeneration = generation,
@@ -4823,8 +4605,9 @@ private class TestForegroundState(
     }
 }
 
-private class TestMediaFileStore : SyncMediaFileStore {
+internal class TestMediaFileStore : SyncMediaFileStore {
     val deleted = mutableListOf<String>()
+    val deleteFailures = ArrayDeque<Throwable>()
     var afterInspect: (suspend () -> Unit)? = null
     var afterSaveDownloaded: (suspend () -> Unit)? = null
 
@@ -4849,6 +4632,7 @@ private class TestMediaFileStore : SyncMediaFileStore {
 
     override suspend fun delete(localUri: String) {
         deleted += localUri
+        deleteFailures.removeFirstOrNull()?.let { throw it }
     }
 }
 
@@ -5216,7 +5000,7 @@ private fun joinedSession(familyId: String) = SyncSession(
     allowedSsids = listOf("Home"),
 )
 
-private class MemoryOutboxDao : OutboxDao {
+internal class MemoryOutboxDao : OutboxDao {
     private val rows = mutableListOf<OutboxEntity>()
     private val ids = AtomicLong(1)
     val deleteEntityBatchSizes = mutableListOf<Int>()
@@ -5283,7 +5067,7 @@ private class MemoryOutboxDao : OutboxDao {
     }
 }
 
-private class MemoryBabyDao : BabyDao {
+internal class MemoryBabyDao : BabyDao {
     private val rows = MutableStateFlow<List<BabyEntity>>(emptyList())
     private val ids = AtomicLong(1)
 
@@ -5401,7 +5185,7 @@ private class MemoryBabyDao : BabyDao {
     }
 }
 
-private class MemoryRecordDao : RecordDao {
+internal class MemoryRecordDao : RecordDao {
     private val rows = MutableStateFlow<List<RecordEntity>>(emptyList())
     private val ids = AtomicLong(1)
 
@@ -5584,7 +5368,7 @@ private class MemoryRecordDao : RecordDao {
     }
 }
 
-private class MemoryMediaDao : MediaAssetDao {
+internal class MemoryMediaDao : MediaAssetDao {
     private val rows = mutableListOf<MediaAssetEntity>()
     private val ids = AtomicLong(1)
 

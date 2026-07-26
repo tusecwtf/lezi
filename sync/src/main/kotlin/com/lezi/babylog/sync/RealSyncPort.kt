@@ -89,6 +89,15 @@ class RealSyncPort @Inject constructor(
     private val currentStatus = MutableStateFlow(SyncStatus.Disabled)
     private val processScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val syncMutex = Mutex()
+    private val localReplicaClearCoordinator = LocalReplicaClearCoordinator(
+        barrier = syncMutex,
+        preferences = preferences,
+        outboxDao = outboxDao,
+        recordDao = recordDao,
+        babyDao = babyDao,
+        mediaDao = mediaDao,
+        mediaFiles = mediaFiles,
+    )
     private val syncSignal = Channel<Unit>(Channel.CONFLATED)
     private val pullRequested = AtomicBoolean(false)
     @Volatile private var cachedSession = SyncSession()
@@ -347,114 +356,15 @@ class RealSyncPort @Inject constructor(
 
     override suspend fun clearLocalRecords(
         clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
-    ): Result<Unit> = runCatching {
-        syncMutex.withLock {
-            val session = preferences.session.first()
-            val logMedia = mediaDao.listAllIncludingDeleted().filter { it.kind == "log" }
-            val localMediaPaths = buildList {
-                addAll(logMedia.map(MediaAssetEntity::localUri))
-                recordDao.listAllIncludingDeleted().forEach { record ->
-                    addAll(localPhotoPaths(record.payloadJson))
-                }
-            }.filter(String::isNotBlank).distinct()
-            // The authoritative delete must share the same barrier as pull/apply.
-            // Otherwise a pull can reinsert records between the domain delete
-            // and replica cleanup while the UI still reports success.
-            var domainCommitted = false
-            try {
-                clearLocal { domainCommitted = true }
-                check(domainCommitted) { "本机记录清除未确认领域事务已提交" }
-                finishLocalRecordsClear(session, logMedia, localMediaPaths)
-            } catch (error: Throwable) {
-                if (domainCommitted) {
-                    runCatching {
-                        finishLocalRecordsClear(session, logMedia, localMediaPaths)
-                    }.onFailure(error::addSuppressed)
-                    throw LocalClearCommittedException(
-                        familyServerRetained = session.familyId.isNotBlank(),
-                        cause = error,
-                    )
-                }
-                throw error
-            }
-        }
-    }.onFailure(::updateFailureStatus)
+    ): Result<Unit> = localReplicaClearCoordinator
+        .clear(LocalReplicaClearScope.RecordsOnly, clearLocal)
+        .onFailure(::updateFailureStatus)
 
     override suspend fun clearAllLocalData(
         clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
-    ): Result<Unit> = runCatching {
-        syncMutex.withLock {
-            val familyServerRetained = preferences.session.first().familyId.isNotBlank()
-            val allMedia = mediaDao.listAllIncludingDeleted()
-            val localMediaPaths = buildList {
-                addAll(allMedia.map(MediaAssetEntity::localUri))
-                recordDao.listAllIncludingDeleted().forEach { record ->
-                    addAll(localPhotoPaths(record.payloadJson))
-                }
-                babyDao.listAllIncludingDeleted().forEach { baby ->
-                    baby.avatarPath?.takeIf(String::isNotBlank)?.let(::add)
-                }
-            }.filter(String::isNotBlank).distinct()
-            // Same barrier as clearLocalRecords: domain wipe + outbox/media/files
-            // must not interleave with pull/apply.
-            var domainCommitted = false
-            try {
-                clearLocal { domainCommitted = true }
-                check(domainCommitted) { "本机数据清除未确认领域事务已提交" }
-                finishAllLocalDataClear(localMediaPaths)
-            } catch (error: Throwable) {
-                if (domainCommitted) {
-                    runCatching {
-                        finishAllLocalDataClear(localMediaPaths)
-                    }.onFailure(error::addSuppressed)
-                    throw LocalClearCommittedException(
-                        familyServerRetained = familyServerRetained,
-                        cause = error,
-                    )
-                }
-                throw error
-            }
-        }
-    }.onFailure(::updateFailureStatus)
-
-    private suspend fun finishLocalRecordsClear(
-        session: SyncSession,
-        logMedia: List<MediaAssetEntity>,
-        localMediaPaths: List<String>,
-    ) {
-        if (session.familyId.isNotBlank()) {
-            outboxDao.deleteType(session.familyId, "record")
-            // History clear also wipes care plans + candidates locally.
-            outboxDao.deleteType(session.familyId, "care_plan")
-            outboxDao.deleteType(session.familyId, "fulfillment_candidate")
-            logMedia.map(MediaAssetEntity::clientUuid)
-                .chunked(OUTBOX_DELETE_CHUNK_SIZE)
-                .forEach { chunk ->
-                    outboxDao.deleteEntities(session.familyId, "media", chunk)
-                }
-        }
-        mediaDao.deleteLogMedia()
-        localMediaPaths.forEach { localUri ->
-            runCatching { mediaFiles.delete(localUri) }
-        }
-        // Keep the last server incarnation as a push precondition. If the
-        // server was restored while records were being cleared, the next dirty
-        // Baby must enter full recovery before mutation.
-        preferences.updateCursor(0, generation = session.pullGeneration)
-        cachedSession = preferences.session.first()
-    }
-
-    private suspend fun finishAllLocalDataClear(localMediaPaths: List<String>) {
-        outboxDao.deleteAll()
-        mediaDao.deleteAll()
-        localMediaPaths.forEach { localUri ->
-            runCatching { mediaFiles.delete(localUri) }
-        }
-        // Full wipe leaves no local replica. Drop generation so the next
-        // join/create starts from a clean push precondition.
-        preferences.updateCursor(0, generation = "")
-        cachedSession = preferences.session.first()
-    }
+    ): Result<Unit> = localReplicaClearCoordinator
+        .clear(LocalReplicaClearScope.AllLocal, clearLocal)
+        .onFailure(::updateFailureStatus)
 
     private suspend fun pushPending(session: SyncSession) {
         while (pushPendingBatch(session)) {
@@ -2426,7 +2336,7 @@ private fun preserveDeviceLocalPhotos(
     return JsonObject(remote + ("photos" to photos)).toString()
 }
 
-private fun localPhotoPaths(raw: String): Set<String> =
+internal fun localPhotoPaths(raw: String): Set<String> =
     runCatching {
         val photos = Json.parseToJsonElement(raw).jsonObject["photos"] as? JsonArray
         photos.orEmpty()
@@ -2448,7 +2358,6 @@ private const val MAX_PUSH_BATCH_SIZE = 1_000
 /** Normal home libraries are far smaller; reaching this many pages is anomalous. */
 private const val MAX_PULL_PAGE_COUNT = 500
 private const val SYNC_PULL_PAGE_ENTITY_LIMIT = 200
-private const val OUTBOX_DELETE_CHUNK_SIZE = 400
 private const val RECEIPT_PREFIX = "lezi-sync:"
 
 /**

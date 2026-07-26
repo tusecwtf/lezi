@@ -136,8 +136,7 @@ class AndroidSyncMediaFileStore @Inject constructor(
     }
 
     override suspend fun delete(localUri: String) = withContext(Dispatchers.IO) {
-        resolve(localUri)?.takeIf(File::isFile)?.delete()
-        Unit
+        deleteExistingSyncMediaFile(resolve(localUri))
     }
 
     private fun resolve(localUri: String): File? {
@@ -192,6 +191,11 @@ class AndroidSyncMediaFileStore @Inject constructor(
         const val AVATAR_DIRECTORY = "baby_avatars"
         const val RECORD_MEDIA_DIRECTORY = "record-media"
     }
+}
+
+internal fun deleteExistingSyncMediaFile(file: File?) {
+    if (file?.isFile != true) return
+    check(file.delete() || !file.exists()) { "无法删除本地媒体文件" }
 }
 
 internal data class ExifOrientationTransform(
