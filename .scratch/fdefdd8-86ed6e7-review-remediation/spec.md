@@ -1,6 +1,6 @@
 # Spec: `fdefdd8` / `86ed6e7` 固定提交审查整改
 
-Status: ready-for-agent
+Status: in-progress
 Feature: fdefdd8-86ed6e7-review-remediation
 Source: `$review-agent` 固定提交 `fdefdd819e28699c858811f694161711b00b7024` 与 `86ed6e72817c932117400de8ae87892730e216d0`
 Ticket count: 7

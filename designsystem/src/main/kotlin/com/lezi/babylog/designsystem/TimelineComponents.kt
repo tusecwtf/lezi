@@ -73,23 +73,10 @@ data class TimelineLegendEntry(
     val isBar: Boolean = false,
 )
 
-/** Pixel center X (horizontal lane) or Y (vertical rail) for an event mark. */
-private fun eventSlotOffset(
-    segments: List<TimelineLaneSegment>,
-    seg: TimelineLaneSegment,
-    slotPx: Float,
-): Float {
-    val cluster = segments.filter {
-        it.isEvent && kotlin.math.abs(it.startMinOfDay - seg.startMinOfDay) <= 12
-    }
-    if (cluster.size <= 1) return 0f
-    val index = cluster.indexOfFirst {
-        it.startMinOfDay == seg.startMinOfDay &&
-            it.title == seg.title &&
-            it.detail == seg.detail
-    }.coerceAtLeast(0)
-    return (index - (cluster.size - 1) / 2f) * slotPx
-}
+private const val EVENT_CLUSTER_WINDOW_MINUTES = 12
+private val EVENT_SLOT_SPACING = 5.dp
+private val EVENT_EDGE_INSET = 10.dp
+private val EVENT_HIT_RADIUS = 14.dp
 
 /**
  * Resolve a tap on a segment into the next category selection.
@@ -139,33 +126,21 @@ fun TimelineLane(
                 .semantics {
                     contentDescription = "$label 轨道，点按可按类型筛选明细"
                 }
-                .pointerInput(segments, markerStyle, selectedCategoryKey) {
+                .pointerInput(segments, markerStyle, selectedCategoryKey, density) {
                     detectTapGestures { offset ->
                         val total = 24f * 60f
                         val min = ((offset.x / size.width) * total).toInt().coerceIn(0, 24 * 60)
-                        // Large touch halo: ~28dp or ≥18 minutes of day-axis.
-                        val halfMin = with(density) {
-                            ((28.dp.toPx() / 2f) / size.width * total).toInt().coerceAtLeast(18)
-                        }
                         val hit = if (markerStyle) {
-                            // Nearest event within the halo — easier than exact hit boxes.
-                            segments
-                                .filter { seg ->
-                                    val anchor = if (seg.isEvent) {
-                                        seg.startMinOfDay
-                                    } else {
-                                        (seg.startMinOfDay + seg.endMinOfDay) / 2
-                                    }
-                                    kotlin.math.abs(anchor - min) <= halfMin
-                                }
-                                .minByOrNull { seg ->
-                                    val anchor = if (seg.isEvent) {
-                                        seg.startMinOfDay
-                                    } else {
-                                        (seg.startMinOfDay + seg.endMinOfDay) / 2
-                                    }
-                                    kotlin.math.abs(anchor - min)
-                                }
+                            with(density) {
+                                layoutTimelineEventMarkers(
+                                    segments = segments,
+                                    axisLengthPx = size.width.toFloat(),
+                                    clusterWindowMinutes = EVENT_CLUSTER_WINDOW_MINUTES,
+                                    slotSpacingPx = EVENT_SLOT_SPACING.toPx(),
+                                    edgeInsetPx = EVENT_EDGE_INSET.toPx(),
+                                    hitRadiusPx = EVENT_HIT_RADIUS.toPx(),
+                                )
+                            }.hitTest(offset.x)
                         } else {
                             segments.asReversed().firstOrNull { seg ->
                                 val end = seg.endMinOfDay.coerceAtLeast(seg.startMinOfDay + 1)
@@ -188,16 +163,28 @@ fun TimelineLane(
                 strokeWidth = 1.2f,
             )
             val total = 24f * 60f
-            val slotPx = 5.dp.toPx()
+            val markerTargetsByIndex = layoutTimelineEventMarkers(
+                segments = segments,
+                axisLengthPx = size.width,
+                clusterWindowMinutes = EVENT_CLUSTER_WINDOW_MINUTES,
+                slotSpacingPx = EVENT_SLOT_SPACING.toPx(),
+                edgeInsetPx = EVENT_EDGE_INSET.toPx(),
+                hitRadiusPx = EVENT_HIT_RADIUS.toPx(),
+            ).targets.associateBy(TimelineMarkerTarget::sourceIndex)
             val hasSelection = selectedCategoryKey != null
-            for (seg in segments) {
+            val drawingIndices = segments.indices.sortedWith(
+                compareBy<Int> { markerTargetsByIndex[it] != null }
+                    .thenBy { markerTargetsByIndex[it]?.zOrder ?: it },
+            )
+            drawingIndices.forEach { index ->
+                val seg = segments[index]
                 val highlighted = hasSelection &&
                     seg.dayChartCategoryKey != null &&
                     seg.dayChartCategoryKey == selectedCategoryKey
                 val dimmed = hasSelection && !highlighted
-                if (markerStyle || seg.isEvent) {
-                    val baseX = size.width * (seg.startMinOfDay / total)
-                    val x = baseX + eventSlotOffset(segments, seg, slotPx)
+                val markerTarget = markerTargetsByIndex[index]
+                if (markerTarget != null) {
+                    val x = markerTarget.centerPx
                     val center = Offset(x, h * 0.32f)
                     val radius = when {
                         highlighted -> 11.dp.toPx()
@@ -545,6 +532,7 @@ private fun JournalTimelineRail(
     val grid = LeziThemeExt.colors.chartGrid
     val danger = LeziThemeExt.colors.danger
     val focusRing = MaterialTheme.colorScheme.primary
+    val density = LocalDensity.current
     val lanes = listOf(sleep, feed, care)
     LeziCard(modifier = modifier.fillMaxWidth(), contentPadding = PaddingValues(10.dp)) {
         Row(
@@ -575,28 +563,30 @@ private fun JournalTimelineRail(
                     .weight(1f)
                     .height(220.dp)
                     .semantics { contentDescription = "0到24小时记录轨道，点按可按类型筛选明细" }
-                    .pointerInput(sleep, feed, care, selectedCategoryKey) {
+                    .pointerInput(sleep, feed, care, selectedCategoryKey, density) {
                         detectTapGestures { offset ->
                             val laneIndex = ((offset.x / size.width) * 3f).toInt().coerceIn(0, 2)
                             val min = ((offset.y / size.height) * 1440f).toInt().coerceIn(0, 1440)
                             val lane = lanes[laneIndex]
-                            // Events: nearest pin within ~22 minutes; intervals: contain check.
-                            val hit = lane
-                                .mapNotNull { seg ->
-                                    if (seg.isEvent) {
-                                        val dist = kotlin.math.abs(seg.startMinOfDay - min)
-                                        if (dist <= 22) seg to dist else null
-                                    } else {
-                                        val end = seg.endMinOfDay.coerceAtLeast(seg.startMinOfDay + 1)
-                                        if (min in seg.startMinOfDay until end) {
-                                            seg to 0
-                                        } else {
-                                            null
-                                        }
-                                    }
+                            val intervalHit = lane.firstOrNull { seg ->
+                                if (seg.isEvent) {
+                                    false
+                                } else {
+                                    val end = seg.endMinOfDay.coerceAtLeast(seg.startMinOfDay + 1)
+                                    min in seg.startMinOfDay until end
                                 }
-                                .minByOrNull { it.second }
-                                ?.first
+                            }
+                            val eventHit = with(density) {
+                                layoutTimelineEventMarkers(
+                                    segments = lane,
+                                    axisLengthPx = size.height.toFloat(),
+                                    clusterWindowMinutes = EVENT_CLUSTER_WINDOW_MINUTES,
+                                    slotSpacingPx = EVENT_SLOT_SPACING.toPx(),
+                                    edgeInsetPx = EVENT_EDGE_INSET.toPx(),
+                                    hitRadiusPx = EVENT_HIT_RADIUS.toPx(),
+                                )
+                            }.hitTest(offset.y)
+                            val hit = intervalHit ?: eventHit
                             onCategorySelect(nextCategorySelection(selectedCategoryKey, hit))
                         }
                     },
@@ -609,20 +599,31 @@ private fun JournalTimelineRail(
                     val x = size.width * i / 3f
                     drawLine(grid.copy(alpha = 0.5f), Offset(x, 0f), Offset(x, size.height), strokeWidth = 1f)
                 }
-                val slotPx = 5.dp.toPx()
                 val hasSelection = selectedCategoryKey != null
                 lanes.forEachIndexed { laneIndex, segments ->
                     val laneWidth = size.width / 3f
                     val laneLeft = laneIndex * laneWidth
-                    segments.forEach { segment ->
+                    val markerTargetsByIndex = layoutTimelineEventMarkers(
+                        segments = segments,
+                        axisLengthPx = size.height,
+                        clusterWindowMinutes = EVENT_CLUSTER_WINDOW_MINUTES,
+                        slotSpacingPx = EVENT_SLOT_SPACING.toPx(),
+                        edgeInsetPx = EVENT_EDGE_INSET.toPx(),
+                        hitRadiusPx = EVENT_HIT_RADIUS.toPx(),
+                    ).targets.associateBy(TimelineMarkerTarget::sourceIndex)
+                    val drawingIndices = segments.indices.sortedWith(
+                        compareBy<Int> { markerTargetsByIndex[it] != null }
+                            .thenBy { markerTargetsByIndex[it]?.zOrder ?: it },
+                    )
+                    drawingIndices.forEach { segmentIndex ->
+                        val segment = segments[segmentIndex]
                         val highlighted = hasSelection &&
                             segment.dayChartCategoryKey != null &&
                             segment.dayChartCategoryKey == selectedCategoryKey
                         val dimmed = hasSelection && !highlighted
-                        if (segment.isEvent) {
-                            val baseY = size.height * (segment.startMinOfDay.coerceIn(0, 1440) / 1440f)
-                            val y = (baseY + eventSlotOffset(segments, segment, slotPx))
-                                .coerceIn(10f, size.height - 10f)
+                        val markerTarget = markerTargetsByIndex[segmentIndex]
+                        if (markerTarget != null) {
+                            val y = markerTarget.centerPx
                             val cx = laneLeft + laneWidth / 2f
                             val center = Offset(cx, y)
                             val radius = when {

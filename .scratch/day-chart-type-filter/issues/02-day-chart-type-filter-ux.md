@@ -12,7 +12,7 @@
 
 - [x] 选中态提升到记录页状态层（与列表同源），时间条 UI 不私藏筛选真源；不进 DataStore/设置；离开页或进程结束后不恢复
 - [x] 命中与高亮按**日图类型集合**（非单段 tip）：点属于类 C 的色块/圆点 → `toggleSelection` 进入/取消 C；点另一类 → 切换；午睡∈睡眠，配方/瓶喂挤出乳∈奶
-- [ ] 同一时刻存在多个可选标记时按实际绘制位置命中；尤其 `BOTH_DIAPER` 拆出的尿/便两个标记必须都能直接点中对应类型，不得因时间距离并列而固定选中列表第一项
+- [x] 同一时刻存在多个可选标记时按实际绘制位置命中；尤其 `BOTH_DIAPER` 拆出的尿/便两个标记必须都能直接点中对应类型，不得因时间距离并列而固定选中列表第一项
 - [x] 点图例类 C 与点色块等价；图例项为当日有数据的日图类型名（奶、母乳、睡眠、尿、便），**不得**用「喂养」「护理」等物理轨名顶替；有明确选中态
 - [x] 筛选 C 时：图上属于 C 的全部标记高亮，其它标记（含同轨另一日图类型、非日图类型如吸奶）弱化；非日图类型标记不可作为选中目标
 - [x] 筛选 C 时记录明细只含 `categoriesOf` 命中 C 的护理记录；未筛选时明细为当日全量（含非日图类型）；排序规则不变；筛选后非空列表可点行编辑
@@ -31,3 +31,4 @@
 - 并行审查（2026-07-26）：approve-with-nits — 已补刷新保持、非持久、图例=日图类型名、条数语义、非今日一致。体量 large but OK，不拆票。
 - 2026-07-26 implement：`TimelineLaneSegment.dayChartCategoryKey` + 页级 `selectedDayChart`；`TimelineRailCard` 外置 selected/legend/tip；`buildLanes` 按 `DayChartCategory.name` 打标；列表 `filterRecords`；`DayChartFilterWiringTest`。
 - 2026-07-26 只读审计：重开为 `partial`；当前 warm/journal 点击命中未使用 `eventSlotOffset` 后的实际标记位置，`BOTH_DIAPER` 的第二个类型标记不可可靠直点。
+- 2026-07-27：共享一维 marker layout 已让绘制与 hit-test 使用相同实际中心；纯 JVM 回归和 designsystem/feature:log 全量测试通过。最终 warm/journal 设备直接点击 smoke 完成后再把本票由 `partial` 关闭。
