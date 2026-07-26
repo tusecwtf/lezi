@@ -285,6 +285,139 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun defaultLocalPlaceholderIsNeverPublishedAsAnotherMembersName() = runTest {
+        val ownerRig = SyncRig(
+            session = SyncSession(
+                baseUrl = "http://192.168.1.20:8787",
+                serverHost = "192.168.1.20",
+                serverPort = 8787,
+                allowedSsids = listOf("Home"),
+            ),
+        )
+        assertThat(ownerRig.port.createFamily("我（本机）").isSuccess).isTrue()
+        assertThat(ownerRig.backend.createDisplayNames).hasSize(1)
+        assertThat(ownerRig.backend.createDisplayNames.single()).isNull()
+
+        val memberRig = SyncRig(session = SyncSession(), ssid = "Home")
+        val config = HomeLanServerConfig(
+            host = "192.168.1.20",
+            port = 8787,
+            allowedSsids = listOf("Home"),
+        )
+        assertThat(
+            memberRig.port.joinWithPayload(
+                payload = "ABCD1234",
+                preferredConfig = config,
+                displayName = "我（本机）",
+            ).isSuccess,
+        ).isTrue()
+        assertThat(memberRig.backend.joinDisplayNames).hasSize(1)
+        assertThat(memberRig.backend.joinDisplayNames.single()).isNull()
+    }
+
+    @Test
+    fun editedSavedAddressWinsOverStaleQrPrefillWhenJoining() = runTest {
+        val rig = SyncRig(session = SyncSession(), ssid = "EditedHome")
+        val edited = HomeLanServerConfig(
+            host = "192.168.1.99",
+            port = 9443,
+            scheme = "https",
+            allowedSsids = listOf("EditedHome"),
+        )
+        assertThat(rig.port.saveHomeLanConfig(edited).isSuccess).isTrue()
+        val staleQr = InvitePayloadCodec.encode(
+            InvitePayload(
+                baseUrl = "http://192.168.1.20:8787",
+                code = "ABCD1234",
+                ssids = listOf("OldHome"),
+            ),
+        )
+
+        assertThat(rig.port.joinWithPayload(staleQr).isSuccess).isTrue()
+
+        assertThat(rig.backend.joinBaseUrls).containsExactly("https://192.168.1.99:9443")
+        assertThat(rig.preferences.current().allowedSsids).containsExactly("EditedHome")
+    }
+
+    @Test
+    fun scannedUnsavedAddressWinsOverPreviouslySavedServerAndPersistsAfterSuccess() = runTest {
+        val rig = SyncRig(
+            session = SyncSession(
+                baseUrl = "http://old.home:8765",
+                serverHost = "old.home",
+                serverPort = 8765,
+                allowedSsids = listOf("OldHome"),
+            ),
+            ssid = "EditedHome",
+        )
+        val edited = HomeLanServerConfig(
+            host = "lezi.home",
+            port = 443,
+            scheme = "https",
+            allowedSsids = listOf("EditedHome"),
+        )
+        val scannedQr = InvitePayloadCodec.encode(
+            InvitePayload(
+                baseUrl = "https://lezi.home:443",
+                code = "ABCD1234",
+                ssids = listOf("EditedHome"),
+            ),
+        )
+
+        assertThat(
+            rig.port.joinWithPayload(scannedQr, edited, displayName = "爸爸").isSuccess,
+        ).isTrue()
+
+        assertThat(rig.backend.joinBaseUrls).containsExactly("https://lezi.home:443")
+        assertThat(rig.backend.joinDisplayNames).containsExactly("爸爸")
+        assertThat(rig.preferences.current().baseUrl).isEqualTo("https://lezi.home:443")
+        assertThat(rig.preferences.current().allowedSsids).containsExactly("EditedHome")
+    }
+
+    @Test
+    fun familyMemberListUsesTheJoinedHomeLanSession() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        rig.backend.nextMembers = listOf(
+            FamilyMember("妈妈", FamilyRole.Owner, isSelf = true),
+            FamilyMember("爸爸", FamilyRole.Member, isSelf = false),
+        )
+
+        val result = rig.port.listFamilyMembers()
+
+        assertThat(result.getOrThrow()).containsExactlyElementsIn(rig.backend.nextMembers).inOrder()
+        assertThat(rig.backend.memberCalls).isEqualTo(1)
+    }
+
+    @Test
+    fun familyMemberListDoesNotReachBackendAwayFromHomeWifi() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"), wifi = false, ssid = null)
+
+        assertThat(rig.port.listFamilyMembers().isFailure).isTrue()
+        assertThat(rig.backend.memberCalls).isEqualTo(0)
+    }
+
+    @Test
+    fun failedJoinDoesNotPersistEditedServerOrWifi() = runTest {
+        val rig = SyncRig(session = SyncSession(), ssid = "EditedHome")
+        rig.backend.joinFailure = IllegalStateException("join rejected")
+        val edited = HomeLanServerConfig(
+            host = "lezi.home",
+            port = 443,
+            scheme = "https",
+            allowedSsids = listOf("EditedHome"),
+        )
+
+        assertThat(rig.port.joinWithPayload("ABCD1234", edited).isFailure).isTrue()
+
+        assertThat(rig.backend.joinBaseUrls).containsExactly("https://lezi.home:443")
+        val after = rig.preferences.current()
+        assertThat(after.baseUrl).isEmpty()
+        assertThat(after.serverHost).isEmpty()
+        assertThat(after.allowedSsids).isEmpty()
+        assertThat(after.isJoined).isFalse()
+    }
+
+    @Test
     fun createRetriesReuseThePersistedRecoveryIdUntilSessionSave() = runTest {
         val rig = SyncRig(
             session = SyncSession(
@@ -303,6 +436,58 @@ class RealSyncPortTest {
         assertThat(rig.backend.createRequestIds).hasSize(2)
         assertThat(rig.backend.createRequestIds.distinct()).hasSize(1)
         assertThat(rig.preferences.current().isJoined).isTrue()
+    }
+
+    @Test
+    fun createForwardsBootstrapSecretWithoutPersistingItInSession() = runTest {
+        val rig = SyncRig(
+            session = SyncSession(
+                baseUrl = "http://192.168.1.20:8787",
+                serverHost = "192.168.1.20",
+                serverPort = 8787,
+                allowedSsids = listOf("Home"),
+            ),
+        )
+
+        assertThat(
+            rig.port.createFamily(
+                displayName = "妈妈",
+                bootstrapSecret = "one-time-bootstrap-secret",
+            ).isSuccess,
+        ).isTrue()
+
+        assertThat(rig.backend.createBootstrapSecrets)
+            .containsExactly("one-time-bootstrap-secret")
+        assertThat(rig.preferences.current().toString())
+            .doesNotContain("one-time-bootstrap-secret")
+    }
+
+    @Test
+    fun createMapsRejectedBootstrapSecretToActionableProductError() = runTest {
+        val rig = SyncRig(
+            session = SyncSession(
+                baseUrl = "http://192.168.1.20:8787",
+                serverHost = "192.168.1.20",
+                serverPort = 8787,
+                allowedSsids = listOf("Home"),
+            ),
+        )
+        listOf(401, 403).forEach { statusCode ->
+            rig.backend.createFailure = SyncHttpException(
+                statusCode,
+                "Bootstrap secret required or invalid",
+            )
+
+            val error = rig.port.createFamily(
+                displayName = "妈妈",
+                bootstrapSecret = "wrong-secret",
+            ).exceptionOrNull()
+
+            assertThat(error).isInstanceOf(BootstrapSecretRejectedException::class.java)
+            assertThat(error).hasMessageThat()
+                .isEqualTo("初始化口令不正确，请核对 NAS 配置")
+            assertThat(error.toString()).doesNotContain("HTTP")
+        }
     }
 
     @Test
@@ -849,6 +1034,127 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun failedPagedMemberFullResyncDoesNotClearBabiesFromUnseenPages() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(
+                role = FamilyRole.Member,
+                pullCursor = 7,
+                pullGeneration = "old-generation",
+            ),
+        )
+        rig.babies.seed(
+            localBaby().copy(
+                clientUuid = "baby-page-one",
+                avatarMediaUuid = "avatar-page-one",
+                avatarPath = "baby_avatars/page-one.jpg",
+                syncDirty = false,
+            ),
+        )
+        rig.babies.seed(
+            localBaby().copy(
+                clientUuid = "baby-page-two",
+                avatarMediaUuid = "avatar-page-two",
+                avatarPath = "baby_avatars/page-two.jpg",
+                syncDirty = false,
+            ),
+        )
+        rig.backend.pullFailures.add(
+            SyncHttpException(
+                statusCode = 409,
+                responseBody = """
+                    {
+                      "detail":{
+                        "code":"generation_changed",
+                        "action":"full_resync",
+                        "reset_cursor":0
+                      }
+                    }
+                """.trimIndent(),
+            ),
+        )
+        rig.backend.pullResults.add(
+            PullResult(
+                entities = listOf(
+                    remoteBaby().copy(
+                        clientUuid = "baby-page-one",
+                        payloadJson = """
+                            {
+                              "nickname":"第一页宝宝",
+                              "birthday":"2024-01-01",
+                              "avatar_media_uuid":null
+                            }
+                        """.trimIndent(),
+                    ),
+                ),
+                cursor = 1,
+                generation = "new-generation",
+                hasMore = true,
+            ),
+        )
+        rig.backend.pullResults.add(
+            PullResult(
+                entities = emptyList(),
+                cursor = 1,
+                generation = "new-generation",
+                hasMore = true,
+            ),
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isFailure).isTrue()
+
+        val unseen = requireNotNull(rig.babies.getByClientUuid("baby-page-two"))
+        assertThat(unseen.avatarMediaUuid).isEqualTo("avatar-page-two")
+        assertThat(unseen.avatarPath).isEqualTo("baby_avatars/page-two.jpg")
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(0)
+    }
+
+    @Test
+    fun failedPagedOwnerFullResyncDoesNotPublishAPartialAuthoritativeCursor() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(
+                pullCursor = 7,
+                pullGeneration = "old-generation",
+            ),
+        )
+        rig.backend.pullFailures.add(
+            SyncHttpException(
+                statusCode = 409,
+                responseBody = """
+                    {
+                      "detail":{
+                        "code":"generation_changed",
+                        "action":"full_resync",
+                        "reset_cursor":0
+                      }
+                    }
+                """.trimIndent(),
+            ),
+        )
+        rig.backend.pullResults.add(
+            PullResult(
+                entities = listOf(remoteBaby()),
+                cursor = 1,
+                generation = "new-generation",
+                hasMore = true,
+            ),
+        )
+        rig.backend.pullResults.add(
+            PullResult(
+                entities = emptyList(),
+                cursor = 1,
+                generation = "new-generation",
+                hasMore = true,
+            ),
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isFailure).isTrue()
+
+        assertThat(rig.babies.getByClientUuid("baby-remote")).isNotNull()
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(0)
+        assertThat(rig.preferences.current().pullGeneration).isEmpty()
+    }
+
+    @Test
     fun avatarMaterializationNeverOverwritesAProfileChangedAfterSnapshot() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         val babyId = rig.babies.seed(
@@ -1342,6 +1648,89 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun pullDrainsEveryPageAndPersistsEachAppliedPageCursor() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        rig.backend.pullResults.add(
+            PullResult(
+                entities = listOf(remoteBaby()),
+                cursor = 1,
+                generation = "current-generation",
+                hasMore = true,
+            ),
+        )
+        rig.backend.pullResults.add(
+            PullResult(
+                entities = listOf(remoteRecord()),
+                cursor = 2,
+                generation = "current-generation",
+            ),
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+
+        assertThat(rig.backend.pullCursors).containsExactly(0L, 1L).inOrder()
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(2)
+        assertThat(rig.babies.getByClientUuid("baby-remote")).isNotNull()
+        assertThat(rig.records.getByClientUuid("record-remote")).isNotNull()
+    }
+
+    @Test
+    fun laterPageFailureRetainsOnlyTheLastFullyAppliedPageCursor() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        rig.backend.pullResults.add(
+            PullResult(
+                entities = listOf(remoteBaby()),
+                cursor = 1,
+                hasMore = true,
+            ),
+        )
+        rig.backend.pullResults.add(
+            PullResult(
+                entities = listOf(
+                    remoteRecord().copy(
+                        payloadJson = """
+                            {
+                              "baby_client_uuid":"missing-baby",
+                              "type":"formula",
+                              "timestamp":100,
+                              "payload_json":{"amount_ml":90}
+                            }
+                        """.trimIndent(),
+                    ),
+                ),
+                cursor = 2,
+            ),
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isFailure).isTrue()
+
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(1)
+        assertThat(rig.babies.getByClientUuid("baby-remote")).isNotNull()
+        assertThat(rig.records.getByClientUuid("record-remote")).isNull()
+    }
+
+    @Test
+    fun pagedPullRejectsAContinuationThatDoesNotAdvanceCursor() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(
+                pullCursor = 5,
+                pullGeneration = "current-generation",
+            ),
+        )
+        rig.backend.nextPull = PullResult(
+            entities = emptyList(),
+            cursor = 5,
+            hasMore = true,
+        )
+
+        val failure = rig.port.sync(SyncTrigger.PullToRefresh).exceptionOrNull()
+
+        assertThat(failure).hasMessageThat().contains("cursor 未推进")
+        assertThat(rig.backend.pullCursors).containsExactly(5L)
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(5)
+    }
+
+    @Test
     fun pulledExplicitNullsClearNullableBabyFacts() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         rig.babies.seed(
@@ -1653,6 +2042,83 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun mediaGetAuthFailureFailsSyncWithoutAdvancingCursorOrMarkingSuccess() = runTest {
+        listOf(401, 403).forEach { statusCode ->
+            val rig = SyncRig(session = joinedSession("family-a"))
+            val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+            val recordId = rig.records.seed(localRecord(babyId).copy(syncDirty = false))
+            val mediaUuid = "auth-media-$statusCode"
+            rig.media.seed(
+                MediaAssetEntity(
+                    recordId = recordId,
+                    clientUuid = mediaUuid,
+                    kind = "log",
+                    localUri = "",
+                    remoteUri = mediaUuid,
+                    mime = "image/jpeg",
+                    byteSize = 12,
+                    createdAt = 100,
+                    updatedAt = 100,
+                    syncDirty = false,
+                ),
+            )
+            rig.backend.getMediaFailure = SyncHttpException(statusCode, "auth failed")
+            rig.backend.nextPull = PullResult(
+                emptyList(),
+                cursor = 42,
+                generation = "gen-after-auth-failure",
+            )
+
+            val result = rig.port.sync(SyncTrigger.PullToRefresh)
+
+            assertThat(result.isFailure).isTrue()
+            assertThat(result.exceptionOrNull()).isInstanceOf(SyncHttpException::class.java)
+            assertThat((result.exceptionOrNull() as SyncHttpException).statusCode)
+                .isEqualTo(statusCode)
+            assertThat(rig.preferences.current().pullCursor).isEqualTo(0)
+            assertThat(rig.preferences.current().pullGeneration).isEmpty()
+            assertThat(rig.preferences.current().lastSuccessAt).isNull()
+        }
+    }
+
+    @Test
+    fun invalidMediaBytesDoNotBlockPullCursorAdvance() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val recordId = rig.records.seed(localRecord(babyId).copy(syncDirty = false))
+        val mediaUuid = "56565656-5656-5656-5656-565656565656"
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = mediaUuid,
+                kind = "log",
+                localUri = "",
+                remoteUri = mediaUuid,
+                mime = "image/jpeg",
+                byteSize = 12,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+        rig.backend.mediaBytes = byteArrayOf()
+        rig.backend.nextPull = PullResult(
+            emptyList(),
+            cursor = 43,
+            generation = "gen-after-invalid-media",
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(43)
+        assertThat(rig.preferences.current().pullGeneration)
+            .isEqualTo("gen-after-invalid-media")
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.localUri).isEmpty()
+        assertThat(rig.media.listMissingLocalBytes().map(MediaAssetEntity::clientUuid))
+            .containsExactly(mediaUuid)
+    }
+
+    @Test
     fun pullWithMultipleOpenSleepsKeepsOnlyLatestOpen() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         rig.babies.seed(localBaby().copy(syncDirty = false, clientUuid = "baby-remote"))
@@ -1732,12 +2198,23 @@ private class RecordingSyncBackend : SyncBackend {
     var leaveFailure: Throwable? = null
     var deleteFailure: Throwable? = null
     var createFailure: Throwable? = null
+    var joinFailure: Throwable? = null
+    var membersFailure: Throwable? = null
+    var nextMembers = listOf(
+        FamilyMember("我（本机）", FamilyRole.Owner, isSelf = true),
+    )
     var rejectMemberAvatarPointers = false
     var beforeGetMediaReturn: (suspend () -> Unit)? = null
     var beforePullReturn: (suspend () -> Unit)? = null
     var getMediaFailure: Throwable? = null
+    var mediaBytes: ByteArray = byteArrayOf(1)
     val createRequestIds = mutableListOf<String>()
+    val createDisplayNames = mutableListOf<String?>()
+    val createBootstrapSecrets = mutableListOf<String?>()
     var joinCalls = 0
+    val joinBaseUrls = mutableListOf<String>()
+    val joinDisplayNames = mutableListOf<String?>()
+    var memberCalls = 0
     private val knownEntities = mutableSetOf<Pair<String, String>>()
 
     fun remember(type: String, clientUuid: String) {
@@ -1749,8 +2226,11 @@ private class RecordingSyncBackend : SyncBackend {
         deviceId: String,
         displayName: String?,
         createRequestId: String,
+        bootstrapSecret: String?,
     ): JoinResult {
         createRequestIds += createRequestId
+        createDisplayNames += displayName
+        createBootstrapSecrets += bootstrapSecret
         createStarted?.complete(Unit)
         releaseCreate?.await()
         createFailure?.let { throw it }
@@ -1811,13 +2291,27 @@ private class RecordingSyncBackend : SyncBackend {
     }
 
     override suspend fun invite(session: SyncSession): Invite = error("not used")
-    override suspend fun join(baseUrl: String, code: String, deviceId: String): JoinResult {
+    override suspend fun join(
+        baseUrl: String,
+        code: String,
+        deviceId: String,
+        displayName: String?,
+    ): JoinResult {
         joinCalls++
+        joinBaseUrls += baseUrl
+        joinDisplayNames += displayName
+        joinFailure?.let { throw it }
         return JoinResult(
             familyId = "family-joined",
             token = "member-token",
             role = FamilyRole.Member,
         )
+    }
+
+    override suspend fun members(session: SyncSession): List<FamilyMember> {
+        memberCalls++
+        membersFailure?.let { throw it }
+        return nextMembers
     }
 
     override suspend fun leave(session: SyncSession) {
@@ -1840,7 +2334,7 @@ private class RecordingSyncBackend : SyncBackend {
     override suspend fun getMedia(session: SyncSession, clientUuid: String): ByteArray {
         beforeGetMediaReturn?.also { beforeGetMediaReturn = null }?.invoke()
         getMediaFailure?.let { throw it }
-        return byteArrayOf(1)
+        return mediaBytes
     }
 }
 
@@ -1867,6 +2361,7 @@ private class MemorySyncPreferences(initial: SyncSession) : SyncPreferences {
             serverHost = n.host,
             serverPort = n.port,
             allowedSsids = n.allowedSsids,
+            serverScheme = n.scheme,
         )
         if (prev.isJoined && prev.baseUrl != n.baseUrl && n.baseUrl.isNotBlank()) {
             next = next.copy(pullCursor = 0, pullGeneration = "")
@@ -1933,7 +2428,14 @@ private class MemorySyncPreferences(initial: SyncSession) : SyncPreferences {
 
 private fun SyncSession.withHomeLanDerived(): SyncSession {
     if (serverHost.isNotBlank()) {
-        return copy(baseUrl = HomeLanServerConfig(serverHost, serverPort, allowedSsids).baseUrl)
+        return copy(
+            baseUrl = HomeLanServerConfig(
+                serverHost,
+                serverPort,
+                allowedSsids,
+                serverScheme,
+            ).baseUrl,
+        )
     }
     if (baseUrl.isBlank()) return this
     val parsed = HomeLanServerConfig.fromBaseUrl(baseUrl)
@@ -1941,6 +2443,7 @@ private fun SyncSession.withHomeLanDerived(): SyncSession {
         serverHost = parsed.host,
         serverPort = parsed.port,
         baseUrl = parsed.baseUrl,
+        serverScheme = parsed.scheme,
     )
 }
 
@@ -1976,6 +2479,7 @@ private class TestMediaFileStore : SyncMediaFileStore {
         bytes: ByteArray,
         mime: String?,
     ): String {
+        require(bytes.isNotEmpty()) { "downloaded media must not be empty" }
         afterSaveDownloaded?.also { afterSaveDownloaded = null }?.invoke()
         return "downloaded/$clientUuid"
     }

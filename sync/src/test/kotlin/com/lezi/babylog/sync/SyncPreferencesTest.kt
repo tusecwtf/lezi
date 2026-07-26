@@ -129,7 +129,7 @@ class SyncPreferencesTest {
     }
 
     @Test
-    fun changingServerAtomicallyDropsCredentialsAndCursor() = runTest {
+    fun changingJoinedServerPreservesCredentialsAndResetsOnlyPullReceipt() = runTest {
         val file = File.createTempFile("lezi-sync-", ".preferences_pb").also { it.delete() }
         val tokens = InMemorySecureFamilyTokenStore()
         val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
@@ -152,10 +152,17 @@ class SyncPreferencesTest {
         assertThat(preferences.session.first()).isEqualTo(
             SyncSession(
                 baseUrl = "http://new-nas:8765",
+                familyId = "old-family",
+                familyToken = "old-token",
                 deviceId = "stable-device",
+                role = FamilyRole.Owner,
+                pullCursor = 0,
+                pullGeneration = "",
+                lastSuccessAt = 123,
+                serverHost = "new-nas",
             ),
         )
-        assertThat(tokens.getToken()).isEmpty()
+        assertThat(tokens.getToken()).isEqualTo("old-token")
     }
 
     @Test
@@ -190,6 +197,27 @@ class SyncPreferencesTest {
         assertThat(preferences.session.first().pullCursor).isEqualTo(0)
         assertThat(preferences.session.first().pullGeneration).isEmpty()
         assertThat(preferences.session.first().familyToken).isEqualTo("new-token")
+    }
+
+    @Test
+    fun httpsSchemeSurvivesSessionPersistence() = runTest {
+        val file = File.createTempFile("lezi-sync-", ".preferences_pb").also { it.delete() }
+        val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
+        val preferences = preferences(store)
+
+        preferences.saveSession(
+            SyncSession(
+                baseUrl = "https://lezi.home:443",
+                familyId = "family",
+                familyToken = "token",
+                deviceId = "device",
+                role = FamilyRole.Owner,
+            ),
+        )
+
+        val restored = preferences.session.first()
+        assertThat(restored.baseUrl).isEqualTo("https://lezi.home:443")
+        assertThat(restored.homeLanConfig.baseUrl).isEqualTo("https://lezi.home:443")
     }
 
     @Test

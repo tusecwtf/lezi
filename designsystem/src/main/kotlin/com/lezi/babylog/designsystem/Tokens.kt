@@ -89,6 +89,10 @@ object LeziSpacing {
     val Page: Dp = 16.dp
     val CardPad: Dp = 14.dp
     val SectionGap: Dp = 12.dp
+    val TopBarHeight: Dp = 68.dp
+    val TopBarHorizontal: Dp = 10.dp
+    val TopBarAvatar: Dp = 34.dp
+    val TopBarAction: Dp = 48.dp
 }
 
 @Immutable

@@ -13,6 +13,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::model::Entity;
+use crate::{PULL_ENTITY_TARGET_BYTES, PULL_PAGE_ENTITY_LIMIT, PULL_PAGE_TARGET_BYTES};
 
 const ENTITY_QUERY_CHUNK_SIZE: usize = 400;
 
@@ -24,7 +25,15 @@ pub struct Principal {
     pub device_id: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone)]
+pub struct ActiveMembership {
+    pub token_hash: String,
+    pub role: String,
+    pub device_id: String,
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct PulledEntity {
     #[serde(rename = "type")]
     pub entity_type: String,
@@ -35,11 +44,24 @@ pub struct PulledEntity {
     pub rev: i64,
 }
 
+#[derive(Debug)]
+pub struct PullPage {
+    pub entities: Vec<PulledEntity>,
+    pub cursor: i64,
+    pub has_more: bool,
+}
+
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct PushResult {
     pub applied: usize,
     pub skipped: usize,
     pub cursor: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaMetadata {
+    pub kind: String,
+    pub byte_size: Option<usize>,
 }
 
 #[derive(Debug, Error)]
@@ -64,6 +86,10 @@ pub enum StoreError {
     ForbiddenAvatar,
     #[error("media kind and association are immutable")]
     ImmutableMediaAssociation,
+    #[error("entity updated_at is outside the accepted time range")]
+    TimestampOutOfRange,
+    #[error("entity is too large for a bounded pull page")]
+    PullEntityTooLarge,
     #[error("{0}")]
     UnresolvedReference(String),
     #[error("stored entity payload is invalid")]
@@ -120,6 +146,14 @@ impl Store {
                 crate::secure_file(&path)?;
             }
         }
+        Ok(())
+    }
+
+    pub fn health_check(&self) -> Result<(), StoreError> {
+        let connection = self.connect()?;
+        connection.query_row("SELECT COUNT(*) FROM family_meta", [], |row| {
+            row.get::<_, i64>(0)
+        })?;
         Ok(())
     }
 
@@ -303,6 +337,30 @@ impl Store {
         Ok(principal)
     }
 
+    pub fn active_memberships(&self, family_id: &str) -> Result<Vec<ActiveMembership>, StoreError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "
+            SELECT token_hash, role, device_id, display_name
+            FROM memberships
+            WHERE family_id = ?1 AND revoked_at IS NULL
+            ORDER BY
+                CASE role WHEN 'owner' THEN 0 ELSE 1 END,
+                device_id COLLATE BINARY,
+                token_hash COLLATE BINARY
+            ",
+        )?;
+        let rows = statement.query_map(params![family_id], |row| {
+            Ok(ActiveMembership {
+                token_hash: row.get(0)?,
+                role: row.get(1)?,
+                device_id: row.get(2)?,
+                display_name: row.get(3)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn create_invite(
         &self,
         family_id: &str,
@@ -419,13 +477,30 @@ impl Store {
         family_id: &str,
         role: &str,
         entities: Vec<Entity>,
+        max_updated_at: i64,
     ) -> Result<PushResult, StoreError> {
+        if entities
+            .iter()
+            .any(|entity| entity.updated_at > max_updated_at)
+        {
+            return Err(StoreError::TimestampOutOfRange);
+        }
         let original_count = entities.len();
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let incoming_keys = entities.iter().map(entity_key).collect::<BTreeSet<_>>();
         let mut existing = load_existing_entities(&transaction, family_id, &incoming_keys)?;
         let mut effective = effective_lww_winners(entities, &existing);
+        for entity in &effective {
+            let payload_bytes = serde_json::to_vec(&entity.payload)?.len();
+            // Leave room for the entity envelope and the page response fields.
+            // A media page can need media -> record -> baby. Keeping each
+            // entity below one third of the page target guarantees that the
+            // complete dependency group can be emitted without stalling.
+            if payload_bytes.saturating_add(512) > PULL_ENTITY_TARGET_BYTES {
+                return Err(StoreError::PullEntityTooLarge);
+            }
+        }
         let reference_keys = validation_reference_keys(&effective);
         let missing_references = reference_keys
             .difference(&incoming_keys)
@@ -487,11 +562,7 @@ impl Store {
         })
     }
 
-    pub fn pull(
-        &self,
-        family_id: &str,
-        cursor: i64,
-    ) -> Result<(Vec<PulledEntity>, i64), StoreError> {
+    pub fn pull(&self, family_id: &str, cursor: i64) -> Result<PullPage, StoreError> {
         let connection = self.connect()?;
         let current: i64 = connection.query_row(
             "SELECT rev FROM family_meta WHERE family_id = ?1",
@@ -505,37 +576,70 @@ impl Store {
             "
             SELECT entity_type, client_uuid, updated_at, deleted_at, payload_json, rev
             FROM entities
-            WHERE family_id = ?1 AND rev > ?2
+            WHERE family_id = ?1 AND rev > ?2 AND rev <= ?3
             ORDER BY rev ASC
             ",
         )?;
-        let rows = statement.query_map(params![family_id, cursor], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, Option<i64>>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, i64>(5)?,
-            ))
-        })?;
+        let mut rows = statement.query(params![family_id, cursor, current])?;
         let mut entities = Vec::new();
-        for row in rows {
-            let (entity_type, client_uuid, updated_at, deleted_at, payload_json, rev) = row?;
-            let mut payload = parse_payload(&payload_json)?;
-            if entity_type == "baby" {
-                payload.remove("sort_order");
+        let mut included_keys = BTreeSet::new();
+        let mut serialized_bytes = 0usize;
+        let mut page_cursor = cursor;
+        let mut has_more = false;
+        while let Some(row) = rows.next()? {
+            let entity = pulled_entity_from_row(row)?;
+            let base_rev = entity.rev;
+            let mut group = Vec::new();
+            let mut group_keys = BTreeSet::new();
+            collect_pull_entity_with_dependencies(
+                &connection,
+                family_id,
+                cursor,
+                entity,
+                &included_keys,
+                &mut group_keys,
+                &mut group,
+            )?;
+            let group_bytes = group.iter().try_fold(0usize, |total, entity| {
+                Ok::<_, StoreError>(
+                    total
+                        .saturating_add(serde_json::to_vec(entity)?.len())
+                        .saturating_add(1),
+                )
+            })?;
+            let would_exceed_count =
+                entities.len().saturating_add(group.len()) > PULL_PAGE_ENTITY_LIMIT;
+            let would_exceed_bytes =
+                serialized_bytes.saturating_add(group_bytes) > PULL_PAGE_TARGET_BYTES;
+            if would_exceed_count || would_exceed_bytes {
+                if page_cursor == cursor {
+                    return Err(StoreError::PullEntityTooLarge);
+                }
+                has_more = true;
+                break;
             }
-            entities.push(PulledEntity {
-                entity_type,
-                client_uuid,
-                updated_at,
-                deleted_at,
-                payload,
-                rev,
-            });
+            serialized_bytes = serialized_bytes.saturating_add(group_bytes);
+            included_keys.extend(group_keys);
+            entities.extend(group);
+            page_cursor = base_rev;
+            if entities.len() >= PULL_PAGE_ENTITY_LIMIT
+                || serialized_bytes >= PULL_PAGE_TARGET_BYTES
+            {
+                has_more = page_cursor < current;
+                break;
+            }
         }
-        Ok((entities, current))
+        if !has_more {
+            // Revisions can contain gaps after a later update replaces an
+            // entity's older row. Once the snapshot is exhausted it is safe to
+            // advance across those gaps to the captured server revision.
+            page_cursor = current;
+        }
+        Ok(PullPage {
+            entities,
+            cursor: page_cursor,
+            has_more,
+        })
     }
 
     pub fn current_revision(&self, family_id: &str) -> Result<i64, StoreError> {
@@ -550,11 +654,11 @@ impl Store {
             .unwrap_or(0))
     }
 
-    pub fn media_kind(
+    pub fn media_metadata(
         &self,
         family_id: &str,
         client_uuid: &str,
-    ) -> Result<Option<String>, StoreError> {
+    ) -> Result<Option<MediaMetadata>, StoreError> {
         let connection = self.connect()?;
         let row = connection
             .query_row(
@@ -568,20 +672,30 @@ impl Store {
             .optional()?;
         match row {
             None | Some((_, Some(_))) => Ok(None),
-            Some((payload, None)) => Ok(parse_payload(&payload)?
-                .get("kind")
-                .and_then(Value::as_str)
-                .map(str::to_owned)),
+            Some((payload, None)) => {
+                let payload = parse_payload(&payload)?;
+                let kind = payload
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .ok_or(StoreError::InvalidStoredPayload)?
+                    .to_owned();
+                let byte_size = payload
+                    .get("byte_size")
+                    .map(|value| {
+                        value
+                            .as_u64()
+                            .and_then(|size| usize::try_from(size).ok())
+                            .ok_or(StoreError::InvalidStoredPayload)
+                    })
+                    .transpose()?;
+                Ok(Some(MediaMetadata { kind, byte_size }))
+            }
         }
     }
 
     /// Bump a live media entity's revision after its bytes become available so
     /// pull clients that advanced past the incomplete metadata rev see it again.
-    pub fn republish_media(
-        &self,
-        family_id: &str,
-        client_uuid: &str,
-    ) -> Result<bool, StoreError> {
+    pub fn republish_media(&self, family_id: &str, client_uuid: &str) -> Result<bool, StoreError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let live = transaction
@@ -626,6 +740,175 @@ impl Store {
         self.secure_database_files()?;
         Ok(true)
     }
+}
+
+fn pulled_entity_from_row(row: &rusqlite::Row<'_>) -> Result<PulledEntity, StoreError> {
+    let entity_type = row.get::<_, String>(0)?;
+    let mut payload = parse_payload(&row.get::<_, String>(4)?)?;
+    if entity_type == "baby" {
+        payload.remove("sort_order");
+    }
+    Ok(PulledEntity {
+        entity_type,
+        client_uuid: row.get(1)?,
+        updated_at: row.get(2)?,
+        deleted_at: row.get(3)?,
+        payload,
+        rev: row.get(5)?,
+    })
+}
+
+fn load_pulled_entity(
+    connection: &Connection,
+    family_id: &str,
+    entity_type: &str,
+    client_uuid: &str,
+) -> Result<Option<PulledEntity>, StoreError> {
+    connection
+        .query_row(
+            "
+            SELECT entity_type, client_uuid, updated_at, deleted_at, payload_json, rev
+            FROM entities
+            WHERE family_id = ?1 AND entity_type = ?2 AND client_uuid = ?3
+            ",
+            params![family_id, entity_type, client_uuid],
+            |row| {
+                let entity_type = row.get::<_, String>(0)?;
+                let payload_raw = row.get::<_, String>(4)?;
+                Ok((
+                    entity_type,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    payload_raw,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .optional()?
+        .map(
+            |(entity_type, client_uuid, updated_at, deleted_at, payload_raw, rev)| {
+                let mut payload = parse_payload(&payload_raw)?;
+                if entity_type == "baby" {
+                    payload.remove("sort_order");
+                }
+                Ok(PulledEntity {
+                    entity_type,
+                    client_uuid,
+                    updated_at,
+                    deleted_at,
+                    payload,
+                    rev,
+                })
+            },
+        )
+        .transpose()
+}
+
+fn collect_pull_entity_with_dependencies(
+    connection: &Connection,
+    family_id: &str,
+    cursor: i64,
+    entity: PulledEntity,
+    included_keys: &BTreeSet<EntityKey>,
+    group_keys: &mut BTreeSet<EntityKey>,
+    group: &mut Vec<PulledEntity>,
+) -> Result<(), StoreError> {
+    let key = (entity.entity_type.clone(), entity.client_uuid.clone());
+    if included_keys.contains(&key) || group_keys.contains(&key) {
+        return Ok(());
+    }
+    if entity.deleted_at.is_none() {
+        match entity.entity_type.as_str() {
+            "record" => append_pull_dependency(
+                connection,
+                family_id,
+                cursor,
+                "baby",
+                required_payload_reference(&entity.payload, "baby_client_uuid")?,
+                included_keys,
+                group_keys,
+                group,
+            )?,
+            "media" => match entity.payload.get("kind").and_then(Value::as_str) {
+                Some("avatar") => append_pull_dependency(
+                    connection,
+                    family_id,
+                    cursor,
+                    "baby",
+                    required_payload_reference(&entity.payload, "baby_client_uuid")?,
+                    included_keys,
+                    group_keys,
+                    group,
+                )?,
+                Some("log") => append_pull_dependency(
+                    connection,
+                    family_id,
+                    cursor,
+                    "record",
+                    required_payload_reference(&entity.payload, "record_client_uuid")?,
+                    included_keys,
+                    group_keys,
+                    group,
+                )?,
+                _ => return Err(StoreError::InvalidStoredPayload),
+            },
+            _ => {}
+        }
+    }
+    group_keys.insert(key);
+    group.push(entity);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_pull_dependency(
+    connection: &Connection,
+    family_id: &str,
+    cursor: i64,
+    entity_type: &str,
+    client_uuid: &str,
+    included_keys: &BTreeSet<EntityKey>,
+    group_keys: &mut BTreeSet<EntityKey>,
+    group: &mut Vec<PulledEntity>,
+) -> Result<(), StoreError> {
+    let key = (entity_type.to_owned(), client_uuid.to_owned());
+    if included_keys.contains(&key) || group_keys.contains(&key) {
+        return Ok(());
+    }
+    let dependency = load_pulled_entity(connection, family_id, entity_type, client_uuid)?
+        .ok_or_else(|| {
+            StoreError::UnresolvedReference(format!(
+                "{entity_type} {client_uuid} referenced by stored entity does not exist"
+            ))
+        })?;
+    // A tombstone is still a valid dependency. In particular, deleting a baby
+    // intentionally retains its care records, so a fresh client needs the baby
+    // tombstone before those records to preserve the relationship while keeping
+    // the profile hidden. Push validation likewise treats retained tombstones as
+    // existing reference targets.
+    if dependency.rev <= cursor {
+        return Ok(());
+    }
+    collect_pull_entity_with_dependencies(
+        connection,
+        family_id,
+        cursor,
+        dependency,
+        included_keys,
+        group_keys,
+        group,
+    )
+}
+
+fn required_payload_reference<'a>(
+    payload: &'a Map<String, Value>,
+    field: &str,
+) -> Result<&'a str, StoreError> {
+    payload
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or(StoreError::InvalidStoredPayload)
 }
 
 fn table_columns(connection: &Connection, table: &str) -> Result<BTreeSet<String>, StoreError> {
@@ -988,6 +1271,7 @@ mod tests {
                         entity("record", record_id, 1, record),
                         entity("baby", baby_id, 1, baby.clone()),
                     ],
+                    10,
                 )
                 .unwrap()
                 .applied,
@@ -995,11 +1279,124 @@ mod tests {
         );
         assert_eq!(
             store
-                .push(&family_id, "owner", vec![entity("baby", baby_id, 1, baby)],)
+                .push(
+                    &family_id,
+                    "owner",
+                    vec![entity("baby", baby_id, 1, baby)],
+                    10,
+                )
                 .unwrap()
                 .skipped,
             1
         );
-        assert_eq!(store.pull(&family_id, 0).unwrap().0.len(), 2);
+        assert_eq!(store.pull(&family_id, 0).unwrap().entities.len(), 2);
+    }
+
+    #[test]
+    fn push_rejects_entities_past_the_supplied_timestamp_limit_without_writing() {
+        let directory = TempDir::new().unwrap();
+        let store = Store::open(directory.path().join("lezi.db")).unwrap();
+        let family_id = family(&store);
+        let baby = json!({
+            "nickname":"年年","sex":"female","birthday":"2025-01-02",
+            "due_date":null,"avatar_media_uuid":null,"birth_weight_grams":3200
+        });
+
+        let result = store.push(
+            &family_id,
+            "owner",
+            vec![entity("baby", Uuid::new_v4(), 11, baby)],
+            10,
+        );
+
+        assert!(matches!(result, Err(StoreError::TimestampOutOfRange)));
+        assert!(store.pull(&family_id, 0).unwrap().entities.is_empty());
+    }
+
+    #[test]
+    fn pull_page_is_bounded_by_serialized_bytes_as_well_as_entity_count() {
+        let directory = TempDir::new().unwrap();
+        let store = Store::open(directory.path().join("lezi.db")).unwrap();
+        let family_id = family(&store);
+        let baby_id = Uuid::new_v4();
+        let baby = json!({
+            "nickname":"年年","sex":"female","birthday":"2025-01-02",
+            "due_date":null,"avatar_media_uuid":null,"birth_weight_grams":3200
+        });
+        let mut entities = vec![entity("baby", baby_id, 1, baby)];
+        entities.extend((0..10).map(|index| {
+            entity(
+                "record",
+                Uuid::new_v4(),
+                index + 2,
+                json!({
+                    "baby_client_uuid":baby_id,
+                    "type":"custom",
+                    "timestamp":100,
+                    "payload_json":{"blob":"x".repeat(1024 * 1024)}
+                }),
+            )
+        }));
+        store.push(&family_id, "owner", entities, 100).unwrap();
+
+        let first = store.pull(&family_id, 0).unwrap();
+        let serialized_bytes = first
+            .entities
+            .iter()
+            .map(|entity| serde_json::to_vec(entity).unwrap().len() + 1)
+            .sum::<usize>();
+
+        assert!(first.has_more);
+        assert!(first.cursor < 11);
+        assert!(serialized_bytes <= PULL_PAGE_TARGET_BYTES);
+    }
+
+    #[test]
+    fn push_rejects_an_entity_that_cannot_fit_on_a_bounded_pull_page() {
+        let directory = TempDir::new().unwrap();
+        let store = Store::open(directory.path().join("lezi.db")).unwrap();
+        let family_id = family(&store);
+        let baby_id = Uuid::new_v4();
+        store
+            .push(
+                &family_id,
+                "owner",
+                vec![entity(
+                    "baby",
+                    baby_id,
+                    1,
+                    json!({
+                        "nickname":"年年","sex":"female","birthday":"2025-01-02",
+                        "due_date":null,"avatar_media_uuid":null
+                    }),
+                )],
+                100,
+            )
+            .unwrap();
+        let record_id = Uuid::new_v4();
+        let result = store.push(
+            &family_id,
+            "owner",
+            vec![entity(
+                "record",
+                record_id,
+                2,
+                json!({
+                    "baby_client_uuid":baby_id,
+                    "type":"custom",
+                    "timestamp":100,
+                    "payload_json":{"blob":"x".repeat(PULL_PAGE_TARGET_BYTES)}
+                }),
+            )],
+            100,
+        );
+
+        assert!(matches!(result, Err(StoreError::PullEntityTooLarge)));
+        assert!(store
+            .pull(&family_id, 0)
+            .unwrap()
+            .entities
+            .iter()
+            .all(|entity| entity.client_uuid != record_id.to_string()));
     }
 }

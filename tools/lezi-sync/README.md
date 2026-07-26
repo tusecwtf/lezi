@@ -23,13 +23,13 @@ $LEZI_DATA_DIR/
 
 ## NAS / Docker Compose
 
-默认镜像为 `lezi-sync:0.2.3`。**默认安全基线：**
+默认镜像为 `lezi-sync:0.2.4`。**默认安全基线：**
 
 | 项 | 默认 | 说明 |
 |---|---|---|
 | 容器用户 | `10001:10001`（`lezi`） | 非 root |
 | 主机端口映射 | `127.0.0.1:8765:8765` | 仅 loopback；手机经反代或显式覆盖访问 |
-| 引导密钥 | 未设置 | **生产必须设置** `LEZI_BOOTSTRAP_SECRET`（见下） |
+| 引导密钥 | Compose 必填 | 缺失或空值时 Compose 拒绝启动（见下） |
 
 ```bash
 cd tools/lezi-sync
@@ -39,13 +39,14 @@ cd tools/lezi-sync
 mkdir -p /volume1/docker/lezi
 sudo chown -R 10001:10001 /volume1/docker/lezi
 
-# 生产：长随机 bootstrap（≥16 字符）。空值时 /v1/family/create 在空库上对 LAN 开放。
+# Compose 必填：长随机 bootstrap（≥16 字符）。APK 建家时输入同一一次性口令。
 export LEZI_BOOTSTRAP_SECRET="$(openssl rand -hex 24)"
 export LEZI_DATA_HOST_PATH=/volume1/docker/lezi
 
 docker compose up -d
 docker compose ps
 curl -fsS http://127.0.0.1:8765/health
+curl -fsS http://127.0.0.1:8765/ready
 ```
 
 ### 端口发布覆盖
@@ -56,6 +57,7 @@ curl -fsS http://127.0.0.1:8765/health
 # 仅示例：发布到所有宿主接口的 8765
 LEZI_SYNC_PUBLISH=0.0.0.0:8765 \
   LEZI_DATA_HOST_PATH=/volume1/docker/lezi \
+  LEZI_BOOTSTRAP_SECRET=... \
   docker compose up -d
 ```
 
@@ -81,21 +83,23 @@ Synology、QNAP 或其它 NAS 的数据路径不同，只需把 `LEZI_DATA_HOST_
 并启用 `no-new-privileges`。不要开启特权模式，也不要挂载 Docker socket 或其它
 宿主目录。
 
-服务会尽力把私有目录和文件收紧为 `0700`/`0600`。部分 NAS 的 ACL 或共享
-文件系统允许容器读写，却禁止调用 `chmod`；从 `0.2.1` 起，这类
-`EPERM`、`EACCES`、`EOPNOTSUPP` 会记录一次警告后继续运行。只读挂载以及
-实际创建、读取或写入失败仍会阻止启动。
+服务会把私有目录和文件收紧为 `0700`/`0600`。默认
+`LEZI_ALLOW_PERMISSION_HARDENING_SKIP=0`，任何 `chmod` 失败都会 fail-closed。
+只有先确认 NAS 挂载确实可创建、读取和写入文件，但其 ACL/共享文件系统单独拒绝
+`chmod` 时，才显式设置 `LEZI_ALLOW_PERMISSION_HARDENING_SKIP=1`；此时仅
+`EPERM`、`EACCES`、`EOPNOTSUPP` 会记录警告后继续。只读挂载以及实际持久化 I/O
+失败无论是否开启 skip 都会阻止启动。
 
 升级既有部署：
 
 ```bash
+export LEZI_BOOTSTRAP_SECRET="<deployment bootstrap secret>"
 docker compose stop
 cp -a /volume1/docker/lezi /volume1/backup/lezi-before-rust
 ./build-image.sh
 # 若原数据为 root 拥有，先 chown 10001 或改用 nas-root profile
 sudo chown -R 10001:10001 /volume1/docker/lezi
 LEZI_DATA_HOST_PATH=/volume1/docker/lezi \
-  LEZI_BOOTSTRAP_SECRET=... \
   docker compose up -d
 docker compose ps
 ```
@@ -103,9 +107,9 @@ docker compose ps
 如果 NAS 不适合本机编译，可在开发机导出镜像：
 
 ```bash
-docker save lezi-sync:0.2.3 | gzip > lezi-sync-0.2.3.tar.gz
+docker save lezi-sync:0.2.4 | gzip > lezi-sync-0.2.4.tar.gz
 # 把 tar.gz 复制到 NAS 后：
-gzip -dc lezi-sync-0.2.3.tar.gz | docker load
+gzip -dc lezi-sync-0.2.4.tar.gz | docker load
 ```
 
 构建脚本只把 Cargo 清单、锁文件、Dockerfile 与 `src/` 放进临时构建上下文，
@@ -118,8 +122,8 @@ gzip -dc lezi-sync-0.2.3.tar.gz | docker load
 ```bash
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  --build-arg LEZI_SYNC_VERSION=0.2.3 \
-  -t your-registry/lezi-sync:0.2.3 \
+  --build-arg LEZI_SYNC_VERSION=0.2.4 \
+  -t your-registry/lezi-sync:0.2.4 \
   --push .
 ```
 
@@ -133,24 +137,26 @@ docker buildx build \
 | `LEZI_DATA_DIR` | `/data` | SQLite、密钥和媒体的唯一数据根 |
 | `LEZI_HOST` | `0.0.0.0` | 容器内监听地址（宿主暴露面由 compose 端口映射控制） |
 | `LEZI_PORT` | `8765` | 监听端口 |
-| `LEZI_SYNC_VERSION` | `0.2.3` | `/health` 返回的版本 |
+| `LEZI_SYNC_VERSION` | `0.2.4` | `/health` 返回的版本 |
 | `LEZI_INVITE_TTL_HOURS` | `24` | 邀请有效期，范围 1–168 |
 | `LEZI_MAX_MEDIA_BYTES` | `10485760` | 单个媒体最大字节数 |
-| `LEZI_BOOTSTRAP_SECRET` | _(empty)_ | 非空时 `POST /v1/family/create` 必须带 `X-Lezi-Bootstrap-Secret`；**生产 fail-closed：必须设置** |
-| `LEZI_CREATE_RATE_LIMIT` | `20` | 每个窗口内 create 尝试上限 |
-| `LEZI_JOIN_RATE_LIMIT` | `60` | 每个窗口内 join 尝试上限 |
+| `LEZI_BOOTSTRAP_SECRET` | Compose 必填；`cargo run` 可空 | `POST /v1/family/create` 要求同值 `X-Lezi-Bootstrap-Secret`；Compose 缺失或空值时拒绝启动 |
+| `LEZI_CREATE_RATE_LIMIT` | `20` | 每台 device 每窗口的 create 尝试上限 |
+| `LEZI_JOIN_RATE_LIMIT` | `60` | 每个邀请码每窗口的 join 尝试上限 |
 | `LEZI_RATE_LIMIT_WINDOW_SECONDS` | `60` | create/join 限流窗口秒数 |
 | `LEZI_SYNC_PUBLISH` | `127.0.0.1:8765` | compose 宿主侧发布地址（仅 docker compose） |
-| `LEZI_ALLOW_PERMISSION_HARDENING_SKIP` | _(unset)_ | 设为 `1` 时，chmod 在 EPERM/EACCES/EOPNOTSUPP 上 warn 并继续；**默认 fail-closed** 拒绝启动（部分 NAS 卷需显式开启） |
+| `LEZI_ALLOW_PERMISSION_HARDENING_SKIP` | Compose `0`；`cargo run` 未设置 | 仅显式设为 `1` 时，chmod 在 EPERM/EACCES/EOPNOTSUPP 上 warn 并继续；默认 fail-closed |
 
 服务本身只监听 HTTP。可信家庭局域网可以直接访问；需要 HTTPS 时，在 NAS
 上使用 Caddy、Nginx 或系统自带反向代理终止 TLS，并只把容器端口暴露在私有
 Docker 网络或家庭 LAN。不要把 8765 直接映射到公网。
 
-### 生产 bootstrap（fail-closed 文档）
+### 生产 bootstrap（fail-closed）
 
-- **生产部署必须设置** `LEZI_BOOTSTRAP_SECRET`（≥16 字符随机串）。
-- 未设置时服务会打 warn，空库上任意 LAN 客户端可抢先 `POST /v1/family/create`。
+- **Compose 部署必须设置** `LEZI_BOOTSTRAP_SECRET`（≥16 字符随机串）；缺失或
+  空值时 `docker compose` 会在启动前报错。
+- 本地 `cargo run` 仍可不设置，便于开发；此时服务会打 warn，空库上的 create
+  接口对本机网络开放，不能作为生产配置。
 - 设置后，建家请求需额外请求头：
 
 ```http
@@ -159,9 +165,8 @@ X-Lezi-Bootstrap-Secret: <same as LEZI_BOOTSTRAP_SECRET>
 Content-Type: application/json
 ```
 
-- 既有 Android 客户端在未带该头时无法在已加锁实例上建家；可先用 curl 建家并
-  用邀请码加入，或在 App 侧配置同一密钥（后续客户端工作）。密钥为空时保持
-  与旧 Android 客户端线协议兼容。
+- Android 建家页输入相同的一次性初始化口令；客户端仅将其放入该请求头，不写入
+  session、邀请载荷或本地持久化。缺失或错误时建家失败并允许重新输入。
 
 ## 本地开发
 
@@ -181,26 +186,57 @@ lezi-sync healthcheck
 
 ## HTTP interface
 
-除 `/health`、`/v1/family/create` 和 `/v1/join` 外，接口都要求
+除 `/health`、`/ready`、`/v1/family/create` 和 `/v1/join` 外，接口都要求
 `Authorization: Bearer <family-token>`。`create`/`join` 受进程内速率限制；
-`create` 在配置了 `LEZI_BOOTSTRAP_SECRET` 时还要求 bootstrap 头。
+`create` 在配置了 `LEZI_BOOTSTRAP_SECRET` 时还要求 bootstrap 头。局部分桶达到
+上限时只阻断同一 device/邀请码；轮换标识仍受局部上限 10 倍的全局兜底限制。
+无效 bootstrap 或格式错误的请求不消耗有效建家调用的额度。
 
 | 方法 | 路径 | 摘要 |
 |---|---|---|
-| GET | `/health` | `{ok, version}` |
+| GET | `/health` | 廉价进程存活检查，正常 `{ok, version}`，不访问 DB/文件系统 |
+| GET | `/ready` | DB 与数据目录就绪检查；结果缓存 5 秒，异常返回 `503 {ok:false,status:"degraded",version}` |
 | POST | `/v1/family/create` | 幂等创建家庭并返回 owner token |
+| GET | `/v1/family/members` | 当前家庭的 active 成员安全视图；owner/member 均可读 |
 | POST | `/v1/invite` | owner 创建一次性邀请码 |
 | POST | `/v1/join` | 邀请码换 member token |
 | POST | `/v1/leave` | member 吊销自身 token |
 | POST | `/v1/family/delete` | owner 删除家庭及媒体 |
 | POST | `/v1/push` | Baby、Record、Media 的严格 LWW push |
-| GET | `/v1/pull?cursor=&generation=` | 单调 cursor 增量 pull |
+| GET | `/v1/pull?cursor=&generation=` | 有界分页、单调 cursor 增量 pull |
 | PUT/GET | `/v1/media/{client_uuid}` | 上传或下载媒体字节 |
 
 服务每次启动生成新的 `generation`。客户端在发现 generation 变化或 cursor
 领先时执行既有 `full_resync` 契约。Record 使用 `baby_client_uuid` 跨设备关联；
 Media 的 kind 与关联创建后不可改变；member 可以写日志媒体，但头像 metadata
 和字节只允许 owner 修改。
+
+`GET /v1/family/members` 返回 owner-first 的稳定列表：
+`{"members":[{"display_name":"妈妈","role":"owner","is_self":true}]}`。
+服务端只按 Bearer principal 的 `family_id` 查询 active memberships，并由当前
+token 计算 `is_self`；响应绝不包含 token、`token_hash`、原始 `device_id` 或
+`family_id`。加入时 `display_name` 会 trim，Unicode 空白名归一为 `null`，最长
+128 个 Unicode 字符，并拒绝控制符与双向文本格式控制符；历史库中的空名或不安全
+名字在读取时降级为 `null`，客户端应用本地兜底名称；本机 UI 占位名“我（本机）”
+不作为真实成员名上传。
+
+为兼容旧库且不引入 schema migration，同一 role + device 的多条 active token
+在列表中合并。不同 role 不合并，因为 `device_id` 是客户端声明而非鉴权证据，不能
+据此把 member 提升成 owner；退出也只吊销当前 Bearer token，无法安全地按
+`device_id` 批量吊销其它历史 token。管理员删除家庭会统一清除全部 memberships。
+
+pull 响应新增兼容字段 `has_more`。每页最多扫描 200 个实体，并以约 8 MiB
+序列化实体为体积目标；响应 `cursor` 只前进到本页已扫描的 revision。客户端在
+该页实体和媒体全部落地后保存 cursor，再以新 cursor 连续请求，直到
+`has_more=false`。全量页会附带页内实体所需、但 revision 位于后页的 Baby/Record
+依赖；这些依赖后续可幂等重复。旧客户端虽然不会同轮连续拉取，但因收到的不是
+全局 cursor，下一次前台/下拉仍会继续，避免跳过数据。
+客户端执行 full-resync 时，重新 push 本地副本之前的权威拉取阶段会把分页 cursor
+只保存在内存；全部页与成员头像对账成功后才一次持久化，防止中途重启后用半份
+服务器快照提前 push。
+为保证最深的 Media → Record → Baby 依赖组总能装入一页，单个新实体的
+序列化 payload 上限约为页目标的三分之一；超限 push 返回 `422`，不会写入一条
+永远无法 pull 的数据。
 
 ### 媒体完整性（半上传）
 
@@ -211,12 +247,18 @@ Media 的 kind 与关联创建后不可改变；member 可以写日志媒体，�
   仍为家庭全局 rev。
 - 首次成功 `PUT` 字节后服务端会 **提升该 media 的 rev**，对端后续 pull 才能
   看到实体并安全下载。
+- `byte_size` 若存在必须大于 0；PUT body 必须非空，并与声明字节数完全一致。
+- pull/GET 会核对落盘文件非空且与声明大小一致；发现零字节或大小不符时拒绝下发
+  并清理损坏项，非普通文件同样拒绝，下一次正确 PUT 会重新发布该 media。
+- PUT 以临时文件写入并同步文件，原子替换后再同步父目录，确保成功响应前 rename
+  已进入文件系统持久化边界。
 
 线协议字段形状不变，旧客户端只需不再收到不完整 media 即可前进 cursor。
 
 ## 备份与恢复
 
 ```bash
+export LEZI_BOOTSTRAP_SECRET="<deployment bootstrap secret>"
 docker compose stop
 cp -a /volume1/docker/lezi /volume1/backup/lezi-$(date +%F)
 docker compose start

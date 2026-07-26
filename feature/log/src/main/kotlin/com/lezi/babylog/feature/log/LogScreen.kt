@@ -409,7 +409,7 @@ fun LogRoute(
                                 RecordSummaryStrip(
                                     values = listOf(
                                         RecordSummaryValue(RecordType.FORMULA, "${state.summary.feedMl}", "奶ml"),
-                                        RecordSummaryValue(RecordType.NURSING, "${state.summary.nursingMinutes}", "母乳min"),
+                                        RecordSummaryValue(RecordType.NURSING, "${state.summary.nursingMinutes}m", "母乳"),
                                         RecordSummaryValue(
                                             RecordType.SLEEP,
                                             formatMinutes(state.summary.sleepMinutes),

@@ -7,22 +7,23 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -30,7 +31,6 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -40,7 +40,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
@@ -51,10 +53,14 @@ import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordTimeDecision
 import com.lezi.babylog.core.model.FutureEventError
 import com.lezi.babylog.designsystem.LeziClockDialDialog
+import com.lezi.babylog.designsystem.LeziDatePicker
+import com.lezi.babylog.designsystem.LeziDetailTopBar
 import com.lezi.babylog.designsystem.LeziCard
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.designsystem.StateContainer
+import com.lezi.babylog.designsystem.StateKind
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CalendarEvent
@@ -189,7 +195,7 @@ class CalendarViewModel @Inject constructor(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun CalendarRoute(
     onBack: () -> Unit,
@@ -242,14 +248,7 @@ fun CalendarRoute(
     }
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text("日程") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
-            )
+            LeziDetailTopBar(title = "日程", onBack = onBack)
         },
     ) { padding ->
         Column(
@@ -272,24 +271,42 @@ fun CalendarRoute(
                 )
                 Spacer(Modifier.height(LeziSpacing.Xs))
             }
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs)) {
-                items(events, key = { it.id }) { e ->
-                    LeziCard(
-                        modifier = Modifier.fillMaxWidth(),
-                        onClick = {
-                            editingEvent = e
-                            title = e.title
-                            eventAt = e.eventAt
-                            reminderEnabled = e.remindAt != null
-                            remindAt = e.remindAt ?: (e.eventAt - 60 * 60_000L)
-                            addError = null
-                            showAdd = true
-                        },
-                    ) {
-                        Text(e.title, style = LeziTypography.BodyStrong)
-                        Text(formatCalendarDateTime(e.eventAt, zone), style = LeziTypography.Meta)
-                        e.remindAt?.let {
-                            Text("提醒 ${formatCalendarDateTime(it, zone)}", style = LeziTypography.Meta)
+            if (events.isEmpty()) {
+                StateContainer(
+                    kind = StateKind.Empty,
+                    title = "还没有日程",
+                    message = "为体检、用药或重要安排设一个时间",
+                    actionLabel = "添加日程",
+                    onAction = openCalendarDraft,
+                )
+            } else {
+                LazyColumn(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
+                ) {
+                    items(events, key = { it.id }) { e ->
+                        LeziCard(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = {
+                                editingEvent = e
+                                title = e.title
+                                eventAt = e.eventAt
+                                reminderEnabled = e.remindAt != null
+                                remindAt = e.remindAt ?: (e.eventAt - 60 * 60_000L)
+                                addError = null
+                                showAdd = true
+                            },
+                        ) {
+                            Text(
+                                e.title,
+                                style = LeziTypography.BodyStrong,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(formatCalendarDateTime(e.eventAt, zone), style = LeziTypography.Meta)
+                            e.remindAt?.let {
+                                Text("提醒 ${formatCalendarDateTime(it, zone)}", style = LeziTypography.Meta)
+                            }
                         }
                     }
                 }
@@ -299,16 +316,22 @@ fun CalendarRoute(
     if (showAdd) {
         AlertDialog(
             onDismissRequest = closeCalendarDraft,
+            modifier = Modifier.imePadding(),
+            properties = DialogProperties(decorFitsSystemWindows = false),
             title = { Text(if (editingEvent == null) "新日程" else "编辑日程") },
             text = {
                 Column(
-                    Modifier.dismissKeyboardOnTap(),
+                    Modifier
+                        .heightIn(max = 520.dp)
+                        .verticalScroll(rememberScrollState())
+                        .imePadding()
+                        .dismissKeyboardOnTap(),
                     verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
                 ) {
                     OutlinedTextField(
                         value = title,
                         onValueChange = {
-                            title = it
+                            title = limitCalendarTitleInput(it)
                             addError = null
                         },
                         label = { Text("标题") },
@@ -320,7 +343,10 @@ fun CalendarRoute(
                         formatCalendarDateTime(eventAt, zone),
                         style = LeziTypography.BodyStrong,
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
                         OutlinedButton(onClick = { dateTarget = CalendarClockTarget.Event }) {
                             Text("修改日期")
                         }
@@ -349,7 +375,10 @@ fun CalendarRoute(
                             formatCalendarDateTime(remindAt, zone),
                             style = LeziTypography.BodyStrong,
                         )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
                             OutlinedButton(onClick = { dateTarget = CalendarClockTarget.Reminder }) {
                                 Text("提醒日期")
                             }
@@ -488,7 +517,7 @@ fun CalendarRoute(
                 TextButton(onClick = { dateTarget = null }) { Text("取消") }
             },
         ) {
-            DatePicker(state = dateState)
+            LeziDatePicker(state = dateState)
         }
     }
 
@@ -532,12 +561,25 @@ internal fun calendarEventError(
     now: Long = RecordTime.currentTimeMillis(),
 ): String? {
     if (title.isBlank()) return "请填写日程标题"
+    if (calendarTitleLength(title.trim()) > MAX_CALENDAR_TITLE_CODE_POINTS) {
+        return "日程标题最多 $MAX_CALENDAR_TITLE_CODE_POINTS 个字符"
+    }
     return when (RecordTime.futureEventError(eventAt, remindAt, now)) {
         FutureEventError.EventNotFuture -> "日程时间必须晚于现在"
         FutureEventError.ReminderNotFuture -> "提醒时间必须晚于现在"
         FutureEventError.ReminderNotBeforeEvent -> "提醒时间必须早于日程时间"
         null -> null
     }
+}
+
+private const val MAX_CALENDAR_TITLE_CODE_POINTS = 40
+
+private fun calendarTitleLength(value: String): Int =
+    value.codePointCount(0, value.length)
+
+private fun limitCalendarTitleInput(value: String): String {
+    if (calendarTitleLength(value) <= MAX_CALENDAR_TITLE_CODE_POINTS) return value
+    return value.substring(0, value.offsetByCodePoints(0, MAX_CALENDAR_TITLE_CODE_POINTS))
 }
 
 private fun formatCalendarDateTime(timestamp: Long, zone: ZoneId): String =

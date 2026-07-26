@@ -32,8 +32,8 @@
 | minSdk | 26 |
 | compileSdk | 35 |
 | targetSdk | 35 |
-| versionName | `0.2.3` |
-| versionCode | `2`（Play/安装升级单调整数；与 versionName 独立） |
+| versionName | `0.2.4` |
+| versionCode | `3`（Play/安装升级单调整数；与 versionName 独立） |
 | 应用名 | 乐记 |
 
 ---
@@ -114,9 +114,10 @@ UI 事件
 | RECEIVE_BOOT_COMPLETED | 重启恢复本地提醒/计时 | V1 |
 | 相册 / Photo Picker | 日记照片 | V1 |
 | INTERNET / ACCESS_NETWORK_STATE | 家网 health、push/pull 与媒体 | 已声明；网络调用仍受前台 + Wi-Fi + health 门闩 |
+| ACCESS_FINE_LOCATION | 读取当前 SSID，执行硬家庭 Wi-Fi 门闩 | 仅用户操作家庭同步时申请；Android 将 SSID 视为位置敏感字段，应用不读取坐标、不上传 SSID |
 | CAMERA | 扫描家庭邀请 QR | 可选硬件；无相机仍可粘贴载荷 |
 | SCHEDULE_EXACT_ALARM / USE_EXACT_ALARM | **不申请**；喂奶/日程提醒用非精确闹钟即可 | |
-| 麦克风 / 定位 | **不申请** | |
+| 麦克风 / 后台定位 / 附近设备 | **不申请** | |
 
 拒绝通知：仍可记账，无提醒。
 本地提醒（下次喂奶、日程）允许系统在省电策略下批量/延后触发，**不保证**准时到秒；产品不承诺「精确闹钟」体验。
@@ -190,8 +191,8 @@ UI 事件
 
 ```text
 app/build/outputs/apk/debug/app-debug.apk
-app/build/outputs/apk/release/app-release-unsigned.apk
-README.md  # ./gradlew assembleDebug
+app/build/outputs/apk/release/app-release.apk  # 必须通过 release 签名与 apksigner 校验
+README.md  # ./gradlew assembleDebug assembleRelease
 docs/prd/  # 本产品规格
 ```
 

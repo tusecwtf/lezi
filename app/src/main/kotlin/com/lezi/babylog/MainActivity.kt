@@ -1,6 +1,8 @@
 package com.lezi.babylog
 
+import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
@@ -13,6 +15,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -93,6 +96,7 @@ import java.time.LocalDate
 import java.time.YearMonth
 import java.time.ZoneId
 import java.time.ZonedDateTime
+import java.util.Locale
 import javax.inject.Inject
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -108,6 +112,15 @@ import kotlinx.coroutines.launch
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
     private val pendingWidgetComposer = mutableStateOf<WidgetComposerTarget?>(null)
+
+    override fun attachBaseContext(newBase: Context) {
+        val chineseLocale = Locale.forLanguageTag("zh-CN")
+        Locale.setDefault(chineseLocale)
+        val localizedConfiguration = Configuration(newBase.resources.configuration).apply {
+            setLocale(chineseLocale)
+        }
+        super.attachBaseContext(newBase.createConfigurationContext(localizedConfiguration))
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -170,6 +183,7 @@ data class RootUi(
     val selectedDate: LocalDate = LocalDate.now(),
     val today: LocalDate = LocalDate.now(),
     val calendarRecordDays: Set<LocalDate> = emptySet(),
+    val composerRequest: RecordComposerRequest? = null,
 )
 
 @HiltViewModel
@@ -188,6 +202,10 @@ class RootViewModel @Inject constructor(
     private val calendarMonthFlow = MutableStateFlow(YearMonth.from(dayFlow.value))
     private val zone = ZoneId.systemDefault()
     private val todayFlow = MutableStateFlow(LocalDate.now(zone))
+    private val composerRequestFlow = savedStateHandle.getStateFlow<RecordComposerRequest?>(
+        COMPOSER_REQUEST_KEY,
+        null,
+    )
 
     init {
         savedStateHandle[SELECTED_DATE_KEY] = dayFlow.value.toEpochDay()
@@ -252,11 +270,13 @@ class RootViewModel @Inject constructor(
         sleepingBaby,
         calendarRecordDays,
         todayFlow,
-    ) { base, (sleepingBabyId, sleeping), recordDays, today ->
+        composerRequestFlow,
+    ) { base, (sleepingBabyId, sleeping), recordDays, today, composerRequest ->
         base.copy(
             sleeping = sleepingBabyId == base.baby?.id && sleeping,
             calendarRecordDays = recordDays,
             today = today,
+            composerRequest = composerRequest,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), RootUi())
 
@@ -308,6 +328,14 @@ class RootViewModel @Inject constructor(
         viewModelScope.launch { careLog.setCurrentBaby(babyId) }
     }
 
+    fun openComposer(request: RecordComposerRequest) {
+        savedStateHandle[COMPOSER_REQUEST_KEY] = request
+    }
+
+    fun closeComposer() {
+        savedStateHandle[COMPOSER_REQUEST_KEY] = null
+    }
+
     fun refreshWidgets() {
         viewModelScope.launch { widgetRefreshController.refreshAll() }
     }
@@ -320,6 +348,7 @@ class RootViewModel @Inject constructor(
 
     private companion object {
         const val SELECTED_DATE_KEY = "root_selected_date_epoch_day"
+        const val COMPOSER_REQUEST_KEY = "root_record_composer_request"
     }
 }
 
@@ -365,22 +394,29 @@ fun LeziRoot(
     val today = ui.today
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
-    var composerRequest by remember { mutableStateOf<RecordComposerRequest?>(null) }
+    val composerRequest = ui.composerRequest
     var showHeaderCalendar by remember { mutableStateOf(false) }
     var displayedMonth by remember { mutableStateOf(YearMonth.from(ui.selectedDate)) }
 
     LaunchedEffect(widgetComposerTarget) {
         val target = widgetComposerTarget ?: return@LaunchedEffect
+        // Never replace an in-progress draft without an explicit discard action.
+        if (composerRequest != null) {
+            onWidgetComposerConsumed()
+            return@LaunchedEffect
+        }
         if (ui.babies.none { it.id == target.babyId }) {
             onWidgetComposerConsumed()
             return@LaunchedEffect
         }
         vm.openWidgetBaby(target.babyId)
-        composerRequest = RecordComposerRequest.New(
-            babyId = target.babyId,
-            type = target.type,
-            timestamp = System.currentTimeMillis(),
-            historical = false,
+        vm.openComposer(
+            RecordComposerRequest.New(
+                babyId = target.babyId,
+                type = target.type,
+                timestamp = System.currentTimeMillis(),
+                historical = false,
+            ),
         )
         onWidgetComposerConsumed()
     }
@@ -393,10 +429,8 @@ fun LeziRoot(
         TopDest.Summary.route,
         TopDest.Growth.route,
     )
-    val showBrandHeader = current in setOf(
-        TopDest.Family.route,
-        TopDest.Settings.route,
-    )
+    val showBrandHeader = current == TopDest.Family.route ||
+        current?.startsWith(TopDest.Settings.route) == true
 
     LaunchedEffect(today) {
         vm.refreshToday()
@@ -480,45 +514,36 @@ fun LeziRoot(
                 ) {
                     TopDest.entries.forEach { dest ->
                         val selected = current == dest.route ||
-                            (dest == TopDest.Log && current?.startsWith("log") == true)
+                            (dest == TopDest.Log && current?.startsWith("log") == true) ||
+                            (dest == TopDest.Settings && current?.startsWith("settings") == true)
+                        val navigateToDestination = {
+                            nav.navigate(dest.route) {
+                                popUpTo(nav.graph.findStartDestination().id) { saveState = true }
+                                launchSingleTop = true
+                                restoreState = true
+                            }
+                        }
                         NavigationBarItem(
                             selected = selected,
-                            onClick = {
-                                nav.navigate(dest.route) {
-                                    popUpTo(nav.graph.findStartDestination().id) { saveState = true }
-                                    launchSingleTop = true
-                                    restoreState = true
-                                }
+                            onClick = navigateToDestination,
+                            modifier = Modifier.pointerInput(dest) {
+                                detectTapGestures(
+                                    onLongPress = {
+                                        if (dest == TopDest.Log ||
+                                            dest == TopDest.Summary ||
+                                            dest == TopDest.Growth
+                                        ) {
+                                            vm.cycleBaby()
+                                        }
+                                    },
+                                    onTap = { navigateToDestination() },
+                                )
                             },
                             icon = {
-                                Box(
-                                    Modifier.pointerInput(dest) {
-                                        detectTapGestures(
-                                            onLongPress = {
-                                                if (dest == TopDest.Log ||
-                                                    dest == TopDest.Summary ||
-                                                    dest == TopDest.Growth
-                                                ) {
-                                                    vm.cycleBaby()
-                                                }
-                                            },
-                                            onTap = {
-                                                nav.navigate(dest.route) {
-                                                    popUpTo(nav.graph.findStartDestination().id) {
-                                                        saveState = true
-                                                    }
-                                                    launchSingleTop = true
-                                                    restoreState = true
-                                                }
-                                            },
-                                        )
-                                    },
-                                ) {
-                                    Icon(
-                                        if (selected) dest.selectedIcon else dest.unselectedIcon,
-                                        contentDescription = dest.label,
-                                    )
-                                }
+                                Icon(
+                                    if (selected) dest.selectedIcon else dest.unselectedIcon,
+                                    contentDescription = dest.label,
+                                )
                             },
                             label = { Text(dest.label) },
                             colors = NavigationBarItemDefaults.colors(
@@ -539,7 +564,8 @@ fun LeziRoot(
             startDestination = TopDest.Log.route,
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding),
+                .padding(padding)
+                .consumeWindowInsets(padding),
             enterTransition = { EnterTransition.None },
             exitTransition = { ExitTransition.None },
             popEnterTransition = { EnterTransition.None },
@@ -548,13 +574,15 @@ fun LeziRoot(
             composable(TopDest.Log.route) {
                 LogRoute(
                     externalDay = ui.selectedDate,
-                    onOpenComposer = { composerRequest = it },
+                    onOpenComposer = vm::openComposer,
                     onGoToday = { vm.setDay(today) },
                 )
             }
             composable(TopDest.Summary.route) { SummaryRoute(anchorDate = ui.selectedDate) }
             composable(TopDest.Growth.route) { GrowthRoute(initialDate = ui.selectedDate) }
-            composable(TopDest.Family.route) { FamilyRoute() }
+            composable(TopDest.Family.route) {
+                FamilyRoute(onAddBaby = { nav.navigate("settings/add-baby") })
+            }
             composable(TopDest.Settings.route) {
                 SettingsRoute(
                     onOpenExport = { nav.navigate("export") },
@@ -562,11 +590,20 @@ fun LeziRoot(
                     onOpenCalendar = { nav.navigate("calendar") },
                 )
             }
+            composable("settings/add-baby") {
+                SettingsRoute(
+                    onOpenExport = { nav.navigate("export") },
+                    onOpenSearch = { nav.navigate("search") },
+                    onOpenCalendar = { nav.navigate("calendar") },
+                    initiallyShowAddBaby = true,
+                    onInitialAddBabyFinished = { nav.popBackStack() },
+                )
+            }
             composable("search") {
                 SearchRoute(
                     onBack = { nav.popBackStack() },
                     onOpenEdit = { id ->
-                        composerRequest = RecordComposerRequest.Edit(id)
+                        vm.openComposer(RecordComposerRequest.Edit(id))
                     },
                 )
             }
@@ -592,14 +629,16 @@ fun LeziRoot(
 
     RecordComposerHost(
         request = composerRequest,
-        onDismiss = { composerRequest = null },
-        onSaved = { message ->
-            composerRequest = null
+        onDismiss = vm::closeComposer,
+        onPersisted = {
+            vm.closeComposer()
             vm.refreshWidgets()
+        },
+        onSaved = { message ->
             scope.launch { snackbar.showSnackbar(message) }
         },
         onStartNursingTimer = { note, amountMl ->
-            composerRequest = null
+            vm.closeComposer()
             nav.currentBackStackEntry?.savedStateHandle?.apply {
                 set(TIMER_SEED_NOTE_KEY, note)
                 set(TIMER_SEED_AMOUNT_KEY, amountMl)

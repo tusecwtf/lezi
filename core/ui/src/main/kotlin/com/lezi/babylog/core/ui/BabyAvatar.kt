@@ -30,6 +30,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.designsystem.readableContentColor
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -47,7 +48,7 @@ fun BabyAvatar(
     fallbackBackground: Color,
     modifier: Modifier = Modifier,
     previewBitmap: ImageBitmap? = null,
-    fallbackContentColor: Color = Color.White,
+    fallbackContentColor: Color? = null,
     fallbackStyle: TextStyle = LeziTypography.BodyStrong,
     borderWidth: Dp = 1.dp,
     borderColor: Color? = null,
@@ -65,6 +66,7 @@ fun BabyAvatar(
         }
     }
     val bitmap = previewBitmap ?: storedBitmap
+    val resolvedFallbackContentColor = fallbackContentColor ?: readableContentColor(fallbackBackground)
     val outline = borderColor ?: MaterialTheme.colorScheme.outline.copy(alpha = 0.55f)
     val semanticsModifier = if (avatarContentDescription == null) {
         Modifier
@@ -98,7 +100,7 @@ fun BabyAvatar(
         } else {
             Text(
                 text = nickname.take(1).ifBlank { "乐" },
-                color = fallbackContentColor,
+                color = resolvedFallbackContentColor,
                 style = fallbackStyle,
             )
         }

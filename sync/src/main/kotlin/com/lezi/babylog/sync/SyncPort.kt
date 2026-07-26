@@ -8,6 +8,13 @@ import javax.inject.Singleton
 
 data class Invite(val code: String, val expiresAt: Long)
 
+/** A privacy-preserving family member projection returned by the home server. */
+data class FamilyMember(
+    val displayName: String?,
+    val role: FamilyRole,
+    val isSelf: Boolean,
+)
+
 enum class SyncTrigger { Foreground, PullToRefresh, LocalWrite }
 
 data class SyncPlan(val push: Boolean, val pull: Boolean) {
@@ -20,6 +27,7 @@ data class SyncPlan(val push: Boolean, val pull: Boolean) {
 }
 
 class SyncNotEnabledException : Exception("请先配置家庭服务器并加入家庭")
+class BootstrapSecretRejectedException : Exception("初始化口令不正确，请核对 NAS 配置")
 
 interface SyncPort {
     fun status(): Flow<SyncStatus>
@@ -29,7 +37,10 @@ interface SyncPort {
     suspend fun saveServer(baseUrl: String): Result<Unit>
     /** Persists the host, port, and up to two SSIDs; form defaults are not applied here. */
     suspend fun saveHomeLanConfig(config: HomeLanServerConfig): Result<Unit>
-    suspend fun createFamily(displayName: String? = null): Result<SyncSession>
+    suspend fun createFamily(
+        displayName: String? = null,
+        bootstrapSecret: String? = null,
+    ): Result<SyncSession>
     suspend fun sync(trigger: SyncTrigger): Result<Unit>
     suspend fun pull(familyId: String): Result<Unit>
     suspend fun push(familyId: String): Result<Unit>
@@ -40,7 +51,12 @@ interface SyncPort {
      * same [SyncSession] (server `family_id` is a UUID string — never a local Long).
      */
     suspend fun joinWithCode(code: String): Result<SyncSession>
-    suspend fun joinWithPayload(payload: String): Result<SyncSession>
+    suspend fun joinWithPayload(
+        payload: String,
+        preferredConfig: HomeLanServerConfig? = null,
+        displayName: String? = null,
+    ): Result<SyncSession>
+    suspend fun listFamilyMembers(): Result<List<FamilyMember>>
     suspend fun leave(familyId: String): Result<Unit>
     suspend fun deleteFamily(): Result<Unit>
     suspend fun clearLocalRecords(clearLocal: suspend () -> Unit): Result<Unit>
@@ -63,13 +79,21 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
     override fun requestSync(trigger: SyncTrigger) = Unit
     override suspend fun saveServer(baseUrl: String) = Result.success(Unit)
     override suspend fun saveHomeLanConfig(config: HomeLanServerConfig) = Result.success(Unit)
-    override suspend fun createFamily(displayName: String?) = Result.failure<SyncSession>(SyncNotEnabledException())
+    override suspend fun createFamily(displayName: String?, bootstrapSecret: String?) =
+        Result.failure<SyncSession>(SyncNotEnabledException())
     override suspend fun sync(trigger: SyncTrigger) = Result.success(Unit)
     override suspend fun pull(familyId: String) = Result.success(Unit)
     override suspend fun push(familyId: String) = Result.success(Unit)
     override suspend fun createInvite(familyId: String) = Result.failure<Invite>(SyncNotEnabledException())
     override suspend fun joinWithCode(code: String) = Result.failure<SyncSession>(SyncNotEnabledException())
-    override suspend fun joinWithPayload(payload: String) = Result.failure<SyncSession>(SyncNotEnabledException())
+    override suspend fun joinWithPayload(
+        payload: String,
+        preferredConfig: HomeLanServerConfig?,
+        displayName: String?,
+    ) =
+        Result.failure<SyncSession>(SyncNotEnabledException())
+    override suspend fun listFamilyMembers() =
+        Result.failure<List<FamilyMember>>(SyncNotEnabledException())
     override suspend fun leave(familyId: String) = Result.failure<Unit>(SyncNotEnabledException())
     override suspend fun deleteFamily() = Result.failure<Unit>(SyncNotEnabledException())
     override suspend fun clearLocalRecords(clearLocal: suspend () -> Unit) = runCatching {

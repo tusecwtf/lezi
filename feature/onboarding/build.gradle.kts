@@ -33,6 +33,7 @@ android {
 dependencies {
 
     implementation(project(":core:common"))
+    implementation(project(":core:model"))
     implementation(project(":core:ui"))
     implementation(project(":designsystem"))
     implementation(project(":domain"))
@@ -53,5 +54,6 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.zxing.android.embedded)
     debugImplementation(libs.androidx.compose.ui.tooling)
+    testImplementation(libs.junit)
 
 }

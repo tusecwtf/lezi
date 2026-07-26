@@ -21,7 +21,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CalendarMonth
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -327,7 +326,7 @@ fun LeziClockDialDialog(
             },
         ) {
             ChineseLocale {
-                DatePicker(
+                LeziDatePicker(
                     state = dateState,
                     title = {
                         Text(
@@ -368,7 +367,8 @@ private val TimeDisplayNumberWidth = 96.dp
 private val TimeDisplaySeparatorWidth = 24.dp
 private val TimeDisplayRowHeight = 80.dp
 private val PeriodToggleWidth = 52.dp
-private val PeriodToggleHeight = TimeDisplayRowHeight
+// Each half remains a full 48dp touch target around the divider.
+private val PeriodToggleHeight = 98.dp
 private val PeriodToggleGap = 12.dp
 private val ClockDialSize = 256.dp
 private val ClockDisplayBottomMargin = 36.dp

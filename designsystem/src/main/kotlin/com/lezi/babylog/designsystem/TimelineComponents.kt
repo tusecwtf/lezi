@@ -106,7 +106,7 @@ fun TimelineLane(
     val focusRing = MaterialTheme.colorScheme.primary
     val density = LocalDensity.current
     // Taller lanes for event markers so dots + touch targets are comfortable.
-    val laneHeight = if (markerStyle) trackHeight.coerceAtLeast(36.dp) else trackHeight
+    val laneHeight = trackHeight.coerceAtLeast(48.dp)
     Row(
         modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -115,7 +115,7 @@ fun TimelineLane(
             label,
             style = LeziTypography.Meta.copy(fontSize = 10.sp),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.width(34.dp),
+            modifier = Modifier.width(44.dp),
             maxLines = 1,
         )
         Canvas(
@@ -327,11 +327,7 @@ fun TimelineRailCard(
             }
             Text("$recordCount 条记录", style = LeziTypography.Meta, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Text(
-            "点睡眠条或喂养/护理圆点可高亮并查看说明",
-            style = LeziTypography.Meta,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        TimelineInteractionHint()
         Spacer(Modifier.height(10.dp))
         Row(Modifier.fillMaxWidth()) {
             Spacer(Modifier.width(34.dp))
@@ -532,11 +528,7 @@ private fun JournalTimelineRail(
             Text("0–24h 记录轨道", style = LeziTypography.Label)
             Text("$recordCount 条", style = LeziTypography.Meta, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Text(
-            "点睡眠条或喂养/护理圆点可高亮并查看说明",
-            style = LeziTypography.Meta,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        TimelineInteractionHint()
         Spacer(Modifier.height(6.dp))
         Row(Modifier.fillMaxWidth()) {
             Column(
@@ -734,5 +726,23 @@ private fun JournalTimelineRail(
             segment = selected,
             onDismiss = { onSelect(null) },
         )
+    }
+}
+
+@Composable
+private fun TimelineInteractionHint() {
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = MaterialTheme.colorScheme.primaryContainer,
+        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("点按轨道", style = LeziTypography.Meta)
+            Text("查看详情", style = LeziTypography.Meta)
+        }
     }
 }

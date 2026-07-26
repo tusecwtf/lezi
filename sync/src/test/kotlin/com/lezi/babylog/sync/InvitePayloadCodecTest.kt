@@ -41,6 +41,15 @@ class InvitePayloadCodecTest {
     }
 
     @Test
+    fun httpsInviteKeepsSchemeInHomeLanConfig() {
+        val decoded = InvitePayloadCodec.decode(
+            """{"v":1,"baseUrl":"https://lezi.home:443","code":"ABCD1234"}""",
+        )
+
+        assertThat(decoded.homeLanConfig.baseUrl).isEqualTo("https://lezi.home:443")
+    }
+
+    @Test
     fun plainCodeStillDecodes() {
         val decoded = InvitePayloadCodec.decode("ab12cd34")
         assertThat(decoded.code).isEqualTo("AB12CD34")

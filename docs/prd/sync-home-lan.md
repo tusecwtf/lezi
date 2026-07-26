@@ -23,9 +23,9 @@
 | # | 主题 | 结论 |
 |---|------|------|
 | 1 | 网络门闩 | **硬家庭局域网**：**本机 SSID 白名单（1～2 个名字，典型 2.4G/5G）** + 当前为 Wi‑Fi + 当前 SSID **精确命中** 白名单 + 配置的 NAS `/health` 可达，才允许一切 NAS API |
-| 2 | 鉴权 | **邀请码进门** + 长期 **family token**；无 token → 401/403 |
+| 2 | 鉴权 | 建家使用 NAS 部署时设置的**一次性初始化口令**；成员用**邀请码进门**；加入后使用长期 **family token**；无有效凭证 → 401/403 |
 | 3 | 建家 / 发码 / 加码 / 同步 | **全部** 受同一门闩约束（含 SSID；仅在家） |
-| 4 | 传输 | 默认 **HTTP + token**；镜像预留可选 HTTPS（环境变量证书） |
+| 4 | 传输 | 默认 **HTTP + token**；可选 HTTPS 由 NAS 的 Caddy/Nginx/系统反向代理终止，服务本身不接收证书环境变量 |
 | 5 | 同步实体（首版） | **Baby + Record + 日志 MediaAsset** |
 | 5b | 写权限 | **宝宝头像：仅管理员（owner）**；**日志媒体：家庭内可同步** |
 | 6 | 媒体字节 | NAS 本地文件；API 上传/下载；DB 只存元数据 |
@@ -129,7 +129,7 @@ SSID 白名单 **仅存本机**，不随家庭同步到 NAS。两台手机可登
 2. 已保存完整 **host + port**。
 3. **`allowedSsids` 至少 1 个**（空名单 **禁止**，即使 health 通）。
 4. 活跃网络 **`TRANSPORT_WIFI`**（蜂窝不兜底）。
-5. 能读到当前 SSID，且 **trim 后精确等于** 白名单之一；读不到（无权限 / `<unknown ssid>`）→ **禁止** 并引导开定位/附近设备权限（**不**降级为「仅 Wi‑Fi」）。
+5. 能读到当前 SSID，且 **trim 后精确等于** 白名单之一；读不到（无权限 / `<unknown ssid>`）→ **禁止** 并在用户发起家庭同步操作时引导开启位置权限与系统定位服务（**不**降级为「仅 Wi‑Fi」）。Android 将 SSID 视为位置敏感字段；应用不读取坐标、不上传 SSID。
 6. `GET {baseUrl}/health` 在短超时内（建议 ≤3s）成功。
 7. 需会话的 API 另需有效 family token（join/create 前无 token）。
 
@@ -158,6 +158,7 @@ SSID 白名单 **仅存本机**，不随家庭同步到 NAS。两台手机可登
 
 | 凭证 | 用途 |
 |------|------|
+| **初始化口令** | NAS 运维者通过 `LEZI_BOOTSTRAP_SECRET` 设置；仅随建家请求发送，Android 不持久化、不写日志、不放入邀请载荷 |
 | **邀请码** | 短时效（默认 24h）；用于 `join`；QR 载荷同时携带 `baseUrl` |
 | **family token** | join/create 成功后下发；后续 API `Authorization: Bearer <token>` |
 | **device_id** | 客户端生成的稳定设备标识；登记成员，不代替 token |
@@ -362,7 +363,8 @@ volumes:
 
 ## 9. HTTP API（契约）
 
-Base：`{baseUrl}`，JSON UTF-8。除 `/health` 外均需 Bearer（`create`/`join` 按下方说明）。
+Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
+（`create`/`join` 按下方说明）。
 
 ### 9.1 `GET /health`
 
@@ -391,10 +393,28 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health` 外均需 Bearer（`create`/`joi
 ### 9.4 `POST /v1/join`
 
 - Body：`{ "code", "device_id", "display_name?" }`
+- `display_name`：服务端 trim；Unicode 空白名归一为 `null`；最长 128 个
+  Unicode 字符；控制字符或 Unicode 双向文本格式控制符返回 `422`。客户端本地
+  占位名“我（本机）”不得上传，应省略该字段，由 `is_self` 决定本机文案
 - 响应：`{ "family_id", "token", "role":"member", "entities":[], "cursor":0, "generation" }`
   （首包可空，随后 pull；或 join 时带全量，实现二选一，**须幂等**）
 
-### 9.5 `POST /v1/push`
+### 9.5 `GET /v1/family/members`
+
+- Auth：任一有效 owner/member family token
+- 作用域：只查询 Bearer principal 所在家庭且 `revoked_at IS NULL` 的 membership
+- 响应：
+  `{"members":[{"display_name":"妈妈","role":"owner","is_self":true}]}`
+- 仅返回规范化后的 `display_name`、`role`、`is_self`。`is_self` 由服务端比较
+  当前 principal 的 token hash 得出；绝不返回 token、`token_hash`、原始
+  `device_id` 或 `family_id`
+- owner-first；其余按规范化名称与服务端内部稳定键排序。`display_name=null`
+  表示历史 null/空/不安全名称，客户端显示本地兜底名称
+- 兼容旧库时，同 role + device 的重复 active token 只展示一行；owner/member
+  role 冲突不合并，因为 `device_id` 不是鉴权证据。退出只吊销当前 Bearer token；
+  无法安全地凭未鉴权 `device_id` 批量吊销其它历史 token，删除家庭时才统一清除
+
+### 9.6 `POST /v1/push`
 
 - Auth：member/owner token
 - Body：
@@ -422,17 +442,29 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health` 外均需 Bearer（`create`/`joi
 - avatar 类 media：非 owner → `403`
 - 响应：`{ "applied": N }`
 
-### 9.6 `GET /v1/pull?cursor=&generation=`
+### 9.7 `GET /v1/pull?cursor=&generation=`
 
 - Auth：token
-- 响应：`{ "entities":[...], "cursor": <rev>, "generation": "..." }`
+- 响应：
+  `{ "entities":[...], "cursor": <本页已扫描 rev>, "generation": "...", "has_more": true|false }`
+- 服务端按实体数（默认最多 200）与序列化体积（目标最多 8 MiB）双重分页；
+  `has_more=true` 时客户端必须用本页 `cursor` 继续拉取。每页 apply 与缺失媒体落盘
+  全部成功后才持久化该页 cursor，任一页失败只重试未完成页。full-resync 在重新
+  push 本地副本前的权威拉取阶段例外：页间进度只保存在内存，全部页与成员头像
+  权威对账完成后才一次发布 cursor，避免中途重启后过早 push。
+- 新实体 payload 需小于页体积目标的三分之一，确保最深的
+  Media → Record → Baby 依赖组仍可完整放进一页；超限 push 以 `422` 原子拒绝。
+- 全量恢复时，若 Record/Media 所依赖的 Baby/Record 当前 revision 落在后页，
+  服务端会在当前页附带该依赖（后页允许幂等重复），避免分页切断引用。
+- `has_more` 为向后兼容的增量字段：旧服务端缺少该字段时新版客户端按单页处理；
+  旧客户端忽略该字段时仍只推进到本页 cursor，下一次前台/下拉会继续而不会跳过。
 - `cursor` 在一个服务进程代际内单调；客户端同时持久化 `cursor` 与 `generation`
 - 服务重启会更换 `generation`。客户端携带旧代际时服务端返回结构化 `409`
   `generation_changed/full_resync`，避免备份恢复后 revision 恰好复用而漏拉。
   既有安装若只有非零 cursor、尚无 generation，也会先从 cursor 0 校准。
   因此恢复整个数据根后必须重启服务；普通重启也会触发一次安全的全量校准。
 
-### 9.7 媒体字节
+### 9.8 媒体字节
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -440,12 +472,12 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health` 外均需 Bearer（`create`/`joi
 | `GET` | `/v1/media/{client_uuid}` | 下载；家庭 token |
 | `DELETE` | `/v1/media/{client_uuid}` | 可选；或仅走 entity tombstone |
 
-### 9.8 `POST /v1/family/delete`
+### 9.9 `POST /v1/family/delete`
 
 - Auth：owner
 - 多重确认由客户端 UI；服务端执行后清空 entities、tokens、invites，并删除 `media/` 下文件（保留空目录）。
 
-### 9.9 `POST /v1/leave`
+### 9.10 `POST /v1/leave`
 
 - Auth：member token；owner 调用返回 `403`
 - 吊销**本 device** 或本 token；**不**删家庭数据。owner 必须使用
@@ -509,11 +541,12 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health` 外均需 Bearer（`create`/`joi
 | 项 | 要求 |
 |----|------|
 | 服务器 | host+端口（空态预填 192.168.50.4:8765）+ SSID 白名单≤2（预填当前 SSID）；扫码可填入 host+port+code 与可选 SSID≤2 |
-| 文案 | 「仅在连接家庭 Wi‑Fi 且能访问家庭服务器时同步」 |
-| 文案 | 「不会在对方记录时推送通知；打开乐记后更新」 |
+| 建家 | 输入 NAS 部署时设置的一次性初始化口令；仅随本次请求发送，结束后立即清除 |
+| 引导 | 用“家庭网络 → 家庭身份 → 同步状态”步骤与就地错误呈现门闩；不用独立 PRD 说明段落 |
+| 共享范围 | 加入前用结构化元素展示“育儿记录与日志图片会共享、个人设置留本机”；不用整段警示文字 |
 | 下拉 | 记录页下拉 → 若 allowSync 则 pull+push |
 | 错误 | health 失败 → 「无法连接家庭服务器，请确认在家中 Wi‑Fi」；禁止堆栈/IP 英文裸奔为主文案 |
-| 账户页 | 同步状态、上次成功时间、立即同步、生成邀请、退出、owner 删除家庭 |
+| 账户页 | 同步状态、当前家庭成员列表、上次成功时间、立即同步、生成邀请、退出、owner 删除家庭 |
 
 ---
 
@@ -550,7 +583,7 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health` 外均需 Bearer（`create`/`joi
 
 - [x] Rust/Axum 项目骨架 + 多阶段 Dockerfile + compose（静态单卷 `/data` 配置）
 - [x] SQLite schema：entities、invites、tokens、meta.rev
-- [x] health / create / invite / join / push / pull / media / leave / delete
+- [x] health / create / invite / join / members / push / pull / media / leave / delete
 - [x] avatar 写权限
 - [x] README：部署、备份、示例 `192.168.50.4:8765`
 - [x] 在本机全局 Docker 构建并启动 Rust 镜像，核对单卷、非 root、`/health`

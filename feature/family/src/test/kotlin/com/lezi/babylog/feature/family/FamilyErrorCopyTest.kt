@@ -2,6 +2,7 @@ package com.lezi.babylog.feature.family
 
 import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.sync.FamilyRole
+import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.PUBLIC_CLEARTEXT_WARNING
 import com.lezi.babylog.sync.SyncNotEnabledException
 import com.lezi.babylog.sync.isPublicCleartextBaseUrl
@@ -11,6 +12,40 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FamilyErrorCopyTest {
+    @Test
+    fun memberListAlwaysShowsThisDeviceWithoutExposingAnIdentifier() {
+        val fallback = familyMembersForDisplay(
+            members = emptyList(),
+            localDisplayName = "我（本机）",
+            localRole = FamilyRole.Owner,
+        )
+
+        assertEquals(1, fallback.size)
+        assertTrue(fallback.single().isSelf)
+        assertEquals("我（本机）", familyMemberDisplayName(fallback.single()))
+
+        val serverMembers = listOf(
+            FamilyMember("妈妈", FamilyRole.Owner, isSelf = true),
+            FamilyMember(null, FamilyRole.Member, isSelf = false),
+        )
+        assertEquals(serverMembers, familyMembersForDisplay(serverMembers, "忽略", FamilyRole.Owner))
+        assertEquals("家庭成员", familyMemberDisplayName(serverMembers.last()))
+        assertEquals(
+            "家庭管理员",
+            familyMemberDisplayName(FamilyMember(null, FamilyRole.Owner, isSelf = false)),
+        )
+        assertEquals(
+            "家庭成员",
+            familyMemberDisplayName(FamilyMember("我（本机）", FamilyRole.Member, isSelf = false)),
+        )
+        assertEquals(
+            "家庭管理员",
+            familyMemberDisplayName(FamilyMember("我（本机）", FamilyRole.Owner, isSelf = false)),
+        )
+        assertEquals("待刷新 · 管理员", familyMemberSummary(1, FamilyRole.Owner, loaded = false))
+        assertEquals("2 位 · 管理员", familyMemberSummary(2, FamilyRole.Owner, loaded = true))
+    }
+
     @Test
     fun hidesNetworkAndAddressDetailsFromFamilyCopy() {
         val copy = familySyncError(
@@ -93,9 +128,9 @@ class FamilyErrorCopyTest {
 
     @Test
     fun storageCopyReflectsWhetherFamilySyncIsActive() {
-        assertEquals("数据仅保存在本机 · 无需登录", familyStorageCopy(false))
+        assertEquals("仅本机", familyStorageCopy(false))
         assertEquals(
-            "记录本地优先，并同步到家庭服务器 · 无需云账号",
+            "本机 + 家庭服务器",
             familyStorageCopy(true),
         )
     }

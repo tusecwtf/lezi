@@ -117,6 +117,7 @@ class TimerStateRestorationTest {
     fun snapshotRoundTripPreservesBoundBaby() {
         val original = TimerState(
             babyId = 42L,
+            completionClientUuid = "timer-session-42",
             leftAccumMs = 60_000L,
             sessionStartedAt = 1_700_000_000_000L,
             order = "L",
@@ -134,7 +135,38 @@ class TimerStateRestorationTest {
         )
 
         assertEquals(42L, restored.babyId)
+        assertEquals("timer-session-42", restored.completionClientUuid)
         assertEquals(60_000L, restored.leftAccumMs)
         assertEquals("L", restored.order)
+    }
+
+    @Test
+    fun legacyActiveSnapshotGetsOneStableCompletionIdBeforeReplay() {
+        val legacy = TimerState(
+            babyId = 42L,
+            leftAccumMs = 60_000L,
+            sessionStartedAt = 1_700_000_000_000L,
+        )
+
+        val upgraded = legacy.withStableCompletionId { "stable-completion-id" }
+        val replay = upgraded.withStableCompletionId { "must-not-replace" }
+
+        assertEquals("stable-completion-id", upgraded.completionClientUuid)
+        assertEquals("stable-completion-id", replay.completionClientUuid)
+        assertNull(TimerState().withStableCompletionId { "unused" }.completionClientUuid)
+    }
+
+    @Test
+    fun foregroundNotificationAdvancesOnlyTheRunningSide() {
+        val snapshot = NursingNotificationSnapshot(
+            leftMs = 15_000L,
+            rightMs = 20_000L,
+            leftRunning = true,
+            rightRunning = false,
+            capturedElapsed = 100_000L,
+        )
+
+        assertEquals(17_500L to 20_000L, snapshot.at(102_500L))
+        assertEquals(15_000L to 20_000L, snapshot.at(99_000L))
     }
 }

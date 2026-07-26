@@ -1,7 +1,7 @@
 mod model;
 mod store;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -22,11 +22,14 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use futures_util::StreamExt;
 use hmac::{Hmac, Mac};
-use model::{EmptyRequest, FamilyCreateRequest, InviteRequest, JoinRequest, PushRequest};
+use model::{
+    normalize_display_name, EmptyRequest, FamilyCreateRequest, InviteRequest, JoinRequest,
+    PushRequest,
+};
 use rand::distributions::{Distribution, Uniform};
 use rand::rngs::OsRng;
 use rand::RngCore;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use store::{Principal, Store, StoreError};
@@ -40,6 +43,13 @@ pub const DEFAULT_MAX_MEDIA_BYTES: usize = 10 * 1024 * 1024;
 pub const DEFAULT_CREATE_RATE_LIMIT: u32 = 20;
 pub const DEFAULT_JOIN_RATE_LIMIT: u32 = 60;
 pub const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: i64 = 60;
+const GLOBAL_RATE_LIMIT_MULTIPLIER: u32 = 10;
+const READINESS_CACHE_SECONDS: i64 = 5;
+const MAX_ENTITY_FUTURE_SKEW_MILLIS: i64 = 24 * 60 * 60 * 1_000;
+const LOCAL_DEVICE_DISPLAY_NAME: &str = "我（本机）";
+pub(crate) const PULL_PAGE_ENTITY_LIMIT: usize = 200;
+pub(crate) const PULL_PAGE_TARGET_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const PULL_ENTITY_TARGET_BYTES: usize = PULL_PAGE_TARGET_BYTES / 3;
 const BOOTSTRAP_SECRET_HEADER: HeaderName = HeaderName::from_static("x-lezi-bootstrap-secret");
 
 #[cfg(unix)]
@@ -170,42 +180,80 @@ impl ServerConfig {
 }
 
 struct RateLimiter {
-    max_attempts: u32,
+    scoped_max_attempts: u32,
+    global_max_attempts: u32,
     window_seconds: i64,
-    windows: StdMutex<HashMap<String, VecDeque<i64>>>,
+    windows: StdMutex<RateLimitWindows>,
+}
+
+#[derive(Default)]
+struct RateLimitWindows {
+    global: VecDeque<i64>,
+    scoped: HashMap<String, VecDeque<i64>>,
+    last_cleanup: Option<i64>,
 }
 
 impl RateLimiter {
     fn new(config: RateLimitConfig) -> Self {
         Self {
-            max_attempts: config.max_attempts,
+            scoped_max_attempts: config.max_attempts,
+            global_max_attempts: config
+                .max_attempts
+                .saturating_mul(GLOBAL_RATE_LIMIT_MULTIPLIER),
             window_seconds: config.window_seconds,
-            windows: StdMutex::new(HashMap::new()),
+            windows: StdMutex::new(RateLimitWindows::default()),
         }
     }
 
-    fn check_and_record(&self, key: &str, now: i64) -> bool {
+    fn check_and_record(&self, scope: &str, now: i64) -> bool {
         let Ok(mut windows) = self.windows.lock() else {
             return false;
         };
-        let queue = windows.entry(key.to_owned()).or_default();
-        while queue
-            .front()
-            .is_some_and(|timestamp| now - *timestamp >= self.window_seconds)
+
+        prune_rate_limit_window(&mut windows.global, now, self.window_seconds);
+        if windows
+            .last_cleanup
+            .is_none_or(|last| now.saturating_sub(last) >= self.window_seconds || now < last)
         {
-            queue.pop_front();
+            windows.scoped.retain(|_, queue| {
+                prune_rate_limit_window(queue, now, self.window_seconds);
+                !queue.is_empty()
+            });
+            windows.last_cleanup = Some(now);
         }
-        if queue.len() as u32 >= self.max_attempts {
+
+        if windows.global.len() as u32 >= self.global_max_attempts {
+            return false;
+        }
+        let queue = windows.scoped.entry(scope.to_owned()).or_default();
+        prune_rate_limit_window(queue, now, self.window_seconds);
+        if queue.len() as u32 >= self.scoped_max_attempts {
             return false;
         }
         queue.push_back(now);
+        windows.global.push_back(now);
         true
     }
+}
+
+fn prune_rate_limit_window(queue: &mut VecDeque<i64>, now: i64, window_seconds: i64) {
+    while queue.front().is_some_and(|timestamp| {
+        now < *timestamp || now.saturating_sub(*timestamp) >= window_seconds
+    }) {
+        queue.pop_front();
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CachedReadiness {
+    checked_at: i64,
+    healthy: bool,
 }
 
 #[derive(Clone)]
 struct AppState {
     store: Store,
+    data_root: PathBuf,
     media_root: PathBuf,
     version: String,
     max_media_bytes: usize,
@@ -218,6 +266,7 @@ struct AppState {
     bootstrap_secret: Option<Arc<str>>,
     create_limiter: Arc<RateLimiter>,
     join_limiter: Arc<RateLimiter>,
+    readiness_cache: Arc<Mutex<Option<CachedReadiness>>>,
 }
 
 impl AppState {
@@ -293,6 +342,7 @@ pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
     }
     let state = AppState {
         store: Store::open(config.data_dir.join("lezi.db"))?,
+        data_root: config.data_dir,
         media_root,
         version: config.version,
         max_media_bytes: config.max_media_bytes,
@@ -305,11 +355,14 @@ pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
         bootstrap_secret: bootstrap_secret.map(|value| Arc::from(value.into_boxed_str())),
         create_limiter: Arc::new(RateLimiter::new(config.create_rate_limit)),
         join_limiter: Arc::new(RateLimiter::new(config.join_rate_limit)),
+        readiness_cache: Arc::new(Mutex::new(None)),
     };
     let body_limit = state.max_media_bytes.max(16 * 1024 * 1024);
     Ok(Router::new()
         .route("/health", get(health))
+        .route("/ready", get(readiness))
         .route("/v1/family/create", post(create_family))
+        .route("/v1/family/members", get(list_family_members))
         .route("/v1/invite", post(create_invite))
         .route("/v1/join", post(join))
         .route("/v1/leave", post(leave))
@@ -326,22 +379,113 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({"ok": true, "version": state.version}))
 }
 
+async fn readiness(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    let now = state.now();
+    let mut cache = state.readiness_cache.lock().await;
+    let healthy = if let Some(cached) = *cache {
+        if now >= cached.checked_at
+            && now.saturating_sub(cached.checked_at) < READINESS_CACHE_SECONDS
+        {
+            cached.healthy
+        } else {
+            refresh_readiness(&state, now, &mut cache).await
+        }
+    } else {
+        refresh_readiness(&state, now, &mut cache).await
+    };
+    readiness_response(&state.version, healthy)
+}
+
+async fn refresh_readiness(
+    state: &AppState,
+    now: i64,
+    cache: &mut Option<CachedReadiness>,
+) -> bool {
+    let store = state.store.clone();
+    let data_root = state.data_root.clone();
+    let media_root = state.media_root.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        store
+            .health_check()
+            .map_err(|error| error.to_string())
+            .and_then(|()| probe_directory_writable(&data_root).map_err(|error| error.to_string()))
+            .and_then(|()| probe_directory_writable(&media_root).map_err(|error| error.to_string()))
+    })
+    .await;
+    let healthy = match result {
+        Ok(Ok(())) => true,
+        Ok(Err(error)) => {
+            tracing::error!(%error, "readiness check failed");
+            false
+        }
+        Err(error) => {
+            tracing::error!(%error, "readiness worker failed");
+            false
+        }
+    };
+    *cache = Some(CachedReadiness {
+        checked_at: now,
+        healthy,
+    });
+    healthy
+}
+
+fn readiness_response(version: &str, healthy: bool) -> (StatusCode, Json<Value>) {
+    if healthy {
+        (
+            StatusCode::OK,
+            Json(json!({"ok": true, "version": version})),
+        )
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "ok": false,
+                "status": "degraded",
+                "version": version,
+            })),
+        )
+    }
+}
+
+fn probe_directory_writable(directory: &Path) -> std::io::Result<()> {
+    let path = directory.join(format!(
+        ".lezi-health-{}-{}",
+        std::process::id(),
+        Uuid::new_v4()
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        file.write_all(b"ok")?;
+        file.sync_all()
+    })();
+    let cleanup = if path.exists() {
+        fs::remove_file(path)
+    } else {
+        Ok(())
+    };
+    result.and(cleanup).and_then(|()| sync_directory(directory))
+}
+
 async fn create_family(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: Result<Json<FamilyCreateRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if !state
-        .create_limiter
-        .check_and_record("family_create", state.now())
-    {
+    // Invalid bootstrap credentials and malformed requests must not consume the
+    // allowance reserved for callers that can actually create a family.
+    require_bootstrap_secret(&state, &headers)?;
+    let request = json_body(body)?;
+    request.validate()?;
+    let scope = format!("device:{}", hash_secret(&request.device_id));
+    if !state.create_limiter.check_and_record(&scope, state.now()) {
         return Err(ApiError::too_many_requests(
             "Too many family create attempts; try again later",
         ));
     }
-    require_bootstrap_secret(&state, &headers)?;
-    let request = json_body(body)?;
-    request.validate()?;
     let signing_state = state.clone();
     let result = state.store.create_family(
         state.now(),
@@ -407,18 +551,19 @@ async fn join(
     State(state): State<Arc<AppState>>,
     body: Result<Json<JoinRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    if !state.join_limiter.check_and_record("family_join", state.now()) {
+    let request = json_body(body)?;
+    let display_name = request.validate()?;
+    let scope = format!("invite:{}", hash_secret(&request.code));
+    if !state.join_limiter.check_and_record(&scope, state.now()) {
         return Err(ApiError::too_many_requests(
             "Too many join attempts; try again later",
         ));
     }
-    let request = json_body(body)?;
-    request.validate()?;
     let signing_state = state.clone();
     let result = state.store.join_family(
         &request.code,
         &request.device_id,
-        request.display_name.as_deref(),
+        display_name.as_deref(),
         state.now(),
         move |code_hash, device_id| signing_state.member_token(code_hash, device_id),
     );
@@ -441,6 +586,105 @@ async fn join(
         "cursor": 0,
         "generation": state.generation,
     })))
+}
+
+#[derive(Debug)]
+struct MemberCandidate {
+    device_id: String,
+    display_name: Option<String>,
+    role: String,
+    is_self: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct MemberView {
+    display_name: Option<String>,
+    role: String,
+    is_self: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct MembersResponse {
+    members: Vec<MemberView>,
+}
+
+async fn list_family_members(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<MembersResponse>, ApiError> {
+    let principal = authenticate(&state, &headers)?;
+    let memberships = state.store.active_memberships(&principal.family_id)?;
+
+    // Historical databases can contain more than one active token for one
+    // device after repeated invitations. Coalesce rows with the same role and
+    // device for presentation without treating the unauthenticated device_id
+    // claim as authority or rotating another token. An owner/member collision
+    // remains two rows so the view never promotes a member to owner.
+    let mut coalesced = BTreeMap::<(String, String), MemberCandidate>::new();
+    for membership in memberships {
+        let display_name = member_display_name_for_view(membership.display_name.as_deref());
+        let is_self = constant_time_eq(
+            membership.token_hash.as_bytes(),
+            principal.token_hash.as_bytes(),
+        );
+        let key = (membership.role.clone(), membership.device_id.clone());
+        coalesced
+            .entry(key)
+            .and_modify(|candidate| {
+                candidate.is_self |= is_self;
+                if candidate.display_name.is_none() {
+                    candidate.display_name = display_name.clone();
+                }
+            })
+            .or_insert(MemberCandidate {
+                device_id: membership.device_id,
+                display_name,
+                role: membership.role,
+                is_self,
+            });
+    }
+
+    let mut members = coalesced.into_values().collect::<Vec<_>>();
+    members.sort_by(|left, right| {
+        member_role_rank(&left.role)
+            .cmp(&member_role_rank(&right.role))
+            .then_with(|| {
+                left.display_name
+                    .is_none()
+                    .cmp(&right.display_name.is_none())
+            })
+            .then_with(|| left.display_name.cmp(&right.display_name))
+            .then_with(|| left.device_id.cmp(&right.device_id))
+    });
+    Ok(Json(MembersResponse {
+        members: members
+            .into_iter()
+            .map(|member| MemberView {
+                display_name: member.display_name,
+                role: member.role,
+                is_self: member.is_self,
+            })
+            .collect(),
+    }))
+}
+
+/// Historical Android clients persisted their device-local fallback label as
+/// a shared member name. It is meaningful only to the originating device, so
+/// never project it to another family member. `is_self` lets each client apply
+/// its own local fallback after the privacy-safe response is received.
+fn member_display_name_for_view(value: Option<&str>) -> Option<String> {
+    normalize_display_name(value)
+        .ok()
+        .flatten()
+        .filter(|name| name != LOCAL_DEVICE_DISPLAY_NAME)
+}
+
+fn member_role_rank(role: &str) -> u8 {
+    if role == "owner" {
+        0
+    } else {
+        1
+    }
 }
 
 async fn leave(
@@ -482,7 +726,7 @@ async fn push_entities(
     body: Result<Json<PushRequest>, JsonRejection>,
 ) -> Result<Json<store::PushResult>, ApiError> {
     let principal = authenticate(&state, &headers)?;
-    let request = json_body(body)?.validate()?;
+    let request = json_body(body)?.validate(state.max_media_bytes)?;
     if request
         .device_id
         .as_deref()
@@ -501,10 +745,16 @@ async fn push_entities(
     }
     let family_lock = state.family_lock(&principal.family_id).await;
     let _guard = family_lock.lock().await;
-    let result = match state
-        .store
-        .push(&principal.family_id, &principal.role, request.entities)
-    {
+    let max_updated_at = state
+        .now()
+        .saturating_mul(1_000)
+        .saturating_add(MAX_ENTITY_FUTURE_SKEW_MILLIS);
+    let result = match state.store.push(
+        &principal.family_id,
+        &principal.role,
+        request.entities,
+        max_updated_at,
+    ) {
         Ok(value) => value,
         Err(StoreError::ForbiddenAvatar) => {
             return Err(ApiError::forbidden("Only owner may change avatar"))
@@ -512,6 +762,16 @@ async fn push_entities(
         Err(StoreError::ImmutableMediaAssociation) => {
             return Err(ApiError::conflict(
                 "Media kind and association are immutable",
+            ))
+        }
+        Err(StoreError::TimestampOutOfRange) => {
+            return Err(ApiError::unprocessable(
+                "updated_at is outside the accepted server time window",
+            ))
+        }
+        Err(StoreError::PullEntityTooLarge) => {
+            return Err(ApiError::unprocessable(
+                "entity payload is too large for bounded sync pull",
             ))
         }
         Err(StoreError::UnresolvedReference(message)) => return Err(ApiError::conflict(message)),
@@ -550,7 +810,9 @@ async fn pull_entities(
             state.recovery_detail(&principal.family_id, "generation_changed")?,
         ));
     }
-    let (entities, cursor) = match state.store.pull(&principal.family_id, query.cursor) {
+    let family_lock = state.family_lock(&principal.family_id).await;
+    let _guard = family_lock.lock().await;
+    let page = match state.store.pull(&principal.family_id, query.cursor) {
         Ok(result) => result,
         Err(StoreError::CursorAhead(server_cursor)) => {
             return Err(ApiError::conflict_value(json!({
@@ -565,14 +827,16 @@ async fn pull_entities(
     };
     // Incomplete media (metadata without bytes) is omitted so clients can advance
     // the pull cursor without GET /media 404 loops. Successful PUT republishes.
-    let entities = entities
+    let entities = page
+        .entities
         .into_iter()
         .filter(|entity| media_entity_is_pullable(state.as_ref(), &principal.family_id, entity))
         .collect::<Vec<_>>();
     Ok(Json(json!({
         "entities": entities,
-        "cursor": cursor,
+        "cursor": page.cursor,
         "generation": state.generation,
+        "has_more": page.has_more,
     })))
 }
 
@@ -584,11 +848,11 @@ async fn put_media(
     let principal = authenticate(&state, request.headers())?;
     let family_lock = state.family_lock(&principal.family_id).await;
     let _guard = family_lock.lock().await;
-    let kind = state
+    let metadata = state
         .store
-        .media_kind(&principal.family_id, &client_uuid.to_string())?
+        .media_metadata(&principal.family_id, &client_uuid.to_string())?
         .ok_or_else(|| ApiError::not_found("Media metadata not found"))?;
-    if kind == "avatar" && principal.role != "owner" {
+    if metadata.kind == "avatar" && principal.role != "owner" {
         return Err(ApiError::forbidden("Only owner may change avatar"));
     }
     if let Some(length) = request.headers().get(CONTENT_LENGTH) {
@@ -611,20 +875,29 @@ async fn put_media(
         }
         content.extend_from_slice(&chunk);
     }
+    if content.is_empty() {
+        return Err(ApiError::unprocessable("Media body must not be empty"));
+    }
+    if metadata
+        .byte_size
+        .is_some_and(|declared_size| declared_size != content.len())
+    {
+        return Err(ApiError::unprocessable(
+            "Media body size does not match declared byte_size",
+        ));
+    }
     let path = state.media_path(&principal.family_id, client_uuid)?;
-    let was_missing = !path.is_file();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
         secure_directory(parent)?;
     }
     write_private_file(&path, &content)?;
-    if was_missing {
-        // Metadata may already have been pulled and skipped; bump rev so peers
-        // observe the media once bytes are durable.
-        state
-            .store
-            .republish_media(&principal.family_id, &client_uuid.to_string())?;
-    }
+    // Metadata may already have been pulled and skipped. Republish after every
+    // durable PUT so retrying a request also heals a process failure between
+    // the file replacement and this database transaction.
+    state
+        .store
+        .republish_media(&principal.family_id, &client_uuid.to_string())?;
     Ok(Json(json!({"ok": true, "size": content.len()})))
 }
 
@@ -634,16 +907,15 @@ async fn get_media(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let principal = authenticate(&state, &headers)?;
-    if state
+    let family_lock = state.family_lock(&principal.family_id).await;
+    let _guard = family_lock.lock().await;
+    let metadata = state
         .store
-        .media_kind(&principal.family_id, &client_uuid.to_string())?
-        .is_none()
-    {
-        return Err(ApiError::not_found("Media metadata not found"));
-    }
+        .media_metadata(&principal.family_id, &client_uuid.to_string())?
+        .ok_or_else(|| ApiError::not_found("Media metadata not found"))?;
     let path = state.media_path(&principal.family_id, client_uuid)?;
-    if !path.is_file() {
-        return Err(ApiError::not_found("Media bytes not found"));
+    if !media_file_is_ready(&path, metadata.byte_size, &client_uuid.to_string()) {
+        return Err(ApiError::not_found("Media bytes incomplete or invalid"));
     }
     let bytes = fs::read(path)?;
     let mut response = Response::new(Body::from(bytes));
@@ -706,10 +978,79 @@ fn media_entity_is_pullable(
     let Ok(client_uuid) = Uuid::parse_str(&entity.client_uuid) else {
         return false;
     };
+    let declared_size = match entity.payload.get("byte_size") {
+        None => None,
+        Some(value) => match value.as_u64().and_then(|size| usize::try_from(size).ok()) {
+            Some(size) => Some(size),
+            None => {
+                tracing::error!(
+                    client_uuid = %entity.client_uuid,
+                    "stored media byte_size is invalid; omitting media from pull"
+                );
+                return false;
+            }
+        },
+    };
     match state.media_path(family_id, client_uuid) {
-        Ok(path) => path.is_file(),
+        Ok(path) => media_file_is_ready(&path, declared_size, &entity.client_uuid),
         Err(_) => false,
     }
+}
+
+fn media_file_is_ready(path: &Path, declared_size: Option<usize>, client_uuid: &str) -> bool {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(error) => {
+            tracing::error!(
+                %client_uuid,
+                path = %path.display(),
+                %error,
+                "cannot inspect media bytes; omitting media"
+            );
+            return false;
+        }
+    };
+    let actual_size = metadata.len();
+    let expected_matches = declared_size.is_none_or(|expected| {
+        u64::try_from(expected).is_ok_and(|expected| expected == actual_size)
+    });
+    if metadata.file_type().is_file() && actual_size > 0 && expected_matches {
+        return true;
+    }
+
+    tracing::warn!(
+        %client_uuid,
+        path = %path.display(),
+        actual_size,
+        ?declared_size,
+        "media bytes are invalid; omitting and repairing incomplete state"
+    );
+    if metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        match fs::remove_file(path) {
+            Ok(()) => {
+                if let Some(parent) = path.parent() {
+                    if let Err(error) = sync_directory(parent) {
+                        tracing::error!(
+                            %client_uuid,
+                            path = %parent.display(),
+                            %error,
+                            "failed to sync media directory after corrupt-file cleanup"
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::error!(
+                    %client_uuid,
+                    path = %path.display(),
+                    %error,
+                    "failed to remove invalid media bytes"
+                );
+            }
+        }
+    }
+    false
 }
 
 fn require_owner(state: &AppState, headers: &HeaderMap) -> Result<Principal, ApiError> {
@@ -787,12 +1128,20 @@ fn write_private_file(path: &Path, content: &[u8]) -> Result<(), ApiError> {
         secure_file(&temporary)?;
         fs::rename(&temporary, path)?;
         secure_file(path)?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| ApiError::internal("media path has no parent directory"))?;
+        sync_directory(parent)?;
         Ok(())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    fs::File::open(path)?.sync_all()
 }
 
 pub(crate) fn hash_secret(value: &str) -> String {
@@ -1027,6 +1376,42 @@ mod tests {
         assert!(constant_time_eq(b"same-secret-value", b"same-secret-value"));
         assert!(!constant_time_eq(b"same-secret-value", b"other-secret-val"));
         assert!(!constant_time_eq(b"short", b"longer-value"));
+    }
+
+    #[test]
+    fn rate_limiter_is_scoped_and_keeps_a_global_fallback() {
+        let config = RateLimitConfig {
+            max_attempts: 2,
+            window_seconds: 60,
+        };
+        let scoped = RateLimiter::new(config.clone());
+        assert!(scoped.check_and_record("scope-a", 100));
+        assert!(scoped.check_and_record("scope-a", 100));
+        assert!(!scoped.check_and_record("scope-a", 100));
+        assert!(scoped.check_and_record("scope-b", 100));
+
+        let global = RateLimiter::new(config);
+        for index in 0..(2 * GLOBAL_RATE_LIMIT_MULTIPLIER) {
+            assert!(global.check_and_record(&format!("rotated-{index}"), 100));
+        }
+        assert!(!global.check_and_record("rotated-overflow", 100));
+        assert!(global.check_and_record("rotated-overflow", 160));
+    }
+
+    #[test]
+    fn private_file_replacement_is_complete_and_leaves_no_temporary_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("media-id");
+        write_private_file(&path, b"old").unwrap();
+        write_private_file(&path, b"new-content").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new-content");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        }
     }
 
     #[cfg(unix)]

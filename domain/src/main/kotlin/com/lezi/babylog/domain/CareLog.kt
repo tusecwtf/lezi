@@ -28,8 +28,10 @@ import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordPayloadCodec
 import com.lezi.babylog.core.model.RecordPayloadDocument
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.birthWeightValidationError
 import com.lezi.babylog.core.model.Sex
 import com.lezi.babylog.core.model.SleepPayload
+import com.lezi.babylog.core.model.normalizeBabyNickname
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -131,6 +133,7 @@ class CareLog @Inject constructor(
     private val mediaAssetDao: MediaAssetDao,
     private val settings: SettingsStore,
     private val syncPort: SyncPort,
+    private val reminderCleanup: ReminderCleanupPort,
     private val transactionRunner: DatabaseTransactionRunner,
 ) {
     /**
@@ -154,6 +157,18 @@ class CareLog @Inject constructor(
         }
 
     suspend fun createBaby(input: CreateBabyInput): Long = addBaby(input)
+
+    /**
+     * Creates the local user/family parent rows needed to apply a remote Baby during first-run
+     * join, without publishing a placeholder Baby that would prematurely leave onboarding.
+     */
+    suspend fun ensureFamilyScaffold() {
+        val now = System.currentTimeMillis()
+        transactionRunner.run {
+            val userId = ensureLocalUser(now)
+            ensureFamily(userId, now)
+        }
+    }
 
     suspend fun addBaby(input: CreateBabyInput): Long {
         val now = System.currentTimeMillis()
@@ -218,6 +233,7 @@ class CareLog @Inject constructor(
 
     /** Soft-delete a baby profile. Reassigns current baby if needed. Keeps at least one baby. */
     suspend fun deleteBaby(babyId: Long): Boolean {
+        val reminderEventIds = calendarEventDao.listForBabyIncludingDeleted(babyId).map { it.id }
         var deleted = false
         val remaining = transactionRunner.run {
             val babies = babyDao.listAll()
@@ -229,6 +245,7 @@ class CareLog @Inject constructor(
             babyDao.listAll()
         }
         if (!deleted) return false
+        reminderCleanup.cancelForBabyDelete(reminderEventIds)
         val currentId = settings.currentBabyId.first()
         if (currentId == null || currentId == babyId || remaining.none { it.id == currentId }) {
             remaining.firstOrNull()?.let { settings.setCurrentBabyId(it.id) }
@@ -477,6 +494,7 @@ class CareLog @Inject constructor(
         val id = if (type == RecordType.SLEEP && endTimestamp == null) {
             sleepMutationMutex.withLock {
                 transactionRunner.run {
+                    requireActiveBaby(babyId)
                     healDuplicateOpenSleeps(babyId)
                     if (recordDao.findOpenSleep(babyId) != null) {
                         throw SleepStateChangedException()
@@ -486,6 +504,7 @@ class CareLog @Inject constructor(
             }
         } else {
             transactionRunner.run {
+                requireActiveBaby(babyId)
                 insertRecord(record)
             }
         }
@@ -505,6 +524,7 @@ class CareLog @Inject constructor(
         sleepMutationMutex.withLock {
             transactionRunner.run {
                 val existing = recordDao.get(id) ?: return@run
+                requireActiveBaby(existing.babyId)
                 val type = RecordType.fromKey(existing.type)
                 if (
                     type == RecordType.SLEEP &&
@@ -556,6 +576,7 @@ class CareLog @Inject constructor(
         startedAt: Long,
         endedAt: Long,
         recordMode: String = "end",
+        completionClientUuid: String = newClientUuid(),
     ): Long {
         require(order in NURSING_ORDER_ALLOWLIST) {
             "不支持的哺乳顺序"
@@ -576,15 +597,35 @@ class CareLog @Inject constructor(
                 schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
             ),
         )
-        return addRecord(
-            babyId = babyId,
-            type = RecordType.NURSING,
-            timestamp = if (recordMode == "start") startedAt else endedAt,
-            endTimestamp = endedAt.takeIf { recordMode == "start" },
-            note = note,
-            payloadJson = payload,
-            schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-        )
+        require(completionClientUuid.isNotBlank()) { "计时完成标识不能为空" }
+        val userId = ensureLocalUser(System.currentTimeMillis())
+        val now = System.currentTimeMillis()
+        val id = transactionRunner.run {
+            val existing = recordDao.getByClientUuid(completionClientUuid)
+            if (existing != null) {
+                require(existing.babyId == babyId && existing.type == RecordType.NURSING.key) {
+                    "计时完成标识与既有记录冲突"
+                }
+                return@run existing.id
+            }
+            requireActiveBaby(babyId)
+            insertRecord(
+                RecordEntity(
+                    clientUuid = completionClientUuid,
+                    babyId = babyId,
+                    type = RecordType.NURSING.key,
+                    timestamp = if (recordMode == "start") startedAt else endedAt,
+                    endTimestamp = endedAt.takeIf { recordMode == "start" },
+                    note = note,
+                    createdByUserId = userId,
+                    payloadJson = payload,
+                    schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+                    updatedAt = now,
+                ),
+            )
+        }
+        requestLocalSync()
+        return id
     }
 
     /**
@@ -605,6 +646,7 @@ class CareLog @Inject constructor(
         val id = sleepMutationMutex.withLock {
             validateSleepInterval(RecordType.SLEEP, timestamp, endTimestamp)
             transactionRunner.run {
+                requireActiveBaby(babyId)
                 healDuplicateOpenSleeps(babyId)
                 val currentOpen = recordDao.findOpenSleep(babyId)
                 if (expectedOpenSleepId == null) {
@@ -652,6 +694,7 @@ class CareLog @Inject constructor(
     ): Long {
         val id = sleepMutationMutex.withLock {
             transactionRunner.run {
+                requireActiveBaby(babyId)
                 healDuplicateOpenSleeps(babyId)
                 val open = recordDao.findOpenSleep(babyId)
                 if (open != null) {
@@ -694,6 +737,7 @@ class CareLog @Inject constructor(
     ): Long {
         val id = sleepMutationMutex.withLock {
             transactionRunner.run {
+                requireActiveBaby(babyId)
                 healDuplicateOpenSleeps(babyId)
                 val open = recordDao.findOpenSleep(babyId)
                 if (open != null) {
@@ -856,11 +900,26 @@ class CareLog @Inject constructor(
      * Settings cleanup is deliberately local-only (not a family tombstone).
      */
     suspend fun clearRecordsOnly() {
-        syncPort.clearLocalRecords {
-            recordDao.deleteAll()
-            calendarEventDao.deleteAll()
-            settings.clearNextFeedAt()
-        }.getOrThrow()
+        val calendarEventIds = babyDao.listAllIncludingDeleted()
+            .flatMap { baby -> calendarEventDao.listForBabyIncludingDeleted(baby.id) }
+            .map { it.id }
+            .distinct()
+        var historyDeleted = false
+        try {
+            syncPort.clearLocalRecords {
+                transactionRunner.run {
+                    recordDao.deleteAll()
+                    calendarEventDao.deleteAll()
+                }
+                historyDeleted = true
+                settings.clearNextFeedAt()
+            }.getOrThrow()
+        } finally {
+            // Never cancel a still-backed reminder before the authoritative Room delete commits.
+            // If later replica/DataStore cleanup fails, the records are already gone and their
+            // alarms must still be removed.
+            if (historyDeleted) reminderCleanup.cancelForRecordsClear(calendarEventIds)
+        }
     }
 
     /**
@@ -873,19 +932,29 @@ class CareLog @Inject constructor(
      * as [clearRecordsOnly].
      */
     suspend fun clearAllLocalData() {
-        syncPort.clearAllLocalData {
-            transactionRunner.run {
-                recordDao.deleteAll()
-                calendarEventDao.deleteAll()
-                customItemDao.deleteAll()
-                babyDao.deleteAll()
-                membershipDao.deleteAll()
-                familyDao.deleteAll()
-                localUserDao.deleteAll()
-            }
-            settings.setCurrentBabyId(null)
-            settings.clearNextFeedAt()
-        }.getOrThrow()
+        val calendarEventIds = babyDao.listAllIncludingDeleted()
+            .flatMap { baby -> calendarEventDao.listForBabyIncludingDeleted(baby.id) }
+            .map { it.id }
+            .distinct()
+        var historyDeleted = false
+        try {
+            syncPort.clearAllLocalData {
+                transactionRunner.run {
+                    recordDao.deleteAll()
+                    calendarEventDao.deleteAll()
+                    customItemDao.deleteAll()
+                    babyDao.deleteAll()
+                    membershipDao.deleteAll()
+                    familyDao.deleteAll()
+                    localUserDao.deleteAll()
+                }
+                historyDeleted = true
+                settings.setCurrentBabyId(null)
+                settings.clearNextFeedAt()
+            }.getOrThrow()
+        } finally {
+            if (historyDeleted) reminderCleanup.cancelForRecordsClear(calendarEventIds)
+        }
     }
 
     suspend fun renameBaby(babyId: Long, nickname: String) {
@@ -935,73 +1004,81 @@ class CareLog @Inject constructor(
      * calendar events, and avatar media rows are re-bound to the target baby.
      */
     suspend fun mergeBabyProfiles(sourceBabyId: Long, targetBabyId: Long): Boolean {
-        val preview = previewBabyMerge(sourceBabyId, targetBabyId) ?: return false
+        if (sourceBabyId == targetBabyId) return false
         val now = System.currentTimeMillis()
-        transactionRunner.run {
-            val source = babyDao.get(preview.sourceBabyId) ?: return@run
-            val target = babyDao.get(preview.targetBabyId) ?: return@run
-            if (source.familyId != target.familyId) return@run
-            // Include soft-deleted rows so tombstones stay with the keeper profile.
-            recordDao.listAllIncludingDeleted()
-                .filter { it.babyId == source.id }
-                .forEach { record ->
-                    recordDao.update(
-                        record.copy(
+        val merged = sleepMutationMutex.withLock {
+            transactionRunner.run {
+                val source = babyDao.get(sourceBabyId) ?: return@run false
+                val target = babyDao.get(targetBabyId) ?: return@run false
+                if (source.familyId != target.familyId) return@run false
+                // Include soft-deleted rows so tombstones stay with the keeper profile.
+                recordDao.listAllIncludingDeleted()
+                    .filter { it.babyId == source.id }
+                    .forEach { record ->
+                        recordDao.update(
+                            record.copy(
+                                babyId = target.id,
+                                updatedAt = nextSyncUpdatedAt(record.updatedAt, now),
+                                syncDirty = true,
+                            ),
+                        )
+                    }
+                calendarEventDao.listForBabyIncludingDeleted(source.id).forEach { event ->
+                    calendarEventDao.update(
+                        event.copy(
                             babyId = target.id,
-                            updatedAt = nextSyncUpdatedAt(record.updatedAt, now),
-                            syncDirty = true,
+                            updatedAt = nextSyncUpdatedAt(event.updatedAt, now),
                         ),
                     )
                 }
-            calendarEventDao.listForBabyIncludingDeleted(source.id).forEach { event ->
-                calendarEventDao.update(
-                    event.copy(
-                        babyId = target.id,
-                        updatedAt = nextSyncUpdatedAt(event.updatedAt, now),
-                    ),
+                mediaAssetDao.listAllIncludingDeleted()
+                    .filter { it.babyId == source.id }
+                    .forEach { asset ->
+                        mediaAssetDao.update(
+                            asset.copy(
+                                babyId = target.id,
+                                updatedAt = nextSyncUpdatedAt(asset.updatedAt, now),
+                                syncDirty = true,
+                            ),
+                        )
+                    }
+                healDuplicateOpenSleeps(target.id)
+                babyDao.update(
+                    nextSyncUpdatedAt(source.updatedAt, now).let { deletedAt ->
+                        source.copy(
+                            deletedAt = deletedAt,
+                            updatedAt = deletedAt,
+                            syncDirty = true,
+                        )
+                    },
                 )
+                true
             }
-            mediaAssetDao.listAllIncludingDeleted()
-                .filter { it.babyId == source.id }
-                .forEach { asset ->
-                    mediaAssetDao.update(
-                        asset.copy(
-                            babyId = target.id,
-                            updatedAt = nextSyncUpdatedAt(asset.updatedAt, now),
-                            syncDirty = true,
-                        ),
-                    )
-                }
-            babyDao.update(
-                nextSyncUpdatedAt(source.updatedAt, now).let { deletedAt ->
-                    source.copy(
-                        deletedAt = deletedAt,
-                        updatedAt = deletedAt,
-                        syncDirty = true,
-                    )
-                },
-            )
         }
+        if (!merged) return false
         if (settings.currentBabyId.first() == sourceBabyId) {
             settings.setCurrentBabyId(targetBabyId)
         }
-        val merged = babyDao.get(sourceBabyId) == null && babyDao.get(targetBabyId) != null
-        if (merged) requestLocalSync()
-        return merged
+        requestLocalSync()
+        return true
     }
 
     private fun normalizeNickname(raw: String): String =
-        raw.trim().ifBlank { "年年" }
+        normalizeBabyNickname(raw)
 
     private fun normalizeBirthWeightGrams(grams: Int?): Int? {
         val g = grams ?: return null
-        return g.takeIf { it in 500..9_000 }
+        birthWeightValidationError(g)?.let { throw IllegalArgumentException(it) }
+        return g
     }
 
     private suspend fun ensureNicknameAvailable(nickname: String, excludeId: Long = -1L) {
         val count = babyDao.countByNickname(nickname, excludeId)
         if (count > 0) throw DuplicateBabyNicknameException(nickname)
     }
+
+    private suspend fun requireActiveBaby(babyId: Long): BabyEntity =
+        requireNotNull(babyDao.get(babyId)) { "宝宝档案不存在，请返回后重试" }
 
     private suspend fun ensureLocalUser(now: Long): Long {
         localUserDao.get()?.id?.let { return it }

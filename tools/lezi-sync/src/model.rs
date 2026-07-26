@@ -50,7 +50,7 @@ pub struct JoinRequest {
 }
 
 impl JoinRequest {
-    pub fn validate(&self) -> Result<(), ApiError> {
+    pub fn validate(&self) -> Result<Option<String>, ApiError> {
         if !(8..=32).contains(&self.code.len())
             || !self
                 .code
@@ -62,8 +62,44 @@ impl JoinRequest {
             ));
         }
         validate_required_string(&self.device_id, 128, "device_id")?;
-        validate_optional_string(&self.display_name, 128, "display_name")
+        normalize_display_name(self.display_name.as_deref())
     }
+}
+
+/// Normalize a human-facing member name at the API boundary.
+///
+/// Whitespace-only names intentionally become `None` so clients can use their
+/// local fallback label. Directional formatting and control characters are
+/// rejected because this value is rendered next to a security-sensitive role.
+pub(crate) fn normalize_display_name(value: Option<&str>) -> Result<Option<String>, ApiError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value
+        .chars()
+        .any(|character| character.is_control() || is_bidirectional_control(character))
+    {
+        return Err(ApiError::unprocessable(
+            "display_name must not contain control or bidirectional formatting characters",
+        ));
+    }
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    validate_length(value, 1, 128, "display_name")?;
+    Ok(Some(value.to_owned()))
+}
+
+fn is_bidirectional_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{206f}'
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,7 +119,7 @@ pub struct ValidatedPush {
 }
 
 impl PushRequest {
-    pub fn validate(self) -> Result<ValidatedPush, ApiError> {
+    pub fn validate(self, max_media_bytes: usize) -> Result<ValidatedPush, ApiError> {
         validate_optional_nonempty_string(&self.device_id, 128, "device_id")?;
         validate_optional_nonempty_string(&self.generation, 128, "generation")?;
         if self.entities.len() > 1000 {
@@ -94,7 +130,7 @@ impl PushRequest {
         let entities = self
             .entities
             .into_iter()
-            .map(RawEntity::validate)
+            .map(|entity| entity.validate(max_media_bytes))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(ValidatedPush {
             device_id: self.device_id,
@@ -127,7 +163,7 @@ pub struct Entity {
 }
 
 impl RawEntity {
-    fn validate(mut self) -> Result<Entity, ApiError> {
+    fn validate(mut self, max_media_bytes: usize) -> Result<Entity, ApiError> {
         if self.updated_at < 0 || self.deleted_at.is_some_and(|value| value < 0) {
             return Err(ApiError::unprocessable(
                 "updated_at and deleted_at must be non-negative",
@@ -136,7 +172,7 @@ impl RawEntity {
         match self.entity_type.as_str() {
             "baby" => validate_baby(&mut self.payload)?,
             "record" => validate_record(&self.payload)?,
-            "media" => validate_media(&self.payload)?,
+            "media" => validate_media(&self.payload, max_media_bytes)?,
             _ => {
                 return Err(ApiError::unprocessable(
                     "entity type must be baby, record, or media",
@@ -176,7 +212,7 @@ fn validate_baby(payload: &mut Map<String, Value>) -> Result<(), ApiError> {
             "birth_weight_grams",
         ],
     )?;
-    string(payload, "nickname", 1, 128)?;
+    string(payload, "nickname", 1, 20)?;
     nullable_string(payload, "sex", 0, usize::MAX)?;
     date(payload, "birthday", false)?;
     date(payload, "due_date", true)?;
@@ -218,7 +254,7 @@ fn validate_record(payload: &Map<String, Value>) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn validate_media(payload: &Map<String, Value>) -> Result<(), ApiError> {
+fn validate_media(payload: &Map<String, Value>, max_media_bytes: usize) -> Result<(), ApiError> {
     require_keys(payload, &["kind"])?;
     allow_keys(
         payload,
@@ -239,9 +275,11 @@ fn validate_media(payload: &Map<String, Value>) -> Result<(), ApiError> {
     optional_nullable_uuid(payload, "record_client_uuid")?;
     optional_nullable_uuid(payload, "baby_client_uuid")?;
     optional_nullable_string(payload, "mime", 0, 255)?;
-    optional_integer(payload, "width", 1, i64::MAX)?;
-    optional_integer(payload, "height", 1, i64::MAX)?;
-    optional_integer(payload, "byte_size", 0, i64::MAX)?;
+    let max_dimension = i64::from(i32::MAX);
+    let max_byte_size = i64::try_from(max_media_bytes).unwrap_or(i64::MAX);
+    optional_integer(payload, "width", 1, max_dimension)?;
+    optional_integer(payload, "height", 1, max_dimension)?;
+    optional_integer(payload, "byte_size", 1, max_byte_size)?;
 
     let record = optional_string_value(payload, "record_client_uuid")?;
     let baby = optional_string_value(payload, "baby_client_uuid")?;

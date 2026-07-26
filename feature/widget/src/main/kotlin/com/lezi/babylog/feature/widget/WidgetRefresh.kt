@@ -6,6 +6,8 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 internal class WidgetRefreshEngine(
     private val store: WidgetStateStore,
@@ -58,6 +60,9 @@ class CareWidgetRefreshController @Inject constructor(
     summarySource: WidgetSummarySource,
 ) {
     private val engine = WidgetRefreshEngine(store, summarySource)
+    private val configuredBabyIds = MutableStateFlow(readConfiguredBabyIds())
+
+    internal fun observeConfiguredBabyIds() = configuredBabyIds.asStateFlow()
 
     fun configuration(widgetId: Int): WidgetConfiguration? = store.configuration(widgetId)
 
@@ -65,6 +70,7 @@ class CareWidgetRefreshController @Inject constructor(
 
     suspend fun configure(configuration: WidgetConfiguration): WidgetDisplayModel {
         store.saveConfiguration(configuration)
+        publishConfiguredBabyIds()
         val display = engine.refresh(configuration.widgetId)
         update(configuration.widgetId)
         return display
@@ -88,7 +94,15 @@ class CareWidgetRefreshController @Inject constructor(
 
     suspend fun remove(widgetId: Int) {
         store.remove(widgetId)
+        publishConfiguredBabyIds()
     }
+
+    private fun publishConfiguredBabyIds() {
+        configuredBabyIds.value = readConfiguredBabyIds()
+    }
+
+    private fun readConfiguredBabyIds(): List<Long> =
+        store.configurations().map(WidgetConfiguration::babyId).distinct().sorted()
 
     private suspend fun update(widgetId: Int) {
         try {

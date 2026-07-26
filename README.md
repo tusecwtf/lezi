@@ -1,7 +1,7 @@
 # 乐记（lezi）
 
 家庭育儿日志 · Android · Kotlin + Jetpack Compose
-包名：`com.lezi.babylog` · minSdk 26 · targetSdk 35 · 显示名「乐记」 · version `0.2.3`
+包名：`com.lezi.babylog` · minSdk 26 · targetSdk 35 · 显示名「乐记」 · version `0.2.4`
 
 产品规格：[`docs/prd/`](docs/prd/)
 
@@ -48,9 +48,24 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 # 在有 Docker 的 NAS/主机上构建并启动
 ./build-image.sh
-LEZI_DATA_HOST_PATH=/volume1/docker/lezi docker compose up -d
-curl -s http://127.0.0.1:8765/health
+export LEZI_DATA_HOST_PATH=/volume1/docker/lezi
+# Compose 必填；openssl rand -hex 24 生成 48 字符，满足 >=16 字符要求。
+export LEZI_BOOTSTRAP_SECRET="$(openssl rand -hex 24)"
+
+# 手机访问必须二选一：
+# A. 仅在可信家庭 LAN 直连（同时用 NAS 防火墙禁止公网访问 8765）：
+export LEZI_SYNC_PUBLISH=192.168.1.10:8765 # 替换为 NAS 的真实 LAN IP
+# B. 或不设置 LEZI_SYNC_PUBLISH，保持默认 127.0.0.1:8765，
+#    在 NAS 配置 HTTPS 反代：https://你的家庭域名 -> http://127.0.0.1:8765
+
+docker compose up -d
+curl -fsS http://127.0.0.1:8765/health
+curl -fsS http://127.0.0.1:8765/ready
 ```
+
+选择 A 时，账户页填写 `http://<NAS-LAN-IP>:8765`；选择 B 时填写 NAS 反代的
+`https://` 地址。手机直连场景不能保留默认 loopback 后仍期待手机访问服务，且
+不要把 8765 映射到公网。
 
 Android 模拟器调试本机服务时，在账户页手动填写
 `http://10.0.2.2:8765`；该地址只用于调试，不是任何 build type 的默认值。
@@ -61,6 +76,8 @@ Android 模拟器调试本机服务时，在账户页手动填写
   已有支撑验收，物理双设备与 NAS 生产部署仍待目标环境执行；未宣称已部署
 - **同步策略**：仅家 Wi‑Fi + NAS 可达 + App 前台；无后台轮询和伴侣记录通知；
   设置/深色**不同步**
+- **家网权限**：首次使用家庭同步时请求位置权限；Android 把当前 SSID 视为
+  位置敏感字段。应用只在本机做 SSID 精确匹配，不读取坐标、不上传 SSID
 - **成长曲线**：离线内置 WHO 0–24 月、分性别参考数据，**非医疗诊断**
 - **Widget**：需手动添加到桌面
 - **厂商杀后台**：母乳计时依赖 FGS + DataStore

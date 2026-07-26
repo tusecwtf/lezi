@@ -31,19 +31,27 @@ data class SyncSession(
     val serverHost: String = "",
     val serverPort: Int = DEFAULT_SERVER_PORT,
     val allowedSsids: List<String> = emptyList(),
+    val serverScheme: String = DEFAULT_SERVER_SCHEME,
 ) {
     val isJoined: Boolean
         get() = baseUrl.isNotBlank() && familyId.isNotBlank() && familyToken.isNotBlank()
 
     val homeLanConfig: HomeLanServerConfig
-        get() = HomeLanServerConfig(
-            host = serverHost.ifBlank {
-                HomeLanServerConfig.fromBaseUrl(baseUrl).host
-            },
-            port = serverPort.takeIf { it in 1..65535 }
-                ?: HomeLanServerConfig.fromBaseUrl(baseUrl).port,
-            allowedSsids = allowedSsids,
-        )
+        get() {
+            val parsedBaseUrl = runCatching { HomeLanServerConfig.fromBaseUrl(baseUrl) }
+                .getOrDefault(HomeLanServerConfig())
+            val hasStructuredServer = serverHost.isNotBlank()
+            return HomeLanServerConfig(
+                host = serverHost.ifBlank { parsedBaseUrl.host },
+                port = if (hasStructuredServer) {
+                    serverPort.takeIf { it in 1..65535 } ?: parsedBaseUrl.port
+                } else {
+                    parsedBaseUrl.port
+                },
+                allowedSsids = allowedSsids,
+                scheme = if (baseUrl.isNotBlank()) parsedBaseUrl.scheme else serverScheme,
+            )
+        }
 }
 
 interface SyncPreferences {
@@ -75,16 +83,25 @@ class DataStoreSyncPreferences @Inject constructor(
 
     private fun mapSession(prefs: Preferences): SyncSession {
         val legacyUrl = prefs[Keys.BASE_URL].orEmpty()
-        val host = prefs[Keys.SERVER_HOST].orEmpty().ifBlank {
-            HomeLanServerConfig.fromBaseUrl(legacyUrl).host
+        val parsedLegacyUrl = runCatching { HomeLanServerConfig.fromBaseUrl(legacyUrl) }
+            .getOrNull()
+        val rawScheme = prefs[Keys.SERVER_SCHEME].orEmpty()
+            .ifBlank { parsedLegacyUrl?.scheme.orEmpty() }
+        val schemeIsValid = rawScheme.lowercase() == "http" || rawScheme.lowercase() == "https"
+        val host = if (schemeIsValid) {
+            prefs[Keys.SERVER_HOST].orEmpty().ifBlank { parsedLegacyUrl?.host.orEmpty() }
+        } else {
+            ""
         }
         val port = prefs[Keys.SERVER_PORT]
-            ?: HomeLanServerConfig.fromBaseUrl(legacyUrl).port.takeIf { legacyUrl.isNotBlank() }
+            ?: parsedLegacyUrl?.port?.takeIf { legacyUrl.isNotBlank() }
             ?: DEFAULT_SERVER_PORT
+        val scheme = if (schemeIsValid) rawScheme.lowercase() else DEFAULT_SERVER_SCHEME
         val ssids = decodeSsids(prefs[Keys.ALLOWED_SSIDS])
         val derivedBase = when {
-            host.isNotBlank() -> HomeLanServerConfig(host, port, ssids).baseUrl
-            else -> legacyUrl.trim().trimEnd('/')
+            host.isNotBlank() -> HomeLanServerConfig(host, port, ssids, scheme).baseUrl
+            parsedLegacyUrl != null -> legacyUrl.trim().trimEnd('/')
+            else -> ""
         }
         return SyncSession(
             baseUrl = derivedBase,
@@ -99,6 +116,7 @@ class DataStoreSyncPreferences @Inject constructor(
             serverHost = host,
             serverPort = port,
             allowedSsids = ssids,
+            serverScheme = scheme,
         )
     }
 
@@ -128,10 +146,12 @@ class DataStoreSyncPreferences @Inject constructor(
             if (normalized.host.isBlank()) {
                 prefs.remove(Keys.SERVER_HOST)
                 prefs.remove(Keys.BASE_URL)
+                prefs.remove(Keys.SERVER_SCHEME)
             } else {
                 prefs[Keys.SERVER_HOST] = normalized.host
                 prefs[Keys.SERVER_PORT] = normalized.port
                 prefs[Keys.BASE_URL] = newBase
+                prefs[Keys.SERVER_SCHEME] = normalized.scheme
             }
             val ssidEncoded = encodeSsids(normalized.allowedSsids)
             if (ssidEncoded.isBlank()) {
@@ -165,6 +185,7 @@ class DataStoreSyncPreferences @Inject constructor(
                 prefs[Keys.SERVER_HOST] = config.host
                 prefs[Keys.SERVER_PORT] = config.port
                 prefs[Keys.BASE_URL] = config.baseUrl
+                prefs[Keys.SERVER_SCHEME] = config.scheme
             } else {
                 prefs[Keys.BASE_URL] = normalizeBaseUrl(session.baseUrl)
             }
@@ -244,6 +265,7 @@ class DataStoreSyncPreferences @Inject constructor(
             prefs.remove(Keys.BASE_URL)
             prefs.remove(Keys.SERVER_HOST)
             prefs.remove(Keys.SERVER_PORT)
+            prefs.remove(Keys.SERVER_SCHEME)
             prefs.remove(Keys.ALLOWED_SSIDS)
         }
     }
@@ -262,10 +284,12 @@ class DataStoreSyncPreferences @Inject constructor(
             // Populate structured host and port from the legacy base URL.
             val base = prefs[Keys.BASE_URL].orEmpty()
             if (base.isNotBlank() && prefs[Keys.SERVER_HOST].isNullOrBlank()) {
-                val parsed = HomeLanServerConfig.fromBaseUrl(base)
+                val parsed = runCatching { HomeLanServerConfig.fromBaseUrl(base) }.getOrNull()
+                    ?: return@edit
                 if (parsed.host.isNotBlank()) {
                     prefs[Keys.SERVER_HOST] = parsed.host
                     prefs[Keys.SERVER_PORT] = parsed.port
+                    prefs[Keys.SERVER_SCHEME] = parsed.scheme
                 }
             }
         }
@@ -307,6 +331,7 @@ class DataStoreSyncPreferences @Inject constructor(
         val BASE_URL = stringPreferencesKey("sync_base_url")
         val SERVER_HOST = stringPreferencesKey("sync_server_host")
         val SERVER_PORT = intPreferencesKey("sync_server_port")
+        val SERVER_SCHEME = stringPreferencesKey("sync_server_scheme")
         val ALLOWED_SSIDS = stringPreferencesKey("sync_allowed_ssids")
         val FAMILY_ID = stringPreferencesKey("sync_family_id")
         val FAMILY_TOKEN = stringPreferencesKey("sync_family_token")

@@ -8,15 +8,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -36,6 +30,7 @@ import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.core.ui.presentationSummary
 import com.lezi.babylog.core.ui.presentationTone
 import com.lezi.babylog.designsystem.LeziSpacing
+import com.lezi.babylog.designsystem.LeziDetailTopBar
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.RecordRow
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
@@ -74,19 +69,19 @@ class SearchViewModel @Inject constructor(
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SearchUi())
 
     fun onQuery(q: String) {
-        query.value = q
+        val limited = limitSearchQuery(q)
+        query.value = limited
         job?.cancel()
         job = viewModelScope.launch {
             searching.value = true
             delay(200)
             val baby = careLog.getCurrentBaby()
-            results.value = if (baby == null) emptyList() else careLog.search(baby.id, q)
+            results.value = if (baby == null) emptyList() else careLog.search(baby.id, limited)
             searching.value = false
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SearchRoute(
     onBack: () -> Unit,
@@ -96,14 +91,7 @@ fun SearchRoute(
     val ui by vm.ui.collectAsStateWithLifecycle()
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text("搜索") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
-            )
+            LeziDetailTopBar(title = "搜索", onBack = onBack)
         },
     ) { padding ->
         Column(
@@ -142,7 +130,7 @@ fun SearchRoute(
                     StateContainer(
                         kind = StateKind.Empty,
                         title = "无结果",
-                        message = "没有匹配「${ui.query}」的记录",
+                        message = "没有匹配「${searchQueryPreview(ui.query)}」的记录",
                         modifier = Modifier.padding(top = LeziSpacing.Md),
                     )
                 }
@@ -170,4 +158,17 @@ fun SearchRoute(
             }
         }
     }
+}
+
+private const val MAX_SEARCH_QUERY_CODE_POINTS = 100
+private const val SEARCH_QUERY_PREVIEW_CODE_POINTS = 30
+
+internal fun limitSearchQuery(value: String, maxCodePoints: Int = MAX_SEARCH_QUERY_CODE_POINTS): String {
+    if (value.codePointCount(0, value.length) <= maxCodePoints) return value
+    return value.substring(0, value.offsetByCodePoints(0, maxCodePoints))
+}
+
+internal fun searchQueryPreview(value: String): String {
+    val limited = limitSearchQuery(value, SEARCH_QUERY_PREVIEW_CODE_POINTS)
+    return if (limited == value) limited else "$limited…"
 }

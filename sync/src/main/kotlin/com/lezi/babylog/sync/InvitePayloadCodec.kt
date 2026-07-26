@@ -26,12 +26,16 @@ data class InvitePayload(
     val ssids: List<String> = emptyList(),
 ) {
     val homeLanConfig: HomeLanServerConfig
-        get() = HomeLanServerConfig(
-            host = host.ifBlank { HomeLanServerConfig.fromBaseUrl(baseUrl).host },
-            port = port.takeIf { it in 1..65535 }
-                ?: HomeLanServerConfig.fromBaseUrl(baseUrl).port,
-            allowedSsids = ssids,
-        ).withNormalized()
+        get() {
+            val parsedBaseUrl = HomeLanServerConfig.fromBaseUrl(baseUrl)
+            return HomeLanServerConfig(
+                host = host.ifBlank { parsedBaseUrl.host },
+                port = port.takeIf { it in 1..65535 }
+                    ?: parsedBaseUrl.port,
+                allowedSsids = ssids,
+                scheme = parsedBaseUrl.scheme,
+            ).withNormalized()
+        }
 }
 
 object InvitePayloadCodec {

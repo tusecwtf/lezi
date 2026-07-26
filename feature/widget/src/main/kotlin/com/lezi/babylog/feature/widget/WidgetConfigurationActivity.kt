@@ -6,12 +6,16 @@ import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -32,6 +36,7 @@ import androidx.lifecycle.lifecycleScope
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.domain.CareLog
+import com.lezi.babylog.designsystem.LeziTheme
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlinx.coroutines.launch
@@ -45,6 +50,7 @@ class WidgetConfigurationActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         setResult(Activity.RESULT_CANCELED)
         val widgetId = intent?.getIntExtra(
             AppWidgetManager.EXTRA_APPWIDGET_ID,
@@ -55,8 +61,12 @@ class WidgetConfigurationActivity : ComponentActivity() {
             return
         }
         setContent {
-            MaterialTheme {
-                Surface(Modifier.fillMaxSize()) {
+            LeziTheme {
+                Surface(
+                    Modifier
+                        .fillMaxSize()
+                        .safeDrawingPadding(),
+                ) {
                     val state = screenState
                     if (state == null) {
                         Column(
@@ -163,30 +173,48 @@ private fun WidgetConfigurationScreen(
         Text("选择宝宝", style = MaterialTheme.typography.titleMedium)
         state.babies.forEach { baby ->
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .clickable { onStateChange(state.selectBaby(baby.id)) },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 RadioButton(
                     selected = state.selectedBabyId == baby.id,
-                    onClick = { onStateChange(state.selectBaby(baby.id)) },
+                    onClick = null,
                 )
                 Text(baby.nickname)
             }
         }
         Text(
-            "快捷记录（最多 $MAX_WIDGET_QUICK_TYPES 个）",
+            "快捷记录（已选 ${state.selectedTypes.size}/$MAX_WIDGET_QUICK_TYPES）",
             style = MaterialTheme.typography.titleMedium,
         )
         CONFIGURABLE_WIDGET_QUICK_TYPES.forEach { type ->
+            val enabled = type in state.selectedTypes ||
+                state.selectedTypes.size < MAX_WIDGET_QUICK_TYPES
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .clickable(enabled = enabled) {
+                        onStateChange(state.toggle(type))
+                    },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Checkbox(
                     checked = type in state.selectedTypes,
-                    onCheckedChange = { onStateChange(state.toggle(type)) },
+                    onCheckedChange = null,
+                    enabled = enabled,
                 )
-                Text(type.presentation.label)
+                Text(
+                    type.presentation.label,
+                    color = if (enabled) {
+                        MaterialTheme.colorScheme.onSurface
+                    } else {
+                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                    },
+                )
             }
         }
         Button(

@@ -67,6 +67,21 @@ class CareLogTest {
     }
 
     @Test
+    fun familyScaffoldSupportsFirstRunJoinWithoutPublishingPlaceholderBaby() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+
+        care.ensureFamilyScaffold()
+
+        assertThat(care.observeHasBaby().first()).isFalse()
+        assertThat(care.listBabies()).isEmpty()
+        assertThat(fakes.users.get()).isNotNull()
+        assertThat(fakes.families.listAll()).hasSize(1)
+        val familyId = fakes.families.listAll().single().id
+        assertThat(fakes.memberships.listForFamily(familyId)).hasSize(1)
+    }
+
+    @Test
     fun addBaby_rejectsDuplicateNickname() = runTest {
         val care = Fakes().careLog()
         care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
@@ -202,6 +217,22 @@ class CareLogTest {
     }
 
     @Test
+    fun addRecordRejectsBabyDeletedAfterComposerOpened() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        care.createBaby(CreateBabyInput(nickname = "保留", birthdayEpochDay = 1))
+        val deletedBaby = care.addBaby(CreateBabyInput(nickname = "待删除", birthdayEpochDay = 2))
+        assertThat(care.deleteBaby(deletedBaby)).isTrue()
+
+        val failure = runCatching {
+            care.addRecord(deletedBaby, RecordType.PEE, timestamp = 1_000L)
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(fakes.records.listForBaby(deletedBaby)).isEmpty()
+    }
+
+    @Test
     fun explicitBabyMergeRequiresIdsAndProvidesPreview() = runTest {
         val fakes = Fakes()
         val care = fakes.careLog()
@@ -257,6 +288,24 @@ class CareLogTest {
             .containsExactly(liveId to target, tombstoneId to target)
         assertThat(fakes.media.listAllIncludingDeleted().single().babyId).isEqualTo(target)
         assertThat(fakes.media.listAllIncludingDeleted().single().syncDirty).isTrue()
+    }
+
+    @Test
+    fun mergeBabyProfilesKeepsOnlyLatestSleepOpen() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val target = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val source = care.addBaby(CreateBabyInput(nickname = "临时", birthdayEpochDay = 2))
+        val staleOpenId = care.sleepDown(source, at = 1_000L)
+        val latestOpenId = care.sleepDown(target, at = 2_000L)
+
+        assertThat(care.mergeBabyProfiles(source, target)).isTrue()
+
+        val opens = fakes.records.listOpenSleeps(target)
+        assertThat(opens.map { it.id }).containsExactly(latestOpenId)
+        val stale = requireNotNull(fakes.records.get(staleOpenId))
+        assertThat(stale.endTimestamp).isEqualTo(2_000L)
+        assertThat(stale.payloadJson).contains("\"anomaly_flag\":true")
     }
 
     @Test
@@ -608,6 +657,40 @@ class CareLogTest {
     }
 
     @Test
+    fun completeNursing_replayWithStableCompletionUuidIsIdempotent() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
+        val completionUuid = "8ba9c421-9a85-4e37-94fe-e15e8f4a40f6"
+
+        val first = care.completeNursing(
+            babyId = babyId,
+            leftMin = 3,
+            rightMin = 2,
+            order = "LR",
+            amountMl = 40,
+            startedAt = 1_000L,
+            endedAt = 301_000L,
+            completionClientUuid = completionUuid,
+        )
+        val replay = care.completeNursing(
+            babyId = babyId,
+            leftMin = 99,
+            rightMin = 0,
+            order = "L",
+            amountMl = 90,
+            startedAt = 1_000L,
+            endedAt = 999_000L,
+            completionClientUuid = completionUuid,
+        )
+
+        assertThat(replay).isEqualTo(first)
+        assertThat(fakes.records.listForBaby(babyId)).hasSize(1)
+        assertThat(care.getRecord(first)!!.payloadJson).contains("\"left_min\":3")
+        assertThat(care.getRecord(first)!!.payloadJson).contains("\"amount_ml\":40")
+    }
+
+    @Test
     fun completeNursing_rejectsUntrustedOrderBeforePersistence() = runTest {
         val fakes = Fakes()
         val care = fakes.careLog()
@@ -895,6 +978,59 @@ class CareLogTest {
     }
 
     @Test
+    fun clearRecordsOnlyCancelsNextFeedAndEveryCalendarReminder() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val first = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val second = care.addBaby(CreateBabyInput(nickname = "果果", birthdayEpochDay = 2))
+        val firstEvent = care.addCalendarEvent(first, "疫苗", 10_000L, 9_000L)
+        val secondEvent = care.addCalendarEvent(second, "体检", 20_000L, 19_000L)
+        fakes.reminders.scheduleNextFeed()
+        fakes.reminders.scheduleCalendar(firstEvent, secondEvent)
+
+        care.clearRecordsOnly()
+
+        assertThat(fakes.reminders.nextFeedScheduled).isFalse()
+        assertThat(fakes.reminders.scheduledCalendarIds).isEmpty()
+    }
+
+    @Test
+    fun clearRecordsFailureBeforeRoomCommitKeepsRecordsAndReminders() = runTest {
+        val sync = RecordingSyncPort().apply { failBeforeLocalRecordClear = true }
+        val fakes = Fakes(sync)
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        care.addRecord(babyId, RecordType.PEE, timestamp = 1_000L)
+        val eventId = care.addCalendarEvent(babyId, "疫苗", 10_000L, 9_000L)
+        fakes.reminders.scheduleNextFeed()
+        fakes.reminders.scheduleCalendar(eventId)
+
+        assertThat(runCatching { care.clearRecordsOnly() }.isFailure).isTrue()
+
+        assertThat(fakes.records.listForBaby(babyId)).hasSize(1)
+        assertThat(fakes.calendarEvents.listForBabyIncludingDeleted(babyId)).hasSize(1)
+        assertThat(fakes.reminders.nextFeedScheduled).isTrue()
+        assertThat(fakes.reminders.scheduledCalendarIds).containsExactly(eventId)
+    }
+
+    @Test
+    fun deleteBabyCancelsOnlyThatBabysCalendarReminders() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val keep = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val deleted = care.addBaby(CreateBabyInput(nickname = "临时", birthdayEpochDay = 2))
+        val keptEvent = care.addCalendarEvent(keep, "保留日程", 10_000L, 9_000L)
+        val deletedEvent = care.addCalendarEvent(deleted, "删除日程", 20_000L, 19_000L)
+        fakes.reminders.scheduleNextFeed()
+        fakes.reminders.scheduleCalendar(keptEvent, deletedEvent)
+
+        assertThat(care.deleteBaby(deleted)).isTrue()
+
+        assertThat(fakes.reminders.nextFeedScheduled).isTrue()
+        assertThat(fakes.reminders.scheduledCalendarIds).containsExactly(keptEvent)
+    }
+
+    @Test
     fun clearAllLocalDataWipesBabiesCustomItemsCalendarAndUsesSyncBarrier() = runTest {
         val sync = RecordingSyncPort()
         val fakes = Fakes(sync)
@@ -953,6 +1089,7 @@ private class Fakes(
     val customItems = FakeCustomItemDao()
     val media = FakeMediaAssetDao()
     val settings = FakeSettingsStore()
+    val reminders = FakeReminderCleanupPort()
     val transactions = RecordingTransactionRunner()
 
     fun careLog() = CareLog(
@@ -966,8 +1103,32 @@ private class Fakes(
         media,
         settings,
         syncPort,
+        reminders,
         transactions,
     )
+}
+
+private class FakeReminderCleanupPort : ReminderCleanupPort {
+    var nextFeedScheduled: Boolean = false
+        private set
+    val scheduledCalendarIds = linkedSetOf<Long>()
+
+    fun scheduleNextFeed() {
+        nextFeedScheduled = true
+    }
+
+    fun scheduleCalendar(vararg eventIds: Long) {
+        scheduledCalendarIds += eventIds.toList()
+    }
+
+    override suspend fun cancelForRecordsClear(calendarEventIds: Collection<Long>) {
+        nextFeedScheduled = false
+        scheduledCalendarIds.removeAll(calendarEventIds.toSet())
+    }
+
+    override suspend fun cancelForBabyDelete(calendarEventIds: Collection<Long>) {
+        scheduledCalendarIds.removeAll(calendarEventIds.toSet())
+    }
 }
 
 private class RecordingTransactionRunner :
@@ -986,6 +1147,7 @@ private class RecordingSyncPort(
     var requests = 0
     var localRecordReconciliations = 0
     var fullLocalWipes = 0
+    var failBeforeLocalRecordClear = false
 
     override fun requestSync(trigger: com.lezi.babylog.sync.SyncTrigger) {
         requests++
@@ -993,6 +1155,7 @@ private class RecordingSyncPort(
 
     override suspend fun clearLocalRecords(clearLocal: suspend () -> Unit): Result<Unit> {
         localRecordReconciliations++
+        if (failBeforeLocalRecordClear) return Result.failure(IllegalStateException("blocked"))
         clearLocal()
         return Result.success(Unit)
     }

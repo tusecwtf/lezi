@@ -64,6 +64,19 @@ V1 最小路径：创建默认 `Family` + 当前 `LocalUser`（匿名）+ `Baby`
 | `status` | `active` \| `revoked` |
 | `joined_at` | |
 
+NAS 实现以 `token_hash` 为 membership 主键，同时保存 `device_id` 与可选
+`display_name`；三者都不是可公开的成员标识。家庭成员视图只返回规范化后的
+`display_name`、`role`、`is_self`：服务端按当前 Bearer principal 计算
+`is_self`，不返回 token、`token_hash`、原始 `device_id` 或 `family_id`。
+客户端不得把本机 UI 占位名“我（本机）”当成真实成员名上传。
+加入时名称 trim，空白归一为 null，最长 128 个 Unicode 字符，并拒绝控制字符与
+双向文本格式控制符；历史 null/空/不安全名称由客户端显示本地兜底。
+
+旧库没有 `(family_id, device_id, role)` 唯一约束。服务端读取时合并同 role +
+device 的重复 active token 行，不跨 role 合并，也不凭客户端声明的 `device_id`
+批量吊销；退出严格吊销当前 token。这样无需 schema migration，且不会把 member
+误呈现为 owner。管理员删除家庭时由外键级联清除全部 membership。
+
 权限（V2）：
 
 | | 管理员 | 成员 |
@@ -284,6 +297,8 @@ interface SyncPort {
   suspend fun push(familyId: String): Result<Unit>
 
   suspend fun createInvite(familyId: String): Result<Invite>
+  /** 当前 token 所在家庭的 active 成员安全视图 */
+  suspend fun listFamilyMembers(): Result<List<FamilyMemberView>>
   /** 邀请码或完整载荷；返回 SyncSession（server family_id 为 UUID 字符串） */
   suspend fun joinWithCode(code: String): Result<SyncSession>
   suspend fun joinWithPayload(payload: String): Result<SyncSession>

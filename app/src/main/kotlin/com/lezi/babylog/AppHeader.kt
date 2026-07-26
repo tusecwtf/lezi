@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -72,6 +73,7 @@ import com.lezi.babylog.designsystem.LeziColors
 import com.lezi.babylog.designsystem.LeziShapes
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTheme
+import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.core.ui.BabyAvatar
 import java.time.DayOfWeek
@@ -103,12 +105,13 @@ internal fun AppHeaderBar(
 ) {
     val background = if (dark) MaterialTheme.colorScheme.surface else LeziColors.JournalAccent
     val content = if (dark) MaterialTheme.colorScheme.onSurface else Color(0xFF271015)
+    val babyAccent = LeziThemeExt.colors.babyAccent
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .height(68.dp)
+            .height(LeziSpacing.TopBarHeight)
             .background(background)
-            .padding(horizontal = 10.dp),
+            .padding(horizontal = LeziSpacing.TopBarHorizontal),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Row(
@@ -120,21 +123,22 @@ internal fun AppHeaderBar(
                 .padding(horizontal = 4.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // Taller than avatar so the sleep cap can rise; avatar stays BottomStart (seam on crown).
+            // Keep the avatar centered with AppBrandBar while the cap rises above it.
             Box(
                 modifier = Modifier
                     .width(38.dp)
-                    .height(46.dp),
+                    .height(46.dp)
+                    .offset(y = (-6).dp),
             ) {
                 BabyAvatar(
                     nickname = babyName,
                     avatarPath = avatarPath,
-                    fallbackBackground = content.copy(alpha = 0.18f),
-                    fallbackContentColor = content,
-                    borderColor = content.copy(alpha = 0.45f),
+                    fallbackBackground = babyAccent,
+                    borderColor = babyAccent,
+                    borderWidth = 2.dp,
                     modifier = Modifier
                         .align(Alignment.BottomStart)
-                        .size(34.dp),
+                        .size(LeziSpacing.TopBarAvatar),
                 )
                 AnimatedSleepMoonCap(
                     sleeping = sleeping,
@@ -193,7 +197,7 @@ internal fun AppHeaderBar(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center,
         ) {
-            IconButton(onClick = onPreviousDate, modifier = Modifier.size(48.dp)) {
+            IconButton(onClick = onPreviousDate, modifier = Modifier.size(LeziSpacing.TopBarAction)) {
                 Icon(Icons.Filled.ChevronLeft, contentDescription = "前一天", tint = content)
             }
             Column(
@@ -229,7 +233,7 @@ internal fun AppHeaderBar(
             IconButton(
                 onClick = onNextDate,
                 enabled = canGoNext,
-                modifier = Modifier.size(48.dp),
+                modifier = Modifier.size(LeziSpacing.TopBarAction),
             ) {
                 Icon(
                     Icons.Filled.ChevronRight,
@@ -243,7 +247,7 @@ internal fun AppHeaderBar(
             modifier = Modifier.weight(0.42f),
             contentAlignment = Alignment.CenterEnd,
         ) {
-            IconButton(onClick = onSearch, modifier = Modifier.size(48.dp)) {
+            IconButton(onClick = onSearch, modifier = Modifier.size(LeziSpacing.TopBarAction)) {
                 Icon(Icons.Outlined.Search, contentDescription = "搜索", tint = content)
             }
         }

@@ -24,14 +24,13 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 @Singleton
-class CalendarReminderScheduler @Inject constructor(
+class CalendarReminderAlarm @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val careLog: CareLog,
 ) {
     fun schedule(event: CalendarEvent): Boolean {
         val remindAt = event.remindAt ?: return false
         if (remindAt <= RecordTime.currentTimeMillis()) return false
-        ensureChannel(context)
+        CalendarReminderScheduler.ensureChannel(context)
         val alarm = context.getSystemService(AlarmManager::class.java)
         val pending = pendingIntent(context, event)
         alarm.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, remindAt, pending)
@@ -43,33 +42,15 @@ class CalendarReminderScheduler @Inject constructor(
             .cancel(pendingIntent(context, eventId, "", 0L))
     }
 
-    suspend fun rescheduleAll() {
-        careLog.listBabies().forEach { baby ->
-            careLog.listCalendarEvents(baby.id).forEach(::schedule)
-        }
-    }
+    private companion object {
+        const val EXTRA_ID = "calendar_event_id"
+        const val EXTRA_TITLE = "calendar_title"
+        const val EXTRA_EVENT_AT = "calendar_event_at"
 
-    companion object {
-        const val CHANNEL = "calendar_reminders"
-        private const val EXTRA_ID = "calendar_event_id"
-        private const val EXTRA_TITLE = "calendar_title"
-        private const val EXTRA_EVENT_AT = "calendar_event_at"
-
-        fun ensureChannel(context: Context) {
-            context.getSystemService(NotificationManager::class.java)
-                .createNotificationChannel(
-                    NotificationChannel(
-                        CHANNEL,
-                        "育儿日程",
-                        NotificationManager.IMPORTANCE_DEFAULT,
-                    ),
-                )
-        }
-
-        private fun pendingIntent(context: Context, event: CalendarEvent): PendingIntent =
+        fun pendingIntent(context: Context, event: CalendarEvent): PendingIntent =
             pendingIntent(context, event.id, event.title, event.eventAt)
 
-        private fun pendingIntent(
+        fun pendingIntent(
             context: Context,
             eventId: Long,
             title: String,
@@ -83,6 +64,40 @@ class CalendarReminderScheduler @Inject constructor(
                 .putExtra(EXTRA_EVENT_AT, eventAt),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+    }
+}
+
+@Singleton
+class CalendarReminderScheduler @Inject constructor(
+    private val alarm: CalendarReminderAlarm,
+    private val careLog: CareLog,
+) {
+    fun schedule(event: CalendarEvent): Boolean = alarm.schedule(event)
+
+    fun cancel(eventId: Long) {
+        alarm.cancel(eventId)
+    }
+
+    suspend fun rescheduleAll() {
+        careLog.listBabies().forEach { baby ->
+            careLog.listCalendarEvents(baby.id).forEach(::schedule)
+        }
+    }
+
+    companion object {
+        const val CHANNEL = "calendar_reminders"
+
+        fun ensureChannel(context: Context) {
+            context.getSystemService(NotificationManager::class.java)
+                .createNotificationChannel(
+                    NotificationChannel(
+                        CHANNEL,
+                        "育儿日程",
+                        NotificationManager.IMPORTANCE_DEFAULT,
+                    ),
+                )
+        }
+
     }
 }
 

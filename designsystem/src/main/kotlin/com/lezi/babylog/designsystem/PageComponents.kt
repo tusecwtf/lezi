@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.DarkMode
@@ -59,6 +60,39 @@ fun PageScaffoldBackground(content: @Composable BoxScope.() -> Unit) {
     )
 }
 
+/** Shared 68dp detail-page chrome aligned with the main and brand headers. */
+@Composable
+fun LeziDetailTopBar(
+    title: String,
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier,
+    actions: @Composable RowScope.() -> Unit = {},
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(LeziSpacing.TopBarHeight)
+            .background(MaterialTheme.colorScheme.surface)
+            .padding(horizontal = LeziSpacing.TopBarHorizontal),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(
+            onClick = onBack,
+            modifier = Modifier.size(LeziSpacing.TopBarAction),
+        ) {
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+        }
+        Spacer(Modifier.width(8.dp))
+        Text(
+            title,
+            style = LeziTypography.TitleSm,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+        )
+        actions()
+    }
+}
+
 /** Shared brand strip with optional search and theme actions. */
 @Composable
 fun AppBrandBar(
@@ -73,14 +107,14 @@ fun AppBrandBar(
     Row(
         modifier
             .fillMaxWidth()
-            .height(68.dp)
+            .height(LeziSpacing.TopBarHeight)
             .background(background)
-            .padding(horizontal = 10.dp),
+            .padding(horizontal = LeziSpacing.TopBarHorizontal),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
             Modifier
-                .size(34.dp)
+                .size(LeziSpacing.TopBarAvatar)
                 .clip(CircleShape)
                 .background(content.copy(alpha = 0.18f)),
             contentAlignment = Alignment.Center,
@@ -88,7 +122,7 @@ fun AppBrandBar(
             Text(
                 "乐",
                 color = content,
-                style = LeziTypography.TitleSm.copy(fontWeight = FontWeight.Bold),
+                style = LeziTypography.Label.copy(fontWeight = FontWeight.Bold),
             )
         }
         Spacer(Modifier.width(10.dp))
@@ -96,7 +130,7 @@ fun AppBrandBar(
             Text(
                 "乐记",
                 color = content,
-                style = LeziTypography.TitleSm.copy(fontWeight = FontWeight.SemiBold),
+                style = LeziTypography.Label.copy(fontWeight = FontWeight.SemiBold),
             )
             Text(
                 "今天也好好长大",
@@ -105,7 +139,10 @@ fun AppBrandBar(
             )
         }
         if (onSearch != null) {
-            IconButton(onClick = onSearch) {
+            IconButton(
+                onClick = onSearch,
+                modifier = Modifier.size(LeziSpacing.TopBarAction),
+            ) {
                 Icon(
                     Icons.Outlined.Search,
                     contentDescription = "搜索",
@@ -114,7 +151,10 @@ fun AppBrandBar(
             }
         }
         if (onToggleTheme != null) {
-            IconButton(onClick = onToggleTheme) {
+            IconButton(
+                onClick = onToggleTheme,
+                modifier = Modifier.size(LeziSpacing.TopBarAction),
+            ) {
                 Icon(
                     if (dark) Icons.Filled.DarkMode else Icons.Outlined.DarkMode,
                     contentDescription = "切换深色",

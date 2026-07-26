@@ -10,23 +10,27 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -36,16 +40,20 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,7 +62,10 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -63,9 +74,12 @@ import com.lezi.babylog.core.common.looksTechnicalDetail
 import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.SyncStatus
+import com.lezi.babylog.core.model.limitBabyNicknameInput
+import com.lezi.babylog.core.model.birthWeightValidationError
 import com.lezi.babylog.core.ui.BabyAvatar
 import com.lezi.babylog.core.ui.CameraCapture
 import com.lezi.babylog.designsystem.LeziCard
+import com.lezi.babylog.designsystem.LeziDatePicker
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
@@ -79,9 +93,12 @@ import com.lezi.babylog.domain.DuplicateBabyNicknameException
 import com.lezi.babylog.domain.UpdateBabyInput
 import com.lezi.babylog.domain.babyAgeLabel
 import com.lezi.babylog.sync.SyncNotEnabledException
+import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.sync.HomeLanServerConfig
+import com.lezi.babylog.sync.HomeWifiPermission
+import com.lezi.babylog.sync.HomeWifiSettingsTarget
 import com.lezi.babylog.sync.InvitePayload
 import com.lezi.babylog.sync.InvitePayloadCodec
 import com.lezi.babylog.sync.PUBLIC_CLEARTEXT_WARNING
@@ -102,7 +119,9 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -121,9 +140,22 @@ data class FamilyUi(
     val baseUrl: String = "",
     val serverHost: String = "",
     val serverPort: Int = com.lezi.babylog.sync.DEFAULT_SERVER_PORT,
+    val serverScheme: String = com.lezi.babylog.sync.DEFAULT_SERVER_SCHEME,
     val allowedSsids: List<String> = emptyList(),
     val role: FamilyRole = FamilyRole.None,
     val lastSuccessAt: Long? = null,
+    val members: List<FamilyMember> = emptyList(),
+    val membersLoaded: Boolean = false,
+    val membersLoading: Boolean = false,
+    val membersError: String? = null,
+)
+
+private data class FamilyMembersState(
+    val familyId: String = "",
+    val members: List<FamilyMember> = emptyList(),
+    val loaded: Boolean = false,
+    val loading: Boolean = false,
+    val error: String? = null,
 )
 
 data class FamilyInviteView(
@@ -140,10 +172,12 @@ class FamilyViewModel @Inject constructor(
     private val networkState: com.lezi.babylog.sync.NetworkState,
 ) : ViewModel() {
     private val profileSaveMutex = Mutex()
+    private val memberRefreshMutex = Mutex()
+    private val familyMembers = MutableStateFlow(FamilyMembersState())
 
     fun currentWifiSsid(): String? = networkState.currentWifiSsid()
 
-    val ui = combine(
+    private val baseUi = combine(
         sync.status(),
         careLog.observeHasBaby(),
         careLog.observeCurrentBaby(),
@@ -166,11 +200,72 @@ class FamilyViewModel @Inject constructor(
             baseUrl = session.baseUrl,
             serverHost = session.serverHost,
             serverPort = session.serverPort,
+            serverScheme = session.serverScheme,
             allowedSsids = session.allowedSsids,
             role = session.role,
             lastSuccessAt = session.lastSuccessAt,
         )
+    }
+
+    val ui = combine(baseUi, familyMembers) { family, memberState ->
+        if (family.enabled && memberState.familyId == family.familyId) {
+            family.copy(
+                members = memberState.members,
+                membersLoaded = memberState.loaded,
+                membersLoading = memberState.loading,
+                membersError = memberState.error,
+            )
+        } else {
+            family
+        }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), FamilyUi())
+
+    fun refreshMembers(showErrors: Boolean = true) {
+        viewModelScope.launch { refreshMembersNow(showErrors) }
+    }
+
+    private suspend fun refreshMembersNow(showErrors: Boolean) = memberRefreshMutex.withLock {
+        val session = sync.session().first()
+        if (!session.isJoined) {
+            familyMembers.value = FamilyMembersState()
+            return@withLock
+        }
+        val previous = familyMembers.value.takeIf { it.familyId == session.familyId }
+        if (!showErrors && previous != null &&
+            (previous.loading || previous.loaded || previous.error != null)
+        ) {
+            return@withLock
+        }
+        familyMembers.value = FamilyMembersState(
+            familyId = session.familyId,
+            members = previous?.members.orEmpty(),
+            loaded = previous?.loaded ?: false,
+            loading = true,
+        )
+        val result = sync.listFamilyMembers()
+        if (sync.session().first().familyId != session.familyId) return@withLock
+        familyMembers.value = result.fold(
+            onSuccess = { members ->
+                FamilyMembersState(
+                    familyId = session.familyId,
+                    members = members,
+                    loaded = true,
+                )
+            },
+            onFailure = { error ->
+                FamilyMembersState(
+                    familyId = session.familyId,
+                    members = previous?.members.orEmpty(),
+                    loaded = previous?.loaded ?: false,
+                    error = if (showErrors) {
+                        familySyncError(error, "暂时无法读取成员，请连接家庭 Wi‑Fi 后重试")
+                    } else {
+                        null
+                    },
+                )
+            },
+        )
+    }
 
     fun setCurrent(id: Long) {
         viewModelScope.launch { careLog.setCurrentBaby(id) }
@@ -314,7 +409,11 @@ class FamilyViewModel @Inject constructor(
                         val port = session.serverPort.takeIf { p -> p in 1..65535 }
                             ?: HomeLanServerConfig.fromBaseUrl(session.baseUrl).port
                         val base = session.baseUrl.ifBlank {
-                            HomeLanServerConfig(host = host, port = port).baseUrl
+                            HomeLanServerConfig(
+                                host = host,
+                                port = port,
+                                scheme = session.serverScheme,
+                            ).baseUrl
                         }
                         FamilyInviteView(
                             code = it.code,
@@ -339,19 +438,40 @@ class FamilyViewModel @Inject constructor(
         }
     }
 
-    fun join(code: String, onMessage: (String) -> Unit) {
+    fun join(
+        code: String,
+        host: String,
+        portText: String,
+        ssid1: String,
+        ssid2: String,
+        fallbackScheme: String,
+        onDone: (success: Boolean, message: String) -> Unit,
+    ) {
         viewModelScope.launch {
-            val result = sync.joinWithPayload(code.trim())
-            onMessage(
+            val config = runCatching {
+                HomeLanServerConfig.fromUserInput(
+                    rawHostOrUrl = host,
+                    explicitPort = portText.toIntOrNull(),
+                    allowedSsids = listOf(ssid1, ssid2),
+                    fallbackScheme = fallbackScheme,
+                )
+            }.getOrElse {
+                onDone(false, it.message ?: "服务器地址无效")
+                return@launch
+            }
+            val result = sync.joinWithPayload(
+                payload = code.trim(),
+                preferredConfig = config,
+                displayName = ui.value.displayName,
+            )
+            onDone(
+                result.isSuccess,
                 result.fold(
-                    onSuccess = {
-                        "已加入家庭"
-                    },
-                    onFailure = {
-                        familySyncError(it, fallback = "加入家庭失败，请稍后重试")
-                    },
+                    onSuccess = { "已加入家庭" },
+                    onFailure = { familySyncError(it, fallback = "加入家庭失败，请稍后重试") },
                 ),
             )
+            if (result.isSuccess) refreshMembersNow(showErrors = true)
         }
     }
 
@@ -365,6 +485,7 @@ class FamilyViewModel @Inject constructor(
                     onFailure = { familySyncError(it, fallback = "离开家庭失败，请稍后重试") },
                 ),
             )
+            if (result.isSuccess) familyMembers.value = FamilyMembersState()
         }
     }
 
@@ -378,6 +499,7 @@ class FamilyViewModel @Inject constructor(
                     onFailure = { familySyncError(it, fallback = "同步失败，请稍后重试") },
                 ),
             )
+            if (r.isSuccess) refreshMembersNow(showErrors = true)
         }
     }
 
@@ -394,40 +516,52 @@ class FamilyViewModel @Inject constructor(
         portText: String,
         ssid1: String,
         ssid2: String,
+        fallbackScheme: String,
         onMessage: (String) -> Unit,
     ) {
         viewModelScope.launch {
-            val (h, p) = com.lezi.babylog.sync.HomeLanServerConfig.parseHostPort(
-                host,
-                portText.toIntOrNull() ?: com.lezi.babylog.sync.DEFAULT_SERVER_PORT,
-            )
-            val port = portText.toIntOrNull() ?: p
-            val config = com.lezi.babylog.sync.HomeLanServerConfig(
-                host = h,
-                port = port,
-                allowedSsids = listOf(ssid1, ssid2),
-            )
+            val config = runCatching {
+                com.lezi.babylog.sync.HomeLanServerConfig.fromUserInput(
+                    rawHostOrUrl = host,
+                    explicitPort = portText.toIntOrNull(),
+                    allowedSsids = listOf(ssid1, ssid2),
+                    fallbackScheme = fallbackScheme,
+                )
+            }.getOrElse {
+                onMessage(it.message ?: "服务器地址无效")
+                return@launch
+            }
             onMessage(sync.saveHomeLanConfig(config).fold({ "家庭网络与服务器已保存" }) {
                 familySyncError(it, "保存失败")
             })
         }
     }
 
-    fun createFamily(onMessage: (String) -> Unit) {
+    fun createFamily(
+        bootstrapSecret: String,
+        onDone: (success: Boolean, message: String) -> Unit,
+    ) {
         viewModelScope.launch {
-            onMessage(sync.createFamily(ui.value.displayName).fold(
-                { "家庭已创建" },
-                { familySyncError(it, "创建家庭失败") },
-            ))
+            val result = sync.createFamily(ui.value.displayName, bootstrapSecret)
+            onDone(
+                result.isSuccess,
+                result.fold(
+                    { "家庭已创建" },
+                    { familySyncError(it, "创建家庭失败") },
+                ),
+            )
+            if (result.isSuccess) refreshMembersNow(showErrors = true)
         }
     }
 
     fun deleteFamily(onMessage: (String) -> Unit) {
         viewModelScope.launch {
-            onMessage(sync.deleteFamily().fold(
+            val result = sync.deleteFamily()
+            onMessage(result.fold(
                 { "家庭数据已删除" },
                 { familySyncError(it, "删除家庭失败") },
             ))
+            if (result.isSuccess) familyMembers.value = FamilyMembersState()
         }
     }
 }
@@ -490,9 +624,9 @@ internal fun canEditFamilyAvatar(role: FamilyRole): Boolean = role != FamilyRole
 
 internal fun familyStorageCopy(enabled: Boolean): String =
     if (enabled) {
-        "记录本地优先，并同步到家庭服务器 · 无需云账号"
+        "本机 + 家庭服务器"
     } else {
-        "数据仅保存在本机 · 无需登录"
+        "仅本机"
     }
 
 internal fun familyDeviceId(syncDeviceId: String, localDeviceId: String): String =
@@ -570,15 +704,210 @@ internal fun familyRoleLabel(role: FamilyRole): String = when (role) {
     FamilyRole.None -> "未加入"
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+internal fun familyMemberDisplayName(member: FamilyMember): String =
+    member.displayName
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() && (member.isSelf || it != "我（本机）") }
+        ?: when {
+            member.isSelf -> "我（本机）"
+            member.role == FamilyRole.Owner -> "家庭管理员"
+            else -> "家庭成员"
+        }
+
+internal fun familyMemberSummary(
+    visibleCount: Int,
+    role: FamilyRole,
+    loaded: Boolean,
+): String = if (loaded) {
+    "$visibleCount 位 · ${familyRoleLabel(role)}"
+} else {
+    "待刷新 · ${familyRoleLabel(role)}"
+}
+
+internal fun familyMembersForDisplay(
+    members: List<FamilyMember>,
+    localDisplayName: String,
+    localRole: FamilyRole,
+): List<FamilyMember> {
+    val bounded = members.take(50)
+    if (bounded.any(FamilyMember::isSelf)) return bounded
+    return listOf(
+        FamilyMember(
+            displayName = localDisplayName,
+            role = localRole.takeUnless { it == FamilyRole.None } ?: FamilyRole.Member,
+            isSelf = true,
+        ),
+    ) + bounded
+}
+
 @Composable
-fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
+private fun FamilyMemberRow(member: FamilyMember) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 56.dp)
+            .padding(vertical = LeziSpacing.Xs),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Surface(
+            modifier = Modifier.size(40.dp),
+            shape = CircleShape,
+            color = if (member.isSelf) {
+                MaterialTheme.colorScheme.primaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            },
+            contentColor = if (member.isSelf) {
+                MaterialTheme.colorScheme.onPrimaryContainer
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
+        ) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    when {
+                        member.isSelf -> "我"
+                        member.role == FamilyRole.Owner -> "管"
+                        else -> "员"
+                    },
+                    style = LeziTypography.Label,
+                )
+            }
+        }
+        Spacer(Modifier.size(LeziSpacing.Sm))
+        Column(Modifier.weight(1f)) {
+            Text(
+                familyMemberDisplayName(member),
+                style = LeziTypography.BodyStrong,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                buildString {
+                    append(familyRoleLabel(member.role))
+                    if (member.isSelf) append(" · 本机")
+                },
+                style = LeziTypography.Meta,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+internal fun compactSyncStatusLabel(status: SyncStatus, isJoined: Boolean): String = when {
+    !isJoined -> "等待完成前两步"
+    status == SyncStatus.BlockedOfflineHome -> "等待家庭 Wi-Fi"
+    status == SyncStatus.Idle -> "已就绪"
+    status == SyncStatus.Syncing -> "同步中"
+    status == SyncStatus.Error -> "需要重试"
+    else -> "等待同步"
+}
+
+@Composable
+private fun FamilyGuideRow(
+    step: String,
+    title: String,
+    detail: String,
+    complete: Boolean,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Surface(
+            modifier = Modifier.size(32.dp),
+            shape = CircleShape,
+            color = if (complete) {
+                MaterialTheme.colorScheme.primaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            },
+        ) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    if (complete) "✓" else step,
+                    style = LeziTypography.Label,
+                    color = if (complete) {
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
+        }
+        Spacer(Modifier.size(LeziSpacing.Sm))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, style = LeziTypography.BodyStrong)
+            Text(
+                detail,
+                style = LeziTypography.Meta,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun FamilyScopeRow(
+    marker: String,
+    title: String,
+    detail: String,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Surface(
+            modifier = Modifier.size(40.dp),
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.primaryContainer,
+        ) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    marker,
+                    style = LeziTypography.Eyebrow,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+            }
+        }
+        Spacer(Modifier.size(LeziSpacing.Sm))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, style = LeziTypography.BodyStrong)
+            Text(
+                detail,
+                style = LeziTypography.Meta,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@Composable
+fun FamilyRoute(
+    onAddBaby: () -> Unit = {},
+    vm: FamilyViewModel = hiltViewModel(),
+) {
     val ui by vm.ui.collectAsStateWithLifecycle()
     var message by remember { mutableStateOf<String?>(null) }
     var showJoin by remember { mutableStateOf(false) }
+    var joiningFamily by remember { mutableStateOf(false) }
     var joinCode by remember { mutableStateOf("") }
+    val familyContext = LocalContext.current
     val novice = remember {
-        com.lezi.babylog.sync.HomeLanServerConfig.noviceUiDefaults(vm.currentWifiSsid())
+        com.lezi.babylog.sync.HomeLanServerConfig.noviceUiDefaults(
+            if (HomeWifiPermission.hasRequiredPermissions(familyContext)) {
+                vm.currentWifiSsid()
+            } else {
+                null
+            },
+        )
     }
     // Defaults prefill an empty form but are not persisted until save.
     val persistedEmpty = ui.serverHost.isBlank() && ui.baseUrl.isBlank()
@@ -602,28 +931,73 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
             },
         )
     }
+    var serverScheme by remember(ui.serverScheme, ui.baseUrl) {
+        mutableStateOf(
+            ui.baseUrl.takeIf(String::isNotBlank)
+                ?.let(com.lezi.babylog.sync.HomeLanServerConfig::fromBaseUrl)
+                ?.scheme
+                ?: ui.serverScheme,
+        )
+    }
     var ssid1 by remember(ui.allowedSsids) {
         mutableStateOf(ui.allowedSsids.getOrNull(0) ?: novice.allowedSsids.getOrNull(0).orEmpty())
     }
     var ssid2 by remember(ui.allowedSsids) {
         mutableStateOf(ui.allowedSsids.getOrNull(1).orEmpty())
     }
-    val previewBaseUrl = remember(serverHost, serverPort) {
-        com.lezi.babylog.sync.HomeLanServerConfig(
-            host = serverHost,
-            port = serverPort.toIntOrNull() ?: com.lezi.babylog.sync.DEFAULT_SERVER_PORT,
-        ).baseUrl
+    val previewBaseUrl = remember(serverHost, serverPort, serverScheme) {
+        runCatching {
+            com.lezi.babylog.sync.HomeLanServerConfig.fromUserInput(
+                rawHostOrUrl = serverHost,
+                explicitPort = serverPort.toIntOrNull(),
+                allowedSsids = emptyList(),
+                fallbackScheme = serverScheme,
+            ).baseUrl
+        }.getOrDefault("")
     }
-    var confirmDeleteFamily by remember { mutableStateOf(false) }
+    var deleteFamilyStep by rememberSaveable { mutableIntStateOf(0) }
+    var confirmLeaveFamily by rememberSaveable { mutableStateOf(false) }
     var editing by remember { mutableStateOf<Baby?>(null) }
     var confirmDelete by remember { mutableStateOf<Baby?>(null) }
     var mergeSource by remember { mutableStateOf<Baby?>(null) }
     var mergePreview by remember { mutableStateOf<BabyMergePreview?>(null) }
     var inviteView by remember { mutableStateOf<FamilyInviteView?>(null) }
     var showNetworkSettings by remember { mutableStateOf(false) }
+    var showCreateFamily by remember { mutableStateOf(false) }
+    var bootstrapSecret by remember { mutableStateOf("") }
+    var bootstrapSecretFeedback by remember { mutableStateOf<String?>(null) }
+    var creatingFamily by remember { mutableStateOf(false) }
     var pendingAfterNetworkSave by remember { mutableStateOf<(() -> Unit)?>(null) }
     val networkSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    val familyContext = LocalContext.current
+    var pendingHomeWifiAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var showHomeWifiAccessGuide by remember { mutableStateOf(false) }
+    val homeWifiPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) {
+        val action = pendingHomeWifiAction
+        pendingHomeWifiAction = null
+        if (HomeWifiPermission.isSsidAccessReady(familyContext)) {
+            action?.invoke()
+        } else {
+            showHomeWifiAccessGuide = true
+        }
+    }
+    fun withHomeWifiAccess(action: () -> Unit) {
+        val missing = HomeWifiPermission.missingPermissions(familyContext)
+        if (missing.isNotEmpty()) {
+            pendingHomeWifiAction = action
+            homeWifiPermission.launch(missing.toTypedArray())
+        } else if (HomeWifiPermission.isSsidAccessReady(familyContext)) {
+            action()
+        } else {
+            showHomeWifiAccessGuide = true
+        }
+    }
+    LaunchedEffect(ui.enabled, ui.familyId) {
+        if (ui.enabled && HomeWifiPermission.isSsidAccessReady(familyContext)) {
+            vm.refreshMembers(showErrors = false)
+        }
+    }
     fun applyScannedInvite(raw: String) {
         val payload = raw.trim()
         if (payload.isEmpty()) return
@@ -633,6 +1007,7 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
             if (config.host.isNotBlank()) {
                 serverHost = config.host
                 serverPort = config.port.toString()
+                serverScheme = config.scheme
             }
             if (decoded.ssids.isNotEmpty()) {
                 ssid1 = decoded.ssids.getOrNull(0).orEmpty()
@@ -691,10 +1066,15 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
             networkConfigured = networkConfigured,
         )
     }
-    val savedSummaryBaseUrl = remember(ui.serverHost, ui.serverPort, ui.baseUrl) {
+    val savedSummaryBaseUrl = remember(ui.serverHost, ui.serverPort, ui.serverScheme, ui.baseUrl) {
         when {
             ui.serverHost.isNotBlank() ->
-                HomeLanServerConfig(ui.serverHost, ui.serverPort, ui.allowedSsids).baseUrl
+                HomeLanServerConfig(
+                    ui.serverHost,
+                    ui.serverPort,
+                    ui.allowedSsids,
+                    ui.serverScheme,
+                ).baseUrl
             ui.baseUrl.isNotBlank() -> ui.baseUrl
             else -> ""
         }
@@ -709,18 +1089,19 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
             verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
         ) {
             com.lezi.babylog.designsystem.PageHero(
-                eyebrow = "",
+                eyebrow = "宝宝与家庭",
                 title = "账户",
-                subtitle = "宝宝档案、家庭成员和同步设置都在这里。",
             )
 
             LeziCard(modifier = Modifier.fillMaxWidth()) {
                 Row(
                     Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         val accent = current?.themeColorArgb?.let { Color(it) }
                             ?: MaterialTheme.colorScheme.primary
                         BabyAvatar(
@@ -733,9 +1114,14 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                             avatarContentDescription = current?.let { "${it.nickname}的头像" },
                         )
                         Spacer(Modifier.size(LeziSpacing.Sm))
-                        Column {
+                        Column(modifier = Modifier.weight(1f)) {
                             Text("当前宝宝", style = LeziTypography.Meta, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(current?.nickname ?: "—", style = LeziTypography.TitleSm)
+                            Text(
+                                current?.nickname ?: "—",
+                                style = LeziTypography.TitleSm,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                             val age = current?.let { babyAgeLabel(it.birthdayEpochDay) }.orEmpty()
                             val sex = when (current?.sex?.name) {
                                 "MALE" -> "男宝"
@@ -757,13 +1143,19 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                                 ).joinToString(" · "),
                                 style = LeziTypography.Meta,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (current != null) {
-                            LeziSecondaryButton("编辑", onClick = { editing = current })
-                        }
+                }
+                if (current != null) {
+                    Spacer(Modifier.height(LeziSpacing.Sm))
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        LeziSecondaryButton("编辑", onClick = { editing = current })
                         if (ui.babies.size > 1) {
                             LeziSecondaryButton("切换", onClick = {
                                 val cur = ui.current?.id
@@ -777,15 +1169,24 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
             }
 
             LeziCard(modifier = Modifier.fillMaxWidth()) {
-                Text(familyStorageCopy(ui.enabled), style = LeziTypography.BodyStrong)
-                Text(
-                    "本机 ID：${ui.deviceId.take(12).uppercase()}",
-                    style = LeziTypography.Meta,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                FamilyScopeRow(
+                    marker = "存储",
+                    title = familyStorageCopy(ui.enabled),
+                    detail = if (ui.enabled) "家庭同步已开启" else "家庭同步未开启",
+                )
+                FamilyScopeRow(
+                    marker = "设备",
+                    title = "本机标识",
+                    detail = ui.deviceId.take(12).uppercase().ifBlank { "生成中" },
                 )
             }
 
-            SectionHeading(title = "宝宝档案")
+            SectionHeading(
+                title = "宝宝档案",
+                trailing = {
+                    TextButton(onClick = onAddBaby) { Text("添加宝宝") }
+                },
+            )
             ui.babies.forEach { b ->
                 val selected = b.id == current?.id
                 val dup = (nickCounts[b.nickname.trim()] ?: 0) > 1
@@ -809,10 +1210,12 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                                 avatarContentDescription = "${b.nickname}的头像",
                             )
                             Spacer(Modifier.size(LeziSpacing.Sm))
-                            Column {
+                            Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     b.nickname + if (selected) "（当前）" else "",
                                     style = LeziTypography.BodyStrong,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                                 val birth = LocalDate.ofEpochDay(b.birthdayEpochDay)
                                     .format(DateTimeFormatter.ofPattern("yyyy年M月d日"))
@@ -823,12 +1226,17 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                                     style = LeziTypography.Meta,
                                     color = if (dup) MaterialTheme.colorScheme.error
                                     else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
                             }
                         }
                     }
                     Spacer(Modifier.height(LeziSpacing.Sm))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
                         if (!selected) {
                             LeziSecondaryButton("设为当前", onClick = { vm.setCurrent(b.id) })
                         }
@@ -840,14 +1248,15 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                     }
                 }
             }
-            Text(
-                "昵称不可重复。合并前会明确显示来源、目标和迁移数量；不会按昵称自动迁移。",
-                style = LeziTypography.Meta,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
             SectionHeading(title = "家人一起记")
             fun saveNetworkThen(onReady: () -> Unit) {
+                if (!HomeWifiPermission.isSsidAccessReady(familyContext)) {
+                    withHomeWifiAccess { saveNetworkThen(onReady) }
+                    return
+                }
+                if (ssid1.isBlank()) {
+                    vm.currentWifiSsid()?.trim()?.takeIf(String::isNotEmpty)?.let { ssid1 = it }
+                }
                 val host = serverHost.trim()
                 val ssids = listOf(ssid1, ssid2).map { it.trim() }.filter { it.isNotEmpty() }
                 val dirty =
@@ -864,7 +1273,7 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                     onReady()
                     return
                 }
-                vm.saveHomeLanConfig(serverHost, serverPort, ssid1, ssid2) { result ->
+                vm.saveHomeLanConfig(serverHost, serverPort, ssid1, ssid2, serverScheme) { result ->
                     message = result
                     if (result.contains("已保存")) onReady()
                 }
@@ -905,99 +1314,115 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                 LeziSecondaryButton(
                     "保存家庭网络与服务器",
                     onClick = {
-                        vm.saveHomeLanConfig(serverHost, serverPort, ssid1, ssid2) { message = it }
+                        vm.saveHomeLanConfig(
+                            serverHost,
+                            serverPort,
+                            ssid1,
+                            ssid2,
+                            serverScheme,
+                        ) { message = it }
                     },
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
 
             LeziCard(modifier = Modifier.fillMaxWidth()) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    if (primary.compactJoined) {
-                        Text(
-                            "家庭 · ${familyRoleLabel(ui.role)}",
-                            style = LeziTypography.BodyStrong,
-                        )
-                        Text(
-                            "状态：${syncStatusLabel(
-                                status = ui.status,
-                                hasServer = true,
-                                hasSsid = true,
-                                isJoined = true,
-                            )}",
-                            style = LeziTypography.Meta,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Text(
-                            buildString {
-                                append(savedSummaryBaseUrl.ifBlank { "服务器已配置" })
-                                if (ui.allowedSsids.isNotEmpty()) {
-                                    append(" · ")
-                                    append(ui.allowedSsids.joinToString(" / "))
-                                }
-                            },
-                            style = LeziTypography.Meta,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        if (savedSummaryBaseUrl.isNotBlank() &&
-                            isPublicCleartextBaseUrl(savedSummaryBaseUrl)
-                        ) {
-                            Text(
-                                PUBLIC_CLEARTEXT_WARNING,
-                                style = LeziTypography.Meta,
-                                color = MaterialTheme.colorScheme.error,
-                            )
+                Text("家庭同步", style = LeziTypography.BodyStrong)
+                Spacer(Modifier.height(LeziSpacing.Sm))
+                FamilyGuideRow(
+                    step = "1",
+                    title = "家庭网络",
+                    detail = if (networkConfigured) {
+                        buildString {
+                            append(ui.allowedSsids.joinToString(" / "))
+                            if (savedSummaryBaseUrl.isNotBlank()) append(" · $savedSummaryBaseUrl")
                         }
                     } else {
-                        Text(
-                            if (ui.enabled) {
-                                "家庭 · ${familyRoleLabel(ui.role)}"
-                            } else {
-                                "尚未加入家庭"
+                        "待设置服务器与 Wi-Fi"
+                    },
+                    complete = networkConfigured,
+                )
+                FamilyGuideRow(
+                    step = "2",
+                    title = "家庭身份",
+                    detail = if (ui.enabled) {
+                        "已加入 · ${familyRoleLabel(ui.role)}"
+                    } else {
+                        "待新建或加入"
+                    },
+                    complete = ui.enabled,
+                )
+                FamilyGuideRow(
+                    step = "3",
+                    title = "同步状态",
+                    detail = compactSyncStatusLabel(ui.status, ui.enabled) +
+                        (ui.lastSuccessAt?.let {
+                            " · ${java.text.DateFormat.getDateTimeInstance().format(it)}"
+                        } ?: ""),
+                    complete = ui.enabled && ui.status == SyncStatus.Idle,
+                )
+                if (savedSummaryBaseUrl.isNotBlank() && isPublicCleartextBaseUrl(savedSummaryBaseUrl)) {
+                    Spacer(Modifier.height(LeziSpacing.Xs))
+                    Text(
+                        PUBLIC_CLEARTEXT_WARNING,
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+
+            if (ui.enabled) {
+                val visibleMembers = familyMembersForDisplay(
+                    members = ui.members,
+                    localDisplayName = ui.displayName,
+                    localRole = ui.role,
+                )
+                LeziCard(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("共享中的成员", style = LeziTypography.BodyStrong)
+                            Text(
+                                familyMemberSummary(
+                                    visibleCount = visibleMembers.size,
+                                    role = ui.role,
+                                    loaded = ui.membersLoaded,
+                                ),
+                                style = LeziTypography.Meta,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        TextButton(
+                            onClick = {
+                                withHomeWifiAccess { vm.refreshMembers(showErrors = true) }
                             },
-                            style = LeziTypography.BodyStrong,
-                        )
+                            enabled = !ui.membersLoading,
+                        ) {
+                            Text(if (ui.membersLoading) "刷新中…" else "刷新")
+                        }
+                    }
+                    Spacer(Modifier.height(LeziSpacing.Xs))
+                    visibleMembers.forEach { member ->
+                        FamilyMemberRow(member)
+                    }
+                    ui.membersError?.let { error ->
                         Text(
-                            "状态：${syncStatusLabel(
-                                status = ui.status,
-                                hasServer = ui.serverHost.isNotBlank() || ui.baseUrl.isNotBlank(),
-                                hasSsid = ui.allowedSsids.isNotEmpty(),
-                                isJoined = ui.enabled,
-                            )}" +
-                                (ui.lastSuccessAt?.let {
-                                    " · 上次成功：${java.text.DateFormat.getDateTimeInstance().format(it)}"
-                                } ?: ""),
+                            error,
+                            style = LeziTypography.Meta,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(top = LeziSpacing.Xs),
+                        )
+                    } ?: if (!ui.membersLoaded && !ui.membersLoading) {
+                        Text(
+                            "连接家庭 Wi-Fi 后刷新完整列表",
                             style = LeziTypography.Meta,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = LeziSpacing.Xs),
                         )
-                        if (networkConfigured) {
-                            Text(
-                                buildString {
-                                    append(savedSummaryBaseUrl.ifBlank { "服务器已配置" })
-                                    if (ui.allowedSsids.isNotEmpty()) {
-                                        append(" · Wi‑Fi ")
-                                        append(ui.allowedSsids.joinToString(" / "))
-                                    }
-                                },
-                                style = LeziTypography.Meta,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        } else {
-                            Text(
-                                "同步前请在网络设置中绑定服务器与家庭 Wi‑Fi 名称。",
-                                style = LeziTypography.Meta,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        if (savedSummaryBaseUrl.isNotBlank() &&
-                            isPublicCleartextBaseUrl(savedSummaryBaseUrl)
-                        ) {
-                            Text(
-                                PUBLIC_CLEARTEXT_WARNING,
-                                style = LeziTypography.Meta,
-                                color = MaterialTheme.colorScheme.error,
-                            )
-                        }
+                    } else {
+                        Unit
                     }
                 }
             }
@@ -1017,7 +1442,7 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                 if (controls.showCreateFamily) {
                     LeziPrimaryButton(
                         "新建家庭",
-                        onClick = { saveNetworkThen { vm.createFamily { message = it } } },
+                        onClick = { saveNetworkThen { showCreateFamily = true } },
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
@@ -1030,12 +1455,10 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                     LeziSecondaryButton(
                         "扫码加入",
                         onClick = {
-                            saveNetworkThen {
-                                if (CameraCapture.hasPermission(familyContext)) {
-                                    launchInviteScan()
-                                } else {
-                                    scanCameraPermission.launch(CameraCapture.PERMISSION)
-                                }
+                            if (CameraCapture.hasPermission(familyContext)) {
+                                launchInviteScan()
+                            } else {
+                                scanCameraPermission.launch(CameraCapture.PERMISSION)
                             }
                         },
                         modifier = Modifier.fillMaxWidth(),
@@ -1047,13 +1470,15 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                 LeziPrimaryButton(
                     "生成邀请二维码",
                     onClick = {
-                        vm.createInvite { result ->
-                            result.fold(
-                                onSuccess = { inviteView = it },
-                                onFailure = {
-                                    message = it.message ?: "生成共享码失败，请稍后重试"
-                                },
-                            )
+                        withHomeWifiAccess {
+                            vm.createInvite { result ->
+                                result.fold(
+                                    onSuccess = { inviteView = it },
+                                    onFailure = {
+                                        message = it.message ?: "生成共享码失败，请稍后重试"
+                                    },
+                                )
+                            }
                         }
                     },
                     modifier = Modifier.fillMaxWidth(),
@@ -1063,32 +1488,27 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
             if (primary.showJoinedActions) {
                 LeziSecondaryButton(
                     "立即同步",
-                    onClick = { vm.pullNow { message = it } },
+                    onClick = {
+                        withHomeWifiAccess { vm.pullNow { message = it } }
+                    },
                     modifier = Modifier.fillMaxWidth(),
                 )
                 if (primary.showLeave) {
                     LeziSecondaryButton(
                         "离开家庭",
-                        onClick = { vm.leave { message = it } },
+                        onClick = { confirmLeaveFamily = true },
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
                 if (ui.role == FamilyRole.Owner) {
                     LeziSecondaryButton(
                         "删除家庭数据",
-                        onClick = { confirmDeleteFamily = true },
+                        onClick = { deleteFamilyStep = 1 },
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
             }
 
-            if (!primary.compactJoined) {
-                Text(
-                    "仅在已绑定的家庭 Wi‑Fi 且服务器可达时前台同步。",
-                    style = LeziTypography.Meta,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
             Spacer(Modifier.height(LeziSpacing.Xxl))
         }
     }
@@ -1105,16 +1525,18 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                 Modifier
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState())
+                    .imePadding()
                     .padding(horizontal = LeziSpacing.Page)
                     .padding(bottom = LeziSpacing.Xxl)
                     .dismissKeyboardOnTap(),
                 verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
             ) {
                 Text("家庭网络设置", style = LeziTypography.TitleSm)
-                Text(
-                    "服务器与 Wi‑Fi 名称仅保存在本机。保存后才会用于同步与加入家庭。",
-                    style = LeziTypography.Meta,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                FamilyGuideRow(
+                    step = "1",
+                    title = "填写并保存",
+                    detail = "服务器和家庭 Wi-Fi 仅存本机",
+                    complete = networkConfigured,
                 )
                 OutlinedTextField(
                     value = serverHost,
@@ -1151,17 +1573,19 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                 LeziSecondaryButton(
                     "填入当前 Wi‑Fi 名称",
                     onClick = {
-                        val cur = vm.currentWifiSsid()?.trim().orEmpty()
-                        if (cur.isEmpty()) {
-                            message = "无法读取 Wi‑Fi 名称，请开启定位权限后重试"
-                        } else if (ssid1.isBlank()) {
-                            ssid1 = cur
-                        } else if (ssid2.isBlank() && ssid1 != cur) {
-                            ssid2 = cur
-                        } else if (ssid1 != cur && ssid2 != cur) {
-                            message = "Wi‑Fi 名称已满 2 个，请先清空一格"
-                        } else {
-                            message = "当前 Wi‑Fi 已在列表中"
+                        withHomeWifiAccess {
+                            val cur = vm.currentWifiSsid()?.trim().orEmpty()
+                            if (cur.isEmpty()) {
+                                showHomeWifiAccessGuide = true
+                            } else if (ssid1.isBlank()) {
+                                ssid1 = cur
+                            } else if (ssid2.isBlank() && ssid1 != cur) {
+                                ssid2 = cur
+                            } else if (ssid1 != cur && ssid2 != cur) {
+                                message = "Wi‑Fi 名称已满 2 个，请先清空一格"
+                            } else {
+                                message = "当前 Wi‑Fi 已在列表中"
+                            }
                         }
                     },
                     modifier = Modifier.fillMaxWidth(),
@@ -1185,9 +1609,9 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                 if (persistedEmpty || networkDraftDirty) {
                     Text(
                         if (networkDraftDirty && !persistedEmpty) {
-                            "当前填写尚未保存，请点「保存」后才会生效。"
+                            "有未保存的更改"
                         } else {
-                            "请确认后保存（未保存不会生效）。"
+                            "保存后即可新建或加入家庭"
                         },
                         style = LeziTypography.Meta,
                         color = MaterialTheme.colorScheme.error,
@@ -1196,7 +1620,13 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                 LeziPrimaryButton(
                     "保存家庭网络与服务器",
                     onClick = {
-                        vm.saveHomeLanConfig(serverHost, serverPort, ssid1, ssid2) { result ->
+                        vm.saveHomeLanConfig(
+                            serverHost,
+                            serverPort,
+                            ssid1,
+                            ssid2,
+                            serverScheme,
+                        ) { result ->
                             message = result
                             if (result.contains("已保存")) {
                                 val next = pendingAfterNetworkSave
@@ -1214,33 +1644,22 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
 
     if (showJoin && controls.showJoin) {
         AlertDialog(
-            onDismissRequest = { showJoin = false },
+            onDismissRequest = { if (!joiningFamily) showJoin = false },
+            modifier = Modifier.imePadding(),
+            properties = DialogProperties(decorFitsSystemWindows = false),
             title = { Text("加入家庭") },
             text = {
                 Column(Modifier.dismissKeyboardOnTap()) {
-                    Text("加入后将全量共享育儿记录与日志图片；本机数据不会在加入成功前清除。")
+                    FamilyScopeRow("共享", "家庭数据", "宝宝档案、照护记录、日志图片")
+                    Spacer(Modifier.height(LeziSpacing.Xs))
+                    FamilyScopeRow("本机", "个人偏好", "主题、提醒、桌面小组件")
                     Spacer(Modifier.height(LeziSpacing.Sm))
                     OutlinedTextField(
                         value = joinCode,
                         onValueChange = { joinCode = it },
-                        label = { Text("邀请码或 QR JSON 载荷") },
+                        label = { Text("邀请码") },
+                        placeholder = { Text("输入共享码，或使用下方扫码") },
                         singleLine = true,
-                        trailingIcon = {
-                            IconButton(
-                                onClick = {
-                                    if (CameraCapture.hasPermission(familyContext)) {
-                                        launchInviteScan()
-                                    } else {
-                                        scanCameraPermission.launch(CameraCapture.PERMISSION)
-                                    }
-                                },
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Outlined.QrCodeScanner,
-                                    contentDescription = "扫码填入邀请",
-                                )
-                            }
-                        },
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Spacer(Modifier.height(LeziSpacing.Sm))
@@ -1267,13 +1686,104 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
             confirmButton = {
                 TextButton(
                     onClick = {
-                        showJoin = false
-                        vm.join(joinCode) { message = it }
+                        withHomeWifiAccess {
+                            joiningFamily = true
+                            vm.join(
+                                code = joinCode,
+                                host = serverHost,
+                                portText = serverPort,
+                                ssid1 = ssid1,
+                                ssid2 = ssid2,
+                                fallbackScheme = serverScheme,
+                            ) { success, resultMessage ->
+                                joiningFamily = false
+                                message = resultMessage
+                                if (success) showJoin = false
+                            }
+                        }
                     },
-                ) { Text("加入") }
+                    enabled = !joiningFamily,
+                ) { Text(if (joiningFamily) "正在加入…" else "加入") }
             },
             dismissButton = {
-                TextButton(onClick = { showJoin = false }) { Text("取消") }
+                TextButton(
+                    onClick = { showJoin = false },
+                    enabled = !joiningFamily,
+                ) { Text("取消") }
+            },
+        )
+    }
+
+    if (showCreateFamily && controls.showCreateFamily) {
+        fun dismissCreateFamily() {
+            showCreateFamily = false
+            bootstrapSecret = ""
+            bootstrapSecretFeedback = null
+            creatingFamily = false
+        }
+        AlertDialog(
+            onDismissRequest = { if (!creatingFamily) dismissCreateFamily() },
+            modifier = Modifier.imePadding(),
+            properties = DialogProperties(decorFitsSystemWindows = false),
+            title = { Text("新建家庭") },
+            text = {
+                Column(
+                    modifier = Modifier.dismissKeyboardOnTap(),
+                    verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
+                ) {
+                    FamilyScopeRow("一次", "服务器初始化", "口令只用于本次建家")
+                    OutlinedTextField(
+                        value = bootstrapSecret,
+                        onValueChange = {
+                            bootstrapSecret = it
+                            bootstrapSecretFeedback = null
+                        },
+                        label = { Text("服务器初始化口令") },
+                        supportingText = {
+                            Text(
+                                bootstrapSecretFeedback
+                                    ?: "与 NAS 部署时设置的口令一致",
+                            )
+                        },
+                        isError = bootstrapSecretFeedback != null,
+                        enabled = !creatingFamily,
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val secret = bootstrapSecret.trim()
+                        if (secret.isEmpty()) {
+                            bootstrapSecretFeedback = "请填写服务器初始化口令"
+                        } else {
+                            withHomeWifiAccess {
+                                creatingFamily = true
+                                bootstrapSecretFeedback = null
+                                vm.createFamily(secret) { success, outcome ->
+                                    creatingFamily = false
+                                    if (success) {
+                                        dismissCreateFamily()
+                                        message = outcome
+                                    } else {
+                                        bootstrapSecretFeedback = outcome
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    enabled = !creatingFamily,
+                ) { Text(if (creatingFamily) "创建中…" else "创建") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = ::dismissCreateFamily,
+                    enabled = !creatingFamily,
+                ) { Text("取消") }
             },
         )
     }
@@ -1291,14 +1801,14 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
             title = { Text("家庭邀请二维码") },
             text = {
                 Column(
+                    modifier = Modifier
+                        .heightIn(max = 520.dp)
+                        .verticalScroll(rememberScrollState()),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
                 ) {
-                    Text(
-                        "二维码含服务器地址与已保存的家庭 Wi‑Fi 名称，对方扫码可自动填入。请勿在公共场合展示；截屏与录屏已暂时禁用。",
-                        style = LeziTypography.Meta,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    FamilyScopeRow("扫码", "自动填入", "服务器与家庭 Wi-Fi")
+                    FamilyScopeRow("安全", "隐私保护", "截屏与录屏已禁用")
                     Image(
                         bitmap = qrBitmap,
                         contentDescription = "家庭邀请二维码",
@@ -1329,19 +1839,91 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
         )
     }
 
-    if (confirmDeleteFamily) {
+    if (deleteFamilyStep == 1) {
         AlertDialog(
-            onDismissRequest = { confirmDeleteFamily = false },
+            onDismissRequest = { deleteFamilyStep = 0 },
             title = { Text("删除家庭服务器上的全部数据？") },
-            text = { Text("这会删除家庭记录、成员凭证和媒体文件，且不可恢复。") },
+            text = {
+                Text("这会影响全部家庭成员，并删除 NAS 上的记录、成员凭证和媒体文件。")
+            },
             confirmButton = {
-                TextButton(onClick = {
-                    confirmDeleteFamily = false
-                    vm.deleteFamily { message = it }
-                }) { Text("确认永久删除", color = MaterialTheme.colorScheme.error) }
+                TextButton(onClick = { deleteFamilyStep = 2 }) {
+                    Text("继续", color = MaterialTheme.colorScheme.error)
+                }
             },
             dismissButton = {
-                TextButton(onClick = { confirmDeleteFamily = false }) { Text("取消") }
+                TextButton(onClick = { deleteFamilyStep = 0 }) { Text("取消") }
+            },
+        )
+    }
+
+    if (confirmLeaveFamily) {
+        AlertDialog(
+            onDismissRequest = { confirmLeaveFamily = false },
+            title = { Text("离开当前家庭？") },
+            text = {
+                Text("本机将停止共享并清除家庭服务器、Wi-Fi 与登录会话；NAS 上的家庭记录会保留。")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmLeaveFamily = false
+                    withHomeWifiAccess { vm.leave { message = it } }
+                }) { Text("确认离开", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmLeaveFamily = false }) { Text("取消") }
+            },
+        )
+    }
+
+    if (deleteFamilyStep == 2) {
+        AlertDialog(
+            onDismissRequest = { deleteFamilyStep = 0 },
+            title = { Text("最后确认：永久删除") },
+            text = {
+                Text("删除后无法恢复。家庭记录、成员凭证与所有日志图片都会从 NAS 清除。")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    deleteFamilyStep = 0
+                    withHomeWifiAccess { vm.deleteFamily { message = it } }
+                }) { Text("永久删除家庭数据", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteFamilyStep = 0 }) { Text("取消") }
+            },
+        )
+    }
+
+    if (showHomeWifiAccessGuide) {
+        val settingsTarget = HomeWifiPermission.settingsTarget(familyContext)
+        AlertDialog(
+            onDismissRequest = { showHomeWifiAccessGuide = false },
+            title = { Text("允许识别家庭 Wi‑Fi") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
+                    FamilyScopeRow("权限", "位置权限", "仅用于读取当前 Wi-Fi 名称")
+                    FamilyScopeRow("系统", "定位服务", "需保持开启，位置不会上传")
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showHomeWifiAccessGuide = false
+                        familyContext.startActivity(HomeWifiPermission.settingsIntent(familyContext))
+                    },
+                ) {
+                    Text(
+                        when (settingsTarget) {
+                            HomeWifiSettingsTarget.AppPermission -> "打开权限设置"
+                            HomeWifiSettingsTarget.LocationServices -> "开启定位服务"
+                            HomeWifiSettingsTarget.Wifi -> "打开 Wi-Fi 设置"
+                        },
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showHomeWifiAccessGuide = false }) { Text("稍后") }
             },
         )
     }
@@ -1388,8 +1970,12 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
             onDismissRequest = { mergeSource = null },
             title = { Text("把「${source.nickname}」合并到…") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("请选择保留的目标档案。来源档案的记录和日程会迁移，目标昵称与资料不变。")
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     ui.babies.filter { it.id != source.id }.forEach { target ->
                         OutlinedButton(
                             onClick = {
@@ -1404,7 +1990,11 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                             },
                             modifier = Modifier.fillMaxWidth(),
                         ) {
-                            Text("保留「${target.nickname}」")
+                            Text(
+                                "保留「${target.nickname}」",
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
                     }
                 }
@@ -1421,12 +2011,16 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
             onDismissRequest = { mergePreview = null },
             title = { Text("确认合并宝宝档案？") },
             text = {
-                Text(
-                    "来源：${preview.sourceNickname}\n" +
-                        "保留：${preview.targetNickname}\n" +
-                        "将迁移 ${preview.recordCount} 条记录、" +
-                        "${preview.calendarEventCount} 条日程。此操作不可撤销。",
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs)) {
+                    FamilyScopeRow("来源", "移出档案", preview.sourceNickname)
+                    FamilyScopeRow("保留", "目标档案", preview.targetNickname)
+                    FamilyScopeRow(
+                        "迁移",
+                        "关联数据",
+                        "${preview.recordCount} 条记录 · ${preview.calendarEventCount} 条日程",
+                    )
+                    Text("操作不可撤销", color = MaterialTheme.colorScheme.error)
+                }
             },
             confirmButton = {
                 TextButton(
@@ -1564,6 +2158,8 @@ private fun BabyEditDialog(
         onDismissRequest = {
             if (!saving) onDismiss()
         },
+        modifier = Modifier.imePadding(),
+        properties = DialogProperties(decorFitsSystemWindows = false),
         title = { Text("编辑宝宝档案") },
         text = {
             Column(
@@ -1658,7 +2254,7 @@ private fun BabyEditDialog(
                     value = nickname,
                     enabled = !saving,
                     onValueChange = {
-                        nickname = it
+                        nickname = limitBabyNicknameInput(it)
                         localError = null
                     },
                     label = { Text("昵称（不可重复）") },
@@ -1713,6 +2309,10 @@ private fun BabyEditDialog(
                         localError = "出生体重格式不正确"
                         return@TextButton
                     }
+                    birthWeightValidationError(grams)?.let {
+                        localError = it
+                        return@TextButton
+                    }
                     saving = true
                     onSave(
                         nickname.trim(),
@@ -1757,7 +2357,7 @@ private fun BabyEditDialog(
                 TextButton(onClick = { showDate = false }) { Text("取消") }
             },
         ) {
-            DatePicker(state = dateState)
+            LeziDatePicker(state = dateState)
         }
     }
 

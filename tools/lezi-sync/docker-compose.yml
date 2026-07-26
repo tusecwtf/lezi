@@ -7,12 +7,12 @@
 # Do not run both services against the same data directory.
 
 x-lezi-sync-common: &lezi-sync-common
-  image: ${LEZI_SYNC_IMAGE:-lezi-sync:0.2.3}
+  image: ${LEZI_SYNC_IMAGE:-lezi-sync:0.2.4}
   build:
     context: .
     dockerfile: Dockerfile
     args:
-      LEZI_SYNC_VERSION: ${LEZI_SYNC_VERSION:-0.2.3}
+      LEZI_SYNC_VERSION: ${LEZI_SYNC_VERSION:-0.2.4}
   restart: unless-stopped
   stop_grace_period: 30s
   init: true
@@ -22,9 +22,15 @@ x-lezi-sync-common: &lezi-sync-common
     LEZI_PORT: "8765"
     LEZI_INVITE_TTL_HOURS: ${LEZI_INVITE_TTL_HOURS:-24}
     LEZI_MAX_MEDIA_BYTES: ${LEZI_MAX_MEDIA_BYTES:-10485760}
-    # Production: set a long random value. Empty keeps /v1/family/create open
-    # until the first family exists (dev/compat only; documented fail-closed).
-    LEZI_BOOTSTRAP_SECRET: ${LEZI_BOOTSTRAP_SECRET:-}
+    LEZI_CREATE_RATE_LIMIT: "${LEZI_CREATE_RATE_LIMIT:-20}"
+    LEZI_JOIN_RATE_LIMIT: "${LEZI_JOIN_RATE_LIMIT:-60}"
+    LEZI_RATE_LIMIT_WINDOW_SECONDS: "${LEZI_RATE_LIMIT_WINDOW_SECONDS:-60}"
+    # Default remains fail-closed. Set 1 only on a NAS filesystem that permits
+    # real persistence I/O but rejects chmod with EPERM/EACCES/EOPNOTSUPP.
+    LEZI_ALLOW_PERMISSION_HARDENING_SKIP: "${LEZI_ALLOW_PERMISSION_HARDENING_SKIP:-0}"
+    # Compose is the production deployment path and fails closed when unset.
+    # Local `cargo run` may still omit the variable for development.
+    LEZI_BOOTSTRAP_SECRET: ${LEZI_BOOTSTRAP_SECRET:?set LEZI_BOOTSTRAP_SECRET to a random value of at least 16 characters}
   volumes:
     - ${LEZI_DATA_HOST_PATH:-./data}:/data
   security_opt:

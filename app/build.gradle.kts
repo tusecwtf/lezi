@@ -10,11 +10,24 @@ plugins {
 
 // Local release signing (keystore.properties is gitignored). Required for
 // installable APKs on Chinese OEM ROMs — unsigned packages parse as PackageInfo null.
-val keystorePropertiesFile = rootProject.file("keystore.properties")
+val keystorePropertiesFile = providers.gradleProperty("leziReleaseKeystoreProperties")
+    .orNull
+    ?.let(rootProject::file)
+    ?: rootProject.file("keystore.properties")
 val keystoreProperties = Properties()
 if (keystorePropertiesFile.exists()) {
     keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
 }
+val requiredSigningKeys = listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
+val missingSigningKeys = requiredSigningKeys.filter {
+    keystoreProperties.getProperty(it).isNullOrBlank()
+}
+val releaseStoreFile = keystoreProperties.getProperty("storeFile")
+    ?.takeIf(String::isNotBlank)
+    ?.let(rootProject::file)
+val releaseSigningReady = keystorePropertiesFile.isFile &&
+    missingSigningKeys.isEmpty() &&
+    releaseStoreFile?.isFile == true
 
 android {
     namespace = "com.lezi.babylog"
@@ -24,17 +37,16 @@ android {
         applicationId = "com.lezi.babylog"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.3"
+        versionCode = 3
+        versionName = "0.2.4"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }
 
     signingConfigs {
         create("release") {
-            val storePath = keystoreProperties.getProperty("storeFile")
-            if (storePath != null) {
-                storeFile = rootProject.file(storePath)
+            if (releaseSigningReady) {
+                storeFile = releaseStoreFile
                 storePassword = keystoreProperties.getProperty("storePassword")
                 keyAlias = keystoreProperties.getProperty("keyAlias")
                 keyPassword = keystoreProperties.getProperty("keyPassword")
@@ -55,7 +67,7 @@ android {
                 "proguard-rules.pro",
             )
             val releaseSigning = signingConfigs.getByName("release")
-            if (releaseSigning.storeFile != null && releaseSigning.storeFile!!.exists()) {
+            if (releaseSigningReady) {
                 signingConfig = releaseSigning
             }
         }
@@ -84,6 +96,77 @@ android {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
+}
+
+val validateReleaseSigning = tasks.register("validateReleaseSigning") {
+    group = "verification"
+    description = "Fails unless a complete, readable release signing configuration is present."
+    doLast {
+        check(keystorePropertiesFile.isFile) {
+            "Release signing configuration is missing: ${keystorePropertiesFile.path}"
+        }
+        check(missingSigningKeys.isEmpty()) {
+            "Release signing configuration is missing keys: ${missingSigningKeys.joinToString()}"
+        }
+        check(releaseStoreFile?.isFile == true) {
+            "Release keystore is missing or unreadable"
+        }
+    }
+}
+
+tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+    dependsOn(validateReleaseSigning)
+}
+
+fun verifyReleaseApkSignatures() {
+    val localProperties = Properties().apply {
+        val file = rootProject.file("local.properties")
+        if (file.isFile) file.inputStream().use(::load)
+    }
+    val sdkDir = providers.environmentVariable("ANDROID_SDK_ROOT").orNull
+        ?: providers.environmentVariable("ANDROID_HOME").orNull
+        ?: localProperties.getProperty("sdk.dir")
+    check(!sdkDir.isNullOrBlank()) { "Android SDK path is unavailable for apksigner verification" }
+    val buildToolsDir = file(sdkDir).resolve("build-tools")
+    val configuredApkSigner = buildToolsDir.resolve(android.buildToolsVersion).resolve("apksigner")
+    val apkSigner = configuredApkSigner.takeIf(File::isFile)
+        ?: buildToolsDir.listFiles()
+            .orEmpty()
+            .map { it.resolve("apksigner") }
+            .filter(File::isFile)
+            .maxByOrNull { it.parentFile.name }
+    val requiredApkSigner = requireNotNull(apkSigner?.takeIf(File::canExecute)) {
+        "apksigner is unavailable in the Android SDK"
+    }
+
+    val releaseApks = layout.buildDirectory.dir("outputs/apk/release").get().asFile
+        .listFiles()
+        .orEmpty()
+        .filter { it.isFile && it.extension == "apk" && !it.name.contains("unsigned") }
+    check(releaseApks.isNotEmpty()) { "No signed release APK was produced" }
+    releaseApks.forEach { apk ->
+        providers.exec {
+            commandLine(
+                requiredApkSigner.absolutePath,
+                "verify",
+                "--verbose",
+                "--print-certs",
+                apk.absolutePath,
+            )
+        }.result.get().assertNormalExitValue()
+        logger.lifecycle("Verified release APK signature: ${apk.name}")
+    }
+}
+
+val verifyReleaseApkSignature = tasks.register("verifyReleaseApkSignature") {
+    group = "verification"
+    description = "Verifies every generated release APK with Android apksigner."
+    dependsOn(validateReleaseSigning)
+    doLast { verifyReleaseApkSignatures() }
+}
+
+tasks.matching { it.name == "assembleRelease" }.configureEach {
+    doLast { verifyReleaseApkSignatures() }
 }
 
 dependencies {

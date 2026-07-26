@@ -1,8 +1,10 @@
 package com.lezi.babylog.feature.export
 
+import android.content.ClipData
 import android.content.Intent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -10,78 +12,170 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.Alignment
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
+import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.designsystem.LeziCard
+import com.lezi.babylog.designsystem.LeziDetailTopBar
+import com.lezi.babylog.designsystem.LeziDatePicker
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.ExportPort
-import com.lezi.babylog.domain.ExportDocument
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.LocalDate
+import java.time.Instant
 import java.time.YearMonth
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 import javax.inject.Inject
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+internal data class ExportUiState(
+    val busy: Boolean = false,
+    val preview: String? = null,
+    val pendingShare: PreparedExport? = null,
+    val error: String? = null,
+)
 
 @HiltViewModel
 class ExportViewModel @Inject constructor(
     private val exportPort: ExportPort,
     private val careLog: CareLog,
+    private val fileGenerator: ExportFileGenerator,
 ) : ViewModel() {
-    fun exportRange(from: LocalDate, to: LocalDate, onResult: (Result<ExportDocument>) -> Unit) {
+    private val _state = MutableStateFlow(ExportUiState())
+    internal val state = _state.asStateFlow()
+
+    internal fun exportRange(
+        from: LocalDate,
+        to: LocalDate,
+        format: ExportFormat,
+        includePhotos: Boolean,
+    ) {
+        if (_state.value.busy) return
+        _state.update { it.copy(busy = true, pendingShare = null, error = null) }
         viewModelScope.launch {
-            val result = runCatching {
-                val baby = careLog.getCurrentBaby() ?: error("请先添加宝宝")
-                exportPort.exportDocument(baby.id, from, to)
+            val result = try {
+                withContext(Dispatchers.IO) {
+                    val baby = careLog.getCurrentBaby() ?: error("请先添加宝宝")
+                    val document = exportPort.exportDocument(baby.id, from, to)
+                    val prepared = fileGenerator.prepare(
+                        format = format,
+                        title = "乐记导出",
+                        document = document,
+                        includePhotos = includePhotos,
+                    )
+                    document.text to prepared
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        error = productUiError(error, "导出失败，请重试"),
+                    )
+                }
+                return@launch
             }
-            onResult(result)
+            _state.update {
+                it.copy(
+                    preview = result.first,
+                    pendingShare = result.second,
+                    error = null,
+                )
+            }
+        }
+    }
+
+    internal fun shareLaunched() {
+        // The Sharesheet may stay open indefinitely before a target reads the URI. Keep the
+        // cache file until age-based startup/next-export cleanup instead of racing that read.
+        _state.update { it.copy(busy = false, pendingShare = null) }
+    }
+
+    internal fun shareFailed(error: Throwable) {
+        _state.value.pendingShare?.let(fileGenerator::discard)
+        _state.update {
+            it.copy(
+                busy = false,
+                pendingShare = null,
+                error = productUiError(error, "无法打开系统分享，请重试"),
+            )
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun ExportRoute(
     onBack: () -> Unit,
     vm: ExportViewModel = hiltViewModel(),
 ) {
     val context = LocalContext.current
-    var preview by remember { mutableStateOf<String?>(null) }
+    val state by vm.state.collectAsStateWithLifecycle()
     val defaultMonth = remember { YearMonth.now() }
-    var fromText by remember { mutableStateOf(defaultMonth.atDay(1).toString()) }
-    var toText by remember { mutableStateOf(defaultMonth.atEndOfMonth().toString()) }
+    var fromDate by remember { mutableStateOf(defaultMonth.atDay(1)) }
+    var toDate by remember { mutableStateOf(defaultMonth.atEndOfMonth()) }
+    var dateTarget by remember { mutableStateOf<ExportDateTarget?>(null) }
     var includePhotos by remember { mutableStateOf(true) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var inputError by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(state.pendingShare) {
+        val share = state.pendingShare ?: return@LaunchedEffect
+        runCatching {
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = share.mimeType
+                putExtra(Intent.EXTRA_SUBJECT, "乐记导出")
+                putExtra(Intent.EXTRA_STREAM, share.uri)
+                clipData = ClipData.newUri(context.contentResolver, "乐记导出", share.uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            context.startActivity(Intent.createChooser(send, share.chooserTitle))
+        }.onSuccess {
+            vm.shareLaunched()
+        }.onFailure(vm::shareFailed)
+    }
+
+    fun request(format: ExportFormat) {
+        if (toDate.isBefore(fromDate)) {
+            inputError = "请输入有效日期范围"
+            return
+        }
+        inputError = null
+        vm.exportRange(fromDate, toDate, format, includePhotos)
+    }
+
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text("导出记录") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
-            )
+            LeziDetailTopBar(title = "导出记录", onBack = onBack)
         },
     ) { padding ->
         Column(
@@ -92,84 +186,100 @@ fun ExportRoute(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
         ) {
-            Text("选择任意日期范围，可导出至少一个完整自然月。正文、备注与业务摘要使用时间轴同一语义。", style = LeziTypography.Body)
-            OutlinedTextField(
-                value = fromText,
-                onValueChange = { fromText = it; error = null },
-                label = { Text("开始日期 YYYY-MM-DD") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            OutlinedTextField(
-                value = toText,
-                onValueChange = { toText = it; error = null },
-                label = { Text("结束日期 YYYY-MM-DD") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            androidx.compose.foundation.layout.Row(
+            LeziCard(Modifier.fillMaxWidth()) {
+                Text("导出范围", style = LeziTypography.TitleSm)
+                Text(
+                    "${fromDate.exportLabel()} — ${toDate.exportLabel()}",
+                    style = LeziTypography.BodyStrong,
+                )
+                OutlinedButton(
+                    onClick = { dateTarget = ExportDateTarget.From },
+                    enabled = !state.busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("选择开始日期") }
+                OutlinedButton(
+                    onClick = { dateTarget = ExportDateTarget.To },
+                    enabled = !state.busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("选择结束日期") }
+            }
+            Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text("PDF 包含记录图片", style = LeziTypography.Body)
-                Switch(checked = includePhotos, onCheckedChange = { includePhotos = it })
+                Switch(
+                    checked = includePhotos,
+                    onCheckedChange = { includePhotos = it },
+                    enabled = !state.busy,
+                )
             }
             LeziPrimaryButton(
-                "导出 TXT 并分享",
-                onClick = {
-                    val from = runCatching { LocalDate.parse(fromText) }.getOrNull()
-                    val to = runCatching { LocalDate.parse(toText) }.getOrNull()
-                    if (from == null || to == null || to.isBefore(from)) {
-                        error = "请输入有效日期范围"
-                    } else {
-                        vm.exportRange(from, to) { result ->
-                            result.onSuccess { document ->
-                                preview = document.text
-                                val send = Intent(Intent.ACTION_SEND).apply {
-                                    type = "text/plain"
-                                    putExtra(Intent.EXTRA_SUBJECT, "乐记导出")
-                                    putExtra(Intent.EXTRA_TEXT, document.text)
-                                }
-                                context.startActivity(Intent.createChooser(send, "分享导出"))
-                            }.onFailure { error = it.message ?: "导出失败" }
-                        }
-                    }
-                },
+                if (state.busy) "正在生成…" else "导出 TXT 并分享",
+                onClick = { request(ExportFormat.Txt) },
+                enabled = !state.busy,
                 modifier = Modifier.fillMaxWidth(),
             )
             LeziPrimaryButton(
-                "导出 PDF 并分享",
-                onClick = {
-                    val from = runCatching { LocalDate.parse(fromText) }.getOrNull()
-                    val to = runCatching { LocalDate.parse(toText) }.getOrNull()
-                    if (from == null || to == null || to.isBefore(from)) {
-                        error = "请输入有效日期范围"
-                    } else {
-                        vm.exportRange(from, to) { result ->
-                            result.onSuccess { document ->
-                                preview = document.text
-                                PdfExport.writeAndShare(
-                                    context,
-                                    "乐记导出",
-                                    document.text,
-                                    if (includePhotos) document.photoPaths else emptyList(),
-                                )
-                            }.onFailure { error = it.message ?: "导出失败" }
-                        }
-                    }
-                },
+                if (state.busy) "正在生成…" else "导出 PDF 并分享",
+                onClick = { request(ExportFormat.Pdf) },
+                enabled = !state.busy,
                 modifier = Modifier.fillMaxWidth(),
             )
-            error?.let {
-                Text(it, color = androidx.compose.material3.MaterialTheme.colorScheme.error)
+            (inputError ?: state.error)?.let {
+                Text(it, color = MaterialTheme.colorScheme.error)
             }
-            preview?.let { text ->
+            state.preview?.let { text ->
                 LeziCard(Modifier.fillMaxWidth()) {
                     Text("预览", style = LeziTypography.TitleSm)
                     Spacer(Modifier.height(LeziSpacing.Xs))
-                    Text(text.take(2000), style = LeziTypography.Mono)
+                    Text(text.take(2_000), style = LeziTypography.Mono)
                 }
             }
         }
     }
+
+    dateTarget?.let { target ->
+        val selected = if (target == ExportDateTarget.From) fromDate else toDate
+        val picker = rememberDatePickerState(
+            initialSelectedDateMillis = selected
+                .atStartOfDay(ZoneOffset.UTC)
+                .toInstant()
+                .toEpochMilli(),
+        )
+        DatePickerDialog(
+            onDismissRequest = { dateTarget = null },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        picker.selectedDateMillis?.let { millis ->
+                            val picked = Instant.ofEpochMilli(millis)
+                                .atZone(ZoneOffset.UTC)
+                                .toLocalDate()
+                            if (target == ExportDateTarget.From) {
+                                fromDate = picked
+                                if (toDate.isBefore(picked)) toDate = picked
+                            } else {
+                                toDate = picked
+                                if (fromDate.isAfter(picked)) fromDate = picked
+                            }
+                            inputError = null
+                        }
+                        dateTarget = null
+                    },
+                ) { Text("确定") }
+            },
+            dismissButton = {
+                TextButton(onClick = { dateTarget = null }) { Text("取消") }
+            },
+        ) {
+            LeziDatePicker(state = picker)
+        }
+    }
 }
+
+private enum class ExportDateTarget { From, To }
+
+private fun LocalDate.exportLabel(): String =
+    format(DateTimeFormatter.ofPattern("yyyy年M月d日"))

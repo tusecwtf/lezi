@@ -15,8 +15,9 @@ import com.lezi.babylog.core.model.RecordPayloadCodec
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SleepPayload
 import com.lezi.babylog.core.model.SyncStatus
-import java.io.BufferedReader
-import java.io.InputStreamReader
+import com.lezi.babylog.core.model.limitBabyNicknameInput
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
@@ -42,6 +43,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -50,6 +52,17 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+
+private const val BOOTSTRAP_SECRET_HEADER = "X-Lezi-Bootstrap-Secret"
+internal const val MAX_SYNC_JSON_RESPONSE_BYTES = 16 * 1024 * 1024
+internal const val MAX_SYNC_MEDIA_RESPONSE_BYTES = 10 * 1024 * 1024
+private const val MAX_SYNC_ERROR_RESPONSE_BYTES = 64 * 1024
+
+/** Do not publish a device-local UI placeholder as another person's name. */
+internal fun memberDisplayNameForWire(displayName: String?): String? =
+    displayName
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() && it != "我（本机）" }
 
 data class SyncEntity(
     val type: String,
@@ -64,6 +77,7 @@ data class PullResult(
     val entities: List<SyncEntity>,
     val cursor: Long,
     val generation: String = "",
+    val hasMore: Boolean = false,
 )
 data class JoinResult(
     val familyId: String,
@@ -80,11 +94,18 @@ interface SyncBackend {
         deviceId: String,
         displayName: String?,
         createRequestId: String,
+        bootstrapSecret: String?,
     ): JoinResult
     suspend fun push(session: SyncSession, entities: List<SyncEntity>): Int
     suspend fun pull(session: SyncSession): PullResult
     suspend fun invite(session: SyncSession): Invite
-    suspend fun join(baseUrl: String, code: String, deviceId: String): JoinResult
+    suspend fun join(
+        baseUrl: String,
+        code: String,
+        deviceId: String,
+        displayName: String?,
+    ): JoinResult
+    suspend fun members(session: SyncSession): List<FamilyMember>
     suspend fun leave(session: SyncSession)
     suspend fun deleteFamily(session: SyncSession)
     suspend fun putMedia(session: SyncSession, clientUuid: String, bytes: ByteArray, mime: String?)
@@ -129,6 +150,7 @@ class FakeSyncBackend : SyncBackend {
         deviceId: String,
         displayName: String?,
         createRequestId: String,
+        bootstrapSecret: String?,
     ) =
         JoinResult("family-${rows.size + 1}", "owner-token", FamilyRole.Owner)
 
@@ -137,8 +159,20 @@ class FakeSyncBackend : SyncBackend {
 
     override suspend fun pull(session: SyncSession) = pullRows(session.familyId, session.pullCursor)
     override suspend fun invite(session: SyncSession) = invite(session.familyId).getOrThrow()
-    override suspend fun join(baseUrl: String, code: String, deviceId: String) =
+    override suspend fun join(
+        baseUrl: String,
+        code: String,
+        deviceId: String,
+        displayName: String?,
+    ) =
         join(code, deviceId).getOrThrow()
+    override suspend fun members(session: SyncSession) = listOf(
+        FamilyMember(
+            displayName = if (session.role == FamilyRole.Owner) "管理员" else null,
+            role = session.role,
+            isSelf = true,
+        ),
+    )
     override suspend fun leave(session: SyncSession) = Unit
     override suspend fun deleteFamily(session: SyncSession) {
         rows.remove(session.familyId)
@@ -278,11 +312,16 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
         deviceId: String,
         displayName: String?,
         createRequestId: String,
+        bootstrapSecret: String?,
     ) =
         post(baseUrl, "/v1/family/create", null, buildJsonObject {
             put("device_id", deviceId)
             put("create_request_id", createRequestId)
-            displayName?.let { put("display_name", it) }
+            memberDisplayNameForWire(displayName)?.let { put("display_name", it) }
+        }, extraHeaders = buildMap {
+            bootstrapSecret?.takeIf(String::isNotBlank)?.let {
+                put(BOOTSTRAP_SECRET_HEADER, it)
+            }
         }).toJoinResult()
 
     override suspend fun push(session: SyncSession, entities: List<SyncEntity>): Int =
@@ -308,6 +347,7 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
             entities = json.entities(),
             cursor = json["cursor"]?.jsonPrimitive?.longOrNull ?: session.pullCursor,
             generation = json["generation"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            hasMore = json["has_more"]?.jsonPrimitive?.booleanOrNull ?: false,
         )
     }
 
@@ -316,11 +356,34 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
         return inviteFromWire(json)
     }
 
-    override suspend fun join(baseUrl: String, code: String, deviceId: String): JoinResult =
+    override suspend fun join(
+        baseUrl: String,
+        code: String,
+        deviceId: String,
+        displayName: String?,
+    ): JoinResult =
         post(baseUrl, "/v1/join", null, buildJsonObject {
             put("code", code)
             put("device_id", deviceId)
+            memberDisplayNameForWire(displayName)?.let { put("display_name", it) }
         }).toJoinResult()
+
+    override suspend fun members(session: SyncSession): List<FamilyMember> {
+        val json = get(session.baseUrl, "/v1/family/members", session.familyToken)
+        return json["members"]?.jsonArray?.map { memberElement ->
+            val member = memberElement.jsonObject
+            FamilyMember(
+                displayName = member["display_name"]?.jsonPrimitive?.contentOrNull,
+                role = when (member["role"]?.jsonPrimitive?.contentOrNull) {
+                    "owner" -> FamilyRole.Owner
+                    "member" -> FamilyRole.Member
+                    else -> error("成员响应包含未知身份")
+                },
+                isSelf = member["is_self"]?.jsonPrimitive?.booleanOrNull
+                    ?: error("成员响应缺少 is_self"),
+            )
+        } ?: error("成员响应缺少 members")
+    }
 
     override suspend fun leave(session: SyncSession) {
         post(session.baseUrl, "/v1/leave", session.familyToken, buildJsonObject {})
@@ -340,8 +403,13 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
     override suspend fun getMedia(session: SyncSession, clientUuid: String): ByteArray =
         requestBytes(session.baseUrl, "/v1/media/$clientUuid", "GET", session.familyToken)
 
-    private suspend fun post(base: String, path: String, token: String?, body: JsonObject): JsonObject =
-        requestJson(base, path, "POST", token, body)
+    private suspend fun post(
+        base: String,
+        path: String,
+        token: String?,
+        body: JsonObject,
+        extraHeaders: Map<String, String> = emptyMap(),
+    ): JsonObject = requestJson(base, path, "POST", token, body, extraHeaders)
 
     private suspend fun get(base: String, path: String, token: String?): JsonObject =
         requestJson(base, path, "GET", token, null)
@@ -352,14 +420,21 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
         method: String,
         token: String?,
         body: JsonObject?,
+        extraHeaders: Map<String, String> = emptyMap(),
     ): JsonObject = withContext(Dispatchers.IO) {
-        val connection = open(base, path, method, token)
-        if (body != null) {
-            connection.doOutput = true
-            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use { it.write(body.toString()) }
+        val connection = open(base, path, method, token, extraHeaders)
+        try {
+            if (body != null) {
+                connection.doOutput = true
+                connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use {
+                    it.write(body.toString())
+                }
+            }
+            readResponse(connection).let { Json.parseToJsonElement(it).jsonObject }
+        } finally {
+            connection.disconnect()
         }
-        readResponse(connection).let { Json.parseToJsonElement(it).jsonObject }
     }
 
     private suspend fun requestBytes(
@@ -371,38 +446,101 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
         mime: String? = null,
     ): ByteArray = withContext(Dispatchers.IO) {
         val connection = open(base, path, method, token)
-        if (body != null) {
-            connection.doOutput = true
-            connection.setRequestProperty("Content-Type", mime ?: "application/octet-stream")
-            connection.outputStream.use { it.write(body) }
+        try {
+            if (body != null) {
+                connection.doOutput = true
+                connection.setRequestProperty("Content-Type", mime ?: "application/octet-stream")
+                connection.outputStream.use { it.write(body) }
+            }
+            val (code, bytes) = readBoundedBody(
+                connection = connection,
+                successLimitBytes = MAX_SYNC_MEDIA_RESPONSE_BYTES,
+                successResponseKind = "媒体",
+            )
+            if (code !in 200..299) {
+                throw SyncHttpException(code, bytes.toString(Charsets.UTF_8))
+            }
+            bytes
+        } finally {
+            connection.disconnect()
         }
-        val code = connection.responseCode
-        val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-        val bytes = stream?.use { it.readBytes() } ?: byteArrayOf()
-        connection.disconnect()
-        if (code !in 200..299) {
-            throw SyncHttpException(code, bytes.toString(Charsets.UTF_8))
-        }
-        bytes
     }
 
-    private fun open(base: String, path: String, method: String, token: String?): HttpURLConnection =
+    private fun open(
+        base: String,
+        path: String,
+        method: String,
+        token: String?,
+        extraHeaders: Map<String, String> = emptyMap(),
+    ): HttpURLConnection =
         (URL("${base.trimEnd('/')}$path").openConnection() as HttpURLConnection).apply {
             requestMethod = method
             connectTimeout = 8_000
             readTimeout = 8_000
             useCaches = false
+            instanceFollowRedirects = false
             if (!token.isNullOrBlank()) setRequestProperty("Authorization", "Bearer $token")
+            extraHeaders.forEach(::setRequestProperty)
         }
 
     private fun readResponse(connection: HttpURLConnection): String {
-        val code = connection.responseCode
-        val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-        val text = stream?.let { BufferedReader(InputStreamReader(it, Charsets.UTF_8)).use(BufferedReader::readText) }.orEmpty()
-        connection.disconnect()
+        val (code, bytes) = readBoundedBody(
+            connection = connection,
+            successLimitBytes = MAX_SYNC_JSON_RESPONSE_BYTES,
+            successResponseKind = "JSON",
+        )
+        val text = bytes.toString(Charsets.UTF_8)
         if (code !in 200..299) throw SyncHttpException(code, text)
         return text.ifBlank { "{}" }
     }
+
+    private fun readBoundedBody(
+        connection: HttpURLConnection,
+        successLimitBytes: Int,
+        successResponseKind: String,
+    ): Pair<Int, ByteArray> {
+        val code = connection.responseCode
+        val success = code in 200..299
+        val limitBytes = if (success) successLimitBytes else MAX_SYNC_ERROR_RESPONSE_BYTES
+        val responseKind = if (success) successResponseKind else "错误"
+        val declaredBytes = connection.contentLengthLong
+        if (declaredBytes > limitBytes) {
+            throw SyncResponseTooLargeException(responseKind, limitBytes, declaredBytes)
+        }
+        val stream = if (success) connection.inputStream else connection.errorStream
+        val bytes = stream?.use {
+            it.readBytesUpTo(
+                limitBytes = limitBytes,
+                responseKind = responseKind,
+                declaredBytes = declaredBytes,
+            )
+        } ?: byteArrayOf()
+        return code to bytes
+    }
+}
+
+private fun InputStream.readBytesUpTo(
+    limitBytes: Int,
+    responseKind: String,
+    declaredBytes: Long,
+): ByteArray {
+    val initialCapacity = declaredBytes
+        .takeIf { it in 1..limitBytes.toLong() }
+        ?.toInt()
+        ?: minOf(DEFAULT_BUFFER_SIZE, limitBytes)
+    val output = ByteArrayOutputStream(initialCapacity)
+    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+    var totalBytes = 0
+    while (true) {
+        val count = read(buffer)
+        if (count < 0) break
+        if (count > limitBytes - totalBytes) {
+            throw SyncResponseTooLargeException(responseKind, limitBytes, declaredBytes)
+        }
+        output.write(buffer, 0, count)
+        totalBytes += count
+    }
+    return output.toByteArray()
 }
 
 internal fun inviteFromWire(json: JsonObject): Invite {
@@ -518,18 +656,37 @@ class RealSyncPort @Inject constructor(
         }
     }.onFailure(::updateFailureStatus)
 
-    override suspend fun createFamily(displayName: String?) = gatedWithoutSession { baseUrl ->
+    override suspend fun createFamily(
+        displayName: String?,
+        bootstrapSecret: String?,
+    ) = gatedWithoutSession { baseUrl ->
         val deviceId = preferences.ensureDeviceId()
         val createRequestId = preferences.ensureCreateRequestId()
-        backend.create(baseUrl, deviceId, displayName, createRequestId).let { joined ->
-            persistJoin(baseUrl, deviceId, joined).also {
-                preferences.clearCreateRequestId()
-                requestSync(SyncTrigger.LocalWrite)
+        val joined = try {
+            backend.create(
+                baseUrl,
+                deviceId,
+                memberDisplayNameForWire(displayName),
+                createRequestId,
+                bootstrapSecret,
+            )
+        } catch (error: SyncHttpException) {
+            if (error.statusCode == 401 || error.statusCode == 403) {
+                throw BootstrapSecretRejectedException()
             }
+            throw error
+        }
+        persistJoin(baseUrl, deviceId, joined).also {
+            preferences.clearCreateRequestId()
+            requestSync(SyncTrigger.LocalWrite)
         }
     }
 
-    override suspend fun joinWithPayload(payload: String) = runCatching {
+    override suspend fun joinWithPayload(
+        payload: String,
+        preferredConfig: HomeLanServerConfig?,
+        displayName: String?,
+    ) = runCatching {
         syncMutex.withLock {
             require(!preferences.session.first().isJoined) {
                 "请先退出当前家庭，再加入新的家庭"
@@ -538,11 +695,20 @@ class RealSyncPort @Inject constructor(
             val previous = preferences.session.first()
             val fromQr = decoded.homeLanConfig.takeIf { it.isServerConfigured }
                 ?: decoded.baseUrl.takeIf { it.isNotBlank() }?.let { HomeLanServerConfig.fromBaseUrl(it) }
-            val baseConfig = (fromQr ?: previous.homeLanConfig).withNormalized()
+            // QR values are editable prefill hints. Once the user saves the form, that explicit
+            // local choice must win over a stale address embedded in the invite.
+            val editedConfig = preferredConfig
+                ?.withNormalized()
+                ?.takeIf { it.isServerConfigured }
+            val savedConfig = previous.homeLanConfig.takeIf { it.isServerConfigured }
+            val baseConfig = (editedConfig ?: savedConfig ?: fromQr ?: previous.homeLanConfig)
+                .withNormalized()
             val currentSsid = networkState.currentWifiSsid()?.trim().orEmpty()
-            // Prefer QR-carried SSIDs (owner's home Wi‑Fi names), then local, then current.
+            val preferredSsids = editedConfig?.allowedSsids?.takeIf { it.isNotEmpty() }
+                ?: previous.allowedSsids.takeIf { it.isNotEmpty() }
+                ?: decoded.ssids
             val ssids = HomeLanServerConfig.normalizeSsids(
-                decoded.ssids + previous.allowedSsids + listOfNotNull(
+                preferredSsids + listOfNotNull(
                     currentSsid.takeIf {
                         it.isNotEmpty() && !HomeNetworkPolicy.isUnknownSsid(it)
                     },
@@ -552,30 +718,32 @@ class RealSyncPort @Inject constructor(
                 "请先填写家庭 Wi‑Fi 名称（扫码邀请若未带 Wi‑Fi 名，可手动填写）"
             }
             val config = baseConfig.copy(allowedSsids = ssids)
-            preferences.saveHomeLanConfig(config, clearSessionIfServerChanged = false)
             val decision = policy.evaluate(config, foregroundState.isForeground())
             requireAllowed(decision)
             val baseUrl = config.baseUrl
             val deviceId = preferences.ensureDeviceId()
-            val joined = backend.join(baseUrl, decoded.code, deviceId)
-            persistJoin(baseUrl, deviceId, joined).also {
-                // The join response replaces session fields, so restore the local-only SSID allowlist.
-                val after = preferences.session.first()
-                preferences.saveHomeLanConfig(
-                    after.homeLanConfig.copy(allowedSsids = config.allowedSsids),
-                    clearSessionIfServerChanged = false,
-                )
+            val joined = backend.join(
+                baseUrl,
+                decoded.code,
+                deviceId,
+                memberDisplayNameForWire(displayName),
+            )
+            persistJoin(baseUrl, deviceId, joined, config).also {
                 requestSync(SyncTrigger.PullToRefresh)
             }
         }
     }.onFailure(::updateFailureStatus)
 
     override suspend fun joinWithCode(code: String): Result<SyncSession> =
-        joinWithPayload(code)
+        joinWithPayload(code, null, null)
 
     override suspend fun createInvite(familyId: String): Result<Invite> = withAllowedSession {
         require(it.role == FamilyRole.Owner) { "仅家庭管理员可生成邀请" }
         backend.invite(it)
+    }
+
+    override suspend fun listFamilyMembers(): Result<List<FamilyMember>> = withAllowedSession {
+        backend.members(it)
     }
 
     override suspend fun sync(trigger: SyncTrigger): Result<Unit> = runCatching {
@@ -612,20 +780,14 @@ class RealSyncPort @Inject constructor(
                 }
             }
             if (plan.pull && !recovered) {
-                requireAllowed(
-                    policy.evaluate(current.homeLanConfig, foregroundState.isForeground()),
-                )
-                val pulled = try {
-                    backend.pull(current)
+                try {
+                    current = pullAllPages(
+                        initial = current,
+                        mediaEditGuard = mediaEditGuard,
+                    )
                 } catch (error: SyncHttpException) {
                     error.fullResyncCursorOrNull() ?: throw error
-                    recoverFullResync(current, mediaEditGuard)
-                    null
-                }
-                if (pulled != null) {
-                    applyRemote(current, pulled.entities, mediaEditGuard = mediaEditGuard)
-                    downloadMissingMedia(current, mediaEditGuard)
-                    preferences.updateCursor(pulled.cursor, pulled.generation)
+                    current = recoverFullResync(current, mediaEditGuard)
                 }
             }
             preferences.markSuccess(clock.nowMillis())
@@ -861,7 +1023,6 @@ class RealSyncPort @Inject constructor(
     private suspend fun applyRemote(
         session: SyncSession,
         entities: List<SyncEntity>,
-        reconcileMemberAvatars: Boolean = false,
         mediaEditGuard: LocalMediaEditGuard? = null,
     ) {
         val deletedLocalUris = mutableListOf<String>()
@@ -907,9 +1068,6 @@ class RealSyncPort @Inject constructor(
                 .forEach {
                     refreshBabyAvatar(it, mediaEditGuard)
                 }
-            if (reconcileMemberAvatars) {
-                reconcileMemberAvatarAuthority(entities, mediaEditGuard)
-            }
         }
         deletedLocalUris.forEach { mediaFiles.delete(it) }
         check(session.isJoined)
@@ -938,7 +1096,12 @@ class RealSyncPort @Inject constructor(
             BabyEntity(
                 id = existing?.id ?: 0,
                 familyId = familyId,
-                nickname = payload.string("nickname") ?: existing?.nickname ?: "宝宝",
+                nickname = payload.string("nickname")
+                    ?.let(::limitBabyNicknameInput)
+                    ?.trim()
+                    ?.ifBlank { null }
+                    ?: existing?.nickname
+                    ?: "宝宝",
                 sex = if ("sex" in payload) payload.string("sex") else existing?.sex,
                 birthdayEpochDay = SyncWireMapper.birthdayEpochDay(payload)
                     ?: existing?.birthdayEpochDay
@@ -1106,20 +1269,28 @@ class RealSyncPort @Inject constructor(
         return true
     }
 
-    private suspend fun persistJoin(baseUrl: String, deviceId: String, joined: JoinResult): SyncSession {
+    private suspend fun persistJoin(
+        baseUrl: String,
+        deviceId: String,
+        joined: JoinResult,
+        joinedConfig: HomeLanServerConfig? = null,
+    ): SyncSession {
         val previous = preferences.session.first()
         val parsed = HomeLanServerConfig.fromBaseUrl(baseUrl).withNormalized()
+        val config = joinedConfig?.withNormalized()
+            ?: parsed.copy(allowedSsids = previous.allowedSsids)
         val session = SyncSession(
-            baseUrl = parsed.baseUrl.ifBlank { baseUrl },
+            baseUrl = config.baseUrl.ifBlank { baseUrl },
             familyId = joined.familyId,
             familyToken = joined.token,
             deviceId = deviceId,
             role = joined.role,
             pullCursor = joined.cursor,
             pullGeneration = joined.generation,
-            serverHost = parsed.host.ifBlank { previous.serverHost },
-            serverPort = if (parsed.host.isNotBlank()) parsed.port else previous.serverPort,
-            allowedSsids = previous.allowedSsids,
+            serverHost = config.host.ifBlank { previous.serverHost },
+            serverPort = if (config.host.isNotBlank()) config.port else previous.serverPort,
+            allowedSsids = config.allowedSsids,
+            serverScheme = if (config.host.isNotBlank()) config.scheme else previous.serverScheme,
         )
         // Upload receipts only prove that bytes exist in the previous
         // server/family namespace. A new family must reconcile them again.
@@ -1171,41 +1342,105 @@ class RealSyncPort @Inject constructor(
         )
         preferences.updateCursor(0, generation = "")
         var current = preferences.session.first()
-        requireAllowed(policy.evaluate(current.homeLanConfig, foregroundState.isForeground()))
-        val authoritative = backend.pull(current)
-        applyRemote(
-            current,
-            authoritative.entities,
+        current = pullAllPages(
+            initial = current,
             reconcileMemberAvatars = current.role == FamilyRole.Member,
+            deferCursorUntilComplete = true,
             mediaEditGuard = mediaEditGuard,
         )
-        downloadMissingMedia(current, mediaEditGuard)
-        preferences.updateCursor(
-            authoritative.cursor,
-            authoritative.generation,
-        )
-        current = preferences.session.first()
         captureLocalChanges(current)
         pushPending(current)
         current = preferences.session.first()
-        requireAllowed(policy.evaluate(current.homeLanConfig, foregroundState.isForeground()))
-        val finalPull = backend.pull(current)
-        applyRemote(current, finalPull.entities, mediaEditGuard = mediaEditGuard)
-        downloadMissingMedia(current, mediaEditGuard)
-        preferences.updateCursor(finalPull.cursor, finalPull.generation)
-        return preferences.session.first()
+        return pullAllPages(
+            initial = current,
+            mediaEditGuard = mediaEditGuard,
+        )
+    }
+
+    /**
+     * Applies one bounded server page at a time. Normal incremental pulls
+     * durably advance only after that page (including media materialization)
+     * succeeds; the authoritative pre-push phase of full resync publishes its
+     * cursor only after every page succeeds. `hasMore` is an additive wire
+     * field, so an older unpaged server remains a one-page pull.
+     */
+    private suspend fun pullAllPages(
+        initial: SyncSession,
+        reconcileMemberAvatars: Boolean = false,
+        deferCursorUntilComplete: Boolean = false,
+        mediaEditGuard: LocalMediaEditGuard,
+    ): SyncSession {
+        var current = initial
+        val authoritativeMemberAvatarPointers = if (reconcileMemberAvatars) {
+            linkedMapOf<String, String?>()
+        } else {
+            null
+        }
+        do {
+            requireAllowed(policy.evaluate(current.homeLanConfig, foregroundState.isForeground()))
+            val pulled = backend.pull(current)
+            require(pulled.cursor >= current.pullCursor) {
+                "家庭服务器返回了倒退的同步 cursor"
+            }
+            if (pulled.hasMore) {
+                require(pulled.cursor > current.pullCursor) {
+                    "家庭服务器分页 cursor 未推进"
+                }
+            }
+            if (current.pullGeneration.isNotBlank() && pulled.generation.isNotBlank()) {
+                require(pulled.generation == current.pullGeneration) {
+                    "家庭服务器在分页期间切换了同步代际"
+                }
+            }
+            authoritativeMemberAvatarPointers?.let { pointers ->
+                pulled.entities
+                    .filter { it.type == "baby" }
+                    .forEach { entity ->
+                        if (entity.deletedAt == null) {
+                            val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
+                            pointers[entity.clientUuid] = payload.string("avatar_media_uuid")
+                        } else {
+                            pointers.remove(entity.clientUuid)
+                        }
+                    }
+            }
+            applyRemote(
+                current,
+                pulled.entities,
+                mediaEditGuard = mediaEditGuard,
+            )
+            downloadMissingMedia(current, mediaEditGuard)
+            val nextGeneration = pulled.generation.ifBlank { current.pullGeneration }
+            if (!deferCursorUntilComplete) {
+                preferences.updateCursor(pulled.cursor, nextGeneration)
+                current = preferences.session.first()
+            } else {
+                // The authoritative pre-push phase of full resync must not
+                // publish a partial cursor. Otherwise a restart can push the
+                // re-queued local replica before the remaining server pages
+                // have been applied.
+                current = current.copy(
+                    pullCursor = pulled.cursor,
+                    pullGeneration = nextGeneration,
+                )
+            }
+        } while (pulled.hasMore)
+        authoritativeMemberAvatarPointers?.let { pointers ->
+            transactionRunner.run {
+                reconcileMemberAvatarAuthority(pointers, mediaEditGuard)
+            }
+        }
+        if (deferCursorUntilComplete) {
+            preferences.updateCursor(current.pullCursor, current.pullGeneration)
+            current = preferences.session.first()
+        }
+        return current
     }
 
     private suspend fun reconcileMemberAvatarAuthority(
-        entities: List<SyncEntity>,
+        serverPointers: Map<String, String?>,
         mediaEditGuard: LocalMediaEditGuard?,
     ) {
-        val serverPointers = entities
-            .filter { it.type == "baby" && it.deletedAt == null }
-            .associate { entity ->
-                val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
-                entity.clientUuid to payload.string("avatar_media_uuid")
-            }
         babyDao.listAllIncludingDeleted().forEach { baby ->
             val authoritativePointer = serverPointers[baby.clientUuid]
             if (baby.avatarMediaUuid != authoritativePointer) {
@@ -1526,22 +1761,29 @@ class RealSyncPort @Inject constructor(
             .filter { it.hasReceiptFor(session) }
             .forEach { media ->
                 requireAllowed(policy.evaluate(session.homeLanConfig, foregroundState.isForeground()))
-                // Soft-fail missing remote bytes (half-upload / 404) and other
-                // media GET failures so the pull cursor can still advance.
-                // Empty localUri keeps the asset queued for a later retry.
+                // A 404 is an isolated half-upload and stays queued for retry.
+                // Auth, server, and transport failures fail the whole cycle so
+                // they cannot be reported as a successful sync.
                 val bytes = try {
                     backend.getMedia(session, media.clientUuid)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: SyncHttpException) {
+                    if (error.statusCode == 404) return@forEach
+                    throw error
+                }
+                val localUri = try {
+                    mediaFiles.saveDownloaded(
+                        media.clientUuid,
+                        media.kind,
+                        bytes,
+                        media.mime,
+                    )
                 } catch (error: CancellationException) {
                     throw error
                 } catch (_: Exception) {
                     return@forEach
                 }
-                val localUri = mediaFiles.saveDownloaded(
-                    media.clientUuid,
-                    media.kind,
-                    bytes,
-                    media.mime,
-                )
                 transactionRunner.run {
                     val current = mediaDao.getByClientUuid(media.clientUuid) ?: return@run
                     mediaDao.update(current.copy(localUri = localUri))
@@ -1701,6 +1943,12 @@ internal class SyncHttpException(
     val statusCode: Int,
     val responseBody: String = "",
 ) : IllegalStateException("家庭服务器请求失败（HTTP $statusCode）")
+
+internal class SyncResponseTooLargeException(
+    val responseKind: String,
+    val limitBytes: Int,
+    val declaredBytes: Long,
+) : IllegalStateException("家庭服务器$responseKind 响应过大（上限 $limitBytes 字节）")
 
 private fun SyncHttpException.meansSessionIsGone(): Boolean =
     statusCode == 401

@@ -20,6 +20,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -30,7 +31,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -41,7 +41,6 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -49,6 +48,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -64,15 +64,21 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
+import com.lezi.babylog.core.common.newClientUuid
 import com.lezi.babylog.core.common.productUiError
+import com.lezi.babylog.designsystem.LeziDetailTopBar
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.FeedReminderPort
-import dagger.hilt.android.AndroidEntryPoint
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -96,6 +102,8 @@ import kotlinx.serialization.json.put
 
 data class TimerState(
     val babyId: Long? = null,
+    /** Stable idempotency key retained until this timer session is cleared. */
+    val completionClientUuid: String? = null,
     val leftRunning: Boolean = false,
     val rightRunning: Boolean = false,
     val leftAccumMs: Long = 0L,
@@ -118,6 +126,11 @@ data class TimerState(
         savedBootCount: Long? = null,
     ): String = buildJsonObject {
         putNullableLong("babyId", babyId)
+        if (completionClientUuid == null) {
+            put("completionClientUuid", JsonNull)
+        } else {
+            put("completionClientUuid", completionClientUuid)
+        }
         put("leftRunning", leftRunning)
         put("rightRunning", rightRunning)
         put("leftAccumMs", leftAccumMs)
@@ -162,6 +175,8 @@ data class TimerState(
                 if (rightRunning) rightAccum += drift
                 TimerState(
                     babyId = o.optionalLong("babyId"),
+                    completionClientUuid = o.optionalString("completionClientUuid")
+                        ?.takeIf { it.isNotBlank() },
                     leftRunning = false,
                     rightRunning = false,
                     leftAccumMs = leftAccum,
@@ -175,6 +190,14 @@ data class TimerState(
             }.getOrDefault(TimerState())
         }
     }
+}
+
+internal fun TimerState.withStableCompletionId(
+    createId: () -> String = ::newClientUuid,
+): TimerState = if (hasTimerData() && completionClientUuid == null) {
+    copy(completionClientUuid = createId())
+} else {
+    this
 }
 
 private fun kotlinx.serialization.json.JsonObjectBuilder.putNullableLong(
@@ -254,11 +277,15 @@ internal fun TimerState.withToggleLeft(
     nowElapsed: Long,
     nowWall: Long,
     babyIdForStart: Long? = null,
+    completionClientUuidForStart: String? = null,
 ): TimerState? {
     var cur = this
     if (!cur.leftRunning && cur.babyId == null) {
         val babyId = babyIdForStart ?: return null
         cur = cur.copy(babyId = babyId)
+    }
+    if (cur.completionClientUuid == null && completionClientUuidForStart != null) {
+        cur = cur.copy(completionClientUuid = completionClientUuidForStart)
     }
     return if (cur.leftRunning) {
         cur.copy(
@@ -301,11 +328,15 @@ internal fun TimerState.withToggleRight(
     nowElapsed: Long,
     nowWall: Long,
     babyIdForStart: Long? = null,
+    completionClientUuidForStart: String? = null,
 ): TimerState? {
     var cur = this
     if (!cur.rightRunning && cur.babyId == null) {
         val babyId = babyIdForStart ?: return null
         cur = cur.copy(babyId = babyId)
+    }
+    if (cur.completionClientUuid == null && completionClientUuidForStart != null) {
+        cur = cur.copy(completionClientUuid = completionClientUuidForStart)
     }
     return if (cur.rightRunning) {
         cur.copy(
@@ -363,30 +394,34 @@ class TimerViewModel @Inject constructor(
 
     init {
         viewModelScope.launch {
-            val raw = settings.nursingTimerJson.first()
-            _state.value = TimerState.fromJson(
-                raw = raw,
-                nowBootCount = currentBootCount(app),
-            )
+            toggleMutex.withLock {
+                val restored = TimerState.fromJson(
+                    raw = settings.nursingTimerJson.first(),
+                    nowBootCount = currentBootCount(app),
+                )
+                val ready = restored.withStableCompletionId()
+                if (ready != restored) {
+                    settings.setNursingTimerJson(
+                        ready.toJson(savedBootCount = currentBootCount(app)),
+                    )
+                }
+                _state.value = ready
+                // A restored running snapshot is deliberately frozen by fromJson; reconcile any
+                // surviving service notification with that authoritative paused state.
+                updateService(ready)
+            }
         }
     }
 
-    private fun persist(s: TimerState) {
+    private suspend fun persist(s: TimerState) {
+        settings.setNursingTimerJson(
+            if (!s.hasTimerData()) {
+                null
+            } else {
+                s.toJson(savedBootCount = currentBootCount(app))
+            },
+        )
         _state.value = s
-        viewModelScope.launch {
-            settings.setNursingTimerJson(
-                if (s.leftAccumMs == 0L &&
-                    s.rightAccumMs == 0L &&
-                    !s.leftRunning &&
-                    !s.rightRunning &&
-                    s.sessionStartedAt == null
-                ) {
-                    null
-                } else {
-                    s.toJson(savedBootCount = currentBootCount(app))
-                },
-            )
-        }
         updateService(s)
     }
 
@@ -394,9 +429,13 @@ class TimerViewModel @Inject constructor(
         val running = s.leftRunning || s.rightRunning
         val intent = Intent(app, NursingTimerService::class.java)
         if (running) {
+            val snapshotElapsed = SystemClock.elapsedRealtime()
             intent.action = NursingTimerService.ACTION_UPDATE
-            intent.putExtra(NursingTimerService.EXTRA_LEFT_MS, s.leftMs())
-            intent.putExtra(NursingTimerService.EXTRA_RIGHT_MS, s.rightMs())
+            intent.putExtra(NursingTimerService.EXTRA_LEFT_MS, s.leftMs(snapshotElapsed))
+            intent.putExtra(NursingTimerService.EXTRA_RIGHT_MS, s.rightMs(snapshotElapsed))
+            intent.putExtra(NursingTimerService.EXTRA_LEFT_RUNNING, s.leftRunning)
+            intent.putExtra(NursingTimerService.EXTRA_RIGHT_RUNNING, s.rightRunning)
+            intent.putExtra(NursingTimerService.EXTRA_SNAPSHOT_ELAPSED, snapshotElapsed)
             ContextCompat.startForegroundService(app, intent)
         } else {
             app.stopService(Intent(app, NursingTimerService::class.java))
@@ -418,6 +457,7 @@ class TimerViewModel @Inject constructor(
                     nowElapsed = now,
                     nowWall = wall,
                     babyIdForStart = babyIdForStart,
+                    completionClientUuidForStart = cur.completionClientUuid ?: newClientUuid(),
                 ) ?: return@withLock
                 persist(next)
             }
@@ -439,6 +479,7 @@ class TimerViewModel @Inject constructor(
                     nowElapsed = now,
                     nowWall = wall,
                     babyIdForStart = babyIdForStart,
+                    completionClientUuidForStart = cur.completionClientUuid ?: newClientUuid(),
                 ) ?: return@withLock
                 persist(next)
             }
@@ -468,25 +509,35 @@ class TimerViewModel @Inject constructor(
                     onError(it)
                     return@launch
                 }
-                val babyId = _state.value.babyId ?: careLog.getCurrentBaby()?.id
-                if (babyId == null) {
-                    onError("请先添加宝宝")
-                    return@launch
+                toggleMutex.withLock {
+                    val stableState = _state.value.withStableCompletionId()
+                    if (stableState != _state.value) persist(stableState)
+                    val babyId = stableState.babyId ?: careLog.getCurrentBaby()?.id
+                    if (babyId == null) {
+                        onError("请先添加宝宝")
+                        return@launch
+                    }
+                    val completionClientUuid = requireNotNull(stableState.completionClientUuid) {
+                        "计时会话尚未准备好，请重试"
+                    }
+                    val command = draft.toCommand()
+                    val recordMode = settings.settings.first().recordAtStartOrEnd
+                    careLog.completeNursing(
+                        babyId = babyId,
+                        leftMin = command.leftMin,
+                        rightMin = command.rightMin,
+                        order = command.order,
+                        amountMl = command.amountMl,
+                        note = command.note,
+                        startedAt = command.startedAt,
+                        endedAt = command.endedAt,
+                        recordMode = recordMode,
+                        completionClientUuid = completionClientUuid,
+                    )
+                    // Await the DataStore clear. If the process dies before it commits, replay uses
+                    // the same completionClientUuid and CareLog returns the existing record.
+                    persist(TimerState())
                 }
-                val command = draft.toCommand()
-                val recordMode = settings.settings.first().recordAtStartOrEnd
-                careLog.completeNursing(
-                    babyId = babyId,
-                    leftMin = command.leftMin,
-                    rightMin = command.rightMin,
-                    order = command.order,
-                    amountMl = command.amountMl,
-                    note = command.note,
-                    startedAt = command.startedAt,
-                    endedAt = command.endedAt,
-                    recordMode = recordMode,
-                )
-                clear()
                 onDone()
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
@@ -504,29 +555,59 @@ class TimerViewModel @Inject constructor(
         }
     }
 
-    fun clear() {
-        persist(TimerState())
-        app.stopService(Intent(app, NursingTimerService::class.java))
+    fun clear(onCleared: () -> Unit = {}) {
+        viewModelScope.launch {
+            toggleMutex.withLock { persist(TimerState()) }
+            onCleared()
+        }
     }
 }
 
-@AndroidEntryPoint
 class NursingTimerService : Service() {
-    @Inject lateinit var settings: SettingsStore
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var tickerJob: Job? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action != ACTION_UPDATE) {
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
         ensureChannel()
-        val left = intent?.getLongExtra(EXTRA_LEFT_MS, 0L) ?: 0L
-        val right = intent?.getLongExtra(EXTRA_RIGHT_MS, 0L) ?: 0L
-        val notification = buildNotification(left, right)
+        val snapshot = NursingNotificationSnapshot(
+            leftMs = intent.getLongExtra(EXTRA_LEFT_MS, 0L),
+            rightMs = intent.getLongExtra(EXTRA_RIGHT_MS, 0L),
+            leftRunning = intent.getBooleanExtra(EXTRA_LEFT_RUNNING, false),
+            rightRunning = intent.getBooleanExtra(EXTRA_RIGHT_RUNNING, false),
+            capturedElapsed = intent.getLongExtra(
+                EXTRA_SNAPSHOT_ELAPSED,
+                SystemClock.elapsedRealtime(),
+            ),
+        )
+        val initial = snapshot.at(SystemClock.elapsedRealtime())
+        val notification = buildNotification(initial.first, initial.second)
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
             startForeground(NOTIF_ID, notification)
         }
-        return START_STICKY
+        tickerJob?.cancel()
+        tickerJob = serviceScope.launch {
+            val manager = getSystemService(NotificationManager::class.java)
+            while (true) {
+                delay(1_000L)
+                val current = snapshot.at(SystemClock.elapsedRealtime())
+                manager.notify(NOTIF_ID, buildNotification(current.first, current.second))
+            }
+        }
+        return START_NOT_STICKY
+    }
+
+    override fun onDestroy() {
+        tickerJob?.cancel()
+        serviceScope.cancel()
+        super.onDestroy()
     }
 
     private fun ensureChannel() {
@@ -568,6 +649,23 @@ class NursingTimerService : Service() {
         const val ACTION_UPDATE = "com.lezi.babylog.timer.UPDATE"
         const val EXTRA_LEFT_MS = "left_ms"
         const val EXTRA_RIGHT_MS = "right_ms"
+        const val EXTRA_LEFT_RUNNING = "left_running"
+        const val EXTRA_RIGHT_RUNNING = "right_running"
+        const val EXTRA_SNAPSHOT_ELAPSED = "snapshot_elapsed"
+    }
+}
+
+internal data class NursingNotificationSnapshot(
+    val leftMs: Long,
+    val rightMs: Long,
+    val leftRunning: Boolean,
+    val rightRunning: Boolean,
+    val capturedElapsed: Long,
+) {
+    fun at(nowElapsed: Long): Pair<Long, Long> {
+        val delta = (nowElapsed - capturedElapsed).coerceAtLeast(0L)
+        return (leftMs + if (leftRunning) delta else 0L) to
+            (rightMs + if (rightRunning) delta else 0L)
     }
 }
 
@@ -585,10 +683,12 @@ fun TimerRoute(
     val timePickerStyle by vm.timePickerStyle.collectAsStateWithLifecycle()
     val preferredHand by vm.preferredHand.collectAsStateWithLifecycle()
     var tick by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
-    LaunchedEffect(state.leftRunning, state.rightRunning) {
-        while (true) {
-            tick = SystemClock.elapsedRealtime()
+    val running = state.leftRunning || state.rightRunning
+    LaunchedEffect(running) {
+        tick = SystemClock.elapsedRealtime()
+        while (running) {
             delay(200)
+            tick = SystemClock.elapsedRealtime()
         }
     }
     val leftMs = state.leftMs(tick)
@@ -597,33 +697,43 @@ fun TimerRoute(
     var completionSaving by remember { mutableStateOf(false) }
     var completionSaveError by remember { mutableStateOf<String?>(null) }
     var showDiscardConfirmation by remember { mutableStateOf(false) }
-    var savedAwaitingReminder by remember { mutableStateOf(false) }
-    var pendingReminderAt by remember { mutableStateOf<Long?>(null) }
+    var savedAwaitingReminder by rememberSaveable { mutableStateOf(false) }
+    var pendingReminderAt by rememberSaveable { mutableStateOf<Long?>(null) }
+    var reminderScheduleError by rememberSaveable { mutableStateOf<String?>(null) }
+    var reminderScheduling by remember { mutableStateOf(false) }
+    fun finishReminderSchedule(success: Boolean) {
+        reminderScheduling = false
+        if (success) {
+            savedAwaitingReminder = false
+            reminderScheduleError = null
+            onDone()
+        } else {
+            reminderScheduleError = "提醒设置失败，请重试或选择不提醒"
+        }
+    }
     val notificationPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
         if (!granted) {
+            reminderScheduling = false
             savedAwaitingReminder = false
             onDone()
         } else {
-            vm.scheduleReminder(pendingReminderAt) {
-                savedAwaitingReminder = false
-                onDone()
-            }
+            vm.scheduleReminder(pendingReminderAt, ::finishReminderSchedule)
         }
     }
     fun requestOrSchedule(atMillis: Long?) {
+        if (reminderScheduling) return
         pendingReminderAt = atMillis
+        reminderScheduleError = null
+        reminderScheduling = true
         val granted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
             ContextCompat.checkSelfPermission(
                 context,
                 Manifest.permission.POST_NOTIFICATIONS,
             ) == PackageManager.PERMISSION_GRANTED
         if (granted) {
-            vm.scheduleReminder(atMillis) {
-                savedAwaitingReminder = false
-                onDone()
-            }
+            vm.scheduleReminder(atMillis, ::finishReminderSchedule)
         } else {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
@@ -632,14 +742,7 @@ fun TimerRoute(
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text("喂奶计时") },
-                navigationIcon = {
-                    IconButton(onClick = onDone) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
-            )
+            LeziDetailTopBar(title = "喂奶计时", onBack = onDone)
         },
     ) { padding ->
         Column(
@@ -667,25 +770,35 @@ fun TimerRoute(
                 )
             }
 
-            Row(
+            BoxWithConstraints(
                 Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically,
             ) {
-                SideButton(
-                    label = "左",
-                    time = fmtMs(leftMs),
-                    running = state.leftRunning,
-                    color = MaterialTheme.colorScheme.primary,
-                    onClick = vm::toggleLeft,
-                )
-                SideButton(
-                    label = "右",
-                    time = fmtMs(rightMs),
-                    running = state.rightRunning,
-                    color = MaterialTheme.colorScheme.tertiary,
-                    onClick = vm::toggleRight,
-                )
+                val buttonSize = ((maxWidth - 12.dp) / 2)
+                    .coerceIn(120.dp, 148.dp)
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    SideButton(
+                        label = "左",
+                        time = fmtMs(leftMs),
+                        running = state.leftRunning,
+                        color = MaterialTheme.colorScheme.primary,
+                        runningContentColor = MaterialTheme.colorScheme.onPrimary,
+                        size = buttonSize,
+                        onClick = vm::toggleLeft,
+                    )
+                    SideButton(
+                        label = "右",
+                        time = fmtMs(rightMs),
+                        running = state.rightRunning,
+                        color = MaterialTheme.colorScheme.tertiary,
+                        runningContentColor = MaterialTheme.colorScheme.onTertiary,
+                        size = buttonSize,
+                        onClick = vm::toggleRight,
+                    )
+                }
             }
 
             Column(Modifier.fillMaxWidth()) {
@@ -706,8 +819,7 @@ fun TimerRoute(
                         if (state.hasTimerData()) {
                             showDiscardConfirmation = true
                         } else {
-                            vm.clear()
-                            onDone()
+                            vm.clear(onDone)
                         }
                     },
                     modifier = Modifier.fillMaxWidth(),
@@ -725,8 +837,7 @@ fun TimerRoute(
                 TextButton(
                     onClick = {
                         showDiscardConfirmation = false
-                        vm.clear()
-                        onDone()
+                        vm.clear(onDone)
                     },
                 ) {
                     Text(
@@ -794,10 +905,20 @@ fun TimerRoute(
         AlertDialog(
             onDismissRequest = {},
             title = { Text("设置下次喂养提醒？") },
-            text = { Text("计时记录已经安全保存。可按设置间隔提醒、调整为 60 分钟，或不提醒。") },
+            text = {
+                Column {
+                    Text("记录已保存。请选择提醒时间。")
+                    reminderScheduleError?.let {
+                        Text(it, color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
             confirmButton = {
-                TextButton(onClick = { requestOrSchedule(null) }) {
-                    Text("确认提醒")
+                TextButton(
+                    onClick = { requestOrSchedule(null) },
+                    enabled = !reminderScheduling,
+                ) {
+                    Text(if (reminderScheduling) "正在设置…" else "确认提醒")
                 }
             },
             dismissButton = {
@@ -806,12 +927,14 @@ fun TimerRoute(
                         onClick = {
                             requestOrSchedule(System.currentTimeMillis() + 60 * 60_000L)
                         },
+                        enabled = !reminderScheduling,
                     ) { Text("60 分钟") }
                     TextButton(
                         onClick = {
                             savedAwaitingReminder = false
                             onDone()
                         },
+                        enabled = !reminderScheduling,
                     ) { Text("不提醒") }
                 }
             },
@@ -832,12 +955,14 @@ private fun SideButton(
     time: String,
     running: Boolean,
     color: Color,
+    runningContentColor: Color,
+    size: androidx.compose.ui.unit.Dp,
     onClick: () -> Unit,
 ) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
             Modifier
-                .size(148.dp)
+                .size(size)
                 .clip(CircleShape)
                 .background(if (running) color else color.copy(alpha = 0.18f))
                 .clickable(onClick = onClick),
@@ -846,18 +971,23 @@ private fun SideButton(
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
                     label,
-                    color = if (running) Color.White else color,
+                    color = if (running) runningContentColor else color,
                     style = MaterialTheme.typography.titleLarge,
                 )
                 Text(
                     time,
-                    color = if (running) Color.White else MaterialTheme.colorScheme.onBackground,
-                    fontSize = 28.sp,
+                    color = if (running) runningContentColor else MaterialTheme.colorScheme.onBackground,
+                    fontSize = if (time.length >= 6) 22.sp else 28.sp,
                     fontWeight = FontWeight.Bold,
+                    maxLines = 1,
                 )
                 Text(
                     if (running) "暂停" else "开始",
-                    color = if (running) Color.White.copy(alpha = 0.9f) else MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (running) {
+                        runningContentColor.copy(alpha = 0.9f)
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
                 )
             }
         }

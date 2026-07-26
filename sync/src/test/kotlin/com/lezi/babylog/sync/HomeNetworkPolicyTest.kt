@@ -137,6 +137,88 @@ class HomeNetworkPolicyTest {
     }
 
     @Test
+    fun userInputPreservesHttpsAndEmbeddedPort() {
+        val config = HomeLanServerConfig.fromUserInput(
+            rawHostOrUrl = "https://lezi.home:9443",
+            explicitPort = 8765,
+            allowedSsids = listOf("Home"),
+        )
+
+        assertThat(config.baseUrl).isEqualTo("https://lezi.home:9443")
+    }
+
+    @Test
+    fun bareHostKeepsExistingHttpsWhenOnlyWifiChanges() {
+        val config = HomeLanServerConfig.fromUserInput(
+            rawHostOrUrl = "lezi.home",
+            explicitPort = 443,
+            allowedSsids = listOf("Home-5G"),
+            fallbackScheme = "https",
+        )
+
+        assertThat(config.baseUrl).isEqualTo("https://lezi.home:443")
+    }
+
+    @Test
+    fun bareNewHostDefaultsToHttp() {
+        val config = HomeLanServerConfig.fromUserInput(
+            rawHostOrUrl = "192.168.50.4",
+            explicitPort = 8765,
+            allowedSsids = emptyList(),
+        )
+
+        assertThat(config.baseUrl).isEqualTo("http://192.168.50.4:8765")
+    }
+
+    @Test
+    fun explicitUnsupportedSchemeIsRejectedInsteadOfDowngraded() {
+        val error = runCatching {
+            HomeLanServerConfig.fromUserInput(
+                rawHostOrUrl = "ftp://lezi.home",
+                explicitPort = 8765,
+                allowedSsids = emptyList(),
+            )
+        }.exceptionOrNull()
+
+        assertThat(error).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(error).hasMessageThat().contains("HTTP")
+    }
+
+    @Test
+    fun explicitMalformedOrOutOfRangePortIsRejected() {
+        listOf(
+            "http://lezi.home:bad",
+            "http://lezi.home:",
+            "http://lezi.home:0",
+            "http://lezi.home:65536",
+        ).forEach { address ->
+            val error = runCatching {
+                HomeLanServerConfig.fromUserInput(
+                    rawHostOrUrl = address,
+                    explicitPort = 8765,
+                    allowedSsids = listOf("Home"),
+                )
+            }.exceptionOrNull()
+
+            assertThat(error).isInstanceOf(IllegalArgumentException::class.java)
+        }
+    }
+
+    @Test
+    fun malformedBareHostPortCannotBecomeBracketedPseudoHost() {
+        val error = runCatching {
+            HomeLanServerConfig.fromUserInput(
+                rawHostOrUrl = "lezi.home:bad",
+                explicitPort = null,
+                allowedSsids = listOf("Home"),
+            )
+        }.exceptionOrNull()
+
+        assertThat(error).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(error).hasMessageThat().doesNotContain("[lezi.home:bad]")
+    }
+
+    @Test
     fun noviceUiDefaultsPrefillHostAndCurrentSsid() {
         val withSsid = HomeLanServerConfig.noviceUiDefaults("Home-2.4G")
         assertThat(withSsid.host).isEqualTo(DEFAULT_SERVER_HOST)

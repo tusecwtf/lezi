@@ -3,7 +3,10 @@ package com.lezi.babylog.feature.timer
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
@@ -40,6 +43,7 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun NursingCompletionSheet(
     draft: NursingCompletionDraft,
@@ -65,6 +69,7 @@ internal fun NursingCompletionSheet(
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .fillMaxHeight(0.96f)
             .navigationBarsPadding()
             .imePadding()
             .dismissKeyboardOnTap(),
@@ -75,16 +80,19 @@ internal fun NursingCompletionSheet(
         ) {
             Text("母乳 · 计时完成", style = LeziTypography.Eyebrow)
             Text("确认母乳记录", style = LeziTypography.Title)
-            Text(
-                "左右时长已按点击“完成”时冻结；取消后原计时继续。",
-                style = LeziTypography.Meta,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                NursingStatusBadge("时长已冻结")
+                NursingStatusBadge("取消后继续计时")
+            }
         }
 
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .weight(1f, fill = false)
                 .heightIn(max = 530.dp)
                 .verticalScroll(rememberScrollState())
                 .dismissKeyboardOnTap()
@@ -240,6 +248,21 @@ internal fun NursingCompletionSheet(
                 showClock = false
             },
             onDismiss = { showClock = false },
+        )
+    }
+}
+
+@Composable
+private fun NursingStatusBadge(label: String) {
+    Surface(
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+        shape = LeziShapes.Pill,
+    ) {
+        Text(
+            label,
+            style = LeziTypography.Meta,
+            modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
         )
     }
 }

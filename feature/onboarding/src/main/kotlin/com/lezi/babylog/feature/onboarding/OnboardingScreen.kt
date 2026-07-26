@@ -4,18 +4,23 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -23,7 +28,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -32,6 +36,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
@@ -49,6 +54,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -57,14 +65,21 @@ import androidx.lifecycle.viewModelScope
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import com.lezi.babylog.core.common.productUiError
+import com.lezi.babylog.core.model.limitBabyNicknameInput
+import com.lezi.babylog.core.model.birthWeightValidationError
 import com.lezi.babylog.core.ui.CameraCapture
 import com.lezi.babylog.core.ui.UiTags
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
+import com.lezi.babylog.designsystem.LeziDatePicker
+import com.lezi.babylog.designsystem.LeziSpacing
+import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
 import com.lezi.babylog.sync.DEFAULT_SERVER_HOST
 import com.lezi.babylog.sync.DEFAULT_SERVER_PORT
 import com.lezi.babylog.sync.HomeLanServerConfig
+import com.lezi.babylog.sync.HomeWifiPermission
+import com.lezi.babylog.sync.HomeWifiSettingsTarget
 import com.lezi.babylog.sync.InvitePayloadCodec
 import com.lezi.babylog.sync.NetworkState
 import com.lezi.babylog.sync.SyncPort
@@ -72,10 +87,9 @@ import com.lezi.babylog.sync.SyncTrigger
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate
-import java.time.ZoneId
+import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import javax.inject.Inject
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 private val ThemePalette = listOf(
@@ -87,6 +101,16 @@ private val ThemePalette = listOf(
     0xFFD4578C.toInt(),
     0xFF4C6A92.toInt(),
     0xFF5B8C5A.toInt(),
+)
+private val ThemePaletteLabels = listOf(
+    "湖蓝",
+    "砖红",
+    "青绿",
+    "紫罗兰",
+    "琥珀",
+    "玫红",
+    "灰蓝",
+    "草绿",
 )
 
 @HiltViewModel
@@ -126,55 +150,47 @@ class OnboardingViewModel @Inject constructor(
     }
 
     /**
-     * Ensure a local baby exists, save home-LAN config, then join family.
+     * Join the existing family before publishing any Baby locally. The join response owns the
+     * family's Baby snapshot; creating a placeholder first would both exit onboarding on failure
+     * and later upload an unwanted extra Baby.
      */
     fun joinFamily(
-        nickname: String,
-        sex: String?,
-        birthdayEpochDay: Long,
-        birthWeightGrams: Int?,
-        themeColorArgb: Int,
         host: String,
         portText: String,
+        scheme: String,
         ssid1: String,
         ssid2: String,
         invitePayload: String,
         onDone: (String?) -> Unit,
     ) {
         viewModelScope.launch {
-            try {
-                if (!careLog.observeHasBaby().first()) {
-                    careLog.createBaby(
-                        CreateBabyInput(
-                            nickname = nickname.trim().ifBlank { "年年" },
-                            sex = sex,
-                            birthdayEpochDay = birthdayEpochDay,
-                            birthWeightGrams = birthWeightGrams,
-                            themeColorArgb = themeColorArgb,
-                        ),
-                    )
-                }
-            } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                throw cancelled
-            } catch (t: Throwable) {
-                val msg = t.message.orEmpty()
-                if (!msg.contains("已存在") && !msg.contains("duplicate", ignoreCase = true)) {
-                    onDone(productUiError(t, "创建宝宝失败"))
-                    return@launch
-                }
-            }
-            val (h, p) = HomeLanServerConfig.parseHostPort(
-                host,
-                portText.toIntOrNull() ?: DEFAULT_SERVER_PORT,
-            )
-            val port = portText.toIntOrNull() ?: p
-            val config = HomeLanServerConfig(host = h, port = port, allowedSsids = listOf(ssid1, ssid2))
-            val save = sync.saveHomeLanConfig(config)
-            if (save.isFailure) {
-                onDone(productUiError(save.exceptionOrNull() ?: Exception("保存失败"), "保存家庭网络失败"))
+            val config = runCatching {
+                buildOnboardingHomeLanConfig(
+                    host = host,
+                    portText = portText,
+                    scheme = scheme,
+                    ssids = listOf(ssid1, ssid2),
+                )
+            }.getOrElse {
+                onDone(it.message ?: "服务器地址无效")
                 return@launch
             }
-            val join = sync.joinWithPayload(invitePayload.trim())
+            val displayName = try {
+                careLog.ensureFamilyScaffold()
+                careLog.localFamilyIdentity().displayName
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                onDone(productUiError(error, "准备本机家庭失败"))
+                return@launch
+            }
+            // The edited endpoint is an in-memory join candidate. RealSyncPort persists it
+            // atomically with the joined session only after the server accepts the invite.
+            val join = sync.joinWithPayload(
+                payload = invitePayload.trim(),
+                preferredConfig = config,
+                displayName = displayName,
+            )
             if (join.isFailure) {
                 onDone(productUiError(join.exceptionOrNull() ?: Exception("加入失败"), "加入家庭失败"))
                 return@launch
@@ -185,7 +201,82 @@ class OnboardingViewModel @Inject constructor(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun HomeWifiGuideRow(
+    marker: String,
+    title: String,
+    detail: String,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Surface(
+            modifier = Modifier.size(40.dp),
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        ) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(marker, style = LeziTypography.Eyebrow)
+            }
+        }
+        Spacer(Modifier.size(LeziSpacing.Sm))
+        Column(Modifier.weight(1f)) {
+            Text(title, style = LeziTypography.BodyStrong)
+            Text(
+                detail,
+                style = LeziTypography.Meta,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun JoinSetupStep(
+    step: String,
+    title: String,
+    status: String,
+    complete: Boolean,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Surface(
+            modifier = Modifier.size(32.dp),
+            shape = CircleShape,
+            color = if (complete) {
+                MaterialTheme.colorScheme.primaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            },
+            contentColor = if (complete) {
+                MaterialTheme.colorScheme.onPrimaryContainer
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
+        ) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(if (complete) "✓" else step, style = LeziTypography.Label)
+            }
+        }
+        Spacer(Modifier.size(LeziSpacing.Sm))
+        Column(Modifier.weight(1f)) {
+            Text(title, style = LeziTypography.BodyStrong)
+            Text(
+                status,
+                style = LeziTypography.Meta,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun OnboardingRoute(
     onFinished: () -> Unit,
@@ -200,29 +291,62 @@ fun OnboardingRoute(
     var showJoin by remember { mutableStateOf(false) }
     var nameError by remember { mutableStateOf(false) }
     var formError by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
     // Prefill unsaved defaults, including the current Wi-Fi name when available.
-    val novice = remember { HomeLanServerConfig.noviceUiDefaults(vm.currentWifiSsid()) }
+    val novice = remember {
+        HomeLanServerConfig.noviceUiDefaults(
+            if (HomeWifiPermission.hasRequiredPermissions(context)) vm.currentWifiSsid() else null,
+        )
+    }
     var joinHost by remember { mutableStateOf(novice.host) }
     var joinPort by remember { mutableStateOf(novice.port.toString()) }
+    var joinScheme by remember { mutableStateOf(novice.scheme) }
     var joinSsid1 by remember { mutableStateOf(novice.allowedSsids.getOrNull(0).orEmpty()) }
     var joinSsid2 by remember { mutableStateOf("") }
     var joinCode by remember { mutableStateOf("") }
-    val context = LocalContext.current
+    var pendingHomeWifiAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var showHomeWifiAccessGuide by remember { mutableStateOf(false) }
+    val homeWifiPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) {
+        val action = pendingHomeWifiAction
+        pendingHomeWifiAction = null
+        if (HomeWifiPermission.isSsidAccessReady(context)) {
+            action?.invoke()
+        } else {
+            showHomeWifiAccessGuide = true
+        }
+    }
+    fun withHomeWifiAccess(action: () -> Unit) {
+        val missing = HomeWifiPermission.missingPermissions(context)
+        if (missing.isNotEmpty()) {
+            pendingHomeWifiAction = action
+            homeWifiPermission.launch(missing.toTypedArray())
+        } else if (HomeWifiPermission.isSsidAccessReady(context)) {
+            action()
+        } else {
+            showHomeWifiAccessGuide = true
+        }
+    }
+    fun fillCurrentWifiIfBlank() {
+        val currentSsid = vm.currentWifiSsid()?.trim().orEmpty()
+        if (currentSsid.isNotEmpty() && joinSsid1.isBlank()) joinSsid1 = currentSsid
+    }
     fun applyScannedInvite(raw: String) {
         val payload = raw.trim()
         if (payload.isEmpty()) return
         joinCode = payload
         formError = null
         // Prefill host, port, and optional SSIDs; persist them only after join succeeds.
-        runCatching { InvitePayloadCodec.decode(payload) }.getOrNull()?.let { decoded ->
-            val config = decoded.homeLanConfig
-            if (config.host.isNotBlank()) {
-                joinHost = config.host
-                joinPort = config.port.toString()
+        runCatching { decodeOnboardingInvitePrefill(payload) }.getOrNull()?.let { prefill ->
+            if (prefill.host.isNotBlank()) {
+                joinHost = prefill.host
+                joinPort = prefill.portText
+                joinScheme = prefill.scheme
             }
-            if (decoded.ssids.isNotEmpty()) {
-                joinSsid1 = decoded.ssids.getOrNull(0).orEmpty()
-                joinSsid2 = decoded.ssids.getOrNull(1).orEmpty()
+            if (prefill.ssids.isNotEmpty()) {
+                joinSsid1 = prefill.ssids.getOrNull(0).orEmpty()
+                joinSsid2 = prefill.ssids.getOrNull(1).orEmpty()
             }
         }
         showJoin = true
@@ -263,15 +387,11 @@ fun OnboardingRoute(
             scanCameraPermission.launch(CameraCapture.PERMISSION)
         }
     }
-    // Refresh an untouched SSID field because permission may have just been granted.
+    // Form defaults do not trigger runtime permission prompts; only explicit family actions do.
     LaunchedEffect(showJoin) {
         if (!showJoin) return@LaunchedEffect
         if (joinHost.isBlank()) joinHost = DEFAULT_SERVER_HOST
         if (joinPort.isBlank()) joinPort = DEFAULT_SERVER_PORT.toString()
-        val cur = vm.currentWifiSsid()?.trim().orEmpty()
-        if (cur.isNotEmpty() && joinSsid1.isBlank()) {
-            joinSsid1 = cur
-        }
     }
     val dateLabel = remember(birthday) {
         LocalDate.ofEpochDay(birthday).format(DateTimeFormatter.ofPattern("yyyy年M月d日"))
@@ -280,7 +400,9 @@ fun OnboardingRoute(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .safeDrawingPadding()
             .verticalScroll(rememberScrollState())
+            .imePadding()
             .dismissKeyboardOnTap()
             .padding(24.dp)
             .testTag(UiTags.ONBOARDING),
@@ -295,7 +417,7 @@ fun OnboardingRoute(
         OutlinedTextField(
             value = name,
             onValueChange = {
-                name = it
+                name = limitBabyNicknameInput(it)
                 nameError = false
             },
             label = { Text("宝宝昵称") },
@@ -303,7 +425,10 @@ fun OnboardingRoute(
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
             listOf(null to "未设置", "female" to "女", "male" to "男").forEach { (v, label) ->
                 FilterChip(
                     selected = sex == v,
@@ -324,22 +449,41 @@ fun OnboardingRoute(
             modifier = Modifier.fillMaxWidth(),
         )
         Text("主题色", style = MaterialTheme.typography.labelLarge)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            maxItemsInEachRow = 4,
+        ) {
             ThemePalette.forEachIndexed { index, color ->
                 Box(
                     modifier = Modifier
-                        .size(36.dp)
+                        .size(48.dp)
                         .clip(CircleShape)
-                        .background(Color(color))
                         .then(
                             if (themeIdx == index) {
-                                Modifier.border(2.dp, MaterialTheme.colorScheme.primary, CircleShape)
+                                Modifier.border(2.dp, MaterialTheme.colorScheme.onSurface, CircleShape)
                             } else {
                                 Modifier
                             },
                         )
-                        .clickable { themeIdx = index },
-                )
+                        .selectable(
+                            selected = themeIdx == index,
+                            role = Role.RadioButton,
+                            onClick = { themeIdx = index },
+                        )
+                        .semantics {
+                            contentDescription = "主题色：${ThemePaletteLabels[index]}"
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Box(
+                        Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(Color(color)),
+                    )
+                }
             }
         }
         formError?.let {
@@ -352,6 +496,10 @@ fun OnboardingRoute(
                     return@Button
                 }
                 val grams = weightText.toIntOrNull()
+                birthWeightValidationError(grams)?.let {
+                    formError = it
+                    return@Button
+                }
                 vm.createBaby(
                     nickname = name,
                     sex = sex,
@@ -377,7 +525,12 @@ fun OnboardingRoute(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             OutlinedButton(
-                onClick = { showJoin = true },
+                onClick = {
+                    withHomeWifiAccess {
+                        fillCurrentWifiIfBlank()
+                        showJoin = true
+                    }
+                },
                 modifier = Modifier
                     .weight(1f)
                     .height(52.dp),
@@ -385,7 +538,7 @@ fun OnboardingRoute(
                 Text("加入家庭")
             }
             OutlinedButton(
-                onClick = { requestOrLaunchInviteScan() },
+                onClick = { withHomeWifiAccess { requestOrLaunchInviteScan() } },
                 modifier = Modifier.height(52.dp),
             ) {
                 Icon(
@@ -400,10 +553,7 @@ fun OnboardingRoute(
     }
 
     if (showDate) {
-        val initialMillis = LocalDate.ofEpochDay(birthday)
-            .atStartOfDay(ZoneId.systemDefault())
-            .toInstant()
-            .toEpochMilli()
+        val initialMillis = birthday.toDatePickerMillis()
         val state = rememberDatePickerState(initialSelectedDateMillis = initialMillis)
         DatePickerDialog(
             onDismissRequest = { showDate = false },
@@ -411,10 +561,7 @@ fun OnboardingRoute(
                 TextButton(
                     onClick = {
                         state.selectedDateMillis?.let { ms ->
-                            birthday = Instant.ofEpochMilli(ms)
-                                .atZone(ZoneId.systemDefault())
-                                .toLocalDate()
-                                .toEpochDay()
+                            birthday = ms.datePickerMillisToEpochDay()
                         }
                         showDate = false
                     },
@@ -424,7 +571,7 @@ fun OnboardingRoute(
                 TextButton(onClick = { showDate = false }) { Text("取消") }
             },
         ) {
-            DatePicker(state = state)
+            LeziDatePicker(state = state)
         }
     }
 
@@ -435,23 +582,45 @@ fun OnboardingRoute(
             text = {
                 Column(
                     Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 480.dp)
                         .dismissKeyboardOnTap()
-                        .verticalScroll(rememberScrollState()),
+                        .verticalScroll(rememberScrollState())
+                        .imePadding(),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Text(
-                        "已预填当前 Wi‑Fi 与常见服务器地址。可点扫码图标扫描邀请二维码，" +
-                            "也可手动粘贴邀请码。加入后将共享育儿记录与日志图片。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    JoinSetupStep(
+                        step = "1",
+                        title = "家庭网络",
+                        status = if (joinHost.isNotBlank() && joinSsid1.isNotBlank()) {
+                            "服务器与家庭 Wi‑Fi 已填写"
+                        } else {
+                            "填写服务器并绑定家庭 Wi‑Fi"
+                        },
+                        complete = joinHost.isNotBlank() && joinSsid1.isNotBlank(),
+                    )
+                    JoinSetupStep(
+                        step = "2",
+                        title = "家庭邀请",
+                        status = if (joinCode.isBlank()) "扫码或粘贴邀请码" else "邀请码已填入",
+                        complete = joinCode.isNotBlank(),
+                    )
+                    JoinSetupStep(
+                        step = "3",
+                        title = "共享范围",
+                        status = "加入成功后同步育儿记录与日志图片",
+                        complete = false,
                     )
                     OutlinedTextField(
                         value = joinHost,
                         onValueChange = { joinHost = it },
                         label = { Text("服务器主机（IP/域名）") },
                         placeholder = { Text("192.168.50.4") },
-                        supportingText = { Text("家里 NAS 的 IP，不确定时保持默认即可") },
+                        supportingText = {
+                            Text(if (joinHost.isBlank()) "待填写" else "服务器地址已填写")
+                        },
                         singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
                     )
                     OutlinedTextField(
                         value = joinPort,
@@ -460,6 +629,7 @@ fun OnboardingRoute(
                         placeholder = { Text("8765") },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth(),
                     )
                     OutlinedTextField(
                         value = joinSsid1,
@@ -469,33 +639,37 @@ fun OnboardingRoute(
                         supportingText = {
                             Text(
                                 if (joinSsid1.isNotBlank()) {
-                                    "已填入当前连接；若手机连的是 5G 名，第二格可再填 2.4G"
+                                    "已绑定：$joinSsid1"
                                 } else {
-                                    "无法自动读取时请手动填写与路由器一致的名称"
+                                    "待填写，或读取当前 Wi‑Fi"
                                 },
                             )
                         },
                         singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
                     )
                     OutlinedTextField(
                         value = joinSsid2,
                         onValueChange = { joinSsid2 = it },
                         label = { Text("家庭 Wi‑Fi 名称 2（可选，如 5G）") },
                         singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
                     )
                     OutlinedButton(
                         onClick = {
-                            val cur = vm.currentWifiSsid()?.trim().orEmpty()
-                            if (cur.isEmpty()) {
-                                formError = "无法读取 Wi‑Fi 名称，请开启定位权限后重试"
-                            } else if (joinSsid1.isBlank()) {
-                                joinSsid1 = cur
-                            } else if (joinSsid2.isBlank() && joinSsid1 != cur) {
-                                joinSsid2 = cur
-                            } else if (joinSsid1 != cur && joinSsid2 != cur) {
-                                formError = "Wi‑Fi 名称已满 2 个，请先清空一格"
-                            } else {
-                                formError = "当前 Wi‑Fi 已在列表中"
+                            withHomeWifiAccess {
+                                val cur = vm.currentWifiSsid()?.trim().orEmpty()
+                                if (cur.isEmpty()) {
+                                    showHomeWifiAccessGuide = true
+                                } else if (joinSsid1.isBlank()) {
+                                    joinSsid1 = cur
+                                } else if (joinSsid2.isBlank() && joinSsid1 != cur) {
+                                    joinSsid2 = cur
+                                } else if (joinSsid1 != cur && joinSsid2 != cur) {
+                                    formError = "Wi‑Fi 名称已满 2 个，请先清空一格"
+                                } else {
+                                    formError = "当前 Wi‑Fi 已在列表中"
+                                }
                             }
                         },
                         modifier = Modifier.fillMaxWidth(),
@@ -508,7 +682,9 @@ fun OnboardingRoute(
                         label = { Text("邀请码或 QR 载荷") },
                         singleLine = true,
                         trailingIcon = {
-                            IconButton(onClick = { requestOrLaunchInviteScan() }) {
+                            IconButton(
+                                onClick = { withHomeWifiAccess { requestOrLaunchInviteScan() } },
+                            ) {
                                 Icon(
                                     imageVector = Icons.Outlined.QrCodeScanner,
                                     contentDescription = "扫码填入邀请",
@@ -517,18 +693,6 @@ fun OnboardingRoute(
                         },
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    OutlinedButton(
-                        onClick = { requestOrLaunchInviteScan() },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.QrCodeScanner,
-                            contentDescription = null,
-                            modifier = Modifier.size(20.dp),
-                        )
-                        Spacer(Modifier.size(8.dp))
-                        Text("扫码填入邀请码")
-                    }
                     formError?.let { err ->
                         Text(err, color = MaterialTheme.colorScheme.error)
                     }
@@ -537,40 +701,38 @@ fun OnboardingRoute(
             confirmButton = {
                 TextButton(
                     onClick = {
-                        if (joinCode.trim().isEmpty()) {
-                            formError = "请填写邀请码"
-                            return@TextButton
+                        withHomeWifiAccess {
+                            fillCurrentWifiIfBlank()
+                            if (joinCode.trim().isEmpty()) {
+                                formError = "请填写邀请码"
+                                return@withHomeWifiAccess
+                            }
+                            if (joinHost.trim().isEmpty()) {
+                                formError = "请填写服务器主机"
+                                return@withHomeWifiAccess
+                            }
+                            if (joinSsid1.isBlank() && joinSsid2.isBlank()) {
+                                formError = "请至少填写一个家庭 Wi‑Fi 名称"
+                                return@withHomeWifiAccess
+                            }
+                            formError = null
+                            vm.joinFamily(
+                                host = joinHost,
+                                portText = joinPort,
+                                scheme = joinScheme,
+                                ssid1 = joinSsid1,
+                                ssid2 = joinSsid2,
+                                invitePayload = joinCode,
+                                onDone = { err ->
+                                    if (err == null) {
+                                        showJoin = false
+                                        onFinished()
+                                    } else {
+                                        formError = err
+                                    }
+                                },
+                            )
                         }
-                        if (joinHost.trim().isEmpty()) {
-                            formError = "请填写服务器主机"
-                            return@TextButton
-                        }
-                        if (joinSsid1.isBlank() && joinSsid2.isBlank()) {
-                            formError = "请至少填写一个家庭 Wi‑Fi 名称"
-                            return@TextButton
-                        }
-                        formError = null
-                        val grams = weightText.toIntOrNull()
-                        vm.joinFamily(
-                            nickname = name,
-                            sex = sex,
-                            birthdayEpochDay = birthday,
-                            birthWeightGrams = grams,
-                            themeColorArgb = ThemePalette[themeIdx],
-                            host = joinHost,
-                            portText = joinPort,
-                            ssid1 = joinSsid1,
-                            ssid2 = joinSsid2,
-                            invitePayload = joinCode,
-                            onDone = { err ->
-                                if (err == null) {
-                                    showJoin = false
-                                    onFinished()
-                                } else {
-                                    formError = err
-                                }
-                            },
-                        )
                     },
                 ) { Text("加入") }
             },
@@ -579,4 +741,49 @@ fun OnboardingRoute(
             },
         )
     }
+
+    if (showHomeWifiAccessGuide) {
+        val settingsTarget = HomeWifiPermission.settingsTarget(context)
+        AlertDialog(
+            onDismissRequest = { showHomeWifiAccessGuide = false },
+            title = { Text("允许识别家庭 Wi‑Fi") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
+                    HomeWifiGuideRow("1", "位置权限", "仅用于读取当前 Wi‑Fi 名称")
+                    HomeWifiGuideRow("2", "定位服务", "需保持开启；位置数据不会上传")
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showHomeWifiAccessGuide = false
+                        context.startActivity(HomeWifiPermission.settingsIntent(context))
+                    },
+                ) {
+                    Text(
+                        when (settingsTarget) {
+                            HomeWifiSettingsTarget.AppPermission -> "打开权限设置"
+                            HomeWifiSettingsTarget.LocationServices -> "开启定位服务"
+                            HomeWifiSettingsTarget.Wifi -> "打开 Wi-Fi 设置"
+                        },
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showHomeWifiAccessGuide = false }) { Text("稍后") }
+            },
+        )
+    }
 }
+
+internal fun Long.toDatePickerMillis(): Long =
+    LocalDate.ofEpochDay(this)
+        .atStartOfDay(ZoneOffset.UTC)
+        .toInstant()
+        .toEpochMilli()
+
+internal fun Long.datePickerMillisToEpochDay(): Long =
+    Instant.ofEpochMilli(this)
+        .atZone(ZoneOffset.UTC)
+        .toLocalDate()
+        .toEpochDay()

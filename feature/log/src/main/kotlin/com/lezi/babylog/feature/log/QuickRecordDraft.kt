@@ -160,7 +160,7 @@ internal data class QuickRecordDraft(
     val foodAmount: String = "",
     val vaccineName: String = "",
     val vaccineBatch: String = "",
-) {
+) : java.io.Serializable {
     val mode: QuickRecordMode
         get() = type.quickRecordMode
 

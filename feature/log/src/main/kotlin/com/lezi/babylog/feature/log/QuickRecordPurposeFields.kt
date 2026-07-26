@@ -94,7 +94,7 @@ internal fun PurposeFields(
             onDraftChange = onDraftChange,
         )
         QuickRecordMode.Text -> TextFields(draft, onDraftChange)
-        QuickRecordMode.Simple -> SimpleFields(draft.type)
+        QuickRecordMode.Simple -> Unit
         QuickRecordMode.Symptom -> SymptomFields(draft, onDraftChange)
         QuickRecordMode.Medicine -> MedicineFields(draft, onDraftChange)
         QuickRecordMode.Hospital -> HospitalFields(draft, onDraftChange)
@@ -152,9 +152,9 @@ private fun NursingFields(
                 RecordTypeIcon(RecordType.NURSING)
                 Spacer(Modifier.size(10.dp))
                 Column {
-                    Text("需要实时计时？", style = LeziTypography.BodyStrong)
+                    Text("打开左右计时器", style = LeziTypography.BodyStrong)
                     Text(
-                        "备注和奶量会带入；点击完成时冻结时长与结束时刻",
+                        "沿用当前奶量与备注",
                         style = LeziTypography.Meta,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -562,18 +562,6 @@ private fun TextFields(
         minLines = if (draft.type == RecordType.DIARY) 4 else 2,
         maxLines = 7,
         supportingText = { Text("${draft.body.length}/800") },
-    )
-}
-
-@Composable
-private fun SimpleFields(type: RecordType) {
-    Text(
-        when (type) {
-            RecordType.BATH -> "记录本次洗澡，可在备注中补充水温或皮肤状态。"
-            else -> "确认本次记录，可在备注中补充细节。"
-        },
-        style = LeziTypography.Body,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
 }
 

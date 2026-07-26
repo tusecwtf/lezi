@@ -22,6 +22,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -29,6 +30,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
@@ -46,6 +48,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -54,7 +57,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-sealed interface RecordComposerRequest {
+sealed interface RecordComposerRequest : java.io.Serializable {
     data class New(
         val babyId: Long,
         val type: RecordType,
@@ -65,6 +68,33 @@ sealed interface RecordComposerRequest {
     ) : RecordComposerRequest
 
     data class Edit(val recordId: Long) : RecordComposerRequest
+}
+
+/** SavedStateHandle adapter for the restorable Composer request/draft pair. */
+internal class RecordComposerSavedState(
+    private val handle: SavedStateHandle,
+) {
+    fun save(request: RecordComposerRequest, draft: QuickRecordDraft) {
+        handle[REQUEST_KEY] = request
+        handle[DRAFT_KEY] = draft
+    }
+
+    fun restore(request: RecordComposerRequest): QuickRecordDraft? =
+        handle.get<RecordComposerRequest>(REQUEST_KEY)
+            ?.takeIf { it == request }
+            ?.let { handle[DRAFT_KEY] }
+
+    fun draftForCleanup(): QuickRecordDraft? = handle[DRAFT_KEY]
+
+    fun clear() {
+        handle.remove<RecordComposerRequest>(REQUEST_KEY)
+        handle.remove<QuickRecordDraft>(DRAFT_KEY)
+    }
+
+    private companion object {
+        const val REQUEST_KEY = "record_composer_saved_request"
+        const val DRAFT_KEY = "record_composer_saved_draft"
+    }
 }
 
 internal data class RecordComposerUiState(
@@ -92,15 +122,19 @@ class RecordComposerViewModel @Inject constructor(
     private val settingsStore: SettingsStore,
     private val feedReminder: FeedReminderPort,
     private val photoStore: RecordPhotoStore,
+    savedStateHandle: SavedStateHandle,
 ) : ViewModel() {
     private val _state = MutableStateFlow(RecordComposerUiState())
     internal val state = _state.asStateFlow()
     private val sessionGate = RecordComposerSessionGate()
+    private val savedState = RecordComposerSavedState(savedStateHandle)
     private var loadJob: Job? = null
     private var actionJob: Job? = null
 
     internal fun open(request: RecordComposerRequest) {
-        cleanupUnpersistedPhotos(_state.value.draft)
+        val current = _state.value
+        if (current.activeRequest == request && (current.loading || current.draft != null)) return
+        val restoredDraft = savedState.restore(request)
         val session = sessionGate.open()
         loadJob?.cancel()
         actionJob?.cancel()
@@ -210,9 +244,10 @@ class RecordComposerViewModel @Inject constructor(
             currentCoroutineContext().ensureActive()
             val (babyId, birthdayEpochDay, draft) = loaded
             sessionGate.deliver(session) {
+                val activeDraft = restoredDraft ?: draft
                 _state.value = RecordComposerUiState(
                     activeRequest = request,
-                    draft = draft,
+                    draft = activeDraft,
                     babyId = babyId,
                     birthdayEpochDay = birthdayEpochDay,
                     amountStepMl = settings.amountStepMl,
@@ -226,12 +261,14 @@ class RecordComposerViewModel @Inject constructor(
                         request.type == RecordType.NURSING &&
                         settings.timerEnabled,
                 )
+                savedState.save(request, activeDraft)
             }
         }
     }
 
     internal fun close() {
-        cleanupUnpersistedPhotos(_state.value.draft)
+        cleanupUnpersistedPhotos(_state.value.draft ?: savedState.draftForCleanup())
+        savedState.clear()
         sessionGate.close()
         loadJob?.cancel()
         actionJob?.cancel()
@@ -242,6 +279,7 @@ class RecordComposerViewModel @Inject constructor(
 
     internal fun updateDraft(draft: QuickRecordDraft) {
         _state.update { it.copy(draft = draft, error = null) }
+        _state.value.activeRequest?.let { request -> savedState.save(request, draft) }
     }
 
     internal fun importPhotos(uris: List<Uri>) {
@@ -273,6 +311,7 @@ class RecordComposerViewModel @Inject constructor(
                         error = null,
                     )
                 }
+                persistCurrentDraft()
             }
         }
     }
@@ -280,6 +319,7 @@ class RecordComposerViewModel @Inject constructor(
     internal fun removePhoto(path: String) {
         val draft = _state.value.draft ?: return
         _state.update { it.copy(draft = draft.copy(photos = draft.photos - path)) }
+        persistCurrentDraft()
         if (path !in draft.sourcePhotos) {
             viewModelScope.launch { photoStore.delete(listOf(path)) }
         }
@@ -367,6 +407,7 @@ class RecordComposerViewModel @Inject constructor(
                 _state.update {
                     it.copy(draft = it.draft?.copy(sourcePhotos = draft.photos))
                 }
+                savedState.clear()
                 onSaved(message.first, message.second)
             }
         }
@@ -408,6 +449,7 @@ class RecordComposerViewModel @Inject constructor(
             }
             currentCoroutineContext().ensureActive()
             sessionGate.deliver(session) {
+                savedState.clear()
                 onDeleted("已删除记录")
             }
         }
@@ -416,8 +458,15 @@ class RecordComposerViewModel @Inject constructor(
     private fun cleanupUnpersistedPhotos(draft: QuickRecordDraft?) {
         val paths = draft?.photos.orEmpty() - draft?.sourcePhotos.orEmpty().toSet()
         if (paths.isNotEmpty()) {
-            viewModelScope.launch { photoStore.delete(paths) }
+            viewModelScope.launch(NonCancellable) { photoStore.delete(paths) }
         }
+    }
+
+    private fun persistCurrentDraft() {
+        val state = _state.value
+        val request = state.activeRequest ?: return
+        val draft = state.draft ?: return
+        savedState.save(request, draft)
     }
 
     private companion object {
@@ -435,15 +484,20 @@ class RecordComposerViewModel @Inject constructor(
 fun RecordComposerHost(
     request: RecordComposerRequest?,
     onDismiss: () -> Unit,
+    /** Consumes the restorable root request as soon as a database write succeeds. */
+    onPersisted: () -> Unit,
     onSaved: (String) -> Unit,
     onStartNursingTimer: (note: String, amountMl: String) -> Unit,
     vm: RecordComposerViewModel = hiltViewModel(),
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
     var confirmDelete by remember(request) { mutableStateOf(false) }
-    var pendingSavedMessage by remember(request) { mutableStateOf<String?>(null) }
-    var adjustReminder by remember(request) { mutableStateOf(false) }
-    var pendingReminderAt by remember(request) { mutableStateOf<Long?>(null) }
+    // These outlive request=null so a saved record can finish its optional reminder flow after
+    // the restorable root request has already been consumed. rememberSaveable also preserves the
+    // prompt across process recreation without ever reopening the persisted New request.
+    var pendingSavedMessage by rememberSaveable { mutableStateOf<String?>(null) }
+    var adjustReminder by rememberSaveable { mutableStateOf(false) }
+    var pendingReminderAt by rememberSaveable { mutableStateOf<Long?>(null) }
     val context = LocalContext.current
     fun finishSaved(message: String) {
         pendingSavedMessage = null
@@ -550,11 +604,13 @@ fun RecordComposerHost(
                     },
                     onConfirm = {
                         vm.save { message, offerReminder ->
-                            if (offerReminder) {
-                                pendingSavedMessage = message
-                            } else {
-                                onSaved(message)
-                            }
+                            dispatchRecordSaveCompletion(
+                                message = message,
+                                offerReminder = offerReminder,
+                                onOfferReminder = { pendingSavedMessage = it },
+                                onPersisted = onPersisted,
+                                onFinished = onSaved,
+                            )
                         }
                     },
                     onStartNursingTimer = {
@@ -580,6 +636,7 @@ fun RecordComposerHost(
                     onClick = {
                         vm.delete { message ->
                             confirmDelete = false
+                            onPersisted()
                             onSaved(message)
                         }
                     },
@@ -645,6 +702,23 @@ fun RecordComposerHost(
             },
         )
     }
+}
+
+/**
+ * Enforces the post-write ordering: prepare any reminder UI, then consume the restorable root
+ * request before reporting final completion. This prevents process recreation from replaying a
+ * successfully persisted New request.
+ */
+internal fun dispatchRecordSaveCompletion(
+    message: String,
+    offerReminder: Boolean,
+    onOfferReminder: (String) -> Unit,
+    onPersisted: () -> Unit,
+    onFinished: (String) -> Unit,
+) {
+    if (offerReminder) onOfferReminder(message)
+    onPersisted()
+    if (!offerReminder) onFinished(message)
 }
 
 @Composable

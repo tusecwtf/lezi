@@ -11,6 +11,7 @@ use axum::Router;
 use http_body_util::BodyExt;
 use lezi_sync::{build_app, RateLimitConfig, ServerConfig, VERSION};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 use tower::ServiceExt;
@@ -239,12 +240,19 @@ async fn invite_and_join(app: &Router, owner_token: &str, device_id: &str) -> Va
     member
 }
 
+fn token_hash(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
 #[tokio::test]
-async fn health_initializes_private_single_data_root() {
+async fn liveness_and_readiness_initialize_private_single_data_root() {
     let rig = Rig::new();
     let (status, body) = get_json(&rig.app, "/health", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!({"ok": true, "version": VERSION}));
+    let (ready_status, ready_body) = get_json(&rig.app, "/ready", None).await;
+    assert_eq!(ready_status, StatusCode::OK);
+    assert_eq!(ready_body, json!({"ok": true, "version": VERSION}));
     assert!(rig.directory.path().join("lezi.db").is_file());
     assert!(rig.directory.path().join("media").is_dir());
     assert!(rig.directory.path().join("server.secret").is_file());
@@ -264,6 +272,66 @@ async fn health_initializes_private_single_data_root() {
     ] {
         assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
     }
+}
+
+#[tokio::test]
+async fn readiness_reports_degraded_when_database_is_not_queryable() {
+    let rig = Rig::new();
+    fs::write(
+        rig.directory.path().join("lezi.db"),
+        b"not a sqlite database",
+    )
+    .unwrap();
+
+    let (status, body) = get_json(&rig.app, "/ready", None).await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        body,
+        json!({"ok": false, "status": "degraded", "version": VERSION})
+    );
+}
+
+#[tokio::test]
+async fn readiness_reports_degraded_when_media_directory_is_not_writable() {
+    let rig = Rig::new();
+    let media_root = rig.directory.path().join("media");
+    let mut permissions = media_root.metadata().unwrap().permissions();
+    permissions.set_mode(0o500);
+    fs::set_permissions(&media_root, permissions).unwrap();
+
+    let (status, body) = get_json(&rig.app, "/ready", None).await;
+
+    let mut restored = media_root.metadata().unwrap().permissions();
+    restored.set_mode(0o700);
+    fs::set_permissions(&media_root, restored).unwrap();
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        body,
+        json!({"ok": false, "status": "degraded", "version": VERSION})
+    );
+}
+
+#[tokio::test]
+async fn public_health_is_cheap_while_readiness_is_cached_and_expires() {
+    let rig = Rig::new();
+    assert_eq!(get_json(&rig.app, "/ready", None).await.0, StatusCode::OK);
+    fs::write(
+        rig.directory.path().join("lezi.db"),
+        b"not a sqlite database",
+    )
+    .unwrap();
+
+    // Liveness performs no database or filesystem probes, and readiness reuses
+    // its recent result to prevent a public endpoint from forcing fsync I/O.
+    assert_eq!(get_json(&rig.app, "/health", None).await.0, StatusCode::OK);
+    assert_eq!(get_json(&rig.app, "/ready", None).await.0, StatusCode::OK);
+
+    rig.now.fetch_add(5, Ordering::SeqCst);
+    assert_eq!(
+        get_json(&rig.app, "/ready", None).await.0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
 }
 
 #[tokio::test]
@@ -437,6 +505,341 @@ async fn invite_join_roles_expiry_restart_and_leave_match_contract() {
 }
 
 #[tokio::test]
+async fn family_members_are_authenticated_isolated_stable_and_redacted() {
+    let rig = Rig::new();
+    assert_eq!(
+        get_json(&rig.app, "/v1/family/members", None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        get_json(&rig.app, "/v1/family/members", Some("not-a-token"))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+
+    let owner = create_family(
+        &rig.app,
+        "owner-sensitive-device-id",
+        "member-list-owner-request-0000000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let (invite_status, invitation) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/invite",
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(invite_status, StatusCode::CREATED);
+    let (join_status, member) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/join",
+        None,
+        json!({
+            "code": invitation["code"],
+            "device_id": "member-sensitive-device-id",
+            "display_name": "　 陈爸爸 🌿  ",
+        }),
+    )
+    .await;
+    assert_eq!(join_status, StatusCode::OK, "{member}");
+    let member_token = member["token"].as_str().unwrap();
+
+    let (owner_status, owner_view) =
+        get_json(&rig.app, "/v1/family/members", Some(owner_token)).await;
+    assert_eq!(owner_status, StatusCode::OK);
+    assert_eq!(
+        owner_view,
+        json!({"members":[
+            {"display_name":"妈妈","role":"owner","is_self":true},
+            {"display_name":"陈爸爸 🌿","role":"member","is_self":false},
+        ]})
+    );
+    let (member_status, member_view) =
+        get_json(&rig.app, "/v1/family/members", Some(member_token)).await;
+    assert_eq!(member_status, StatusCode::OK);
+    assert_eq!(
+        member_view,
+        json!({"members":[
+            {"display_name":"妈妈","role":"owner","is_self":false},
+            {"display_name":"陈爸爸 🌿","role":"member","is_self":true},
+        ]})
+    );
+    let visible_members = |body: &Value| {
+        body["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|member| (member["display_name"].clone(), member["role"].clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(visible_members(&owner_view), visible_members(&member_view));
+
+    let serialized = owner_view.to_string();
+    for secret in [
+        "owner-sensitive-device-id",
+        "member-sensitive-device-id",
+        owner_token,
+        member_token,
+        &token_hash(owner_token),
+        &token_hash(member_token),
+    ] {
+        assert!(
+            !serialized.contains(secret),
+            "leaked {secret}: {serialized}"
+        );
+    }
+    for row in owner_view["members"].as_array().unwrap() {
+        let fields = row.as_object().unwrap();
+        assert_eq!(fields.len(), 3);
+        assert!(!fields.contains_key("device_id"));
+        assert!(!fields.contains_key("token_hash"));
+    }
+
+    let isolated_family_id = Uuid::new_v4().to_string();
+    let isolated_token = "isolated-family-owner-token";
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute(
+            "INSERT INTO families(id, created_at) VALUES (?1, ?2)",
+            rusqlite::params![isolated_family_id, rig.now.load(Ordering::SeqCst)],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO family_meta(family_id, rev) VALUES (?1, 0)",
+            rusqlite::params![isolated_family_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "
+            INSERT INTO memberships(token_hash, family_id, role, device_id, display_name)
+            VALUES (?1, ?2, 'owner', 'isolated-raw-device-id', '隔离家庭')
+            ",
+            rusqlite::params![token_hash(isolated_token), isolated_family_id],
+        )
+        .unwrap();
+    drop(connection);
+
+    let (_, isolated_view) = get_json(&rig.app, "/v1/family/members", Some(isolated_token)).await;
+    assert_eq!(
+        isolated_view,
+        json!({"members":[
+            {"display_name":"隔离家庭","role":"owner","is_self":true},
+        ]})
+    );
+    let (_, owner_after_isolated_insert) =
+        get_json(&rig.app, "/v1/family/members", Some(owner_token)).await;
+    assert_eq!(owner_after_isolated_insert, owner_view);
+    assert!(!owner_after_isolated_insert.to_string().contains("隔离家庭"));
+    assert!(!isolated_view.to_string().contains("妈妈"));
+    assert!(!isolated_view.to_string().contains("isolated-raw-device-id"));
+
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/leave",
+            Some(member_token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, after_leave) = get_json(&rig.app, "/v1/family/members", Some(owner_token)).await;
+    assert_eq!(
+        after_leave,
+        json!({"members":[
+            {"display_name":"妈妈","role":"owner","is_self":true},
+        ]})
+    );
+}
+
+#[tokio::test]
+async fn family_members_normalize_unicode_and_empty_names_and_reject_unsafe_join_names() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "name-owner-device",
+        "member-name-owner-request-000000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+
+    let join = |code: Value, device_id: &str, display_name: Value| {
+        json!({
+            "code": code,
+            "device_id": device_id,
+            "display_name": display_name,
+        })
+    };
+    let (_, unicode_invite) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/invite",
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/join",
+            None,
+            join(
+                unicode_invite["code"].clone(),
+                "unicode-member",
+                json!("　李爸爸 👨‍🍼　"),
+            ),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    let (_, empty_invite) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/invite",
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/join",
+            None,
+            join(
+                empty_invite["code"].clone(),
+                "empty-name-member",
+                json!("　  "),
+            ),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    for (device_id, unsafe_name) in [
+        ("newline-member", "名字\n伪装".to_owned()),
+        ("bidi-member", "成员\u{202e}renwo".to_owned()),
+        ("long-member", "名".repeat(129)),
+    ] {
+        let (_, invitation) = json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/invite",
+            Some(owner_token),
+            json!({}),
+        )
+        .await;
+        let (status, _) = json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/join",
+            None,
+            join(invitation["code"].clone(), device_id, json!(unsafe_name)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    let (_, members) = get_json(&rig.app, "/v1/family/members", Some(owner_token)).await;
+    assert_eq!(members["members"].as_array().unwrap().len(), 3);
+    assert_eq!(members["members"][0]["role"], "owner");
+    assert!(members["members"].as_array().unwrap().iter().any(|member| {
+        member["display_name"] == "李爸爸 👨‍🍼" && member["role"] == "member"
+    }));
+    assert!(members["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|member| { member["display_name"].is_null() && member["role"] == "member" }));
+}
+
+#[tokio::test]
+async fn family_members_coalesce_legacy_duplicate_member_tokens_without_role_promotion() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "duplicate-owner-device",
+        "duplicate-owner-request-00000000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    for token in ["legacy-member-token-a", "legacy-member-token-b"] {
+        connection
+            .execute(
+                "
+                INSERT INTO memberships(token_hash, family_id, role, device_id, display_name)
+                VALUES (?1, ?2, 'member', 'same-legacy-device', '  历史成员  ')
+                ",
+                rusqlite::params![token_hash(token), family_id],
+            )
+            .unwrap();
+    }
+    // A role collision is kept separate: device_id is a client claim, not
+    // authentication evidence, so it must never promote a member row to owner.
+    connection
+        .execute(
+            "
+            INSERT INTO memberships(token_hash, family_id, role, device_id, display_name)
+            VALUES (?1, ?2, 'member', 'duplicate-owner-device', '伪装管理员')
+            ",
+            rusqlite::params![token_hash("owner-device-collision"), family_id],
+        )
+        .unwrap();
+    for (token, device_id, display_name) in [
+        ("legacy-empty-token", "legacy-empty-device", Some("")),
+        (
+            "legacy-local-placeholder-token",
+            "legacy-local-placeholder-device",
+            Some("我（本机）"),
+        ),
+        ("legacy-null-token", "legacy-null-device", None),
+    ] {
+        connection
+            .execute(
+                "
+                INSERT INTO memberships(token_hash, family_id, role, device_id, display_name)
+                VALUES (?1, ?2, 'member', ?3, ?4)
+                ",
+                rusqlite::params![token_hash(token), family_id, device_id, display_name],
+            )
+            .unwrap();
+    }
+    drop(connection);
+
+    let (_, members) = get_json(&rig.app, "/v1/family/members", Some(owner_token)).await;
+    assert_eq!(
+        members,
+        json!({"members":[
+            {"display_name":"妈妈","role":"owner","is_self":true},
+            {"display_name":"伪装管理员","role":"member","is_self":false},
+            {"display_name":"历史成员","role":"member","is_self":false},
+            {"display_name":null,"role":"member","is_self":false},
+            {"display_name":null,"role":"member","is_self":false},
+            {"display_name":null,"role":"member","is_self":false},
+        ]})
+    );
+    let serialized = members.to_string();
+    assert!(!serialized.contains("我（本机）"));
+    assert!(!serialized.contains("same-legacy-device"));
+    assert!(!serialized.contains("duplicate-owner-device"));
+}
+
+#[tokio::test]
 async fn push_lww_cursor_and_generation_recovery_are_wire_compatible() {
     let rig = Rig::new();
     let owner = create_family(
@@ -519,6 +922,225 @@ async fn push_lww_cursor_and_generation_recovery_are_wire_compatible() {
     )
     .await;
     assert_eq!(stale_push, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn pull_pages_large_bootstrap_without_skipping_the_remaining_entities() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "owner-device",
+        "paged-pull-owner-request-00000000001",
+    )
+    .await;
+    let token = owner["token"].as_str().unwrap();
+    let entities = (0..201)
+        .map(|index| {
+            json!({
+                "type":"baby",
+                "client_uuid":Uuid::new_v4(),
+                "updated_at":index + 1,
+                "payload":baby_payload(&format!("宝宝{index}"), None)
+            })
+        })
+        .collect::<Vec<_>>();
+    let (push_status, push_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({"entities":entities}),
+    )
+    .await;
+    assert_eq!(push_status, StatusCode::OK, "{push_body}");
+
+    let (first_status, first) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    assert_eq!(first_status, StatusCode::OK);
+    assert_eq!(first["entities"].as_array().unwrap().len(), 200);
+    assert_eq!(first["cursor"], 200);
+    assert_eq!(first["has_more"], true);
+
+    let (second_status, second) = get_json(&rig.app, "/v1/pull?cursor=200", Some(token)).await;
+    assert_eq!(second_status, StatusCode::OK);
+    assert_eq!(second["entities"].as_array().unwrap().len(), 1);
+    assert_eq!(second["cursor"], 201);
+    assert_eq!(second["has_more"], false);
+}
+
+#[tokio::test]
+async fn paged_full_resync_includes_dependencies_that_have_a_later_revision() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "owner-device",
+        "paged-reference-owner-request-00000001",
+    )
+    .await;
+    let token = owner["token"].as_str().unwrap();
+    let baby_id = Uuid::new_v4().to_string();
+    let record_ids = (0..201)
+        .map(|_| Uuid::new_v4().to_string())
+        .collect::<Vec<_>>();
+    let records = record_ids.iter().enumerate().map(|(index, record_id)| {
+        json!({
+            "type":"record",
+            "client_uuid":record_id,
+            "updated_at":index + 1,
+            "payload":record_payload(&baby_id)
+        })
+    });
+    let (push_status, push_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({"entities":std::iter::once(json!({
+            "type":"baby",
+            "client_uuid":baby_id,
+            "updated_at":1,
+            "payload":baby_payload("初始宝宝", None)
+        })).chain(records).collect::<Vec<_>>() }),
+    )
+    .await;
+    assert_eq!(push_status, StatusCode::OK, "{push_body}");
+    let (update_status, update_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({"entities":[{
+            "type":"baby",
+            "client_uuid":baby_id,
+            "updated_at":10_000,
+            "payload":baby_payload("更新宝宝", None)
+        }]}),
+    )
+    .await;
+    assert_eq!(update_status, StatusCode::OK, "{update_body}");
+
+    let mut cursor = 0;
+    let mut pulled_records = std::collections::BTreeSet::new();
+    let mut page_count = 0;
+    loop {
+        let (status, page) =
+            get_json(&rig.app, &format!("/v1/pull?cursor={cursor}"), Some(token)).await;
+        assert_eq!(status, StatusCode::OK);
+        let entities = page["entities"].as_array().unwrap();
+        assert!(entities.iter().any(|entity| entity["type"] == "baby"));
+        pulled_records.extend(
+            entities
+                .iter()
+                .filter(|entity| entity["type"] == "record")
+                .map(|entity| entity["client_uuid"].as_str().unwrap().to_owned()),
+        );
+        page_count += 1;
+        cursor = page["cursor"].as_i64().unwrap();
+        if page["has_more"] == false {
+            break;
+        }
+    }
+
+    assert!(page_count >= 2);
+    assert_eq!(pulled_records.len(), record_ids.len());
+    assert_eq!(cursor, 203);
+}
+
+#[tokio::test]
+async fn push_rejects_terminal_updated_at() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "owner-device",
+        "timestamp-owner-request-00000000001",
+    )
+    .await;
+    let token = owner["token"].as_str().unwrap();
+
+    let (status, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({"entities":[{
+            "type":"baby",
+            "client_uuid":Uuid::new_v4(),
+            "updated_at":i64::MAX,
+            "payload":baby_payload("年年", None)
+        }]}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn push_rejects_updated_at_more_than_24_hours_ahead() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "owner-device",
+        "future-time-owner-request-000000001",
+    )
+    .await;
+    let token = owner["token"].as_str().unwrap();
+    let server_now_millis = rig.now.load(Ordering::SeqCst) * 1_000;
+
+    let (status, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({"entities":[{
+            "type":"baby",
+            "client_uuid":Uuid::new_v4(),
+            "updated_at":server_now_millis + 86_400_001,
+            "payload":baby_payload("年年", None)
+        }]}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn baby_nickname_accepts_20_unicode_chars_and_rejects_21() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "owner-device",
+        "nickname-owner-request-0000000000001",
+    )
+    .await;
+    let token = owner["token"].as_str().unwrap();
+    let baby_id = Uuid::new_v4().to_string();
+
+    let nickname_20 = "年".repeat(20);
+    let (accepted, body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({"entities":[{
+            "type":"baby","client_uuid":baby_id,"updated_at":1,
+            "payload":baby_payload(&nickname_20, None)
+        }]}),
+    )
+    .await;
+    assert_eq!(accepted, StatusCode::OK, "{body}");
+
+    let nickname_21 = "年".repeat(21);
+    let (rejected, body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({"entities":[{
+            "type":"baby","client_uuid":baby_id,"updated_at":2,
+            "payload":baby_payload(&nickname_21, None)
+        }]}),
+    )
+    .await;
+    assert_eq!(rejected, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
 }
 
 #[tokio::test]
@@ -623,6 +1245,63 @@ async fn strict_entity_contract_orders_same_batch_references_and_strips_sort_ord
     assert_eq!(media_types, ["media"]);
     assert_eq!(after_bytes["entities"][0]["client_uuid"], media_id);
     assert_eq!(after_bytes["cursor"], 4);
+}
+
+#[tokio::test]
+async fn full_pull_includes_deleted_baby_dependency_before_retained_record() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "owner-device",
+        "deleted-baby-owner-request-000000001",
+    )
+    .await;
+    let token = owner["token"].as_str().unwrap();
+    let baby_id = Uuid::new_v4().to_string();
+    let record_id = Uuid::new_v4().to_string();
+
+    let (seeded, body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({"entities":[
+            {"type":"baby","client_uuid":baby_id,"updated_at":1,
+             "payload":baby_payload("年年", None)},
+            {"type":"record","client_uuid":record_id,"updated_at":1,
+             "payload":record_payload(&baby_id)}
+        ]}),
+    )
+    .await;
+    assert_eq!(seeded, StatusCode::OK, "{body}");
+    assert_eq!(body["cursor"], 2);
+
+    let (deleted, body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({"entities":[{
+            "type":"baby","client_uuid":baby_id,"updated_at":2,"deleted_at":2,
+            "payload":baby_payload("年年", None)
+        }]}),
+    )
+    .await;
+    assert_eq!(deleted, StatusCode::OK, "{body}");
+    assert_eq!(body["cursor"], 3);
+
+    let (status, pulled) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    assert_eq!(status, StatusCode::OK, "{pulled}");
+    assert_eq!(pulled["cursor"], 3);
+    assert_eq!(pulled["has_more"], false);
+    let entities = pulled["entities"].as_array().unwrap();
+    assert_eq!(entities.len(), 2);
+    assert_eq!(entities[0]["type"], "baby");
+    assert_eq!(entities[0]["client_uuid"], baby_id);
+    assert_eq!(entities[0]["deleted_at"], 2);
+    assert_eq!(entities[1]["type"], "record");
+    assert_eq!(entities[1]["client_uuid"], record_id);
+    assert!(entities[1]["deleted_at"].is_null());
 }
 
 #[tokio::test]
@@ -742,6 +1421,161 @@ async fn media_bytes_size_acl_and_immutable_association_are_enforced() {
     )
     .await;
     assert_eq!(owner_reassociate, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn media_metadata_rejects_zero_declared_byte_size() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "owner-device",
+        "zero-media-owner-request-000000001",
+    )
+    .await;
+    let token = owner["token"].as_str().unwrap();
+    let baby_id = Uuid::new_v4().to_string();
+    let record_id = Uuid::new_v4().to_string();
+    let media_id = Uuid::new_v4().to_string();
+    let mut media_payload = log_media_payload(&record_id);
+    media_payload["byte_size"] = json!(0);
+
+    let (status, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({"entities":[
+            {"type":"baby","client_uuid":baby_id,"updated_at":1,
+             "payload":baby_payload("年年", None)},
+            {"type":"record","client_uuid":record_id,"updated_at":1,
+             "payload":record_payload(&baby_id)},
+            {"type":"media","client_uuid":media_id,"updated_at":1,
+             "payload":media_payload}
+        ]}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn media_metadata_enforces_server_byte_limit_and_android_dimension_bounds() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "owner-device",
+        "bounded-media-owner-request-0000001",
+    )
+    .await;
+    let token = owner["token"].as_str().unwrap();
+    let baby_id = Uuid::new_v4().to_string();
+    let record_id = Uuid::new_v4().to_string();
+    let boundary_media_id = Uuid::new_v4().to_string();
+    let mut boundary_payload = log_media_payload(&record_id);
+    boundary_payload["byte_size"] = json!(8);
+    boundary_payload["width"] = json!(i32::MAX);
+    boundary_payload["height"] = json!(i32::MAX);
+
+    let (accepted, body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({"entities":[
+            {"type":"baby","client_uuid":baby_id,"updated_at":1,
+             "payload":baby_payload("年年", None)},
+            {"type":"record","client_uuid":record_id,"updated_at":1,
+             "payload":record_payload(&baby_id)},
+            {"type":"media","client_uuid":boundary_media_id,"updated_at":1,
+             "payload":boundary_payload}
+        ]}),
+    )
+    .await;
+    assert_eq!(accepted, StatusCode::OK, "{body}");
+
+    for (field, invalid_value) in [
+        ("byte_size", json!(9)),
+        ("width", json!(i64::from(i32::MAX) + 1)),
+        ("height", json!(i64::from(i32::MAX) + 1)),
+    ] {
+        let mut payload = log_media_payload(&record_id);
+        payload[field] = invalid_value;
+        let (status, body) = json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/push",
+            Some(token),
+            json!({"entities":[{
+                "type":"media","client_uuid":Uuid::new_v4(),"updated_at":2,
+                "payload":payload
+            }]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{field}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn media_upload_rejects_empty_or_mismatched_body() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "owner-device",
+        "empty-media-owner-request-00000001",
+    )
+    .await;
+    let token = owner["token"].as_str().unwrap();
+    let baby_id = Uuid::new_v4().to_string();
+    let record_id = Uuid::new_v4().to_string();
+    let media_id = Uuid::new_v4().to_string();
+    let (status, body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({"entities":[
+            {"type":"baby","client_uuid":baby_id,"updated_at":1,
+             "payload":baby_payload("年年", None)},
+            {"type":"record","client_uuid":record_id,"updated_at":1,
+             "payload":record_payload(&baby_id)},
+            {"type":"media","client_uuid":media_id,"updated_at":1,
+             "payload":log_media_payload(&record_id)}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let uploaded = request(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/media/{media_id}"),
+        Some(token),
+        Body::empty(),
+        Some("application/octet-stream"),
+    )
+    .await;
+
+    assert_eq!(uploaded.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let mismatched = request(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/media/{media_id}"),
+        Some(token),
+        Body::from("no"),
+        Some("application/octet-stream"),
+    )
+    .await;
+    assert_eq!(mismatched.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let downloaded = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(downloaded.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -1060,6 +1894,10 @@ async fn bootstrap_secret_gates_family_create_when_configured() {
     let secret = "production-bootstrap-secret";
     let rig = Rig::with_config(|config| {
         config.bootstrap_secret = Some(secret.to_owned());
+        config.create_rate_limit = RateLimitConfig {
+            max_attempts: 1,
+            window_seconds: 60,
+        };
     });
     let body = json!({
         "create_request_id": "bootstrap-owner-request-000000000001",
@@ -1090,16 +1928,30 @@ async fn bootstrap_secret_gates_family_create_when_configured() {
         Method::POST,
         "/v1/family/create",
         None,
-        body,
+        body.clone(),
         &[("x-lezi-bootstrap-secret", secret)],
     )
     .await;
     assert_eq!(created, StatusCode::CREATED, "{family}");
     assert_eq!(family["role"], "owner");
+
+    let (limited, _) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": "bootstrap-owner-request-000000000002",
+            "device_id": "owner-device",
+        }),
+        &[("x-lezi-bootstrap-secret", secret)],
+    )
+    .await;
+    assert_eq!(limited, StatusCode::TOO_MANY_REQUESTS);
 }
 
 #[tokio::test]
-async fn create_and_join_are_rate_limited() {
+async fn create_and_join_limits_are_scoped_without_losing_global_protection() {
     let rig = Rig::with_config(|config| {
         config.create_rate_limit = RateLimitConfig {
             max_attempts: 2,
@@ -1117,8 +1969,8 @@ async fn create_and_join_are_rate_limited() {
     )
     .await;
     let owner_token = first["token"].as_str().unwrap();
-    // Second create (different request id) still counts against the window even
-    // though it conflicts with the single-family stack.
+    // A different device has its own scoped allowance, but remains subject to
+    // the limiter's process-wide fallback.
     let (second, _) = json_request(
         &rig.app,
         Method::POST,
@@ -1131,13 +1983,25 @@ async fn create_and_join_are_rate_limited() {
     )
     .await;
     assert_eq!(second, StatusCode::CONFLICT);
-    let (limited, body) = json_request(
+    let (third, _) = json_request(
         &rig.app,
         Method::POST,
         "/v1/family/create",
         None,
         json!({
             "create_request_id": "rate-limit-owner-request-0000000003",
+            "device_id": "other-device",
+        }),
+    )
+    .await;
+    assert_eq!(third, StatusCode::CONFLICT);
+    let (limited, body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": "rate-limit-owner-request-0000000004",
             "device_id": "other-device",
         }),
     )
@@ -1153,34 +2017,39 @@ async fn create_and_join_are_rate_limited() {
     )
     .await;
     assert_eq!(invite_status, StatusCode::CREATED);
-    let code = invitation["code"].as_str().unwrap();
-    for device in ["member-a", "member-b"] {
+    for device in ["attacker-a", "attacker-b"] {
         let (status, _) = json_request(
             &rig.app,
             Method::POST,
             "/v1/join",
             None,
-            json!({"code": code, "device_id": device}),
+            json!({"code": "WRONGCODE001", "device_id": device}),
         )
         .await;
-        // First join may succeed; second device may conflict or 429 after budget.
-        assert!(
-            matches!(
-                status,
-                StatusCode::OK | StatusCode::CONFLICT | StatusCode::TOO_MANY_REQUESTS
-            ),
-            "{status}"
-        );
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
     let (join_limited, join_body) = json_request(
         &rig.app,
         Method::POST,
         "/v1/join",
         None,
-        json!({"code": code, "device_id": "member-c"}),
+        json!({"code": "WRONGCODE001", "device_id": "attacker-c"}),
     )
     .await;
     assert_eq!(join_limited, StatusCode::TOO_MANY_REQUESTS, "{join_body}");
+
+    // Exhausting one guessed invite code must not consume the valid invite's
+    // scoped budget.
+    let code = invitation["code"].as_str().unwrap();
+    let (joined, member) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/join",
+        None,
+        json!({"code": code, "device_id": "member-device"}),
+    )
+    .await;
+    assert_eq!(joined, StatusCode::OK, "{member}");
 }
 
 #[tokio::test]
@@ -1219,9 +2088,7 @@ async fn pull_omits_incomplete_media_until_bytes_are_uploaded() {
     assert_eq!(pulled["cursor"], 3);
     let entities = pulled["entities"].as_array().unwrap();
     assert_eq!(entities.len(), 2);
-    assert!(entities
-        .iter()
-        .all(|entity| entity["type"] != "media"));
+    assert!(entities.iter().all(|entity| entity["type"] != "media"));
 
     let missing = request(
         &rig.app,
@@ -1266,4 +2133,146 @@ async fn pull_omits_incomplete_media_until_bytes_are_uploaded() {
         downloaded.into_body().collect().await.unwrap().to_bytes(),
         "log"
     );
+}
+
+#[tokio::test]
+async fn media_upload_retry_republishes_when_bytes_already_exist() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "owner-device",
+        "retry-media-owner-request-000000001",
+    )
+    .await;
+    let token = owner["token"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let baby_id = Uuid::new_v4().to_string();
+    let record_id = Uuid::new_v4().to_string();
+    let media_id = Uuid::new_v4().to_string();
+
+    let (pushed, body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({"entities":[
+            {"type":"baby","client_uuid":baby_id,"updated_at":1,
+             "payload":baby_payload("年年", None)},
+            {"type":"record","client_uuid":record_id,"updated_at":1,
+             "payload":record_payload(&baby_id)},
+            {"type":"media","client_uuid":media_id,"updated_at":1,
+             "payload":log_media_payload(&record_id)}
+        ]}),
+    )
+    .await;
+    assert_eq!(pushed, StatusCode::OK, "{body}");
+    assert_eq!(body["cursor"], 3);
+
+    // Reproduce a process failure after durable file replacement but before the
+    // metadata revision is republished. A retry must heal this state through
+    // the public PUT/pull contract even though the target file already exists.
+    let media_directory = rig.directory.path().join("media").join(family_id);
+    fs::create_dir_all(&media_directory).unwrap();
+    fs::write(media_directory.join(&media_id), b"old").unwrap();
+
+    let uploaded = request(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/media/{media_id}"),
+        Some(token),
+        Body::from("log"),
+        Some("application/octet-stream"),
+    )
+    .await;
+    assert_eq!(uploaded.status(), StatusCode::OK);
+
+    let (status, ready) = get_json(&rig.app, "/v1/pull?cursor=3", Some(token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ready["cursor"], 4);
+    assert_eq!(ready["entities"].as_array().unwrap().len(), 1);
+    assert_eq!(ready["entities"][0]["type"], "media");
+    assert_eq!(ready["entities"][0]["client_uuid"], media_id);
+}
+
+#[tokio::test]
+async fn corrupt_ready_media_is_removed_and_not_advertised_until_reuploaded() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "owner-device",
+        "corrupt-media-owner-request-0000001",
+    )
+    .await;
+    let token = owner["token"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let baby_id = Uuid::new_v4().to_string();
+    let record_id = Uuid::new_v4().to_string();
+    let zero_media_id = Uuid::new_v4().to_string();
+    let mismatched_media_id = Uuid::new_v4().to_string();
+
+    let (pushed, body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({"entities":[
+            {"type":"baby","client_uuid":baby_id,"updated_at":1,
+             "payload":baby_payload("年年", None)},
+            {"type":"record","client_uuid":record_id,"updated_at":1,
+             "payload":record_payload(&baby_id)},
+            {"type":"media","client_uuid":zero_media_id,"updated_at":1,
+             "payload":log_media_payload(&record_id)},
+            {"type":"media","client_uuid":mismatched_media_id,"updated_at":1,
+             "payload":log_media_payload(&record_id)}
+        ]}),
+    )
+    .await;
+    assert_eq!(pushed, StatusCode::OK, "{body}");
+    assert_eq!(body["cursor"], 4);
+
+    let media_directory = rig.directory.path().join("media").join(family_id);
+    fs::create_dir_all(&media_directory).unwrap();
+    let zero_path = media_directory.join(&zero_media_id);
+    let mismatched_path = media_directory.join(&mismatched_media_id);
+    fs::write(&zero_path, []).unwrap();
+    fs::write(&mismatched_path, b"four").unwrap();
+
+    let (status, pulled) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(pulled["cursor"], 4);
+    assert!(pulled["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|entity| entity["type"] != "media"));
+    assert!(!zero_path.exists());
+    assert!(!mismatched_path.exists());
+
+    for media_id in [&zero_media_id, &mismatched_media_id] {
+        let response = request(
+            &rig.app,
+            Method::GET,
+            &format!("/v1/media/{media_id}"),
+            Some(token),
+            Body::empty(),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    let uploaded = request(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/media/{zero_media_id}"),
+        Some(token),
+        Body::from("log"),
+        Some("application/octet-stream"),
+    )
+    .await;
+    assert_eq!(uploaded.status(), StatusCode::OK);
+    let (_, ready) = get_json(&rig.app, "/v1/pull?cursor=4", Some(token)).await;
+    assert_eq!(ready["cursor"], 5);
+    assert_eq!(ready["entities"].as_array().unwrap().len(), 1);
+    assert_eq!(ready["entities"][0]["client_uuid"], zero_media_id);
 }

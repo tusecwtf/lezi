@@ -5,11 +5,16 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -17,7 +22,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -39,8 +43,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -50,8 +57,11 @@ import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SettingsLocal
+import com.lezi.babylog.core.model.limitBabyNicknameInput
+import com.lezi.babylog.core.model.birthWeightValidationError
 import com.lezi.babylog.core.ui.BabyAvatar
 import com.lezi.babylog.designsystem.LeziCard
+import com.lezi.babylog.designsystem.LeziDatePicker
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.PageScaffoldBackground
@@ -80,6 +90,16 @@ private val BabyThemePalette = listOf(
     0xFFD4578C.toInt(),
     0xFF4C6A92.toInt(),
     0xFF5B8C5A.toInt(),
+)
+private val BabyThemePaletteLabels = listOf(
+    "湖蓝",
+    "砖红",
+    "青绿",
+    "紫罗兰",
+    "琥珀",
+    "玫红",
+    "灰蓝",
+    "草绿",
 )
 
 data class SettingsUi(
@@ -219,25 +239,29 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch { careLog.deleteCustomItem(id) }
 
     /** Clears records only — babies are never deleted from settings. */
-    fun clearRecords(onDone: () -> Unit) {
+    fun clearRecords(onDone: (String?) -> Unit) {
         viewModelScope.launch {
-            careLog.clearRecordsOnly()
-            onDone()
+            val result = runCatching { careLog.clearRecordsOnly() }
+            onDone(result.exceptionOrNull()?.let { productUiError(it, "清除失败，请重试") })
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SettingsRoute(
     onOpenExport: () -> Unit = {},
     onOpenSearch: () -> Unit = {},
     onOpenCalendar: () -> Unit = {},
+    initiallyShowAddBaby: Boolean = false,
+    onInitialAddBabyFinished: () -> Unit = {},
     vm: SettingsViewModel = hiltViewModel(),
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
-    var showAdd by remember { mutableStateOf(false) }
+    var showAdd by remember(initiallyShowAddBaby) { mutableStateOf(initiallyShowAddBaby) }
     var clearStep by remember { mutableIntStateOf(0) }
+    var clearingRecords by remember { mutableStateOf(false) }
+    var clearRecordsError by remember { mutableStateOf<String?>(null) }
     var newName by remember { mutableStateOf("") }
     var newSex by remember { mutableStateOf<String?>(null) }
     var newBirthday by remember { mutableLongStateOf(LocalDate.now().toEpochDay()) }
@@ -251,6 +275,11 @@ fun SettingsRoute(
     var showDisplay by remember { mutableStateOf(false) }
     var showRecordItems by remember { mutableStateOf(false) }
     var showCustomItems by remember { mutableStateOf(false) }
+    fun finishAddBabyDialog() {
+        showAdd = false
+        addError = null
+        if (initiallyShowAddBaby) onInitialAddBabyFinished()
+    }
 
     PageScaffoldBackground {
         Column(
@@ -338,7 +367,10 @@ fun SettingsRoute(
                 title = "清除全部记录",
                 subtitle = "不删除宝宝档案",
                 icon = "!",
-                onClick = { clearStep = 1 },
+                onClick = {
+                    clearRecordsError = null
+                    clearStep = 1
+                },
                 danger = true,
             )
 
@@ -360,7 +392,7 @@ fun SettingsRoute(
             onDismissRequest = { showFeed = false },
             title = { Text("记录设置") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ScrollableDialogColumn {
                     Row(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -388,7 +420,10 @@ fun SettingsRoute(
                         )
                     }
                     Text("记录时刻", style = LeziTypography.Label)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
                         FilterChip(
                             selected = ui.settings.recordAtStartOrEnd == "start",
                             onClick = { vm.setRecordAt("start") },
@@ -401,7 +436,10 @@ fun SettingsRoute(
                         )
                     }
                     Text("下次喂奶间隔（分钟）", style = LeziTypography.Label)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
                         listOf(120, 150, 180, 210, 240).forEach { m ->
                             FilterChip(
                                 selected = ui.settings.nursingIntervalMin == m,
@@ -411,7 +449,10 @@ fun SettingsRoute(
                         }
                     }
                     Text("奶量步进 ml", style = LeziTypography.Label)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
                         listOf(5, 10, 15).forEach { s ->
                             FilterChip(
                                 selected = ui.settings.amountStepMl == s,
@@ -421,7 +462,10 @@ fun SettingsRoute(
                         }
                     }
                     Text("时间选择分钟步进", style = LeziTypography.Label)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
                         listOf(1 to "1 分钟", 5 to "5 分钟").forEach { (step, label) ->
                             FilterChip(
                                 selected = ui.settings.timeStepMin == step,
@@ -431,7 +475,10 @@ fun SettingsRoute(
                         }
                     }
                     Text("时间轴顺序", style = LeziTypography.Label)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
                         listOf(
                             "newest_first" to "新→旧",
                             "oldest_first" to "旧→新",
@@ -444,7 +491,10 @@ fun SettingsRoute(
                         }
                     }
                     Text("快捷记录显隐", style = LeziTypography.Label)
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
                         listOf(
                             "nursing" to "母乳",
                             "formula" to "配方奶",
@@ -469,9 +519,12 @@ fun SettingsRoute(
             onDismissRequest = { showDisplay = false },
             title = { Text("显示设置") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ScrollableDialogColumn {
                     Text("界面模板", style = LeziTypography.Label)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
                         listOf("warm" to "温暖卡片", "journal" to "紧凑记录簿").forEach { (key, label) ->
                             FilterChip(
                                 selected = ui.settings.visualStyle == key,
@@ -481,7 +534,10 @@ fun SettingsRoute(
                         }
                     }
                     Text("单手操作 · 惯用手", style = LeziTypography.Label)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
                         listOf("left" to "左手", "right" to "右手").forEach { (key, label) ->
                             FilterChip(
                                 selected = ui.settings.preferredHand == key,
@@ -496,7 +552,10 @@ fun SettingsRoute(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Text("深色模式", style = LeziTypography.Label)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
                         listOf("system" to "跟随系统", "light" to "浅色", "dark" to "深色").forEach { (k, label) ->
                             FilterChip(
                                 selected = ui.settings.darkMode == k,
@@ -506,7 +565,10 @@ fun SettingsRoute(
                         }
                     }
                     Text("时间选择方式", style = LeziTypography.Label)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
                         listOf(
                             "dropdown" to "数字时钟",
                             "dial" to "指针时钟",
@@ -524,7 +586,10 @@ fun SettingsRoute(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Text("汇总周起始日", style = LeziTypography.Label)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
                         listOf(1 to "周一", 7 to "周日").forEach { (day, label) ->
                             FilterChip(
                                 selected = ui.settings.weekStart == day,
@@ -568,20 +633,16 @@ fun SettingsRoute(
             LocalDate.ofEpochDay(it).format(DateTimeFormatter.ofPattern("yyyy年M月d日"))
         } ?: "未设置"
         AlertDialog(
-            onDismissRequest = {
-                showAdd = false
-                addError = null
-            },
+            onDismissRequest = ::finishAddBabyDialog,
+            modifier = Modifier.imePadding(),
+            properties = DialogProperties(decorFitsSystemWindows = false),
             title = { Text("添加宝宝") },
             text = {
-                Column(
-                    Modifier.dismissKeyboardOnTap(),
-                    verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
-                ) {
+                ScrollableDialogColumn {
                     OutlinedTextField(
                         value = newName,
                         onValueChange = {
-                            newName = it
+                            newName = limitBabyNicknameInput(it)
                             addError = null
                         },
                         label = { Text("昵称（不可重复）") },
@@ -591,7 +652,10 @@ fun SettingsRoute(
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Text("性别", style = LeziTypography.Label)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
                         listOf(
                             "FEMALE" to "女宝",
                             "MALE" to "男宝",
@@ -610,9 +674,10 @@ fun SettingsRoute(
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text(dateLabel) }
                     Text("预产期（可选）", style = LeziTypography.Label)
-                    Row(
-                        Modifier.fillMaxWidth(),
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         OutlinedButton(onClick = { showAddDueDate = true }) {
                             Text(dueDateLabel)
@@ -630,23 +695,27 @@ fun SettingsRoute(
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Text("主题色", style = LeziTypography.Label)
-                    BabyThemePalette.chunked(4).forEachIndexed { rowIndex, colors ->
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            colors.forEachIndexed { columnIndex, argb ->
-                                val index = rowIndex * 4 + columnIndex
-                                FilterChip(
-                                    selected = newThemeIndex == index,
-                                    onClick = { newThemeIndex = index },
-                                    label = {
-                                        Box(
-                                            Modifier
-                                                .size(18.dp)
-                                                .clip(CircleShape)
-                                                .background(Color(argb)),
-                                        )
-                                    },
-                                )
-                            }
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        maxItemsInEachRow = 4,
+                    ) {
+                        BabyThemePalette.forEachIndexed { index, argb ->
+                            FilterChip(
+                                selected = newThemeIndex == index,
+                                onClick = { newThemeIndex = index },
+                                modifier = Modifier.semantics {
+                                    contentDescription = "主题色：${BabyThemePaletteLabels[index]}"
+                                },
+                                label = {
+                                    Box(
+                                        Modifier
+                                            .size(18.dp)
+                                            .clip(CircleShape)
+                                            .background(Color(argb)),
+                                    )
+                                },
+                            )
                         }
                     }
                 }
@@ -664,6 +733,10 @@ fun SettingsRoute(
                             addError = "出生体重格式不正确"
                             return@TextButton
                         }
+                        birthWeightValidationError(grams)?.let {
+                            addError = it
+                            return@TextButton
+                        }
                         vm.addBaby(
                             nickname = newName.trim(),
                             sex = newSex,
@@ -679,8 +752,7 @@ fun SettingsRoute(
                                 newBirthday = LocalDate.now().toEpochDay()
                                 newDueDate = null
                                 newThemeIndex = 0
-                                addError = null
-                                showAdd = false
+                                finishAddBabyDialog()
                             } else {
                                 addError = err
                             }
@@ -689,10 +761,7 @@ fun SettingsRoute(
                 ) { Text("添加") }
             },
             dismissButton = {
-                TextButton(onClick = {
-                    showAdd = false
-                    addError = null
-                }) { Text("取消") }
+                TextButton(onClick = ::finishAddBabyDialog) { Text("取消") }
             },
         )
     }
@@ -722,7 +791,7 @@ fun SettingsRoute(
                 TextButton(onClick = { showAddDate = false }) { Text("取消") }
             },
         ) {
-            DatePicker(state = dateState)
+            LeziDatePicker(state = dateState)
         }
     }
 
@@ -751,7 +820,7 @@ fun SettingsRoute(
                 TextButton(onClick = { showAddDueDate = false }) { Text("取消") }
             },
         ) {
-            DatePicker(state = dateState)
+            LeziDatePicker(state = dateState)
         }
     }
 
@@ -796,24 +865,66 @@ fun SettingsRoute(
     }
     if (clearStep == 2) {
         AlertDialog(
-            onDismissRequest = { clearStep = 0 },
+            onDismissRequest = { if (!clearingRecords) clearStep = 0 },
             title = { Text("最后确认") },
             text = {
-                Text(
-                    "真的要清除本机全部记录吗？宝宝不会被删除；下次家庭同步时，" +
-                        "服务器上的记录可能重新下载。",
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
+                    Text(
+                        "真的要清除本机全部记录吗？宝宝不会被删除；下次家庭同步时，" +
+                            "服务器上的记录可能重新下载。",
+                    )
+                    clearRecordsError?.let {
+                        Text(it, color = MaterialTheme.colorScheme.error)
+                    }
+                }
             },
             confirmButton = {
-                TextButton(onClick = { vm.clearRecords { clearStep = 0 } }) {
-                    Text("清除记录", color = MaterialTheme.colorScheme.error)
+                TextButton(
+                    enabled = !clearingRecords,
+                    onClick = {
+                        clearingRecords = true
+                        clearRecordsError = null
+                        vm.clearRecords { error ->
+                            clearingRecords = false
+                            if (error == null) {
+                                clearStep = 0
+                            } else {
+                                clearRecordsError = error
+                            }
+                        }
+                    },
+                ) {
+                    Text(
+                        if (clearingRecords) "清除中…" else "清除记录",
+                        color = MaterialTheme.colorScheme.error,
+                    )
                 }
             },
             dismissButton = {
-                TextButton(onClick = { clearStep = 0 }) { Text("取消") }
+                TextButton(
+                    enabled = !clearingRecords,
+                    onClick = { clearStep = 0 },
+                ) { Text("取消") }
             },
         )
     }
+}
+
+@Composable
+private fun ScrollableDialogColumn(
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(max = 480.dp)
+            .verticalScroll(rememberScrollState())
+            .imePadding()
+            .dismissKeyboardOnTap(),
+        verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
+        content = content,
+    )
 }
 
 @Composable

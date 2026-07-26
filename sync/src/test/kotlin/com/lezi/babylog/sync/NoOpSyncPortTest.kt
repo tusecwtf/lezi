@@ -14,5 +14,7 @@ class NoOpSyncPortTest {
         assertThat(port.push("1").isSuccess).isTrue()
         assertThat(port.createInvite("1").exceptionOrNull())
             .isInstanceOf(SyncNotEnabledException::class.java)
+        assertThat(port.listFamilyMembers().exceptionOrNull())
+            .isInstanceOf(SyncNotEnabledException::class.java)
     }
 }

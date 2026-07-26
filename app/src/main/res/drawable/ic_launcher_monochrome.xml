@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- A compact cradle ring keeps the mark inside the adaptive-icon safe zone. -->
+    <path
+        android:fillColor="#FF000000"
+        android:fillType="evenOdd"
+        android:pathData="M54,21 C72.23,21 87,35.77 87,54 C87,72.23 72.23,87 54,87 C35.77,87 21,72.23 21,54 C21,35.77 35.77,21 54,21 Z M54,27 C39.09,27 27,39.09 27,54 C27,68.91 39.09,81 54,81 C68.91,81 81,68.91 81,54 C81,39.09 68.91,27 54,27 Z" />
+    <!-- Geometric 乐 mark, simplified for legibility at launcher-icon size. -->
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M36,34 L72,29 L74,36 L45,40 L43,48 L73,48 L73,56 L58,56 L58,74 C58,82 52,85 43,83 L40,75 C47,77 50,76 50,72 L50,56 L33,56 L33,48 L36,48 Z" />
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M39,62 L46,67 L36,79 L29,73 Z" />
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M66,62 L79,73 L73,80 L60,67 Z" />
+</vector>

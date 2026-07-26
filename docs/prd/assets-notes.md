@@ -4,7 +4,7 @@
 
 ## APK 实际实现
 
-正式 APK（0.2.3）的排泄分档由 `designsystem/RecordVisuals.kt` 的
+正式 APK（0.2.4）的排泄分档由 `designsystem/RecordVisuals.kt` 的
 Compose Canvas 组件直接绘制：
 
 - `LeziPeeAmountMark`

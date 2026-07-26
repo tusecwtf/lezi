@@ -171,9 +171,13 @@ fun LeziPrimaryButton(
         color = if (enabled) {
             MaterialTheme.colorScheme.primary
         } else {
-            MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)
+            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
         },
-        contentColor = MaterialTheme.colorScheme.onPrimary,
+        contentColor = if (enabled) {
+            MaterialTheme.colorScheme.onPrimary
+        } else {
+            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+        },
         shadowElevation = if (pressed) 0.dp else 4.dp,
     ) {
         Box(

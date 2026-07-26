@@ -235,6 +235,7 @@ internal fun QuickRecordSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .weight(1f, fill = false)
                 .heightIn(max = 620.dp)
                 .verticalScroll(rememberScrollState())
                 .dismissKeyboardOnTap()
@@ -430,7 +431,6 @@ internal fun QuickRecordSheet(
                 )
             }
         }
-        Spacer(Modifier.weight(1f))
     }
 
     clockTarget?.let { target ->

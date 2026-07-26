@@ -9,12 +9,13 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -37,8 +38,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -52,6 +56,7 @@ import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.Sex
 import com.lezi.babylog.designsystem.LeziCard
 import com.lezi.babylog.designsystem.LeziClockDialDialog
+import com.lezi.babylog.designsystem.LeziDatePicker
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
@@ -73,6 +78,7 @@ import java.time.LocalDate
 import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 import javax.inject.Inject
 import kotlin.math.max
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -450,7 +456,7 @@ fun GrowthRoute(
                             )
                         }
                     }
-                    if (journal) {
+                    if (bands.isNotEmpty()) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             Text("— P3", style = LeziTypography.Meta, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             Text("— P50", style = LeziTypography.Meta, color = MaterialTheme.colorScheme.secondary)
@@ -498,6 +504,8 @@ fun GrowthRoute(
         val isEditing = activeDraft.recordId != null
         AlertDialog(
             onDismissRequest = { closeMeasurementDraft() },
+            modifier = Modifier.imePadding(),
+            properties = DialogProperties(decorFitsSystemWindows = false),
             title = {
                 Text(
                     when {
@@ -512,7 +520,12 @@ fun GrowthRoute(
             },
             text = {
                 Column(
-                    Modifier.dismissKeyboardOnTap(),
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 480.dp)
+                        .verticalScroll(rememberScrollState())
+                        .imePadding()
+                        .dismissKeyboardOnTap(),
                     verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
                 ) {
                     OutlinedTextField(
@@ -644,7 +657,7 @@ fun GrowthRoute(
                 TextButton(onClick = { showDueDate = false }) { Text("取消") }
             },
         ) {
-            DatePicker(state = dueDateState)
+            LeziDatePicker(state = dueDateState)
         }
     }
 
@@ -738,7 +751,7 @@ fun GrowthRoute(
                 TextButton(onClick = { showMeasureDate = false }) { Text("取消") }
             },
         ) {
-            DatePicker(state = dateState)
+            LeziDatePicker(state = dateState)
         }
     }
 
@@ -815,6 +828,43 @@ private fun formatMeasurementValue(metric: GrowthMetric, value: Float): String {
     }
 }
 
+internal fun growthChartAccessibilitySummary(
+    points: List<MeasurePoint>,
+    metric: GrowthMetric,
+    hasReferenceBands: Boolean,
+): String {
+    val metricLabel = when (metric) {
+        GrowthMetric.WEIGHT -> "体重"
+        GrowthMetric.HEIGHT -> "身高"
+        GrowthMetric.HEAD -> "头围"
+    }
+    if (points.isEmpty()) return "${metricLabel}趋势图，暂无测量"
+
+    val monthMin = points.minOf(MeasurePoint::monthAge)
+    val monthMax = points.maxOf(MeasurePoint::monthAge)
+    val valueMin = points.minOf(MeasurePoint::value)
+    val valueMax = points.maxOf(MeasurePoint::value)
+    val monthRange = if (monthMin == monthMax) {
+        "月龄 ${formatGrowthNumber(monthMin, 1)} 个月"
+    } else {
+        "月龄 ${formatGrowthNumber(monthMin, 1)} 到 ${formatGrowthNumber(monthMax, 1)} 个月"
+    }
+    val decimals = if (metric == GrowthMetric.WEIGHT) 2 else 1
+    val unit = if (metric == GrowthMetric.WEIGHT) "kg" else "cm"
+    val valueRange = if (valueMin == valueMax) {
+        "数值 ${formatGrowthNumber(valueMin, decimals)} $unit"
+    } else {
+        "数值 ${formatGrowthNumber(valueMin, decimals)} 到 ${formatGrowthNumber(valueMax, decimals)} $unit"
+    }
+    return buildString {
+        append("${metricLabel}趋势图，共 ${points.size} 次测量；$monthRange；$valueRange")
+        if (hasReferenceBands) append("；包含 WHO P3、P50、P97 参考曲线")
+    }
+}
+
+private fun formatGrowthNumber(value: Float, decimals: Int): String =
+    String.format(Locale.CHINA, "%.${decimals}f", value)
+
 @Composable
 private fun GrowthChart(points: List<MeasurePoint>, bands: List<CurveBand>, metric: GrowthMetric) {
     val accent = MaterialTheme.colorScheme.primary
@@ -826,7 +876,14 @@ private fun GrowthChart(points: List<MeasurePoint>, bands: List<CurveBand>, metr
         Modifier
             .fillMaxWidth()
             .height(200.dp)
-            .padding(top = 12.dp),
+            .padding(top = 12.dp)
+            .semantics {
+                contentDescription = growthChartAccessibilitySummary(
+                    points = points,
+                    metric = metric,
+                    hasReferenceBands = bands.isNotEmpty(),
+                )
+            },
     ) {
         val maxMonth = max(24f, points.maxOfOrNull { it.monthAge } ?: 12f)
         val yValues = points.map { it.value } + bands.flatMap { listOf(it.p3, it.p50, it.p97) }
@@ -871,7 +928,7 @@ private fun GrowthChart(points: List<MeasurePoint>, bands: List<CurveBand>, metr
             drawPath(bandPath { it.p3 }, muted.copy(alpha = 0.65f), style = Stroke(if (journal) 1.5f else 2f))
             drawPath(
                 bandPath { it.p50 },
-                if (journal) percentile else muted.copy(alpha = 0.7f),
+                percentile,
                 style = Stroke(if (journal) 2f else 2.5f),
             )
             drawPath(bandPath { it.p97 }, muted.copy(alpha = 0.65f), style = Stroke(if (journal) 1.5f else 2f))
