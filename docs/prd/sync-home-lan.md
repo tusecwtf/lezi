@@ -559,7 +559,8 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 ### 9.10 `POST /v1/leave`
 
 - Auth：member token；owner 调用返回 `403`
-- 吊销**本 device** 或本 token；**不**删家庭数据。owner 必须使用
+- 标记当前 canonical membership 离开，并原子吊销指向它的全部 credentials；
+  **不**删家庭数据。单 credential 轮换/吊销不改变 membership。owner 必须使用
   `/v1/family/delete`，首版不提供“停止共享但保留无管理员家庭”的语义。
 
 ---

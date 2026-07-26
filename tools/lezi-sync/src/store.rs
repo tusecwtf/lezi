@@ -2612,6 +2612,150 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn membership_normalization_supports_schema_without_membership_id() {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("lezi.db");
+        let family_id = Uuid::new_v4().to_string();
+        let owner_token = "pre-membership-id-owner-token";
+        let member_tokens = [
+            "pre-membership-id-member-token-a",
+            "pre-membership-id-member-token-b",
+        ];
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(
+                "
+                PRAGMA foreign_keys = ON;
+                CREATE TABLE families (
+                    id TEXT PRIMARY KEY,
+                    created_at INTEGER NOT NULL,
+                    create_request_hash TEXT,
+                    name TEXT
+                );
+                CREATE TABLE memberships (
+                    token_hash TEXT PRIMARY KEY,
+                    family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+                    role TEXT NOT NULL CHECK(role IN ('owner', 'member')),
+                    device_id TEXT NOT NULL,
+                    display_name TEXT,
+                    revoked_at INTEGER
+                );
+                ",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO families(id, created_at, name) VALUES (?1, 1, '旧家庭')",
+                params![family_id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "
+                INSERT INTO memberships(
+                    token_hash, family_id, role, device_id, display_name
+                ) VALUES (?1, ?2, 'owner', 'legacy-owner-device', '妈妈')
+                ",
+                params![crate::hash_secret(owner_token), family_id],
+            )
+            .unwrap();
+        for (index, token) in member_tokens.iter().enumerate() {
+            connection
+                .execute(
+                    "
+                    INSERT INTO memberships(
+                        token_hash, family_id, role, device_id, display_name
+                    ) VALUES (?1, ?2, 'member', 'legacy-member-device', ?3)
+                    ",
+                    params![
+                        crate::hash_secret(token),
+                        family_id,
+                        if index == 0 { "" } else { "家人" }
+                    ],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        let first = Store::open(&database_path).unwrap();
+        let owner = first.authenticate(owner_token).unwrap().unwrap();
+        let member_a = first.authenticate(member_tokens[0]).unwrap().unwrap();
+        let member_b = first.authenticate(member_tokens[1]).unwrap().unwrap();
+        assert_eq!(owner.family_id, family_id);
+        assert_eq!(owner.role, "owner");
+        assert_eq!(member_a.role, "member");
+        assert_eq!(member_a.membership_id, member_b.membership_id);
+        assert_ne!(owner.membership_id, member_a.membership_id);
+        let original_owner_id = owner.membership_id;
+        let original_member_id = member_a.membership_id;
+        let active = first.active_memberships(&family_id).unwrap();
+        assert_eq!(active.len(), 2);
+        assert_eq!(active[0].display_name.as_deref(), Some("妈妈"));
+        assert_eq!(active[1].display_name.as_deref(), Some("家人"));
+        drop(first);
+
+        let restarted = Store::open(&database_path).unwrap();
+        assert_eq!(
+            restarted
+                .authenticate(owner_token)
+                .unwrap()
+                .unwrap()
+                .membership_id,
+            original_owner_id
+        );
+        for token in member_tokens {
+            assert_eq!(
+                restarted
+                    .authenticate(token)
+                    .unwrap()
+                    .unwrap()
+                    .membership_id,
+                original_member_id
+            );
+        }
+        drop(restarted);
+
+        let connection = Connection::open(database_path).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT name FROM families WHERE id = ?1",
+                    params![family_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "旧家庭"
+        );
+        assert!(!table_columns(&connection, "memberships")
+            .unwrap()
+            .contains("token_hash"));
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM memberships", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM membership_credentials", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
     fn membership_normalization_failure_rolls_back_the_legacy_schema() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("lezi.db");

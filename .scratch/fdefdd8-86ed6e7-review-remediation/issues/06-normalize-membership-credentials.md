@@ -74,3 +74,4 @@
 - 认证只返回 canonical membership principal；members 每 membership 一行并按 membership equality 计算 self；rename 对全部 credentials 立即生效；leave 原子撤销 membership 的全部 credentials；运行时相同 device 的新 join 保持独立。
 - 验证：`cargo test --manifest-path tools/lezi-sync/Cargo.toml --locked`（12 unit + 53 API + doc tests，全部通过）；`cargo clippy --manifest-path tools/lezi-sync/Cargo.toml --locked --all-targets --all-features -- -D warnings`、`cargo fmt --manifest-path tools/lezi-sync/Cargo.toml --all -- --check`、`git diff --check` 均通过。
 - Documentation Gate：已更新 `tools/lezi-sync/README.md`、`docs/prd/data-model.md` 与 `docs/prd/sync-home-lan.md`；`CONTEXT.md` 和 ADR 0007 已与实现一致，无需修改。
+- 独立复核未发现 Critical；follow-up 补上最老发布 schema（无 `membership_id` 列）的迁移/重启测试，验证 3 个旧 token、family/name/role/display name、稳定新 ID、2→3 凭证归并计数与 SQLite FK。同步修正文档中“不改变 schema”和“leave 只吊销本 token”的两处残留旧描述。follow-up 后全量为 13 unit + 53 API，全部通过。

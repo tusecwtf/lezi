@@ -6,8 +6,8 @@ Docker 容器和一个持久化目录。
 
 ## 数据兼容性
 
-Rust 版本原位兼容既有数据根，不改变 SQLite schema、token hash 或
-`server.secret` 的 HMAC 派生规则：
+Rust 版本原位兼容既有数据根；升级会事务迁移 SQLite schema，但不改变既有有效
+token hash 或 `server.secret` 的 HMAC 派生规则：
 
 ```text
 $LEZI_DATA_DIR/
