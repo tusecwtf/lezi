@@ -1,13 +1,16 @@
+mod members;
 mod model;
+mod rate_limit;
+mod readiness;
 mod store;
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
@@ -22,14 +25,15 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use futures_util::StreamExt;
 use hmac::{Hmac, Mac};
-use model::{
-    normalize_display_name, EmptyRequest, FamilyCreateRequest, InviteRequest, JoinRequest,
-    PushRequest,
-};
+use members::list_family_members;
+use model::{EmptyRequest, FamilyCreateRequest, InviteRequest, JoinRequest, PushRequest};
 use rand::distributions::{Distribution, Uniform};
 use rand::rngs::OsRng;
 use rand::RngCore;
-use serde::{Deserialize, Serialize};
+pub use rate_limit::RateLimitConfig;
+use rate_limit::RateLimiter;
+use readiness::{readiness, CachedReadiness};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use store::{Principal, Store, StoreError};
@@ -43,10 +47,7 @@ pub const DEFAULT_MAX_MEDIA_BYTES: usize = 10 * 1024 * 1024;
 pub const DEFAULT_CREATE_RATE_LIMIT: u32 = 20;
 pub const DEFAULT_JOIN_RATE_LIMIT: u32 = 60;
 pub const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: i64 = 60;
-const GLOBAL_RATE_LIMIT_MULTIPLIER: u32 = 10;
-const READINESS_CACHE_SECONDS: i64 = 5;
 const MAX_ENTITY_FUTURE_SKEW_MILLIS: i64 = 24 * 60 * 60 * 1_000;
-const LOCAL_DEVICE_DISPLAY_NAME: &str = "我（本机）";
 pub(crate) const PULL_PAGE_ENTITY_LIMIT: usize = 200;
 pub(crate) const PULL_PAGE_TARGET_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const PULL_ENTITY_TARGET_BYTES: usize = PULL_PAGE_TARGET_BYTES / 3;
@@ -57,21 +58,6 @@ static PERMISSION_HARDENING_DISABLED: AtomicBool = AtomicBool::new(false);
 
 type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 type InviteCodeFactory = Arc<dyn Fn() -> String + Send + Sync>;
-
-#[derive(Clone, Debug)]
-pub struct RateLimitConfig {
-    pub max_attempts: u32,
-    pub window_seconds: i64,
-}
-
-impl Default for RateLimitConfig {
-    fn default() -> Self {
-        Self {
-            max_attempts: DEFAULT_CREATE_RATE_LIMIT,
-            window_seconds: DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct ServerConfig {
@@ -177,77 +163,6 @@ impl ServerConfig {
         }
         Ok(())
     }
-}
-
-struct RateLimiter {
-    scoped_max_attempts: u32,
-    global_max_attempts: u32,
-    window_seconds: i64,
-    windows: StdMutex<RateLimitWindows>,
-}
-
-#[derive(Default)]
-struct RateLimitWindows {
-    global: VecDeque<i64>,
-    scoped: HashMap<String, VecDeque<i64>>,
-    last_cleanup: Option<i64>,
-}
-
-impl RateLimiter {
-    fn new(config: RateLimitConfig) -> Self {
-        Self {
-            scoped_max_attempts: config.max_attempts,
-            global_max_attempts: config
-                .max_attempts
-                .saturating_mul(GLOBAL_RATE_LIMIT_MULTIPLIER),
-            window_seconds: config.window_seconds,
-            windows: StdMutex::new(RateLimitWindows::default()),
-        }
-    }
-
-    fn check_and_record(&self, scope: &str, now: i64) -> bool {
-        let Ok(mut windows) = self.windows.lock() else {
-            return false;
-        };
-
-        prune_rate_limit_window(&mut windows.global, now, self.window_seconds);
-        if windows
-            .last_cleanup
-            .is_none_or(|last| now.saturating_sub(last) >= self.window_seconds || now < last)
-        {
-            windows.scoped.retain(|_, queue| {
-                prune_rate_limit_window(queue, now, self.window_seconds);
-                !queue.is_empty()
-            });
-            windows.last_cleanup = Some(now);
-        }
-
-        if windows.global.len() as u32 >= self.global_max_attempts {
-            return false;
-        }
-        let queue = windows.scoped.entry(scope.to_owned()).or_default();
-        prune_rate_limit_window(queue, now, self.window_seconds);
-        if queue.len() as u32 >= self.scoped_max_attempts {
-            return false;
-        }
-        queue.push_back(now);
-        windows.global.push_back(now);
-        true
-    }
-}
-
-fn prune_rate_limit_window(queue: &mut VecDeque<i64>, now: i64, window_seconds: i64) {
-    while queue.front().is_some_and(|timestamp| {
-        now < *timestamp || now.saturating_sub(*timestamp) >= window_seconds
-    }) {
-        queue.pop_front();
-    }
-}
-
-#[derive(Clone, Copy)]
-struct CachedReadiness {
-    checked_at: i64,
-    healthy: bool,
 }
 
 #[derive(Clone)]
@@ -379,97 +294,6 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({"ok": true, "version": state.version}))
 }
 
-async fn readiness(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
-    let now = state.now();
-    let mut cache = state.readiness_cache.lock().await;
-    let healthy = if let Some(cached) = *cache {
-        if now >= cached.checked_at
-            && now.saturating_sub(cached.checked_at) < READINESS_CACHE_SECONDS
-        {
-            cached.healthy
-        } else {
-            refresh_readiness(&state, now, &mut cache).await
-        }
-    } else {
-        refresh_readiness(&state, now, &mut cache).await
-    };
-    readiness_response(&state.version, healthy)
-}
-
-async fn refresh_readiness(
-    state: &AppState,
-    now: i64,
-    cache: &mut Option<CachedReadiness>,
-) -> bool {
-    let store = state.store.clone();
-    let data_root = state.data_root.clone();
-    let media_root = state.media_root.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        store
-            .health_check()
-            .map_err(|error| error.to_string())
-            .and_then(|()| probe_directory_writable(&data_root).map_err(|error| error.to_string()))
-            .and_then(|()| probe_directory_writable(&media_root).map_err(|error| error.to_string()))
-    })
-    .await;
-    let healthy = match result {
-        Ok(Ok(())) => true,
-        Ok(Err(error)) => {
-            tracing::error!(%error, "readiness check failed");
-            false
-        }
-        Err(error) => {
-            tracing::error!(%error, "readiness worker failed");
-            false
-        }
-    };
-    *cache = Some(CachedReadiness {
-        checked_at: now,
-        healthy,
-    });
-    healthy
-}
-
-fn readiness_response(version: &str, healthy: bool) -> (StatusCode, Json<Value>) {
-    if healthy {
-        (
-            StatusCode::OK,
-            Json(json!({"ok": true, "version": version})),
-        )
-    } else {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "ok": false,
-                "status": "degraded",
-                "version": version,
-            })),
-        )
-    }
-}
-
-fn probe_directory_writable(directory: &Path) -> std::io::Result<()> {
-    let path = directory.join(format!(
-        ".lezi-health-{}-{}",
-        std::process::id(),
-        Uuid::new_v4()
-    ));
-    let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
-        file.write_all(b"ok")?;
-        file.sync_all()
-    })();
-    let cleanup = if path.exists() {
-        fs::remove_file(path)
-    } else {
-        Ok(())
-    };
-    result.and(cleanup).and_then(|()| sync_directory(directory))
-}
-
 async fn create_family(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -586,105 +410,6 @@ async fn join(
         "cursor": 0,
         "generation": state.generation,
     })))
-}
-
-#[derive(Debug)]
-struct MemberCandidate {
-    device_id: String,
-    display_name: Option<String>,
-    role: String,
-    is_self: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct MemberView {
-    display_name: Option<String>,
-    role: String,
-    is_self: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct MembersResponse {
-    members: Vec<MemberView>,
-}
-
-async fn list_family_members(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Result<Json<MembersResponse>, ApiError> {
-    let principal = authenticate(&state, &headers)?;
-    let memberships = state.store.active_memberships(&principal.family_id)?;
-
-    // Historical databases can contain more than one active token for one
-    // device after repeated invitations. Coalesce rows with the same role and
-    // device for presentation without treating the unauthenticated device_id
-    // claim as authority or rotating another token. An owner/member collision
-    // remains two rows so the view never promotes a member to owner.
-    let mut coalesced = BTreeMap::<(String, String), MemberCandidate>::new();
-    for membership in memberships {
-        let display_name = member_display_name_for_view(membership.display_name.as_deref());
-        let is_self = constant_time_eq(
-            membership.token_hash.as_bytes(),
-            principal.token_hash.as_bytes(),
-        );
-        let key = (membership.role.clone(), membership.device_id.clone());
-        coalesced
-            .entry(key)
-            .and_modify(|candidate| {
-                candidate.is_self |= is_self;
-                if candidate.display_name.is_none() {
-                    candidate.display_name = display_name.clone();
-                }
-            })
-            .or_insert(MemberCandidate {
-                device_id: membership.device_id,
-                display_name,
-                role: membership.role,
-                is_self,
-            });
-    }
-
-    let mut members = coalesced.into_values().collect::<Vec<_>>();
-    members.sort_by(|left, right| {
-        member_role_rank(&left.role)
-            .cmp(&member_role_rank(&right.role))
-            .then_with(|| {
-                left.display_name
-                    .is_none()
-                    .cmp(&right.display_name.is_none())
-            })
-            .then_with(|| left.display_name.cmp(&right.display_name))
-            .then_with(|| left.device_id.cmp(&right.device_id))
-    });
-    Ok(Json(MembersResponse {
-        members: members
-            .into_iter()
-            .map(|member| MemberView {
-                display_name: member.display_name,
-                role: member.role,
-                is_self: member.is_self,
-            })
-            .collect(),
-    }))
-}
-
-/// Historical Android clients persisted their device-local fallback label as
-/// a shared member name. It is meaningful only to the originating device, so
-/// never project it to another family member. `is_self` lets each client apply
-/// its own local fallback after the privacy-safe response is received.
-fn member_display_name_for_view(value: Option<&str>) -> Option<String> {
-    normalize_display_name(value)
-        .ok()
-        .flatten()
-        .filter(|name| name != LOCAL_DEVICE_DISPLAY_NAME)
-}
-
-fn member_role_rank(role: &str) -> u8 {
-    if role == "owner" {
-        0
-    } else {
-        1
-    }
 }
 
 async fn leave(
@@ -1376,26 +1101,6 @@ mod tests {
         assert!(constant_time_eq(b"same-secret-value", b"same-secret-value"));
         assert!(!constant_time_eq(b"same-secret-value", b"other-secret-val"));
         assert!(!constant_time_eq(b"short", b"longer-value"));
-    }
-
-    #[test]
-    fn rate_limiter_is_scoped_and_keeps_a_global_fallback() {
-        let config = RateLimitConfig {
-            max_attempts: 2,
-            window_seconds: 60,
-        };
-        let scoped = RateLimiter::new(config.clone());
-        assert!(scoped.check_and_record("scope-a", 100));
-        assert!(scoped.check_and_record("scope-a", 100));
-        assert!(!scoped.check_and_record("scope-a", 100));
-        assert!(scoped.check_and_record("scope-b", 100));
-
-        let global = RateLimiter::new(config);
-        for index in 0..(2 * GLOBAL_RATE_LIMIT_MULTIPLIER) {
-            assert!(global.check_and_record(&format!("rotated-{index}"), 100));
-        }
-        assert!(!global.check_and_record("rotated-overflow", 100));
-        assert!(global.check_and_record("rotated-overflow", 160));
     }
 
     #[test]
