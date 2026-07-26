@@ -32,7 +32,7 @@
 | 6b | 落盘布局 | **data 与 media 同一数据根路径**（单 volume） |
 | 7 | 多家庭 | **一家一栈** 交付；schema 保留 `family_id`，不多租户产品化 |
 | 8 | 触发 | **回前台 + 下拉 + 前台写成功后 push**；无后台、无 60s 定时、无推送拉同步 |
-| 9 | 服务器地址 | **单一** host（IP/域名）+ **端口**（默认 8765）→ `baseUrl=http://{host}:{port}`；**SSID 白名单最多 2**（共用该 host:port，不为每个 SSID 记不同 IP）；**邀请 QR 含 baseUrl/host/port + code + 可选 ssids≤2**；可手改 |
+| 9 | 服务器地址 | **单一** `serverHost` + `serverPort` + `serverScheme`（`http`/`https`，默认 `http`）为真源，`baseUrl={scheme}://{host}:{port}` 只派生；**SSID 白名单最多 2**；邀请 QR 含 baseUrl/host/port + code + 可选 ssids≤2，扫码仅预填、可手改 |
 | 9b | 小白默认（空态预填） | host 预填 **`192.168.50.4`**，端口 **8765**，SSID 第一格预填 **当前连接 Wi‑Fi 名**（可读时）；预填 ≠ 已保存，保存/加入成功后才持久化 |
 | 10 | 退出 / 删除 | member 可 leave；owner 二次确认后**删除家庭数据**；**leave 与 delete 成功后本机均清空** host/port、SSID 白名单与会话 token |
 | 11 | 持久化引擎 | 首版 **SQLite**；API 不绑死引擎，可替换 |
@@ -75,9 +75,9 @@
 | 组件 | 职责 |
 |------|------|
 | `HomeNetworkPolicy` | 前台 + host/port 已配 + **SSID 白名单非空** + `TRANSPORT_WIFI` + **当前 SSID 精确命中白名单** + `GET {baseUrl}/health` → `allowSync` |
-| `SyncPort` | push / pull / invite / join / leave / media 协调 |
+| `SyncPort` | 保存家网配置、create / invite / 显式 `JoinFamilyCommand` / members / push / pull / media / leave / delete，以及带领域提交 marker 的本机清除协调 |
 | `Outbox` | 待上行实体队列（baby / record / media 元数据） |
-| `SyncPreferences` | `serverHost`、`serverPort`、`allowedSsids`（≤2，**仅本机**）、会话 `baseUrl`（派生）、`familyId`、`familyToken`、`deviceId`、`pullCursor`、`pullGeneration` |
+| `SyncPreferences` | `serverHost`、`serverPort`、`serverScheme`、`allowedSsids`（≤2，**仅本机**）；`baseUrl` 每次派生；会话另含 `familyId`、安全 token、`deviceId`、`pullCursor`、`pullGeneration` |
 | 触发器 | `ProcessLifecycle` ON_START、下拉、前台写成功 |
 
 ### 2.3 写与同步路径
@@ -114,8 +114,9 @@
 |------|------|
 | `serverHost` | 非空；IPv4 / IPv6 / 域名；保存时若用户粘贴完整 URL 则解析出 host/port |
 | `serverPort` | 1–65535，默认 **8765** |
+| `serverScheme` | `http` 或 `https`，默认 `http`；HTTPS 仅表示连接 NAS 反代，不承诺公网暴露安全 |
 | `allowedSsids` | **0～2** 个非空字符串（trim、去重）；**精确匹配**（大小写敏感）；典型登记家里 2.4G 与 5G 两个名字 |
-| 派生 `baseUrl` | `http://{serverHost}:{serverPort}`（无尾 `/`） |
+| 派生 `baseUrl` | `{serverScheme}://{serverHost}:{serverPort}`（无尾 `/`），不作为并列持久化真源 |
 
 SSID 白名单 **仅存本机**，不随家庭同步到 NAS。两台手机可登记不同 SSID 名。
 
@@ -383,8 +384,11 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 ### 9.2 `POST /v1/family/create`
 
 - 门闩：客户端仅在家调用
-- Body：`{ "create_request_id", "device_id", "display_name?" }`；客户端在成功
-  落盘会话前必须复用同一高熵 `create_request_id`
+- Header：Android 要求非空 `X-Lezi-Bootstrap-Secret`，只随本次建家请求发送；
+  服务端配置 `LEZI_BOOTSTRAP_SECRET` 时执行恒时校验。客户端不持久化该口令
+- Body：`{ "create_request_id", "device_id", "display_name?" }`
+  - 客户端在成功落盘会话前必须复用同一高熵 `create_request_id`
+  - `display_name` 与 join 共用同一 normalize；空白/本机占位名省略
 - 响应：`{ "family_id", "token", "role": "owner", "generation" }`
 - 同一创建请求重试幂等恢复相同响应；一家一栈已有其它创建请求时返回 `409`
 
@@ -401,9 +405,10 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 ### 9.4 `POST /v1/join`
 
 - Body：`{ "code", "device_id", "display_name?" }`
-- `display_name`：服务端 trim；Unicode 空白名归一为 `null`；最长 128 个
-  Unicode 字符；控制字符或 Unicode 双向文本格式控制符返回 `422`。客户端本地
-  占位名“我（本机）”不得上传，应省略该字段，由 `is_self` 决定本机文案
+- `display_name`：create 与 join 在 Android HTTP 边界和服务端使用同一规则：先拒绝
+  控制字符/Unicode 双向文本格式控制符，再 trim；空白归一为 `null`；最长 128 个
+  Unicode code point。客户端本地占位名“我（本机）”不得上传，应省略该字段，由
+  `is_self` 决定本机文案
 - 响应：`{ "family_id", "token", "role":"member", "entities":[], "cursor":0, "generation" }`
   （首包可空，随后 pull；或 join 时带全量，实现二选一，**须幂等**）
 
@@ -418,6 +423,9 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
   `device_id` 或 `family_id`
 - owner-first；其余按规范化名称与服务端内部稳定键排序。`display_name=null`
   表示历史 null/空/不安全名称，客户端显示本地兜底名称
+- 滚动升级兼容：客户端把未知 `role` 安全降级为 member、缺失/非法 `is_self` 视为
+  false，跳过非对象项；只有成员列表从未成功加载时才合成本机占位，服务端已返回
+  空列表或无 self 的列表时不注入，避免改变服务器语义
 - 兼容旧库时，同 role + device 的重复 active token 只展示一行；owner/member
   role 冲突不合并，因为 `device_id` 不是鉴权证据。退出只吊销当前 Bearer token；
   无法安全地凭未鉴权 `device_id` 批量吊销其它历史 token，删除家庭时才统一清除

@@ -68,9 +68,11 @@ NAS 实现以 `token_hash` 为 membership 主键，同时保存 `device_id` 与�
 `display_name`；三者都不是可公开的成员标识。家庭成员视图只返回规范化后的
 `display_name`、`role`、`is_self`：服务端按当前 Bearer principal 计算
 `is_self`，不返回 token、`token_hash`、原始 `device_id` 或 `family_id`。
-客户端不得把本机 UI 占位名“我（本机）”当成真实成员名上传。
-加入时名称 trim，空白归一为 null，最长 128 个 Unicode 字符，并拒绝控制字符与
-双向文本格式控制符；历史 null/空/不安全名称由客户端显示本地兜底。
+客户端不得把本机 UI 占位名“我（本机）”当成真实成员名上传。create 与 join 共用
+同一 normalize：拒绝控制字符和双向文本格式控制符，再 trim；空白归一为 null，
+最长 128 个 Unicode code point。历史 null/空/不安全名称由客户端显示本地兜底。
+客户端软解析滚动升级响应：未知 role 按 member、缺 `is_self` 按 false；只有从未
+成功加载成员列表时才合成本机占位，服务端已返回空列表或无 self 列表时保持原样。
 
 旧库没有 `(family_id, device_id, role)` 唯一约束。服务端读取时合并同 role +
 device 的重复 active token 行，不跨 role 合并，也不凭客户端声明的 `device_id`
@@ -268,7 +270,7 @@ enum class SyncStatus {
 
 | 字段 | 说明 |
 |------|------|
-| `serverHost` / `serverPort` | 单一 NAS；port 默认 8765；派生 `baseUrl=http://host:port` |
+| `serverHost` / `serverPort` / `serverScheme` | 单一 NAS；port 默认 8765、scheme 默认 `http`；三者为真源并派生 `{scheme}://{host}:{port}` |
 | `allowedSsids` | 最多 2 个；trim 后精确匹配当前 Wi‑Fi 名 |
 | 会话字段 | `familyId` / token / role / cursor / generation（同前） |
 
@@ -288,7 +290,8 @@ interface SyncPort {
   fun requestSync(trigger: SyncTrigger)
 
   suspend fun saveServer(baseUrl: String): Result<Unit>
-  suspend fun createFamily(displayName: String?): Result<SyncSession>
+  suspend fun saveHomeLanConfig(config: HomeLanServerConfig): Result<Unit>
+  suspend fun createFamily(displayName: String? = null, bootstrapSecret: String): Result<SyncSession>
   suspend fun sync(trigger: SyncTrigger): Result<Unit>
 
   /** 显式触发；内部走同一前台/门闩路径 */
@@ -296,18 +299,27 @@ interface SyncPort {
   suspend fun push(familyId: String): Result<Unit>
 
   suspend fun createInvite(familyId: String): Result<Invite>
-  /** 当前 token 所在家庭的 active 成员安全视图 */
-  suspend fun listFamilyMembers(): Result<List<FamilyMemberView>>
-  /** 邀请码或完整载荷；返回 SyncSession（server family_id 为 UUID 字符串） */
+  /** 产品入口必须显式携带邀请码与本次编辑后的 endpoint/SSID */
+  suspend fun joinFamily(command: JoinFamilyCommand): Result<SyncSession>
+  /** 仅兼容旧调用；产品 UI 不依赖保存态隐式补端点 */
   suspend fun joinWithCode(code: String): Result<SyncSession>
-  suspend fun joinWithPayload(payload: String): Result<SyncSession>
+  suspend fun joinWithPayload(
+    payload: String,
+    preferredConfig: HomeLanServerConfig? = null,
+    displayName: String? = null,
+  ): Result<SyncSession>
+  suspend fun listFamilyMembers(): Result<List<FamilyMember>>
   suspend fun leave(familyId: String): Result<Unit>
   suspend fun deleteFamily(): Result<Unit>
 
-  /** 清本机记录副本 + 日志媒体/文件；保留会话 generation */
-  suspend fun clearLocalRecords(clearLocal: suspend () -> Unit): Result<Unit>
-  /** 全量 wipe（含 outbox/头像媒体），join 前用 */
-  suspend fun clearAllLocalData(clearLocal: suspend () -> Unit): Result<Unit>
+  /** 回调须在领域事务提交后立刻调用 marker；随后清日志媒体/outbox，generation 保留 */
+  suspend fun clearLocalRecords(
+    clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
+  ): Result<Unit>
+  /** 全量本机 wipe（含 outbox/头像媒体/文件）；同样要求领域提交 marker */
+  suspend fun clearAllLocalData(
+    clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
+  ): Result<Unit>
 }
 ```
 
