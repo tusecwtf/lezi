@@ -551,14 +551,16 @@ internal fun familyPrimarySurface(
     networkConfigured: Boolean,
 ): FamilyPrimarySurface {
     val controls = familyControlVisibility(isJoined, role)
+    // Editors never sit on primary; reconfigure always via secondary entry.
+    val editorsOnPrimary = false
     return FamilyPrimarySurface(
         compactJoined = isJoined && networkConfigured,
         showCreateJoin = controls.showJoin || controls.showCreateFamily,
         showInvite = controls.showInvite,
         showJoinedActions = controls.showJoinedActions,
         showLeave = controls.showLeave,
-        showNetworkSecondaryEntry = true,
-        showNetworkEditorsOnPrimary = false,
+        showNetworkSecondaryEntry = !editorsOnPrimary,
+        showNetworkEditorsOnPrimary = editorsOnPrimary,
     )
 }
 
@@ -868,62 +870,141 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                 }
             }
 
-            // Compact summary: no host/port/SSID editors on primary.
+            // Driven by familyPrimarySurface — editors only if flag true (product default: false).
+            if (primary.showNetworkEditorsOnPrimary) {
+                // Fallback path kept for the predicate; product keeps editors off primary.
+                OutlinedTextField(
+                    value = serverHost,
+                    onValueChange = { serverHost = it },
+                    label = { Text("家庭服务器主机（IP 或域名）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = serverPort,
+                    onValueChange = { serverPort = it.filter { ch -> ch.isDigit() }.take(5) },
+                    label = { Text("端口") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = ssid1,
+                    onValueChange = { ssid1 = it },
+                    label = { Text("家庭 Wi‑Fi 名称 1（如 2.4G）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = ssid2,
+                    onValueChange = { ssid2 = it },
+                    label = { Text("家庭 Wi‑Fi 名称 2（可选，如 5G）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                LeziSecondaryButton(
+                    "保存家庭网络与服务器",
+                    onClick = {
+                        vm.saveHomeLanConfig(serverHost, serverPort, ssid1, ssid2) { message = it }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+
             LeziCard(modifier = Modifier.fillMaxWidth()) {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(
-                        if (ui.enabled) {
-                            "家庭 · ${familyRoleLabel(ui.role)}"
-                        } else {
-                            "尚未加入家庭"
-                        },
-                        style = LeziTypography.BodyStrong,
-                    )
-                    Text(
-                        "状态：${syncStatusLabel(
-                            status = ui.status,
-                            hasServer = ui.serverHost.isNotBlank() || ui.baseUrl.isNotBlank(),
-                            hasSsid = ui.allowedSsids.isNotEmpty(),
-                            isJoined = ui.enabled,
-                        )}" +
-                            (ui.lastSuccessAt?.let {
-                                " · 上次成功：${java.text.DateFormat.getDateTimeInstance().format(it)}"
-                            } ?: ""),
-                        style = LeziTypography.Meta,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    if (networkConfigured) {
+                    if (primary.compactJoined) {
+                        Text(
+                            "家庭 · ${familyRoleLabel(ui.role)}",
+                            style = LeziTypography.BodyStrong,
+                        )
+                        Text(
+                            "状态：${syncStatusLabel(
+                                status = ui.status,
+                                hasServer = true,
+                                hasSsid = true,
+                                isJoined = true,
+                            )}",
+                            style = LeziTypography.Meta,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                         Text(
                             buildString {
                                 append(savedSummaryBaseUrl.ifBlank { "服务器已配置" })
                                 if (ui.allowedSsids.isNotEmpty()) {
-                                    append(" · Wi‑Fi ")
+                                    append(" · ")
                                     append(ui.allowedSsids.joinToString(" / "))
                                 }
                             },
                             style = LeziTypography.Meta,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        if (savedSummaryBaseUrl.isNotBlank() &&
+                            isPublicCleartextBaseUrl(savedSummaryBaseUrl)
+                        ) {
+                            Text(
+                                PUBLIC_CLEARTEXT_WARNING,
+                                style = LeziTypography.Meta,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
                     } else {
                         Text(
-                            "同步前请在网络设置中绑定服务器与家庭 Wi‑Fi 名称。",
+                            if (ui.enabled) {
+                                "家庭 · ${familyRoleLabel(ui.role)}"
+                            } else {
+                                "尚未加入家庭"
+                            },
+                            style = LeziTypography.BodyStrong,
+                        )
+                        Text(
+                            "状态：${syncStatusLabel(
+                                status = ui.status,
+                                hasServer = ui.serverHost.isNotBlank() || ui.baseUrl.isNotBlank(),
+                                hasSsid = ui.allowedSsids.isNotEmpty(),
+                                isJoined = ui.enabled,
+                            )}" +
+                                (ui.lastSuccessAt?.let {
+                                    " · 上次成功：${java.text.DateFormat.getDateTimeInstance().format(it)}"
+                                } ?: ""),
                             style = LeziTypography.Meta,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                    }
-                    if (savedSummaryBaseUrl.isNotBlank() && isPublicCleartextBaseUrl(savedSummaryBaseUrl)) {
-                        Text(
-                            PUBLIC_CLEARTEXT_WARNING,
-                            style = LeziTypography.Meta,
-                            color = MaterialTheme.colorScheme.error,
-                        )
+                        if (networkConfigured) {
+                            Text(
+                                buildString {
+                                    append(savedSummaryBaseUrl.ifBlank { "服务器已配置" })
+                                    if (ui.allowedSsids.isNotEmpty()) {
+                                        append(" · Wi‑Fi ")
+                                        append(ui.allowedSsids.joinToString(" / "))
+                                    }
+                                },
+                                style = LeziTypography.Meta,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        } else {
+                            Text(
+                                "同步前请在网络设置中绑定服务器与家庭 Wi‑Fi 名称。",
+                                style = LeziTypography.Meta,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (savedSummaryBaseUrl.isNotBlank() &&
+                            isPublicCleartextBaseUrl(savedSummaryBaseUrl)
+                        ) {
+                            Text(
+                                PUBLIC_CLEARTEXT_WARNING,
+                                style = LeziTypography.Meta,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
                     }
                 }
             }
 
             if (primary.showNetworkSecondaryEntry) {
                 LeziSecondaryButton(
-                    "家庭网络设置",
+                    if (primary.compactJoined) "网络设置" else "家庭网络设置",
                     onClick = {
                         pendingAfterNetworkSave = null
                         showNetworkSettings = true
@@ -1001,11 +1082,13 @@ fun FamilyRoute(vm: FamilyViewModel = hiltViewModel()) {
                 }
             }
 
-            Text(
-                "仅在已绑定的家庭 Wi‑Fi 且服务器可达时前台同步。",
-                style = LeziTypography.Meta,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            if (!primary.compactJoined) {
+                Text(
+                    "仅在已绑定的家庭 Wi‑Fi 且服务器可达时前台同步。",
+                    style = LeziTypography.Meta,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Spacer(Modifier.height(LeziSpacing.Xxl))
         }
     }

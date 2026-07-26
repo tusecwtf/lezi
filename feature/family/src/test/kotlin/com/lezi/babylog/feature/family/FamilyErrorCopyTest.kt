@@ -158,6 +158,19 @@ class FamilyErrorCopyTest {
         assertTrue(joinedConfigured.showInvite)
         assertTrue(joinedConfigured.showJoinedActions)
         assertFalse(joinedConfigured.showCreateJoin)
+        // compact owner primary = invite + sync/delete path, not create/join stack
+        assertTrue(joinedConfigured.showInvite && joinedConfigured.showJoinedActions)
+        assertFalse(joinedConfigured.showLeave)
+
+        val joinedMember = familyPrimarySurface(
+            isJoined = true,
+            role = FamilyRole.Member,
+            networkConfigured = true,
+        )
+        assertTrue(joinedMember.compactJoined)
+        assertFalse(joinedMember.showInvite)
+        assertTrue(joinedMember.showLeave)
+        assertFalse(joinedMember.showNetworkEditorsOnPrimary)
 
         val unjoined = familyPrimarySurface(
             isJoined = false,
