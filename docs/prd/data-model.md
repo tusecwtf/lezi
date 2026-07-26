@@ -370,9 +370,8 @@ interface SyncPort {
   suspend fun createInvite(familyId: String): Result<Invite>
   /** 当前 token 所在家庭的 active 成员安全视图（含称呼与 role） */
   suspend fun listFamilyMembers(): Result<List<FamilyMemberView>>
-  /** 邀请码或完整载荷；displayName 为必填家庭称呼 */
-  suspend fun joinWithCode(code: String, displayName: String): Result<SyncSession>
-  suspend fun joinWithPayload(payload: String, displayName: String): Result<SyncSession>
+  /** invitation + 家网配置 + 必填家庭称呼组成唯一 Join command */
+  suspend fun joinFamily(command: JoinFamilyCommand): Result<SyncSession>
   suspend fun leave(familyId: String): Result<Unit>
   suspend fun deleteFamily(): Result<Unit>
 

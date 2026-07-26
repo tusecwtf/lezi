@@ -29,7 +29,7 @@
 
 - [ ] create/join/invite/members/rename/leave/delete 的 endpoint、鉴权、持久化与错误分类集中在一个 module。
 - [ ] 家庭称呼/家庭名的最终 wire 契约与 `family-identity-account-overview` 已落地版本一致，不恢复可选参数旧形状。
-- [ ] 删除无生产 caller 的 deprecated `joinWithPayload` / `joinWithCode`；若仍有 caller，先在本票迁移后删除。
+- [x] 删除无生产 caller 的 deprecated `joinWithPayload` / `joinWithCode`；由 `fdefdd8-86ed6e7-review-remediation/07` 完成并以 contract test 防回归。
 - [ ] server changed、leave、delete 后 receipt/outbox/session reset 顺序保持并有 interface 测试。
 - [ ] owner/member 权限、bootstrap 拒绝、Home-LAN gate 与取消传播不回归。
 - [ ] `RealSyncPort.kt` 最终 ≤800 行；不得以 pass-through wrapper、空类或机械拆文件达标。
@@ -56,4 +56,3 @@
 ## Comments
 
 - 来源：固定范围审查 Standards finding 4；这是 05→06→07 的收口票，不得提前与当前家庭身份 WIP 混做。
-

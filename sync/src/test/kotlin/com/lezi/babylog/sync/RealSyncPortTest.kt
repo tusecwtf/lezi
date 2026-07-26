@@ -419,7 +419,15 @@ class RealSyncPortTest {
         val rig = SyncRig(session = initial)
 
         assertThat(rig.port.createFamily("妈妈", "bootstrap-secret").isFailure).isTrue()
-        assertThat(rig.port.joinWithPayload("ANY-CODE").isFailure).isTrue()
+        assertThat(
+            rig.port.joinFamily(
+                JoinFamilyCommand(
+                    invitation = "ANY-CODE",
+                    homeLanConfig = initial.homeLanConfig,
+                    displayName = "爸爸",
+                ),
+            ).isFailure,
+        ).isTrue()
 
         assertThat(rig.preferences.current()).isEqualTo(initial)
     }
@@ -445,17 +453,21 @@ class RealSyncPortTest {
             allowedSsids = listOf("Home"),
         )
         assertThat(
-            memberRig.port.joinWithPayload(
-                payload = "ABCD1234",
-                preferredConfig = config,
-                displayName = "我（本机）",
+            memberRig.port.joinFamily(
+                JoinFamilyCommand(
+                    invitation = "ABCD1234",
+                    homeLanConfig = config,
+                    displayName = "我（本机）",
+                ),
             ).isFailure,
         ).isTrue()
         assertThat(
-            memberRig.port.joinWithPayload(
-                payload = "ABCD1234",
-                preferredConfig = config,
-                displayName = null,
+            memberRig.port.joinFamily(
+                JoinFamilyCommand(
+                    invitation = "ABCD1234",
+                    homeLanConfig = config,
+                    displayName = "  ",
+                ),
             ).isFailure,
         ).isTrue()
         assertThat(memberRig.backend.joinDisplayNames).isEmpty()
@@ -471,7 +483,7 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun editedSavedAddressWinsOverStaleQrPrefillWhenJoining() = runTest {
+    fun explicitSavedAddressCommandWinsOverStaleQrPayloadWhenJoining() = runTest {
         val rig = SyncRig(session = SyncSession(), ssid = "EditedHome")
         val edited = HomeLanServerConfig(
             host = "192.168.1.99",
@@ -489,7 +501,13 @@ class RealSyncPortTest {
         )
 
         assertThat(
-            rig.port.joinWithPayload(staleQr, displayName = "爸爸").isSuccess,
+            rig.port.joinFamily(
+                JoinFamilyCommand(
+                    invitation = staleQr,
+                    homeLanConfig = edited,
+                    displayName = "爸爸",
+                ),
+            ).isSuccess,
         ).isTrue()
 
         assertThat(rig.backend.joinBaseUrls).containsExactly("https://192.168.1.99:9443")
@@ -521,7 +539,13 @@ class RealSyncPortTest {
         )
 
         assertThat(
-            rig.port.joinWithPayload(scannedQr, edited, displayName = "爸爸").isSuccess,
+            rig.port.joinFamily(
+                JoinFamilyCommand(
+                    invitation = scannedQr,
+                    homeLanConfig = edited,
+                    displayName = "爸爸",
+                ),
+            ).isSuccess,
         ).isTrue()
 
         assertThat(rig.backend.joinBaseUrls).containsExactly("https://lezi.home:443")
@@ -649,7 +673,13 @@ class RealSyncPortTest {
         )
 
         assertThat(
-            rig.port.joinWithPayload("ABCD1234", edited, displayName = "爸爸").isFailure,
+            rig.port.joinFamily(
+                JoinFamilyCommand(
+                    invitation = "ABCD1234",
+                    homeLanConfig = edited,
+                    displayName = "爸爸",
+                ),
+            ).isFailure,
         ).isTrue()
 
         assertThat(rig.backend.joinBaseUrls).containsExactly("https://lezi.home:443")
@@ -808,7 +838,13 @@ class RealSyncPortTest {
         val creating = async { rig.port.createFamily("妈妈", "bootstrap-secret") }
         rig.backend.createStarted!!.await()
         val joining = async {
-            rig.port.joinWithPayload("JOIN-CODE", displayName = "爸爸")
+            rig.port.joinFamily(
+                JoinFamilyCommand(
+                    invitation = "JOIN-CODE",
+                    homeLanConfig = rig.preferences.current().homeLanConfig,
+                    displayName = "爸爸",
+                ),
+            )
         }
         runCurrent()
 

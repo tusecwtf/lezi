@@ -63,19 +63,6 @@ interface SyncPort {
     suspend fun push(familyId: String): Result<Unit>
     suspend fun createInvite(familyId: String): Result<Invite>
     suspend fun joinFamily(command: JoinFamilyCommand): Result<SyncSession>
-    /**
-     * Join via invite code or full invite payload.
-     * Compatibility alias for tests and old callers. Product UI must build a
-     * complete [JoinFamilyCommand] instead of relying on saved endpoint state.
-     */
-    @Deprecated("Use joinFamily with an explicit HomeLanServerConfig")
-    suspend fun joinWithCode(code: String): Result<SyncSession>
-    @Deprecated("Use joinFamily with an explicit HomeLanServerConfig")
-    suspend fun joinWithPayload(
-        payload: String,
-        preferredConfig: HomeLanServerConfig? = null,
-        displayName: String? = null,
-    ): Result<SyncSession>
     suspend fun listFamilyMembers(): Result<List<FamilyMember>>
     /** Self-only rename of this device's membership 家庭称呼. */
     suspend fun updateMyDisplayName(displayName: String): Result<Unit>
@@ -118,15 +105,6 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
     override suspend fun push(familyId: String) = Result.success(Unit)
     override suspend fun createInvite(familyId: String) = Result.failure<Invite>(SyncNotEnabledException())
     override suspend fun joinFamily(command: JoinFamilyCommand) =
-        Result.failure<SyncSession>(SyncNotEnabledException())
-    @Deprecated("Use joinFamily with an explicit HomeLanServerConfig")
-    override suspend fun joinWithCode(code: String) = Result.failure<SyncSession>(SyncNotEnabledException())
-    @Deprecated("Use joinFamily with an explicit HomeLanServerConfig")
-    override suspend fun joinWithPayload(
-        payload: String,
-        preferredConfig: HomeLanServerConfig?,
-        displayName: String?,
-    ) =
         Result.failure<SyncSession>(SyncNotEnabledException())
     override suspend fun listFamilyMembers() =
         Result.failure<List<FamilyMember>>(SyncNotEnabledException())

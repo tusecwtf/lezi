@@ -183,7 +183,7 @@ class OnboardingViewModel @Inject constructor(
                 onDone(joinFamilyError(join.exceptionOrNull() ?: Exception("加入失败")))
                 return@launch
             }
-            careLog.updateLocalDisplayName(command.displayName ?: displayName.trim())
+            careLog.updateLocalDisplayName(command.displayName)
             sync.requestSync(SyncTrigger.PullToRefresh)
             onDone(null)
         }

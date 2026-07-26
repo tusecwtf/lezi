@@ -4,7 +4,7 @@ package com.lezi.babylog.sync
 data class JoinFamilyCommand(
     val invitation: String,
     val homeLanConfig: HomeLanServerConfig,
-    val displayName: String? = null,
+    val displayName: String,
 )
 
 /**
@@ -46,11 +46,11 @@ data class JoinFamilyDraft(
     }
 
     /**
-     * Build a join command. When [displayName] is non-null it is product-required
-     * (same rules as createFamily / updateMyDisplayName); blank / 「我（本机）」 fail.
+     * Build a join command. [displayName] is product-required (same rules as
+     * createFamily / updateMyDisplayName); blank / 「我（本机）」 fail.
      * Network host + ≥1 SSID are always required so account wizard and onboarding share one path.
      */
-    fun toCommand(displayName: String? = null): JoinFamilyCommand {
+    fun toCommand(displayName: String): JoinFamilyCommand {
         require(invitation.trim().isNotEmpty()) { "请填写邀请码" }
         val config = HomeLanServerConfig.fromUserInput(
             rawHostOrUrl = host,
@@ -60,7 +60,7 @@ data class JoinFamilyDraft(
         )
         require(config.isServerConfigured) { "请填写服务器主机" }
         require(config.allowedSsids.isNotEmpty()) { "请至少填写一个家庭 Wi‑Fi 名称" }
-        val normalizedName = displayName?.let { requireMemberDisplayName(it) }
+        val normalizedName = requireMemberDisplayName(displayName)
         return JoinFamilyCommand(
             invitation = invitation.trim(),
             homeLanConfig = config,

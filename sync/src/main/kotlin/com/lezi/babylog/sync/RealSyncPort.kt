@@ -239,48 +239,6 @@ class RealSyncPort @Inject constructor(
         }
     }.onFailure(::updateFailureStatus)
 
-    @Deprecated("Use joinFamily with an explicit HomeLanServerConfig")
-    override suspend fun joinWithPayload(
-        payload: String,
-        preferredConfig: HomeLanServerConfig?,
-        displayName: String?,
-    ): Result<SyncSession> {
-        val previous = preferences.session.first()
-        val decoded = runCatching { InvitePayloadCodec.decode(payload) }.getOrElse { error ->
-            return Result.failure<SyncSession>(error).onFailure(::updateFailureStatus)
-        }
-        val explicit = preferredConfig?.withNormalized()?.takeIf { it.isServerConfigured }
-        val saved = previous.homeLanConfig.takeIf { it.isServerConfigured }
-        val invited = decoded.homeLanConfig.takeIf { it.isServerConfigured }
-        val base = explicit ?: saved ?: invited ?: previous.homeLanConfig
-        val currentSsid = networkState.currentWifiSsid()?.trim().orEmpty()
-        val ssids = HomeLanServerConfig.normalizeSsids(
-            (explicit?.allowedSsids?.takeIf { it.isNotEmpty() }
-                ?: previous.allowedSsids.takeIf { it.isNotEmpty() }
-                ?: decoded.ssids) + listOfNotNull(
-                currentSsid.takeIf {
-                    it.isNotEmpty() && !HomeNetworkPolicy.isUnknownSsid(it)
-                },
-            ),
-        )
-        return joinFamily(
-            JoinFamilyCommand(
-                invitation = payload,
-                homeLanConfig = base.copy(allowedSsids = ssids),
-                displayName = displayName,
-            ),
-        )
-    }
-
-    @Deprecated("Use joinFamily with an explicit HomeLanServerConfig")
-    override suspend fun joinWithCode(code: String): Result<SyncSession> =
-        joinFamily(
-            JoinFamilyCommand(
-                invitation = code,
-                homeLanConfig = preferences.session.first().homeLanConfig,
-            ),
-        )
-
     override suspend fun createInvite(familyId: String): Result<Invite> = withAllowedSession {
         require(it.role == FamilyRole.Owner) { "仅家庭管理员可生成邀请" }
         backend.invite(it)
