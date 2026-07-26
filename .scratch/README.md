@@ -12,7 +12,7 @@
 | `fdefdd8` / `86ed6e7` 固定提交审查整改 | [spec.md](./fdefdd8-86ed6e7-review-remediation/spec.md) | [ISSUES.md](./fdefdd8-86ed6e7-review-remediation/ISSUES.md)（7 票） | ready-for-agent |
 | 0.2.4 固定范围审查整改 | [spec.md](./post-0.2.4-review-remediation/spec.md) | [ISSUES.md](./post-0.2.4-review-remediation/ISSUES.md)（7 票） | in-progress（01 complete） |
 | 护理计划、记录自定义与照片原子同步 | [spec.md](./care-plan-record-customization/spec.md) | [ISSUES.md](./care-plan-record-customization/ISSUES.md)（28 票） | ready-for-agent |
-| 快捷记录坞中性空闲态 | [spec.md](./quick-dock-neutral-idle-state/spec.md) | [ISSUES.md](./quick-dock-neutral-idle-state/ISSUES.md)（1 票） | ready-for-agent |
+| 快捷记录坞中性空闲态 | [spec.md](./quick-dock-neutral-idle-state/spec.md) | [ISSUES.md](./quick-dock-neutral-idle-state/ISSUES.md)（1 票） | in-progress（device pending） |
 | 0.2.4 后跟进（止血·拆骨·契约） | [spec.md](./post-0.2.4-followup/spec.md) | [ISSUES.md](./post-0.2.4-followup/ISSUES.md)（R2 · 15 票） | complete |
 
 已完成的实施过程、审查报告、截图和运行 dump 不在仓库中长期归档；产品结论应写回

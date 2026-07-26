@@ -1110,7 +1110,6 @@ private fun OneHandQuickDock(
                     QuickDockCell.Empty -> "one_hand_action_empty_$index"
                     QuickDockCell.More -> "one_hand_action_more"
                 }
-                val isPee = cell is QuickDockCell.Bound && cell.recordType == RecordType.PEE
                 Surface(
                     modifier = Modifier
                         .weight(1f)
@@ -1124,7 +1123,7 @@ private fun OneHandQuickDock(
                             }
                         },
                     shape = if (journal) LeziShapes.JournalButton else LeziShapes.Sm,
-                    color = if (isPee) {
+                    color = if (quickDockIdleContainerIsEmphasized(cell)) {
                         MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f)
                     } else {
                         Color.Transparent

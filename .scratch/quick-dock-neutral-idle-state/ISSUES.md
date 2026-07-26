@@ -10,10 +10,10 @@ Tracker: `.scratch/quick-dock-neutral-idle-state/issues/`
 01 消除快捷记录坞的尿尿伪选中态
 ```
 
-Frontier：**01** 可立即开始。
+Frontier：**01** 自动化与模块构建已完成，等待最终候选设备视觉验收。
 
 ## 票列表
 
 | # | 文件 | 主题 | Blocked by | Status |
 |---|------|------|------------|--------|
-| 01 | [01-remove-pee-pseudo-selection.md](./issues/01-remove-pee-pseudo-selection.md) | 消除快捷记录坞的尿尿伪选中态 | — | ready-for-agent |
+| 01 | [01-remove-pee-pseudo-selection.md](./issues/01-remove-pee-pseudo-selection.md) | 消除快捷记录坞的尿尿伪选中态 | — | in-progress（device pending） |

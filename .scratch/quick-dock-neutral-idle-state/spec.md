@@ -1,6 +1,6 @@
 # 快捷记录坞中性空闲态
 
-**Status:** ready-for-agent
+**Status:** in-progress（自动化完成，最终候选设备视觉验收待执行）
 
 ## 问题
 

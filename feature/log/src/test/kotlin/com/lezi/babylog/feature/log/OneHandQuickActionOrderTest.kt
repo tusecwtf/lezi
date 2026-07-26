@@ -64,4 +64,34 @@ class OneHandQuickActionOrderTest {
             order.filterIsInstance<QuickDockCell.Bound>().map { it.catalogKey },
         )
     }
+
+    @Test
+    fun idleContainerNeverInventsSelectionForEitherHand() {
+        listOf("left", "right").forEach { hand ->
+            val order = oneHandQuickDockOrder(hand, defaultSlots())
+
+            assertTrue(order.none(::quickDockIdleContainerIsEmphasized))
+            assertTrue(
+                order.filterIsInstance<QuickDockCell.Bound>()
+                    .map { it.recordType }
+                    .containsAll(listOf(RecordType.PEE, RecordType.SLEEP)),
+            )
+        }
+    }
+
+    @Test
+    fun customOrderDoesNotMovePseudoSelectionWithPee() {
+        val slots = resolveQuickSlots(
+            storedSlots = listOf("sleep", "formula", "pee", "nursing"),
+            hiddenItems = emptySet(),
+            customItems = emptyList(),
+        )
+
+        listOf("left", "right").forEach { hand ->
+            assertTrue(
+                oneHandQuickDockOrder(hand, slots)
+                    .none(::quickDockIdleContainerIsEmphasized),
+            )
+        }
+    }
 }

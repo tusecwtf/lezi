@@ -28,6 +28,15 @@ internal sealed class QuickDockCell {
     data object More : QuickDockCell()
 }
 
+/** Whether an otherwise idle slot should use a selected/emphasized container. */
+internal fun quickDockIdleContainerIsEmphasized(cell: QuickDockCell): Boolean =
+    when (cell) {
+        is QuickDockCell.Bound,
+        QuickDockCell.Empty,
+        QuickDockCell.More,
+        -> false
+    }
+
 /**
  * Candidate for binding a quick slot (enabled built-ins + concrete customs).
  */
