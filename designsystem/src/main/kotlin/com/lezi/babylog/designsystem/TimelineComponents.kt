@@ -8,14 +8,18 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
@@ -32,6 +36,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
@@ -394,6 +399,7 @@ fun TimelineRailCard(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun TimelineLegendRow(
     items: List<TimelineLegendEntry>,
@@ -401,9 +407,10 @@ private fun TimelineLegendRow(
     onCategorySelect: (String?) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Row(
+    FlowRow(
         modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         items.forEach { item ->
             val selected = item.key == selectedCategoryKey
@@ -429,13 +436,18 @@ private fun TimelineLegendRow(
                             Modifier
                         },
                     )
-                    .clickable {
-                        onCategorySelect(
-                            if (selected) null else item.key,
-                        )
-                    }
+                    .heightIn(min = LeziSpacing.Touch)
+                    .selectable(
+                        selected = selected,
+                        role = Role.Button,
+                        onClick = {
+                            onCategorySelect(
+                                if (selected) null else item.key,
+                            )
+                        },
+                    )
                     .semantics { contentDescription = description }
-                    .padding(horizontal = 6.dp, vertical = 3.dp),
+                    .padding(horizontal = 8.dp, vertical = 3.dp),
             ) {
                 if (item.isBar) {
                     Box(
