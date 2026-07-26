@@ -1378,48 +1378,6 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun cursorAheadRequeuesCleanLocalReplicaThenPushesBeforeFullPull() = runTest {
-        val rig = SyncRig(
-            session = joinedSession("family-a").copy(
-                pullCursor = 9,
-                pullGeneration = "old-generation",
-            ),
-        )
-        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
-        rig.records.seed(
-            localRecord(babyId).copy(
-                clientUuid = "record-after-backup",
-                syncDirty = false,
-            ),
-        )
-        rig.backend.pullFailures.add(
-            SyncHttpException(
-                statusCode = 409,
-                responseBody = """
-                    {
-                      "detail":{
-                        "code":"cursor_ahead",
-                        "action":"full_resync",
-                        "reset_cursor":0,
-                        "server_cursor":1
-                      }
-                    }
-                """.trimIndent(),
-            ),
-        )
-        rig.backend.nextPull = PullResult(emptyList(), cursor = 2)
-
-        val result = rig.port.sync(SyncTrigger.PullToRefresh)
-        assertThat(result.exceptionOrNull()).isNull()
-
-        assertThat(rig.backend.pullCursors).containsExactly(9L, 0L, 2L).inOrder()
-        val pushedUuids = rig.backend.pushes.flatMap(PushedBatch::entities).map(SyncEntity::clientUuid) +
-            rig.backend.stagedBundles.map { it.root.clientUuid }
-        assertThat(pushedUuids).containsAtLeast("baby-local", "record-after-backup")
-        assertThat(rig.preferences.current().pullCursor).isEqualTo(2)
-    }
-
-    @Test
     fun generationChangeAtTheSameCursorStillForcesAFullResync() = runTest {
         val rig = SyncRig(
             session = joinedSession("family-a").copy(
@@ -2294,48 +2252,6 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun pullFailsClosedWhenAFullPageOmitsTheContinuationFlag() = runTest {
-        val rig = SyncRig(session = joinedSession("family-a"))
-        rig.backend.nextPull = PullResult(
-            entities = List(200) { index ->
-                remoteBaby().copy(clientUuid = "baby-page-limit-$index")
-            },
-            cursor = 200,
-            hasMore = null,
-        )
-
-        val failure = rig.port.sync(SyncTrigger.PullToRefresh).exceptionOrNull()
-
-        assertThat(failure).hasMessageThat().contains("缺少 has_more")
-        assertThat(rig.preferences.current().pullCursor).isEqualTo(0)
-        assertThat(rig.babies.getByClientUuid("baby-page-limit-0")).isNull()
-    }
-
-    @Test
-    fun pullFailsInsteadOfRequestingMoreThanThePageLimit() = runTest {
-        val rig = SyncRig(session = joinedSession("family-a"))
-        repeat(500) { index ->
-            rig.backend.pullResults.add(
-                PullResult(
-                    entities = emptyList(),
-                    cursor = index.toLong() + 1,
-                    hasMore = true,
-                ),
-            )
-        }
-        rig.backend.nextPull = PullResult(
-            entities = emptyList(),
-            cursor = 501,
-            hasMore = false,
-        )
-
-        val failure = rig.port.sync(SyncTrigger.PullToRefresh).exceptionOrNull()
-
-        assertThat(failure).hasMessageThat().contains("500 页上限")
-        assertThat(rig.backend.pullCount).isEqualTo(500)
-    }
-
-    @Test
     fun laterPageFailureRetainsOnlyTheLastFullyAppliedPageCursor() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         rig.backend.pullResults.add(
@@ -2368,27 +2284,6 @@ class RealSyncPortTest {
         assertThat(rig.preferences.current().pullCursor).isEqualTo(1)
         assertThat(rig.babies.getByClientUuid("baby-remote")).isNotNull()
         assertThat(rig.records.getByClientUuid("record-remote")).isNull()
-    }
-
-    @Test
-    fun pagedPullRejectsAContinuationThatDoesNotAdvanceCursor() = runTest {
-        val rig = SyncRig(
-            session = joinedSession("family-a").copy(
-                pullCursor = 5,
-                pullGeneration = "current-generation",
-            ),
-        )
-        rig.backend.nextPull = PullResult(
-            entities = emptyList(),
-            cursor = 5,
-            hasMore = true,
-        )
-
-        val failure = rig.port.sync(SyncTrigger.PullToRefresh).exceptionOrNull()
-
-        assertThat(failure).hasMessageThat().contains("cursor 未推进")
-        assertThat(rig.backend.pullCursors).containsExactly(5L)
-        assertThat(rig.preferences.current().pullCursor).isEqualTo(5)
     }
 
     @Test
@@ -4248,12 +4143,12 @@ class RealSyncPortTest {
     }
 }
 
-private data class PushedBatch(
+internal data class PushedBatch(
     val session: SyncSession,
     val entities: List<SyncEntity>,
 )
 
-private class RecordingSyncBackend : SyncBackend {
+internal class RecordingSyncBackend : SyncBackend {
     val pushes = mutableListOf<PushedBatch>()
     val pushAttempts = mutableListOf<SyncSession>()
     val mediaUploads = mutableListOf<String>()
@@ -4683,7 +4578,6 @@ private class SyncRig(
         backend = syncBackend ?: backend,
         preferences = preferences,
         policy = policy,
-        networkState = networkState,
         outboxDao = outbox,
         recordDao = records,
         carePlanDao = carePlans,
@@ -4700,7 +4594,7 @@ private class SyncRig(
     )
 }
 
-private class MemoryFulfillmentCandidateDao : FulfillmentCandidateDao {
+internal class MemoryFulfillmentCandidateDao : FulfillmentCandidateDao {
     private val rows = MutableStateFlow<List<FulfillmentCandidateEntity>>(emptyList())
     private val ids = AtomicLong(1)
 
@@ -4782,7 +4676,7 @@ private class MemoryFulfillmentCandidateDao : FulfillmentCandidateDao {
     }
 }
 
-private class MemoryCarePlanDao : CarePlanDao {
+internal class MemoryCarePlanDao : CarePlanDao {
     private val rows = MutableStateFlow<List<CarePlanEntity>>(emptyList())
     private val ids = AtomicLong(1)
 
@@ -4915,7 +4809,7 @@ private class MemoryCarePlanDao : CarePlanDao {
     }
 }
 
-private class MemoryCustomItemDao : CustomItemDao {
+internal class MemoryCustomItemDao : CustomItemDao {
     private val rows = mutableListOf<CustomItemEntity>()
     private val ids = AtomicLong(1)
 
@@ -4981,7 +4875,7 @@ private class MemoryCustomItemDao : CustomItemDao {
     }
 }
 
-private class RecordingTransactionRunner : DatabaseTransactionRunner {
+internal class RecordingTransactionRunner : DatabaseTransactionRunner {
     var runCount = 0
 
     override suspend fun <T> run(block: suspend () -> T): T {
@@ -5442,7 +5336,7 @@ internal class MemoryMediaDao : MediaAssetDao {
     }
 }
 
-private class MemoryFamilyDao : FamilyDao {
+internal class MemoryFamilyDao : FamilyDao {
     private val rows = mutableListOf<FamilyEntity>()
     private val ids = AtomicLong(1)
 
