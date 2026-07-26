@@ -3,6 +3,7 @@ package com.lezi.babylog.feature.log
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.domain.DayChartCategories
 import com.lezi.babylog.domain.DayChartCategory
+import java.time.LocalDate
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -12,6 +13,60 @@ import org.junit.Test
  * segment keys, key decoding, and tip count = filterRecords size (not mark count).
  */
 class DayChartFilterWiringTest {
+
+    @Test
+    fun filterContext_changeClearsSelection_withoutRestoringPerBabyState() {
+        val day = LocalDate.of(2026, 7, 27)
+        val babyA = DayChartFilterContext(babyId = 101, day = day)
+        val babyB = DayChartFilterContext(babyId = 202, day = day)
+        var state = DayChartFilterState(context = babyA)
+
+        state = reduceDayChartFilter(state, DayChartFilterAction.Select("PEE"))
+        assertEquals(DayChartCategory.PEE, state.selection)
+
+        state = reduceDayChartFilter(state, DayChartFilterAction.ChangeContext(babyB))
+        assertNull(state.selection)
+
+        state = reduceDayChartFilter(state, DayChartFilterAction.Select("PEE"))
+        state = reduceDayChartFilter(state, DayChartFilterAction.ChangeContext(babyA))
+        assertNull(state.selection)
+
+        state = reduceDayChartFilter(state, DayChartFilterAction.Select("POOP"))
+        state = reduceDayChartFilter(
+            state,
+            DayChartFilterAction.ChangeContext(babyA.copy(day = day.plusDays(1))),
+        )
+        assertNull(state.selection)
+
+        state = reduceDayChartFilter(state, DayChartFilterAction.Select("MILK"))
+        state = reduceDayChartFilter(
+            state,
+            DayChartFilterAction.ChangeContext(DayChartFilterContext(babyId = null, day = day)),
+        )
+        assertNull(state.selection)
+    }
+
+    @Test
+    fun filterRefresh_sameContextPreservesExistingCategory_thenClearsWhenItDisappears() {
+        val context = DayChartFilterContext(
+            babyId = 101,
+            day = LocalDate.of(2026, 7, 27),
+        )
+        var state = DayChartFilterState(context = context)
+        state = reduceDayChartFilter(state, DayChartFilterAction.Select("PEE"))
+
+        state = reduceDayChartFilter(
+            state,
+            DayChartFilterAction.RefreshRecords(listOf(stubRecord(1, RecordType.PEE))),
+        )
+        assertEquals(DayChartCategory.PEE, state.selection)
+
+        state = reduceDayChartFilter(
+            state,
+            DayChartFilterAction.RefreshRecords(listOf(stubRecord(2, RecordType.POOP))),
+        )
+        assertNull(state.selection)
+    }
 
     @Test
     fun dayChartCategoryKey_mapsSingleCategoryTypes() {

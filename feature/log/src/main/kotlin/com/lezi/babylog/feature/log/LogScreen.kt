@@ -525,6 +525,47 @@ internal fun resolveDayChartSelection(selectedKey: String?): DayChartCategory? {
     return DayChartCategory.entries.firstOrNull { it.name == selectedKey }
 }
 
+internal data class DayChartFilterContext(
+    val babyId: Long?,
+    val day: LocalDate,
+)
+
+internal data class DayChartFilterState(
+    val context: DayChartFilterContext,
+    val selection: DayChartCategory? = null,
+)
+
+internal sealed interface DayChartFilterAction {
+    data class ChangeContext(val context: DayChartFilterContext) : DayChartFilterAction
+
+    data class Select(val categoryKey: String?) : DayChartFilterAction
+
+    data class RefreshRecords(val records: List<Record>) : DayChartFilterAction
+}
+
+internal fun reduceDayChartFilter(
+    state: DayChartFilterState,
+    action: DayChartFilterAction,
+): DayChartFilterState = when (action) {
+    is DayChartFilterAction.ChangeContext -> {
+        if (action.context == state.context) state
+        else DayChartFilterState(context = action.context)
+    }
+
+    is DayChartFilterAction.Select -> {
+        state.copy(selection = resolveDayChartSelection(action.categoryKey))
+    }
+
+    is DayChartFilterAction.RefreshRecords -> {
+        state.copy(
+            selection = DayChartCategories.reconcileSelection(
+                state.selection,
+                action.records,
+            ),
+        )
+    }
+}
+
 /** Legend swatch colors for day-chart categories (feature owns labels/keys; designsystem stays free of domain). */
 internal fun dayChartLegendColor(
     category: DayChartCategory,
@@ -568,23 +609,35 @@ fun LogRoute(
     val state by vm.uiState.collectAsStateWithLifecycle()
     var showMore by remember { mutableStateOf(false) }
     var publishChromeRecord by remember { mutableStateOf<PublishChromeTarget?>(null) }
-    // Page-level day-chart filter (temporary; cleared on day change via remember key).
-    var selectedDayChart by remember(state.day) {
-        mutableStateOf<DayChartCategory?>(null)
+    val dayChartContext = remember(state.baby?.id, state.day) {
+        DayChartFilterContext(babyId = state.baby?.id, day = state.day)
+    }
+    var dayChartFilterState by remember {
+        mutableStateOf(DayChartFilterState(context = dayChartContext))
     }
     val today = LocalDate.now()
     val zone = ZoneId.systemDefault()
     val ext = LeziThemeExt.colors
     val journal = LeziThemeExt.isJournal
-    // Reconcile after refresh/delete so a vanished category does not stick at 0 rows.
-    val dayChartFilter = remember(selectedDayChart, state.records) {
-        DayChartCategories.reconcileSelection(selectedDayChart, state.records)
+    val contextualDayChartFilterState = remember(dayChartFilterState, dayChartContext) {
+        reduceDayChartFilter(
+            dayChartFilterState,
+            DayChartFilterAction.ChangeContext(dayChartContext),
+        )
     }
-    LaunchedEffect(dayChartFilter, selectedDayChart) {
-        if (dayChartFilter != selectedDayChart) {
-            selectedDayChart = dayChartFilter
+    // Reconcile after refresh/delete so a vanished category does not stick at 0 rows.
+    val reconciledDayChartFilterState = remember(contextualDayChartFilterState, state.records) {
+        reduceDayChartFilter(
+            contextualDayChartFilterState,
+            DayChartFilterAction.RefreshRecords(state.records),
+        )
+    }
+    LaunchedEffect(reconciledDayChartFilterState) {
+        if (dayChartFilterState != reconciledDayChartFilterState) {
+            dayChartFilterState = reconciledDayChartFilterState
         }
     }
+    val dayChartFilter = reconciledDayChartFilterState.selection
     val timelineRecords = if (state.settings.timelineOrder == "oldest_first") {
         state.records.sortedBy(Record::timestamp)
     } else {
@@ -761,7 +814,10 @@ fun LogRoute(
                                 nowMinOfDay = nowMin,
                                 selectedCategoryKey = dayChartFilter?.name,
                                 onCategorySelect = { key ->
-                                    selectedDayChart = resolveDayChartSelection(key)
+                                    dayChartFilterState = reduceDayChartFilter(
+                                        reconciledDayChartFilterState,
+                                        DayChartFilterAction.Select(key),
+                                    )
                                 },
                                 legend = dayChartLegend,
                                 tipLabel = dayChartFilter?.label,

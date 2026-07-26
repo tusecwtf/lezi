@@ -10,7 +10,7 @@ Frontier count: 4
 ```text
 04 共享标记布局（in-progress：device smoke pending）
 
-05 baby-scoped 筛选（frontier）
+05 baby-scoped 筛选（in-progress：device smoke pending）
 
 06 membership/credential 正规化（frontier） ──► 01 权威记录作者 ──► 02 历史作者回填 ──► 03 家庭名 pull 收敛
 
@@ -27,7 +27,7 @@ Frontier count: 4
 | [02](./issues/02-historical-author-hydration.md) | 历史与建家前作者回填 | P1 #2 | 01 | M–L | ready-for-agent |
 | [03](./issues/03-family-name-pull-convergence.md) | 家庭名随 pull 跨设备收敛 | P2 #3 | 02, 07（交付排序） | M | ready-for-agent |
 | [04](./issues/04-shared-marker-layout-hit-test.md) | 绘制与命中共享标记布局 | P2 #4 | — | M | in-progress（device pending） |
-| [05](./issues/05-baby-scoped-day-chart-filter.md) | baby-scoped 日图筛选状态 | P2 #5 | — | S | ready-for-agent |
+| [05](./issues/05-baby-scoped-day-chart-filter.md) | baby-scoped 日图筛选状态 | P2 #5 | — | S | in-progress（device pending） |
 | [06](./issues/06-normalize-membership-credentials.md) | membership / credential 正规化 | P2 #6 | — | L | ready-for-agent |
 | [07](./issues/07-remove-invalid-join-aliases.md) | 删除必失败 Join 兼容别名 | P3 #7 | — | S | ready-for-agent |
 
