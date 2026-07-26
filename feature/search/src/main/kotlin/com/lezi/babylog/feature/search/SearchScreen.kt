@@ -37,11 +37,11 @@ import com.lezi.babylog.designsystem.RecordRow
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
-import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.formatClock
 import com.lezi.babylog.domain.relativeTimeLabel
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -54,32 +54,46 @@ data class SearchUi(
     val query: String = "",
     val results: List<Record> = emptyList(),
     val searching: Boolean = false,
+    val errorMessage: String? = null,
 )
 
 @HiltViewModel
 class SearchViewModel @Inject constructor(
-    private val careLog: CareLog,
+    private val repository: SearchRepository,
 ) : ViewModel() {
     private val query = MutableStateFlow("")
     private val results = MutableStateFlow<List<Record>>(emptyList())
     private val searching = MutableStateFlow(false)
+    private val errorMessage = MutableStateFlow<String?>(null)
     private var job: Job? = null
 
-    val ui = combine(query, results, searching) { q, r, s ->
-        SearchUi(q, r, s)
+    val ui = combine(query, results, searching, errorMessage) { q, r, s, error ->
+        SearchUi(q, r, s, error)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SearchUi())
 
     fun onQuery(q: String) {
         val limited = limitSearchQuery(q)
         query.value = limited
         job?.cancel()
+        errorMessage.value = null
         job = viewModelScope.launch {
             searching.value = true
-            delay(200)
-            val baby = careLog.getCurrentBaby()
-            results.value = if (baby == null) emptyList() else careLog.search(baby.id, limited)
-            searching.value = false
+            try {
+                delay(200)
+                results.value = repository.search(limited)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Throwable) {
+                errorMessage.value = SEARCH_ERROR_MESSAGE
+            } finally {
+                searching.value = false
+            }
         }
+    }
+
+    fun retry() {
+        val currentQuery = query.value
+        if (currentQuery.isNotBlank()) onQuery(currentQuery)
     }
 }
 
@@ -127,6 +141,16 @@ fun SearchRoute(
                         modifier = Modifier.padding(top = LeziSpacing.Md),
                     )
                 }
+                ui.errorMessage != null -> {
+                    StateContainer(
+                        kind = StateKind.Error,
+                        title = "暂时无法搜索",
+                        message = ui.errorMessage.orEmpty(),
+                        modifier = Modifier.padding(top = LeziSpacing.Md),
+                        actionLabel = "重试",
+                        onAction = vm::retry,
+                    )
+                }
                 ui.results.isEmpty() -> {
                     StateContainer(
                         kind = StateKind.Empty,
@@ -164,6 +188,7 @@ fun SearchRoute(
 
 private const val MAX_SEARCH_QUERY_CODE_POINTS = 100
 private const val SEARCH_QUERY_PREVIEW_CODE_POINTS = 30
+private const val SEARCH_ERROR_MESSAGE = "搜索失败，请重试"
 
 internal fun limitSearchQuery(value: String, maxCodePoints: Int = MAX_SEARCH_QUERY_CODE_POINTS): String {
     if (value.codePointCount(0, value.length) <= maxCodePoints) return value
