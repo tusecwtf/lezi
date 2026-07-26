@@ -1,0 +1,219 @@
+package com.lezi.babylog.feature.timer
+
+import android.content.Context
+import android.content.Intent
+import android.os.SystemClock
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.lezi.babylog.core.common.newClientUuid
+import com.lezi.babylog.core.common.productUiError
+import com.lezi.babylog.core.datastore.SettingsStore
+import com.lezi.babylog.domain.CareLog
+import com.lezi.babylog.domain.FeedReminderPort
+import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
+import java.util.concurrent.atomic.AtomicBoolean
+import javax.inject.Inject
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+
+@HiltViewModel
+class TimerViewModel @Inject constructor(
+    private val careLog: CareLog,
+    private val settings: SettingsStore,
+    private val nextFeed: FeedReminderPort,
+    @ApplicationContext private val app: Context,
+) : ViewModel() {
+    private val _state = MutableStateFlow(TimerState())
+    val state: StateFlow<TimerState> = _state
+    private val completionInFlight = AtomicBoolean(false)
+    /** Serializes L/R toggles so concurrent launches cannot clobber either side. */
+    private val toggleMutex = Mutex()
+    val timeStepMin = settings.settings
+        .map { it.timeStepMin }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 1)
+    val timePickerStyle = settings.settings
+        .map { it.timePickerStyle }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "dropdown")
+    val preferredHand = settings.settings
+        .map { it.preferredHand }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "right")
+
+    init {
+        viewModelScope.launch {
+            toggleMutex.withLock {
+                val restored = TimerState.fromJson(
+                    raw = settings.nursingTimerJson.first(),
+                    nowBootCount = currentBootCount(app),
+                )
+                val ready = restored.withStableCompletionId()
+                if (ready != restored) {
+                    settings.setNursingTimerJson(
+                        ready.toJson(savedBootCount = currentBootCount(app)),
+                    )
+                }
+                _state.value = ready
+                // A restored running snapshot is deliberately frozen by fromJson; reconcile any
+                // surviving service notification with that authoritative paused state.
+                updateService(ready)
+            }
+        }
+    }
+
+    private suspend fun persist(s: TimerState) {
+        settings.setNursingTimerJson(
+            if (!s.hasTimerData()) {
+                null
+            } else {
+                s.toJson(savedBootCount = currentBootCount(app))
+            },
+        )
+        _state.value = s
+        updateService(s)
+    }
+
+    private fun updateService(s: TimerState) {
+        val running = s.leftRunning || s.rightRunning
+        val intent = Intent(app, NursingTimerService::class.java)
+        if (running) {
+            val snapshotElapsed = SystemClock.elapsedRealtime()
+            intent.action = NursingTimerService.ACTION_UPDATE
+            intent.putExtra(NursingTimerService.EXTRA_LEFT_MS, s.leftMs(snapshotElapsed))
+            intent.putExtra(NursingTimerService.EXTRA_RIGHT_MS, s.rightMs(snapshotElapsed))
+            intent.putExtra(NursingTimerService.EXTRA_LEFT_RUNNING, s.leftRunning)
+            intent.putExtra(NursingTimerService.EXTRA_RIGHT_RUNNING, s.rightRunning)
+            intent.putExtra(NursingTimerService.EXTRA_SNAPSHOT_ELAPSED, snapshotElapsed)
+            ContextCompat.startForegroundService(app, intent)
+        } else {
+            app.stopService(Intent(app, NursingTimerService::class.java))
+        }
+    }
+
+    fun toggleLeft() {
+        viewModelScope.launch {
+            toggleMutex.withLock {
+                val now = SystemClock.elapsedRealtime()
+                val wall = System.currentTimeMillis()
+                val cur = _state.value
+                val babyIdForStart = if (!cur.leftRunning && cur.babyId == null) {
+                    careLog.getCurrentBaby()?.id ?: return@withLock
+                } else {
+                    null
+                }
+                val next = cur.withToggleLeft(
+                    nowElapsed = now,
+                    nowWall = wall,
+                    babyIdForStart = babyIdForStart,
+                    completionClientUuidForStart = cur.completionClientUuid ?: newClientUuid(),
+                ) ?: return@withLock
+                persist(next)
+            }
+        }
+    }
+
+    fun toggleRight() {
+        viewModelScope.launch {
+            toggleMutex.withLock {
+                val now = SystemClock.elapsedRealtime()
+                val wall = System.currentTimeMillis()
+                val cur = _state.value
+                val babyIdForStart = if (!cur.rightRunning && cur.babyId == null) {
+                    careLog.getCurrentBaby()?.id ?: return@withLock
+                } else {
+                    null
+                }
+                val next = cur.withToggleRight(
+                    nowElapsed = now,
+                    nowWall = wall,
+                    babyIdForStart = babyIdForStart,
+                    completionClientUuidForStart = cur.completionClientUuid ?: newClientUuid(),
+                ) ?: return@withLock
+                persist(next)
+            }
+        }
+    }
+
+    internal fun freezeCompletion(
+        initialNote: String = "",
+        initialAmountMl: String = "",
+    ): NursingCompletionDraft = freezeNursingCompletion(
+        state = _state.value,
+        nowElapsed = SystemClock.elapsedRealtime(),
+        clickedAt = System.currentTimeMillis(),
+        initialNote = initialNote,
+        initialAmountMl = initialAmountMl,
+    )
+
+    internal fun complete(
+        draft: NursingCompletionDraft,
+        onDone: () -> Unit,
+        onError: (String) -> Unit,
+    ) {
+        if (!completionInFlight.compareAndSet(false, true)) return
+        viewModelScope.launch {
+            try {
+                draft.validationError(System.currentTimeMillis())?.let {
+                    onError(it)
+                    return@launch
+                }
+                toggleMutex.withLock {
+                    val stableState = _state.value.withStableCompletionId()
+                    if (stableState != _state.value) persist(stableState)
+                    val babyId = stableState.babyId ?: careLog.getCurrentBaby()?.id
+                    if (babyId == null) {
+                        onError("请先添加宝宝")
+                        return@launch
+                    }
+                    val completionClientUuid = requireNotNull(stableState.completionClientUuid) {
+                        "计时会话尚未准备好，请重试"
+                    }
+                    val command = draft.toCommand()
+                    val recordMode = settings.settings.first().recordAtStartOrEnd
+                    careLog.completeNursing(
+                        babyId = babyId,
+                        leftMin = command.leftMin,
+                        rightMin = command.rightMin,
+                        order = command.order,
+                        amountMl = command.amountMl,
+                        note = command.note,
+                        startedAt = command.startedAt,
+                        endedAt = command.endedAt,
+                        recordMode = recordMode,
+                        completionClientUuid = completionClientUuid,
+                    )
+                    // Await the DataStore clear. If the process dies before it commits, replay uses
+                    // the same completionClientUuid and CareLog returns the existing record.
+                    persist(TimerState())
+                }
+                onDone()
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (throwable: Throwable) {
+                onError(productUiError(throwable, "保存失败"))
+            } finally {
+                completionInFlight.set(false)
+            }
+        }
+    }
+
+    internal fun scheduleReminder(atMillis: Long?, onResult: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            onResult(runCatching { nextFeed.scheduleAfterFeed(atMillis) }.isSuccess)
+        }
+    }
+
+    fun clear(onCleared: () -> Unit = {}) {
+        viewModelScope.launch {
+            toggleMutex.withLock { persist(TimerState()) }
+            onCleared()
+        }
+    }
+}
