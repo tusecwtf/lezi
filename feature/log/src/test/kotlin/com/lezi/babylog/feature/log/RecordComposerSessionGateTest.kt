@@ -45,8 +45,6 @@ class RecordComposerSessionGateTest {
 
     @Test
     fun importPhotosSuccessOnlyAppliesWhileSessionActive() {
-        // Mirrors RecordComposer.importPhotos: post-import draft updates go
-        // through deliver so a closed/switched sheet cannot append photos.
         val gate = RecordComposerSessionGate()
         val importSession = gate.open()
         val photos = mutableListOf<String>()
@@ -71,7 +69,7 @@ class RecordComposerSessionGateTest {
     fun importPhotosErrorDoesNotPolluteNewSession() {
         val gate = RecordComposerSessionGate()
         val oldSession = gate.open()
-        gate.open() // user switched type / reopened sheet
+        gate.open()
         var error: String? = null
 
         assertFalse(
@@ -84,8 +82,6 @@ class RecordComposerSessionGateTest {
 
     @Test
     fun savePostWriteUiOnlyRunsInsideMatchingDeliver() {
-        // Mirrors RecordComposer.save: sourcePhotos mark + onSaved only when
-        // the request that started the write is still current (ISS-005).
         val gate = RecordComposerSessionGate()
         val saveSession = gate.open()
         var sourcePhotos: List<String> = emptyList()
@@ -99,7 +95,6 @@ class RecordComposerSessionGateTest {
         assertEquals(listOf("/cache/kept.jpg"), sourcePhotos)
         assertEquals("已记录笔记", savedMessage)
 
-        // Late success after close must not side-write the next draft.
         val nextSession = gate.open()
         sourcePhotos = listOf("/cache/next-draft.jpg")
         savedMessage = null

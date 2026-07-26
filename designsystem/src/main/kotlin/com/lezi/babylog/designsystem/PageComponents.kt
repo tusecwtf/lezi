@@ -59,7 +59,7 @@ fun PageScaffoldBackground(content: @Composable BoxScope.() -> Unit) {
     )
 }
 
-/** Brand strip aligned to AppHeaderBar: 68dp coral fill, 乐 mark + tagline + tools. */
+/** Shared brand strip with optional search and theme actions. */
 @Composable
 fun AppBrandBar(
     onSearch: (() -> Unit)? = null,
@@ -67,7 +67,7 @@ fun AppBrandBar(
     dark: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    // Match AppHeaderBar surface + ink so account/menu top chrome lines up with log tabs.
+    // Keep account and menu chrome consistent with the main app header.
     val background = if (dark) MaterialTheme.colorScheme.surface else LeziColors.JournalAccent
     val content = if (dark) MaterialTheme.colorScheme.onSurface else Color(0xFF271015)
     Row(
@@ -125,7 +125,6 @@ fun AppBrandBar(
     }
 }
 
-/** Prototype context row: baby chip + day navigator. */
 @Composable
 fun AppContextRow(
     babyName: String,
@@ -236,7 +235,6 @@ fun AppContextRow(
     }
 }
 
-/** Large page title block matching prototype hero copy. */
 @Composable
 fun PageHero(
     eyebrow: String,

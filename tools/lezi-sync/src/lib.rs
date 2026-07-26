@@ -818,8 +818,8 @@ fn set_mode(path: &Path, mode: u32) -> Result<(), std::io::Error> {
     match fs::set_permissions(path, fs::Permissions::from_mode(mode)) {
         Ok(()) => Ok(()),
         Err(error) if is_compatible_permission_hardening_error(&error) => {
-            // Fail-closed by default (ISS-022 / F-D-11). NAS filesystems that
-            // cannot chmod must opt in via LEZI_ALLOW_PERMISSION_HARDENING_SKIP=1.
+            // Fail closed unless a NAS filesystem that cannot chmod is explicitly
+            // allowed via LEZI_ALLOW_PERMISSION_HARDENING_SKIP=1.
             if permission_hardening_skip_allowed() {
                 if !PERMISSION_HARDENING_DISABLED.swap(true, Ordering::AcqRel) {
                     tracing::warn!(

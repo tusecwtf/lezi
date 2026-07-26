@@ -508,7 +508,7 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health` 外均需 Bearer（`create`/`joi
 
 | 项 | 要求 |
 |----|------|
-| 服务器 | host+端口（空态预填 192.168.50.4:8765）+ SSID 白名单≤2（预填当前 SSID）；扫码可填入 baseUrl+code |
+| 服务器 | host+端口（空态预填 192.168.50.4:8765）+ SSID 白名单≤2（预填当前 SSID）；扫码可填入 host+port+code 与可选 SSID≤2 |
 | 文案 | 「仅在连接家庭 Wi‑Fi 且能访问家庭服务器时同步」 |
 | 文案 | 「不会在对方记录时推送通知；打开乐记后更新」 |
 | 下拉 | 记录页下拉 → 若 allowSync 则 pull+push |

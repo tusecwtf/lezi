@@ -27,7 +27,7 @@ class FamilyErrorCopyTest {
                 "同步失败",
             ),
         )
-        // Chinese + host/path must not bypass the filter (ISS-017 / F-C-004).
+        // Localized messages containing host or path details must still be filtered.
         assertEquals(
             "家庭同步服务暂未连接，请稍后重试",
             familySyncError(

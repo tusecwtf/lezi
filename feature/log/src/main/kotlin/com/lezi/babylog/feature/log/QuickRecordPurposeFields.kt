@@ -375,7 +375,6 @@ private fun ExcretionChoice(
 
 @Composable
 private fun SleepFields(draft: QuickRecordDraft) {
-    // No instructional copy / sleep-type chips — time fields + switch carry the action.
     Column(
         Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally,

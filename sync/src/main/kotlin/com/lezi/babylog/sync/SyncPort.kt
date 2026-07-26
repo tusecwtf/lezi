@@ -27,7 +27,7 @@ interface SyncPort {
     fun isEnabled(): Boolean
     fun requestSync(trigger: SyncTrigger)
     suspend fun saveServer(baseUrl: String): Result<Unit>
-    /** Persist host/port + SSID allowlist (max 2). Novice defaults applied in UI, not here. */
+    /** Persists the host, port, and up to two SSIDs; form defaults are not applied here. */
     suspend fun saveHomeLanConfig(config: HomeLanServerConfig): Result<Unit>
     suspend fun createFamily(displayName: String? = null): Result<SyncSession>
     suspend fun sync(trigger: SyncTrigger): Result<Unit>

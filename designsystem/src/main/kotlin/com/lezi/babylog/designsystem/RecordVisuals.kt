@@ -22,7 +22,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.PathParser
 
-/** Compose-native record glyphs derived from the original template-v2 SVG set. */
 enum class LeziRecordGlyph {
     Nursing,
     Bottle,

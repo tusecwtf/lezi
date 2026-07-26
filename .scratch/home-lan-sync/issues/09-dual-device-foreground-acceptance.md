@@ -1,98 +1,45 @@
 # 09 — 双机前台同步验收（家网）
 
-**Parent:** [../spec.md](../spec.md) · PRD `sync-home-lan` §5.4
-**Blocked by:** 04, 07, 08
-**Status:** partial — dual-emu formula/pee UI cross-visible；QR camera、日志图 UI、蜂窝、通知、独立设置待验
+**Parent:** [../spec.md](../spec.md) · PRD [`sync-home-lan.md`](../../../docs/prd/sync-home-lan.md) §5.4
+**Status:** partial
 
-## What to build
+## 已验证基线
 
-可重复的验收步骤（真机或模拟器 + NAS/compose），**不**验收息屏后台 60s。
+- 本机 rootless Docker：镜像、健康检查、单数据根、HTTP/媒体接口与旧数据兼容已验证。
+- 双模拟器本机路径：A formula 120ml → B 前台可见；B pee → A 前台可见。
+- 严格 live 路径（2026-07-25）：两台模拟器均使用
+  `http://192.168.50.4:8765`；服务端清空后 A 建家、B 输入邀请码加入；
+  formula/pee 双向协议记录通过；头像 owner 写入成功、member 被 403 拒绝。
+- 严格 live 汇总：11 pass、0 fail、4 env-blocked；token 未进入仓库。
 
-## 交付物
+这些结果不等于物理 NAS 生产部署、双真机或相机扫码已经验收。
 
-| 工程 | 验收记录（可写在本票 Comments 或 `docs/reviews/`） |
-| 用户可见 | 双机家庭日志一致（前台路径） |
+## 剩余 Must
 
-## 验收标准（Must）
+- [ ] A 建家，B 在同家 Wi‑Fi 上用相机扫描 QR 加入；当前只验证了输入邀请码。
+- [x] A 前台记 formula，B 回前台或下拉后可见。
+- [x] B 前台记 pee，A 回前台或下拉后可见。
+- [ ] 日志图在一端添加，另一端前台同步后在 UI 可见；协议字节链路已有自动化支撑。
+- [x] 头像仅 owner 可改；member 写入被拒。
+- [ ] 蜂窝网络不上传，回到已绑定家庭 Wi‑Fi 后 Outbox 冲刷。
+- [ ] 伴侣新记录不产生系统通知。
+- [ ] 深色等本机设置在两端保持独立。
+- [ ] 在目标物理 NAS 与双真机环境复跑上述路径并记录版本与结果。
 
-- [ ] A 建家，B 扫码加入（同家 Wi‑Fi + NAS） — 已通过双模拟器建家 + **输入邀请码**加入并留有 QR 截图；未执行相机扫码，且后端是本机 Docker、非 NAS 生产
-- [x] A 前台记 formula → B **回前台或下拉** 后可见 — dual-emu UI: A 配方奶 120ml + 立即同步; B after pull + 设为当前 family baby shows formula (`04-ui-cross`)
-- [x] B 前台记 pee → A 下拉可见 — dual-emu UI: B pee@18:42; A 尿 1次→2次 after 立即同步 (`04-ui-cross`)
-- [ ] 日志图：一端添加 → 另一端前台同步后可见 — live HTTP 已验证同家庭 metadata+bytes；本轮未执行设备 UI 添加与跨端可见
-- [x] 头像：仅 owner 可改；member 改被拒或 UI 不可用 — live HTTP member 403 / owner ok on device family (`04-backend`)
-- [ ] 蜂窝网络：不上传；回家 Wi‑Fi 打开 App 后 Outbox 冲刷 — **env-blocked** (no cellular toggle); unit: HomeNetworkPolicyTest + RealSyncPortTest.nonWifiStillSnapshots…
-- [ ] 无伴侣新记录系统通知 — **env-blocked** (cannot dual-device observe partner system notifications); SyncTriggerTest + UI copy 不会推送伴侣的新记录
-- [ ] Settings（深色等）两端可不同 — **env-blocked** (not dual-UI exercised); dark_mode is local SettingsDataStore (not sync entities); SyncPreferencesTest cited
+## 复验命令
+
+自动化支撑：
+
+```bash
+./gradlew :sync:test :feature:family:testDebugUnitTest
+cargo test --manifest-path tools/lezi-sync/Cargo.toml --locked
+```
+
+设备复验必须记录 App commit、APK SHA-256、服务端版本、两台设备、SSID 与目标地址；
+不得记录 family token、Authorization 或未脱敏的邀请凭证。设备环境无法提供时保持
+`partial`，不要用单元测试替代未执行的 Must。
 
 ## 明确不验收
 
-- [ ] ~~双方息屏 60s 内自动对齐~~（规格废止）
-
-## 不在本票范围
-
-- 自定义项/日程同步
-
-## Comments
-
-- 2026-07-25：Android fake backend 与服务端 ASGI 测试已覆盖对应协议与门闩，
-  但不能替代设备级验收。
-- 2026-07-25 **dual-path-09 runtime** — **Status → partial** (not done):
-  - Live dual-client HTTP against `http://127.0.0.1:8765` (container `lezi-sync`,
-    一家一栈) **18/18 PASS** (create/join, formula↔pee, log media bytes, avatar ACL).
-  - Client A/B were pure HTTP identities on the live container — **not** two physical phones.
-  - Single emulator `emulator-5554` configured `http://10.0.2.2:8765`, joined same family
-    via **输入邀请码** (not QR dual-phone), UI pulled `年年-dual`.
-  - Device-UI track also **partial**: account/family UI, base URL save, create-family
-    hit live server with **HTTP 409** (family already on volume), invite-code + scan UIs
-    shown; owner invite QR + dual-phone join **not** completed; no FATAL in logcat.
-  - Env blockers (left unchecked above): only one emulator; cannot toggle cellular vs
-    home Wi-Fi; cannot dual-device observe partner notifications or independent dark mode UI.
-  - Evidence dir: `docs/reviews/home-lan-sync-docker-acceptance-2026-07-25/`
-    - `09-dual-path/dual-path.json`, `09-dual-path/live-dual-http.json`
-    - `09-dual-path/ACCEPTANCE-NOTES.txt`, `09-dual-path/raw/dual-path-summary.txt`
-    - `09-dual-path/device/` (shots, dumps, device-notes.txt)
-    - `live-api.json`, `android-sync-tests.txt`
-    - device-ui track: `device-ui.md`, `device-ui/shots/`, `device-ui/logs/`
-  - Regression (supporting, not dual-phone): legacy server suite 26 passed/1 skipped;
-    Gradle `:sync:test` + `:feature:family:testDebugUnitTest` 103 tests pass
-    (`regression/regression-summary.md`).
-  - **Not claimed:** two physical phones, dual-device QR join, NAS production deploy,
-    cellular hardware gate, dual-device partner notification observation.
-- 2026-07-25 **device-family-dual-emu-09** — **Status remains partial**:
-  - Dual emulators: `emulator-5554` (owner, `lezi_api35`) + `emulator-5556`
-    (member, cloned `lezi_api35_b`); debug APK installed, `pm clear`, MainActivity both.
-  - Volume wipe + healthy `lezi-sync:0.1.0` on `:8765`; backend smoke left server empty;
-    A UI **新建家庭** → family `51d1cdf6-b106-4be4-bbf8-d74de90234a0`, invite
-    **`TBAYSUCVKNTU`** + QR shots; B UI **输入邀请码** join as **Member** (invite reuse 409).
-  - UI cross: A formula 120ml → B visible after 立即同步 + family-baby **设为当前**;
-    B pee@18:42 → A 尿 **1→2次** after 立即同步. Final DB both formula=2 pee=2. No FATAL.
-  - Protocol-verify on **same** device family: **22/22** (formula↔pee, log media, avatar ACL,
-    401/403). Tokens recovered via `run-as` then **REDACTED** in evidence.
-  - Ops notes: first create/join hit HomeNetworkPolicy Wi‑Fi/health gate (force-stop retry);
-    dual-emu `10.0.2.2` flaky under AndroidWifi — offline DataStore `sync_base_url` rewrite
-    to host-reachable IP for UI cross (joined UI hides URL).
-  - Evidence root: `docs/reviews/device-family-dual-emu-09/`
-    - `REPORT.md`, `summary.json`
-    - `00-reset/`, `01-devices/`, `02-owner/`, `02-backend-smoke/`, `03-join/`,
-      `04-backend/`, `04-ui-cross/`
-  - **Still unchecked:** camera QR E2E；日志图跨端 UI；cellular hardware gate；
-    partner system notifications；independent dual-device dark mode UI。
-  - **Not claimed:** two physical phones; dual-device **camera** QR scan E2E; NAS production;
-    background 60s sync.
-
-- 2026-07-25 **home-lan-live-emu-192.168.50.4** — **Status remains partial**:
-  - Live `http://192.168.50.4:8765`: health 200 (0.2.2); unauth pull 401; create **409** occupied (一家一栈).
-  - Dual-emu create/join/cross-sync ran on host empty `lezi-sync :18765` + `adb reverse` → app URL `http://127.0.0.1:18765` (documented deviation).
-  - A Owner create + invite-code; B Member join same family `75e3ea5c-…`.
-  - Bidirectional UI after 立即同步: both show `2 条记录` with `120ml · cross-sync-A-formula-ui` and `尿量中 · cross-sync-B-pee`.
-  - Avatar ACL protocol on same family: owner 200, member 403.
-  - Evidence: `docs/reviews/home-lan-live-emu-192.168.50.4-2026-07-25/` (`REPORT.md`, `summary.json`, `results.json`).
-  - **Still unchecked:** camera QR E2E; 日志图 UI cross; cellular; partner notif; dual dark UI.
-  - **Not claimed:** exclusive dual-emu create on live 192.168.50.4; physical phones; NAS production wipe.
-
-- 2026-07-25 **home-lan-live STRICT** after wipe:
-  - Live empty create OK; dual-emu apps URL **http://192.168.50.4:8765**.
-  - A Owner 新建家庭 → family `08d1ed76-…`; invite-code; B Member 已加入.
-  - Protocol bidirectional formula/pee True; avatar owner 200 / member 403 on live.
-  - Evidence refreshed: `docs/reviews/home-lan-live-emu-192.168.50.4-2026-07-25/`.
-  - Residual env-blocked unchanged (QR camera, cellular, partner notif, dual dark).
+- 息屏后台 60 秒自动对齐。
+- P2P、公网强制云、伴侣逐条推送。

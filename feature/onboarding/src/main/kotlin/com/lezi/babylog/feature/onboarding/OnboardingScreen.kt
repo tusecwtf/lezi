@@ -213,7 +213,7 @@ fun OnboardingRoute(
         if (payload.isEmpty()) return
         joinCode = payload
         formError = null
-        // QR carries host/port + optional home Wi‑Fi names for novice prefill.
+        // Prefill host, port, and optional SSIDs; persist them only after join succeeds.
         runCatching { InvitePayloadCodec.decode(payload) }.getOrNull()?.let { decoded ->
             val config = decoded.homeLanConfig
             if (config.host.isNotBlank()) {

@@ -134,9 +134,9 @@ class CareLog @Inject constructor(
     private val transactionRunner: DatabaseTransactionRunner,
 ) {
     /**
-     * Serializes every local mutation that can change the active-sleep row.
-     * Room transactions provide atomic writes; this lock also makes the
-     * read-check-write sequence deterministic inside this process.
+     * Serializes record create, update, delete, and confirm operations that may
+     * change active sleep state. Room transactions provide atomic writes; this
+     * lock makes read-check-write sequences deterministic inside this process.
      */
     private val sleepMutationMutex = Mutex()
 
@@ -993,7 +993,6 @@ class CareLog @Inject constructor(
     private fun normalizeNickname(raw: String): String =
         raw.trim().ifBlank { "年年" }
 
-    /** Grams; reject non-positive or absurd values as null. */
     private fun normalizeBirthWeightGrams(grams: Int?): Int? {
         val g = grams ?: return null
         return g.takeIf { it in 500..9_000 }
@@ -1223,7 +1222,10 @@ fun formatClock(timestamp: Long, zone: ZoneId = ZoneId.systemDefault()): String 
     return "%02d:%02d".format(t.hour, t.minute)
 }
 
-/** Candidate ml values for formula/pumped UI: step multiples 30…300, last exact inserted. */
+/**
+ * Formula/pumped UI values from 30 through 300 at step-sized intervals, plus a
+ * missing positive last value.
+ */
 fun amountCandidates(step: Int, lastMl: Int?): List<Int> {
     val s = step.coerceAtLeast(1)
     val base = (30..300 step s).toMutableList()

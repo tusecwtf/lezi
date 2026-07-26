@@ -333,7 +333,6 @@ private fun SleepMoonCap(
         }
         val seamStart = pointOnSeam(seamStartAngle)
         val seamEnd = pointOnSeam(seamStartAngle + seamSweep)
-        // Peak raised toward y≈1 so the hat reads taller above the avatar crown.
         val cap = Path().apply {
             moveTo(seamStart.x, seamStart.y)
             cubicTo(

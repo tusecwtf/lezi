@@ -23,19 +23,21 @@ out/
 keystore.properties
 *.jks
 *.keystore
+.pytest_cache/
+**/.pytest_cache/
 
-# Sync server runtime (db + media under tools/sync-server/data)
-tools/sync-server/data/
-tools/sync-server/*.db
-tools/sync-server/*.db-wal
-tools/sync-server/*.db-shm
+# Generated review and research artifacts
+/.grok/
+/docs/reviews/
+/docs/research/
+/docs/prd/visual-refs/
+/design/assets/app-icon-candidates/
+/.scratch/**/shots/
+/.scratch/**/dumps/
+/.scratch/**/logs/
 
-# lezi-sync local runtime / venv (also tools/lezi-sync/.gitignore)
-tools/lezi-sync/.venv/
+# lezi-sync local runtime (also tools/lezi-sync/.gitignore)
 tools/lezi-sync/data*/
 tools/lezi-sync/*.db
 tools/lezi-sync/*.db-wal
 tools/lezi-sync/*.db-shm
-
-# accidental local dump
-sys,re

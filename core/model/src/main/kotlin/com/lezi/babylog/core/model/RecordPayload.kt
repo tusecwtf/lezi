@@ -223,7 +223,7 @@ data class RecordPayloadDraft(
  * The only module allowed to translate between storage JSON and typed payloads.
  *
  * Schema v1 and v2 are read compatibly. Future and malformed documents remain
- * [UnknownPayload] and encode back to their original bytes.
+ * [UnknownPayload] and encode back to their original JSON text.
  */
 object RecordPayloadCodec {
     private val json = Json {

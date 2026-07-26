@@ -154,7 +154,6 @@ fun SummaryMetric(
     modifier: Modifier = Modifier,
     icon: (@Composable () -> Unit)? = null,
 ) {
-    // Prototype glance-card: soft tinted surface, icon, strong value, muted label.
     val bg = toneBg(tone)
     Surface(
         modifier = modifier.heightIn(min = 82.dp),

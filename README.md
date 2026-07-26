@@ -4,8 +4,6 @@
 包名：`com.lezi.babylog` · minSdk 26 · targetSdk 35 · 显示名「乐记」 · version `0.2.3`
 
 产品规格：[`docs/prd/`](docs/prd/)
-设计同步：[`design/README.md`](design/README.md) · 原型快照 [`prototype/`](prototype/)
-Open Design 项目：`leji-prd-prototype`（禁止 `nuanya-baby-tracker`）
 
 ## 环境
 
@@ -72,7 +70,6 @@ Android 模拟器调试本机服务时，在账户页手动填写
 
 | 层 | 路径 |
 |----|------|
-| Tokens JSON | `design/tokens.json` |
 | Compose tokens | `designsystem/Tokens.kt` · `Theme.kt` |
 | 通用组件 | `designsystem/Components.kt` |
 | Preview 基线 | `designsystem/ComponentPreviews.kt`（390×844） |

@@ -37,8 +37,8 @@ import kotlinx.coroutines.withContext
 /**
  * Shared baby avatar surface.
  *
- * Photos are square app-private files and are always shown with the prototype's
- * circular crop. Missing or unreadable files fall back to the baby's initial.
+ * Photos are square app-private files and are always shown with a circular crop.
+ * Missing or unreadable files fall back to the baby's initial.
  */
 @Composable
 fun BabyAvatar(

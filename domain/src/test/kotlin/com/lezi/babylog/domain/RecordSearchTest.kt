@@ -6,7 +6,7 @@ import org.junit.Test
 /**
  * Locks the SQL-facing search helpers that production [CareLog.search] feeds
  * into Room `LIKE … ESCAPE '\'`. These pure tests are the JVM stand-in for
- * real DAO semantics (F-F-01 / ISS-025) without requiring instrumented Room.
+ * real DAO semantics without requiring instrumented Room.
  */
 class RecordSearchTest {
 
@@ -59,7 +59,6 @@ class RecordSearchTest {
         assertThat("30分钟".payloadSearchNeedle()).isEqualTo("30")
         assertThat("30分".payloadSearchNeedle()).isEqualTo("30")
         assertThat("50cm".payloadSearchNeedle()).isEqualTo("50")
-        // No known suffix — needle is the full query (lowercased by caller).
         assertThat("布洛芬".payloadSearchNeedle()).isEqualTo("布洛芬")
         assertThat("ml".payloadSearchNeedle()).isEqualTo("ml")
         // Bare unit-only after strip would be empty → keep original.
@@ -85,7 +84,6 @@ class RecordSearchTest {
 
     @Test
     fun typeTermMatchesQuery_latinAliasUsesPrefixNotMidSubstring() {
-        // ISS-030: short Latin queries must not hit mid-alias ("e" ⊂ "pee").
         assertThat(typeTermMatchesQuery("pee", "e")).isFalse()
         assertThat(typeTermMatchesQuery("sleep", "e")).isFalse()
         assertThat(typeTermMatchesQuery("formula", "a")).isFalse()

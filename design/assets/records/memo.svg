@@ -1,6 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-  <!-- memo · 备注 -->
-  <path d="M7 4.5h7.5L18.5 8.5V18c0 .8-.7 1.5-1.5 1.5H7c-.8 0-1.5-.7-1.5-1.5V6c0-.8.7-1.5 1.5-1.5z"/>
-  <path d="M14.5 4.5V8h3.5"/>
-  <path d="M9 12h6M9 15.5h5"/>
-</svg>

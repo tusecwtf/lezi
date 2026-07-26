@@ -1,62 +1,15 @@
-# Spec: 家庭局域网同步（Home LAN Sync）
+# Spec: 家庭局域网同步设备验收
 
-Status: implementation-complete; docker-01 runtime done (rootless, not NAS prod); 09 partial (dual-emu formula/pee UI path proven; remaining device Must pending)
+Status: implementation-complete; Ticket 09 partial
 Feature: home-lan-sync
-Product: 乐记 (`com.lezi.babylog`)
-Prerequisite: V1 本地记账可用；账户页入口存在
-Source: **[`docs/prd/sync-home-lan.md`](../../docs/prd/sync-home-lan.md)**（权威）
-Supersedes: `.scratch/v2-delivery` 中同步相关票 01–03 的「公网/后台 60s」假设
+Authority: [`docs/prd/sync-home-lan.md`](../../docs/prd/sync-home-lan.md)
 
----
+Android `:sync`、家庭 UI、Outbox、媒体链路和 Rust `tools/lezi-sync` 已实现并有自动化覆盖。
+本机 Docker 运行与双模拟器前台 formula/pee UI 交叉可见已验证；严格使用
+`http://192.168.50.4:8765` 的服务端也已完成建家、邀请码加入、双向协议记录和头像 ACL。
 
-## Problem Statement
+剩余工作仅是目标环境中的设备级验收：相机扫码、日志图跨端 UI、蜂窝离家与回家冲刷、
+伴侣通知观察、双端独立设置，以及物理 NAS/双真机部署路径。不得把协议测试或模拟器结果
+写成这些设备场景已经通过。
 
-家庭需要同一份育儿日志，但不接受公网强制云、后台常醒同步、伴侣逐条推送。
-已锁定方案：**NAS 中心化 + 硬家庭 Wi‑Fi + 仅前台 + 邀请码/family token**。
-交付实现位于 Android `:sync` / `:feature:family` 与
-`tools/lezi-sync/`：已覆盖 token、家网门闩、前台触发、Outbox、
-媒体字节及规格 API。
-
----
-
-## Solution
-
-1. NAS 部署 **`lezi-sync`**（Rust + Axum + Tokio + SQLite，Docker 单卷 `DATA_DIR` = db + media）
-2. Android：`HomeNetworkPolicy` + 持久化 `baseUrl`/token/cursor；**无内置默认地址**；QR 可带 baseUrl+code
-3. 触发：回前台、下拉、前台写成功 push；**无**后台轮询、**无**推送拉同步
-4. 同步域首版：**Baby + Record + 日志 MediaAsset**；头像仅 owner 可改
-5. 冲突：client_uuid 幂等 + updated_at LWW + tombstone
-
-### Seams
-
-| Seam | 职责 |
-|------|------|
-| **CareLog / Outbox** | 本地写立刻成功并标记 dirty；同步触发将 baby/record/media 快照入队 |
-| **SyncPort** | create/invite/join/leave/push/pull/media；尊重门闩 |
-| **HomeNetworkPolicy** | Wi‑Fi + health → allowSync |
-| **lezi-sync** | 家庭服务器权威副本 |
-
-### Explicit non-goals
-
-- P2P、后台 60s SLA、伴侣记录推送、公网默认云、字段级 ACL、CustomItem/Calendar 同步（后置）
-
----
-
-## Acceptance (feature-level)
-
-见 [ISSUES.md](./ISSUES.md) 关键路径末票与各票 Must。产品验收表：`sync-home-lan.md` §5.4。
-
-### 交付状态（2026-07-25）
-
-- Android 与服务端实现、单元/API 自动化测试已完成（含 Cargo 与 Gradle 模块回归）。
-- **Rust migration local acceptance passed**：`lezi-sync:0.2.0` 为 29.7 MB
-  非 root 镜像；完整 HTTP/媒体 smoke 通过；旧 `0.1.0` 写入的数据卷由
-  `0.2.0` 原位读取，owner token、family 与 cursor 兼容。物理 NAS 上线仍需
-  明确远端目标。证据：
-  `docs/reviews/home-lan-sync-rust-migration-2026-07-25/REPORT.md`。
-- **01 Docker runtime done（本机 rootless Docker）**：镜像存在；`lezi-sync` 健康于
-  `:8765`；单卷 `lezi-sync-data` 含 `lezi.db` + `media/`；`/health` 200 + version。
-  **未**宣称 NAS 生产部署。证据：`docs/reviews/home-lan-sync-docker-acceptance-2026-07-25/01-docker/`。
-- **09 partial**：双模拟器已验证建家、输入邀请码加入与 formula/pee 双向 UI 可见；
-  live HTTP 协议覆盖日志媒体和头像 ACL。相机扫码、日志图跨端 UI、蜂窝硬件门闩、
-  伴侣通知和独立设置仍未验收。证据：`docs/reviews/device-family-dual-emu-09/`。
+唯一活动票：[09 — 双机前台同步验收](./issues/09-dual-device-foreground-acceptance.md)。

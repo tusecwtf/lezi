@@ -3,7 +3,7 @@ package com.lezi.babylog.domain
 /**
  * SQLite-style `LIKE` matcher with `ESCAPE '\'` for unit tests that cannot
  * host Room. Mirrors the production `searchCandidates` contract so fake DAOs
- * and pure pattern tests share one semantics surface (F-F-01 / ISS-025).
+ * and pure pattern tests share one semantics surface.
  *
  * Rules (SQLite defaults used by Room on Android):
  * - `%` matches any sequence (including empty)

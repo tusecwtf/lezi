@@ -1,6 +1,6 @@
 package com.lezi.babylog.core.ui
 
-/** Shared Compose UI helpers across features. */
+/** Stable semantics tags shared by Compose UI tests. */
 object UiTags {
     const val ROOT = "lezi_root"
     const val ONBOARDING = "lezi_onboarding"

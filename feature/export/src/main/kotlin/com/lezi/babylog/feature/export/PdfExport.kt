@@ -52,7 +52,6 @@ object PdfExport {
                 canvas = page.canvas
                 y = 48f
             }
-            // crude wrap
             var rest = line
             while (rest.isNotEmpty()) {
                 val count = paint.breakText(rest, true, pageWidth - 80f, null)
@@ -107,8 +106,6 @@ object PdfExport {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         context.startActivity(Intent.createChooser(send, "分享 PDF"))
-        // Lazy cleanup residual: remove this PDF shortly after share so cache is not retained
-        // indefinitely when the user never exports again (ISS-020).
         scheduleExportCleanup(context, file)
     }
 
@@ -143,7 +140,6 @@ object PdfExport {
         Handler(Looper.getMainLooper()).postDelayed({
             runCatching {
                 if (file.exists()) file.delete()
-                // Also sweep any other leftover export files under cache/export.
                 clearExportCache(exportCacheDir(appContext))
             }
         }, CLEANUP_DELAY_MS)

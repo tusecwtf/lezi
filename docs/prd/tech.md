@@ -74,11 +74,10 @@
 
 计时状态落 `core`/`domain`，避免 log ↔ timer 循环依赖。
 
-**运行环境 / 验收证据**：本机 Docker `lezi-sync` 与双模拟器前台交叉可见路径已有
-reviews 证据（见主 PRD 与
-[`docs/reviews/home-lan-sync-docker-acceptance-2026-07-25/`](../reviews/home-lan-sync-docker-acceptance-2026-07-25/)、
-[`docs/reviews/device-family-dual-emu-09/`](../reviews/device-family-dual-emu-09/)）。
-物理 NAS / 双真机 / 相机扫码仍 open。
+**运行环境 / 验收状态**：本机 Docker `lezi-sync` 与双模拟器前台交叉可见路径已验证；
+严格 live 服务端路径还完成了建家、邀请码加入、双向协议和头像 ACL。物理 NAS 生产、
+双真机和相机扫码仍 open，详见
+[Ticket 09](../../.scratch/home-lan-sync/issues/09-dual-device-foreground-acceptance.md)。
 
 ---
 
@@ -93,7 +92,7 @@ UI 事件
         → push；回前台/下拉 → pull + 媒体字节
 ```
 
-实现无后台同步、无推送拉同步；单一 host:port + 本机 SSID 白名单≤2 为门闩；空态 UI 预填 `192.168.50.4:8765` 与当前 SSID（QR 可带 baseUrl）。
+实现无后台同步、无推送拉同步；单一 host:port + 本机 SSID 白名单≤2 为门闩；空态 UI 预填 `192.168.50.4:8765` 与当前 SSID，邀请 QR 可带 host、port、code 与最多两个 SSID。
 未配置时为 `Disabled`，离线/非家网写入仍先落 Room 并保留待同步状态。
 
 计时器：
@@ -149,7 +148,7 @@ UI 事件
 
 > **V2 同步策略（2026-07-25）**：中心化 NAS、硬家网、仅前台、无即时通知；
 > **不做**后台 60s 对齐。实现与自动化已完成；本机 Docker 与双模拟器前台
-> formula/pee 交叉可见已有 reviews 证据。物理 NAS / 双真机 / 相机扫码仍 open。
+> formula/pee 交叉可见已验证。物理 NAS / 双真机 / 相机扫码仍 open。
 
 ---
 

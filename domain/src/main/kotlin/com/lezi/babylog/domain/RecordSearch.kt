@@ -97,7 +97,7 @@ internal fun RecordType.candidateSearchTerms(): List<String> = searchTerms() + w
 }
 
 /**
- * Type-alias match for search (ISS-030 / F-A-07).
+ * Type-alias matching rules for search.
  *
  * Latin-only aliases (`pee`, `sleep`, `formula`, …) match by prefix / whole
  * term, multi-word token, or when the **query is longer than the term** and

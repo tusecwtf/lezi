@@ -912,7 +912,6 @@ class RealSyncPort @Inject constructor(
             }
         }
         deletedLocalUris.forEach { mediaFiles.delete(it) }
-        // The applied batch must belong to the joined session that authorized its media.
         check(session.isJoined)
     }
 

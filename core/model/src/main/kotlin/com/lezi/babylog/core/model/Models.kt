@@ -1,6 +1,6 @@
 package com.lezi.babylog.core.model
 
-/** Domain-facing models (no Android / Room types). */
+/** Domain-facing baby profile without Android or Room types. */
 
 data class Baby(
     val id: Long = 0,
@@ -83,7 +83,7 @@ data class SettingsLocal(
     val nursingIntervalMin: Int = 180,
     val nextFeedAt: Long? = null,
     val darkMode: String = "system",
-    /** "warm" = original card template; "journal" = compact logbook template. */
+    /** "warm" = card template; "journal" = compact logbook template. */
     val visualStyle: String = "warm",
     /** Preferred thumb side for the shared one-handed action dock: "left" or "right". */
     val preferredHand: String = "right",

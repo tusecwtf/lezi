@@ -12,10 +12,8 @@ import javax.inject.Singleton
 /**
  * At-rest store for the long-lived family Bearer token.
  *
- * Production uses Keystore-backed [EncryptedSharedPreferences]. Unit tests inject
- * [InMemorySecureFamilyTokenStore]. Device-level Keystore + EncryptedSharedPreferences
- * smoke belongs in androidTest when an instrumented suite is available (Robolectric
- * does not fully emulate Android Keystore AES-GCM MasterKey on all CI images).
+ * Production uses Keystore-backed [EncryptedSharedPreferences]; JVM tests inject
+ * [InMemorySecureFamilyTokenStore].
  */
 interface SecureFamilyTokenStore {
     fun getToken(): String

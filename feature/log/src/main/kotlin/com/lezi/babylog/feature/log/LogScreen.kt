@@ -238,7 +238,6 @@ private fun buildLanes(records: List<Record>, dayStart: Long, dayEnd: Long): Lan
             RecordType.FORMULA, RecordType.NURSING, RecordType.PUMPED_FEED,
             RecordType.PUMP_EXPRESS,
             -> {
-                // Point-in-time mark: keep start==end so UI draws a pin, not a fake duration bar.
                 val startMin = mins(startMs)
                 val title = r.type.presentation.label
                 val detail = buildString {
@@ -272,7 +271,6 @@ private fun buildLanes(records: List<Record>, dayStart: Long, dayEnd: Long): Lan
             -> {
                 val startMin = mins(startMs)
                 val notePart = r.note?.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
-                // 尿尿=绿点，便便=黄点；「尿+便」同时落两个圆点便于统计与辨认。
                 when (r.type) {
                     RecordType.PEE -> care += TimelineLaneSegment(
                         startMinOfDay = startMin,
@@ -422,7 +420,6 @@ fun LogRoute(
                                     ),
                                 )
                             } else {
-                                // Prototype glance-five: one row, five metric cards.
                                 Row(
                                     Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -481,7 +478,7 @@ fun LogRoute(
                         TimelineRailCard(
                             sleep = state.sleepLanes.map { it.copy(color = ext.laneSleep) },
                             feed = state.feedLanes.map { it.copy(color = ext.laneFeed) },
-                            // Keep pee/poop distinct: 绿=尿尿，黄=便便（do not paint all care as laneCare).
+                            // Preserve distinct pee and poop colors instead of one care-lane color.
                             care = state.careLanes.map { seg ->
                                 seg.copy(
                                     color = when (seg.title) {

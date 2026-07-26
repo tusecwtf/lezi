@@ -2,7 +2,7 @@
 <!--
   Full-backup rules for API levels that still consult this file.
   allowBackup=false already disables cloud ADB backup; keep excludes aligned
-  with data_extraction_rules (ISS-019).
+  with data_extraction_rules.
 -->
 <full-backup-content>
     <exclude domain="root" path="." />

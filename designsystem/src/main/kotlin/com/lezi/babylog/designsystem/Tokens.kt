@@ -11,7 +11,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/** OD canvas baseline (styles.css / brand-spec). */
+/** Reference canvas size used by component previews. */
 object LeziCanvas {
     val Width = 390.dp
     val Height = 844.dp
@@ -51,7 +51,7 @@ object LeziColors {
     val LaneFeed = Accent
     val LaneCare = Color(0xFF7A9E7E)
 
-    /** Compact logbook template. Brand-safe colors derived from the visual study. */
+    // Compact logbook colors.
     val JournalBg = Color(0xFFF4F3F5)
     val JournalSurface = Color(0xFFF9F7F8)
     val JournalFg = Color(0xFF36363A)

@@ -713,7 +713,7 @@ class CareLogTest {
         assertThat(care.search(babyId, "secretvalue")).isEmpty()
         assertThat(care.search(babyId, "不存在的词xyz")).isEmpty()
         assertThat(care.search(babyId, "   ")).isEmpty()
-        // ISS-030: short Latin mid-alias hits must not return whole type classes.
+        // Short Latin mid-alias hits must not return whole type classes.
         assertThat(care.search(babyId, "e")).isEmpty()
         assertThat(care.search(babyId, "a")).isEmpty()
         assertThat(care.search(babyId, "pee").single().type).isEqualTo(RecordType.PEE)
@@ -755,13 +755,11 @@ class CareLogTest {
         assertThat(formula.map { it.type }).containsExactly(RecordType.FORMULA)
         assertThat(weight.map { it.type }).containsExactly(RecordType.WEIGHT)
         assertThat(care.getRecord(formula.single().id)!!.visibleBusinessText()).isEqualTo("120ml")
-        // short latin mid-alias still empty on these records
         assertThat(care.search(babyId, "e")).isEmpty()
     }
 
     @Test
     fun searchTreatsSqlLikeMetacharactersAsLiterals() = runTest {
-        // F-F-01: user queries with %, _, \ must not expand as SQL wildcards.
         val care = Fakes().careLog()
         val babyId = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
         val day = LocalDate.now(zone)
@@ -797,8 +795,7 @@ class CareLogTest {
         assertThat(care.search(babyId, "100%").map { it.note }).doesNotContain("100ml plain")
 
         assertThat(care.search(babyId, "a_b").single().note).isEqualTo("code a_b path")
-        // "_" as single-char wildcard would match "100ml plain" notes with any mid char —
-        // ensure a note "axb" is not produced as a false hit via type/payload alone.
+        // "_" must remain literal; wildcard semantics would also match "axb".
         care.addRecord(babyId, RecordType.MEMO, timestamp = ts + 4, note = "axb only")
         assertThat(care.search(babyId, "a_b").map { it.note }).containsExactly("code a_b path")
 
@@ -1555,8 +1552,8 @@ private class FakeRecordDao : RecordDao {
         matchingTypeKeys: List<String>,
     ): List<RecordEntity> {
         // Mirror Room `LIKE :escapedPattern ESCAPE '\'` (see SqlLikeEscaped +
-        // RecordSearchTest) so CareLog.search unit tests do not green on a
-        // weaker contains() approximation of user metacharacters.
+        // RecordSearchTest) so tests exercise user metacharacter handling rather
+        // than a weaker contains() approximation.
         return items.value.filter {
             it.babyId == babyId &&
                 it.deletedAt == null &&

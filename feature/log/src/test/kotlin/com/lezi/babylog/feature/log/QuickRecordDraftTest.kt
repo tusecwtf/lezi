@@ -122,7 +122,6 @@ class QuickRecordDraftTest {
 
     @Test
     fun sleepDownWithEndRecordsCompletedIntervalInOneStep() {
-        // Mirrors switch「同时记醒来」ON (end defaults to a valid moment).
         val end = tappedAt + 30 * 60_000L
         val draft = QuickRecordDraft.create(RecordType.SLEEP, tappedAt)
             .copy(endTimestamp = end)

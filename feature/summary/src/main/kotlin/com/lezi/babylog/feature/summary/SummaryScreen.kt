@@ -259,7 +259,6 @@ fun SummaryRoute(
                 onSelect = vm::setRange,
             )
 
-            // Metric cards always show the selected calendar day (not week/month range).
             val windows = t.chartWindows
             Row(
                 Modifier.fillMaxWidth(),
@@ -336,7 +335,6 @@ fun SummaryRoute(
                 JournalWeekGrid(ui.week!!)
             }
 
-            // Charts: title row always carries the total of the currently plotted range.
             val feedChartTotal = when (ui.range) {
                 SummaryRange.Day -> formatFeedWindowTotal(windows.dayFeedMl, windows.dayNursingMin)
                 SummaryRange.Week, SummaryRange.Month ->
@@ -690,10 +688,6 @@ private fun DiaperLegendDot(color: Color, label: String) {
     }
 }
 
-/**
- * Stacked bars: green pee (bottom) + yellow poop (top).
- * Label on top is pee+poop total for that day.
- */
 @Composable
 private fun StackedDiaperBarChart(
     pee: List<Float>,
@@ -800,7 +794,7 @@ private fun MiniBarChart(
     val grid = LeziThemeExt.colors.chartGrid
     val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
     val max = (values.maxOrNull() ?: 0f).coerceAtLeast(1f)
-    // Day/Week: label every bar. Month: only non-zero bars to reduce clutter.
+    // Label every sample up to seven; for longer sparse ranges, label only non-zero bars.
     val showBarLabels = values.size <= 7 || values.count { it > 0f } <= 12
     val labelAllBars = values.size <= 7
     Column {
@@ -1071,7 +1065,6 @@ private fun formatFeedWindowTotal(feedMl: Int, nursingMin: Long): String {
     }
 }
 
-/** Diaper chart total: pee + poop, with a breakdown. */
 private fun formatDiaperTotal(pee: Int, poop: Int): String {
     val total = pee + poop
     return "${total}次（尿$pee · 便$poop）"

@@ -8,9 +8,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Pure-state coverage for L/R toggle transitions and the lost-side race that
- * motivated serializing [TimerViewModel.toggleLeft]/[TimerViewModel.toggleRight]
- * behind a mutex (ISS-003 / F-C-003).
+ * Pure-state coverage for L/R transitions and the lost-side race prevented by
+ * serializing [TimerViewModel.toggleLeft] and [TimerViewModel.toggleRight].
  */
 class TimerToggleSerializationTest {
     @Test
@@ -96,7 +95,6 @@ class TimerToggleSerializationTest {
 
     @Test
     fun sequentialLeftThenRight_preservesBothSides() {
-        // Night-feed pattern: start L, later switch to R — both sides kept.
         val startedLeft = TimerState().withToggleLeft(
             nowElapsed = 0L,
             nowWall = 1_700_000_000_000L,
@@ -116,10 +114,8 @@ class TimerToggleSerializationTest {
 
     @Test
     fun concurrentReadModifyWriteWithoutSerialRead_losesOneSide() {
-        // Documents the pre-fix race: two toggles snapshot the same empty
-        // state and each writes independently; last writer wins and the other
-        // side's start is dropped. ViewModel now holds a mutex so each toggle
-        // re-reads after the previous write.
+        // Two transitions from one snapshot model an unsynchronized read-modify-write:
+        // the last writer drops the other side.
         val base = TimerState()
         val leftOnly = base.withToggleLeft(
             nowElapsed = 0L,
@@ -132,19 +128,15 @@ class TimerToggleSerializationTest {
             babyIdForStart = 1L,
         )!!
 
-        // Last writer = right: left never started.
         assertTrue(rightOnly.rightRunning)
         assertFalse(rightOnly.leftRunning)
         assertEquals(0L, rightOnly.leftAccumMs)
-        // And the discarded left-only write would have been the opposite.
         assertTrue(leftOnly.leftRunning)
         assertFalse(leftOnly.rightRunning)
     }
 
     @Test
     fun serializedToggles_reReadLatestState_keepBothSides() {
-        // Same concurrent intent as above, but each step re-reads the latest
-        // state (mutex-equivalent serialization) so L then R is not lost.
         var state = TimerState()
         state = state.withToggleLeft(
             nowElapsed = 0L,

@@ -1,9 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-  <!-- head · 头围 -->
-  <path d="M8 15.2c-.8-1.2-1.2-2.5-1.2-4C6.8 7.6 9 5.2 12 5.2s5.2 2.4 5.2 6c0 1.5-.4 2.8-1.2 4"/>
-  <path d="M8 15.2c.5 2.4 1.8 3.8 4 3.8s3.5-1.4 4-3.8"/>
-  <path d="M6.2 10.4a6.4 6.4 0 0 1 11.6 0"/>
-  <path d="M8.4 8.8v1.4"/>
-  <path d="M12 7.6v1.5"/>
-  <path d="M15.6 8.8v1.4"/>
-</svg>

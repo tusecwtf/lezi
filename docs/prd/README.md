@@ -2,7 +2,6 @@
 
 > **个人/家庭使用** · Android · 无商业化
 > 决策日：2026-07-25 · 当前发布：**0.2.3**
-> 需求参考调研：`docs/research/`（只读归档）
 
 | 项 | 内容 |
 |----|------|
@@ -14,12 +13,12 @@
 | 数据 | **V1 纯本地**；模型与 UI 按家庭设计；同步见 [`data-model.md`](./data-model.md) 与 [`sync-home-lan.md`](./sync-home-lan.md) |
 
 当前版本 **0.2.3**（`versionName` 不再含 `offline`）。家庭局域网同步的
-Android 与服务端实现、自动化测试、**本机 Docker 运行**与**双模拟器前台
-formula/pee 交叉可见**路径已有支撑验收（见
-[`docs/reviews/home-lan-sync-docker-acceptance-2026-07-25/`](../reviews/home-lan-sync-docker-acceptance-2026-07-25/)
-与 [`docs/reviews/device-family-dual-emu-09/`](../reviews/device-family-dual-emu-09/)）。
-**物理 NAS / 双真机 / 相机扫码 / 蜂窝门闩硬件**仍待目标环境执行，故不宣称
-已生产部署。
+Android 与服务端实现、自动化测试、本机 Docker 运行和双模拟器前台
+formula/pee UI 交叉可见均已验证；双模拟器还在严格使用
+`192.168.50.4:8765` 的服务端上完成建家、邀请码加入、双向协议记录和头像 ACL。
+相机扫码、日志图跨端 UI、蜂窝回家冲刷、伴侣通知和双端独立设置仍待目标环境执行，
+故 Ticket 09 保持 partial，且不宣称物理 NAS 生产部署。当前状态见
+[家庭局域网同步验收票](../../.scratch/home-lan-sync/issues/09-dual-device-foreground-acceptance.md)。
 
 **子文档**
 
@@ -29,10 +28,7 @@ formula/pee 交叉可见**路径已有支撑验收（见
 | [data-model.md](./data-model.md) | 实体、字段、本地优先、SyncPort 契约 |
 | [sync-home-lan.md](./sync-home-lan.md) | **V2 家庭局域网同步**：门闩、前台策略、NAS Docker（`lezi-sync`） |
 | [tech.md](./tech.md) | Android 技术栈、模块、权限、验收 |
-| [prototype/](../../prototype/) | **可丢弃**竖版网页原型（V1 全表面交互；仓根 `prototype/`） |
-| [design/template-v2/](../../design/template-v2/) | 设计模板 v2（画风/组件参考） |
 | [assets-notes.md](./assets-notes.md) | 排泄图标资源约定（尿尿量档 / 便便分档） |
-| [visual-refs/](./visual-refs/) | PiyoLog 公开界面视觉参考（截图/图表；设计对照，非发货资源） |
 
 ---
 
@@ -306,8 +302,8 @@ Widget 每个实例独立保存 `widgetId`、绑定 `babyId` 和快捷记录类�
 
 - [x] Android `SyncPort`、家网门闩、前台触发、Outbox、媒体与家庭 UI 实现
 - [x] NAS `tools/lezi-sync` API、SQLite、Docker/Compose 单数据根配置与自动化测试
-- [x] 本机 Docker 镜像构建与运行（见 reviews `home-lan-sync-docker-acceptance`）
-- [x] 双模拟器前台 formula/pee 交叉可见（见 reviews `device-family-dual-emu-09`）
+- [x] 本机 Docker 镜像构建与运行
+- [x] 双模拟器前台 formula/pee UI 交叉可见；严格 live 服务端建家/加入与双向协议通过
 - [ ] **物理 NAS / 双真机 / 相机扫码** 目标环境验收（见 [sync-home-lan.md](./sync-home-lan.md) §5.4）
 - [x] **本机** PDF、自定义项目、辅食类、扩展测量、疫苗手记、日程
 - [ ] CustomItem / CalendarEvent **出站家庭同步**（本机功能已有；同步域后置）

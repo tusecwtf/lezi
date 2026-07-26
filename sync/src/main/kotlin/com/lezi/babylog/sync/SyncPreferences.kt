@@ -58,7 +58,7 @@ interface SyncPreferences {
     suspend fun clearCreateRequestId()
     /** Clears family session only (legacy); prefer [clearAllLocalSyncConfig] for leave/delete. */
     suspend fun clearFamilySession()
-    /** G12/G13: wipe host/port/SSID allowlist + session. */
+    /** Wipes the host, port, SSID allowlist, and family session. */
     suspend fun clearAllLocalSyncConfig()
     /** Move legacy plaintext secrets into the secure store when present. */
     suspend fun migrateSecretsIfNeeded() {}
@@ -140,7 +140,7 @@ class DataStoreSyncPreferences @Inject constructor(
                 prefs[Keys.ALLOWED_SSIDS] = ssidEncoded
             }
         }
-        // G10: joined + host/port change → keep token, full_resync cursor
+        // A joined server change keeps the token but forces a full resync.
         if (previous.isJoined && previous.baseUrl != newBase && newBase.isNotBlank()) {
             dataStore.edit {
                 it[Keys.PULL_CURSOR] = 0
@@ -259,7 +259,7 @@ class DataStoreSyncPreferences @Inject constructor(
                 }
                 prefs.remove(Keys.FAMILY_TOKEN)
             }
-            // Migrate legacy baseUrl → host/port once
+            // Populate structured host and port from the legacy base URL.
             val base = prefs[Keys.BASE_URL].orEmpty()
             if (base.isNotBlank() && prefs[Keys.SERVER_HOST].isNullOrBlank()) {
                 val parsed = HomeLanServerConfig.fromBaseUrl(base)

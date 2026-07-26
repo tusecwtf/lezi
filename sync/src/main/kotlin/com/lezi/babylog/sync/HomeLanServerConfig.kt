@@ -66,7 +66,7 @@ data class HomeLanServerConfig(
                 }
                 return host to port
             }
-            // host:port without scheme that URI failed on
+            // Fall back to splitting host:port when URI parsing cannot resolve a host.
             val hostPart = raw.substringBefore('/').substringBefore('?')
             if (hostPart.contains(':') && !hostPart.startsWith('[')) {
                 val idx = hostPart.lastIndexOf(':')
@@ -82,7 +82,7 @@ data class HomeLanServerConfig(
             return HomeLanServerConfig(host = host, port = port, allowedSsids = emptyList())
         }
 
-        /** Empty-form novice defaults (UI only until save). */
+        /** Unsaved defaults for an empty setup form. */
         fun noviceUiDefaults(currentSsid: String?): HomeLanServerConfig =
             HomeLanServerConfig(
                 host = DEFAULT_SERVER_HOST,

@@ -158,7 +158,6 @@ fun TimelineLane(
                                 min in seg.startMinOfDay until end
                             }
                         }
-                        // Tap same mark again to clear highlight.
                         onSegmentClick(
                             if (hit != null && hit.isSameAs(selected)) null else hit,
                         )
@@ -166,12 +165,10 @@ fun TimelineLane(
                 },
         ) {
             val h = size.height
-            // quarter guides
             for (i in 1..3) {
                 val x = size.width * i / 4f
                 drawLine(grid, Offset(x, 0f), Offset(x, h), strokeWidth = 1f)
             }
-            // center baseline
             drawLine(
                 track,
                 Offset(0f, h / 2f),
@@ -185,7 +182,6 @@ fun TimelineLane(
                 val highlighted = seg.isSameAs(selected)
                 val dimmed = hasSelection && !highlighted
                 if (markerStyle || seg.isEvent) {
-                    // Point-in-time: pin + large filled circle (not a thin duration sliver).
                     val baseX = size.width * (seg.startMinOfDay / total)
                     val x = baseX + eventSlotOffset(segments, seg, slotPx)
                     val center = Offset(x, h * 0.32f)
@@ -199,7 +195,6 @@ fun TimelineLane(
                         dimmed -> 0.35f
                         else -> 0.95f
                     }
-                    // Stem to baseline
                     drawLine(
                         color = seg.color.copy(alpha = if (dimmed) 0.2f else 0.55f),
                         start = Offset(x, h * 0.18f),
@@ -207,7 +202,6 @@ fun TimelineLane(
                         strokeWidth = if (highlighted) 3f else 2.2f,
                     )
                     if (highlighted) {
-                        // Soft outer glow
                         drawCircle(
                             color = focusRing.copy(alpha = 0.28f),
                             radius = radius + 7f,
@@ -339,7 +333,6 @@ fun TimelineRailCard(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(10.dp))
-        // Hours on top, indented under lane labels
         Row(Modifier.fillMaxWidth()) {
             Spacer(Modifier.width(34.dp))
             Row(Modifier.weight(1f), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -608,7 +601,6 @@ private fun JournalTimelineRail(
                         val highlighted = segment.isSameAs(selected)
                         val dimmed = hasSelection && !highlighted
                         if (segment.isEvent) {
-                            // Moment pin: large circle centered on time, easy to see/tap.
                             val baseY = size.height * (segment.startMinOfDay.coerceIn(0, 1440) / 1440f)
                             val y = (baseY + eventSlotOffset(segments, segment, slotPx))
                                 .coerceIn(10f, size.height - 10f)
@@ -624,7 +616,6 @@ private fun JournalTimelineRail(
                                 dimmed -> 0.32f
                                 else -> 0.95f
                             }
-                            // Soft lane stripe behind the pin for scanning.
                             drawLine(
                                 color = segment.color.copy(alpha = if (dimmed) 0.08f else 0.22f),
                                 start = Offset(laneLeft + 8f, y),

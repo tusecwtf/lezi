@@ -96,7 +96,6 @@ data class MeasurePoint(
     val referenceWarning: String?,
 )
 
-/** Draft for create or edit of a growth measurement. */
 private data class MeasurementDraft(
     val recordId: Long? = null,
     val valueText: String = "",

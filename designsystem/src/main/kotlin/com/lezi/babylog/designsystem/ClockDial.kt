@@ -72,7 +72,6 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
-/** Settings / callers: "dropdown" (24h menus) or "dial" (24h clock + 上午/下午 ±12). */
 const val TIME_PICKER_STYLE_DROPDOWN = "dropdown"
 const val TIME_PICKER_STYLE_DIAL = "dial"
 
@@ -108,7 +107,6 @@ fun LeziClockDialDialog(
     var selectedDate by remember(value) { mutableStateOf(value.toLocalDate()) }
     var showDatePicker by remember(value) { mutableStateOf(false) }
     val useDial = timePickerStyle == TIME_PICKER_STYLE_DIAL
-    // Thumb side: left-handed → chips left of hour/minute; right-handed → chips right.
     val periodOnStart = preferredHand != "right"
 
     // Dropdown keeps one local wall-clock state. Dial uses TimePickerState itself
@@ -117,7 +115,6 @@ fun LeziClockDialDialog(
     var dropdownHour by remember(value) { mutableIntStateOf(initialTick.hour) }
     var dropdownMinute by remember(value) { mutableIntStateOf(initialTick.minute) }
 
-    // Dial face: Material 24h picker (no built-in AM/PM). Custom chips only do ±12.
     val pickerState = rememberTimePickerState(
         initialHour = initialTick.hour,
         initialMinute = initialTick.minute,
@@ -188,10 +185,8 @@ fun LeziClockDialDialog(
                 }
 
                 if (useDial) {
-                    // No "时间" section label — dial + 上午/下午 already make the role obvious.
-                    // Material-style layout: display row (period + HH:MM) is one centered unit;
-                    // dial is a separate centered unit so neither is clipped nor shifted by the other.
-                    // TimePicker's built-in display is clipped away; we draw our own with 上午/下午.
+                    // The custom time display and Material dial are centered independently.
+                    // Material's built-in display is hidden to avoid a second HH:MM value.
                     DialTimePickerBody(
                         pickerState = pickerState,
                         hour24 = dialTick.hour,
@@ -377,7 +372,6 @@ private val PeriodToggleHeight = TimeDisplayRowHeight
 private val PeriodToggleGap = 12.dp
 private val ClockDialSize = 256.dp
 private val ClockDisplayBottomMargin = 36.dp
-/** Material VerticalTimePicker trailing spacer under the dial. */
 private val ClockFaceBottomMargin = 24.dp
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -396,7 +390,6 @@ private fun DialTimePickerBody(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        // One centered unit: [上午/下午?] [时 0–23] : [分] [上午/下午?]
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (periodOnStart) {
                 PeriodToggle(
@@ -422,9 +415,7 @@ private fun DialTimePickerBody(
                 )
             }
         }
-        // Show only Material's dial: hide its built-in HH:MM by shifting it up, while keeping
-        // the display→dial margin + full 256dp face inside the viewport (previous -116 offset
-        // ate the top of the circle).
+        // Shift Material's display out of view while preserving the full dial.
         Box(
             modifier = Modifier
                 .width(ClockDialSize)
@@ -517,7 +508,6 @@ private fun TimeSelectorBox(
     }
 }
 
-/** Vertical 上午/下午 segmented control (Material period selector 52×80). */
 @Composable
 private fun PeriodToggle(
     isAm: Boolean,
@@ -602,7 +592,6 @@ internal fun applyClockPeriod(hour24: Int, wantAm: Boolean): Int {
     }
 }
 
-/** Morning half-day: hours 0–11 (includes midnight 0:00). Noon 12:00 is afternoon. */
 internal fun isClockAm(hour24: Int): Boolean = hour24.coerceIn(0, 23) < 12
 
 @Composable

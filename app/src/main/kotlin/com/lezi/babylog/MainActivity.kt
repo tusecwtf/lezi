@@ -355,7 +355,8 @@ fun LeziRoot(
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
     if (!ui.hasBaby) {
-        OnboardingRoute(onFinished = { /* CareLog flow updates */ })
+        // Baby creation updates this route through CareLog; no completion callback is needed.
+        OnboardingRoute(onFinished = {})
         return
     }
     val nav = rememberNavController()

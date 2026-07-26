@@ -15,24 +15,20 @@ class ClockDialTest {
 
     @Test
     fun applyClockPeriodAddsOrSubtractsTwelveWithinDay() {
-        // 下午 = +12 when morning; 上午 = -12 when afternoon
         assertEquals(22, applyClockPeriod(10, wantAm = false))
         assertEquals(10, applyClockPeriod(22, wantAm = true))
         assertEquals(15, applyClockPeriod(3, wantAm = false))
         assertEquals(3, applyClockPeriod(15, wantAm = true))
-        // already in half-day → no-op
         assertEquals(15, applyClockPeriod(15, wantAm = false))
         assertEquals(3, applyClockPeriod(3, wantAm = true))
     }
 
     @Test
     fun applyClockPeriodUsesStandardWallClockAtMidnightAndNoon() {
-        // 0:00 midnight 上午 ↔ 12:00 noon 下午
         assertEquals(12, applyClockPeriod(0, wantAm = false))
         assertEquals(0, applyClockPeriod(12, wantAm = true))
         assertEquals(0, applyClockPeriod(0, wantAm = true))
         assertEquals(12, applyClockPeriod(12, wantAm = false))
-        // never 24
         assertEquals(12, applyClockPeriod(0, wantAm = false))
         assertTrue(applyClockPeriod(11, wantAm = false) in 0..23)
         assertTrue(applyClockPeriod(23, wantAm = true) in 0..23)

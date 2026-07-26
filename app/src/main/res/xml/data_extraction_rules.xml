@@ -2,7 +2,7 @@
 <!--
   Cloud backup is already off via android:allowBackup=false.
   Device-to-device transfer must not ship family token (DataStore), Room DB,
-  record photos, avatars, or widget snapshots (ISS-019 / F-D-06).
+  record photos, avatars, or widget snapshots.
   Prefer app-mediated family re-join after transfer over blind system migration.
 -->
 <data-extraction-rules>
