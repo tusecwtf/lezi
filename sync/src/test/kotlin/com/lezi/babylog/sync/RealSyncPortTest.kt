@@ -1734,6 +1734,48 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun pullFailsClosedWhenAFullPageOmitsTheContinuationFlag() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        rig.backend.nextPull = PullResult(
+            entities = List(200) { index ->
+                remoteBaby().copy(clientUuid = "baby-page-limit-$index")
+            },
+            cursor = 200,
+            hasMore = null,
+        )
+
+        val failure = rig.port.sync(SyncTrigger.PullToRefresh).exceptionOrNull()
+
+        assertThat(failure).hasMessageThat().contains("缺少 has_more")
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(0)
+        assertThat(rig.babies.getByClientUuid("baby-page-limit-0")).isNull()
+    }
+
+    @Test
+    fun pullFailsInsteadOfRequestingMoreThanThePageLimit() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        repeat(500) { index ->
+            rig.backend.pullResults.add(
+                PullResult(
+                    entities = emptyList(),
+                    cursor = index.toLong() + 1,
+                    hasMore = true,
+                ),
+            )
+        }
+        rig.backend.nextPull = PullResult(
+            entities = emptyList(),
+            cursor = 501,
+            hasMore = false,
+        )
+
+        val failure = rig.port.sync(SyncTrigger.PullToRefresh).exceptionOrNull()
+
+        assertThat(failure).hasMessageThat().contains("500 页上限")
+        assertThat(rig.backend.pullCount).isEqualTo(500)
+    }
+
+    @Test
     fun laterPageFailureRetainsOnlyTheLastFullyAppliedPageCursor() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         rig.backend.pullResults.add(

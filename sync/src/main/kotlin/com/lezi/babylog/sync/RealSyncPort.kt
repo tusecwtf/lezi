@@ -77,7 +77,8 @@ data class PullResult(
     val entities: List<SyncEntity>,
     val cursor: Long,
     val generation: String = "",
-    val hasMore: Boolean = false,
+    /** Null means a legacy response omitted the additive `has_more` field. */
+    val hasMore: Boolean? = null,
 )
 data class JoinResult(
     val familyId: String,
@@ -347,7 +348,7 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
             entities = json.entities(),
             cursor = json["cursor"]?.jsonPrimitive?.longOrNull ?: session.pullCursor,
             generation = json["generation"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-            hasMore = json["has_more"]?.jsonPrimitive?.booleanOrNull ?: false,
+            hasMore = json["has_more"]?.jsonPrimitive?.booleanOrNull,
         )
     }
 
@@ -1426,7 +1427,8 @@ class RealSyncPort @Inject constructor(
      * durably advance only after that page (including media materialization)
      * succeeds; the authoritative pre-push phase of full resync publishes its
      * cursor only after every page succeeds. `hasMore` is an additive wire
-     * field, so an older unpaged server remains a one-page pull.
+     * field, so an older unpaged server remains compatible only when its one
+     * page is below the current server page-capacity signal.
      */
     private suspend fun pullAllPages(
         initial: SyncSession,
@@ -1440,13 +1442,23 @@ class RealSyncPort @Inject constructor(
         } else {
             null
         }
+        var pageCount = 0
         do {
+            require(pageCount < MAX_PULL_PAGE_COUNT) {
+                "家庭服务器同步超过 $MAX_PULL_PAGE_COUNT 页上限，请稍后重试"
+            }
+            pageCount++
             requireAllowed(policy.evaluate(current.homeLanConfig, foregroundState.isForeground()))
             val pulled = backend.pull(current)
             require(pulled.cursor >= current.pullCursor) {
                 "家庭服务器返回了倒退的同步 cursor"
             }
-            if (pulled.hasMore) {
+            require(
+                pulled.hasMore != null || pulled.entities.size < SYNC_PULL_PAGE_ENTITY_LIMIT,
+            ) {
+                "家庭服务器返回了满页数据但缺少 has_more，无法确认同步已完成"
+            }
+            if (pulled.hasMore == true) {
                 require(pulled.cursor > current.pullCursor) {
                     "家庭服务器分页 cursor 未推进"
                 }
@@ -1488,7 +1500,7 @@ class RealSyncPort @Inject constructor(
                     pullGeneration = nextGeneration,
                 )
             }
-        } while (pulled.hasMore)
+        } while (pulled.hasMore == true)
         authoritativeMemberAvatarPointers?.let { pointers ->
             transactionRunner.run {
                 reconcileMemberAvatarAuthority(pointers, mediaEditGuard)
@@ -2087,6 +2099,9 @@ private fun localPhotoPaths(raw: String): Set<String> =
 private val ENTITY_ORDER = listOf("baby", "record", "media")
 private const val PUSH_ROOT_BATCH_SIZE = 200
 private const val MAX_PUSH_BATCH_SIZE = 1_000
+/** Normal home libraries are far smaller; reaching this many pages is anomalous. */
+private const val MAX_PULL_PAGE_COUNT = 500
+private const val SYNC_PULL_PAGE_ENTITY_LIMIT = 200
 private const val OUTBOX_DELETE_CHUNK_SIZE = 400
 private const val MILLIS_PER_SECOND = 1_000L
 private const val RECEIPT_PREFIX = "lezi-sync:"

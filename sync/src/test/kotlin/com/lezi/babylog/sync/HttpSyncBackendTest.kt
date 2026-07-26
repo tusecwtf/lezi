@@ -13,6 +13,41 @@ import org.junit.Test
 
 class HttpSyncBackendTest {
     @Test
+    fun pullPreservesAnAbsentContinuationFlag() = runTest {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val responder = thread(name = "lezi-legacy-pull-test-server") {
+            runCatching {
+                server.accept().use { socket ->
+                    readRequest(socket)
+                    val body =
+                        """{"entities":[],"cursor":7,"generation":"generation-a"}"""
+                            .toByteArray(Charsets.UTF_8)
+                    socket.getOutputStream().use { output ->
+                        output.write(
+                            (
+                                "HTTP/1.1 200 OK\r\n" +
+                                    "Content-Type: application/json\r\n" +
+                                    "Content-Length: ${body.size}\r\n" +
+                                    "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                        )
+                        output.write(body)
+                    }
+                }
+            }
+        }
+
+        try {
+            val result = HttpSyncBackend().pull(testSession(server))
+
+            assertThat(result.hasMore).isNull()
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
     fun pullParsesTheAdditiveContinuationFlag() = runTest {
         val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
         val responder = thread(name = "lezi-paged-pull-test-server") {
