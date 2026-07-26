@@ -303,7 +303,7 @@ async fn create_family(
     // allowance reserved for callers that can actually create a family.
     require_bootstrap_secret(&state, &headers)?;
     let request = json_body(body)?;
-    request.validate()?;
+    let display_name = request.validate()?;
     let scope = format!("device:{}", hash_secret(&request.device_id));
     if !state.create_limiter.check_and_record(&scope, state.now()) {
         return Err(ApiError::too_many_requests(
@@ -315,7 +315,7 @@ async fn create_family(
         state.now(),
         &request.create_request_id,
         &request.device_id,
-        request.display_name.as_deref(),
+        display_name.as_deref(),
         move |request_hash, family_id| signing_state.owner_token(request_hash, family_id),
     );
     let (family_id, token) = match result {

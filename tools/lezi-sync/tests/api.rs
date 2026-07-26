@@ -767,6 +767,46 @@ async fn family_members_normalize_unicode_and_empty_names_and_reject_unsafe_join
 }
 
 #[tokio::test]
+async fn family_create_uses_the_same_display_name_normalization_as_join() {
+    let unsafe_rig = Rig::new();
+    let (unsafe_status, _) = json_request(
+        &unsafe_rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": "unsafe-owner-request-000000000001",
+            "device_id": "unsafe-owner-device",
+            "display_name": "管理员\u{202e}renwo",
+        }),
+    )
+    .await;
+    assert_eq!(unsafe_status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let normalized_rig = Rig::new();
+    let (create_status, owner) = json_request(
+        &normalized_rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": "trimmed-owner-request-00000000001",
+            "device_id": "trimmed-owner-device",
+            "display_name": "　妈妈　",
+        }),
+    )
+    .await;
+    assert_eq!(create_status, StatusCode::CREATED);
+    let (_, members) = get_json(
+        &normalized_rig.app,
+        "/v1/family/members",
+        owner["token"].as_str(),
+    )
+    .await;
+    assert_eq!(members["members"][0]["display_name"], "妈妈");
+}
+
+#[tokio::test]
 async fn family_members_coalesce_legacy_duplicate_member_tokens_without_role_promotion() {
     let rig = Rig::new();
     let owner = create_family(

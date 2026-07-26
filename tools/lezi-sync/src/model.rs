@@ -17,7 +17,7 @@ pub struct FamilyCreateRequest {
 }
 
 impl FamilyCreateRequest {
-    pub fn validate(&self) -> Result<(), ApiError> {
+    pub fn validate(&self) -> Result<Option<String>, ApiError> {
         validate_urlsafe(
             &self.create_request_id,
             32,
@@ -25,7 +25,7 @@ impl FamilyCreateRequest {
             "create_request_id must be 32-128 URL-safe characters",
         )?;
         validate_required_string(&self.device_id, 128, "device_id")?;
-        validate_optional_string(&self.display_name, 128, "display_name")
+        normalize_display_name(self.display_name.as_deref())
     }
 }
 
@@ -450,17 +450,6 @@ fn validate_urlsafe(value: &str, min: usize, max: usize, message: &str) -> Resul
 
 fn validate_required_string(value: &str, max: usize, field: &str) -> Result<(), ApiError> {
     validate_length(value, 1, max, field)
-}
-
-fn validate_optional_string(
-    value: &Option<String>,
-    max: usize,
-    field: &str,
-) -> Result<(), ApiError> {
-    if let Some(value) = value {
-        validate_length(value, 0, max, field)?;
-    }
-    Ok(())
 }
 
 fn validate_optional_nonempty_string(
