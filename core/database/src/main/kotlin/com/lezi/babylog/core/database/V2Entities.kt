@@ -85,3 +85,29 @@ interface CalendarEventDao {
     @Query("DELETE FROM calendar_events")
     suspend fun deleteAll()
 }
+
+/**
+ * Durable hand-off from the Room clear transaction to Android alarm cleanup.
+ *
+ * A single records-clear row survives process death until every captured
+ * PendingIntent has been cancelled. The IDs are encoded by the domain layer
+ * because Room cannot persist a collection without widening the schema.
+ */
+@Entity(tableName = "pending_reminder_cleanup")
+data class PendingReminderCleanupEntity(
+    @PrimaryKey val operation: String,
+    val calendarEventIds: String,
+    val familyServerRetained: Boolean,
+)
+
+@Dao
+interface PendingReminderCleanupDao {
+    @Query("SELECT * FROM pending_reminder_cleanup WHERE operation = :operation LIMIT 1")
+    suspend fun get(operation: String): PendingReminderCleanupEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(pending: PendingReminderCleanupEntity)
+
+    @Query("DELETE FROM pending_reminder_cleanup WHERE operation = :operation")
+    suspend fun delete(operation: String)
+}

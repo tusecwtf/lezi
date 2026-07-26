@@ -86,7 +86,6 @@ import kotlinx.coroutines.launch
 class CalendarViewModel @Inject constructor(
     private val careLog: CareLog,
     settingsStore: SettingsStore,
-    private val reminderScheduler: CalendarReminderScheduler,
 ) : ViewModel() {
     private val zone = ZoneId.systemDefault()
     private val _status = MutableStateFlow<String?>(null)
@@ -135,14 +134,13 @@ class CalendarViewModel @Inject constructor(
                 onResult(it)
                 return@launch
             }
-            val id = careLog.addCalendarEvent(
+            careLog.addCalendarEvent(
                 babyId = baby.id,
                 title = title,
                 eventAt = eventAt,
                 remindAt = remindAt,
             )
-            val event = careLog.listCalendarEvents(baby.id).firstOrNull { it.id == id }
-            val scheduled = event?.let(reminderScheduler::schedule) == true
+            val scheduled = remindAt != null
             _status.value = scheduleStatus(scheduled, remindAt != null)
             onResult(null)
         }
@@ -160,14 +158,12 @@ class CalendarViewModel @Inject constructor(
                 onResult(it)
                 return@launch
             }
-            reminderScheduler.cancel(event.id)
             val updated = event.copy(
                 title = title.trim(),
                 eventAt = eventAt,
                 remindAt = remindAt,
             )
-            careLog.updateCalendarEvent(updated)
-            val scheduled = reminderScheduler.schedule(updated)
+            val scheduled = careLog.updateCalendarEvent(updated)
             _status.value = scheduleStatus(scheduled, remindAt != null)
             onResult(null)
         }
@@ -175,7 +171,6 @@ class CalendarViewModel @Inject constructor(
 
     fun delete(event: CalendarEvent, onDone: () -> Unit) {
         viewModelScope.launch {
-            reminderScheduler.cancel(event.id)
             careLog.deleteCalendarEvent(event.id)
             onDone()
         }

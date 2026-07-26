@@ -14,8 +14,9 @@ import androidx.room.RoomDatabase
         OutboxEntity::class,
         CustomItemEntity::class,
         CalendarEventEntity::class,
+        PendingReminderCleanupEntity::class,
     ],
-    version = 7,
+    version = 8,
     exportSchema = true,
 )
 abstract class LeziDatabase : RoomDatabase() {
@@ -28,4 +29,5 @@ abstract class LeziDatabase : RoomDatabase() {
     abstract fun outboxDao(): OutboxDao
     abstract fun customItemDao(): CustomItemDao
     abstract fun calendarEventDao(): CalendarEventDao
+    abstract fun pendingReminderCleanupDao(): PendingReminderCleanupDao
 }

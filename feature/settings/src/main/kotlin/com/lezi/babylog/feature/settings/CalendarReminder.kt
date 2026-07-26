@@ -69,19 +69,10 @@ class CalendarReminderAlarm @Inject constructor(
 
 @Singleton
 class CalendarReminderScheduler @Inject constructor(
-    private val alarm: CalendarReminderAlarm,
     private val careLog: CareLog,
 ) {
-    fun schedule(event: CalendarEvent): Boolean = alarm.schedule(event)
-
-    fun cancel(eventId: Long) {
-        alarm.cancel(eventId)
-    }
-
     suspend fun rescheduleAll() {
-        careLog.listBabies().forEach { baby ->
-            careLog.listCalendarEvents(baby.id).forEach(::schedule)
-        }
+        careLog.rescheduleCalendarReminders()
     }
 
     companion object {

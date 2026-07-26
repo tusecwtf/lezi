@@ -15,6 +15,8 @@ import com.lezi.babylog.core.database.LocalUserEntity
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MembershipDao
 import com.lezi.babylog.core.database.MembershipEntity
+import com.lezi.babylog.core.database.PendingReminderCleanupDao
+import com.lezi.babylog.core.database.PendingReminderCleanupEntity
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.datastore.SettingsStore
@@ -40,12 +42,15 @@ import java.time.temporal.ChronoUnit
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 data class CreateBabyInput(
     val nickname: String,
@@ -111,6 +116,13 @@ data class LocalFamilyIdentity(
     val familyId: Long,
 )
 
+private const val RECORDS_CLEAR_REMINDER_OPERATION = "records_clear"
+
+private fun decodeCalendarEventIds(encoded: String): Set<Long> =
+    encoded.split(',')
+        .mapNotNull { it.trim().toLongOrNull() }
+        .toSet()
+
 data class BabyMergePreview(
     val sourceBabyId: Long,
     val sourceNickname: String,
@@ -130,6 +142,7 @@ class CareLog @Inject constructor(
     private val familyDao: FamilyDao,
     private val membershipDao: MembershipDao,
     private val mediaAssetDao: MediaAssetDao,
+    private val pendingReminderCleanupDao: PendingReminderCleanupDao,
     private val settings: SettingsStore,
     private val syncPort: SyncPort,
     private val reminderCleanup: ReminderCleanupPort,
@@ -141,10 +154,7 @@ class CareLog @Inject constructor(
      * lock makes read-check-write sequences deterministic inside this process.
      */
     private val sleepMutationMutex = Mutex()
-    private val recordClearReminderMutex = Mutex()
-    private val pendingRecordClearReminderIds = linkedSetOf<Long>()
-    private var pendingRecordClearReminders = false
-    private var pendingRecordClearFamilyServerRetained = false
+    private val calendarReminderMutationMutex = Mutex()
 
     fun observeHasBaby(): Flow<Boolean> =
         babyDao.observeAll().map { it.isNotEmpty() }
@@ -330,42 +340,57 @@ class CareLog @Inject constructor(
         eventAt: Long,
         remindAt: Long?,
         note: String? = null,
-    ): Long {
+    ): Long = calendarReminderMutationMutex.withLock {
         val now = System.currentTimeMillis()
-        return calendarEventDao.upsert(
-            CalendarEventEntity(
-                clientUuid = newClientUuid(),
-                babyId = babyId,
-                title = title,
-                note = note,
-                eventAt = eventAt,
-                remindAt = remindAt,
-                updatedAt = now,
-            ),
+        val entity = CalendarEventEntity(
+            clientUuid = newClientUuid(),
+            babyId = babyId,
+            title = title,
+            note = note,
+            eventAt = eventAt,
+            remindAt = remindAt,
+            updatedAt = now,
         )
+        val id = calendarEventDao.upsert(entity)
+        reminderCleanup.scheduleCalendar(entity.copy(id = id).toModel())
+        id
     }
 
-    suspend fun updateCalendarEvent(event: CalendarEvent) {
-        calendarEventDao.update(
-            CalendarEventEntity(
-                id = event.id,
-                clientUuid = event.clientUuid,
-                babyId = event.babyId,
-                title = event.title.trim(),
-                note = event.note,
-                eventAt = event.eventAt,
-                remindAt = event.remindAt,
-                updatedAt = System.currentTimeMillis(),
-            ),
-        )
-    }
+    suspend fun updateCalendarEvent(event: CalendarEvent): Boolean =
+        calendarReminderMutationMutex.withLock {
+            calendarEventDao.update(
+                CalendarEventEntity(
+                    id = event.id,
+                    clientUuid = event.clientUuid,
+                    babyId = event.babyId,
+                    title = event.title.trim(),
+                    note = event.note,
+                    eventAt = event.eventAt,
+                    remindAt = event.remindAt,
+                    updatedAt = System.currentTimeMillis(),
+                ),
+            )
+            val scheduled = reminderCleanup.scheduleCalendar(event)
+            if (!scheduled) reminderCleanup.cancelCalendar(event.id)
+            scheduled
+        }
 
-    suspend fun deleteCalendarEvent(id: Long) {
+    suspend fun deleteCalendarEvent(id: Long) = calendarReminderMutationMutex.withLock {
         calendarEventDao.softDelete(id, System.currentTimeMillis())
+        reminderCleanup.cancelCalendar(id)
     }
 
     suspend fun listCalendarEvents(babyId: Long): List<CalendarEvent> =
         calendarEventDao.listForBaby(babyId).map { it.toModel() }
+
+    /** Rebuild alarms without racing a clear or a calendar write. */
+    suspend fun rescheduleCalendarReminders() = calendarReminderMutationMutex.withLock {
+        babyDao.listAll().forEach { baby ->
+            calendarEventDao.listForBaby(baby.id)
+                .map(CalendarEventEntity::toModel)
+                .forEach { reminderCleanup.scheduleCalendar(it) }
+        }
+    }
 
     fun observeCustomItems(): Flow<List<CustomRecordItem>> =
         customItemDao.observeAll().map { items -> items.map { it.toModel() } }
@@ -884,34 +909,30 @@ class CareLog @Inject constructor(
      * Baby profiles and custom items are intentionally retained.
      * Settings cleanup is deliberately local-only (not a family tombstone).
      */
-    suspend fun clearRecordsOnly() {
-        val calendarEventIds = babyDao.listAllIncludingDeleted()
-            .flatMap { baby -> calendarEventDao.listForBabyIncludingDeleted(baby.id) }
-            .map { it.id }
-            .distinct()
+    suspend fun clearRecordsOnly() = calendarReminderMutationMutex.withLock {
         val familyServerRetained = syncPort.session().first().familyId.isNotBlank()
-        var historyDeleted = false
         var failure: Throwable? = null
         try {
             syncPort.clearLocalRecords { onCommitted ->
                 transactionRunner.run {
+                    val calendarEventIds = allCalendarEventIds()
                     recordDao.deleteAll()
                     calendarEventDao.deleteAll()
+                    persistPendingRecordClearReminderCleanup(
+                        calendarEventIds = calendarEventIds,
+                        familyServerRetained = familyServerRetained,
+                    )
                 }
-                historyDeleted = true
                 onCommitted()
                 settings.clearNextFeedAt()
             }.getOrThrow()
         } catch (error: Throwable) {
             failure = error.asDomainLocalClearFailure()
         }
-        failure = finishRecordClearReminders(
-            historyDeleted = historyDeleted,
-            calendarEventIds = calendarEventIds,
-            familyServerRetained = familyServerRetained,
-            initialFailure = failure,
-        )
-        failure?.let { throw it }
+        failure = withContext(NonCancellable) {
+            finishRecordClearReminders(initialFailure = failure)
+        }
+        throwClearFailure(failure)
     }
 
     /**
@@ -923,17 +944,13 @@ class CareLog @Inject constructor(
      * — outbox, media_assets, and on-disk media files under the same sync barrier
      * as [clearRecordsOnly].
      */
-    suspend fun clearAllLocalData() {
-        val calendarEventIds = babyDao.listAllIncludingDeleted()
-            .flatMap { baby -> calendarEventDao.listForBabyIncludingDeleted(baby.id) }
-            .map { it.id }
-            .distinct()
+    suspend fun clearAllLocalData() = calendarReminderMutationMutex.withLock {
         val familyServerRetained = syncPort.session().first().familyId.isNotBlank()
-        var historyDeleted = false
         var failure: Throwable? = null
         try {
             syncPort.clearAllLocalData { onCommitted ->
                 transactionRunner.run {
+                    val calendarEventIds = allCalendarEventIds()
                     recordDao.deleteAll()
                     calendarEventDao.deleteAll()
                     customItemDao.deleteAll()
@@ -941,8 +958,11 @@ class CareLog @Inject constructor(
                     membershipDao.deleteAll()
                     familyDao.deleteAll()
                     localUserDao.deleteAll()
+                    persistPendingRecordClearReminderCleanup(
+                        calendarEventIds = calendarEventIds,
+                        familyServerRetained = familyServerRetained,
+                    )
                 }
-                historyDeleted = true
                 onCommitted()
                 settings.setCurrentBabyId(null)
                 settings.clearNextFeedAt()
@@ -950,49 +970,77 @@ class CareLog @Inject constructor(
         } catch (error: Throwable) {
             failure = error.asDomainLocalClearFailure()
         }
-        failure = finishRecordClearReminders(
-            historyDeleted = historyDeleted,
-            calendarEventIds = calendarEventIds,
-            familyServerRetained = familyServerRetained,
-            initialFailure = failure,
-        )
-        failure?.let { throw it }
+        failure = withContext(NonCancellable) {
+            finishRecordClearReminders(initialFailure = failure)
+        }
+        throwClearFailure(failure)
     }
 
-    private suspend fun finishRecordClearReminders(
-        historyDeleted: Boolean,
-        calendarEventIds: Collection<Long>,
-        familyServerRetained: Boolean,
-        initialFailure: Throwable?,
-    ): Throwable? = recordClearReminderMutex.withLock {
-        if (historyDeleted) {
-            pendingRecordClearReminders = true
-            pendingRecordClearReminderIds += calendarEventIds
-            pendingRecordClearFamilyServerRetained =
-                pendingRecordClearFamilyServerRetained || familyServerRetained
+    /** Retry the durable post-commit hand-off when a new app process starts. */
+    suspend fun recoverPendingRecordClearReminders() =
+        calendarReminderMutationMutex.withLock {
+            val failure = withContext(NonCancellable) {
+                finishRecordClearReminders(initialFailure = null)
+            }
+            throwClearFailure(failure)
         }
-        if (!pendingRecordClearReminders) return@withLock initialFailure
 
-        val retryIds = pendingRecordClearReminderIds.toList()
+    private suspend fun finishRecordClearReminders(
+        initialFailure: Throwable?,
+    ): Throwable? {
+        val pending = pendingReminderCleanupDao.get(RECORDS_CLEAR_REMINDER_OPERATION)
+            ?: return initialFailure
+        val retryIds = decodeCalendarEventIds(pending.calendarEventIds)
         return try {
             reminderCleanup.cancelForRecordsClear(retryIds)
-            pendingRecordClearReminderIds.removeAll(retryIds.toSet())
-            pendingRecordClearReminders = false
-            pendingRecordClearFamilyServerRetained = false
+            pendingReminderCleanupDao.delete(RECORDS_CLEAR_REMINDER_OPERATION)
             initialFailure
+        } catch (cancellation: CancellationException) {
+            throw cancellation
         } catch (reminderError: Throwable) {
             when (initialFailure) {
                 is LocalRecordsClearCommittedException -> initialFailure.apply {
                     addSuppressed(reminderError)
                 }
                 else -> LocalRecordsClearCommittedException(
-                    familyServerRetained = pendingRecordClearFamilyServerRetained,
+                    familyServerRetained = pending.familyServerRetained,
                     cause = initialFailure ?: reminderError,
                 ).also { classified ->
                     if (initialFailure != null) classified.addSuppressed(reminderError)
                 }
             }
         }
+    }
+
+    private suspend fun allCalendarEventIds(): List<Long> =
+        babyDao.listAllIncludingDeleted()
+            .flatMap { baby -> calendarEventDao.listForBabyIncludingDeleted(baby.id) }
+            .map { it.id }
+            .distinct()
+
+    private suspend fun persistPendingRecordClearReminderCleanup(
+        calendarEventIds: Collection<Long>,
+        familyServerRetained: Boolean,
+    ) {
+        val existing = pendingReminderCleanupDao.get(RECORDS_CLEAR_REMINDER_OPERATION)
+        val ids = buildSet {
+            existing?.calendarEventIds?.let { addAll(decodeCalendarEventIds(it)) }
+            addAll(calendarEventIds)
+        }
+        pendingReminderCleanupDao.upsert(
+            PendingReminderCleanupEntity(
+                operation = RECORDS_CLEAR_REMINDER_OPERATION,
+                calendarEventIds = ids.sorted().joinToString(","),
+                familyServerRetained =
+                    familyServerRetained || existing?.familyServerRetained == true,
+            ),
+        )
+    }
+
+    private fun throwClearFailure(failure: Throwable?) {
+        if (failure == null) return
+        failure.cancellationCauseOrNull()?.let { throw it }
+        throw failure
     }
 
     private fun Throwable.asDomainLocalClearFailure(): Throwable =
@@ -1004,6 +1052,15 @@ class CareLog @Inject constructor(
         } else {
             this
         }
+
+    private fun Throwable.cancellationCauseOrNull(): CancellationException? {
+        var current: Throwable? = this
+        while (current != null) {
+            if (current is CancellationException) return current
+            current = current.cause
+        }
+        return null
+    }
 
     suspend fun renameBaby(babyId: Long, nickname: String) {
         val name = normalizeNickname(nickname)

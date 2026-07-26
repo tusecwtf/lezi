@@ -168,6 +168,21 @@ internal val MIGRATION_6_7 = object : Migration(6, 7) {
     }
 }
 
+internal val MIGRATION_7_8 = object : Migration(7, 8) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `pending_reminder_cleanup` (
+                `operation` TEXT NOT NULL,
+                `calendarEventIds` TEXT NOT NULL,
+                `familyServerRetained` INTEGER NOT NULL,
+                PRIMARY KEY(`operation`)
+            )
+            """.trimIndent(),
+        )
+    }
+}
+
 @Module
 @InstallIn(SingletonComponent::class)
 object DatabaseModule {
@@ -182,6 +197,7 @@ object DatabaseModule {
                 MIGRATION_4_5,
                 MIGRATION_5_6,
                 MIGRATION_6_7,
+                MIGRATION_7_8,
             )
             .build()
 
@@ -194,6 +210,9 @@ object DatabaseModule {
     @Provides fun outboxDao(db: LeziDatabase): OutboxDao = db.outboxDao()
     @Provides fun customItemDao(db: LeziDatabase): CustomItemDao = db.customItemDao()
     @Provides fun calendarEventDao(db: LeziDatabase): CalendarEventDao = db.calendarEventDao()
+    @Provides
+    fun pendingReminderCleanupDao(db: LeziDatabase): PendingReminderCleanupDao =
+        db.pendingReminderCleanupDao()
 
     @Provides
     @Singleton

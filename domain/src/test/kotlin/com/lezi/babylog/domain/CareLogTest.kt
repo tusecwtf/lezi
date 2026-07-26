@@ -15,6 +15,8 @@ import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.MembershipDao
 import com.lezi.babylog.core.database.MembershipEntity
+import com.lezi.babylog.core.database.PendingReminderCleanupDao
+import com.lezi.babylog.core.database.PendingReminderCleanupEntity
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.datastore.SettingsStore
@@ -24,7 +26,11 @@ import com.lezi.babylog.core.model.visibleBusinessText
 import java.time.LocalDate
 import java.time.ZoneOffset
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
@@ -34,6 +40,7 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.yield
 import org.junit.Test
 
@@ -1091,6 +1098,78 @@ class CareLogTest {
     }
 
     @Test
+    fun reminderFailureKeepsOriginalIdsAfterCareLogRecreation() = runTest {
+        val fakes = Fakes(RecordingSyncPort(familyServerRetained = true))
+        val firstCareLog = fakes.careLog()
+        val babyId = firstCareLog.createBaby(
+            CreateBabyInput(nickname = "年年", birthdayEpochDay = 1),
+        )
+        val eventId = firstCareLog.addCalendarEvent(babyId, "疫苗", 10_000L, 9_000L)
+        fakes.reminders.failRecordsClearAttempts = 1
+
+        assertThat(runCatching { firstCareLog.clearRecordsOnly() }.isFailure).isTrue()
+
+        val recreatedCareLog = fakes.careLog()
+        recreatedCareLog.recoverPendingRecordClearReminders()
+
+        assertThat(fakes.reminders.scheduledCalendarIds).isEmpty()
+        assertThat(fakes.reminders.recordClearBatches)
+            .containsExactly(listOf(eventId), listOf(eventId))
+            .inOrder()
+    }
+
+    @Test
+    fun reminderCleanupCancellationAfterCommitIsRethrownAsCancellation() = runTest {
+        val fakes = Fakes(RecordingSyncPort(familyServerRetained = true))
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        care.addCalendarEvent(babyId, "疫苗", 10_000L, 9_000L)
+        fakes.reminders.cancelRecordsClearAttempts = 1
+
+        val failure = runCatching { care.clearRecordsOnly() }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(CancellationException::class.java)
+        assertThat(fakes.calendarEvents.listForBabyIncludingDeleted(babyId)).isEmpty()
+    }
+
+    @Test
+    fun calendarWriteSchedulesReminderThroughCareLogSeam() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+
+        val eventId = care.addCalendarEvent(babyId, "疫苗", 10_000L, 9_000L)
+
+        assertThat(fakes.reminders.scheduledCalendarIds).containsExactly(eventId)
+    }
+
+    @Test
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun recordsClearCannotInterleaveBetweenCalendarWriteAndAlarmSchedule() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val scheduleEntered = CompletableDeferred<Unit>()
+        val allowSchedule = CompletableDeferred<Unit>()
+        fakes.reminders.scheduleEntered = scheduleEntered
+        fakes.reminders.allowSchedule = allowSchedule
+
+        val add = async { care.addCalendarEvent(babyId, "疫苗", 10_000L, 9_000L) }
+        scheduleEntered.await()
+        val clear = async { care.clearRecordsOnly() }
+        runCurrent()
+
+        assertThat(clear.isCompleted).isFalse()
+        allowSchedule.complete(Unit)
+        val eventId = add.await()
+        clear.await()
+
+        assertThat(fakes.calendarEvents.listForBabyIncludingDeleted(babyId)).isEmpty()
+        assertThat(fakes.reminders.scheduledCalendarIds).isEmpty()
+        assertThat(fakes.reminders.recordClearBatches).containsExactly(listOf(eventId))
+    }
+
+    @Test
     fun reminderFailureDoesNotReplaceAnExistingCommittedClearClassification() = runTest {
         val sync = RecordingSyncPort().apply { failAfterLocalRecordClear = true }
         val fakes = Fakes(sync)
@@ -1181,6 +1260,7 @@ private class Fakes(
     val calendarEvents = FakeCalendarEventDao()
     val customItems = FakeCustomItemDao()
     val media = FakeMediaAssetDao()
+    val pendingReminderCleanup = FakePendingReminderCleanupDao()
     val settings = FakeSettingsStore()
     val reminders = FakeReminderCleanupPort()
     val transactions = RecordingTransactionRunner()
@@ -1194,6 +1274,7 @@ private class Fakes(
         families,
         memberships,
         media,
+        pendingReminderCleanup,
         settings,
         syncPort,
         reminders,
@@ -1207,6 +1288,9 @@ private class FakeReminderCleanupPort : ReminderCleanupPort {
     val scheduledCalendarIds = linkedSetOf<Long>()
     val recordClearBatches = mutableListOf<List<Long>>()
     var failRecordsClearAttempts = 0
+    var cancelRecordsClearAttempts = 0
+    var scheduleEntered: CompletableDeferred<Unit>? = null
+    var allowSchedule: CompletableDeferred<Unit>? = null
 
     fun scheduleNextFeed() {
         nextFeedScheduled = true
@@ -1216,8 +1300,24 @@ private class FakeReminderCleanupPort : ReminderCleanupPort {
         scheduledCalendarIds += eventIds.toList()
     }
 
+    override suspend fun scheduleCalendar(event: CalendarEvent): Boolean {
+        if (event.remindAt == null) return false
+        scheduleEntered?.complete(Unit)
+        allowSchedule?.await()
+        scheduledCalendarIds += event.id
+        return true
+    }
+
+    override suspend fun cancelCalendar(eventId: Long) {
+        scheduledCalendarIds -= eventId
+    }
+
     override suspend fun cancelForRecordsClear(calendarEventIds: Collection<Long>) {
         recordClearBatches += calendarEventIds.toList()
+        if (cancelRecordsClearAttempts > 0) {
+            cancelRecordsClearAttempts--
+            throw CancellationException("reminder cleanup cancelled")
+        }
         if (failRecordsClearAttempts > 0) {
             failRecordsClearAttempts--
             error("reminder cleanup failed")
@@ -1228,6 +1328,21 @@ private class FakeReminderCleanupPort : ReminderCleanupPort {
 
     override suspend fun cancelForBabyDelete(calendarEventIds: Collection<Long>) {
         scheduledCalendarIds.removeAll(calendarEventIds.toSet())
+    }
+}
+
+private class FakePendingReminderCleanupDao : PendingReminderCleanupDao {
+    private var pending: PendingReminderCleanupEntity? = null
+
+    override suspend fun get(operation: String): PendingReminderCleanupEntity? =
+        pending?.takeIf { it.operation == operation }
+
+    override suspend fun upsert(pending: PendingReminderCleanupEntity) {
+        this.pending = pending
+    }
+
+    override suspend fun delete(operation: String) {
+        if (pending?.operation == operation) pending = null
     }
 }
 
