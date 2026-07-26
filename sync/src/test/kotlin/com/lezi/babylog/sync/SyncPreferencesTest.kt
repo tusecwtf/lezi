@@ -2,6 +2,7 @@ package com.lezi.babylog.sync
 
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.google.common.truth.Truth.assertThat
 import java.io.File
@@ -23,6 +24,17 @@ class SyncPreferencesTest {
     ) = DataStoreSyncPreferences(store, tokens)
 
     @Test
+    fun sessionBaseUrlIsDerivedFromStructuredEndpoint() {
+        val session = SyncSession(
+            serverHost = "authoritative.home",
+            serverPort = 9443,
+            serverScheme = "https",
+        )
+
+        assertThat(session.baseUrl).isEqualTo("https://authoritative.home:9443")
+    }
+
+    @Test
     fun sessionAndCursorSurviveStoreRecreation() = runTest {
         val file = File.createTempFile("lezi-sync-", ".preferences_pb").also { it.delete() }
         val tokens = InMemorySecureFamilyTokenStore()
@@ -31,7 +43,7 @@ class SyncPreferencesTest {
         val first = preferences(firstStore, tokens)
         first.saveSession(
             SyncSession(
-                baseUrl = "http://nas:8765",
+                serverHost = "nas",
                 familyId = "family-uuid",
                 familyToken = "secret-token",
                 deviceId = "device-uuid",
@@ -65,7 +77,7 @@ class SyncPreferencesTest {
         val preferences = preferences(store, tokens)
         preferences.saveSession(
             SyncSession(
-                baseUrl = "http://nas:8765",
+                serverHost = "nas",
                 familyId = "family",
                 familyToken = "secret-token",
                 deviceId = "device",
@@ -74,6 +86,8 @@ class SyncPreferencesTest {
         )
 
         val raw = store.data.first()
+        assertThat(raw[stringPreferencesKey("sync_base_url")]).isNull()
+        assertThat(raw[stringPreferencesKey("sync_server_host")]).isEqualTo("nas")
         assertThat(raw[stringPreferencesKey("sync_family_token")]).isNull()
         assertThat(tokens.getToken()).isEqualTo("secret-token")
         assertThat(preferences.session.first().familyToken).isEqualTo("secret-token")
@@ -106,6 +120,39 @@ class SyncPreferencesTest {
     }
 
     @Test
+    fun legacyBaseUrlMigratesToStructuredEndpointAndIsRemoved() = runTest {
+        val file = File.createTempFile("lezi-sync-", ".preferences_pb").also { it.delete() }
+        val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
+        store.edit { prefs ->
+            prefs[stringPreferencesKey("sync_base_url")] = "https://legacy.home:9443"
+            prefs[stringPreferencesKey("sync_family_id")] = "legacy-family"
+            prefs[stringPreferencesKey("sync_family_token")] = "legacy-token"
+            prefs[stringPreferencesKey("sync_device_id")] = "legacy-device"
+            prefs[stringPreferencesKey("sync_family_role")] = FamilyRole.Member.name
+        }
+        val preferences = preferences(store)
+
+        preferences.migrateSecretsIfNeeded()
+
+        val restored = preferences.session.first()
+        assertThat(restored.homeLanConfig).isEqualTo(
+            HomeLanServerConfig(
+                host = "legacy.home",
+                port = 9443,
+                scheme = "https",
+            ),
+        )
+        assertThat(restored.baseUrl).isEqualTo("https://legacy.home:9443")
+        assertThat(restored.isJoined).isTrue()
+        val raw = store.data.first()
+        assertThat(raw[stringPreferencesKey("sync_server_host")]).isEqualTo("legacy.home")
+        assertThat(raw[intPreferencesKey("sync_server_port")]).isEqualTo(9443)
+        assertThat(raw[stringPreferencesKey("sync_server_scheme")]).isEqualTo("https")
+        assertThat(raw[stringPreferencesKey("sync_base_url")]).isNull()
+        file.delete()
+    }
+
+    @Test
     fun clearingFamilyKeepsConfiguredServer() = runTest {
         val file = File.createTempFile("lezi-sync-", ".preferences_pb").also { it.delete() }
         val tokens = InMemorySecureFamilyTokenStore()
@@ -113,7 +160,7 @@ class SyncPreferencesTest {
         val preferences = preferences(store, tokens)
         preferences.saveSession(
             SyncSession(
-                baseUrl = "http://nas:8765",
+                serverHost = "nas",
                 familyId = "family",
                 familyToken = "token",
                 deviceId = "device",
@@ -136,7 +183,7 @@ class SyncPreferencesTest {
         val preferences = preferences(store, tokens)
         preferences.saveSession(
             SyncSession(
-                baseUrl = "http://old-nas:8765",
+                serverHost = "old-nas",
                 familyId = "old-family",
                 familyToken = "old-token",
                 deviceId = "stable-device",
@@ -151,7 +198,7 @@ class SyncPreferencesTest {
 
         assertThat(preferences.session.first()).isEqualTo(
             SyncSession(
-                baseUrl = "http://new-nas:8765",
+                serverHost = "new-nas",
                 familyId = "old-family",
                 familyToken = "old-token",
                 deviceId = "stable-device",
@@ -159,7 +206,6 @@ class SyncPreferencesTest {
                 pullCursor = 0,
                 pullGeneration = "",
                 lastSuccessAt = 123,
-                serverHost = "new-nas",
             ),
         )
         assertThat(tokens.getToken()).isEqualTo("old-token")
@@ -172,7 +218,7 @@ class SyncPreferencesTest {
         val preferences = preferences(store)
         preferences.saveSession(
             SyncSession(
-                baseUrl = "http://old-nas:8765",
+                serverHost = "old-nas",
                 familyId = "old-family",
                 familyToken = "old-token",
                 deviceId = "stable-device",
@@ -185,7 +231,7 @@ class SyncPreferencesTest {
 
         preferences.saveSession(
             SyncSession(
-                baseUrl = "http://new-nas:8765",
+                serverHost = "new-nas",
                 familyId = "new-family",
                 familyToken = "new-token",
                 deviceId = "stable-device",
@@ -207,7 +253,9 @@ class SyncPreferencesTest {
 
         preferences.saveSession(
             SyncSession(
-                baseUrl = "https://lezi.home:443",
+                serverHost = "lezi.home",
+                serverPort = 443,
+                serverScheme = "https",
                 familyId = "family",
                 familyToken = "token",
                 deviceId = "device",

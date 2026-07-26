@@ -1345,7 +1345,6 @@ class RealSyncPort @Inject constructor(
         val config = joinedConfig?.withNormalized()
             ?: parsed.copy(allowedSsids = previous.allowedSsids)
         val session = SyncSession(
-            baseUrl = config.baseUrl.ifBlank { baseUrl },
             familyId = joined.familyId,
             familyToken = joined.token,
             deviceId = deviceId,

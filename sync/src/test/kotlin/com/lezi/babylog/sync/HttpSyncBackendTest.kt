@@ -383,7 +383,8 @@ class HttpSyncBackendTest {
     }
 
     private fun testSession(server: ServerSocket) = SyncSession(
-        baseUrl = "http://${server.inetAddress.hostAddress}:${server.localPort}",
+        serverHost = requireNotNull(server.inetAddress.hostAddress),
+        serverPort = server.localPort,
         familyId = "family",
         familyToken = "family-token",
         deviceId = "device",

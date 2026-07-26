@@ -105,7 +105,7 @@ class FakeSyncBackendTest {
         val backend = FakeSyncBackend()
         val family = "fam-acl"
         val owner = SyncSession(
-            baseUrl = "http://lan",
+            serverHost = "lan",
             familyId = family,
             familyToken = "owner",
             deviceId = "owner-device",

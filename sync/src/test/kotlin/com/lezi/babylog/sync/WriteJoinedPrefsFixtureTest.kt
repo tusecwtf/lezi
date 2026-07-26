@@ -29,7 +29,6 @@ class WriteJoinedPrefsFixtureTest {
         val prefs = DataStoreSyncPreferences(store, tokens)
         prefs.saveSession(
             SyncSession(
-                baseUrl = "http://192.168.50.4:8765",
                 familyId = "fixture-family-ui",
                 familyToken = "fixture-token-for-ui-layout-only",
                 deviceId = "fixture-device",

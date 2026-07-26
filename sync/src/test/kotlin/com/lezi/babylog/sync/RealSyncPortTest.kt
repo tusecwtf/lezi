@@ -232,7 +232,6 @@ class RealSyncPortTest {
     fun savingServerBeforeJoinClearsMediaUploadMarkers() = runTest {
         val rig = SyncRig(
             session = SyncSession(
-                baseUrl = "http://192.168.1.20:8787",
                 serverHost = "192.168.1.20",
                 serverPort = 8787,
                 allowedSsids = listOf("Home"),
@@ -288,7 +287,6 @@ class RealSyncPortTest {
     fun defaultLocalPlaceholderIsNeverPublishedAsAnotherMembersName() = runTest {
         val ownerRig = SyncRig(
             session = SyncSession(
-                baseUrl = "http://192.168.1.20:8787",
                 serverHost = "192.168.1.20",
                 serverPort = 8787,
                 allowedSsids = listOf("Home"),
@@ -343,7 +341,6 @@ class RealSyncPortTest {
     fun scannedUnsavedAddressWinsOverPreviouslySavedServerAndPersistsAfterSuccess() = runTest {
         val rig = SyncRig(
             session = SyncSession(
-                baseUrl = "http://old.home:8765",
                 serverHost = "old.home",
                 serverPort = 8765,
                 allowedSsids = listOf("OldHome"),
@@ -421,7 +418,6 @@ class RealSyncPortTest {
     fun createRetriesReuseThePersistedRecoveryIdUntilSessionSave() = runTest {
         val rig = SyncRig(
             session = SyncSession(
-                baseUrl = "http://192.168.1.20:8787",
                 serverHost = "192.168.1.20",
                 serverPort = 8787,
                 allowedSsids = listOf("Home"),
@@ -442,7 +438,6 @@ class RealSyncPortTest {
     fun createForwardsBootstrapSecretWithoutPersistingItInSession() = runTest {
         val rig = SyncRig(
             session = SyncSession(
-                baseUrl = "http://192.168.1.20:8787",
                 serverHost = "192.168.1.20",
                 serverPort = 8787,
                 allowedSsids = listOf("Home"),
@@ -466,7 +461,6 @@ class RealSyncPortTest {
     fun createMapsRejectedBootstrapSecretToActionableProductError() = runTest {
         val rig = SyncRig(
             session = SyncSession(
-                baseUrl = "http://192.168.1.20:8787",
                 serverHost = "192.168.1.20",
                 serverPort = 8787,
                 allowedSsids = listOf("Home"),
@@ -494,7 +488,6 @@ class RealSyncPortTest {
     fun concurrentCreateAndJoinCannotOverwriteTheFirstCredential() = runTest {
         val rig = SyncRig(
             session = SyncSession(
-                baseUrl = "http://192.168.1.20:8787",
                 serverHost = "192.168.1.20",
                 serverPort = 8787,
                 allowedSsids = listOf("Home"),
@@ -2440,7 +2433,7 @@ private class RecordingSyncBackend : SyncBackend {
 }
 
 private class MemorySyncPreferences(initial: SyncSession) : SyncPreferences {
-    private val state = MutableStateFlow(initial.withHomeLanDerived())
+    private val state = MutableStateFlow(initial)
     private var createRequestId: String? = null
     override val session: Flow<SyncSession> = state
 
@@ -2458,7 +2451,6 @@ private class MemorySyncPreferences(initial: SyncSession) : SyncPreferences {
         val n = config.withNormalized()
         val prev = state.value
         var next = prev.copy(
-            baseUrl = n.baseUrl,
             serverHost = n.host,
             serverPort = n.port,
             allowedSsids = n.allowedSsids,
@@ -2481,7 +2473,7 @@ private class MemorySyncPreferences(initial: SyncSession) : SyncPreferences {
     }
 
     override suspend fun saveSession(session: SyncSession) {
-        state.value = session.withHomeLanDerived()
+        state.value = session
     }
 
     override suspend fun updateCursor(cursor: Long, generation: String) {
@@ -2525,27 +2517,6 @@ private class MemorySyncPreferences(initial: SyncSession) : SyncPreferences {
     override suspend fun clearAllLocalSyncConfig() {
         state.value = SyncSession()
     }
-}
-
-private fun SyncSession.withHomeLanDerived(): SyncSession {
-    if (serverHost.isNotBlank()) {
-        return copy(
-            baseUrl = HomeLanServerConfig(
-                serverHost,
-                serverPort,
-                allowedSsids,
-                serverScheme,
-            ).baseUrl,
-        )
-    }
-    if (baseUrl.isBlank()) return this
-    val parsed = HomeLanServerConfig.fromBaseUrl(baseUrl)
-    return copy(
-        serverHost = parsed.host,
-        serverPort = parsed.port,
-        baseUrl = parsed.baseUrl,
-        serverScheme = parsed.scheme,
-    )
 }
 
 private class MutablePolicyClock(var now: Long = 1_000) : PolicyClock {
@@ -2644,7 +2615,6 @@ private class RecordingTransactionRunner : DatabaseTransactionRunner {
 }
 
 private fun joinedSession(familyId: String) = SyncSession(
-    baseUrl = "http://192.168.1.20:8787",
     familyId = familyId,
     familyToken = "token",
     deviceId = "device-a",

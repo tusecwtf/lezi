@@ -20,7 +20,6 @@ enum class FamilyRole {
 }
 
 data class SyncSession(
-    val baseUrl: String = "",
     val familyId: String = "",
     val familyToken: String = "",
     val deviceId: String = "",
@@ -33,25 +32,19 @@ data class SyncSession(
     val allowedSsids: List<String> = emptyList(),
     val serverScheme: String = DEFAULT_SERVER_SCHEME,
 ) {
+    val baseUrl: String
+        get() = homeLanConfig.baseUrl
+
     val isJoined: Boolean
         get() = baseUrl.isNotBlank() && familyId.isNotBlank() && familyToken.isNotBlank()
 
     val homeLanConfig: HomeLanServerConfig
-        get() {
-            val parsedBaseUrl = runCatching { HomeLanServerConfig.fromBaseUrl(baseUrl) }
-                .getOrDefault(HomeLanServerConfig())
-            val hasStructuredServer = serverHost.isNotBlank()
-            return HomeLanServerConfig(
-                host = serverHost.ifBlank { parsedBaseUrl.host },
-                port = if (hasStructuredServer) {
-                    serverPort.takeIf { it in 1..65535 } ?: parsedBaseUrl.port
-                } else {
-                    parsedBaseUrl.port
-                },
-                allowedSsids = allowedSsids,
-                scheme = if (baseUrl.isNotBlank()) parsedBaseUrl.scheme else serverScheme,
-            )
-        }
+        get() = HomeLanServerConfig(
+            host = serverHost,
+            port = serverPort,
+            allowedSsids = allowedSsids,
+            scheme = serverScheme,
+        ).withNormalized()
 }
 
 interface SyncPreferences {
@@ -98,13 +91,7 @@ class DataStoreSyncPreferences @Inject constructor(
             ?: DEFAULT_SERVER_PORT
         val scheme = if (schemeIsValid) rawScheme.lowercase() else DEFAULT_SERVER_SCHEME
         val ssids = decodeSsids(prefs[Keys.ALLOWED_SSIDS])
-        val derivedBase = when {
-            host.isNotBlank() -> HomeLanServerConfig(host, port, ssids, scheme).baseUrl
-            parsedLegacyUrl != null -> legacyUrl.trim().trimEnd('/')
-            else -> ""
-        }
         return SyncSession(
-            baseUrl = derivedBase,
             familyId = prefs[Keys.FAMILY_ID].orEmpty(),
             familyToken = resolveFamilyToken(prefs),
             deviceId = prefs[Keys.DEVICE_ID].orEmpty(),
@@ -150,8 +137,8 @@ class DataStoreSyncPreferences @Inject constructor(
             } else {
                 prefs[Keys.SERVER_HOST] = normalized.host
                 prefs[Keys.SERVER_PORT] = normalized.port
-                prefs[Keys.BASE_URL] = newBase
                 prefs[Keys.SERVER_SCHEME] = normalized.scheme
+                prefs.remove(Keys.BASE_URL)
             }
             val ssidEncoded = encodeSsids(normalized.allowedSsids)
             if (ssidEncoded.isBlank()) {
@@ -171,23 +158,15 @@ class DataStoreSyncPreferences @Inject constructor(
 
     override suspend fun saveSession(session: SyncSession) {
         secureTokenStore.setToken(session.familyToken)
-        val config = session.homeLanConfig.withNormalized().let { c ->
-            if (c.host.isBlank() && session.baseUrl.isNotBlank()) {
-                HomeLanServerConfig.fromBaseUrl(session.baseUrl)
-                    .copy(allowedSsids = session.allowedSsids)
-                    .withNormalized()
-            } else {
-                c
-            }
-        }
+        val config = session.homeLanConfig.withNormalized()
         dataStore.edit { prefs ->
             if (config.host.isNotBlank()) {
                 prefs[Keys.SERVER_HOST] = config.host
                 prefs[Keys.SERVER_PORT] = config.port
-                prefs[Keys.BASE_URL] = config.baseUrl
                 prefs[Keys.SERVER_SCHEME] = config.scheme
+                prefs.remove(Keys.BASE_URL)
             } else {
-                prefs[Keys.BASE_URL] = normalizeBaseUrl(session.baseUrl)
+                prefs.remove(Keys.BASE_URL)
             }
             val ssidEncoded = encodeSsids(config.allowedSsids.ifEmpty { session.allowedSsids })
             if (ssidEncoded.isBlank()) prefs.remove(Keys.ALLOWED_SSIDS)
@@ -281,15 +260,24 @@ class DataStoreSyncPreferences @Inject constructor(
                 }
                 prefs.remove(Keys.FAMILY_TOKEN)
             }
-            // Populate structured host and port from the legacy base URL.
+            // Populate any missing structured endpoint fields from the legacy
+            // URL, then retire the legacy key once a usable host exists.
             val base = prefs[Keys.BASE_URL].orEmpty()
-            if (base.isNotBlank() && prefs[Keys.SERVER_HOST].isNullOrBlank()) {
+            if (base.isNotBlank()) {
                 val parsed = runCatching { HomeLanServerConfig.fromBaseUrl(base) }.getOrNull()
-                    ?: return@edit
-                if (parsed.host.isNotBlank()) {
-                    prefs[Keys.SERVER_HOST] = parsed.host
-                    prefs[Keys.SERVER_PORT] = parsed.port
-                    prefs[Keys.SERVER_SCHEME] = parsed.scheme
+                if (parsed != null && parsed.host.isNotBlank()) {
+                    if (prefs[Keys.SERVER_HOST].isNullOrBlank()) {
+                        prefs[Keys.SERVER_HOST] = parsed.host
+                    }
+                    if (prefs[Keys.SERVER_PORT] == null) {
+                        prefs[Keys.SERVER_PORT] = parsed.port
+                    }
+                    if (prefs[Keys.SERVER_SCHEME].isNullOrBlank()) {
+                        prefs[Keys.SERVER_SCHEME] = parsed.scheme
+                    }
+                }
+                if (!prefs[Keys.SERVER_HOST].isNullOrBlank()) {
+                    prefs.remove(Keys.BASE_URL)
                 }
             }
         }
@@ -299,13 +287,6 @@ class DataStoreSyncPreferences @Inject constructor(
         val secure = secureTokenStore.getToken()
         if (secure.isNotBlank()) return secure
         return prefs[Keys.FAMILY_TOKEN].orEmpty()
-    }
-
-    private fun normalizeBaseUrl(value: String): String {
-        val normalized = value.trim().trimEnd('/')
-        if (normalized.isEmpty()) return ""
-        InvitePayloadCodec.encode(InvitePayload(normalized, "ABC12345"))
-        return normalized
     }
 
     private fun clearFamilyValues(prefs: androidx.datastore.preferences.core.MutablePreferences) {
