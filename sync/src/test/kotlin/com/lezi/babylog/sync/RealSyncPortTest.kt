@@ -552,6 +552,62 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun localRecordClearFailureBeforeDomainCommitLeavesReplicaCleanupUntouched() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        rig.outbox.enqueue(
+            OutboxEntity(
+                familyId = "family-a",
+                entityType = "record",
+                clientUuid = "record-local",
+                payloadJson = "{}",
+                updatedAt = 1,
+            ),
+        )
+
+        val failure = rig.port.clearLocalRecords { _ ->
+            error("domain transaction failed")
+        }.exceptionOrNull()
+
+        assertThat(failure).hasMessageThat().isEqualTo("domain transaction failed")
+        assertThat(rig.outbox.peek("family-a", 10).map(OutboxEntity::clientUuid))
+            .containsExactly("record-local")
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(0)
+    }
+
+    @Test
+    fun committedRecordClearFailureCannotResurrectOutboxAndCanBeRetried() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        rig.records.seed(localRecord(babyId).copy(syncDirty = false))
+        rig.outbox.enqueue(
+            OutboxEntity(
+                familyId = "family-a",
+                entityType = "record",
+                clientUuid = "record-local",
+                payloadJson = "{}",
+                updatedAt = 1,
+            ),
+        )
+        rig.outbox.failDeleteTypeAttempts = 2
+
+        val failure = rig.port.clearLocalRecords { committed ->
+            rig.records.deleteAll()
+            committed()
+        }.exceptionOrNull()
+
+        assertThat(failure).hasMessageThat().contains("outbox delete failed")
+        assertThat(rig.records.listAllIncludingDeleted()).isEmpty()
+        assertThat(rig.outbox.peek("family-a", 10)).hasSize(1)
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).exceptionOrNull()).isNull()
+        assertThat(rig.backend.pushes.flatMap(PushedBatch::entities).map(SyncEntity::type))
+            .doesNotContain("record")
+
+        assertThat(rig.port.clearLocalRecords { it() }.isSuccess).isTrue()
+        assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
+    }
+
+    @Test
     fun localRecordClearResetsPullAndRemovesOnlyRecordReplicaMedia() = runTest {
         val rig = SyncRig(
             session = joinedSession("family-a").copy(
@@ -610,8 +666,9 @@ class RealSyncPortTest {
         ).forEach { rig.outbox.enqueue(it) }
 
         assertThat(
-            rig.port.clearLocalRecords {
+            rig.port.clearLocalRecords { committed ->
                 rig.records.deleteAll()
+                committed()
             }.isSuccess,
         ).isTrue()
 
@@ -641,8 +698,9 @@ class RealSyncPortTest {
         val pulling = async { rig.port.sync(SyncTrigger.PullToRefresh) }
         rig.backend.pullStarted!!.await()
         val clearing = async {
-            rig.port.clearLocalRecords {
+            rig.port.clearLocalRecords { committed ->
                 rig.records.deleteAll()
+                committed()
             }
         }
         runCurrent()
@@ -681,7 +739,7 @@ class RealSyncPortTest {
             )
         }
 
-        assertThat(rig.port.clearLocalRecords {}.isSuccess).isTrue()
+        assertThat(rig.port.clearLocalRecords { it() }.isSuccess).isTrue()
 
         assertThat(rig.outbox.deleteEntityBatchSizes).containsExactly(400, 400, 205).inOrder()
         assertThat(rig.outbox.peek("family-a", 2_000)).isEmpty()
@@ -751,9 +809,10 @@ class RealSyncPortTest {
         ).forEach { rig.outbox.enqueue(it) }
 
         assertThat(
-            rig.port.clearAllLocalData {
+            rig.port.clearAllLocalData { committed ->
                 rig.records.deleteAll()
                 rig.babies.deleteAll()
+                committed()
             }.isSuccess,
         ).isTrue()
 
@@ -801,7 +860,7 @@ class RealSyncPortTest {
             ),
         )
 
-        assertThat(rig.port.clearLocalRecords {}.isSuccess).isTrue()
+        assertThat(rig.port.clearLocalRecords { it() }.isSuccess).isTrue()
         assertThat(rig.preferences.current().pullCursor).isEqualTo(0)
         assertThat(rig.preferences.current().pullGeneration).isEqualTo("old-generation")
 
@@ -2557,6 +2616,7 @@ private class MemoryOutboxDao : OutboxDao {
     private val rows = mutableListOf<OutboxEntity>()
     private val ids = AtomicLong(1)
     val deleteEntityBatchSizes = mutableListOf<Int>()
+    var failDeleteTypeAttempts = 0
 
     fun all(): List<OutboxEntity> = rows.toList()
 
@@ -2593,6 +2653,10 @@ private class MemoryOutboxDao : OutboxDao {
     }
 
     override suspend fun deleteType(familyId: String, entityType: String) {
+        if (failDeleteTypeAttempts > 0) {
+            failDeleteTypeAttempts--
+            error("outbox delete failed")
+        }
         rows.removeAll { it.familyId == familyId && it.entityType == entityType }
     }
 

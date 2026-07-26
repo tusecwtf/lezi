@@ -1190,16 +1190,24 @@ private class RecordingSyncPort(
         requests++
     }
 
-    override suspend fun clearLocalRecords(clearLocal: suspend () -> Unit): Result<Unit> {
+    override suspend fun clearLocalRecords(
+        clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
+    ): Result<Unit> {
         localRecordReconciliations++
         if (failBeforeLocalRecordClear) return Result.failure(IllegalStateException("blocked"))
-        clearLocal()
+        var committed = false
+        clearLocal { committed = true }
+        check(committed)
         return Result.success(Unit)
     }
 
-    override suspend fun clearAllLocalData(clearLocal: suspend () -> Unit): Result<Unit> {
+    override suspend fun clearAllLocalData(
+        clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
+    ): Result<Unit> {
         fullLocalWipes++
-        clearLocal()
+        var committed = false
+        clearLocal { committed = true }
+        check(committed)
         return Result.success(Unit)
     }
 }

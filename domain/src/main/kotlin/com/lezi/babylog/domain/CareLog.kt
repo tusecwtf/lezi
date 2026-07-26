@@ -886,12 +886,13 @@ class CareLog @Inject constructor(
             .distinct()
         var historyDeleted = false
         try {
-            syncPort.clearLocalRecords {
+            syncPort.clearLocalRecords { onCommitted ->
                 transactionRunner.run {
                     recordDao.deleteAll()
                     calendarEventDao.deleteAll()
                 }
                 historyDeleted = true
+                onCommitted()
                 settings.clearNextFeedAt()
             }.getOrThrow()
         } finally {
@@ -918,7 +919,7 @@ class CareLog @Inject constructor(
             .distinct()
         var historyDeleted = false
         try {
-            syncPort.clearAllLocalData {
+            syncPort.clearAllLocalData { onCommitted ->
                 transactionRunner.run {
                     recordDao.deleteAll()
                     calendarEventDao.deleteAll()
@@ -929,6 +930,7 @@ class CareLog @Inject constructor(
                     localUserDao.deleteAll()
                 }
                 historyDeleted = true
+                onCommitted()
                 settings.setCurrentBabyId(null)
                 settings.clearNextFeedAt()
             }.getOrThrow()

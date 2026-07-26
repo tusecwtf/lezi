@@ -59,14 +59,19 @@ interface SyncPort {
     suspend fun listFamilyMembers(): Result<List<FamilyMember>>
     suspend fun leave(familyId: String): Result<Unit>
     suspend fun deleteFamily(): Result<Unit>
-    suspend fun clearLocalRecords(clearLocal: suspend () -> Unit): Result<Unit>
+    /** [clearLocal] must call its marker immediately after the domain transaction commits. */
+    suspend fun clearLocalRecords(
+        clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
+    ): Result<Unit>
     /**
      * Full local replica wipe (records, media, outbox, files) under the same
      * sync barrier as pull/apply. Domain tables beyond records are cleared via
      * [clearLocal]. Unlike [clearLocalRecords], avatar media and all outbox
      * rows are removed so a subsequent join cannot push stale residue.
      */
-    suspend fun clearAllLocalData(clearLocal: suspend () -> Unit): Result<Unit>
+    suspend fun clearAllLocalData(
+        clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
+    ): Result<Unit>
 }
 
 @Singleton
@@ -96,11 +101,19 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
         Result.failure<List<FamilyMember>>(SyncNotEnabledException())
     override suspend fun leave(familyId: String) = Result.failure<Unit>(SyncNotEnabledException())
     override suspend fun deleteFamily() = Result.failure<Unit>(SyncNotEnabledException())
-    override suspend fun clearLocalRecords(clearLocal: suspend () -> Unit) = runCatching {
-        clearLocal()
+    override suspend fun clearLocalRecords(
+        clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
+    ) = runCatching {
+        var committed = false
+        clearLocal { committed = true }
+        check(committed) { "本机记录清除未确认领域事务已提交" }
     }
 
-    override suspend fun clearAllLocalData(clearLocal: suspend () -> Unit) = runCatching {
-        clearLocal()
+    override suspend fun clearAllLocalData(
+        clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
+    ) = runCatching {
+        var committed = false
+        clearLocal { committed = true }
+        check(committed) { "本机数据清除未确认领域事务已提交" }
     }
 }

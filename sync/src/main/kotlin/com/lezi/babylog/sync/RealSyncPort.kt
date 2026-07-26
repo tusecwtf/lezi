@@ -829,7 +829,9 @@ class RealSyncPort @Inject constructor(
         currentStatus.value = SyncStatus.Disabled
     }
 
-    override suspend fun clearLocalRecords(clearLocal: suspend () -> Unit): Result<Unit> = runCatching {
+    override suspend fun clearLocalRecords(
+        clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
+    ): Result<Unit> = runCatching {
         syncMutex.withLock {
             val session = preferences.session.first()
             val logMedia = mediaDao.listAllIncludingDeleted().filter { it.kind == "log" }
@@ -842,27 +844,25 @@ class RealSyncPort @Inject constructor(
             // The authoritative delete must share the same barrier as pull/apply.
             // Otherwise a pull can reinsert records between the domain delete
             // and replica cleanup while the UI still reports success.
-            clearLocal()
-            // Keep the last server incarnation as a push precondition. If the
-            // server was restored while records were being cleared, the next
-            // dirty Baby must be rejected into full recovery before mutation.
-            preferences.updateCursor(0, generation = session.pullGeneration)
-            if (session.familyId.isNotBlank()) {
-                outboxDao.deleteType(session.familyId, "record")
-                val mediaUuids = logMedia.map(MediaAssetEntity::clientUuid)
-                mediaUuids.chunked(OUTBOX_DELETE_CHUNK_SIZE).forEach { chunk ->
-                    outboxDao.deleteEntities(session.familyId, "media", chunk)
+            var domainCommitted = false
+            try {
+                clearLocal { domainCommitted = true }
+                check(domainCommitted) { "本机记录清除未确认领域事务已提交" }
+                finishLocalRecordsClear(session, logMedia, localMediaPaths)
+            } catch (error: Throwable) {
+                if (domainCommitted) {
+                    runCatching {
+                        finishLocalRecordsClear(session, logMedia, localMediaPaths)
+                    }.onFailure(error::addSuppressed)
                 }
+                throw error
             }
-            mediaDao.deleteLogMedia()
-            localMediaPaths.forEach { localUri ->
-                runCatching { mediaFiles.delete(localUri) }
-            }
-            cachedSession = preferences.session.first()
         }
     }.onFailure(::updateFailureStatus)
 
-    override suspend fun clearAllLocalData(clearLocal: suspend () -> Unit): Result<Unit> = runCatching {
+    override suspend fun clearAllLocalData(
+        clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
+    ): Result<Unit> = runCatching {
         syncMutex.withLock {
             val allMedia = mediaDao.listAllIncludingDeleted()
             val localMediaPaths = buildList {
@@ -876,18 +876,57 @@ class RealSyncPort @Inject constructor(
             }.filter(String::isNotBlank).distinct()
             // Same barrier as clearLocalRecords: domain wipe + outbox/media/files
             // must not interleave with pull/apply.
-            clearLocal()
-            // Full wipe leaves no local replica. Drop generation so the next
-            // join/create starts from a clean push precondition.
-            preferences.updateCursor(0, generation = "")
-            outboxDao.deleteAll()
-            mediaDao.deleteAll()
-            localMediaPaths.forEach { localUri ->
-                runCatching { mediaFiles.delete(localUri) }
+            var domainCommitted = false
+            try {
+                clearLocal { domainCommitted = true }
+                check(domainCommitted) { "本机数据清除未确认领域事务已提交" }
+                finishAllLocalDataClear(localMediaPaths)
+            } catch (error: Throwable) {
+                if (domainCommitted) {
+                    runCatching {
+                        finishAllLocalDataClear(localMediaPaths)
+                    }.onFailure(error::addSuppressed)
+                }
+                throw error
             }
-            cachedSession = preferences.session.first()
         }
     }.onFailure(::updateFailureStatus)
+
+    private suspend fun finishLocalRecordsClear(
+        session: SyncSession,
+        logMedia: List<MediaAssetEntity>,
+        localMediaPaths: List<String>,
+    ) {
+        if (session.familyId.isNotBlank()) {
+            outboxDao.deleteType(session.familyId, "record")
+            logMedia.map(MediaAssetEntity::clientUuid)
+                .chunked(OUTBOX_DELETE_CHUNK_SIZE)
+                .forEach { chunk ->
+                    outboxDao.deleteEntities(session.familyId, "media", chunk)
+                }
+        }
+        mediaDao.deleteLogMedia()
+        localMediaPaths.forEach { localUri ->
+            runCatching { mediaFiles.delete(localUri) }
+        }
+        // Keep the last server incarnation as a push precondition. If the
+        // server was restored while records were being cleared, the next dirty
+        // Baby must enter full recovery before mutation.
+        preferences.updateCursor(0, generation = session.pullGeneration)
+        cachedSession = preferences.session.first()
+    }
+
+    private suspend fun finishAllLocalDataClear(localMediaPaths: List<String>) {
+        outboxDao.deleteAll()
+        mediaDao.deleteAll()
+        localMediaPaths.forEach { localUri ->
+            runCatching { mediaFiles.delete(localUri) }
+        }
+        // Full wipe leaves no local replica. Drop generation so the next
+        // join/create starts from a clean push precondition.
+        preferences.updateCursor(0, generation = "")
+        cachedSession = preferences.session.first()
+    }
 
     private suspend fun pushPending(session: SyncSession) {
         while (pushPendingBatch(session)) {
@@ -900,8 +939,18 @@ class RealSyncPort @Inject constructor(
         val roots = outboxDao.peek(session.familyId, PUSH_ROOT_BATCH_SIZE)
         if (roots.isEmpty()) return false
         val queued = expandBatchWithDependencies(session, roots)
+        val staleAfterHardDelete = mutableListOf<OutboxEntity>()
+        queued.forEach { row ->
+            if (isStaleAfterHardDelete(row)) staleAfterHardDelete += row
+        }
+        if (staleAfterHardDelete.isNotEmpty()) {
+            // A committed local clear can fail before its outbox cleanup. Never
+            // resurrect a hard-deleted entity on a later sync; deleting these
+            // rows is safe because ordinary soft deletes retain their DB row.
+            outboxDao.deleteIds(staleAfterHardDelete.map(OutboxEntity::id))
+        }
         val unauthorizedAvatarRows = if (session.role == FamilyRole.Member) {
-            queued.filter { row ->
+            (queued - staleAfterHardDelete.toSet()).filter { row ->
                 row.entityType == "media" &&
                     runCatching {
                         Json.parseToJsonElement(row.payloadJson)
@@ -915,7 +964,7 @@ class RealSyncPort @Inject constructor(
         if (unauthorizedAvatarRows.isNotEmpty()) {
             outboxDao.deleteIds(unauthorizedAvatarRows.map { it.id })
         }
-        val pending = queued - unauthorizedAvatarRows.toSet()
+        val pending = queued - staleAfterHardDelete.toSet() - unauthorizedAvatarRows.toSet()
         if (pending.isEmpty()) return true
         val uploads = mutableListOf<MediaAssetEntity>()
         val entities = pending
@@ -975,6 +1024,21 @@ class RealSyncPort @Inject constructor(
         }
         outboxDao.deleteIds(pending.map { it.id })
         return true
+    }
+
+    private suspend fun isStaleAfterHardDelete(row: OutboxEntity): Boolean = when (row.entityType) {
+        "baby" -> babyDao.getByClientUuid(row.clientUuid) == null
+        "record" -> recordDao.getByClientUuid(row.clientUuid) == null
+        "media" -> {
+            val media = mediaDao.getByClientUuid(row.clientUuid)
+            val recordId = media?.recordId
+            media == null || (
+                media.kind == "log" && (
+                    recordId == null || recordDao.getIncludingDeleted(recordId) == null
+                )
+            )
+        }
+        else -> false
     }
 
     private suspend fun expandBatchWithDependencies(
