@@ -19,6 +19,7 @@ import com.lezi.babylog.core.database.OutboxEntity
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.model.SyncStatus
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
@@ -35,6 +36,30 @@ import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Test
 
 class RealSyncPortTest {
+    @Test
+    fun atomicBundleIdIsStableUuidAndIncludesRootTypeEntityAndVersion() {
+        val entityUuid = "11111111-2222-3333-8444-555555555555"
+
+        val recordBundle = AtomicBundleId.forRecord(entityUuid, 1_725_123_456_789)
+
+        assertThat(recordBundle).isEqualTo("f9a0d4c8-1f6d-3c9b-af41-bc497b33b79e")
+        assertThat(UUID.fromString(recordBundle).toString()).isEqualTo(recordBundle)
+        assertThat(AtomicBundleId.forRecord(entityUuid, 1_725_123_456_789))
+            .isEqualTo(recordBundle)
+        assertThat(AtomicBundleId.forRecord(entityUuid, 1_725_123_456_790))
+            .isEqualTo("b8e35751-20fb-3a89-ba93-ac2f906b75eb")
+        assertThat(
+            AtomicBundleId.forRecord(
+                "11111111-2222-3333-8444-555555555556",
+                1_725_123_456_789,
+            ),
+        ).isEqualTo("d9d61874-0056-38c0-8540-8c6d1961ea92")
+        assertThat(AtomicBundleId.forCarePlan(entityUuid, 1_725_123_456_789))
+            .isEqualTo("48dc1a40-05dc-357f-b5c9-00ed00de6f57")
+        assertThat(AtomicBundleId.forRecord(entityUuid, 2))
+            .isEqualTo("e4c2d0cf-4967-347c-b3bd-af9dae2b34f4")
+    }
+
     @Test
     fun unjoinedSyncIsDisabledNoOp() = runTest {
         val rig = SyncRig(session = SyncSession())
@@ -2389,8 +2414,9 @@ class RealSyncPortTest {
             assertThat(draft.root.clientUuid).isEqualTo("record-photos-$photoCount")
             assertThat(draft.media.filter { it.deletedAt == null }).hasSize(photoCount)
             assertThat(rig.backend.bundleMediaUploads).hasSize(photoCount)
-            assertThat(rig.backend.committedBundles.last())
-                .startsWith("record:record-photos-$photoCount:")
+            val committedBundleId = rig.backend.committedBundles.last()
+            assertThat(committedBundleId).isEqualTo(draft.bundleId)
+            assertThat(UUID.fromString(committedBundleId).toString()).isEqualTo(committedBundleId)
             // Creator local still has full rows; outbox drained for this package.
             assertThat(rig.records.getByClientUuid("record-photos-$photoCount")?.syncDirty)
                 .isFalse()
@@ -2517,7 +2543,11 @@ class RealSyncPortTest {
             ),
         )
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
-        assertThat(rig.backend.committedBundles).contains("record:record-mutate:100")
+        val createBundle = rig.backend.stagedBundles.last {
+            it.root.clientUuid == recordUuid && it.root.updatedAt == 100L
+        }.bundleId
+        assertThat(rig.backend.committedBundles).contains(createBundle)
+        assertThat(UUID.fromString(createBundle).toString()).isEqualTo(createBundle)
         assertThat(rig.records.getByClientUuid(recordUuid)?.syncDirty).isFalse()
 
         // Text-only edit → new package id, no media uploads required.
@@ -2530,7 +2560,11 @@ class RealSyncPortTest {
             ),
         )
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
-        assertThat(rig.backend.committedBundles).contains("record:record-mutate:200")
+        val textBundle = rig.backend.stagedBundles.last {
+            it.root.clientUuid == recordUuid && it.root.updatedAt == 200L
+        }.bundleId
+        assertThat(rig.backend.committedBundles).contains(textBundle)
+        assertThat(textBundle).isNotEqualTo(createBundle)
 
         // Replace photo: tombstone old, add new, same package.
         val afterText = rig.records.getByClientUuid(recordUuid)!!
@@ -2584,7 +2618,8 @@ class RealSyncPortTest {
         assertThat(replaceDraft.media).isNotEmpty()
         assertThat(replaceDraft.media.any { it.deletedAt != null }).isTrue()
         assertThat(replaceDraft.media.any { it.deletedAt == null }).isTrue()
-        assertThat(rig.backend.committedBundles).contains("record:record-mutate:300")
+        assertThat(rig.backend.committedBundles).contains(replaceDraft.bundleId)
+        assertThat(replaceDraft.bundleId).isNotEqualTo(textBundle)
 
         // Soft-delete whole record + media tombstones.
         val live = rig.records.getByClientUuid(recordUuid)!!
@@ -2597,8 +2632,9 @@ class RealSyncPortTest {
             ),
         )
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
-        assertThat(rig.backend.committedBundles).contains("record:record-mutate:400")
         val deleteDraft = rig.backend.stagedBundles.last { it.root.updatedAt == 400L }
+        assertThat(rig.backend.committedBundles).contains(deleteDraft.bundleId)
+        assertThat(deleteDraft.bundleId).isNotEqualTo(replaceDraft.bundleId)
         assertThat(deleteDraft.root.deletedAt).isEqualTo(400)
         assertThat(deleteDraft.media.all { it.deletedAt != null }).isTrue()
     }
@@ -2920,15 +2956,19 @@ class RealSyncPortTest {
         rig.backend.putBundleMediaFailure = IllegalStateException("first upload fail")
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isFalse()
         assertThat(rig.backend.committedBundles).isEmpty()
+        val retryBundleId = rig.backend.stagedBundles.single {
+            it.root.clientUuid == "record-retry"
+        }.bundleId
+        assertThat(UUID.fromString(retryBundleId).toString()).isEqualTo(retryBundleId)
 
         rig.backend.putBundleMediaFailure = null
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
-        assertThat(rig.backend.committedBundles).containsExactly("record:record-retry:777")
+        assertThat(rig.backend.committedBundles).containsExactly(retryBundleId)
         assertThat(rig.records.getByClientUuid("record-retry")?.syncDirty).isFalse()
 
         // Already clean — another foreground sync must not mint a second commit id.
         assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
-        assertThat(rig.backend.committedBundles.count { it == "record:record-retry:777" })
+        assertThat(rig.backend.committedBundles.count { it == retryBundleId })
             .isEqualTo(1)
     }
 
@@ -2978,8 +3018,9 @@ class RealSyncPortTest {
                 assertThat(payload["record_client_uuid"]?.jsonPrimitive?.contentOrNull)
                     .isNull()
             }
-            assertThat(rig.backend.committedBundles.last())
-                .startsWith("care_plan:plan-photos-$photoCount:")
+            val committedBundleId = rig.backend.committedBundles.last()
+            assertThat(committedBundleId).isEqualTo(draft.bundleId)
+            assertThat(UUID.fromString(committedBundleId).toString()).isEqualTo(committedBundleId)
             assertThat(rig.carePlans.getByClientUuid("plan-photos-$photoCount")?.syncDirty)
                 .isFalse()
         }
@@ -3017,7 +3058,7 @@ class RealSyncPortTest {
         rig.backend.putBundleMediaFailure = IllegalStateException("upload aborted")
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isFalse()
         assertThat(rig.carePlans.getByClientUuid("plan-fail-upload")?.syncDirty).isTrue()
-        assertThat(rig.backend.committedBundles.none { it.startsWith("care_plan:") }).isTrue()
+        assertThat(rig.backend.committedBundles).isEmpty()
         assertThat(rig.media.listForCarePlan(planId).single().localUri)
             .isEqualTo("photos/fail-plan.jpg")
     }
@@ -3186,8 +3227,9 @@ class RealSyncPortTest {
             ),
         )
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
-        assertThat(rig.backend.committedBundles).contains("care_plan:plan-skip:111")
         val skipDraft = rig.backend.stagedBundles.last { it.root.clientUuid == "plan-skip" }
+        assertThat(rig.backend.committedBundles).contains(skipDraft.bundleId)
+        assertThat(UUID.fromString(skipDraft.bundleId).toString()).isEqualTo(skipDraft.bundleId)
         assertThat(skipDraft.root.deletedAt).isNull()
         assertThat(Json.parseToJsonElement(skipDraft.root.payloadJson).jsonObject["status"]
             ?.jsonPrimitive?.contentOrNull).isEqualTo("skipped")
@@ -3201,8 +3243,9 @@ class RealSyncPortTest {
             ),
         )
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
-        assertThat(rig.backend.committedBundles).contains("care_plan:plan-tomb:222")
         val tombDraft = rig.backend.stagedBundles.last { it.root.clientUuid == "plan-tomb" }
+        assertThat(rig.backend.committedBundles).contains(tombDraft.bundleId)
+        assertThat(tombDraft.bundleId).isNotEqualTo(skipDraft.bundleId)
         assertThat(tombDraft.root.deletedAt).isEqualTo(222)
     }
 
@@ -3293,16 +3336,17 @@ class RealSyncPortTest {
 
             // Fulfill Record commits before completed care_plan so a page that ends
             // after the record still applies the fact before co-gating the plan.
-            val recordCommitIdx = rig.backend.committedBundles.indexOfFirst {
-                it.startsWith("record:$recordUuid:")
+            val recordDraft = rig.backend.stagedBundles.first {
+                it.root.type == "record" && it.root.clientUuid == recordUuid
             }
-            val planCommitIdx = rig.backend.committedBundles.indexOfFirst {
-                it.startsWith("care_plan:$planUuid:")
+            val planDraft = rig.backend.stagedBundles.first {
+                it.root.type == "care_plan" && it.root.clientUuid == planUuid
             }
+            val recordCommitIdx = rig.backend.committedBundles.indexOf(recordDraft.bundleId)
+            val planCommitIdx = rig.backend.committedBundles.indexOf(planDraft.bundleId)
             assertThat(recordCommitIdx).isAtLeast(0)
             assertThat(planCommitIdx).isAtLeast(0)
             assertThat(recordCommitIdx).isLessThan(planCommitIdx)
-            val recordDraft = rig.backend.stagedBundles.first { it.root.clientUuid == recordUuid }
             assertThat(recordDraft.media.filter { it.deletedAt == null }).hasSize(photoCount)
 
             val candidatePush = rig.backend.pushes
@@ -3362,7 +3406,10 @@ class RealSyncPortTest {
         rig.backend.pushFailures.add(IllegalStateException("candidate push lost"))
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isFalse()
         // Atomics may have committed before residual failed.
-        assertThat(rig.backend.committedBundles.any { it.startsWith("record:$recordUuid:") }).isTrue()
+        val recordBundleId = rig.backend.stagedBundles.first {
+            it.root.type == "record" && it.root.clientUuid == recordUuid
+        }.bundleId
+        assertThat(rig.backend.committedBundles).contains(recordBundleId)
         assertThat(rig.fulfillmentCandidates.getByClientUuid(candUuid)?.syncDirty).isTrue()
 
         // Re-dirty only candidate if records already marked synced; re-seed dirty candidate.

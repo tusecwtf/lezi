@@ -50,6 +50,21 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 
+internal object AtomicBundleId {
+    private const val NAMESPACE = "lezi.atomic-bundle.v1"
+
+    fun forRecord(recordClientUuid: String, updatedAt: Long): String =
+        fromRoot("record", recordClientUuid, updatedAt)
+
+    fun forCarePlan(planClientUuid: String, updatedAt: Long): String =
+        fromRoot("care_plan", planClientUuid, updatedAt)
+
+    private fun fromRoot(rootType: String, clientUuid: String, updatedAt: Long): String =
+        UUID.nameUUIDFromBytes(
+            "$NAMESPACE:$rootType:$clientUuid:$updatedAt".toByteArray(Charsets.UTF_8),
+        ).toString()
+}
+
 @Singleton
 class RealSyncPort @Inject constructor(
     private val backend: SyncBackend,
@@ -620,7 +635,7 @@ class RealSyncPort @Inject constructor(
 
     /**
      * Push one record + its 0–3 log photos as an atomic NAS package.
-     * Idempotent [bundleId] = recordUuid + updatedAt so retries do not create duplicates.
+     * [bundleId] is a deterministic UUID derived from root type + record UUID + updatedAt.
      */
     private suspend fun pushRecordAtomicBundle(
         session: SyncSession,
@@ -687,7 +702,7 @@ class RealSyncPort @Inject constructor(
             updatedAt = recordRow.updatedAt,
             deletedAt = recordRow.deletedAt,
         )
-        val bundleId = atomicRecordBundleId(record.clientUuid, recordRow.updatedAt)
+        val bundleId = AtomicBundleId.forRecord(record.clientUuid, recordRow.updatedAt)
         requireAllowed(policy.evaluate(session.homeLanConfig, foregroundState.isForeground()))
         backend.stageBundle(
             session,
@@ -715,12 +730,9 @@ class RealSyncPort @Inject constructor(
         outboxDao.deleteIds((listOf(recordRow) + mediaRows).map { it.id })
     }
 
-    private fun atomicRecordBundleId(recordClientUuid: String, updatedAt: Long): String =
-        "record:$recordClientUuid:$updatedAt"
-
     /**
      * Push one care plan + its 0–3 plan photos as an atomic NAS package.
-     * Idempotent [bundleId] = care_planUuid + updatedAt so retries do not create duplicates.
+     * [bundleId] is a deterministic UUID derived from root type + plan UUID + updatedAt.
      */
     private suspend fun pushCarePlanAtomicBundle(
         session: SyncSession,
@@ -788,7 +800,7 @@ class RealSyncPort @Inject constructor(
             updatedAt = planRow.updatedAt,
             deletedAt = planRow.deletedAt,
         )
-        val bundleId = atomicCarePlanBundleId(plan.clientUuid, planRow.updatedAt)
+        val bundleId = AtomicBundleId.forCarePlan(plan.clientUuid, planRow.updatedAt)
         requireAllowed(policy.evaluate(session.homeLanConfig, foregroundState.isForeground()))
         backend.stageBundle(
             session,
@@ -815,9 +827,6 @@ class RealSyncPort @Inject constructor(
         mediaRows.forEach { mediaDao.markSynced(it.clientUuid, it.updatedAt) }
         outboxDao.deleteIds((listOf(planRow) + mediaRows).map { it.id })
     }
-
-    private fun atomicCarePlanBundleId(planClientUuid: String, updatedAt: Long): String =
-        "care_plan:$planClientUuid:$updatedAt"
 
     private suspend fun isStaleAfterHardDelete(row: OutboxEntity): Boolean = when (row.entityType) {
         "baby" -> babyDao.getByClientUuid(row.clientUuid) == null

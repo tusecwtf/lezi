@@ -538,6 +538,7 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 - **暂存不可见**：commit 前根实体与媒体均不出现在普通 `GET /v1/pull`
 - **清单完整**：live media 必须声明正 `byte_size`；commit 前全部字节校验通过；tombstone media 不需字节
 - **幂等 commit**：重复 commit / 丢失响应可安全重试；已 commit 的 `bundle_id` 内容冲突 → `409`
+- **稳定 UUID**：Android 以命名空间、根类型、根实体 `client_uuid` 与 `updated_at` 确定性生成合法 UUID；同一版本重试复用同一 `bundle_id`，Record 与 CarePlan 不共享身份
 - **旧版本保留**：新版本编辑在 commit 前不覆盖已发布完整版本；根 `updated_at` 落后于已发布 → commit `409`
 - **LWW 与 legacy**：commit 与 `/v1/push` 共享实体键 LWW；不得用半套 legacy 写穿破原子可见性
 - **根类型通用**：`record` 与 `care_plan` 共用同一 HTTP/Store 契约

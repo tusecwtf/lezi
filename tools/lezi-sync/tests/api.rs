@@ -2944,6 +2944,73 @@ async fn health_advertises_atomic_bundle_capability() {
 }
 
 #[tokio::test]
+async fn atomic_bundle_requires_uuid_bundle_id_in_body_and_paths() {
+    let rig = Rig::new();
+    let created = create_family(
+        &rig.app,
+        "bundle-uuid-owner",
+        "bundle-uuid-owner-request-00000001",
+    )
+    .await;
+    let token = created["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let record_id = "11111111-2222-3333-8444-555555555555";
+    let legacy_bundle_id = format!("record:{record_id}:2");
+
+    let (legacy_status, legacy_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": legacy_bundle_id,
+            "root": entity_wire("record", record_id, 2, record_payload(&baby_id), None),
+            "media": []
+        }),
+    )
+    .await;
+    assert_eq!(
+        legacy_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{legacy_body}"
+    );
+
+    let invalid_path = request(
+        &rig.app,
+        Method::GET,
+        "/v1/bundles/not-a-uuid",
+        Some(token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(invalid_path.status(), StatusCode::BAD_REQUEST);
+
+    // Android's deterministic UUID for
+    // lezi.atomic-bundle.v1:record:<record_id>:2 is accepted end to end.
+    let bundle_id = "e4c2d0cf-4967-347c-b3bd-af9dae2b34f4";
+    let (stage_status, staged) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire("record", record_id, 2, record_payload(&baby_id), None),
+            "media": []
+        }),
+    )
+    .await;
+    assert_eq!(stage_status, StatusCode::OK, "{staged}");
+    assert_eq!(staged["bundle_id"], bundle_id);
+
+    let (get_status, status) =
+        get_json(&rig.app, &format!("/v1/bundles/{bundle_id}"), Some(token)).await;
+    assert_eq!(get_status, StatusCode::OK, "{status}");
+    assert_eq!(status["bundle_id"], bundle_id);
+}
+
+#[tokio::test]
 async fn atomic_bundle_is_invisible_until_commit_and_publishes_atomically() {
     let rig = Rig::new();
     let created = create_family(
