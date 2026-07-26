@@ -1671,7 +1671,8 @@ private fun JsonObject.toJoinResult(): JoinResult = JoinResult(
 
 private fun HomeNetworkDecision.userMessage(): String = when (this) {
     HomeNetworkDecision.MissingServer -> "请先填写家庭服务器地址"
-    HomeNetworkDecision.MissingSsidAllowlist -> "请先绑定家庭 Wi‑Fi 名称（最多 2 个，如 2.4G/5G）"
+    HomeNetworkDecision.MissingSsidAllowlist ->
+        "请先填写并点「保存家庭网络与服务器」绑定 Wi‑Fi 名称（最多 2 个，如 2.4G/5G）"
     HomeNetworkDecision.SsidUnavailable -> "无法读取 Wi‑Fi 名称，请开启定位权限后重试"
     HomeNetworkDecision.SsidNotMatched -> "当前 Wi‑Fi 未绑定，请在账户中添加此网络名称"
     HomeNetworkDecision.NotOnWifi, HomeNetworkDecision.ServerUnavailable,
