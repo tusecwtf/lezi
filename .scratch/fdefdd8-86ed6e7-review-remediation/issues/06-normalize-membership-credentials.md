@@ -1,0 +1,71 @@
+# 06 — membership / credential 正规化
+
+**What to build:** 在 NAS store 中把持久家庭 membership 与 Bearer credential 分开。membership 持有 immutable ID、family、role、device label、display name；credential 持有 token hash 并指向 membership。旧库同 family + role + device 的重复 active token 只在迁移时归并到一个 canonical membership；自改称呼更新 membership，因此所有 token/所有成员视图立即一致。
+
+**Blocked by:** None — frontier
+
+**Status:** ready-for-agent
+
+**Size:** L
+**Review finding:** P2 #6 — duplicate token coalescer 可能继续投影旧称呼
+**Seam:** credential authentication → canonical membership principal
+
+## Initial file surface
+
+- `tools/lezi-sync/src/store.rs`
+- `tools/lezi-sync/src/members.rs`
+- `tools/lezi-sync/src/lib.rs` / authentication, leave
+- `tools/lezi-sync/tests/api.rs` 与 store tests
+- `tools/lezi-sync/README.md`（仅 schema/升级说明）
+- `docs/prd/data-model.md`
+- `docs/prd/sync-home-lan.md`（仅身份/吊销语义）
+
+不得修改 Android sync interface、Record payload、family name 或 care-plan ACL；01 后续消费 principal。
+
+## Interface contract
+
+- `authenticate(token) -> Principal{membership_id, family_id, role, ...}`；调用方不感知 token row。
+- `updateMyDisplayName(principal.membership_id, name)` 更新 canonical membership 一次。
+- members projection 每个 membership 一行；`is_self` 按 membership equality，不按 token hash equality。
+- leave 吊销当前 membership 的全部 credentials；credential rotation 单独吊销凭证但不改 membership identity（若尚无 rotation route，只锁 store invariant/test helper）。
+
+## Migration policy
+
+- 加法/事务迁移旧 schema，保留所有仍有效 token 的认证能力与 family 外键。
+- 仅 migration 可按旧 `(family_id, role, device_id)` 归并历史重复；owner/member collision 永不跨 role 合并。
+- 归并后的 display name 选择必须确定且记录规则；迁移后任何本人 rename 成为唯一真值。
+- 已存在的 membership IDs 需保留 alias/映射，避免未来作者引用因归并失联；不得在每次重启重新生成。
+- 新 join 总是由 NAS 创建明确 membership，不得因来宾自报与现有相同 `device_id` 就自动取得对方身份。
+
+## Acceptance criteria
+
+- [ ] schema 明确分离 membership 与 credential；`token_hash` 不再是产品 membership 主键。
+- [ ] 两个历史 active token 归并后认证到同一 membership ID，members 只投影一行。
+- [ ] 任一归并 token 自改称呼后，本 token、另一个旧 token、其他家庭成员看到的都是新称呼；重启后不回退。
+- [ ] 同 device 但 owner/member 的旧行保持两个 membership，不发生角色提升。
+- [ ] 新攻击者在 join body 声明他人 `device_id`，不会被合并到他人 membership、不能改他人称呼。
+- [ ] leave 撤销 canonical membership 的全部 credentials；旧重复 token 不能继续访问。
+- [ ] migration 事务失败可回滚；重复启动幂等；旧 token、family name、role、display name 不丢。
+- [ ] members response 继续不暴露 token/token hash；device 字段只作为 legacy projection，不承担 authority。
+- [ ] 替换当前 BTreeMap coalescer/“first non-null name”真源，不在其上再叠排序补丁。
+
+## Validation
+
+- `cargo test --manifest-path tools/lezi-sync/Cargo.toml`
+- 旧 SQLite fixture → 新 schema migration/restart 测试
+- API tests：duplicate tokens rename、other-member view、role collision、same-device attacker、leave revocation
+- `git diff --check`
+
+## Documentation Gate
+
+- 更新 `docs/prd/data-model.md` 当前“`token_hash` 为 membership 主键”和 runtime device coalescing 的陈旧描述。
+- 对齐 `CONTEXT.md` 与 `docs/adr/0007-separate-family-membership-from-credentials.md`；若实现偏离 ADR，先更新决策而不是静默偏离。
+
+## Out of scope
+
+- 跨设备合并同一照护者、账号体系或管理员转让。
+- Record 作者落地（01）与 custom/care-plan ACL。
+
+## Comments
+
+- 单纯让 self row 在 BTreeMap 中赢只能修调用者视图；其他成员仍可能读到重复行中的旧 non-null name，因此不是闭环。
