@@ -269,11 +269,9 @@ impl RawEntity {
                     "care_plan must be published via atomic bundle",
                 ));
             }
-            (EntityValidationContext::LegacyPush, _) => {
-                return Err(ApiError::unprocessable(
-                    "entity type must be baby, record, media, custom_item, or fulfillment_candidate",
-                ))
-            }
+            (EntityValidationContext::LegacyPush, _) => return Err(ApiError::unprocessable(
+                "entity type must be baby, record, media, custom_item, or fulfillment_candidate",
+            )),
             (EntityValidationContext::AtomicBundleRoot, _) => {
                 return Err(ApiError::unprocessable(
                     "bundle root type must be record or care_plan",
@@ -349,7 +347,8 @@ impl BundleStageRequest {
         let mut media = Vec::with_capacity(self.media.len());
         let mut seen = BTreeSet::new();
         for raw in self.media {
-            let entity = raw.validate_as(max_media_bytes, EntityValidationContext::AtomicBundleMedia)?;
+            let entity =
+                raw.validate_as(max_media_bytes, EntityValidationContext::AtomicBundleMedia)?;
             if entity.entity_type != "media" {
                 return Err(ApiError::unprocessable(
                     "bundle media entities must have type media",
@@ -523,10 +522,7 @@ fn validate_media(payload: &Map<String, Value>, max_media_bytes: usize) -> Resul
 /// and must not appear here. Creator membership is stamped by the server on first insert.
 fn validate_custom_item(payload: &mut Map<String, Value>) -> Result<(), ApiError> {
     require_keys(payload, &["name", "icon_slot"])?;
-    allow_keys(
-        payload,
-        &["name", "icon_slot", "created_by_membership_id"],
-    )?;
+    allow_keys(payload, &["name", "icon_slot", "created_by_membership_id"])?;
     string(payload, "name", 1, 40)?;
     integer(payload, "icon_slot", 0, 7)?;
     // Client may omit or send a guess; server overwrites on insert and freezes later.
@@ -577,11 +573,7 @@ fn validate_care_plan(payload: &mut Map<String, Value>) -> Result<(), ApiError> 
     }
     optional_integer(payload, "schema_version", 1, i64::MAX)?;
     let status = string_value(payload, "status")?;
-    if status != "pending"
-        && status != "missed"
-        && status != "completed"
-        && status != "skipped"
-    {
+    if status != "pending" && status != "missed" && status != "completed" && status != "skipped" {
         return Err(ApiError::unprocessable(
             "status must be pending, missed, completed, or skipped",
         ));
@@ -597,10 +589,7 @@ fn validate_care_plan(payload: &mut Map<String, Value>) -> Result<(), ApiError> 
 /// Submitter membership/role/confirmed_at are server-stamped; clients cannot
 /// forge evidence. Winner selection is a later ticket — this only stores candidates.
 fn validate_fulfillment_candidate(payload: &mut Map<String, Value>) -> Result<(), ApiError> {
-    require_keys(
-        payload,
-        &["care_plan_client_uuid", "record_client_uuid"],
-    )?;
+    require_keys(payload, &["care_plan_client_uuid", "record_client_uuid"])?;
     allow_keys(
         payload,
         &[
