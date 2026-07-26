@@ -62,17 +62,19 @@ NAS 家庭记录须持久化共享 `name`（或等价字段），并在成员可
 
 | 字段 | 说明 |
 |------|------|
-| `family_id` | |
-| `user_id` | |
+| `membership_id` | NAS 生成的不可变 membership UUID，产品身份主键 |
+| `family_id` | 所属家庭 |
 | `role` | `owner` \| `member` |
-| `status` | `active` \| `revoked` |
-| `joined_at` | |
+| `device_id` | 旧数据迁移提示与副本标签，不承担鉴权 |
+| `display_name` | 当前家庭称呼；所有指向该 membership 的凭证共享 |
+| `left_at` | 空表示 active；非空表示已退出 |
 
-NAS 实现以 `token_hash` 为 membership 主键，同时保存 `device_id`、
-`display_name`（**家庭称呼**）与 `membership_id`（服务端生成的不可变 UUID 公开
-身份）。`membership_id` 在建家/加入时分配，加法升级旧库时回填，且**永不重写**；
-token 更新或服务器重启不得改变它。角色与写者身份只由认证 principal 决定，客户端
-payload 不得冒充管理员或其他成员。
+NAS 将持久 membership 与 Bearer credential 分表。`memberships.membership_id` 是
+不可变公开身份；`membership_credentials.token_hash` 是可轮换、可单独吊销并指向
+membership 的访问凭证，不是成员主键。`membership_id` 在建家/加入时分配，升级旧库
+时保留既有 ID 或只生成一次；token 更新、地址变化或服务器重启不得改变它。角色、
+称呼与写者身份只由认证后的 canonical membership principal 决定，客户端 payload
+不得冒充管理员或其他成员。
 
 `display_name` 在产品层于建家/加入时**必填**；服务端 trim，拒绝控制字符与双向文本
 格式控制符，最长 128 个 Unicode 字符；空白、省略字段与本机占位名「我（本机）」均
@@ -85,10 +87,12 @@ UI 占位名“我（本机）”当成真实成员名上传。历史 null/空/�
 兜底（如「家庭管理员」「家庭成员」或「家人」），且不得把「我（本机）」展示给其他
 成员。管理员在 UI 上以 ★ 标出。
 
-旧库没有 `(family_id, device_id, role)` 唯一约束。服务端读取时合并同 role +
-device 的重复 active token 行（一行投影一个稳定 `membership_id`），不跨 role 合并，
-也不凭客户端声明的 `device_id` 批量吊销；退出严格吊销当前 token。不会把 member
-误呈现为 owner。管理员删除家庭时由外键级联清除全部 membership。
+旧库没有 `(family_id, device_id, role)` 唯一约束。升级事务仅在迁移时把同 family +
+role + device 的历史 active token 归并到一个 canonical membership，保留其它既有
+membership ID 为作者/ACL alias；owner/member 冲突不跨 role 合并。迁移后运行时不再
+按客户端声明的 `device_id` 合并，新 join 总是创建独立 membership。单凭证轮换/吊销
+不改变 membership；成员退出会标记该 membership 离开并吊销它的全部凭证。管理员
+删除家庭时由外键级联清除 membership、credential 与 alias。
 
 权限（V2）：
 
@@ -421,7 +425,7 @@ V1 可提供「导出数据库/JSON 到文件」便于换机；与家庭实时�
 | 操作 | 行为 |
 |------|------|
 | 删一条记录 | `deleted_at` 软删；V2 进 Outbox |
-| 成员退出 | membership revoked + 吊销本机 token；**NAS 业务数据保留** |
+| 成员退出 | membership 标记离开并吊销其全部 credentials；**NAS 业务数据保留** |
 | 清除本机全部 | 多重确认后清空本地库；**默认仅本地** |
 | 管理员删除家庭数据 | 多重确认后清空 NAS entities + `DATA_DIR/media/`（见 sync-home-lan） |
 

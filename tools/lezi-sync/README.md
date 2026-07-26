@@ -202,7 +202,7 @@ lezi-sync healthcheck
 | POST | `/v1/family/name` | owner 改共享家庭名 |
 | POST | `/v1/invite` | owner 创建一次性邀请码 |
 | POST | `/v1/join` | 邀请码换 member token（响应含 `family_name`） |
-| POST | `/v1/leave` | member 吊销自身 token |
+| POST | `/v1/leave` | member 退出自身 membership 并吊销其全部凭证 |
 | POST | `/v1/family/delete` | owner 删除家庭及媒体 |
 | POST | `/v1/push` | Baby、Record、Media、CustomItem 的严格 LWW push（兼容路径） |
 | GET | `/v1/pull?cursor=&generation=` | 有界分页、单调 cursor 增量 pull |
@@ -219,8 +219,9 @@ Media 的 kind 与关联创建后不可改变；member 可以写日志媒体，�
 
 `GET /v1/family/members` 返回 owner-first 的稳定列表：
 `{"members":[{"display_name":"妈妈","role":"owner","is_self":true,"device_id":"…","membership_id":"…"}]}`。
-服务端只按 Bearer principal 的 `family_id` 查询 active memberships，并由当前
-token 计算 `is_self`；响应绝不包含 token、`token_hash` 或 `family_id`。
+服务端只按 Bearer principal 的 `family_id` 查询 active memberships，并按返回行的
+`membership_id` 是否等于 principal membership 计算 `is_self`；响应绝不包含 token、
+`token_hash` 或 `family_id`。
 `membership_id` 是服务端生成的**不可变** membership 公开身份（UUID），创建/加入时
 写入，token 轮换、地址变化或进程重启均不改变；供计划作者、自定义定义与履行冲突
 等 ACL 引用。`device_id` 仅作客户端把记录 `created_by_device_id` 解析为当前家庭
@@ -243,12 +244,14 @@ null；最长 128 个 Unicode 字符，并拒绝控制符与双向文本格式�
 `{"ok":true,"family_name":…}`。客户端冷启动依赖本机会话缓存（create/join/rename
 回写），无独立 GET。
 
-为兼容旧库，同一 role + device 的多条 active token 在列表中合并为**一行**；合并时
-若含当前 principal 则投影其 `membership_id`，否则取字典序最小的 `membership_id`
-以保持稳定。不同 role 不合并，因为 `device_id` 是客户端声明而非鉴权证据，不能
-据此把 member 提升成 owner；退出也只吊销当前 Bearer token，无法安全地按
-`device_id` 批量吊销其它历史 token。旧库缺 `membership_id` 时加法回填 UUID，从不
-重写已有 id。管理员删除家庭会统一清除全部 memberships。
+NAS 持久化将 membership 与 credential 分开：`memberships.membership_id` 是产品身份
+主键；`membership_credentials.token_hash` 只用于认证并指向 membership，同一
+membership 可持有多个可独立轮换/吊销的凭证。旧库升级在单一事务中仅一次按
+`(family_id, role, device_id)` 归并历史 active token，按 token hash 字典序稳定选择
+既有 membership ID 和首个安全非占位称呼；其它既有 ID 保留为 ACL alias，缺失 ID
+只生成一次。不同 role 永不合并。运行时 members 每个 active membership 投影一行，
+新 join 即使声明相同 `device_id` 也创建独立 membership；退出标记当前 membership
+离开并吊销其全部凭证。管理员删除家庭时由外键级联清除全部 memberships 与凭证。
 
 `POST /v1/family/create` 与 `POST /v1/join` 响应均含 `membership_id`；同一
 `create_request_id` / 同一邀请码幂等重试返回**相同** `membership_id`。角色与写者

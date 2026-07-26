@@ -13,9 +13,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::model::{
-    Entity, MAX_BUNDLE_MEDIA_ENTITIES, MAX_OPEN_STAGING_BUNDLES_PER_FAMILY,
-};
+use crate::model::{Entity, MAX_BUNDLE_MEDIA_ENTITIES, MAX_OPEN_STAGING_BUNDLES_PER_FAMILY};
 use crate::{PULL_ENTITY_TARGET_BYTES, PULL_PAGE_ENTITY_LIMIT, PULL_PAGE_TARGET_BYTES};
 
 const ENTITY_QUERY_CHUNK_SIZE: usize = 400;
@@ -24,7 +22,6 @@ const ENTITY_QUERY_CHUNK_SIZE: usize = 400;
 pub struct Principal {
     pub family_id: String,
     pub role: String,
-    pub token_hash: String,
     pub device_id: String,
     /// Server-minted immutable membership identity (UUID). Safe to expose to clients.
     pub membership_id: String,
@@ -32,7 +29,6 @@ pub struct Principal {
 
 #[derive(Debug, Clone)]
 pub struct ActiveMembership {
-    pub token_hash: String,
     pub role: String,
     pub device_id: String,
     pub display_name: Option<String>,
@@ -208,7 +204,7 @@ impl Store {
     }
 
     fn initialize(&self) -> Result<(), StoreError> {
-        let connection = self.connect()?;
+        let mut connection = self.connect()?;
         connection.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS families (
@@ -219,16 +215,13 @@ impl Store {
             );
 
             CREATE TABLE IF NOT EXISTS memberships (
-                token_hash TEXT PRIMARY KEY,
+                membership_id TEXT PRIMARY KEY,
                 family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
                 role TEXT NOT NULL CHECK(role IN ('owner', 'member')),
                 device_id TEXT NOT NULL,
                 display_name TEXT,
-                revoked_at INTEGER,
-                membership_id TEXT
+                left_at INTEGER
             );
-            CREATE INDEX IF NOT EXISTS memberships_family
-                ON memberships(family_id);
 
             CREATE TABLE IF NOT EXISTS invites (
                 code_hash TEXT PRIMARY KEY,
@@ -306,25 +299,34 @@ impl Store {
             connection.execute("ALTER TABLE families ADD COLUMN name TEXT", [])?;
         }
         let membership_columns = table_columns(&connection, "memberships")?;
-        if !membership_columns.contains("membership_id") {
-            connection.execute(
-                "ALTER TABLE memberships ADD COLUMN membership_id TEXT",
-                [],
-            )?;
+        if membership_columns.contains("token_hash") {
+            migrate_legacy_memberships(&mut connection)?;
         }
-        // Additive upgrade: mint stable UUIDs for rows created before this column.
-        // Never regenerate an existing membership_id (author ACL depends on immutability).
-        backfill_membership_ids(&connection)?;
+        connection.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS membership_credentials (
+                token_hash TEXT PRIMARY KEY,
+                membership_id TEXT NOT NULL
+                    REFERENCES memberships(membership_id) ON DELETE CASCADE,
+                revoked_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS membership_credentials_membership
+                ON membership_credentials(membership_id);
+
+            CREATE TABLE IF NOT EXISTS membership_aliases (
+                alias_membership_id TEXT PRIMARY KEY,
+                canonical_membership_id TEXT NOT NULL
+                    REFERENCES memberships(membership_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS membership_aliases_canonical
+                ON membership_aliases(canonical_membership_id);
+
+            CREATE INDEX IF NOT EXISTS memberships_family
+                ON memberships(family_id);
+            ",
+        )?;
         // Expand entities CHECK for care_plan, custom_item, fulfillment_candidate.
         ensure_entities_allow_care_plan_and_custom_item(&connection)?;
-        connection.execute(
-            "
-            CREATE UNIQUE INDEX IF NOT EXISTS memberships_membership_id
-            ON memberships(membership_id)
-            WHERE membership_id IS NOT NULL
-            ",
-            [],
-        )?;
         connection.execute(
             "
             CREATE UNIQUE INDEX IF NOT EXISTS families_create_request
@@ -358,13 +360,17 @@ impl Store {
             .query_row(
                 "
                 SELECT families.id, families.name, memberships.device_id,
-                       memberships.display_name, memberships.revoked_at,
-                       memberships.membership_id, memberships.token_hash
+                       memberships.display_name, memberships.membership_id
                 FROM families
                 JOIN memberships
                   ON memberships.family_id = families.id
                  AND memberships.role = 'owner'
+                 AND memberships.left_at IS NULL
+                JOIN membership_credentials
+                  ON membership_credentials.membership_id = memberships.membership_id
+                 AND membership_credentials.revoked_at IS NULL
                 WHERE families.create_request_hash = ?1
+                LIMIT 1
                 ",
                 params![create_request_hash],
                 |row| {
@@ -373,32 +379,20 @@ impl Store {
                         row.get::<_, Option<String>>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<i64>>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(4)?,
                     ))
                 },
             )
             .optional()?;
-        if let Some((
-            family_id,
-            stored_family_name,
-            stored_device,
-            stored_name,
-            revoked_at,
-            stored_membership_id,
-            token_hash,
-        )) = retry
+        if let Some((family_id, stored_family_name, stored_device, stored_name, membership_id)) =
+            retry
         {
             if stored_device != device_id
                 || stored_name.as_deref() != Some(display_name)
                 || stored_family_name.as_deref() != family_name
-                || revoked_at.is_some()
             {
                 return Err(StoreError::FamilyAlreadyExists);
             }
-            let membership_id =
-                ensure_membership_id_in_tx(&transaction, &token_hash, stored_membership_id)?;
             return Ok((
                 family_id.clone(),
                 derive_token(&create_request_hash, &family_id),
@@ -431,16 +425,17 @@ impl Store {
         transaction.execute(
             "
             INSERT INTO memberships(
-                token_hash, family_id, role, device_id, display_name, membership_id
-            ) VALUES (?1, ?2, 'owner', ?3, ?4, ?5)
+                membership_id, family_id, role, device_id, display_name
+            ) VALUES (?1, ?2, 'owner', ?3, ?4)
             ",
-            params![
-                crate::hash_secret(&token),
-                family_id,
-                device_id,
-                display_name,
-                membership_id
-            ],
+            params![membership_id, family_id, device_id, display_name],
+        )?;
+        transaction.execute(
+            "
+            INSERT INTO membership_credentials(token_hash, membership_id)
+            VALUES (?1, ?2)
+            ",
+            params![crate::hash_secret(&token), membership_id],
         )?;
         transaction.commit()?;
         Ok((
@@ -471,9 +466,14 @@ impl Store {
         let row = connection
             .query_row(
                 "
-                SELECT token_hash, family_id, role, device_id, membership_id
-                FROM memberships
-                WHERE token_hash = ?1 AND revoked_at IS NULL
+                SELECT memberships.family_id, memberships.role,
+                       memberships.device_id, memberships.membership_id
+                FROM membership_credentials AS credentials
+                JOIN memberships
+                  ON memberships.membership_id = credentials.membership_id
+                WHERE credentials.token_hash = ?1
+                  AND credentials.revoked_at IS NULL
+                  AND memberships.left_at IS NULL
                 ",
                 params![token_hash],
                 |row| {
@@ -482,17 +482,14 @@ impl Store {
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
-                        row.get::<_, Option<String>>(4)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((token_hash, family_id, role, device_id, membership_id)) = row else {
+        let Some((family_id, role, device_id, membership_id)) = row else {
             return Ok(None);
         };
-        let membership_id = ensure_membership_id(&connection, &token_hash, membership_id)?;
         Ok(Some(Principal {
-            token_hash,
             family_id,
             role,
             device_id,
@@ -504,13 +501,13 @@ impl Store {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
             "
-            SELECT token_hash, role, device_id, display_name, membership_id
+            SELECT role, device_id, display_name, membership_id
             FROM memberships
-            WHERE family_id = ?1 AND revoked_at IS NULL
+            WHERE family_id = ?1 AND left_at IS NULL
             ORDER BY
                 CASE role WHEN 'owner' THEN 0 ELSE 1 END,
                 device_id COLLATE BINARY,
-                token_hash COLLATE BINARY
+                membership_id COLLATE BINARY
             ",
         )?;
         let rows = statement
@@ -518,24 +515,22 @@ impl Store {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        let mut memberships = Vec::with_capacity(rows.len());
-        for (token_hash, role, device_id, display_name, membership_id) in rows {
-            let membership_id = ensure_membership_id(&connection, &token_hash, membership_id)?;
-            memberships.push(ActiveMembership {
-                token_hash,
-                role,
-                device_id,
-                display_name,
-                membership_id,
-            });
-        }
-        Ok(memberships)
+        Ok(rows
+            .into_iter()
+            .map(
+                |(role, device_id, display_name, membership_id)| ActiveMembership {
+                    role,
+                    device_id,
+                    display_name,
+                    membership_id,
+                },
+            )
+            .collect())
     }
 
     pub fn create_invite(
@@ -557,10 +552,10 @@ impl Store {
         Ok(expires_at)
     }
 
-    /// Updates the active membership row for `token_hash` only (self-rename).
+    /// Updates the canonical active membership, regardless of which credential authenticated.
     pub fn update_membership_display_name(
         &self,
-        token_hash: &str,
+        membership_id: &str,
         display_name: &str,
     ) -> Result<(), StoreError> {
         let connection = self.connect()?;
@@ -568,9 +563,9 @@ impl Store {
             "
             UPDATE memberships
             SET display_name = ?1
-            WHERE token_hash = ?2 AND revoked_at IS NULL
+            WHERE membership_id = ?2 AND left_at IS NULL
             ",
-            params![display_name, token_hash],
+            params![display_name, membership_id],
         )?;
         Ok(())
     }
@@ -622,19 +617,23 @@ impl Store {
             let stored_membership_id = transaction
                 .query_row(
                     "
-                    SELECT membership_id FROM memberships
-                    WHERE token_hash = ?1 AND family_id = ?2 AND revoked_at IS NULL
+                    SELECT memberships.membership_id
+                    FROM membership_credentials AS credentials
+                    JOIN memberships
+                      ON memberships.membership_id = credentials.membership_id
+                    WHERE credentials.token_hash = ?1
+                      AND memberships.family_id = ?2
+                      AND credentials.revoked_at IS NULL
+                      AND memberships.left_at IS NULL
                     ",
                     params![token_hash, family_id],
-                    |row| row.get::<_, Option<String>>(0),
+                    |row| row.get::<_, String>(0),
                 )
                 .optional()?;
             let Some(stored_membership_id) = stored_membership_id else {
                 return Err(StoreError::InviteNotFound);
             };
-            let membership_id =
-                ensure_membership_id_in_tx(&transaction, &token_hash, stored_membership_id)?;
-            return Ok((family_id, token, membership_id, family_name));
+            return Ok((family_id, token, stored_membership_id, family_name));
         }
         if expires_at <= now {
             return Err(StoreError::InviteExpired);
@@ -643,16 +642,17 @@ impl Store {
         transaction.execute(
             "
             INSERT INTO memberships(
-                token_hash, family_id, role, device_id, display_name, membership_id
-            ) VALUES (?1, ?2, 'member', ?3, ?4, ?5)
+                membership_id, family_id, role, device_id, display_name
+            ) VALUES (?1, ?2, 'member', ?3, ?4)
             ",
-            params![
-                token_hash,
-                family_id,
-                device_id,
-                display_name,
-                membership_id
-            ],
+            params![membership_id, family_id, device_id, display_name],
+        )?;
+        transaction.execute(
+            "
+            INSERT INTO membership_credentials(token_hash, membership_id)
+            VALUES (?1, ?2)
+            ",
+            params![token_hash, membership_id],
         )?;
         transaction.execute(
             "
@@ -666,12 +666,26 @@ impl Store {
         Ok((family_id, token, membership_id, family_name))
     }
 
-    pub fn revoke(&self, token_hash: &str, now: i64) -> Result<(), StoreError> {
-        let connection = self.connect()?;
-        connection.execute(
-            "UPDATE memberships SET revoked_at = ?1 WHERE token_hash = ?2",
-            params![now, token_hash],
+    pub fn leave_membership(&self, membership_id: &str, now: i64) -> Result<(), StoreError> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "
+            UPDATE memberships
+            SET left_at = ?1
+            WHERE membership_id = ?2 AND left_at IS NULL
+            ",
+            params![now, membership_id],
         )?;
+        transaction.execute(
+            "
+            UPDATE membership_credentials
+            SET revoked_at = ?1
+            WHERE membership_id = ?2 AND revoked_at IS NULL
+            ",
+            params![now, membership_id],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -703,21 +717,28 @@ impl Store {
         let incoming_keys = entities.iter().map(entity_key).collect::<BTreeSet<_>>();
         let mut existing = load_existing_entities(&transaction, family_id, &incoming_keys)?;
         let mut effective = effective_lww_winners(entities, &existing);
-        stamp_and_authorize_custom_items(role, membership_id, &mut effective, &existing)?;
-        stamp_and_authorize_care_plans(role, membership_id, &mut effective, &existing)?;
+        let equivalent_memberships = equivalent_membership_ids(&transaction, membership_id)?;
+        stamp_and_authorize_custom_items(
+            role,
+            membership_id,
+            &equivalent_memberships,
+            &mut effective,
+            &existing,
+        )?;
+        stamp_and_authorize_care_plans(
+            role,
+            membership_id,
+            &equivalent_memberships,
+            &mut effective,
+            &existing,
+        )?;
         // confirmed_at is millis-like; prefer entity.updated_at when already ms-scale.
         let confirmed_at = if now > 1_000_000_000_000 {
             now
         } else {
             now.saturating_mul(1_000)
         };
-        stamp_fulfillment_candidates(
-            role,
-            membership_id,
-            confirmed_at,
-            &mut effective,
-            &existing,
-        )?;
+        stamp_fulfillment_candidates(role, membership_id, confirmed_at, &mut effective, &existing)?;
         for entity in &effective {
             let payload_bytes = serde_json::to_vec(&entity.payload)?.len();
             // Leave room for the entity envelope and the page response fields.
@@ -1002,7 +1023,14 @@ impl Store {
         package.extend(media);
         let incoming_keys = package.iter().map(entity_key).collect::<BTreeSet<_>>();
         let mut existing = load_existing_entities(&transaction, family_id, &incoming_keys)?;
-        stamp_and_authorize_care_plans(role, membership_id, &mut package, &existing)?;
+        let equivalent_memberships = equivalent_membership_ids(&transaction, membership_id)?;
+        stamp_and_authorize_care_plans(
+            role,
+            membership_id,
+            &equivalent_memberships,
+            &mut package,
+            &existing,
+        )?;
         let reference_keys = validation_reference_keys(&package);
         let missing_references = reference_keys
             .difference(&incoming_keys)
@@ -1040,11 +1068,7 @@ impl Store {
                 if existing_bundle.content_hash != content_hash {
                     return Err(StoreError::BundleContentConflict);
                 }
-                return bundle_stage_status_from_row(
-                    &transaction,
-                    family_id,
-                    &existing_bundle,
-                );
+                return bundle_stage_status_from_row(&transaction, family_id, &existing_bundle);
             }
             // Replace open staging with the new package (same bundle_id retry/refine).
             transaction.execute(
@@ -1268,13 +1292,19 @@ impl Store {
             if entity.deleted_at.is_some() {
                 continue;
             }
-            if !media_ready.get(&entity.client_uuid).copied().unwrap_or(false) {
+            if !media_ready
+                .get(&entity.client_uuid)
+                .copied()
+                .unwrap_or(false)
+            {
                 return Err(StoreError::BundleMediaIncomplete);
             }
         }
 
         if root.updated_at > max_updated_at
-            || media.iter().any(|entity| entity.updated_at > max_updated_at)
+            || media
+                .iter()
+                .any(|entity| entity.updated_at > max_updated_at)
         {
             return Err(StoreError::TimestampOutOfRange);
         }
@@ -1283,11 +1313,8 @@ impl Store {
         // identical re-publish of a never-committed package that lost the race
         // to an equal/newer legacy write of the same root).
         let root_key = entity_key(&root);
-        let existing_root = load_existing_entities(
-            &transaction,
-            family_id,
-            &BTreeSet::from([root_key.clone()]),
-        )?;
+        let existing_root =
+            load_existing_entities(&transaction, family_id, &BTreeSet::from([root_key.clone()]))?;
         if let Some(published) = existing_root.get(&root_key) {
             if published.updated_at > root.updated_at {
                 return Err(StoreError::BundleRootNotNewer);
@@ -1306,7 +1333,14 @@ impl Store {
         let mut effective = effective_lww_winners(package.clone(), &existing);
         // Re-stamp/authorize on commit so a staged package cannot bypass ACL after
         // membership role changes, and creator freezes against published rows.
-        stamp_and_authorize_care_plans(role, membership_id, &mut effective, &existing)?;
+        let equivalent_memberships = equivalent_membership_ids(&transaction, membership_id)?;
+        stamp_and_authorize_care_plans(
+            role,
+            membership_id,
+            &equivalent_memberships,
+            &mut effective,
+            &existing,
+        )?;
         for entity in &effective {
             let payload_bytes = serde_json::to_vec(&entity.payload)?.len();
             if payload_bytes.saturating_add(512) > PULL_ENTITY_TARGET_BYTES {
@@ -1493,7 +1527,8 @@ fn staged_media_uuids(
         ",
     )?;
     let rows = statement.query_map(params![family_id, bundle_id], |row| row.get(0))?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(StoreError::from)
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(StoreError::from)
 }
 
 fn required_live_media_uuids(media: &[Entity]) -> Vec<String> {
@@ -1564,6 +1599,7 @@ fn ensure_entities_allow_care_plan_and_custom_item(
 fn stamp_and_authorize_custom_items(
     role: &str,
     membership_id: &str,
+    equivalent_membership_ids: &BTreeSet<String>,
     entities: &mut [Entity],
     existing: &HashMap<EntityKey, ExistingEntity>,
 ) -> Result<(), StoreError> {
@@ -1584,10 +1620,13 @@ fn stamp_and_authorize_custom_items(
                 .unwrap_or("")
                 .to_owned();
             // Creator is immutable after first write.
-            entity
-                .payload
-                .insert("created_by_membership_id".to_owned(), Value::String(creator.clone()));
-            if role != "owner" && (creator.is_empty() || creator != membership_id) {
+            entity.payload.insert(
+                "created_by_membership_id".to_owned(),
+                Value::String(creator.clone()),
+            );
+            if role != "owner"
+                && (creator.is_empty() || !equivalent_membership_ids.contains(&creator))
+            {
                 return Err(StoreError::ForbiddenCustomItem);
             }
         } else {
@@ -1607,6 +1646,7 @@ fn stamp_and_authorize_custom_items(
 fn stamp_and_authorize_care_plans(
     role: &str,
     membership_id: &str,
+    equivalent_membership_ids: &BTreeSet<String>,
     entities: &mut [Entity],
     existing: &HashMap<EntityKey, ExistingEntity>,
 ) -> Result<(), StoreError> {
@@ -1632,7 +1672,9 @@ fn stamp_and_authorize_care_plans(
             );
             // Manage ACL (edit/skip/delete/status): creator or owner only.
             // Fulfillment is not a care_plan rewrite path here (separate candidate).
-            if role != "owner" && (creator.is_empty() || creator != membership_id) {
+            if role != "owner"
+                && (creator.is_empty() || !equivalent_membership_ids.contains(&creator))
+            {
                 return Err(StoreError::ForbiddenCarePlan);
             }
         } else {
@@ -1700,9 +1742,10 @@ fn stamp_fulfillment_candidates(
             entity
                 .payload
                 .insert("submitter_role".to_owned(), Value::String(role.to_owned()));
-            entity
-                .payload
-                .insert("confirmed_at".to_owned(), Value::Number(confirmed_at.into()));
+            entity.payload.insert(
+                "confirmed_at".to_owned(),
+                Value::Number(confirmed_at.into()),
+            );
         }
     }
     Ok(())
@@ -1936,57 +1979,223 @@ fn table_columns(connection: &Connection, table: &str) -> Result<BTreeSet<String
         .map_err(StoreError::from)
 }
 
-/// Assigns UUIDs to memberships missing `membership_id` (legacy rows / additive upgrade).
-fn backfill_membership_ids(connection: &Connection) -> Result<(), StoreError> {
-    let mut statement = connection.prepare(
+fn equivalent_membership_ids(
+    transaction: &Transaction<'_>,
+    canonical_membership_id: &str,
+) -> Result<BTreeSet<String>, StoreError> {
+    let mut membership_ids = BTreeSet::from([canonical_membership_id.to_owned()]);
+    let mut statement = transaction.prepare(
         "
-        SELECT token_hash FROM memberships
-        WHERE membership_id IS NULL OR membership_id = ''
+        SELECT alias_membership_id
+        FROM membership_aliases
+        WHERE canonical_membership_id = ?1
         ",
     )?;
-    let token_hashes = statement
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    for token_hash in token_hashes {
-        connection.execute(
-            "UPDATE memberships SET membership_id = ?1 WHERE token_hash = ?2",
-            params![Uuid::new_v4().to_string(), token_hash],
+    for alias in statement.query_map(params![canonical_membership_id], |row| {
+        row.get::<_, String>(0)
+    })? {
+        membership_ids.insert(alias?);
+    }
+    Ok(membership_ids)
+}
+
+#[derive(Debug)]
+struct LegacyMembership {
+    token_hash: String,
+    family_id: String,
+    role: String,
+    device_id: String,
+    display_name: Option<String>,
+    revoked_at: Option<i64>,
+    membership_id: Option<String>,
+}
+
+/// Transactionally separates persistent memberships from bearer credentials.
+///
+/// Historical active rows are grouped once by `(family_id, role, device_id)`.
+/// The row with the lexicographically smallest token hash supplies the first
+/// existing membership id; if it has none, the first later existing id wins,
+/// otherwise a UUID is minted. Display name uses the first render-safe,
+/// non-placeholder value in that same stable order, falling back to the first
+/// raw non-null value when every historical name is unsafe. Other historical
+/// ids are retained as aliases.
+fn migrate_legacy_memberships(connection: &mut Connection) -> Result<(), StoreError> {
+    let legacy_columns = table_columns(connection, "memberships")?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if !legacy_columns.contains("membership_id") {
+        transaction.execute("ALTER TABLE memberships ADD COLUMN membership_id TEXT", [])?;
+    }
+    transaction.execute_batch(
+        "
+        DROP INDEX IF EXISTS memberships_family;
+        DROP INDEX IF EXISTS memberships_membership_id;
+        ALTER TABLE memberships RENAME TO memberships_legacy;
+
+        CREATE TABLE memberships (
+            membership_id TEXT PRIMARY KEY,
+            family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+            role TEXT NOT NULL CHECK(role IN ('owner', 'member')),
+            device_id TEXT NOT NULL,
+            display_name TEXT,
+            left_at INTEGER
+        );
+        CREATE TABLE membership_credentials (
+            token_hash TEXT PRIMARY KEY,
+            membership_id TEXT NOT NULL
+                REFERENCES memberships(membership_id) ON DELETE CASCADE,
+            revoked_at INTEGER
+        );
+        CREATE TABLE membership_aliases (
+            alias_membership_id TEXT PRIMARY KEY,
+            canonical_membership_id TEXT NOT NULL
+                REFERENCES memberships(membership_id) ON DELETE CASCADE
+        );
+        ",
+    )?;
+
+    let rows = {
+        let mut statement = transaction.prepare(
+            "
+            SELECT token_hash, family_id, role, device_id, display_name,
+                   revoked_at, membership_id
+            FROM memberships_legacy
+            ORDER BY family_id COLLATE BINARY, role COLLATE BINARY,
+                     device_id COLLATE BINARY, token_hash COLLATE BINARY
+            ",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(LegacyMembership {
+                    token_hash: row.get(0)?,
+                    family_id: row.get(1)?,
+                    role: row.get(2)?,
+                    device_id: row.get(3)?,
+                    display_name: row.get(4)?,
+                    revoked_at: row.get(5)?,
+                    membership_id: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+
+    let mut active_groups = BTreeMap::<(String, String, String), Vec<LegacyMembership>>::new();
+    let mut revoked_rows = Vec::new();
+    for row in rows {
+        if row.revoked_at.is_some() {
+            revoked_rows.push(row);
+        } else {
+            active_groups
+                .entry((
+                    row.family_id.clone(),
+                    row.role.clone(),
+                    row.device_id.clone(),
+                ))
+                .or_default()
+                .push(row);
+        }
+    }
+
+    for ((family_id, role, device_id), rows) in active_groups {
+        let canonical_membership_id = rows
+            .iter()
+            .find_map(|row| {
+                row.membership_id
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+            })
+            .map(str::to_owned)
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let display_name = rows
+            .iter()
+            .filter_map(|row| {
+                crate::model::normalize_display_name(row.display_name.as_deref())
+                    .ok()
+                    .flatten()
+            })
+            .find(|name| name != crate::model::LOCAL_DEVICE_DISPLAY_NAME)
+            .or_else(|| rows.iter().find_map(|row| row.display_name.clone()));
+        transaction.execute(
+            "
+            INSERT INTO memberships(
+                membership_id, family_id, role, device_id, display_name
+            ) VALUES (?1, ?2, ?3, ?4, ?5)
+            ",
+            params![
+                canonical_membership_id,
+                family_id,
+                role,
+                device_id,
+                display_name
+            ],
+        )?;
+        for row in rows {
+            transaction.execute(
+                "
+                INSERT INTO membership_credentials(token_hash, membership_id)
+                VALUES (?1, ?2)
+                ",
+                params![row.token_hash, canonical_membership_id],
+            )?;
+            if let Some(alias) = row
+                .membership_id
+                .filter(|alias| !alias.is_empty() && alias != &canonical_membership_id)
+            {
+                transaction.execute(
+                    "
+                    INSERT INTO membership_aliases(
+                        alias_membership_id, canonical_membership_id
+                    ) VALUES (?1, ?2)
+                    ",
+                    params![alias, canonical_membership_id],
+                )?;
+            }
+        }
+    }
+
+    // Revoked legacy rows were not active duplicates and therefore remain
+    // separate historical memberships with their original credential state.
+    for row in revoked_rows {
+        let membership_id = row
+            .membership_id
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        transaction.execute(
+            "
+            INSERT INTO memberships(
+                membership_id, family_id, role, device_id, display_name, left_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ",
+            params![
+                membership_id,
+                row.family_id,
+                row.role,
+                row.device_id,
+                row.display_name,
+                row.revoked_at
+            ],
+        )?;
+        transaction.execute(
+            "
+            INSERT INTO membership_credentials(token_hash, membership_id, revoked_at)
+            VALUES (?1, ?2, ?3)
+            ",
+            params![row.token_hash, membership_id, row.revoked_at],
         )?;
     }
+
+    transaction.execute_batch(
+        "
+        DROP TABLE memberships_legacy;
+        CREATE INDEX memberships_family ON memberships(family_id);
+        CREATE INDEX membership_credentials_membership
+            ON membership_credentials(membership_id);
+        CREATE INDEX membership_aliases_canonical
+            ON membership_aliases(canonical_membership_id);
+        ",
+    )?;
+    transaction.commit()?;
     Ok(())
-}
-
-/// Ensures a non-empty membership_id is stored for the row (lazy mint for test/legacy inserts).
-fn ensure_membership_id(
-    connection: &Connection,
-    token_hash: &str,
-    membership_id: Option<String>,
-) -> Result<String, StoreError> {
-    if let Some(id) = membership_id.filter(|value| !value.is_empty()) {
-        return Ok(id);
-    }
-    let id = Uuid::new_v4().to_string();
-    connection.execute(
-        "UPDATE memberships SET membership_id = ?1 WHERE token_hash = ?2",
-        params![id, token_hash],
-    )?;
-    Ok(id)
-}
-
-fn ensure_membership_id_in_tx(
-    transaction: &Transaction<'_>,
-    token_hash: &str,
-    membership_id: Option<String>,
-) -> Result<String, StoreError> {
-    if let Some(id) = membership_id.filter(|value| !value.is_empty()) {
-        return Ok(id);
-    }
-    let id = Uuid::new_v4().to_string();
-    transaction.execute(
-        "UPDATE memberships SET membership_id = ?1 WHERE token_hash = ?2",
-        params![id, token_hash],
-    )?;
-    Ok(id)
 }
 
 fn entity_key(entity: &Entity) -> EntityKey {
@@ -2402,6 +2611,82 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
 
+    #[test]
+    fn membership_normalization_failure_rolls_back_the_legacy_schema() {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("lezi.db");
+        let family_id = Uuid::new_v4().to_string();
+        let duplicate_membership_id = Uuid::new_v4().to_string();
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(
+                "
+                PRAGMA foreign_keys = ON;
+                CREATE TABLE families (
+                    id TEXT PRIMARY KEY,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE TABLE memberships (
+                    token_hash TEXT PRIMARY KEY,
+                    family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+                    role TEXT NOT NULL CHECK(role IN ('owner', 'member')),
+                    device_id TEXT NOT NULL,
+                    display_name TEXT,
+                    revoked_at INTEGER,
+                    membership_id TEXT
+                );
+                ",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO families(id, created_at) VALUES (?1, 1)",
+                params![family_id],
+            )
+            .unwrap();
+        for (token_hash, device_id) in [
+            ("rollback-token-a", "rollback-device-a"),
+            ("rollback-token-b", "rollback-device-b"),
+        ] {
+            connection
+                .execute(
+                    "
+                    INSERT INTO memberships(
+                        token_hash, family_id, role, device_id, display_name, membership_id
+                    ) VALUES (?1, ?2, 'member', ?3, '成员', ?4)
+                    ",
+                    params![token_hash, family_id, device_id, duplicate_membership_id],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        assert!(Store::open(&database_path).is_err());
+
+        let connection = Connection::open(database_path).unwrap();
+        let tables = connection
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(tables.iter().any(|table| table == "memberships"));
+        assert!(!tables.iter().any(|table| table == "memberships_legacy"));
+        assert!(!tables.iter().any(|table| table == "membership_credentials"));
+        assert!(table_columns(&connection, "memberships")
+            .unwrap()
+            .contains("token_hash"));
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM memberships", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            2
+        );
+    }
+
     fn entity(entity_type: &str, client_uuid: Uuid, updated_at: i64, payload: Value) -> Entity {
         Entity {
             entity_type: entity_type.to_owned(),
@@ -2453,7 +2738,7 @@ mod tests {
                         entity("baby", baby_id, 1, baby.clone()),
                     ],
                     10,
-            1_700_000_000_000,
+                    1_700_000_000_000,
                 )
                 .unwrap()
                 .applied,
@@ -2467,7 +2752,7 @@ mod tests {
                     "m-owner",
                     vec![entity("baby", baby_id, 1, baby)],
                     10,
-            1_700_000_000_000,
+                    1_700_000_000_000,
                 )
                 .unwrap()
                 .skipped,
@@ -2524,7 +2809,14 @@ mod tests {
             )
         }));
         store
-            .push(&family_id, "owner", "m-owner", entities, 100, 1_700_000_000_000)
+            .push(
+                &family_id,
+                "owner",
+                "m-owner",
+                entities,
+                100,
+                1_700_000_000_000,
+            )
             .unwrap();
 
         let first = store.pull(&family_id, 0).unwrap();
@@ -2560,7 +2852,7 @@ mod tests {
                     }),
                 )],
                 100,
-            1_700_000_000_000,
+                1_700_000_000_000,
             )
             .unwrap();
         let record_id = Uuid::new_v4();

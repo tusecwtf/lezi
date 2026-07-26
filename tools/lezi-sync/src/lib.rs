@@ -496,7 +496,9 @@ async fn leave(
             "Owner must delete the family instead of leaving",
         ));
     }
-    state.store.revoke(&principal.token_hash, state.now())?;
+    state
+        .store
+        .leave_membership(&principal.membership_id, state.now())?;
     Ok(Json(json!({"ok": true})))
 }
 
@@ -992,9 +994,7 @@ async fn commit_bundle(
     ) {
         Ok(value) => value,
         Err(StoreError::BundleMediaIncomplete) => {
-            return Err(ApiError::unprocessable(
-                "bundle media bytes are incomplete",
-            ))
+            return Err(ApiError::unprocessable("bundle media bytes are incomplete"))
         }
         Err(StoreError::BundleRootNotNewer) => {
             return Err(ApiError::conflict(

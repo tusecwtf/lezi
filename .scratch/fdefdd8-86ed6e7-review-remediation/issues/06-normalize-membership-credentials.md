@@ -2,9 +2,9 @@
 
 **What to build:** 在 NAS store 中把持久家庭 membership 与 Bearer credential 分开。membership 持有 immutable ID、family、role、device label、display name；credential 持有 token hash 并指向 membership。旧库同 family + role + device 的重复 active token 只在迁移时归并到一个 canonical membership；自改称呼更新 membership，因此所有 token/所有成员视图立即一致。
 
-**Blocked by:** None — frontier
+**Blocked by:** None — completed
 
-**Status:** ready-for-agent
+**Status:** completed
 
 **Size:** L
 **Review finding:** P2 #6 — duplicate token coalescer 可能继续投影旧称呼
@@ -39,15 +39,15 @@
 
 ## Acceptance criteria
 
-- [ ] schema 明确分离 membership 与 credential；`token_hash` 不再是产品 membership 主键。
-- [ ] 两个历史 active token 归并后认证到同一 membership ID，members 只投影一行。
-- [ ] 任一归并 token 自改称呼后，本 token、另一个旧 token、其他家庭成员看到的都是新称呼；重启后不回退。
-- [ ] 同 device 但 owner/member 的旧行保持两个 membership，不发生角色提升。
-- [ ] 新攻击者在 join body 声明他人 `device_id`，不会被合并到他人 membership、不能改他人称呼。
-- [ ] leave 撤销 canonical membership 的全部 credentials；旧重复 token 不能继续访问。
-- [ ] migration 事务失败可回滚；重复启动幂等；旧 token、family name、role、display name 不丢。
-- [ ] members response 继续不暴露 token/token hash；device 字段只作为 legacy projection，不承担 authority。
-- [ ] 替换当前 BTreeMap coalescer/“first non-null name”真源，不在其上再叠排序补丁。
+- [x] schema 明确分离 membership 与 credential；`token_hash` 不再是产品 membership 主键。
+- [x] 两个历史 active token 归并后认证到同一 membership ID，members 只投影一行。
+- [x] 任一归并 token 自改称呼后，本 token、另一个旧 token、其他家庭成员看到的都是新称呼；重启后不回退。
+- [x] 同 device 但 owner/member 的旧行保持两个 membership，不发生角色提升。
+- [x] 新攻击者在 join body 声明他人 `device_id`，不会被合并到他人 membership、不能改他人称呼。
+- [x] leave 撤销 canonical membership 的全部 credentials；旧重复 token 不能继续访问。
+- [x] migration 事务失败可回滚；重复启动幂等；旧 token、family name、role、display name 不丢。
+- [x] members response 继续不暴露 token/token hash；device 字段只作为 legacy projection，不承担 authority。
+- [x] 替换当前 BTreeMap coalescer/“first non-null name”真源，不在其上再叠排序补丁。
 
 ## Validation
 
@@ -69,3 +69,8 @@
 ## Comments
 
 - 单纯让 self row 在 BTreeMap 中赢只能修调用者视图；其他成员仍可能读到重复行中的旧 non-null name，因此不是闭环。
+- 2026-07-27 红灯：`legacy_duplicate_credentials_migrate_to_one_membership_principal` 首次运行时，两个历史 token 仍投影为不同 `membership_id`。
+- 旧库升级在单一 immediate transaction 中把 active 历史行按 family + role + device 归并；token hash 字典序稳定选择 canonical ID/有效称呼，其它既有 ID 写入 alias，缺失 ID 只 mint 一次。故障注入测试证明 schema 重命名、建表与搬迁会整体回滚。
+- 认证只返回 canonical membership principal；members 每 membership 一行并按 membership equality 计算 self；rename 对全部 credentials 立即生效；leave 原子撤销 membership 的全部 credentials；运行时相同 device 的新 join 保持独立。
+- 验证：`cargo test --manifest-path tools/lezi-sync/Cargo.toml --locked`（12 unit + 53 API + doc tests，全部通过）；`cargo clippy --manifest-path tools/lezi-sync/Cargo.toml --locked --all-targets --all-features -- -D warnings`、`cargo fmt --manifest-path tools/lezi-sync/Cargo.toml --all -- --check`、`git diff --check` 均通过。
+- Documentation Gate：已更新 `tools/lezi-sync/README.md`、`docs/prd/data-model.md` 与 `docs/prd/sync-home-lan.md`；`CONTEXT.md` 和 ADR 0007 已与实现一致，无需修改。

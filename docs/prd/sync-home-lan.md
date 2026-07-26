@@ -425,22 +425,25 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 ### 9.5 `GET /v1/family/members`
 
 - Auth：任一有效 owner/member family token
-- 作用域：只查询 Bearer principal 所在家庭且 `revoked_at IS NULL` 的 membership
+- 作用域：只查询 Bearer principal 所在家庭且 `left_at IS NULL` 的 membership；
+  Bearer credential 本身必须 `revoked_at IS NULL`
 - 响应：
   `{"members":[{"display_name":"妈妈","role":"owner","is_self":true,"device_id":"…","membership_id":"…"}]}`
 - 返回规范化后的 `display_name`、`role`、`is_self`、服务器生成的 `membership_id`
   （不可变公开身份，供作者权限与冲突裁决引用），以及客户端链路键
   `device_id`（与记录 payload 的 `created_by_device_id` 对齐，供时间轴上传者
-  解析为**当前**家庭称呼）。`is_self` 由服务端比较当前 principal 的 token hash
-  得出；**绝不**返回 token、`token_hash` 或 `family_id`。`device_id` **不得**在
-  产品 UI 中展示给用户
+  解析为**当前**家庭称呼）。`is_self` 由服务端比较返回行与当前 principal 的
+  `membership_id` 得出；**绝不**返回 token、`token_hash` 或 `family_id`。
+  `device_id` **不得**在产品 UI 中展示给用户
 - owner-first；其余按规范化名称与服务端内部稳定键排序。`display_name=null`
   表示历史 null/空/不安全名称，客户端按角色/「家人」兜底（且不得把「我（本机）」
   展示给其他成员）
-- 兼容旧库时，同 role + device 的重复 active token 只展示一行；合并时优先投影
-  当前 principal 的 `membership_id`，否则取字典序最小 id。owner/member
-  role 冲突不合并，因为 `device_id` 不是鉴权证据。退出只吊销当前 Bearer token；
-  无法安全地凭未鉴权 `device_id` 批量吊销其它历史 token，删除家庭时才统一清除
+- membership 与 credential 分表；members 每个 active membership 只展示一行，
+  credential 轮换不会生成新身份。旧库仅在迁移事务中按 family + role + device
+  归并历史 active token，并保留其它既有 membership ID 为 alias；owner/member
+  role 冲突不合并。迁移后绝不按 `device_id` 合并，新 join 即使声明相同 device 也
+  创建独立 membership。退出会标记当前 membership 离开并吊销其全部 credentials；
+  单 credential 轮换/吊销不改变 membership identity
 
 ### 9.5.1 `POST /v1/family/display-name`
 

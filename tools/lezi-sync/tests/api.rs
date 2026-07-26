@@ -631,7 +631,12 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
     // Tokens / token hashes must never appear; device_id is the intentional
     // client link key for created_by_device_id → 称呼 resolution.
     // membership_id is a public stable identity and may appear.
-    for secret in [owner_token, member_token, &token_hash(owner_token), &token_hash(member_token)] {
+    for secret in [
+        owner_token,
+        member_token,
+        &token_hash(owner_token),
+        &token_hash(member_token),
+    ] {
         assert!(
             !serialized.contains(secret),
             "leaked {secret}: {serialized}"
@@ -665,8 +670,20 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
     connection
         .execute(
             "
-            INSERT INTO memberships(token_hash, family_id, role, device_id, display_name)
-            VALUES (?1, ?2, 'owner', 'isolated-raw-device-id', '隔离家庭')
+            INSERT INTO memberships(
+                membership_id, family_id, role, device_id, display_name
+            ) VALUES (?1, ?2, 'owner', 'isolated-raw-device-id', '隔离家庭')
+            ",
+            rusqlite::params![Uuid::new_v4().to_string(), isolated_family_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "
+            INSERT INTO membership_credentials(token_hash, membership_id)
+            SELECT ?1, membership_id
+            FROM memberships
+            WHERE family_id = ?2 AND device_id = 'isolated-raw-device-id'
             ",
             rusqlite::params![token_hash(isolated_token), isolated_family_id],
         )
@@ -682,7 +699,6 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
         isolated_view["members"][0]["device_id"],
         "isolated-raw-device-id"
     );
-    // Legacy rows without membership_id receive an additive backfill/lazy mint.
     assert!(
         isolated_view["members"][0]["membership_id"]
             .as_str()
@@ -799,10 +815,7 @@ async fn membership_id_is_stable_across_restart_and_rejects_role_forgery() {
     )
     .await;
     assert_eq!(forged_invite, StatusCode::FORBIDDEN);
-    assert_eq!(
-        forged_body,
-        json!({"detail":"Owner role required"})
-    );
+    assert_eq!(forged_body, json!({"detail":"Owner role required"}));
     let (forged_rename, _) = json_request(
         &restarted,
         Method::POST,
@@ -830,41 +843,6 @@ async fn membership_id_is_stable_across_restart_and_rejects_role_forgery() {
         forged_device_body,
         json!({"detail":"device_id does not match token"})
     );
-
-    // Legacy rows without membership_id backfill on open and stay stable.
-    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
-    connection
-        .execute(
-            "
-            INSERT INTO memberships(token_hash, family_id, role, device_id, display_name)
-            VALUES (?1, ?2, 'member', 'legacy-device', '旧成员')
-            ",
-            rusqlite::params![
-                token_hash("legacy-member-token"),
-                owner["family_id"].as_str().unwrap()
-            ],
-        )
-        .unwrap();
-    drop(connection);
-    let reopened = rig.restart("generation-membership-backfill");
-    let (_, with_legacy) = get_json(&reopened, "/v1/family/members", Some(owner_token)).await;
-    let legacy = with_legacy["members"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["device_id"] == "legacy-device")
-        .expect("legacy member projected");
-    let first_legacy_id = legacy["membership_id"].as_str().unwrap().to_owned();
-    assert!(first_legacy_id.len() >= 32);
-    let (_, with_legacy_again) =
-        get_json(&reopened, "/v1/family/members", Some(owner_token)).await;
-    let legacy_again = with_legacy_again["members"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["device_id"] == "legacy-device")
-        .unwrap();
-    assert_eq!(legacy_again["membership_id"], first_legacy_id);
 }
 
 #[tokio::test]
@@ -1315,7 +1293,7 @@ async fn shared_family_name_persists_on_create_join_and_owner_rename() {
 }
 
 #[tokio::test]
-async fn family_members_coalesce_legacy_duplicate_member_tokens_without_role_promotion() {
+async fn family_members_project_canonical_memberships_without_role_promotion() {
     let rig = Rig::new();
     let owner = create_family(
         &rig.app,
@@ -1326,26 +1304,51 @@ async fn family_members_coalesce_legacy_duplicate_member_tokens_without_role_pro
     let owner_token = owner["token"].as_str().unwrap();
     let family_id = owner["family_id"].as_str().unwrap();
     let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let duplicate_membership_id = Uuid::new_v4().to_string();
+    connection
+        .execute(
+            "
+            INSERT INTO memberships(
+                membership_id, family_id, role, device_id, display_name
+            ) VALUES (?1, ?2, 'member', 'same-legacy-device', '  历史成员  ')
+            ",
+            rusqlite::params![duplicate_membership_id, family_id],
+        )
+        .unwrap();
     for token in ["legacy-member-token-a", "legacy-member-token-b"] {
         connection
             .execute(
                 "
-                INSERT INTO memberships(token_hash, family_id, role, device_id, display_name)
-                VALUES (?1, ?2, 'member', 'same-legacy-device', '  历史成员  ')
+                INSERT INTO membership_credentials(token_hash, membership_id)
+                VALUES (?1, ?2)
                 ",
-                rusqlite::params![token_hash(token), family_id],
+                rusqlite::params![token_hash(token), duplicate_membership_id],
             )
             .unwrap();
     }
     // A role collision is kept separate: device_id is a client claim, not
     // authentication evidence, so it must never promote a member row to owner.
+    let role_collision_membership_id = Uuid::new_v4().to_string();
     connection
         .execute(
             "
-            INSERT INTO memberships(token_hash, family_id, role, device_id, display_name)
-            VALUES (?1, ?2, 'member', 'duplicate-owner-device', '伪装管理员')
+            INSERT INTO memberships(
+                membership_id, family_id, role, device_id, display_name
+            ) VALUES (?1, ?2, 'member', 'duplicate-owner-device', '伪装管理员')
             ",
-            rusqlite::params![token_hash("owner-device-collision"), family_id],
+            rusqlite::params![role_collision_membership_id, family_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "
+            INSERT INTO membership_credentials(token_hash, membership_id)
+            VALUES (?1, ?2)
+            ",
+            rusqlite::params![
+                token_hash("owner-device-collision"),
+                role_collision_membership_id
+            ],
         )
         .unwrap();
     for (token, device_id, display_name) in [
@@ -1357,13 +1360,24 @@ async fn family_members_coalesce_legacy_duplicate_member_tokens_without_role_pro
         ),
         ("legacy-null-token", "legacy-null-device", None),
     ] {
+        let membership_id = Uuid::new_v4().to_string();
         connection
             .execute(
                 "
-                INSERT INTO memberships(token_hash, family_id, role, device_id, display_name)
-                VALUES (?1, ?2, 'member', ?3, ?4)
+                INSERT INTO memberships(
+                    membership_id, family_id, role, device_id, display_name
+                ) VALUES (?1, ?2, 'member', ?3, ?4)
                 ",
-                rusqlite::params![token_hash(token), family_id, device_id, display_name],
+                rusqlite::params![membership_id, family_id, device_id, display_name],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "
+                INSERT INTO membership_credentials(token_hash, membership_id)
+                VALUES (?1, ?2)
+                ",
+                rusqlite::params![token_hash(token), membership_id],
             )
             .unwrap();
     }
@@ -1425,20 +1439,14 @@ async fn family_members_coalesce_legacy_duplicate_member_tokens_without_role_pro
             }),
         ]
     );
-    // Self uses create-time membership_id; duplicate role+device coalesces to one id.
+    // Self uses create-time membership_id; two credentials project one membership.
     assert_eq!(rows[0]["membership_id"], owner["membership_id"]);
     let same_device_rows: Vec<_> = rows
         .iter()
         .filter(|row| row["device_id"] == "same-legacy-device")
         .collect();
     assert_eq!(same_device_rows.len(), 1);
-    assert!(
-        same_device_rows[0]["membership_id"]
-            .as_str()
-            .unwrap()
-            .len()
-            >= 32
-    );
+    assert!(same_device_rows[0]["membership_id"].as_str().unwrap().len() >= 32);
     for row in rows {
         assert!(row["membership_id"].as_str().unwrap().len() >= 32);
         assert_eq!(row.as_object().unwrap().len(), 5);
@@ -1447,6 +1455,460 @@ async fn family_members_coalesce_legacy_duplicate_member_tokens_without_role_pro
     assert!(!serialized.contains("我（本机）"));
     assert!(!serialized.contains("legacy-member-token"));
     assert!(!serialized.contains("owner-device-collision"));
+}
+
+#[tokio::test]
+async fn legacy_duplicate_credentials_migrate_to_one_membership_principal() {
+    let directory = TempDir::new().unwrap();
+    let database_path = directory.path().join("lezi.db");
+    let family_id = Uuid::new_v4().to_string();
+    let owner_token = "legacy-normalization-owner-token";
+    let duplicate_tokens = [
+        "legacy-normalization-member-token-a",
+        "legacy-normalization-member-token-b",
+    ];
+    let mut ordered_duplicates = duplicate_tokens
+        .into_iter()
+        .map(|token| (token_hash(token), token))
+        .collect::<Vec<_>>();
+    ordered_duplicates.sort();
+    let canonical_membership_id = Uuid::new_v4().to_string();
+    let aliased_membership_id = Uuid::new_v4().to_string();
+    let owner_membership_id = Uuid::new_v4().to_string();
+    let role_collision_membership_id = Uuid::new_v4().to_string();
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    connection
+        .execute_batch(
+            "
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE families (
+                id TEXT PRIMARY KEY,
+                created_at INTEGER NOT NULL,
+                create_request_hash TEXT,
+                name TEXT
+            );
+            CREATE TABLE memberships (
+                token_hash TEXT PRIMARY KEY,
+                family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+                role TEXT NOT NULL CHECK(role IN ('owner', 'member')),
+                device_id TEXT NOT NULL,
+                display_name TEXT,
+                revoked_at INTEGER,
+                membership_id TEXT
+            );
+            ",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO families(id, created_at, name) VALUES (?1, ?2, ?3)",
+            rusqlite::params![family_id, 1_753_418_400_i64, "迁移家庭"],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "
+            INSERT INTO memberships(
+                token_hash, family_id, role, device_id, display_name, membership_id
+            ) VALUES (?1, ?2, 'owner', 'shared-device', '妈妈', ?3)
+            ",
+            rusqlite::params![token_hash(owner_token), family_id, owner_membership_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "
+            INSERT INTO memberships(
+                token_hash, family_id, role, device_id, display_name, membership_id
+            ) VALUES (?1, ?2, 'member', 'shared-device', '伪装管理员', ?3)
+            ",
+            rusqlite::params![
+                token_hash("legacy-normalization-role-collision"),
+                family_id,
+                role_collision_membership_id
+            ],
+        )
+        .unwrap();
+    for (index, (hash, _)) in ordered_duplicates.iter().enumerate() {
+        connection
+            .execute(
+                "
+                INSERT INTO memberships(
+                    token_hash, family_id, role, device_id, display_name, membership_id
+                ) VALUES (?1, ?2, 'member', 'duplicate-device', ?3, ?4)
+                ",
+                rusqlite::params![
+                    hash,
+                    family_id,
+                    if index == 0 { "" } else { "保留称呼" },
+                    if index == 0 {
+                        &canonical_membership_id
+                    } else {
+                        &aliased_membership_id
+                    }
+                ],
+            )
+            .unwrap();
+    }
+    connection
+        .execute(
+            "
+            INSERT INTO memberships(
+                token_hash, family_id, role, device_id, display_name, membership_id
+            ) VALUES (?1, ?2, 'member', 'missing-id-device', '旧成员', NULL)
+            ",
+            rusqlite::params![
+                token_hash("legacy-normalization-missing-id-token"),
+                family_id
+            ],
+        )
+        .unwrap();
+    drop(connection);
+
+    let now = Arc::new(AtomicI64::new(1_753_418_400));
+    let app = app_for(
+        directory.path(),
+        "membership-normalization-a",
+        now.clone(),
+        8,
+        |_| {},
+    );
+
+    let (_, first_view) = get_json(&app, "/v1/family/members", Some(ordered_duplicates[0].1)).await;
+    let (_, second_view) =
+        get_json(&app, "/v1/family/members", Some(ordered_duplicates[1].1)).await;
+    let duplicate_id = |body: &Value| {
+        body["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|member| member["device_id"] == "duplicate-device")
+            .unwrap()["membership_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(duplicate_id(&first_view), canonical_membership_id);
+    assert_eq!(duplicate_id(&second_view), canonical_membership_id);
+    let migrated_duplicate = first_view["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["membership_id"] == canonical_membership_id)
+        .unwrap();
+    assert_eq!(migrated_duplicate["display_name"], "保留称呼");
+
+    let (rename_status, rename_body) = json_request(
+        &app,
+        Method::POST,
+        "/v1/family/display-name",
+        Some(ordered_duplicates[1].1),
+        json!({"display_name": "统一新称呼"}),
+    )
+    .await;
+    assert_eq!(rename_status, StatusCode::OK, "{rename_body}");
+    for token in [
+        ordered_duplicates[0].1,
+        ordered_duplicates[1].1,
+        owner_token,
+    ] {
+        let (_, body) = get_json(&app, "/v1/family/members", Some(token)).await;
+        let duplicates = body["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|member| member["device_id"] == "duplicate-device")
+            .collect::<Vec<_>>();
+        assert_eq!(duplicates.len(), 1);
+        assert_eq!(duplicates[0]["membership_id"], canonical_membership_id);
+        assert_eq!(duplicates[0]["display_name"], "统一新称呼");
+    }
+
+    // Existing author references keep the historical id, while ACL resolves
+    // the durable alias back to the canonical authenticated membership.
+    let legacy_item_id = Uuid::new_v4().to_string();
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    connection
+        .execute(
+            "INSERT INTO family_meta(family_id, rev) VALUES (?1, 1)",
+            rusqlite::params![family_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "
+            INSERT INTO entities(
+                family_id, entity_type, client_uuid, updated_at,
+                deleted_at, payload_json, rev
+            ) VALUES (?1, 'custom_item', ?2, 1, NULL, ?3, 1)
+            ",
+            rusqlite::params![
+                family_id,
+                legacy_item_id,
+                json!({
+                    "name": "旧项目",
+                    "icon_slot": 1,
+                    "created_by_membership_id": aliased_membership_id,
+                })
+                .to_string()
+            ],
+        )
+        .unwrap();
+    drop(connection);
+    let (alias_edit_status, alias_edit_body) = json_request(
+        &app,
+        Method::POST,
+        "/v1/push",
+        Some(ordered_duplicates[0].1),
+        json!({
+            "entities": [entity_wire(
+                "custom_item",
+                &legacy_item_id,
+                2,
+                json!({"name": "迁移后项目", "icon_slot": 2}),
+                None,
+            )]
+        }),
+    )
+    .await;
+    assert_eq!(alias_edit_status, StatusCode::OK, "{alias_edit_body}");
+    let (_, after_alias_edit) =
+        get_json(&app, "/v1/pull?cursor=0", Some(ordered_duplicates[1].1)).await;
+    let legacy_item = after_alias_edit["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entity| entity["client_uuid"] == legacy_item_id)
+        .unwrap();
+    assert_eq!(legacy_item["payload"]["name"], "迁移后项目");
+    assert_eq!(
+        legacy_item["payload"]["created_by_membership_id"],
+        aliased_membership_id
+    );
+
+    let restarted = app_for(
+        directory.path(),
+        "membership-normalization-b",
+        now,
+        8,
+        |_| {},
+    );
+    let (_, after_restart) = get_json(
+        &restarted,
+        "/v1/family/members",
+        Some(ordered_duplicates[0].1),
+    )
+    .await;
+    assert_eq!(duplicate_id(&after_restart), canonical_membership_id);
+    let missing_id = |body: &Value| {
+        body["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|member| member["device_id"] == "missing-id-device")
+            .unwrap()["membership_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert!(missing_id(&first_view).len() >= 32);
+    assert_eq!(missing_id(&after_restart), missing_id(&first_view));
+    assert!(after_restart["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| {
+            row["role"] == "owner"
+                && row["device_id"] == "shared-device"
+                && row["membership_id"] == owner_membership_id
+        }));
+    assert!(after_restart["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| {
+            row["role"] == "member"
+                && row["device_id"] == "shared-device"
+                && row["membership_id"] == role_collision_membership_id
+        }));
+
+    let (_, invitation) = json_request(
+        &restarted,
+        Method::POST,
+        "/v1/invite",
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    let (attacker_status, attacker) = json_request(
+        &restarted,
+        Method::POST,
+        "/v1/join",
+        None,
+        json!({
+            "code": invitation["code"],
+            "device_id": "duplicate-device",
+            "display_name": "新加入者",
+        }),
+    )
+    .await;
+    assert_eq!(attacker_status, StatusCode::OK, "{attacker}");
+    assert_ne!(attacker["membership_id"], canonical_membership_id);
+    let (_, with_attacker) = get_json(&restarted, "/v1/family/members", Some(owner_token)).await;
+    assert_eq!(
+        with_attacker["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|member| member["device_id"] == "duplicate-device")
+            .count(),
+        2
+    );
+
+    // Credential rotation/revocation is credential-scoped and does not revoke
+    // the canonical membership while another credential remains active.
+    let rotation_connection = rusqlite::Connection::open(&database_path).unwrap();
+    rotation_connection
+        .execute(
+            "
+            UPDATE membership_credentials
+            SET revoked_at = ?1
+            WHERE token_hash = ?2
+            ",
+            rusqlite::params![1_753_418_401_i64, token_hash(ordered_duplicates[0].1)],
+        )
+        .unwrap();
+    drop(rotation_connection);
+    assert_eq!(
+        get_json(
+            &restarted,
+            "/v1/family/members",
+            Some(ordered_duplicates[0].1)
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (remaining_status, remaining_view) = get_json(
+        &restarted,
+        "/v1/family/members",
+        Some(ordered_duplicates[1].1),
+    )
+    .await;
+    assert_eq!(remaining_status, StatusCode::OK);
+    assert!(remaining_view["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|member| {
+            member["membership_id"] == canonical_membership_id && member["is_self"] == true
+        }));
+
+    assert_eq!(
+        json_request(
+            &restarted,
+            Method::POST,
+            "/v1/leave",
+            Some(ordered_duplicates[1].1),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    for token in [ordered_duplicates[0].1, ordered_duplicates[1].1] {
+        assert_eq!(
+            get_json(&restarted, "/v1/family/members", Some(token))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let (_, owner_after_leave) =
+        get_json(&restarted, "/v1/family/members", Some(owner_token)).await;
+    assert!(!owner_after_leave["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|member| member["membership_id"] == canonical_membership_id));
+
+    let connection = rusqlite::Connection::open(database_path).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT canonical_membership_id FROM membership_aliases WHERE alias_membership_id = ?1",
+                rusqlite::params![aliased_membership_id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        canonical_membership_id
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM membership_credentials WHERE membership_id = ?1",
+                rusqlite::params![canonical_membership_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "
+                SELECT COUNT(*)
+                FROM membership_credentials
+                WHERE membership_id = ?1 AND revoked_at IS NOT NULL
+                ",
+                rusqlite::params![canonical_membership_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "
+                SELECT COUNT(*)
+                FROM memberships
+                WHERE membership_id = ?1 AND left_at IS NOT NULL
+                ",
+                rusqlite::params![canonical_membership_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT name FROM families WHERE id = ?1",
+                rusqlite::params![family_id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "迁移家庭"
+    );
+    let membership_columns = connection
+        .prepare("PRAGMA table_info(memberships)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(!membership_columns
+        .iter()
+        .any(|column| column == "token_hash"));
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -3094,7 +3556,11 @@ async fn atomic_bundle_is_invisible_until_commit_and_publishes_atomically() {
         json!({}),
     )
     .await;
-    assert_eq!(commit_early, StatusCode::UNPROCESSABLE_ENTITY, "{early_body}");
+    assert_eq!(
+        commit_early,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{early_body}"
+    );
     let (_, still_hidden) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
     assert!(!still_hidden["entities"]
         .as_array()
@@ -3246,7 +3712,11 @@ async fn atomic_bundle_rejects_manifest_mismatch_and_oversized_media() {
         }),
     )
     .await;
-    assert_eq!(no_size_status, StatusCode::UNPROCESSABLE_ENTITY, "{no_size_body}");
+    assert_eq!(
+        no_size_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{no_size_body}"
+    );
 }
 
 #[tokio::test]
