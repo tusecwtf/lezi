@@ -43,7 +43,12 @@ internal fun FamilyOverview(
 ) {
     val current = ui.current
     val nickCounts = ui.babies.groupingBy { it.nickname.trim() }.eachCount()
-    val visibleMembers = familyMembersForDisplay(ui.members, ui.displayName, ui.role)
+    val visibleMembers = familyMembersForDisplay(
+        members = ui.members,
+        localDisplayName = ui.displayName,
+        localRole = ui.role,
+        membersLoaded = ui.membersLoaded,
+    )
     val (syncTitle, syncDetail) = overviewSyncStatusCopy(ui.status, ui.enabled)
     val (familyTitle, familyDetail) = overviewFamilyIdentityCopy(
         isJoined = ui.enabled,
@@ -53,6 +58,7 @@ internal fun FamilyOverview(
         myDisplayName = ui.displayName,
         role = ui.role,
     )
+    Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
             com.lezi.babylog.designsystem.PageHero(
                 eyebrow = "宝宝与家庭",
                 title = "账户",
@@ -217,4 +223,5 @@ internal fun FamilyOverview(
                     }
                 }
             }
+    }
 }
