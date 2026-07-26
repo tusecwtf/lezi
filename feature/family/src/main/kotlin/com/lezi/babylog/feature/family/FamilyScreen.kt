@@ -323,7 +323,6 @@ class FamilyViewModel @Inject constructor(
                                 birthdayEpochDay = birthdayEpochDay,
                                 birthWeightGrams = birthWeightGrams,
                                 avatarPath = avatarPath,
-                                dueDateEpochDay = existing.dueDateEpochDay,
                                 themeColorArgb = existing.themeColorArgb,
                             ),
                         )

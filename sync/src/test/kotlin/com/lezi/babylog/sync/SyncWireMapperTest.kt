@@ -90,6 +90,7 @@ class SyncWireMapperTest {
         assertThat(babyPayload).doesNotContain("\"id\"")
         assertThat(babyPayload).doesNotContain("familyId")
         assertThat(babyPayload).doesNotContain("sort_order")
+        assertThat(babyPayload).contains("\"due_date\":null")
         assertThat(mediaPayload).contains("\"record_client_uuid\":\"record-uuid\"")
         assertThat(mediaPayload).doesNotContain("/private/photo.jpg")
     }

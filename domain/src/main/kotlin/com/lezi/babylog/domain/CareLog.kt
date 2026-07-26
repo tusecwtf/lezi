@@ -53,7 +53,6 @@ data class CreateBabyInput(
     /** Birth weight in grams; null when not set. */
     val birthWeightGrams: Int? = null,
     val avatarPath: String? = null,
-    val dueDateEpochDay: Long? = null,
     val themeColorArgb: Int = DEFAULT_THEME_COLOR,
 ) {
     companion object {
@@ -67,7 +66,6 @@ data class UpdateBabyInput(
     val birthdayEpochDay: Long,
     val birthWeightGrams: Int? = null,
     val avatarPath: String? = null,
-    val dueDateEpochDay: Long? = null,
     val themeColorArgb: Int? = null,
 )
 
@@ -188,7 +186,6 @@ class CareLog @Inject constructor(
                     birthdayEpochDay = input.birthdayEpochDay,
                     birthWeightGrams = weight,
                     avatarPath = input.avatarPath,
-                    dueDateEpochDay = input.dueDateEpochDay,
                     themeColorArgb = input.themeColorArgb,
                     clientUuid = newClientUuid(),
                     updatedAt = now,
@@ -216,7 +213,6 @@ class CareLog @Inject constructor(
                     birthdayEpochDay = input.birthdayEpochDay,
                     birthWeightGrams = normalizeBirthWeightGrams(input.birthWeightGrams),
                     avatarPath = input.avatarPath,
-                    dueDateEpochDay = input.dueDateEpochDay,
                     themeColorArgb = input.themeColorArgb ?: existing.themeColorArgb,
                     updatedAt = nextSyncUpdatedAt(
                         existing.updatedAt,
@@ -875,25 +871,6 @@ class CareLog @Inject constructor(
         .take(limit)
         .toList()
 
-    suspend fun updateBabyDueDate(babyId: Long, dueDateEpochDay: Long?) {
-        val changed = transactionRunner.run {
-            val baby = babyDao.get(babyId) ?: return@run false
-            babyDao.update(
-                baby.copy(
-                    dueDateEpochDay = dueDateEpochDay,
-                    updatedAt = nextSyncUpdatedAt(
-                        baby.updatedAt,
-                        System.currentTimeMillis(),
-                    ),
-                    syncDirty = true,
-                ),
-            )
-            true
-        }
-        if (!changed) return
-        requestLocalSync()
-    }
-
     /**
      * Wipe care history on this device: records and calendar events.
      * Baby profiles and custom items are intentionally retained.
@@ -1196,7 +1173,6 @@ internal fun BabyEntity.toModel(): Baby =
         birthdayEpochDay = birthdayEpochDay,
         birthWeightGrams = birthWeightGrams,
         avatarPath = avatarPath,
-        dueDateEpochDay = dueDateEpochDay,
         themeColorArgb = themeColorArgb,
         sortOrder = sortOrder,
         clientUuid = clientUuid,

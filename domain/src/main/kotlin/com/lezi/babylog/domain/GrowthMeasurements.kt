@@ -43,8 +43,6 @@ data class ObserveGrowthMeasurements(
     val babyId: Long,
     val type: RecordType,
     val birthday: LocalDate,
-    val dueDate: LocalDate?,
-    val correctedAge: Boolean,
     val zone: ZoneId,
     val sex: Sex?,
 )
@@ -102,9 +100,7 @@ internal class DefaultGrowthMeasurementLifecycle @Inject constructor(
                 val displayValue = GrowthMeasurementFacts.displayValue(payload)
                 val monthAge = GrowthMeasurementFacts.monthAge(
                     birthday = request.birthday,
-                    dueDate = request.dueDate,
                     measuredDate = measuredDate,
-                    corrected = request.correctedAge,
                 )
                 GrowthMeasurementFact(
                     recordId = record.id,

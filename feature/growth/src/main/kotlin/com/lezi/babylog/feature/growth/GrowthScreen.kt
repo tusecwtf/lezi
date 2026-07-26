@@ -24,7 +24,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
@@ -53,7 +52,6 @@ import com.lezi.babylog.core.model.RecordDateDecision
 import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordTimeDecision
 import com.lezi.babylog.core.model.RecordType
-import com.lezi.babylog.core.model.Sex
 import com.lezi.babylog.designsystem.LeziCard
 import com.lezi.babylog.designsystem.LeziClockDialDialog
 import com.lezi.babylog.designsystem.LeziDatePicker
@@ -113,11 +111,6 @@ data class GrowthUi(
     val metric: GrowthMetric = GrowthMetric.WEIGHT,
     val points: List<MeasurePoint> = emptyList(),
     val bands: List<CurveBand> = emptyList(),
-    val corrected: Boolean = false,
-    val dueDateEpochDay: Long? = null,
-    val babyName: String = "",
-    val birthdayEpochDay: Long? = null,
-    val sex: Sex? = null,
 )
 
 @HiltViewModel
@@ -127,9 +120,6 @@ class GrowthViewModel @Inject constructor(
     private val measurements: GrowthMeasurementLifecycle,
 ) : ViewModel() {
     private val metric = MutableStateFlow(GrowthMetric.WEIGHT)
-    private val corrected = settingsStore.settings
-        .map { it.correctedAgeEnabled }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     val timeStepMin = settingsStore.settings
         .map { it.timeStepMin }
@@ -147,24 +137,20 @@ class GrowthViewModel @Inject constructor(
     val ui = combine(
         careLog.observeCurrentBaby(),
         metric,
-        corrected,
-    ) { baby, selectedMetric, useCorrectedAge ->
-        Triple(baby, selectedMetric, useCorrectedAge)
-    }.flatMapLatest { (baby, m, corr) ->
+    ) { baby, selectedMetric ->
+        baby to selectedMetric
+    }.flatMapLatest { (baby, m) ->
         if (baby == null) {
             kotlinx.coroutines.flow.flowOf(GrowthUi())
         } else {
             val type = m.recordType
             val zone = ZoneId.systemDefault()
             val birth = LocalDate.ofEpochDay(baby.birthdayEpochDay)
-            val due = baby.dueDateEpochDay?.let(LocalDate::ofEpochDay)
             measurements.observe(
                 ObserveGrowthMeasurements(
                     babyId = baby.id,
                     type = type,
                     birthday = birth,
-                    dueDate = due,
-                    correctedAge = corr,
                     zone = zone,
                     sex = baby.sex,
                 ),
@@ -182,11 +168,6 @@ class GrowthViewModel @Inject constructor(
                         )
                     },
                     bands = snapshot.referenceBands,
-                    corrected = corr,
-                    dueDateEpochDay = baby.dueDateEpochDay,
-                    babyName = baby.nickname,
-                    birthdayEpochDay = baby.birthdayEpochDay,
-                    sex = baby.sex,
                 )
             }
         }
@@ -194,12 +175,6 @@ class GrowthViewModel @Inject constructor(
 
     fun setMetric(m: GrowthMetric) {
         metric.value = m
-    }
-
-    fun setCorrected(v: Boolean) {
-        viewModelScope.launch {
-            settingsStore.setCorrectedAgeEnabled(v)
-        }
     }
 
     fun validationError(value: Double): String? =
@@ -264,12 +239,6 @@ class GrowthViewModel @Inject constructor(
         }
     }
 
-    fun setDueDate(epochDay: Long?) {
-        viewModelScope.launch {
-            val baby = careLog.getCurrentBaby() ?: return@launch
-            careLog.updateBabyDueDate(baby.id, epochDay)
-        }
-    }
 }
 
 private fun GrowthMeasurementSaveResult.errorOrNull(): String? = when (this) {
@@ -298,7 +267,6 @@ fun GrowthRoute(
     var draft by remember { mutableStateOf<MeasurementDraft?>(null) }
     var showMeasureDate by remember { mutableStateOf(false) }
     var showMeasureClock by remember { mutableStateOf(false) }
-    var showDueDate by remember { mutableStateOf(false) }
     var measurementError by remember { mutableStateOf<String?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
     val journal = LeziThemeExt.isJournal
@@ -375,47 +343,6 @@ fun GrowthRoute(
                     onClick = { vm.setMetric(GrowthMetric.HEAD) },
                     label = { Text("头围") },
                 )
-            }
-
-            LeziCard(Modifier.fillMaxWidth()) {
-                Text("预产期与修正月龄", style = LeziTypography.BodyStrong)
-                Text(
-                    ui.dueDateEpochDay?.let {
-                        "预产期 ${LocalDate.ofEpochDay(it).format(DateTimeFormatter.ofPattern("yyyy年M月d日"))}"
-                    } ?: "尚未设置预产期",
-                    style = LeziTypography.Meta,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    OutlinedButton(onClick = { showDueDate = true }) {
-                        Text(if (ui.dueDateEpochDay == null) "设置预产期" else "修改预产期")
-                    }
-                    if (ui.dueDateEpochDay != null) {
-                        TextButton(onClick = { vm.setDueDate(null) }) { Text("清除") }
-                    }
-                }
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column {
-                        Text("使用修正月龄", style = LeziTypography.BodyStrong)
-                        Text(
-                            if (ui.dueDateEpochDay == null) "设置预产期后可启用" else "适用于早产宝宝",
-                            style = LeziTypography.Meta,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Switch(
-                        checked = ui.corrected && ui.dueDateEpochDay != null,
-                        enabled = ui.dueDateEpochDay != null,
-                        onCheckedChange = vm::setCorrected,
-                    )
-                }
             }
 
             if (ui.points.isEmpty()) {
@@ -625,40 +552,6 @@ fun GrowthRoute(
                 TextButton(onClick = { closeMeasurementDraft() }) { Text("取消") }
             },
         )
-    }
-
-    if (showDueDate) {
-        val initialEpochDay = ui.dueDateEpochDay
-            ?: ui.birthdayEpochDay
-            ?: RecordTime.today(zone).toEpochDay()
-        val initialUtc = LocalDate.ofEpochDay(initialEpochDay)
-            .atStartOfDay(ZoneOffset.UTC)
-            .toInstant()
-            .toEpochMilli()
-        val dueDateState = rememberDatePickerState(initialSelectedDateMillis = initialUtc)
-        DatePickerDialog(
-            onDismissRequest = { showDueDate = false },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        dueDateState.selectedDateMillis?.let { millis ->
-                            vm.setDueDate(
-                                Instant.ofEpochMilli(millis)
-                                    .atZone(ZoneOffset.UTC)
-                                    .toLocalDate()
-                                    .toEpochDay(),
-                            )
-                        }
-                        showDueDate = false
-                    },
-                ) { Text("确定") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDueDate = false }) { Text("取消") }
-            },
-        ) {
-            LeziDatePicker(state = dueDateState)
-        }
     }
 
     if (confirmDelete) {

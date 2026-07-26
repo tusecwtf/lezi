@@ -15,15 +15,12 @@ class GrowthMeasurementFactsTest {
     }
 
     @Test
-    fun correctedAgeAndReferenceInterpolationAreStableFacts() {
+    fun chronologicalAgeAndReferenceInterpolationAreStableFacts() {
         val birth = LocalDate.of(2026, 1, 1)
-        val due = birth.plusDays(61)
         val measured = birth.plusDays(182)
         val monthAge = GrowthMeasurementFacts.monthAge(
             birthday = birth,
-            dueDate = due,
             measuredDate = measured,
-            corrected = true,
         )
         val reference = GrowthMeasurementFacts.referenceAt(
             monthAge = 3f,
@@ -33,7 +30,7 @@ class GrowthMeasurementFactsTest {
             ),
         )
 
-        assertThat(monthAge).isWithin(0.05f).of(3.97f)
+        assertThat(monthAge).isWithin(0.05f).of(5.98f)
         assertThat(reference!!.p3).isWithin(0.001f).of(4.5f)
         assertThat(reference.p50).isWithin(0.001f).of(5.65f)
         assertThat(reference.p97).isWithin(0.001f).of(7.0f)

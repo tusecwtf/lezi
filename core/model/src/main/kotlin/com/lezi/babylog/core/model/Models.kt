@@ -12,7 +12,6 @@ data class Baby(
     val birthWeightGrams: Int? = null,
     /** App-private relative path for the cropped square avatar. */
     val avatarPath: String? = null,
-    val dueDateEpochDay: Long? = null,
     val themeColorArgb: Int,
     val sortOrder: Int = 0,
     val clientUuid: String,
@@ -100,8 +99,6 @@ data class SettingsLocal(
     val timePickerStyle: String = "dropdown",
     val infantFeverAdviceEnabled: Boolean = true,
     val curveDataset: String = "default",
-    /** Persisted per-device preference for applying corrected age in growth charts. */
-    val correctedAgeEnabled: Boolean = false,
     val timelineOrder: String = "newest_first",
 )
 

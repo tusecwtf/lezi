@@ -96,7 +96,7 @@ device 的重复 active token 行，不跨 role 合并，也不凭客户端声�
 | `nickname` | |
 | `sex` | 可选枚举 |
 | `birthday` | 日龄基准 |
-| `due_date` | 修正月龄用，可选 |
+| `due_date` | 旧版本兼容字段；现行产品不采集、不展示、不参与计算 |
 | `theme_color` | 本机展示；是否同步主题 **默认不同步**（见设置） |
 | `sort_order` | 本机展示顺序；不同步 |
 | `client_uuid` | |
@@ -189,7 +189,6 @@ device 的重复 active token 行，不跨 role 合并，也不凭客户端声�
 | `amount_step_ml` | 配方奶/挤出乳步进 ml；**默认 5**；可选 5/10/15；改后 UI 立即按新步进渲染 |
 | `time_step_min` | |
 | `curve_dataset` | 曲线包 id |
-| `corrected_age_enabled` | 成长页修正月龄开关 |
 | `infant_fever_advice_enabled` | 低月龄发热提示开关 |
 | `visual_style` / `preferred_hand` | 模板与惯用手 |
 | `timeline_order` | `newest_first` / `oldest_first` |

@@ -29,8 +29,6 @@ class GrowthMeasurementLifecycleTest {
             babyId = babyId,
             type = RecordType.WEIGHT,
             birthday = LocalDate.of(2026, 1, 1),
-            dueDate = null,
-            correctedAge = false,
             zone = ZoneOffset.UTC,
             sex = Sex.MALE,
         )
@@ -143,8 +141,6 @@ class GrowthMeasurementLifecycleTest {
                 babyId = 7,
                 type = RecordType.WEIGHT,
                 birthday = LocalDate.of(2026, 1, 23),
-                dueDate = null,
-                correctedAge = false,
                 zone = ZoneOffset.UTC,
                 sex = Sex.FEMALE,
             ),

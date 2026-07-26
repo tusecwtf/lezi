@@ -192,7 +192,6 @@ class SettingsViewModel @Inject constructor(
         nickname: String,
         sex: String?,
         birthdayEpochDay: Long,
-        dueDateEpochDay: Long?,
         birthWeightGrams: Int?,
         themeColorArgb: Int,
         onDone: (String?) -> Unit,
@@ -204,7 +203,6 @@ class SettingsViewModel @Inject constructor(
                         nickname = nickname,
                         sex = sex,
                         birthdayEpochDay = birthdayEpochDay,
-                        dueDateEpochDay = dueDateEpochDay,
                         birthWeightGrams = birthWeightGrams,
                         themeColorArgb = themeColorArgb,
                     ),
@@ -265,12 +263,10 @@ fun SettingsRoute(
     var newName by remember { mutableStateOf("") }
     var newSex by remember { mutableStateOf<String?>(null) }
     var newBirthday by remember { mutableLongStateOf(LocalDate.now().toEpochDay()) }
-    var newDueDate by remember { mutableStateOf<Long?>(null) }
     var newWeight by remember { mutableStateOf("") }
     var newThemeIndex by remember { mutableIntStateOf(0) }
     var addError by remember { mutableStateOf<String?>(null) }
     var showAddDate by remember { mutableStateOf(false) }
-    var showAddDueDate by remember { mutableStateOf(false) }
     var showFeed by remember { mutableStateOf(false) }
     var showDisplay by remember { mutableStateOf(false) }
     var showRecordItems by remember { mutableStateOf(false) }
@@ -629,9 +625,6 @@ fun SettingsRoute(
     if (showAdd) {
         val dateLabel = LocalDate.ofEpochDay(newBirthday)
             .format(DateTimeFormatter.ofPattern("yyyy年M月d日"))
-        val dueDateLabel = newDueDate?.let {
-            LocalDate.ofEpochDay(it).format(DateTimeFormatter.ofPattern("yyyy年M月d日"))
-        } ?: "未设置"
         AlertDialog(
             onDismissRequest = ::finishAddBabyDialog,
             modifier = Modifier.imePadding(),
@@ -673,19 +666,6 @@ fun SettingsRoute(
                         onClick = { showAddDate = true },
                         modifier = Modifier.fillMaxWidth(),
                     ) { Text(dateLabel) }
-                    Text("预产期（可选）", style = LeziTypography.Label)
-                    FlowRow(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        OutlinedButton(onClick = { showAddDueDate = true }) {
-                            Text(dueDateLabel)
-                        }
-                        if (newDueDate != null) {
-                            TextButton(onClick = { newDueDate = null }) { Text("清除") }
-                        }
-                    }
                     OutlinedTextField(
                         value = newWeight,
                         onValueChange = { newWeight = it.filter { ch -> ch.isDigit() || ch == '.' } },
@@ -741,7 +721,6 @@ fun SettingsRoute(
                             nickname = newName.trim(),
                             sex = newSex,
                             birthdayEpochDay = newBirthday,
-                            dueDateEpochDay = newDueDate,
                             birthWeightGrams = grams,
                             themeColorArgb = BabyThemePalette[newThemeIndex],
                         ) { err ->
@@ -750,7 +729,6 @@ fun SettingsRoute(
                                 newSex = null
                                 newWeight = ""
                                 newBirthday = LocalDate.now().toEpochDay()
-                                newDueDate = null
                                 newThemeIndex = 0
                                 finishAddBabyDialog()
                             } else {
@@ -789,35 +767,6 @@ fun SettingsRoute(
             },
             dismissButton = {
                 TextButton(onClick = { showAddDate = false }) { Text("取消") }
-            },
-        ) {
-            LeziDatePicker(state = dateState)
-        }
-    }
-
-    if (showAddDueDate) {
-        val initialUtc = LocalDate.ofEpochDay(newDueDate ?: newBirthday)
-            .atStartOfDay(ZoneOffset.UTC)
-            .toInstant()
-            .toEpochMilli()
-        val dateState = rememberDatePickerState(initialSelectedDateMillis = initialUtc)
-        DatePickerDialog(
-            onDismissRequest = { showAddDueDate = false },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        dateState.selectedDateMillis?.let { ms ->
-                            newDueDate = Instant.ofEpochMilli(ms)
-                                .atZone(ZoneOffset.UTC)
-                                .toLocalDate()
-                                .toEpochDay()
-                        }
-                        showAddDueDate = false
-                    },
-                ) { Text("确定") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showAddDueDate = false }) { Text("取消") }
             },
         ) {
             LeziDatePicker(state = dateState)

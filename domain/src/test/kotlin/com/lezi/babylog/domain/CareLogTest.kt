@@ -153,8 +153,10 @@ class CareLogTest {
 
     @Test
     fun updateBabyProfile_canSetBirthdayAndWeight() = runTest {
-        val care = Fakes().careLog()
+        val fakes = Fakes()
+        val care = fakes.careLog()
         val id = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 10))
+        fakes.babies.update(fakes.babies.get(id)!!.copy(dueDateEpochDay = 20))
         val day = LocalDate.of(2025, 12, 1).toEpochDay()
         care.updateBabyProfile(
             id,
@@ -171,6 +173,7 @@ class CareLogTest {
         assertThat(baby.birthWeightGrams).isEqualTo(3500)
         assertThat(baby.avatarPath).isEqualTo("baby_avatars/doudou.jpg")
         assertThat(baby.sex?.name).isEqualTo("MALE")
+        assertThat(fakes.babies.get(id)!!.dueDateEpochDay).isEqualTo(20)
 
         care.updateBabyProfile(
             id,
@@ -197,11 +200,10 @@ class CareLogTest {
             first,
             UpdateBabyInput(nickname = "豆豆", birthdayEpochDay = 12),
         )
-        care.updateBabyDueDate(first, 20)
         care.renameBaby(first, "豆豆新名")
         assertThat(care.deleteBaby(second)).isTrue()
 
-        assertThat(fakes.transactions.runCount - before).isEqualTo(4)
+        assertThat(fakes.transactions.runCount - before).isEqualTo(3)
     }
 
     @Test
@@ -1380,7 +1382,6 @@ private class FakeSettingsStore : SettingsStore {
 
     override suspend fun setTimePickerStyle(style: String) = Unit
     override suspend fun setInfantFeverAdviceEnabled(enabled: Boolean) = Unit
-    override suspend fun setCorrectedAgeEnabled(enabled: Boolean) = Unit
 
     override suspend fun setNursingIntervalMin(min: Int) {
         interval.value = min

@@ -7,7 +7,7 @@ import kotlin.math.roundToInt
 /**
  * Pure growth-measurement interface shared by Composer, Growth and tests.
  *
- * UI units, storage units, age correction and reference interpolation live
+ * UI units, storage units, chronological age and reference interpolation live
  * together so callers cannot reinterpret a measurement independently.
  */
 object GrowthMeasurementFacts {
@@ -47,16 +47,10 @@ object GrowthMeasurementFacts {
 
     fun monthAge(
         birthday: LocalDate,
-        dueDate: LocalDate?,
         measuredDate: LocalDate,
-        corrected: Boolean,
     ): Float {
         val chronological = ChronoUnit.DAYS.between(birthday, measuredDate) / DAYS_PER_MONTH
-        if (!corrected || dueDate == null || !dueDate.isAfter(birthday)) {
-            return chronological.coerceAtLeast(0.0).toFloat()
-        }
-        val correction = ChronoUnit.DAYS.between(birthday, dueDate) / DAYS_PER_MONTH
-        return (chronological - correction).coerceAtLeast(0.0).toFloat()
+        return chronological.coerceAtLeast(0.0).toFloat()
     }
 
     fun referenceAt(

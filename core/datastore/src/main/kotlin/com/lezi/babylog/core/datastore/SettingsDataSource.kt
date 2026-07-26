@@ -42,7 +42,6 @@ class SettingsDataSource @Inject constructor(
                 ?: "dropdown",
             infantFeverAdviceEnabled = prefs[Keys.INFANT_FEVER_ADVICE] ?: true,
             curveDataset = prefs[Keys.CURVE_DATASET] ?: "default",
-            correctedAgeEnabled = prefs[Keys.CORRECTED_AGE] ?: false,
             timelineOrder = prefs[Keys.TIMELINE_ORDER] ?: "newest_first",
         )
     }
@@ -98,10 +97,6 @@ class SettingsDataSource @Inject constructor(
 
     override suspend fun setInfantFeverAdviceEnabled(enabled: Boolean) {
         dataStore.edit { it[Keys.INFANT_FEVER_ADVICE] = enabled }
-    }
-
-    override suspend fun setCorrectedAgeEnabled(enabled: Boolean) {
-        dataStore.edit { it[Keys.CORRECTED_AGE] = enabled }
     }
 
     override suspend fun setNursingIntervalMin(min: Int) {
@@ -179,7 +174,6 @@ class SettingsDataSource @Inject constructor(
         val TIME_PICKER_STYLE = stringPreferencesKey("time_picker_style")
         val INFANT_FEVER_ADVICE = booleanPreferencesKey("infant_fever_advice")
         val CURVE_DATASET = stringPreferencesKey("curve_dataset")
-        val CORRECTED_AGE = booleanPreferencesKey("corrected_age_enabled")
         val TIMELINE_ORDER = stringPreferencesKey("timeline_order")
         val CURRENT_BABY_ID = longPreferencesKey("current_baby_id")
         val NURSING_TIMER_JSON = stringPreferencesKey("nursing_timer_json")

@@ -49,6 +49,7 @@ data class BabyEntity(
     val birthdayEpochDay: Long,
     /** Birth weight in grams; null when not set. */
     val birthWeightGrams: Int? = null,
+    /** Legacy Room/sync v1 compatibility only; never expose to product or domain code. */
     val dueDateEpochDay: Long? = null,
     val themeColorArgb: Int,
     val sortOrder: Int = 0,

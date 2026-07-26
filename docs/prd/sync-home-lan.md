@@ -502,6 +502,8 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 - 不含本机 `avatarPath`
 - `sort_order` 与 `theme_color` 为本机展示字段，不进入 wire payload
 - `avatar_media_uuid` 指向 `type=media` 且 `kind=avatar` 的实体
+- `due_date` 仅为滚动升级兼容字段；现行客户端不采集、展示或参与计算，
+  Android 仍发送旧值或 `null`，避免新旧 APK 与 NAS 服务混用时破坏同步
 
 ### 10.2 `record`
 

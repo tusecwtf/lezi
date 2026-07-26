@@ -21,7 +21,6 @@ interface SettingsStore {
     suspend fun setTimeStepMin(step: Int)
     suspend fun setTimePickerStyle(style: String)
     suspend fun setInfantFeverAdviceEnabled(enabled: Boolean)
-    suspend fun setCorrectedAgeEnabled(enabled: Boolean)
     suspend fun setNursingIntervalMin(min: Int)
     suspend fun setRecordAt(startOrEnd: String)
     suspend fun setNextFeedAt(epochMs: Long?)
