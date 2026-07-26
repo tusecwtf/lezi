@@ -1,6 +1,6 @@
 # Spec: 区间记录保存前时长预览与确认态
 
-Status: ready-for-agent  
+Status: complete
 Feature: interval-duration-preview  
 Product: 乐记 (`com.lezi.babylog`)  
 Source: conversation grill 2026-07-25 · `/to-spec`  
@@ -179,4 +179,6 @@ Source: conversation grill 2026-07-25 · `/to-spec`
 - 发布位置：本地 issue tracker `.scratch/interval-duration-preview/spec.md`。  
 ## Comments
 
-- （无）
+- 2026-07-27 Release 收敛复验：实现提交 `b2a06ef` 的区间预览、短校验与
+  全局确认锁在当前 0.2.5 代码中仍有效；定向重跑 `QuickRecordDraftTest` 与
+  `ComposerConfirmChromeTest`，Gradle 105 个任务全部实际执行并通过。

@@ -6,7 +6,7 @@
 | 主题 | Spec | 票索引 | 状态 |
 |------|------|--------|------|
 | 家庭局域网同步设备验收 | [spec.md](./home-lan-sync/spec.md) | [ISSUES.md](./home-lan-sync/ISSUES.md) | Ticket 09 partial |
-| 区间记录保存前时长预览 | [spec.md](./interval-duration-preview/spec.md) | [ISSUES.md](./interval-duration-preview/ISSUES.md) | ready-for-agent |
+| 区间记录保存前时长预览 | [spec.md](./interval-duration-preview/spec.md) | [ISSUES.md](./interval-duration-preview/ISSUES.md) | complete |
 | 家庭身份与账户概览 | [spec.md](./family-identity-account-overview/spec.md) | [ISSUES.md](./family-identity-account-overview/ISSUES.md)（5 票） | partial（02 重开） |
 | 日视图时间条 · 日图类型筛选 | [spec.md](./day-chart-type-filter/spec.md) | [ISSUES.md](./day-chart-type-filter/ISSUES.md)（2 票） | partial（02 重开） |
 | `fdefdd8` / `86ed6e7` 固定提交审查整改 | [spec.md](./fdefdd8-86ed6e7-review-remediation/spec.md) | [ISSUES.md](./fdefdd8-86ed6e7-review-remediation/ISSUES.md)（7 票） | ready-for-agent |
