@@ -14,6 +14,8 @@ import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
+private const val MAX_HEALTH_RESPONSE_BYTES = 64 * 1024
+
 enum class HomeNetworkDecision {
     Allowed,
     MissingServer,
@@ -154,12 +156,28 @@ class HttpHealthProbe @Inject constructor() : HealthProbe {
             connection.connectTimeout = 3_000
             connection.readTimeout = 3_000
             connection.useCaches = false
+            connection.instanceFollowRedirects = false
             try {
-                connection.responseCode in 200..299
+                val successful = connection.responseCode in 200..299
+                successful && connection.hasBodyWithinLimit(MAX_HEALTH_RESPONSE_BYTES)
             } finally {
                 connection.disconnect()
             }
         }.getOrDefault(false)
+    }
+}
+
+private fun HttpURLConnection.hasBodyWithinLimit(limitBytes: Int): Boolean {
+    if (contentLengthLong > limitBytes) return false
+    inputStream.use { input ->
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        var total = 0
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) return true
+            total += read
+            if (total > limitBytes) return false
+        }
     }
 }
 
