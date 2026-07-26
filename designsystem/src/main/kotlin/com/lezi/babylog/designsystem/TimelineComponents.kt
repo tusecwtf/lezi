@@ -2,6 +2,7 @@ package com.lezi.babylog.designsystem
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -12,7 +13,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -22,10 +22,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -33,14 +29,11 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -50,6 +43,9 @@ enum class LeziGlyph { Bottle, Drop, Moon, Toilet, Pin, Plus, Dot }
 /**
  * A day-lane mark. Sleep is an [isEvent]=false interval; feed/care are
  * moment events so they render as large tappable dots rather than thin bars.
+ *
+ * [dayChartCategoryKey] ties the mark to a page-level day-chart category filter
+ * (opaque string owned by the feature layer; null = not a selectable day-chart type).
  */
 data class TimelineLaneSegment(
     val startMinOfDay: Int,
@@ -61,15 +57,21 @@ data class TimelineLaneSegment(
     val detail: String = "",
     /** true = point-in-time (feed/care); false = duration bar (sleep). */
     val isEvent: Boolean = false,
+    /**
+     * Opaque day-chart category key for type-level selection/highlight.
+     * Null marks (e.g. 吸奶 / 体温) cannot be selected as a filter target.
+     */
+    val dayChartCategoryKey: String? = null,
 )
 
-private fun TimelineLaneSegment.isSameAs(other: TimelineLaneSegment?): Boolean {
-    if (other == null) return false
-    return startMinOfDay == other.startMinOfDay &&
-        endMinOfDay == other.endMinOfDay &&
-        title == other.title &&
-        isEvent == other.isEvent
-}
+/** Legend entry for a day-chart category; keys match [TimelineLaneSegment.dayChartCategoryKey]. */
+data class TimelineLegendEntry(
+    val key: String,
+    val label: String,
+    val color: Color,
+    /** Sleep uses a short bar swatch; feed/care use dots. */
+    val isBar: Boolean = false,
+)
 
 /** Pixel center X (horizontal lane) or Y (vertical rail) for an event mark. */
 private fun eventSlotOffset(
@@ -89,6 +91,18 @@ private fun eventSlotOffset(
     return (index - (cluster.size - 1) / 2f) * slotPx
 }
 
+/**
+ * Resolve a tap on a segment into the next category selection.
+ * Non-day-chart marks and blank hits clear; same key toggles off; other key switches.
+ */
+internal fun nextCategorySelection(
+    selectedCategoryKey: String?,
+    hit: TimelineLaneSegment?,
+): String? {
+    val hitKey = hit?.dayChartCategoryKey ?: return null
+    return if (hitKey == selectedCategoryKey) null else hitKey
+}
+
 @Composable
 fun TimelineLane(
     label: String,
@@ -97,8 +111,8 @@ fun TimelineLane(
     trackHeight: Dp = 34.dp,
     nowMinOfDay: Int? = null,
     markerStyle: Boolean = true,
-    selected: TimelineLaneSegment? = null,
-    onSegmentClick: (TimelineLaneSegment?) -> Unit = {},
+    selectedCategoryKey: String? = null,
+    onCategorySelect: (String?) -> Unit = {},
 ) {
     val track = MaterialTheme.colorScheme.outline.copy(alpha = 0.22f)
     val grid = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
@@ -123,9 +137,9 @@ fun TimelineLane(
                 .weight(1f)
                 .height(laneHeight)
                 .semantics {
-                    contentDescription = "$label 轨道，点按可高亮并查看说明"
+                    contentDescription = "$label 轨道，点按可按类型筛选明细"
                 }
-                .pointerInput(segments, markerStyle, selected) {
+                .pointerInput(segments, markerStyle, selectedCategoryKey) {
                     detectTapGestures { offset ->
                         val total = 24f * 60f
                         val min = ((offset.x / size.width) * total).toInt().coerceIn(0, 24 * 60)
@@ -158,9 +172,7 @@ fun TimelineLane(
                                 min in seg.startMinOfDay until end
                             }
                         }
-                        onSegmentClick(
-                            if (hit != null && hit.isSameAs(selected)) null else hit,
-                        )
+                        onCategorySelect(nextCategorySelection(selectedCategoryKey, hit))
                     }
                 },
         ) {
@@ -177,9 +189,11 @@ fun TimelineLane(
             )
             val total = 24f * 60f
             val slotPx = 5.dp.toPx()
-            val hasSelection = selected != null
+            val hasSelection = selectedCategoryKey != null
             for (seg in segments) {
-                val highlighted = seg.isSameAs(selected)
+                val highlighted = hasSelection &&
+                    seg.dayChartCategoryKey != null &&
+                    seg.dayChartCategoryKey == selectedCategoryKey
                 val dimmed = hasSelection && !highlighted
                 if (markerStyle || seg.isEvent) {
                     val baseX = size.width * (seg.startMinOfDay / total)
@@ -289,6 +303,10 @@ fun TimelineLane(
     }
 }
 
+/**
+ * Day time-bar card. Selection is owned by the caller (page state): all marks that share
+ * [selectedCategoryKey] highlight together; legend and tip use the same key.
+ */
 @Composable
 fun TimelineRailCard(
     sleep: List<TimelineLaneSegment>,
@@ -297,10 +315,12 @@ fun TimelineRailCard(
     recordCount: Int,
     nowMinOfDay: Int?,
     modifier: Modifier = Modifier,
+    selectedCategoryKey: String? = null,
+    onCategorySelect: (String?) -> Unit = {},
+    legend: List<TimelineLegendEntry> = emptyList(),
+    tipLabel: String? = null,
+    tipCount: Int = 0,
 ) {
-    var selected by remember(sleep, feed, care) {
-        mutableStateOf<TimelineLaneSegment?>(null)
-    }
     if (LeziThemeExt.isJournal) {
         JournalTimelineRail(
             sleep = sleep,
@@ -308,13 +328,15 @@ fun TimelineRailCard(
             care = care,
             recordCount = recordCount,
             nowMinOfDay = nowMinOfDay,
-            selected = selected,
-            onSelect = { selected = it },
+            selectedCategoryKey = selectedCategoryKey,
+            onCategorySelect = onCategorySelect,
+            legend = legend,
+            tipLabel = tipLabel,
+            tipCount = tipCount,
             modifier = modifier,
         )
         return
     }
-    val ext = LocalLeziColors.current
     LeziCard(modifier = modifier.fillMaxWidth(), contentPadding = PaddingValues(18.dp)) {
         Row(
             Modifier.fillMaxWidth(),
@@ -347,8 +369,8 @@ fun TimelineRailCard(
             segments = sleep,
             nowMinOfDay = nowMinOfDay,
             markerStyle = false,
-            selected = selected,
-            onSegmentClick = { selected = it },
+            selectedCategoryKey = selectedCategoryKey,
+            onCategorySelect = onCategorySelect,
         )
         Spacer(Modifier.height(8.dp))
         TimelineLane(
@@ -356,8 +378,8 @@ fun TimelineRailCard(
             segments = feed,
             nowMinOfDay = nowMinOfDay,
             markerStyle = true,
-            selected = selected,
-            onSegmentClick = { selected = it },
+            selectedCategoryKey = selectedCategoryKey,
+            onCategorySelect = onCategorySelect,
         )
         Spacer(Modifier.height(8.dp))
         TimelineLane(
@@ -365,110 +387,116 @@ fun TimelineRailCard(
             segments = care,
             nowMinOfDay = nowMinOfDay,
             markerStyle = true,
-            selected = selected,
-            onSegmentClick = { selected = it },
+            selectedCategoryKey = selectedCategoryKey,
+            onCategorySelect = onCategorySelect,
         )
-        TimelineSegmentTip(
-            segment = selected,
-            onDismiss = { selected = null },
+        TimelineCategoryTip(
+            label = tipLabel,
+            count = tipCount,
+            onDismiss = { onCategorySelect(null) },
         )
-        Spacer(Modifier.height(10.dp))
-        TimelineLegendRow(
-            items = listOf(
-                TimelineLegendItem.Bar("睡眠", ext.laneSleep),
-                TimelineLegendItem.Dot("喂养", ext.laneFeed),
-                TimelineLegendItem.Dot("尿尿", ext.laneCare),
-                TimelineLegendItem.Dot("便便", ext.sun),
-            ),
-            modifier = Modifier.padding(start = 34.dp),
-        )
+        if (legend.isNotEmpty()) {
+            Spacer(Modifier.height(10.dp))
+            TimelineLegendRow(
+                items = legend,
+                selectedCategoryKey = selectedCategoryKey,
+                onCategorySelect = onCategorySelect,
+                modifier = Modifier.padding(start = 34.dp),
+            )
+        }
     }
-}
-
-private sealed class TimelineLegendItem {
-    abstract val label: String
-    abstract val color: Color
-
-    data class Dot(override val label: String, override val color: Color) : TimelineLegendItem()
-    data class Bar(override val label: String, override val color: Color) : TimelineLegendItem()
 }
 
 @Composable
 private fun TimelineLegendRow(
-    items: List<TimelineLegendItem>,
+    items: List<TimelineLegendEntry>,
+    selectedCategoryKey: String?,
+    onCategorySelect: (String?) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Row(
         modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         items.forEach { item ->
-            when (item) {
-                is TimelineLegendItem.Dot -> LegendDot(item.label, item.color)
-                is TimelineLegendItem.Bar -> LegendBar(item.label, item.color)
+            val selected = item.key == selectedCategoryKey
+            val description = if (selected) {
+                "已选${item.label}，再点取消筛选"
+            } else {
+                "筛选${item.label}"
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(50))
+                    .then(
+                        if (selected) {
+                            Modifier
+                                .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f))
+                                .border(
+                                    width = 1.5.dp,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    shape = RoundedCornerShape(50),
+                                )
+                        } else {
+                            Modifier
+                        },
+                    )
+                    .clickable {
+                        onCategorySelect(
+                            if (selected) null else item.key,
+                        )
+                    }
+                    .semantics { contentDescription = description }
+                    .padding(horizontal = 6.dp, vertical = 3.dp),
+            ) {
+                if (item.isBar) {
+                    Box(
+                        Modifier
+                            .width(12.dp)
+                            .height(7.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(item.color),
+                    )
+                } else {
+                    Box(
+                        Modifier
+                            .size(9.dp)
+                            .clip(CircleShape)
+                            .background(item.color),
+                    )
+                }
+                Spacer(Modifier.width(5.dp))
+                Text(
+                    item.label,
+                    style = LeziTypography.Meta.copy(fontSize = 10.sp),
+                    color = if (selected) {
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
             }
         }
     }
 }
 
+/** Type-level filter tip: category name · record count · tap to clear. */
 @Composable
-private fun LegendDot(label: String, color: Color) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(
-            Modifier
-                .size(9.dp)
-                .clip(CircleShape)
-                .background(color),
-        )
-        Spacer(Modifier.width(5.dp))
-        Text(
-            label,
-            style = LeziTypography.Meta.copy(fontSize = 10.sp),
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
-
-@Composable
-private fun LegendBar(label: String, color: Color) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(
-            Modifier
-                .width(12.dp)
-                .height(7.dp)
-                .clip(RoundedCornerShape(2.dp))
-                .background(color),
-        )
-        Spacer(Modifier.width(5.dp))
-        Text(
-            label,
-            style = LeziTypography.Meta.copy(fontSize = 10.sp),
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
-
-@Composable
-private fun TimelineSegmentTip(
-    segment: TimelineLaneSegment?,
+private fun TimelineCategoryTip(
+    label: String?,
+    count: Int,
     onDismiss: () -> Unit,
 ) {
-    if (segment == null) return
-    val title = segment.title.ifBlank { "记录" }
-    val detail = segment.detail.ifBlank {
-        val start = formatMinOfDay(segment.startMinOfDay)
-        val end = formatMinOfDay(segment.endMinOfDay)
-        if (segment.endMinOfDay - segment.startMinOfDay <= 15) {
-            "约 $start"
-        } else {
-            "$start–$end"
-        }
-    }
+    if (label.isNullOrBlank()) return
     Spacer(Modifier.height(10.dp))
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onDismiss),
+            .clickable(onClick = onDismiss)
+            .semantics {
+                contentDescription = "已筛选$label，$count 条，再点取消筛选"
+            },
         shape = LeziShapes.Sm,
         color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
     ) {
@@ -481,27 +509,23 @@ private fun TimelineSegmentTip(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(title, style = LeziTypography.BodyStrong)
                 Text(
-                    "关闭",
+                    "$label · $count 条",
+                    style = LeziTypography.BodyStrong,
+                )
+                Text(
+                    "取消",
                     style = LeziTypography.Meta,
                     color = MaterialTheme.colorScheme.primary,
                 )
             }
             Text(
-                detail,
+                "再点取消筛选",
                 style = LeziTypography.Meta,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
-}
-
-private fun formatMinOfDay(minOfDay: Int): String {
-    val clamped = minOfDay.coerceIn(0, 24 * 60)
-    val h = clamped / 60
-    val m = clamped % 60
-    return "%02d:%02d".format(h.coerceAtMost(24), m)
 }
 
 @Composable
@@ -511,8 +535,11 @@ private fun JournalTimelineRail(
     care: List<TimelineLaneSegment>,
     recordCount: Int,
     nowMinOfDay: Int?,
-    selected: TimelineLaneSegment?,
-    onSelect: (TimelineLaneSegment?) -> Unit,
+    selectedCategoryKey: String?,
+    onCategorySelect: (String?) -> Unit,
+    legend: List<TimelineLegendEntry>,
+    tipLabel: String?,
+    tipCount: Int,
     modifier: Modifier,
 ) {
     val grid = LeziThemeExt.colors.chartGrid
@@ -547,8 +574,8 @@ private fun JournalTimelineRail(
                 Modifier
                     .weight(1f)
                     .height(220.dp)
-                    .semantics { contentDescription = "0到24小时记录轨道，点按可高亮并查看说明" }
-                    .pointerInput(sleep, feed, care, selected) {
+                    .semantics { contentDescription = "0到24小时记录轨道，点按可按类型筛选明细" }
+                    .pointerInput(sleep, feed, care, selectedCategoryKey) {
                         detectTapGestures { offset ->
                             val laneIndex = ((offset.x / size.width) * 3f).toInt().coerceIn(0, 2)
                             val min = ((offset.y / size.height) * 1440f).toInt().coerceIn(0, 1440)
@@ -570,9 +597,7 @@ private fun JournalTimelineRail(
                                 }
                                 .minByOrNull { it.second }
                                 ?.first
-                            onSelect(
-                                if (hit != null && hit.isSameAs(selected)) null else hit,
-                            )
+                            onCategorySelect(nextCategorySelection(selectedCategoryKey, hit))
                         }
                     },
             ) {
@@ -585,12 +610,14 @@ private fun JournalTimelineRail(
                     drawLine(grid.copy(alpha = 0.5f), Offset(x, 0f), Offset(x, size.height), strokeWidth = 1f)
                 }
                 val slotPx = 5.dp.toPx()
-                val hasSelection = selected != null
+                val hasSelection = selectedCategoryKey != null
                 lanes.forEachIndexed { laneIndex, segments ->
                     val laneWidth = size.width / 3f
                     val laneLeft = laneIndex * laneWidth
                     segments.forEach { segment ->
-                        val highlighted = segment.isSameAs(selected)
+                        val highlighted = hasSelection &&
+                            segment.dayChartCategoryKey != null &&
+                            segment.dayChartCategoryKey == selectedCategoryKey
                         val dimmed = hasSelection && !highlighted
                         if (segment.isEvent) {
                             val baseY = size.height * (segment.startMinOfDay.coerceIn(0, 1440) / 1440f)
@@ -711,20 +738,19 @@ private fun JournalTimelineRail(
                 )
             }
         }
-        Spacer(Modifier.height(6.dp))
-        val ext = LocalLeziColors.current
-        TimelineLegendRow(
-            items = listOf(
-                TimelineLegendItem.Bar("睡眠", ext.laneSleep),
-                TimelineLegendItem.Dot("喂养", ext.laneFeed),
-                TimelineLegendItem.Dot("尿尿", ext.laneCare),
-                TimelineLegendItem.Dot("便便", ext.sun),
-            ),
-            modifier = Modifier.padding(start = 32.dp),
-        )
-        TimelineSegmentTip(
-            segment = selected,
-            onDismiss = { onSelect(null) },
+        if (legend.isNotEmpty()) {
+            Spacer(Modifier.height(6.dp))
+            TimelineLegendRow(
+                items = legend,
+                selectedCategoryKey = selectedCategoryKey,
+                onCategorySelect = onCategorySelect,
+                modifier = Modifier.padding(start = 32.dp),
+            )
+        }
+        TimelineCategoryTip(
+            label = tipLabel,
+            count = tipCount,
+            onDismiss = { onCategorySelect(null) },
         )
     }
 }
@@ -741,8 +767,8 @@ private fun TimelineInteractionHint() {
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("点按轨道", style = LeziTypography.Meta)
-            Text("查看详情", style = LeziTypography.Meta)
+            Text("点选类型", style = LeziTypography.Meta)
+            Text("筛选明细", style = LeziTypography.Meta)
         }
     }
 }

@@ -46,11 +46,36 @@ fun PreviewJournalOverview() {
             ),
         )
         TimelineRailCard(
-            sleep = listOf(TimelineLaneSegment(30, 330, LeziColors.JournalSleep)),
-            feed = listOf(TimelineLaneSegment(360, 390, LeziColors.JournalFeed)),
-            care = listOf(TimelineLaneSegment(430, 450, LeziColors.JournalCare)),
+            sleep = listOf(
+                TimelineLaneSegment(
+                    30, 330, LeziColors.JournalSleep,
+                    title = "睡眠",
+                    dayChartCategoryKey = "SLEEP",
+                ),
+            ),
+            feed = listOf(
+                TimelineLaneSegment(
+                    360, 390, LeziColors.JournalFeed,
+                    title = "配方奶",
+                    isEvent = true,
+                    dayChartCategoryKey = "MILK",
+                ),
+            ),
+            care = listOf(
+                TimelineLaneSegment(
+                    430, 450, LeziColors.JournalCare,
+                    title = "尿尿",
+                    isEvent = true,
+                    dayChartCategoryKey = "PEE",
+                ),
+            ),
             recordCount = 8,
             nowMinOfDay = 600,
+            legend = listOf(
+                TimelineLegendEntry("SLEEP", "睡眠", LeziColors.JournalSleep, isBar = true),
+                TimelineLegendEntry("MILK", "奶", LeziColors.JournalFeed),
+                TimelineLegendEntry("PEE", "尿", LeziColors.JournalCare),
+            ),
         )
     }
 }
@@ -105,14 +130,46 @@ fun PreviewSummaryMetrics() {
 fun PreviewTimelineNormal() {
     PreviewFrame {
         TimelineRailCard(
-            sleep = listOf(TimelineLaneSegment(60, 180, LeziColors.LaneSleep)),
-            feed = listOf(
-                TimelineLaneSegment(200, 220, LeziColors.LaneFeed),
-                TimelineLaneSegment(480, 500, LeziColors.LaneFeed),
+            sleep = listOf(
+                TimelineLaneSegment(
+                    60, 180, LeziColors.LaneSleep,
+                    title = "睡眠",
+                    dayChartCategoryKey = "SLEEP",
+                ),
             ),
-            care = listOf(TimelineLaneSegment(300, 310, LeziColors.LaneCare)),
+            feed = listOf(
+                TimelineLaneSegment(
+                    200, 220, LeziColors.LaneFeed,
+                    title = "配方奶",
+                    isEvent = true,
+                    dayChartCategoryKey = "MILK",
+                ),
+                TimelineLaneSegment(
+                    480, 500, LeziColors.LaneFeed,
+                    title = "母乳",
+                    isEvent = true,
+                    dayChartCategoryKey = "NURSING",
+                ),
+            ),
+            care = listOf(
+                TimelineLaneSegment(
+                    300, 310, LeziColors.LaneCare,
+                    title = "尿尿",
+                    isEvent = true,
+                    dayChartCategoryKey = "PEE",
+                ),
+            ),
             recordCount = 6,
             nowMinOfDay = 560,
+            selectedCategoryKey = "MILK",
+            legend = listOf(
+                TimelineLegendEntry("SLEEP", "睡眠", LeziColors.LaneSleep, isBar = true),
+                TimelineLegendEntry("MILK", "奶", LeziColors.LaneFeed),
+                TimelineLegendEntry("NURSING", "母乳", LeziColors.LaneFeed),
+                TimelineLegendEntry("PEE", "尿", LeziColors.LaneCare),
+            ),
+            tipLabel = "奶",
+            tipCount = 1,
         )
     }
 }

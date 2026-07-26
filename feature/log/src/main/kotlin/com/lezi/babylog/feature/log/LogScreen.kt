@@ -78,11 +78,14 @@ import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
 import com.lezi.babylog.designsystem.SummaryMetric
 import com.lezi.babylog.designsystem.TimelineLaneSegment
+import com.lezi.babylog.designsystem.TimelineLegendEntry
 import com.lezi.babylog.designsystem.TimelineRailCard
 import com.lezi.babylog.designsystem.leziRecordColor
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CareAggregation
 import com.lezi.babylog.domain.DailySummary
+import com.lezi.babylog.domain.DayChartCategories
+import com.lezi.babylog.domain.DayChartCategory
 import com.lezi.babylog.domain.formatClock
 import com.lezi.babylog.domain.relativeTimeLabel
 import com.lezi.babylog.sync.SyncPort
@@ -299,6 +302,7 @@ private fun buildLanes(records: List<Record>, dayStart: Long, dayEnd: Long): Lan
                         title = title,
                         detail = detail,
                         isEvent = false,
+                        dayChartCategoryKey = DayChartCategory.SLEEP.name,
                     )
                 }
             }
@@ -331,6 +335,8 @@ private fun buildLanes(records: List<Record>, dayStart: Long, dayEnd: Long): Lan
                     title = title,
                     detail = detail,
                     isEvent = true,
+                    // 吸奶 draws on the feed rail but is not a day-chart type (not 奶).
+                    dayChartCategoryKey = dayChartCategoryKeyForRecordType(r.type),
                 )
             }
             RecordType.PEE, RecordType.POOP, RecordType.BOTH_DIAPER, RecordType.BATH,
@@ -346,6 +352,7 @@ private fun buildLanes(records: List<Record>, dayStart: Long, dayEnd: Long): Lan
                         title = "尿尿",
                         detail = "${clock(startMs)}$notePart · 护理",
                         isEvent = true,
+                        dayChartCategoryKey = DayChartCategory.PEE.name,
                     )
                     RecordType.POOP -> care += TimelineLaneSegment(
                         startMinOfDay = startMin,
@@ -354,8 +361,10 @@ private fun buildLanes(records: List<Record>, dayStart: Long, dayEnd: Long): Lan
                         title = "便便",
                         detail = "${clock(startMs)}$notePart · 护理",
                         isEvent = true,
+                        dayChartCategoryKey = DayChartCategory.POOP.name,
                     )
                     RecordType.BOTH_DIAPER -> {
+                        // Two marks share one record; each mark maps to one day-chart type.
                         care += TimelineLaneSegment(
                             startMinOfDay = startMin,
                             endMinOfDay = startMin,
@@ -363,6 +372,7 @@ private fun buildLanes(records: List<Record>, dayStart: Long, dayEnd: Long): Lan
                             title = "尿尿",
                             detail = "${clock(startMs)}$notePart · 尿+便（尿）",
                             isEvent = true,
+                            dayChartCategoryKey = DayChartCategory.PEE.name,
                         )
                         care += TimelineLaneSegment(
                             startMinOfDay = startMin,
@@ -371,6 +381,7 @@ private fun buildLanes(records: List<Record>, dayStart: Long, dayEnd: Long): Lan
                             title = "便便",
                             detail = "${clock(startMs)}$notePart · 尿+便（便）",
                             isEvent = true,
+                            dayChartCategoryKey = DayChartCategory.POOP.name,
                         )
                     }
                     else -> care += TimelineLaneSegment(
@@ -380,6 +391,7 @@ private fun buildLanes(records: List<Record>, dayStart: Long, dayEnd: Long): Lan
                         title = r.type.presentation.label,
                         detail = "${clock(startMs)}$notePart · 护理",
                         isEvent = true,
+                        dayChartCategoryKey = null,
                     )
                 }
             }
@@ -387,6 +399,38 @@ private fun buildLanes(records: List<Record>, dayStart: Long, dayEnd: Long): Lan
         }
     }
     return Lanes(sleep, feed, care)
+}
+
+/**
+ * Opaque key for [TimelineLaneSegment.dayChartCategoryKey], aligned with
+ * [DayChartCategory.name]. Non day-chart types (e.g. 吸奶) return null.
+ * BOTH_DIAPER is handled as two segments in [buildLanes], not here.
+ */
+internal fun dayChartCategoryKeyForRecordType(type: RecordType): String? =
+    DayChartCategories.categoriesOf(type).singleOrNull()?.name
+
+/**
+ * Map a timeline/legend callback key into page-level [DayChartCategory].
+ * The designsystem already applies toggle/clear (same key → null, other key → that key);
+ * this only decodes the opaque key string.
+ */
+internal fun resolveDayChartSelection(selectedKey: String?): DayChartCategory? {
+    if (selectedKey == null) return null
+    return DayChartCategory.entries.firstOrNull { it.name == selectedKey }
+}
+
+/** Legend swatch colors for day-chart categories (feature owns labels/keys; designsystem stays free of domain). */
+internal fun dayChartLegendColor(
+    category: DayChartCategory,
+    sleep: Color,
+    feed: Color,
+    care: Color,
+    poop: Color,
+): Color = when (category) {
+    DayChartCategory.SLEEP -> sleep
+    DayChartCategory.MILK, DayChartCategory.NURSING -> feed
+    DayChartCategory.PEE -> care
+    DayChartCategory.POOP -> poop
 }
 
 private fun formatDurationMinutes(minutes: Long): String {
@@ -411,14 +455,45 @@ fun LogRoute(
 ) {
     val state by vm.uiState.collectAsStateWithLifecycle()
     var showMore by remember { mutableStateOf(false) }
+    // Page-level day-chart filter (temporary; cleared on day change via remember key).
+    var selectedDayChart by remember(state.day) {
+        mutableStateOf<DayChartCategory?>(null)
+    }
     val today = LocalDate.now()
     val zone = ZoneId.systemDefault()
     val ext = LeziThemeExt.colors
     val journal = LeziThemeExt.isJournal
+    // Reconcile after refresh/delete so a vanished category does not stick at 0 rows.
+    val dayChartFilter = remember(selectedDayChart, state.records) {
+        DayChartCategories.reconcileSelection(selectedDayChart, state.records)
+    }
+    LaunchedEffect(dayChartFilter, selectedDayChart) {
+        if (dayChartFilter != selectedDayChart) {
+            selectedDayChart = dayChartFilter
+        }
+    }
     val timelineRecords = if (state.settings.timelineOrder == "oldest_first") {
         state.records.sortedBy(Record::timestamp)
     } else {
         state.records.sortedByDescending(Record::timestamp)
+    }
+    // Detail list only; day summary above always uses full-day aggregation.
+    val filteredTimelineRecords = remember(timelineRecords, dayChartFilter) {
+        DayChartCategories.filterRecords(timelineRecords, dayChartFilter)
+    }
+    val dayChartLegend = remember(state.records, ext.laneSleep, ext.laneFeed, ext.laneCare, ext.sun) {
+        DayChartCategories.legendCategories(state.records).map { cat ->
+            TimelineLegendEntry(
+                key = cat.name,
+                label = cat.label,
+                color = dayChartLegendColor(cat, ext.laneSleep, ext.laneFeed, ext.laneCare, ext.sun),
+                isBar = cat == DayChartCategory.SLEEP,
+            )
+        }
+    }
+    val dayChartTipCount = remember(state.records, dayChartFilter) {
+        if (dayChartFilter == null) 0
+        else DayChartCategories.filterRecords(state.records, dayChartFilter).size
     }
 
     fun openComposer(type: RecordType) {
@@ -541,24 +616,40 @@ fun LogRoute(
                         }
                     }
 
-                    item {
-                        TimelineRailCard(
-                            sleep = state.sleepLanes.map { it.copy(color = ext.laneSleep) },
-                            feed = state.feedLanes.map { it.copy(color = ext.laneFeed) },
-                            // Preserve distinct pee and poop colors instead of one care-lane color.
-                            care = state.careLanes.map { seg ->
-                                seg.copy(
-                                    color = when (seg.title) {
-                                        "便便" -> ext.sun
-                                        "尿尿" -> ext.laneCare
-                                        else -> ext.laneCare.copy(alpha = 0.75f)
-                                    },
-                                )
-                            },
-                            recordCount = state.records.size,
-                            nowMinOfDay = nowMin,
-                            modifier = Modifier.padding(horizontal = LeziSpacing.Page),
-                        )
+                    // Hide the time bar when the day has no day-chart types (empty day or
+                    // only non-rhythm types such as pump_express / temp / medicine).
+                    // Visibility uses DayChartCategories, not buildLanes emptiness.
+                    if (DayChartCategories.shouldShowDayChart(state.records)) {
+                        item {
+                            TimelineRailCard(
+                                sleep = state.sleepLanes.map { it.copy(color = ext.laneSleep) },
+                                feed = state.feedLanes.map { it.copy(color = ext.laneFeed) },
+                                // Preserve distinct pee and poop colors instead of one care-lane color.
+                                care = state.careLanes.map { seg ->
+                                    seg.copy(
+                                        color = when (seg.dayChartCategoryKey) {
+                                            DayChartCategory.POOP.name -> ext.sun
+                                            DayChartCategory.PEE.name -> ext.laneCare
+                                            else -> when (seg.title) {
+                                                "便便" -> ext.sun
+                                                "尿尿" -> ext.laneCare
+                                                else -> ext.laneCare.copy(alpha = 0.75f)
+                                            }
+                                        },
+                                    )
+                                },
+                                recordCount = state.records.size,
+                                nowMinOfDay = nowMin,
+                                selectedCategoryKey = dayChartFilter?.name,
+                                onCategorySelect = { key ->
+                                    selectedDayChart = resolveDayChartSelection(key)
+                                },
+                                legend = dayChartLegend,
+                                tipLabel = dayChartFilter?.label,
+                                tipCount = dayChartTipCount,
+                                modifier = Modifier.padding(horizontal = LeziSpacing.Page),
+                            )
+                        }
                     }
 
                     if (state.day != today) {
@@ -600,7 +691,7 @@ fun LogRoute(
                                 modifier = Modifier.padding(horizontal = LeziSpacing.Page),
                             )
                         }
-                        else -> items(timelineRecords, key = { it.id }) { r ->
+                        else -> items(filteredTimelineRecords, key = { it.id }) { r ->
                             RecordRow(
                                 time = formatClock(r.timestamp),
                                 title = typeLabel(r.type),
