@@ -327,7 +327,8 @@ interface SyncPort {
 
 - 无会话时状态保持 `Disabled`，前台与本地写触发为安全 no-op。
 - 建家、加入、邀请前必须配置服务器；失败返回中文产品文案。
-- 只有已加入家庭的会话才会生成并上传 Outbox；服务器地址变化时原子清除旧 token/cursor。
+- 只有已加入家庭的会话才会生成并上传 Outbox；已加入后变更服务器地址时保留 token/family，
+  原子清除 cursor/generation 并按 full-resync 重新拉取。
 
 ### 6.4 V2 规则（摘要）
 

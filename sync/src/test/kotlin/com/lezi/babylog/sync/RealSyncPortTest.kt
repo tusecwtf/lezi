@@ -640,7 +640,9 @@ class RealSyncPortTest {
             committed()
         }.exceptionOrNull()
 
-        assertThat(failure).hasMessageThat().contains("outbox delete failed")
+        assertThat(failure).isInstanceOf(LocalClearCommittedException::class.java)
+        assertThat((failure as LocalClearCommittedException).familyServerRetained).isTrue()
+        assertThat(failure.cause).hasMessageThat().contains("outbox delete failed")
         assertThat(rig.records.listAllIncludingDeleted()).isEmpty()
         assertThat(rig.outbox.peek("family-a", 10)).hasSize(1)
 

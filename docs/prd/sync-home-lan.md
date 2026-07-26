@@ -131,8 +131,8 @@ SSID 白名单 **仅存本机**，不随家庭同步到 NAS。两台手机可登
 3. **`allowedSsids` 至少 1 个**（空名单 **禁止**，即使 health 通）。
 4. 活跃网络 **`TRANSPORT_WIFI`**（蜂窝不兜底）。
 5. 能读到当前 SSID，且 **trim 后精确等于** 白名单之一；读不到（无权限 / `<unknown ssid>`）→ **禁止** 并在用户发起家庭同步操作时引导开启位置权限与系统定位服务（**不**降级为「仅 Wi‑Fi」）。Android 将 SSID 视为位置敏感字段；应用不读取坐标、不上传 SSID。
-6. `GET {baseUrl}/health` 在短超时内（建议 ≤3s）成功；客户端不跟随重定向，
-   最多读取 64 KiB 响应体，并只接受小型健康 JSON。
+6. `GET {baseUrl}/health` 在短超时内（建议 ≤3s）返回 2xx；客户端不跟随重定向，
+   并最多读取 64 KiB 响应体。
 7. 需会话的 API 另需有效 family token（join/create 前无 token）。
 
 ### 3.3 失败与其它

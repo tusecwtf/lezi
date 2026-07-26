@@ -16,6 +16,7 @@ import com.lezi.babylog.sync.InvitePayloadCodec
 import com.lezi.babylog.sync.JoinFamilyDraft
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
+import com.lezi.babylog.sync.joinFamilyError
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
@@ -347,7 +348,7 @@ class FamilyViewModel @Inject constructor(
     ) {
         viewModelScope.launch {
             val command = runCatching { draft.toCommand(ui.value.displayName) }.getOrElse {
-                onDone(false, it.message ?: "服务器地址无效")
+                onDone(false, joinFamilyError(it))
                 return@launch
             }
             val result = sync.joinFamily(
@@ -357,7 +358,7 @@ class FamilyViewModel @Inject constructor(
                 result.isSuccess,
                 result.fold(
                     onSuccess = { "已加入家庭" },
-                    onFailure = { familySyncError(it, fallback = "加入家庭失败，请稍后重试") },
+                    onFailure = { joinFamilyError(it) },
                 ),
             )
             if (result.isSuccess) refreshMembersNow(showErrors = true)

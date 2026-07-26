@@ -70,6 +70,7 @@ import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
 import com.lezi.babylog.domain.CustomRecordItem
+import com.lezi.babylog.domain.LocalRecordsClearCommittedException
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate
@@ -101,6 +102,13 @@ private val BabyThemePaletteLabels = listOf(
     "灰蓝",
     "草绿",
 )
+
+internal fun clearRecordsFailureCopy(error: Throwable): String = when {
+    error is LocalRecordsClearCommittedException && error.familyServerRetained ->
+        "本机记录可能已部分清理，家庭服务器上的记录仍保留，请重试"
+    error is LocalRecordsClearCommittedException -> "本机记录可能已部分清理，请重试"
+    else -> productUiError(error, "清除失败，请重试")
+}
 
 data class SettingsUi(
     val settings: SettingsLocal = SettingsLocal(),
@@ -240,7 +248,7 @@ class SettingsViewModel @Inject constructor(
     fun clearRecords(onDone: (String?) -> Unit) {
         viewModelScope.launch {
             val result = runCatching { careLog.clearRecordsOnly() }
-            onDone(result.exceptionOrNull()?.let { productUiError(it, "清除失败，请重试") })
+            onDone(result.exceptionOrNull()?.let(::clearRecordsFailureCopy))
         }
     }
 }

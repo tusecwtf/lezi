@@ -112,15 +112,29 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
         clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
     ) = runCatching {
         var committed = false
-        clearLocal { committed = true }
-        check(committed) { "本机记录清除未确认领域事务已提交" }
+        try {
+            clearLocal { committed = true }
+            check(committed) { "本机记录清除未确认领域事务已提交" }
+        } catch (error: Throwable) {
+            if (committed) {
+                throw LocalClearCommittedException(familyServerRetained = false, cause = error)
+            }
+            throw error
+        }
     }
 
     override suspend fun clearAllLocalData(
         clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
     ) = runCatching {
         var committed = false
-        clearLocal { committed = true }
-        check(committed) { "本机数据清除未确认领域事务已提交" }
+        try {
+            clearLocal { committed = true }
+            check(committed) { "本机数据清除未确认领域事务已提交" }
+        } catch (error: Throwable) {
+            if (committed) {
+                throw LocalClearCommittedException(familyServerRetained = false, cause = error)
+            }
+            throw error
+        }
     }
 }

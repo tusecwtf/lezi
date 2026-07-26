@@ -82,6 +82,7 @@ import com.lezi.babylog.sync.HomeWifiSettingsTarget
 import com.lezi.babylog.sync.NetworkState
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
+import com.lezi.babylog.sync.joinFamilyError
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate
@@ -158,7 +159,7 @@ class OnboardingViewModel @Inject constructor(
     ) {
         viewModelScope.launch {
             val command = runCatching { draft.toCommand() }.getOrElse {
-                onDone(it.message ?: "服务器地址无效")
+                onDone(joinFamilyError(it))
                 return@launch
             }
             val displayName = try {
@@ -176,7 +177,7 @@ class OnboardingViewModel @Inject constructor(
                 command.copy(displayName = displayName),
             )
             if (join.isFailure) {
-                onDone(productUiError(join.exceptionOrNull() ?: Exception("加入失败"), "加入家庭失败"))
+                onDone(joinFamilyError(join.exceptionOrNull() ?: Exception("加入失败")))
                 return@launch
             }
             sync.requestSync(SyncTrigger.PullToRefresh)

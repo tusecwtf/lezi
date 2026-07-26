@@ -250,14 +250,6 @@ fun FamilyRoute(
                 onEditBaby = { dialog = FamilyDialog.EditBaby(it) },
                 onMergeBaby = { dialog = FamilyDialog.MergeBaby(it) },
                 onDeleteBaby = { dialog = FamilyDialog.DeleteBaby(it) },
-                onOpenNetwork = {
-                    pendingAfterNetworkSave = null
-                    dialog = FamilyDialog.NetworkSettings
-                },
-                onOpenMembers = {
-                    // Member list still lives in the sharing section below; refresh when user seeks it.
-                    withHomeWifiAccess { vm.refreshMembers(showErrors = true) }
-                },
             )
             FamilySharingContent(
                 ui = ui,

@@ -19,6 +19,7 @@ import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.sync.SyncPort
+import com.lezi.babylog.sync.LocalClearCommittedException
 import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
@@ -895,6 +896,11 @@ class CareLog @Inject constructor(
                 onCommitted()
                 settings.clearNextFeedAt()
             }.getOrThrow()
+        } catch (error: LocalClearCommittedException) {
+            throw LocalRecordsClearCommittedException(
+                familyServerRetained = error.familyServerRetained,
+                cause = error,
+            )
         } finally {
             // Never cancel a still-backed reminder before the authoritative Room delete commits.
             // If later replica/DataStore cleanup fails, the records are already gone and their
@@ -934,6 +940,11 @@ class CareLog @Inject constructor(
                 settings.setCurrentBabyId(null)
                 settings.clearNextFeedAt()
             }.getOrThrow()
+        } catch (error: LocalClearCommittedException) {
+            throw LocalRecordsClearCommittedException(
+                familyServerRetained = error.familyServerRetained,
+                cause = error,
+            )
         } finally {
             if (historyDeleted) reminderCleanup.cancelForRecordsClear(calendarEventIds)
         }

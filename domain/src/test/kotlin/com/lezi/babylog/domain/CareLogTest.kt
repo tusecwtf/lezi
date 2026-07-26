@@ -1051,6 +1051,21 @@ class CareLogTest {
     }
 
     @Test
+    fun clearRecordsFailureAfterRoomCommitPreservesReplicaStateForUiCopy() = runTest {
+        val sync = RecordingSyncPort().apply { failAfterLocalRecordClear = true }
+        val fakes = Fakes(sync)
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        care.addRecord(babyId, RecordType.PEE, timestamp = 1_000L)
+
+        val failure = runCatching { care.clearRecordsOnly() }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(LocalRecordsClearCommittedException::class.java)
+        assertThat((failure as LocalRecordsClearCommittedException).familyServerRetained).isTrue()
+        assertThat(fakes.records.listForBaby(babyId)).isEmpty()
+    }
+
+    @Test
     fun deleteBabyCancelsOnlyThatBabysCalendarReminders() = runTest {
         val fakes = Fakes()
         val care = fakes.careLog()
@@ -1185,6 +1200,7 @@ private class RecordingSyncPort(
     var localRecordReconciliations = 0
     var fullLocalWipes = 0
     var failBeforeLocalRecordClear = false
+    var failAfterLocalRecordClear = false
 
     override fun requestSync(trigger: com.lezi.babylog.sync.SyncTrigger) {
         requests++
@@ -1198,6 +1214,14 @@ private class RecordingSyncPort(
         var committed = false
         clearLocal { committed = true }
         check(committed)
+        if (failAfterLocalRecordClear) {
+            return Result.failure(
+                com.lezi.babylog.sync.LocalClearCommittedException(
+                    familyServerRetained = true,
+                    cause = IllegalStateException("outbox delete failed"),
+                ),
+            )
+        }
         return Result.success(Unit)
     }
 

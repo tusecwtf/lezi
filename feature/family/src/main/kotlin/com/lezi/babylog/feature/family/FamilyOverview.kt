@@ -38,26 +38,9 @@ internal fun FamilyOverview(
     onEditBaby: (Baby) -> Unit,
     onMergeBaby: (Baby) -> Unit,
     onDeleteBaby: (Baby) -> Unit,
-    onOpenNetwork: () -> Unit = {},
-    onOpenMembers: () -> Unit = {},
 ) {
     val current = ui.current
     val nickCounts = ui.babies.groupingBy { it.nickname.trim() }.eachCount()
-    val visibleMembers = familyMembersForDisplay(
-        members = ui.members,
-        localDisplayName = ui.displayName,
-        localRole = ui.role,
-        membersLoaded = ui.membersLoaded,
-    )
-    val (syncTitle, syncDetail) = overviewSyncStatusCopy(ui.status, ui.enabled)
-    val (familyTitle, familyDetail) = overviewFamilyIdentityCopy(
-        isJoined = ui.enabled,
-        babyNicknames = ui.babies.map { it.nickname.trim() }.filter { it.isNotEmpty() },
-        memberCount = visibleMembers.size,
-        membersLoaded = ui.membersLoaded || !ui.enabled,
-        myDisplayName = ui.displayName,
-        role = ui.role,
-    )
     Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
             com.lezi.babylog.designsystem.PageHero(
                 eyebrow = "宝宝与家庭",
@@ -139,20 +122,16 @@ internal fun FamilyOverview(
                 }
             }
 
-            // 同步状态 + 家庭中的宝宝/成员身份（不展示存储模式与本机设备 ID）
             LeziCard(modifier = Modifier.fillMaxWidth()) {
                 FamilyScopeRow(
-                    marker = "同步",
-                    title = syncTitle,
-                    detail = syncDetail,
-                    onClick = onOpenNetwork,
+                    marker = "存储",
+                    title = if (ui.enabled) "本机 + 家庭服务器" else "仅本机",
+                    detail = if (ui.enabled) "家庭同步已开启" else "家庭同步未开启",
                 )
-                Spacer(Modifier.height(LeziSpacing.Xs))
                 FamilyScopeRow(
-                    marker = "家庭",
-                    title = familyTitle,
-                    detail = familyDetail,
-                    onClick = if (ui.enabled) onOpenMembers else onOpenNetwork,
+                    marker = "设备",
+                    title = "本机标识",
+                    detail = ui.deviceId.take(12).uppercase().ifBlank { "生成中" },
                 )
             }
 

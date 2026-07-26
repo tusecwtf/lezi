@@ -358,6 +358,10 @@ class RealSyncPort @Inject constructor(
                     runCatching {
                         finishLocalRecordsClear(session, logMedia, localMediaPaths)
                     }.onFailure(error::addSuppressed)
+                    throw LocalClearCommittedException(
+                        familyServerRetained = session.familyId.isNotBlank(),
+                        cause = error,
+                    )
                 }
                 throw error
             }
@@ -368,6 +372,7 @@ class RealSyncPort @Inject constructor(
         clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
     ): Result<Unit> = runCatching {
         syncMutex.withLock {
+            val familyServerRetained = preferences.session.first().familyId.isNotBlank()
             val allMedia = mediaDao.listAllIncludingDeleted()
             val localMediaPaths = buildList {
                 addAll(allMedia.map(MediaAssetEntity::localUri))
@@ -390,6 +395,10 @@ class RealSyncPort @Inject constructor(
                     runCatching {
                         finishAllLocalDataClear(localMediaPaths)
                     }.onFailure(error::addSuppressed)
+                    throw LocalClearCommittedException(
+                        familyServerRetained = familyServerRetained,
+                        cause = error,
+                    )
                 }
                 throw error
             }
