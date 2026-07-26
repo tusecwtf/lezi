@@ -62,6 +62,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
+import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.core.model.CarePlanStatus
@@ -97,6 +98,7 @@ import java.time.ZoneOffset
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import javax.inject.Inject
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -116,6 +118,78 @@ sealed class CalendarDayItem {
     }
     data class LegacyEvent(val event: CalendarEvent) : CalendarDayItem() {
         override val sortAt: Long get() = event.eventAt
+    }
+}
+
+internal data class LegacyCalendarDeleteState(
+    val target: CalendarEvent? = null,
+    val deleting: Boolean = false,
+    val error: String? = null,
+)
+
+internal sealed interface LegacyCalendarDeleteAction {
+    data class Request(val event: CalendarEvent) : LegacyCalendarDeleteAction
+    data object Cancel : LegacyCalendarDeleteAction
+    data object Confirm : LegacyCalendarDeleteAction
+    data class Finished(val error: String?) : LegacyCalendarDeleteAction
+}
+
+internal data class LegacyCalendarDeleteCommand(
+    val event: CalendarEvent,
+)
+
+internal data class LegacyCalendarDeleteTransition(
+    val state: LegacyCalendarDeleteState,
+    val command: LegacyCalendarDeleteCommand? = null,
+)
+
+internal fun reduceLegacyCalendarDelete(
+    state: LegacyCalendarDeleteState,
+    action: LegacyCalendarDeleteAction,
+): LegacyCalendarDeleteTransition = when (action) {
+    is LegacyCalendarDeleteAction.Request ->
+        LegacyCalendarDeleteTransition(
+            state.copy(target = action.event, deleting = false, error = null),
+        )
+    LegacyCalendarDeleteAction.Cancel ->
+        if (state.deleting) {
+            LegacyCalendarDeleteTransition(state)
+        } else {
+            LegacyCalendarDeleteTransition(LegacyCalendarDeleteState())
+        }
+    LegacyCalendarDeleteAction.Confirm -> {
+        val target = state.target
+        if (target == null || state.deleting) {
+            LegacyCalendarDeleteTransition(state)
+        } else {
+            LegacyCalendarDeleteTransition(
+                state = state.copy(deleting = true, error = null),
+                command = LegacyCalendarDeleteCommand(target),
+            )
+        }
+    }
+    is LegacyCalendarDeleteAction.Finished -> {
+        if (action.error == null) {
+            LegacyCalendarDeleteTransition(LegacyCalendarDeleteState())
+        } else {
+            LegacyCalendarDeleteTransition(
+                state.copy(deleting = false, error = action.error),
+            )
+        }
+    }
+}
+
+internal suspend fun executeLegacyCalendarDelete(
+    event: CalendarEvent,
+    deleteById: suspend (Long) -> Unit,
+): String? {
+    try {
+        deleteById(event.id)
+        return null
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Throwable) {
+        return legacyCalendarDeleteFailureCopy(error)
     }
 }
 
@@ -370,10 +444,13 @@ class CalendarViewModel @Inject constructor(
         }
     }
 
-    fun delete(event: CalendarEvent, onDone: () -> Unit) {
+    fun delete(event: CalendarEvent, onResult: (String?) -> Unit) {
         viewModelScope.launch {
-            careLog.deleteCalendarEvent(event.id)
-            onDone()
+            onResult(
+                executeLegacyCalendarDelete(event) { eventId ->
+                    careLog.deleteCalendarEvent(eventId)
+                },
+            )
         }
     }
 
@@ -425,6 +502,7 @@ fun CalendarRoute(
     var showPlanTypePicker by remember { mutableStateOf(false) }
     var convertEvent by remember { mutableStateOf<CalendarEvent?>(null) }
     var editingEvent by remember { mutableStateOf<CalendarEvent?>(null) }
+    var deleteState by remember { mutableStateOf(LegacyCalendarDeleteState()) }
     var showConflictList by remember { mutableStateOf(false) }
     var confirmConvertCandidate by remember { mutableStateOf<String?>(null) }
     var conflictError by remember { mutableStateOf<String?>(null) }
@@ -462,6 +540,7 @@ fun CalendarRoute(
         dateTarget = null
         clockTarget = null
         addError = null
+        deleteState = LegacyCalendarDeleteState()
         showAdd = true
     }
     val closeCalendarDraft = {
@@ -471,6 +550,7 @@ fun CalendarRoute(
         title = ""
         editingEvent = null
         addError = null
+        deleteState = LegacyCalendarDeleteState()
     }
     Scaffold(
         topBar = {
@@ -581,6 +661,7 @@ fun CalendarRoute(
                                         reminderEnabled = e.remindAt != null
                                         remindAt = e.remindAt ?: (e.eventAt - 60 * 60_000L)
                                         addError = null
+                                        deleteState = LegacyCalendarDeleteState()
                                         showAdd = true
                                     },
                                 ) {
@@ -686,7 +767,11 @@ fun CalendarRoute(
     }
     if (showAdd) {
         AlertDialog(
-            onDismissRequest = closeCalendarDraft,
+            onDismissRequest = {
+                if (deleteState.target == null) {
+                    closeCalendarDraft()
+                }
+            },
             modifier = Modifier.imePadding(),
             properties = DialogProperties(decorFitsSystemWindows = false),
             title = { Text(if (editingEvent == null) "编辑历史日程" else "编辑日程") },
@@ -822,13 +907,83 @@ fun CalendarRoute(
                     editingEvent?.let { event ->
                         TextButton(
                             onClick = {
-                                vm.delete(event) { closeCalendarDraft() }
+                                deleteState = reduceLegacyCalendarDelete(
+                                    state = deleteState,
+                                    action = LegacyCalendarDeleteAction.Request(event),
+                                ).state
                             },
                         ) {
                             Text("删除", color = MaterialTheme.colorScheme.error)
                         }
                     }
                     TextButton(onClick = closeCalendarDraft) { Text("取消") }
+                }
+            },
+        )
+    }
+
+    deleteState.target?.let { target ->
+        AlertDialog(
+            onDismissRequest = {
+                deleteState = reduceLegacyCalendarDelete(
+                    state = deleteState,
+                    action = LegacyCalendarDeleteAction.Cancel,
+                ).state
+            },
+            modifier = Modifier.testTag("legacy_calendar_delete_confirmation"),
+            title = { Text("删除这条历史日程？") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
+                    Text(legacyCalendarDeleteImpactCopy(target, zone))
+                    deleteState.error?.let { error ->
+                        Text(
+                            error,
+                            style = LeziTypography.Meta,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !deleteState.deleting,
+                    onClick = {
+                        val transition = reduceLegacyCalendarDelete(
+                            state = deleteState,
+                            action = LegacyCalendarDeleteAction.Confirm,
+                        )
+                        deleteState = transition.state
+                        transition.command?.let { command ->
+                            vm.delete(command.event) { deleteError ->
+                                deleteState = reduceLegacyCalendarDelete(
+                                    state = deleteState,
+                                    action = LegacyCalendarDeleteAction.Finished(deleteError),
+                                ).state
+                                if (deleteError == null) {
+                                    closeCalendarDraft()
+                                }
+                            }
+                        }
+                    },
+                    modifier = Modifier.testTag("legacy_calendar_delete_confirm"),
+                ) {
+                    Text(
+                        if (deleteState.deleting) "删除中…" else "确认删除",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !deleteState.deleting,
+                    onClick = {
+                        deleteState = reduceLegacyCalendarDelete(
+                            state = deleteState,
+                            action = LegacyCalendarDeleteAction.Cancel,
+                        ).state
+                    },
+                ) {
+                    Text("取消")
                 }
             },
         )
@@ -1229,6 +1384,17 @@ private fun formatCalendarDateTime(timestamp: Long, zone: ZoneId): String =
     Instant.ofEpochMilli(timestamp)
         .atZone(zone)
         .format(DateTimeFormatter.ofPattern("M月d日 HH:mm"))
+
+internal fun legacyCalendarDeleteImpactCopy(
+    event: CalendarEvent,
+    zone: ZoneId,
+): String =
+    "「${event.title} · ${formatCalendarDateTime(event.eventAt, zone)}」" +
+        "只会从本机乐记日历移除，并取消这条日程的乐记提醒；" +
+        "不会改动家庭护理计划或系统日历。删除后不可撤销。"
+
+internal fun legacyCalendarDeleteFailureCopy(error: Throwable): String =
+    productUiError(error, "删除失败，请重试")
 
 /**
  * Local device time + status, and original plan-zone clock when zones differ
