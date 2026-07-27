@@ -44,10 +44,7 @@ pub struct EmptyRequest {}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct InviteRequest {
-    #[serde(default)]
-    pub family_id: Option<Uuid>,
-}
+pub struct InviteRequest {}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -115,9 +112,9 @@ pub(crate) fn require_display_name(value: Option<&str>) -> Result<String, ApiErr
     }
 }
 
-/// Soft-normalize a human-facing member name (historical memberships / list view).
+/// Normalize a human-facing member name before required-field validation.
 ///
-/// Whitespace-only names become `None` so clients can apply role fallbacks.
+/// Whitespace-only names become `None`.
 /// Directional formatting and control characters are rejected because this
 /// value is rendered next to a security-sensitive role.
 pub(crate) fn normalize_display_name(value: Option<&str>) -> Result<Option<String>, ApiError> {
@@ -235,10 +232,10 @@ pub struct Entity {
 
 impl RawEntity {
     fn validate(self, max_media_bytes: usize) -> Result<Entity, ApiError> {
-        self.validate_as(max_media_bytes, EntityValidationContext::LegacyPush)
+        self.validate_as(max_media_bytes, EntityValidationContext::OrdinaryPush)
     }
 
-    /// Validate an entity for either legacy push or atomic-bundle roots/media.
+    /// Validate an entity for either ordinary push or atomic-bundle roots/media.
     pub fn validate_as(
         mut self,
         max_media_bytes: usize,
@@ -253,23 +250,23 @@ impl RawEntity {
             (_, "baby") => validate_baby(&mut self.payload)?,
             (_, "record") => validate_record(&self.payload)?,
             (_, "media") => validate_media(&self.payload, max_media_bytes)?,
-            (EntityValidationContext::LegacyPush, "custom_item") => {
+            (EntityValidationContext::OrdinaryPush, "custom_item") => {
                 validate_custom_item(&mut self.payload)?
             }
-            (EntityValidationContext::LegacyPush, "fulfillment_candidate") => {
+            (EntityValidationContext::OrdinaryPush, "fulfillment_candidate") => {
                 validate_fulfillment_candidate(&mut self.payload)?
             }
             (EntityValidationContext::AtomicBundleRoot, "care_plan") => {
                 validate_care_plan(&mut self.payload)?
             }
-            (EntityValidationContext::LegacyPush, "care_plan") => {
-                // Care plans should use atomic bundles; reject on classic push so
-                // old half-clients cannot forge plans without media package semantics.
+            (EntityValidationContext::OrdinaryPush, "care_plan") => {
+                // Care plans use atomic bundles so plan and media package semantics
+                // cannot diverge.
                 return Err(ApiError::unprocessable(
                     "care_plan must be published via atomic bundle",
                 ));
             }
-            (EntityValidationContext::LegacyPush, _) => return Err(ApiError::unprocessable(
+            (EntityValidationContext::OrdinaryPush, _) => return Err(ApiError::unprocessable(
                 "entity type must be baby, record, media, custom_item, or fulfillment_candidate",
             )),
             (EntityValidationContext::AtomicBundleRoot, _) => {
@@ -296,8 +293,8 @@ impl RawEntity {
 /// Where an entity is being accepted on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntityValidationContext {
-    /// Classic `/v1/push` (baby | record | media | custom_item | fulfillment_candidate).
-    LegacyPush,
+    /// Ordinary `/v1/push` (baby | record | media | custom_item | fulfillment_candidate).
+    OrdinaryPush,
     /// Root of an atomic bundle (`record` | `care_plan`).
     AtomicBundleRoot,
     /// Media row inside an atomic bundle (must be `media`).
@@ -401,13 +398,7 @@ impl BundleCommitRequest {
 fn validate_baby(payload: &mut Map<String, Value>) -> Result<(), ApiError> {
     require_keys(
         payload,
-        &[
-            "nickname",
-            "sex",
-            "birthday",
-            "due_date",
-            "avatar_media_uuid",
-        ],
+        &["nickname", "sex", "birthday", "avatar_media_uuid"],
     )?;
     allow_keys(
         payload,
@@ -415,7 +406,6 @@ fn validate_baby(payload: &mut Map<String, Value>) -> Result<(), ApiError> {
             "nickname",
             "sex",
             "birthday",
-            "due_date",
             "sort_order",
             "avatar_media_uuid",
             "birth_weight_grams",
@@ -424,7 +414,6 @@ fn validate_baby(payload: &mut Map<String, Value>) -> Result<(), ApiError> {
     string(payload, "nickname", 1, 20)?;
     nullable_string(payload, "sex", 0, usize::MAX)?;
     date(payload, "birthday", false)?;
-    date(payload, "due_date", true)?;
     nullable_uuid(payload, "avatar_media_uuid")?;
     optional_integer(payload, "sort_order", i64::MIN, i64::MAX)?;
     optional_integer(payload, "birth_weight_grams", 0, 100_000)?;
@@ -447,7 +436,6 @@ fn validate_record(payload: &Map<String, Value>) -> Result<(), ApiError> {
             "note",
             "payload_json",
             "schema_version",
-            "created_by_device_id",
             "created_by_membership_id",
         ],
     )?;
@@ -460,7 +448,6 @@ fn validate_record(payload: &Map<String, Value>) -> Result<(), ApiError> {
         return Err(ApiError::unprocessable("payload_json must be an object"));
     }
     optional_integer(payload, "schema_version", 1, i64::MAX)?;
-    optional_nullable_string(payload, "created_by_device_id", 1, 128)?;
     optional_nullable_string(payload, "created_by_membership_id", 1, 64)?;
     Ok(())
 }

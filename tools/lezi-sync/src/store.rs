@@ -17,7 +17,104 @@ use crate::model::{Entity, MAX_BUNDLE_MEDIA_ENTITIES, MAX_OPEN_STAGING_BUNDLES_P
 use crate::{PULL_ENTITY_TARGET_BYTES, PULL_PAGE_ENTITY_LIMIT, PULL_PAGE_TARGET_BYTES};
 
 const ENTITY_QUERY_CHUNK_SIZE: usize = 400;
-const DATABASE_SCHEMA_VERSION: i64 = 2;
+const DATABASE_SCHEMA_VERSION: i64 = 3;
+const CURRENT_SCHEMA_SQL: &str = "
+    CREATE TABLE families (
+        id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL,
+        create_request_hash TEXT,
+        name TEXT
+    );
+    CREATE UNIQUE INDEX families_create_request
+        ON families(create_request_hash);
+
+    CREATE TABLE memberships (
+        membership_id TEXT PRIMARY KEY,
+        family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+        role TEXT NOT NULL CHECK(role IN ('owner', 'member')),
+        device_id TEXT NOT NULL,
+        display_name TEXT,
+        left_at INTEGER
+    );
+    CREATE INDEX memberships_family ON memberships(family_id);
+
+    CREATE TABLE membership_credentials (
+        token_hash TEXT PRIMARY KEY,
+        membership_id TEXT NOT NULL
+            REFERENCES memberships(membership_id) ON DELETE CASCADE,
+        revoked_at INTEGER
+    );
+    CREATE INDEX membership_credentials_membership
+        ON membership_credentials(membership_id);
+
+    CREATE TABLE invites (
+        code_hash TEXT PRIMARY KEY,
+        family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+        expires_at INTEGER NOT NULL,
+        used_at INTEGER,
+        joined_device_id TEXT
+    );
+
+    CREATE TABLE family_meta (
+        family_id TEXT PRIMARY KEY REFERENCES families(id) ON DELETE CASCADE,
+        rev INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE entities (
+        family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+        entity_type TEXT NOT NULL CHECK(entity_type IN ('baby', 'record', 'media', 'care_plan', 'custom_item', 'fulfillment_candidate')),
+        client_uuid TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        deleted_at INTEGER,
+        payload_json TEXT NOT NULL,
+        rev INTEGER NOT NULL,
+        PRIMARY KEY (family_id, entity_type, client_uuid)
+    );
+    CREATE INDEX entities_family_rev ON entities(family_id, rev);
+
+    CREATE TABLE sync_bundles (
+        family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+        bundle_id TEXT NOT NULL,
+        staged_membership_id TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('staging', 'committed')),
+        root_type TEXT NOT NULL,
+        root_client_uuid TEXT NOT NULL,
+        root_updated_at INTEGER NOT NULL,
+        root_deleted_at INTEGER,
+        root_payload_json TEXT NOT NULL,
+        media_entities_json TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        committed_at INTEGER,
+        committed_cursor INTEGER,
+        committed_applied INTEGER,
+        PRIMARY KEY (family_id, bundle_id)
+    );
+    CREATE INDEX sync_bundles_family_status
+        ON sync_bundles(family_id, status);
+
+    CREATE TABLE sync_bundle_media (
+        family_id TEXT NOT NULL,
+        bundle_id TEXT NOT NULL,
+        media_uuid TEXT NOT NULL,
+        declared_byte_size INTEGER,
+        staged_byte_size INTEGER,
+        staged_sha256 TEXT,
+        staged_at INTEGER,
+        PRIMARY KEY (family_id, bundle_id, media_uuid),
+        FOREIGN KEY (family_id, bundle_id)
+            REFERENCES sync_bundles(family_id, bundle_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE media_publications (
+        family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+        media_uuid TEXT NOT NULL,
+        source TEXT NOT NULL
+            CHECK(source IN ('ordinary', 'bundle_pending', 'bundle')),
+        bundle_id TEXT,
+        PRIMARY KEY (family_id, media_uuid)
+    );
+";
 
 #[derive(Debug, Clone)]
 pub struct Principal {
@@ -31,7 +128,6 @@ pub struct Principal {
 #[derive(Debug, Clone)]
 pub struct ActiveMembership {
     pub role: String,
-    pub device_id: String,
     pub display_name: Option<String>,
     /// Server-minted immutable membership identity (UUID).
     pub membership_id: String,
@@ -84,8 +180,10 @@ pub enum StoreError {
     Json(#[from] serde_json::Error),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("database schema version {found} is newer than supported version {supported}")]
+    #[error("database schema version {found} is unsupported; expected version {supported}")]
     UnsupportedSchemaVersion { found: i64, supported: i64 },
+    #[error("database schema does not match current version {supported}")]
+    IncompatibleSchema { supported: i64 },
     #[error("family already exists")]
     FamilyAlreadyExists,
     #[error("invitation not found")]
@@ -122,8 +220,6 @@ pub enum StoreError {
     BundleContentConflict,
     #[error("atomic bundle belongs to a different staging membership")]
     BundleMembershipMismatch,
-    #[error("legacy staging bundle has no verifiable membership")]
-    LegacyBundleMembershipUnknown,
     #[error("too many open staging bundles for this family")]
     BundleStagingLimit,
     #[error("media is not listed in the bundle manifest")]
@@ -159,7 +255,7 @@ pub struct StoredBundle {
     pub required_media: Vec<String>,
     pub media_integrity: BTreeMap<String, BundleMediaIntegrity>,
     pub status: String,
-    pub staged_membership_id: Option<String>,
+    pub staged_membership_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -184,14 +280,62 @@ type EntityKey = (String, String);
 /// (kind, record_client_uuid, baby_client_uuid, care_plan_client_uuid)
 type MediaAssociation = (String, Option<String>, Option<String>, Option<String>);
 
-fn ensure_supported_schema_version(schema_version: i64) -> Result<(), StoreError> {
-    if schema_version > DATABASE_SCHEMA_VERSION {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchemaState {
+    Empty,
+    Current,
+}
+
+fn normalized_schema_objects(
+    connection: &Connection,
+) -> Result<BTreeMap<(String, String), String>, StoreError> {
+    let mut statement = connection.prepare(
+        "
+        SELECT type, name, sql
+        FROM sqlite_schema
+        WHERE type IN ('table', 'index', 'view', 'trigger')
+          AND name NOT LIKE 'sqlite_%'
+          AND sql IS NOT NULL
+        ORDER BY type COLLATE BINARY, name COLLATE BINARY
+        ",
+    )?;
+    let rows = statement.query_map([], |row| {
+        let sql: String = row.get(2)?;
+        Ok(((row.get(0)?, row.get(1)?), normalize_schema_sql(&sql)))
+    })?;
+    rows.collect::<Result<BTreeMap<_, _>, _>>()
+        .map_err(StoreError::from)
+}
+
+fn normalize_schema_sql(sql: &str) -> String {
+    sql.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn expected_schema_objects() -> Result<BTreeMap<(String, String), String>, StoreError> {
+    let connection = Connection::open_in_memory()?;
+    connection.execute_batch(CURRENT_SCHEMA_SQL)?;
+    normalized_schema_objects(&connection)
+}
+
+fn inspect_schema(connection: &Connection) -> Result<SchemaState, StoreError> {
+    let schema_version =
+        connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
+    let objects = normalized_schema_objects(connection)?;
+    if schema_version == 0 && objects.is_empty() {
+        return Ok(SchemaState::Empty);
+    }
+    if schema_version != DATABASE_SCHEMA_VERSION {
         return Err(StoreError::UnsupportedSchemaVersion {
             found: schema_version,
             supported: DATABASE_SCHEMA_VERSION,
         });
     }
-    Ok(())
+    if objects != expected_schema_objects()? {
+        return Err(StoreError::IncompatibleSchema {
+            supported: DATABASE_SCHEMA_VERSION,
+        });
+    }
+    Ok(SchemaState::Current)
 }
 
 impl Store {
@@ -203,9 +347,7 @@ impl Store {
             database_path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
-        let schema_version =
-            connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
-        ensure_supported_schema_version(schema_version)
+        inspect_schema(&connection).map(|_| ())
     }
 
     pub fn open(database_path: impl Into<PathBuf>) -> Result<Self, StoreError> {
@@ -266,9 +408,7 @@ impl Store {
     fn initialize(&self) -> Result<(), StoreError> {
         let mut connection = Connection::open(&self.database_path)?;
         connection.busy_timeout(Duration::from_secs(10))?;
-        let schema_version =
-            connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
-        ensure_supported_schema_version(schema_version)?;
+        let schema_state = inspect_schema(&connection)?;
         crate::secure_file(&self.database_path)?;
         connection.execute_batch(
             "
@@ -276,232 +416,16 @@ impl Store {
             PRAGMA journal_mode = WAL;
             ",
         )?;
-        connection.execute_batch(
-            "
-            CREATE TABLE IF NOT EXISTS families (
-                id TEXT PRIMARY KEY,
-                created_at INTEGER NOT NULL,
-                create_request_hash TEXT,
-                name TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS memberships (
-                membership_id TEXT PRIMARY KEY,
-                family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
-                role TEXT NOT NULL CHECK(role IN ('owner', 'member')),
-                device_id TEXT NOT NULL,
-                display_name TEXT,
-                left_at INTEGER
-            );
-
-            CREATE TABLE IF NOT EXISTS invites (
-                code_hash TEXT PRIMARY KEY,
-                family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
-                expires_at INTEGER NOT NULL,
-                used_at INTEGER,
-                joined_device_id TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS family_meta (
-                family_id TEXT PRIMARY KEY REFERENCES families(id) ON DELETE CASCADE,
-                rev INTEGER NOT NULL DEFAULT 0
-            );
-
-            CREATE TABLE IF NOT EXISTS entities (
-                family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
-                entity_type TEXT NOT NULL CHECK(entity_type IN ('baby', 'record', 'media', 'care_plan', 'custom_item', 'fulfillment_candidate')),
-                client_uuid TEXT NOT NULL,
-                updated_at INTEGER NOT NULL,
-                deleted_at INTEGER,
-                payload_json TEXT NOT NULL,
-                rev INTEGER NOT NULL,
-                PRIMARY KEY (family_id, entity_type, client_uuid)
-            );
-            CREATE INDEX IF NOT EXISTS entities_family_rev
-                ON entities(family_id, rev);
-
-            CREATE TABLE IF NOT EXISTS sync_bundles (
-                family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
-                bundle_id TEXT NOT NULL,
-                device_id TEXT NOT NULL,
-                staged_membership_id TEXT,
-                status TEXT NOT NULL CHECK(status IN ('staging', 'committed')),
-                root_type TEXT NOT NULL,
-                root_client_uuid TEXT NOT NULL,
-                root_updated_at INTEGER NOT NULL,
-                root_deleted_at INTEGER,
-                root_payload_json TEXT NOT NULL,
-                media_entities_json TEXT NOT NULL,
-                content_hash TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                committed_at INTEGER,
-                committed_cursor INTEGER,
-                committed_applied INTEGER,
-                PRIMARY KEY (family_id, bundle_id)
-            );
-            CREATE INDEX IF NOT EXISTS sync_bundles_family_status
-                ON sync_bundles(family_id, status);
-
-            CREATE TABLE IF NOT EXISTS sync_bundle_media (
-                family_id TEXT NOT NULL,
-                bundle_id TEXT NOT NULL,
-                media_uuid TEXT NOT NULL,
-                declared_byte_size INTEGER,
-                staged_byte_size INTEGER,
-                staged_sha256 TEXT,
-                staged_at INTEGER,
-                PRIMARY KEY (family_id, bundle_id, media_uuid),
-                FOREIGN KEY (family_id, bundle_id)
-                    REFERENCES sync_bundles(family_id, bundle_id) ON DELETE CASCADE
-            );
-
-            CREATE TABLE IF NOT EXISTS media_publications (
-                family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
-                media_uuid TEXT NOT NULL,
-                source TEXT NOT NULL
-                    CHECK(source IN ('legacy', 'bundle_pending', 'bundle')),
-                bundle_id TEXT,
-                PRIMARY KEY (family_id, media_uuid)
-            );
-            ",
-        )?;
-
-        let invite_columns = table_columns(&connection, "invites")?;
-        if !invite_columns.contains("joined_device_id") {
-            connection.execute("ALTER TABLE invites ADD COLUMN joined_device_id TEXT", [])?;
+        if schema_state == SchemaState::Empty {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(CURRENT_SCHEMA_SQL)?;
+            transaction.pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)?;
+            transaction.commit()?;
         }
-        let family_columns = table_columns(&connection, "families")?;
-        if !family_columns.contains("create_request_hash") {
-            connection.execute(
-                "ALTER TABLE families ADD COLUMN create_request_hash TEXT",
-                [],
-            )?;
-        }
-        if !family_columns.contains("name") {
-            connection.execute("ALTER TABLE families ADD COLUMN name TEXT", [])?;
-        }
-        let membership_columns = table_columns(&connection, "memberships")?;
-        if membership_columns.contains("token_hash") {
-            migrate_legacy_memberships(&mut connection)?;
-        }
-        let bundle_columns = table_columns(&connection, "sync_bundles")?;
-        if !bundle_columns.contains("staged_membership_id") {
-            connection.execute(
-                "ALTER TABLE sync_bundles ADD COLUMN staged_membership_id TEXT",
-                [],
-            )?;
-        }
-        let bundle_media_columns = table_columns(&connection, "sync_bundle_media")?;
-        if !bundle_media_columns.contains("staged_sha256") {
-            connection.execute(
-                "ALTER TABLE sync_bundle_media ADD COLUMN staged_sha256 TEXT",
-                [],
-            )?;
-        }
-        // Legacy bundles only persisted the authenticated device. Recover the
-        // stager membership when that family/device pair is unambiguous across
-        // all historical memberships after normalization. Counting left rows
-        // prevents a same-device rejoin from taking over an older staged bundle;
-        // ambiguous rows remain null and fail closed at stage/commit.
-        connection.execute(
-            "
-            UPDATE sync_bundles
-            SET staged_membership_id = (
-                SELECT memberships.membership_id
-                FROM memberships
-                WHERE memberships.family_id = sync_bundles.family_id
-                  AND memberships.device_id = sync_bundles.device_id
-                ORDER BY memberships.membership_id COLLATE BINARY
-                LIMIT 1
-            )
-            WHERE sync_bundles.status = 'staging'
-              AND sync_bundles.staged_membership_id IS NULL
-              AND 1 = (
-                  SELECT COUNT(*)
-                  FROM memberships
-                  WHERE memberships.family_id = sync_bundles.family_id
-                    AND memberships.device_id = sync_bundles.device_id
-              )
-            ",
-            [],
-        )?;
-        connection.execute_batch(
-            "
-            CREATE TABLE IF NOT EXISTS membership_credentials (
-                token_hash TEXT PRIMARY KEY,
-                membership_id TEXT NOT NULL
-                    REFERENCES memberships(membership_id) ON DELETE CASCADE,
-                revoked_at INTEGER
-            );
-            CREATE INDEX IF NOT EXISTS membership_credentials_membership
-                ON membership_credentials(membership_id);
-
-            CREATE TABLE IF NOT EXISTS membership_aliases (
-                alias_membership_id TEXT PRIMARY KEY,
-                canonical_membership_id TEXT NOT NULL
-                    REFERENCES memberships(membership_id) ON DELETE CASCADE
-            );
-            CREATE INDEX IF NOT EXISTS membership_aliases_canonical
-                ON membership_aliases(canonical_membership_id);
-
-            CREATE INDEX IF NOT EXISTS memberships_family
-                ON memberships(family_id);
-            ",
-        )?;
-        // A committed bundle is authoritative ownership of its final-path
-        // bytes. Restore it first so committed ownership wins before remaining
-        // staging manifests are quarantined below.
-        connection.execute(
-            "
-            INSERT OR IGNORE INTO media_publications(
-                family_id, media_uuid, source, bundle_id
-            )
-            SELECT media.family_id, media.media_uuid, 'bundle', media.bundle_id
-            FROM sync_bundle_media AS media
-            JOIN sync_bundles AS bundle
-              ON bundle.family_id = media.family_id
-             AND bundle.bundle_id = media.bundle_id
-            WHERE bundle.status = 'committed'
-            ",
-            [],
-        )?;
-        // v1 could crash or fail validation after publishing final-path bytes,
-        // before any explicit ownership existed. Persist quarantine for every
-        // remaining staging manifest during upgrade so a later refine/cleanup
-        // cannot make those bytes look like an old legacy upload. Committed or
-        // pre-existing explicit legacy ownership always wins via OR IGNORE.
-        connection.execute(
-            "
-            INSERT OR IGNORE INTO media_publications(
-                family_id, media_uuid, source, bundle_id
-            )
-            SELECT media.family_id,
-                   media.media_uuid,
-                   'bundle_pending',
-                   media.bundle_id
-            FROM sync_bundle_media AS media
-            JOIN sync_bundles AS bundle
-              ON bundle.family_id = media.family_id
-             AND bundle.bundle_id = media.bundle_id
-            WHERE bundle.status = 'staging'
-            ",
-            [],
-        )?;
-        // Expand entities CHECK for care_plan, custom_item, fulfillment_candidate.
-        ensure_entities_allow_care_plan_and_custom_item(&connection)?;
-        hydrate_legacy_record_authors(&mut connection)?;
-        connection.execute(
-            "
-            CREATE UNIQUE INDEX IF NOT EXISTS families_create_request
-            ON families(create_request_hash)
-            ",
-            [],
-        )?;
-        connection.pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)?;
         self.secure_database_files()?;
         Ok(())
     }
-
     /// Creates a family (or returns the same credentials on matching idempotent retry).
     ///
     /// Returns `(family_id, token, membership_id, family_name)`.
@@ -665,12 +589,11 @@ impl Store {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
             "
-            SELECT role, device_id, display_name, membership_id
+            SELECT role, display_name, membership_id
             FROM memberships
             WHERE family_id = ?1 AND left_at IS NULL
             ORDER BY
                 CASE role WHEN 'owner' THEN 0 ELSE 1 END,
-                device_id COLLATE BINARY,
                 membership_id COLLATE BINARY
             ",
         )?;
@@ -678,22 +601,18 @@ impl Store {
             .query_map(params![family_id], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows
             .into_iter()
-            .map(
-                |(role, device_id, display_name, membership_id)| ActiveMembership {
-                    role,
-                    device_id,
-                    display_name,
-                    membership_id,
-                },
-            )
+            .map(|(role, display_name, membership_id)| ActiveMembership {
+                role,
+                display_name,
+                membership_id,
+            })
             .collect())
     }
 
@@ -870,8 +789,8 @@ impl Store {
         let Principal {
             family_id,
             role,
-            device_id,
             membership_id,
+            ..
         } = principal;
         if entities
             .iter()
@@ -890,22 +809,9 @@ impl Store {
         let incoming_keys = entities.iter().map(entity_key).collect::<BTreeSet<_>>();
         let mut existing = load_existing_entities(&transaction, family_id, &incoming_keys)?;
         let mut effective = effective_lww_winners(entities, &existing);
-        canonicalize_record_authors(device_id, membership_id, &mut effective, &existing);
-        let equivalent_memberships = equivalent_membership_ids(&transaction, membership_id)?;
-        stamp_and_authorize_custom_items(
-            role,
-            membership_id,
-            &equivalent_memberships,
-            &mut effective,
-            &existing,
-        )?;
-        stamp_and_authorize_care_plans(
-            role,
-            membership_id,
-            &equivalent_memberships,
-            &mut effective,
-            &existing,
-        )?;
+        canonicalize_record_authors(membership_id, &mut effective, &existing)?;
+        stamp_and_authorize_custom_items(role, membership_id, &mut effective, &existing)?;
+        stamp_and_authorize_care_plans(role, membership_id, &mut effective, &existing)?;
         // confirmed_at is millis-like; prefer entity.updated_at when already ms-scale.
         let confirmed_at = if now > 1_000_000_000_000 {
             now
@@ -1207,46 +1113,6 @@ impl Store {
         Ok(published)
     }
 
-    /// Existing pre-v2 legacy uploads had no explicit ownership row. Startup
-    /// inspects their final-path bytes and calls this method to retain them, but
-    /// only when no uncommitted bundle reserves the same UUID. That exclusion
-    /// prevents a failed pre-publication from becoming legacy-owned on restart.
-    pub fn backfill_legacy_media_publication(
-        &self,
-        family_id: &str,
-        client_uuid: &str,
-    ) -> Result<bool, StoreError> {
-        let connection = self.connect()?;
-        let inserted = connection.execute(
-            "
-            INSERT OR IGNORE INTO media_publications(
-                family_id, media_uuid, source, bundle_id
-            )
-            SELECT ?1, ?2, 'legacy', NULL
-            WHERE EXISTS (
-                SELECT 1 FROM entities
-                WHERE family_id = ?1
-                  AND entity_type = 'media'
-                  AND client_uuid = ?2
-                  AND deleted_at IS NULL
-            )
-              AND NOT EXISTS (
-                SELECT 1
-                FROM sync_bundle_media AS media
-                JOIN sync_bundles AS bundle
-                  ON bundle.family_id = media.family_id
-                 AND bundle.bundle_id = media.bundle_id
-                WHERE media.family_id = ?1
-                  AND media.media_uuid = ?2
-                  AND bundle.status = 'staging'
-            )
-            ",
-            params![family_id, client_uuid],
-        )?;
-        self.secure_database_files()?;
-        Ok(inserted > 0)
-    }
-
     /// Persist quarantine ownership after the final-path file has been fsynced,
     /// but before bundle validation and publication enter SQLite. A failed
     /// commit therefore leaves durable bytes explicitly unservable across
@@ -1265,11 +1131,8 @@ impl Store {
         if row.status == "committed" {
             return Ok(());
         }
-        match row.staged_membership_id.as_deref() {
-            Some(staged_membership_id)
-                if staged_membership_id == principal.membership_id.as_str() => {}
-            Some(_) => return Err(StoreError::BundleMembershipMismatch),
-            None => return Err(StoreError::LegacyBundleMembershipUnknown),
+        if row.staged_membership_id != principal.membership_id {
+            return Err(StoreError::BundleMembershipMismatch);
         }
         let declared = transaction
             .query_row(
@@ -1285,7 +1148,7 @@ impl Store {
         if !declared {
             return Err(StoreError::BundleMediaNotInManifest);
         }
-        // Preserve an already committed legacy/bundle owner. Reusing identical
+        // Preserve an already committed ordinary/bundle owner. Reusing identical
         // bytes in a rejected bundle must not hide a previously valid upload.
         transaction.execute(
             "
@@ -1300,51 +1163,13 @@ impl Store {
         Ok(())
     }
 
-    pub fn unowned_live_media(&self) -> Result<Vec<(String, String, Option<usize>)>, StoreError> {
-        let connection = self.connect()?;
-        let mut statement = connection.prepare(
-            "
-            SELECT entities.family_id, entities.client_uuid, entities.payload_json
-            FROM entities
-            LEFT JOIN media_publications
-              ON media_publications.family_id = entities.family_id
-             AND media_publications.media_uuid = entities.client_uuid
-            WHERE entities.entity_type = 'media'
-              AND entities.deleted_at IS NULL
-              AND media_publications.media_uuid IS NULL
-            ORDER BY entities.family_id COLLATE BINARY,
-                     entities.client_uuid COLLATE BINARY
-            ",
-        )?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows.into_iter()
-            .map(|(family_id, client_uuid, payload_json)| {
-                let payload = parse_payload(&payload_json)?;
-                let byte_size = payload
-                    .get("byte_size")
-                    .map(|value| {
-                        value
-                            .as_u64()
-                            .and_then(|size| usize::try_from(size).ok())
-                            .ok_or(StoreError::InvalidStoredPayload)
-                    })
-                    .transpose()?;
-                Ok((family_id, client_uuid, byte_size))
-            })
-            .collect()
-    }
-
-    /// Atomically claim final-path bytes for an explicit legacy PUT and bump the
+    /// Atomically claim final-path bytes for an ordinary PUT and bump the
     /// live metadata revision so clients that skipped it see it again.
-    pub fn republish_media(&self, family_id: &str, client_uuid: &str) -> Result<bool, StoreError> {
+    pub fn publish_ordinary_media(
+        &self,
+        family_id: &str,
+        client_uuid: &str,
+    ) -> Result<bool, StoreError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let live = transaction
@@ -1367,11 +1192,11 @@ impl Store {
         let claimed = transaction.execute(
             "
             INSERT INTO media_publications(family_id, media_uuid, source, bundle_id)
-            VALUES (?1, ?2, 'legacy', NULL)
+            VALUES (?1, ?2, 'ordinary', NULL)
             ON CONFLICT(family_id, media_uuid) DO UPDATE SET
-                source = 'legacy',
+                source = 'ordinary',
                 bundle_id = NULL
-            WHERE media_publications.source = 'legacy'
+            WHERE media_publications.source = 'ordinary'
             ",
             params![family_id, client_uuid],
         )?;
@@ -1408,7 +1233,7 @@ impl Store {
     /// Nothing is visible to ordinary pull until [Self::commit_bundle].
     ///
     /// [Principal] supplies server-authenticated identity for canonical authors and
-    /// CarePlan creator ACL on the real publish path (not only legacy push).
+    /// CarePlan creator ACL on the real publish path (not only ordinary push).
     pub fn stage_bundle(
         &self,
         principal: &Principal,
@@ -1420,8 +1245,8 @@ impl Store {
         let Principal {
             family_id,
             role,
-            device_id,
             membership_id,
+            ..
         } = principal;
         if media.len() > MAX_BUNDLE_MEDIA_ENTITIES {
             return Err(StoreError::UnresolvedReference(format!(
@@ -1439,15 +1264,8 @@ impl Store {
         let incoming_keys = package.iter().map(entity_key).collect::<BTreeSet<_>>();
         let mut existing = load_existing_entities(&transaction, family_id, &incoming_keys)?;
         canonicalize_equal_lww_bundle_root(&mut package, &existing);
-        canonicalize_record_authors(device_id, membership_id, &mut package, &existing);
-        let equivalent_memberships = equivalent_membership_ids(&transaction, membership_id)?;
-        stamp_and_authorize_care_plans(
-            role,
-            membership_id,
-            &equivalent_memberships,
-            &mut package,
-            &existing,
-        )?;
+        canonicalize_record_authors(membership_id, &mut package, &existing)?;
+        stamp_and_authorize_care_plans(role, membership_id, &mut package, &existing)?;
         let reference_keys = validation_reference_keys(&package);
         let missing_references = reference_keys
             .difference(&incoming_keys)
@@ -1487,10 +1305,8 @@ impl Store {
                 }
                 return bundle_stage_status_from_row(&transaction, family_id, &existing_bundle);
             }
-            match existing_bundle.staged_membership_id.as_deref() {
-                Some(staged_membership_id) if staged_membership_id == membership_id => {}
-                Some(_) => return Err(StoreError::BundleMembershipMismatch),
-                None => return Err(StoreError::LegacyBundleMembershipUnknown),
+            if existing_bundle.staged_membership_id != *membership_id {
+                return Err(StoreError::BundleMembershipMismatch);
             }
             // Replace open staging with the new package (same bundle_id retry/refine).
             transaction.execute(
@@ -1519,15 +1335,14 @@ impl Store {
         transaction.execute(
             "
             INSERT INTO sync_bundles(
-                family_id, bundle_id, device_id, staged_membership_id, status,
+                family_id, bundle_id, staged_membership_id, status,
                 root_type, root_client_uuid, root_updated_at, root_deleted_at,
                 root_payload_json, media_entities_json, content_hash, created_at
-            ) VALUES (?1, ?2, ?3, ?4, 'staging', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            ) VALUES (?1, ?2, ?3, 'staging', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
             ",
             params![
                 family_id,
                 bundle_id,
-                device_id,
                 membership_id,
                 root.entity_type,
                 root.client_uuid,
@@ -1615,11 +1430,8 @@ impl Store {
         if row.status == "committed" {
             return Err(StoreError::BundleMediaUploadClosed);
         }
-        match row.staged_membership_id.as_deref() {
-            Some(staged_membership_id)
-                if staged_membership_id == principal.membership_id.as_str() => {}
-            Some(_) => return Err(StoreError::BundleMembershipMismatch),
-            None => return Err(StoreError::LegacyBundleMembershipUnknown),
+        if row.staged_membership_id != principal.membership_id {
+            return Err(StoreError::BundleMembershipMismatch);
         }
         let updated = transaction.execute(
             "
@@ -1669,27 +1481,6 @@ impl Store {
             .ok_or(StoreError::BundleNotFound)
     }
 
-    pub fn pin_legacy_bundle_media_sha256(
-        &self,
-        family_id: &str,
-        bundle_id: &str,
-        media_uuid: &str,
-        sha256: &str,
-    ) -> Result<(), StoreError> {
-        let connection = self.connect()?;
-        connection.execute(
-            "
-            UPDATE sync_bundle_media
-            SET staged_sha256 = ?1
-            WHERE family_id = ?2 AND bundle_id = ?3 AND media_uuid = ?4
-              AND staged_sha256 IS NULL
-            ",
-            params![sha256, family_id, bundle_id, media_uuid],
-        )?;
-        self.secure_database_files()?;
-        Ok(())
-    }
-
     /// Publish a complete package in one transaction. Idempotent after success.
     ///
     /// `media_ready` maps each live media UUID to an exact, durable filesystem check.
@@ -1706,23 +1497,16 @@ impl Store {
         let Principal {
             family_id,
             role,
-            device_id,
             membership_id,
+            ..
         } = principal;
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let row = load_bundle_row(&transaction, family_id, bundle_id)?
             .ok_or(StoreError::BundleNotFound)?;
 
-        match row.staged_membership_id.as_deref() {
-            Some(staged_membership_id) if staged_membership_id == membership_id => {}
-            Some(_) => return Err(StoreError::BundleMembershipMismatch),
-            None if row.status == "staging" => {
-                return Err(StoreError::LegacyBundleMembershipUnknown)
-            }
-            // A legacy committed row has already published immutable content. Keep
-            // lost-response retries compatible because no author can change now.
-            None => {}
+        if row.staged_membership_id != *membership_id {
+            return Err(StoreError::BundleMembershipMismatch);
         }
 
         let media: Vec<Entity> = serde_json::from_str(&row.media_entities_json)?;
@@ -1789,7 +1573,7 @@ impl Store {
 
         // Reject stale packages that would not update the published root (except
         // identical re-publish of a never-committed package that lost the race
-        // to an equal/newer legacy write of the same root).
+        // to an equal/newer ordinary write of the same root).
         let root_key = entity_key(&root);
         let existing_root =
             load_existing_entities(&transaction, family_id, &BTreeSet::from([root_key.clone()]))?;
@@ -1809,7 +1593,7 @@ impl Store {
         let incoming_keys = package.iter().map(entity_key).collect::<BTreeSet<_>>();
         let mut existing = load_existing_entities(&transaction, family_id, &incoming_keys)?;
         canonicalize_equal_lww_bundle_root(&mut package, &existing);
-        canonicalize_record_authors(device_id, membership_id, &mut package, &existing);
+        canonicalize_record_authors(membership_id, &mut package, &existing)?;
         let canonical_root = package
             .iter()
             .find(|entity| entity.entity_type != "media")
@@ -1832,14 +1616,7 @@ impl Store {
         let mut effective = effective_lww_winners(package.clone(), &existing);
         // Re-stamp/authorize CarePlan winners on commit so a staged package cannot
         // bypass ACL after membership role changes.
-        let equivalent_memberships = equivalent_membership_ids(&transaction, membership_id)?;
-        stamp_and_authorize_care_plans(
-            role,
-            membership_id,
-            &equivalent_memberships,
-            &mut effective,
-            &existing,
-        )?;
+        stamp_and_authorize_care_plans(role, membership_id, &mut effective, &existing)?;
         for entity in &effective {
             let payload_bytes = serde_json::to_vec(&entity.payload)?.len();
             if payload_bytes.saturating_add(512) > PULL_ENTITY_TARGET_BYTES {
@@ -1989,7 +1766,7 @@ impl Store {
 #[derive(Debug, Clone)]
 struct BundleRow {
     bundle_id: String,
-    staged_membership_id: Option<String>,
+    staged_membership_id: String,
     status: String,
     root_type: String,
     root_client_uuid: String,
@@ -2135,58 +1912,11 @@ fn bundle_content_hash(root: &Entity, media: &[Entity]) -> Result<String, StoreE
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
-/// Rebuild entities table when an older schema lacked care_plan / custom_item /
-/// fulfillment_candidate types. Additive CHECK expansion only.
-fn ensure_entities_allow_care_plan_and_custom_item(
-    connection: &Connection,
-) -> Result<(), StoreError> {
-    let sql: Option<String> = connection
-        .query_row(
-            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'entities'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(sql) = sql else {
-        return Ok(());
-    };
-    if sql.contains("care_plan")
-        && sql.contains("custom_item")
-        && sql.contains("fulfillment_candidate")
-    {
-        return Ok(());
-    }
-    connection.execute_batch(
-        "
-        CREATE TABLE entities_new (
-            family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
-            entity_type TEXT NOT NULL CHECK(entity_type IN ('baby', 'record', 'media', 'care_plan', 'custom_item', 'fulfillment_candidate')),
-            client_uuid TEXT NOT NULL,
-            updated_at INTEGER NOT NULL,
-            deleted_at INTEGER,
-            payload_json TEXT NOT NULL,
-            rev INTEGER NOT NULL,
-            PRIMARY KEY (family_id, entity_type, client_uuid)
-        );
-        INSERT INTO entities_new(
-            family_id, entity_type, client_uuid, updated_at, deleted_at, payload_json, rev
-        )
-        SELECT family_id, entity_type, client_uuid, updated_at, deleted_at, payload_json, rev
-        FROM entities;
-        DROP TABLE entities;
-        ALTER TABLE entities_new RENAME TO entities;
-        CREATE INDEX IF NOT EXISTS entities_family_rev ON entities(family_id, rev);
-        ",
-    )?;
-    Ok(())
-}
-
 /// Stamp creator membership on first insert; freeze creator; enforce member-own /
 /// owner-all ACL; refuse clearing deleted_at on tombstones.
 fn stamp_and_authorize_custom_items(
     role: &str,
     membership_id: &str,
-    equivalent_membership_ids: &BTreeSet<String>,
     entities: &mut [Entity],
     existing: &HashMap<EntityKey, ExistingEntity>,
 ) -> Result<(), StoreError> {
@@ -2204,16 +1934,15 @@ fn stamp_and_authorize_custom_items(
                 .payload
                 .get("created_by_membership_id")
                 .and_then(Value::as_str)
-                .unwrap_or("")
+                .filter(|creator| !creator.is_empty())
+                .ok_or(StoreError::InvalidStoredPayload)?
                 .to_owned();
             // Creator is immutable after first write.
             entity.payload.insert(
                 "created_by_membership_id".to_owned(),
                 Value::String(creator.clone()),
             );
-            if role != "owner"
-                && (creator.is_empty() || !equivalent_membership_ids.contains(&creator))
-            {
+            if role != "owner" && creator != membership_id {
                 return Err(StoreError::ForbiddenCustomItem);
             }
         } else {
@@ -2229,35 +1958,34 @@ fn stamp_and_authorize_custom_items(
 
 /// Record authorship belongs to the authenticated principal, never to client claims.
 fn canonicalize_record_authors(
-    device_id: &str,
     membership_id: &str,
     entities: &mut [Entity],
     existing: &HashMap<EntityKey, ExistingEntity>,
-) {
+) -> Result<(), StoreError> {
     for entity in entities.iter_mut() {
         if entity.entity_type != "record" {
             continue;
         }
         let key = ("record".to_owned(), entity.client_uuid.clone());
         if let Some(current) = existing.get(&key) {
-            for field in ["created_by_device_id", "created_by_membership_id"] {
-                if let Some(value) = current.payload.get(field).cloned() {
-                    entity.payload.insert(field.to_owned(), value);
-                } else {
-                    entity.payload.remove(field);
-                }
-            }
-        } else {
+            let value = current
+                .payload
+                .get("created_by_membership_id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .ok_or(StoreError::InvalidStoredPayload)?;
             entity.payload.insert(
-                "created_by_device_id".to_owned(),
-                Value::String(device_id.to_owned()),
+                "created_by_membership_id".to_owned(),
+                Value::String(value.to_owned()),
             );
+        } else {
             entity.payload.insert(
                 "created_by_membership_id".to_owned(),
                 Value::String(membership_id.to_owned()),
             );
         }
     }
+    Ok(())
 }
 
 fn record_author_acknowledgements(
@@ -2352,7 +2080,6 @@ fn canonicalize_equal_lww_bundle_root(
 fn stamp_and_authorize_care_plans(
     role: &str,
     membership_id: &str,
-    equivalent_membership_ids: &BTreeSet<String>,
     entities: &mut [Entity],
     existing: &HashMap<EntityKey, ExistingEntity>,
 ) -> Result<(), StoreError> {
@@ -2370,7 +2097,8 @@ fn stamp_and_authorize_care_plans(
                 .payload
                 .get("created_by_membership_id")
                 .and_then(Value::as_str)
-                .unwrap_or("")
+                .filter(|creator| !creator.is_empty())
+                .ok_or(StoreError::InvalidStoredPayload)?
                 .to_owned();
             entity.payload.insert(
                 "created_by_membership_id".to_owned(),
@@ -2378,9 +2106,7 @@ fn stamp_and_authorize_care_plans(
             );
             // Manage ACL (edit/skip/delete/status): creator or owner only.
             // Fulfillment is not a care_plan rewrite path here (separate candidate).
-            if role != "owner"
-                && (creator.is_empty() || !equivalent_membership_ids.contains(&creator))
-            {
+            if role != "owner" && creator != membership_id {
                 return Err(StoreError::ForbiddenCarePlan);
             }
         } else {
@@ -2678,457 +2404,12 @@ fn required_payload_reference<'a>(
         .ok_or(StoreError::InvalidStoredPayload)
 }
 
+#[cfg(test)]
 fn table_columns(connection: &Connection, table: &str) -> Result<BTreeSet<String>, StoreError> {
     let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
     let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
     rows.collect::<Result<BTreeSet<_>, _>>()
         .map_err(StoreError::from)
-}
-
-fn equivalent_membership_ids(
-    transaction: &Transaction<'_>,
-    canonical_membership_id: &str,
-) -> Result<BTreeSet<String>, StoreError> {
-    let mut membership_ids = BTreeSet::from([canonical_membership_id.to_owned()]);
-    let mut statement = transaction.prepare(
-        "
-        SELECT alias_membership_id
-        FROM membership_aliases
-        WHERE canonical_membership_id = ?1
-        ",
-    )?;
-    for alias in statement.query_map(params![canonical_membership_id], |row| {
-        row.get::<_, String>(0)
-    })? {
-        membership_ids.insert(alias?);
-    }
-    Ok(membership_ids)
-}
-
-#[derive(Debug)]
-struct LegacyMembership {
-    token_hash: String,
-    family_id: String,
-    role: String,
-    device_id: String,
-    display_name: Option<String>,
-    revoked_at: Option<i64>,
-    membership_id: Option<String>,
-}
-
-/// Transactionally separates persistent memberships from bearer credentials.
-///
-/// Historical active rows are grouped once by `(family_id, role, device_id)`.
-/// The row with the lexicographically smallest token hash supplies the first
-/// existing membership id; if it has none, the first later existing id wins,
-/// otherwise a UUID is minted. Display name uses the first render-safe,
-/// non-placeholder value in that same stable order, falling back to the first
-/// raw non-null value when every historical name is unsafe. Other historical
-/// ids are retained as aliases.
-fn migrate_legacy_memberships(connection: &mut Connection) -> Result<(), StoreError> {
-    let legacy_columns = table_columns(connection, "memberships")?;
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if !legacy_columns.contains("membership_id") {
-        transaction.execute("ALTER TABLE memberships ADD COLUMN membership_id TEXT", [])?;
-    }
-    transaction.execute_batch(
-        "
-        DROP INDEX IF EXISTS memberships_family;
-        DROP INDEX IF EXISTS memberships_membership_id;
-        ALTER TABLE memberships RENAME TO memberships_legacy;
-
-        CREATE TABLE memberships (
-            membership_id TEXT PRIMARY KEY,
-            family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
-            role TEXT NOT NULL CHECK(role IN ('owner', 'member')),
-            device_id TEXT NOT NULL,
-            display_name TEXT,
-            left_at INTEGER
-        );
-        CREATE TABLE membership_credentials (
-            token_hash TEXT PRIMARY KEY,
-            membership_id TEXT NOT NULL
-                REFERENCES memberships(membership_id) ON DELETE CASCADE,
-            revoked_at INTEGER
-        );
-        CREATE TABLE membership_aliases (
-            alias_membership_id TEXT PRIMARY KEY,
-            canonical_membership_id TEXT NOT NULL
-                REFERENCES memberships(membership_id) ON DELETE CASCADE
-        );
-        ",
-    )?;
-
-    let rows = {
-        let mut statement = transaction.prepare(
-            "
-            SELECT token_hash, family_id, role, device_id, display_name,
-                   revoked_at, membership_id
-            FROM memberships_legacy
-            ORDER BY family_id COLLATE BINARY, role COLLATE BINARY,
-                     device_id COLLATE BINARY, token_hash COLLATE BINARY
-            ",
-        )?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok(LegacyMembership {
-                    token_hash: row.get(0)?,
-                    family_id: row.get(1)?,
-                    role: row.get(2)?,
-                    device_id: row.get(3)?,
-                    display_name: row.get(4)?,
-                    revoked_at: row.get(5)?,
-                    membership_id: row.get(6)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows
-    };
-
-    let mut active_groups = BTreeMap::<(String, String, String), Vec<LegacyMembership>>::new();
-    let mut revoked_rows = Vec::new();
-    for row in rows {
-        if row.revoked_at.is_some() {
-            revoked_rows.push(row);
-        } else {
-            active_groups
-                .entry((
-                    row.family_id.clone(),
-                    row.role.clone(),
-                    row.device_id.clone(),
-                ))
-                .or_default()
-                .push(row);
-        }
-    }
-
-    for ((family_id, role, device_id), rows) in active_groups {
-        let canonical_membership_id = rows
-            .iter()
-            .find_map(|row| {
-                row.membership_id
-                    .as_deref()
-                    .filter(|value| !value.is_empty())
-            })
-            .map(str::to_owned)
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let display_name = rows
-            .iter()
-            .filter_map(|row| {
-                crate::model::normalize_display_name(row.display_name.as_deref())
-                    .ok()
-                    .flatten()
-            })
-            .find(|name| name != crate::model::LOCAL_DEVICE_DISPLAY_NAME)
-            .or_else(|| rows.iter().find_map(|row| row.display_name.clone()));
-        transaction.execute(
-            "
-            INSERT INTO memberships(
-                membership_id, family_id, role, device_id, display_name
-            ) VALUES (?1, ?2, ?3, ?4, ?5)
-            ",
-            params![
-                canonical_membership_id,
-                family_id,
-                role,
-                device_id,
-                display_name
-            ],
-        )?;
-        for row in rows {
-            transaction.execute(
-                "
-                INSERT INTO membership_credentials(token_hash, membership_id)
-                VALUES (?1, ?2)
-                ",
-                params![row.token_hash, canonical_membership_id],
-            )?;
-            if let Some(alias) = row
-                .membership_id
-                .filter(|alias| !alias.is_empty() && alias != &canonical_membership_id)
-            {
-                transaction.execute(
-                    "
-                    INSERT INTO membership_aliases(
-                        alias_membership_id, canonical_membership_id
-                    ) VALUES (?1, ?2)
-                    ",
-                    params![alias, canonical_membership_id],
-                )?;
-            }
-        }
-    }
-
-    // Revoked legacy rows were not active duplicates and therefore remain
-    // separate historical memberships with their original credential state.
-    for row in revoked_rows {
-        let membership_id = row
-            .membership_id
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
-        transaction.execute(
-            "
-            INSERT INTO memberships(
-                membership_id, family_id, role, device_id, display_name, left_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-            ",
-            params![
-                membership_id,
-                row.family_id,
-                row.role,
-                row.device_id,
-                row.display_name,
-                row.revoked_at
-            ],
-        )?;
-        transaction.execute(
-            "
-            INSERT INTO membership_credentials(token_hash, membership_id, revoked_at)
-            VALUES (?1, ?2, ?3)
-            ",
-            params![row.token_hash, membership_id, row.revoked_at],
-        )?;
-    }
-
-    transaction.execute_batch(
-        "
-        DROP TABLE memberships_legacy;
-        CREATE INDEX memberships_family ON memberships(family_id);
-        CREATE INDEX membership_credentials_membership
-            ON membership_credentials(membership_id);
-        CREATE INDEX membership_aliases_canonical
-            ON membership_aliases(canonical_membership_id);
-        ",
-    )?;
-    transaction.commit()?;
-    Ok(())
-}
-
-/// Hydrates pre-membership Record authors only when the legacy family/device
-/// link resolves to exactly one canonical membership.
-///
-/// Every changed row receives a fresh family revision so clients that already
-/// consumed the legacy version pull the canonical metadata once. Rows with an
-/// empty/unknown device or multiple historical memberships remain unknown. The
-/// persisted membership field is the idempotency marker for later restarts.
-fn hydrate_legacy_record_authors(connection: &mut Connection) -> Result<(), StoreError> {
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let memberships_by_device = {
-        let mut statement = transaction.prepare(
-            "
-            SELECT family_id, device_id, membership_id
-            FROM memberships
-            ORDER BY family_id COLLATE BINARY,
-                     device_id COLLATE BINARY,
-                     membership_id COLLATE BINARY
-            ",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-        let mut grouped = BTreeMap::<(String, String), BTreeSet<String>>::new();
-        for row in rows {
-            let (family_id, device_id, membership_id) = row?;
-            if device_id.is_empty() || membership_id.is_empty() {
-                continue;
-            }
-            grouped
-                .entry((family_id, device_id))
-                .or_default()
-                .insert(membership_id);
-        }
-        grouped
-            .into_iter()
-            .filter_map(|(key, memberships)| {
-                (memberships.len() == 1)
-                    .then(|| (key, memberships.into_iter().next().expect("one membership")))
-            })
-            .collect::<BTreeMap<_, _>>()
-    };
-
-    let legacy_records = {
-        let mut statement = transaction.prepare(
-            "
-            SELECT family_id, client_uuid, payload_json
-            FROM entities
-            WHERE entity_type = 'record'
-            ORDER BY family_id COLLATE BINARY, rev, client_uuid COLLATE BINARY
-            ",
-        )?;
-        let records = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        records
-    };
-
-    for (family_id, client_uuid, payload_json) in legacy_records {
-        let mut payload = parse_payload(&payload_json)?;
-        let has_membership_author = payload
-            .get("created_by_membership_id")
-            .and_then(Value::as_str)
-            .is_some_and(|membership_id| !membership_id.is_empty());
-        if has_membership_author {
-            continue;
-        }
-        let Some(device_id) = payload
-            .get("created_by_device_id")
-            .and_then(Value::as_str)
-            .filter(|device_id| !device_id.is_empty())
-        else {
-            continue;
-        };
-        let Some(membership_id) =
-            memberships_by_device.get(&(family_id.clone(), device_id.to_owned()))
-        else {
-            continue;
-        };
-        payload.insert(
-            "created_by_membership_id".to_owned(),
-            Value::String(membership_id.clone()),
-        );
-        transaction.execute(
-            "UPDATE family_meta SET rev = rev + 1 WHERE family_id = ?1",
-            params![family_id],
-        )?;
-        let rev: i64 = transaction.query_row(
-            "SELECT rev FROM family_meta WHERE family_id = ?1",
-            params![family_id],
-            |row| row.get(0),
-        )?;
-        transaction.execute(
-            "
-            UPDATE entities
-            SET payload_json = ?1, rev = ?2
-            WHERE family_id = ?3
-              AND entity_type = 'record'
-              AND client_uuid = ?4
-            ",
-            params![
-                serde_json::to_string(&payload)?,
-                rev,
-                family_id,
-                client_uuid
-            ],
-        )?;
-    }
-    normalize_committed_record_bundle_authors(&transaction)?;
-    transaction.commit()?;
-    Ok(())
-}
-
-/// Keep historical committed bundle identity aligned with the canonical Record
-/// author hydrated into `entities`. Android retries stage before commit; both the
-/// immutable snapshot and its hash therefore must normalize in the same startup
-/// transaction or a semantically identical retry conflicts on `bundle_id`.
-fn normalize_committed_record_bundle_authors(
-    transaction: &Transaction<'_>,
-) -> Result<(), StoreError> {
-    let rows = {
-        let mut statement = transaction.prepare(
-            "
-            SELECT bundle.family_id,
-                   bundle.bundle_id,
-                   bundle.root_client_uuid,
-                   bundle.root_updated_at,
-                   bundle.root_deleted_at,
-                   bundle.root_payload_json,
-                   bundle.media_entities_json,
-                   entity.payload_json,
-                   bundle.content_hash
-            FROM sync_bundles AS bundle
-            JOIN entities AS entity
-              ON entity.family_id = bundle.family_id
-             AND entity.entity_type = 'record'
-             AND entity.client_uuid = bundle.root_client_uuid
-            WHERE bundle.status = 'committed'
-              AND bundle.root_type = 'record'
-            ORDER BY bundle.family_id COLLATE BINARY,
-                     bundle.bundle_id COLLATE BINARY
-            ",
-        )?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, Option<i64>>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, String>(8)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows
-    };
-
-    for (
-        family_id,
-        bundle_id,
-        client_uuid,
-        updated_at,
-        deleted_at,
-        root_payload_json,
-        media_entities_json,
-        entity_payload_json,
-        stored_content_hash,
-    ) in rows
-    {
-        let entity_payload = parse_payload(&entity_payload_json)?;
-        let Some(membership_id) = entity_payload
-            .get("created_by_membership_id")
-            .and_then(Value::as_str)
-            .filter(|membership_id| !membership_id.is_empty())
-        else {
-            continue;
-        };
-        let mut root_payload = parse_payload(&root_payload_json)?;
-        root_payload.insert(
-            "created_by_membership_id".to_owned(),
-            Value::String(membership_id.to_owned()),
-        );
-        let root = Entity {
-            entity_type: "record".to_owned(),
-            client_uuid,
-            updated_at,
-            deleted_at,
-            payload: root_payload,
-        };
-        let media: Vec<Entity> = serde_json::from_str(&media_entities_json)?;
-        let normalized_payload_json = serde_json::to_string(&root.payload)?;
-        let normalized_content_hash = bundle_content_hash(&root, &media)?;
-        if root_payload_json == normalized_payload_json
-            && stored_content_hash == normalized_content_hash
-        {
-            continue;
-        }
-        transaction.execute(
-            "
-            UPDATE sync_bundles
-            SET root_payload_json = ?1, content_hash = ?2
-            WHERE family_id = ?3 AND bundle_id = ?4
-            ",
-            params![
-                normalized_payload_json,
-                normalized_content_hash,
-                family_id,
-                bundle_id
-            ],
-        )?;
-    }
-    Ok(())
 }
 
 fn entity_key(entity: &Entity) -> EntityKey {
@@ -3585,222 +2866,136 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn membership_normalization_supports_schema_without_membership_id() {
+    fn empty_database_initializes_current_schema_and_restarts_with_persistence() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("lezi.db");
-        let family_id = Uuid::new_v4().to_string();
-        let owner_token = "pre-membership-id-owner-token";
-        let member_tokens = [
-            "pre-membership-id-member-token-a",
-            "pre-membership-id-member-token-b",
-        ];
-        let connection = Connection::open(&database_path).unwrap();
-        connection
-            .execute_batch(
-                "
-                PRAGMA foreign_keys = ON;
-                CREATE TABLE families (
-                    id TEXT PRIMARY KEY,
-                    created_at INTEGER NOT NULL,
-                    create_request_hash TEXT,
-                    name TEXT
-                );
-                CREATE TABLE memberships (
-                    token_hash TEXT PRIMARY KEY,
-                    family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
-                    role TEXT NOT NULL CHECK(role IN ('owner', 'member')),
-                    device_id TEXT NOT NULL,
-                    display_name TEXT,
-                    revoked_at INTEGER
-                );
-                ",
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO families(id, created_at, name) VALUES (?1, 1, '旧家庭')",
-                params![family_id],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "
-                INSERT INTO memberships(
-                    token_hash, family_id, role, device_id, display_name
-                ) VALUES (?1, ?2, 'owner', 'legacy-owner-device', '妈妈')
-                ",
-                params![crate::hash_secret(owner_token), family_id],
-            )
-            .unwrap();
-        for (index, token) in member_tokens.iter().enumerate() {
-            connection
-                .execute(
-                    "
-                    INSERT INTO memberships(
-                        token_hash, family_id, role, device_id, display_name
-                    ) VALUES (?1, ?2, 'member', 'legacy-member-device', ?3)
-                    ",
-                    params![
-                        crate::hash_secret(token),
-                        family_id,
-                        if index == 0 { "" } else { "家人" }
-                    ],
-                )
-                .unwrap();
-        }
-        drop(connection);
+        fs::File::create(&database_path).unwrap();
 
         let first = Store::open(&database_path).unwrap();
-        let owner = first.authenticate(owner_token).unwrap().unwrap();
-        let member_a = first.authenticate(member_tokens[0]).unwrap().unwrap();
-        let member_b = first.authenticate(member_tokens[1]).unwrap().unwrap();
-        assert_eq!(owner.family_id, family_id);
-        assert_eq!(owner.role, "owner");
-        assert_eq!(member_a.role, "member");
-        assert_eq!(member_a.membership_id, member_b.membership_id);
-        assert_ne!(owner.membership_id, member_a.membership_id);
-        let original_owner_id = owner.membership_id;
-        let original_member_id = member_a.membership_id;
-        let active = first.active_memberships(&family_id).unwrap();
-        assert_eq!(active.len(), 2);
-        assert_eq!(active[0].display_name.as_deref(), Some("妈妈"));
-        assert_eq!(active[1].display_name.as_deref(), Some("家人"));
+        let (family_id, token, membership_id, _) = first
+            .create_family(
+                1,
+                "fresh-schema-request-000000000001",
+                "fresh-device",
+                "妈妈",
+                Some("新家庭"),
+                |_, _| "fresh-token".to_owned(),
+            )
+            .unwrap();
         drop(first);
 
         let restarted = Store::open(&database_path).unwrap();
-        assert_eq!(
-            restarted
-                .authenticate(owner_token)
-                .unwrap()
-                .unwrap()
-                .membership_id,
-            original_owner_id
-        );
-        for token in member_tokens {
-            assert_eq!(
-                restarted
-                    .authenticate(token)
-                    .unwrap()
-                    .unwrap()
-                    .membership_id,
-                original_member_id
-            );
-        }
+        let principal = restarted.authenticate(&token).unwrap().unwrap();
+        assert_eq!(principal.family_id, family_id);
+        assert_eq!(principal.membership_id, membership_id);
         drop(restarted);
 
         let connection = Connection::open(database_path).unwrap();
         assert_eq!(
             connection
-                .query_row(
-                    "SELECT name FROM families WHERE id = ?1",
-                    params![family_id],
-                    |row| row.get::<_, String>(0),
-                )
-                .unwrap(),
-            "旧家庭"
-        );
-        assert!(!table_columns(&connection, "memberships")
-            .unwrap()
-            .contains("token_hash"));
-        assert_eq!(
-            connection
-                .query_row("SELECT COUNT(*) FROM memberships", [], |row| {
-                    row.get::<_, i64>(0)
-                })
-                .unwrap(),
-            2
-        );
-        assert_eq!(
-            connection
-                .query_row("SELECT COUNT(*) FROM membership_credentials", [], |row| {
-                    row.get::<_, i64>(0)
-                })
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
             3
         );
+        let bundle_columns = table_columns(&connection, "sync_bundles").unwrap();
+        assert!(bundle_columns.contains("staged_membership_id"));
+        assert!(!bundle_columns.contains("device_id"));
         assert_eq!(
             connection
-                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
-                    row.get::<_, i64>(0)
-                })
+                .query_row(
+                    "SELECT \"notnull\" FROM pragma_table_info('sync_bundles') WHERE name = 'staged_membership_id'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
                 .unwrap(),
-            0
+            1
         );
+        assert!(connection
+            .prepare("SELECT 1 FROM membership_aliases")
+            .is_err());
     }
 
     #[test]
-    fn membership_normalization_failure_rolls_back_the_legacy_schema() {
+    fn nonempty_unsupported_schema_versions_fail_without_mutation() {
+        for version in [0, 1, 2, 4] {
+            let directory = TempDir::new().unwrap();
+            let database_path = directory.path().join("lezi.db");
+            let connection = Connection::open(&database_path).unwrap();
+            connection
+                .execute_batch(&format!(
+                    "
+                    PRAGMA user_version = {version};
+                    CREATE TABLE sentinel(value TEXT NOT NULL);
+                    INSERT INTO sentinel(value) VALUES ('preserve-me');
+                    "
+                ))
+                .unwrap();
+            drop(connection);
+
+            let before = fs::read(&database_path).unwrap();
+            let before_entries = fs::read_dir(directory.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<BTreeSet<_>>();
+            let error = Store::open(&database_path)
+                .err()
+                .expect("unsupported schema version was accepted");
+            assert!(
+                matches!(
+                    &error,
+                    StoreError::UnsupportedSchemaVersion { found, supported }
+                        if *found == version && *supported == 3
+                ),
+                "unexpected rejection for schema v{version}: {error}"
+            );
+            assert_eq!(
+                fs::read(&database_path).unwrap(),
+                before,
+                "mutated schema v{version}"
+            );
+            assert_eq!(
+                fs::read_dir(directory.path())
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name())
+                    .collect::<BTreeSet<_>>(),
+                before_entries,
+                "created sidecars for schema v{version}"
+            );
+        }
+    }
+
+    #[test]
+    fn current_version_with_wrong_shape_fails_without_mutation() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("lezi.db");
-        let family_id = Uuid::new_v4().to_string();
-        let duplicate_membership_id = Uuid::new_v4().to_string();
         let connection = Connection::open(&database_path).unwrap();
         connection
             .execute_batch(
                 "
-                PRAGMA foreign_keys = ON;
-                CREATE TABLE families (
-                    id TEXT PRIMARY KEY,
-                    created_at INTEGER NOT NULL
-                );
-                CREATE TABLE memberships (
-                    token_hash TEXT PRIMARY KEY,
-                    family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
-                    role TEXT NOT NULL CHECK(role IN ('owner', 'member')),
-                    device_id TEXT NOT NULL,
-                    display_name TEXT,
-                    revoked_at INTEGER,
-                    membership_id TEXT
-                );
+                PRAGMA user_version = 3;
+                CREATE TABLE families(id TEXT PRIMARY KEY);
+                INSERT INTO families(id) VALUES ('preserve-me');
                 ",
             )
             .unwrap();
-        connection
-            .execute(
-                "INSERT INTO families(id, created_at) VALUES (?1, 1)",
-                params![family_id],
-            )
-            .unwrap();
-        for (token_hash, device_id) in [
-            ("rollback-token-a", "rollback-device-a"),
-            ("rollback-token-b", "rollback-device-b"),
-        ] {
-            connection
-                .execute(
-                    "
-                    INSERT INTO memberships(
-                        token_hash, family_id, role, device_id, display_name, membership_id
-                    ) VALUES (?1, ?2, 'member', ?3, '成员', ?4)
-                    ",
-                    params![token_hash, family_id, device_id, duplicate_membership_id],
-                )
-                .unwrap();
-        }
         drop(connection);
 
-        assert!(Store::open(&database_path).is_err());
-
-        let connection = Connection::open(database_path).unwrap();
-        let tables = connection
-            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+        let before = fs::read(&database_path).unwrap();
+        let before_entries = fs::read_dir(directory.path())
             .unwrap()
-            .query_map([], |row| row.get::<_, String>(0))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert!(tables.iter().any(|table| table == "memberships"));
-        assert!(!tables.iter().any(|table| table == "memberships_legacy"));
-        assert!(!tables.iter().any(|table| table == "membership_credentials"));
-        assert!(table_columns(&connection, "memberships")
-            .unwrap()
-            .contains("token_hash"));
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>();
+        assert!(matches!(
+            Store::open(&database_path).err(),
+            Some(StoreError::IncompatibleSchema { supported: 3 })
+        ));
+        assert_eq!(fs::read(&database_path).unwrap(), before);
         assert_eq!(
-            connection
-                .query_row("SELECT COUNT(*) FROM memberships", [], |row| {
-                    row.get::<_, i64>(0)
-                })
-                .unwrap(),
-            2
+            fs::read_dir(directory.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<BTreeSet<_>>(),
+            before_entries
         );
     }
 
@@ -3846,7 +3041,7 @@ mod tests {
         let record_id = Uuid::new_v4();
         let baby = json!({
             "nickname":"年年","sex":"female","birthday":"2025-01-02",
-            "due_date":null,"avatar_media_uuid":null,"birth_weight_grams":3200
+            "avatar_media_uuid":null,"birth_weight_grams":3200
         });
         let record = json!({
             "baby_client_uuid":baby_id,"type":"formula","timestamp":100,
@@ -3901,7 +3096,7 @@ mod tests {
                         1,
                         json!({
                             "nickname":"年年","sex":"female","birthday":"2025-01-02",
-                            "due_date":null,"avatar_media_uuid":null,"birth_weight_grams":3200
+                            "avatar_media_uuid":null,"birth_weight_grams":3200
                         }),
                     ),
                     entity(
@@ -3994,7 +3189,7 @@ mod tests {
         let family_id = family(&store);
         let baby = json!({
             "nickname":"年年","sex":"female","birthday":"2025-01-02",
-            "due_date":null,"avatar_media_uuid":null,"birth_weight_grams":3200
+            "avatar_media_uuid":null,"birth_weight_grams":3200
         });
 
         let result = store.push(
@@ -4016,7 +3211,7 @@ mod tests {
         let baby_id = Uuid::new_v4();
         let baby = json!({
             "nickname":"年年","sex":"female","birthday":"2025-01-02",
-            "due_date":null,"avatar_media_uuid":null,"birth_weight_grams":3200
+            "avatar_media_uuid":null,"birth_weight_grams":3200
         });
         let mut entities = vec![entity("baby", baby_id, 1, baby)];
         entities.extend((0..10).map(|index| {
@@ -4068,7 +3263,7 @@ mod tests {
                     1,
                     json!({
                         "nickname":"年年","sex":"female","birthday":"2025-01-02",
-                        "due_date":null,"avatar_media_uuid":null
+                        "avatar_media_uuid":null
                     }),
                 )],
                 100,

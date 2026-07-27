@@ -1,19 +1,18 @@
 # lezi-sync
 
-乐记家庭局域网同步服务的 Rust 实现。Android 端继续使用既有 `/v1/*`
+乐记家庭局域网同步服务的 Rust 实现。Android 端使用当前 `/v1/*`
 HTTP interface；服务端以 Axum + Tokio + rusqlite 运行，NAS 上只需要一个
 Docker 容器和一个持久化目录。
 
-## 数据兼容性
+## 数据目录合同
 
-Rust 版本原位兼容既有数据根；当前 SQLite `PRAGMA user_version=2`。旧的
-`user_version=0/1` 数据根会幂等升级并保留既有家庭、实体、token hash 与
-`server.secret` 的 HMAC 派生规则。v1 的 `sync_bundle_media.staged_sha256` 列迁移
-仍保持幂等；v2 新增 `media_publications`，恢复已提交 bundle 的媒体归属，并把
-仍在 staging 的媒体持久标记为不可见隔离态，避免失败发布的字节被兼容路径认领。
-若数据卷版本高于 2，启动会先对既有数据库执行只读预检并 fail
-closed；预检失败不会创建 `media/`、`server.secret`、SQLite sidecar，也不会
-修改数据根或数据库权限：
+服务仅支持 fresh-only 部署，当前 SQLite `PRAGMA user_version=3`。空数据目录、
+不存在的 `lezi.db` 或零字节空库会初始化为当前 v3 schema；已有数据目录只有在
+`user_version=3` 且表、索引、约束完全匹配当前 schema 时才允许重启并保留数据。
+
+任何非空 v0/v1/v2、未来版本、或声称 v3 但形状不匹配的数据库都在只读预检阶段
+fail closed；不会原位迁移，不会创建 `media/`、`server.secret`、SQLite sidecar，也不会
+改变数据根或数据库权限。旧版本数据不是受支持的部署输入；部署时必须选择新的空数据根。
 
 ```text
 $LEZI_DATA_DIR/
@@ -23,9 +22,6 @@ $LEZI_DATA_DIR/
 └── media/
     └── {family_uuid}/{media_uuid}
 ```
-
-从旧镜像升级前，停止旧容器并备份整个数据根。不要只复制 `lezi.db`，否则会
-遗漏 WAL/SHM、服务密钥或媒体字节。
 
 启动时服务只清理 `media/` 下名称为 UUID、且 SQLite 已无对应家庭的孤儿目录。
 非 UUID 运维目录、仍存在的家庭目录和符号链接不会被启动清理触碰。
@@ -98,20 +94,6 @@ Synology、QNAP 或其它 NAS 的数据路径不同，只需把 `LEZI_DATA_HOST_
 `chmod` 时，才显式设置 `LEZI_ALLOW_PERMISSION_HARDENING_SKIP=1`；此时仅
 `EPERM`、`EACCES`、`EOPNOTSUPP` 会记录警告后继续。只读挂载以及实际持久化 I/O
 失败无论是否开启 skip 都会阻止启动。
-
-升级既有部署：
-
-```bash
-export LEZI_BOOTSTRAP_SECRET="<deployment bootstrap secret>"
-docker compose stop
-cp -a /volume1/docker/lezi /volume1/backup/lezi-before-rust
-./build-image.sh
-# 若原数据为 root 拥有，先 chown 10001 或改用 nas-root profile
-sudo chown -R 10001:10001 /volume1/docker/lezi
-LEZI_DATA_HOST_PATH=/volume1/docker/lezi \
-  docker compose up -d
-docker compose ps
-```
 
 如果 NAS 不适合本机编译，可在开发机导出镜像：
 
@@ -213,9 +195,9 @@ lezi-sync healthcheck
 | POST | `/v1/join` | 邀请码换 member token（响应含 `family_name`） |
 | POST | `/v1/leave` | member 退出自身 membership 并吊销其全部凭证 |
 | POST | `/v1/family/delete` | owner 删除家庭及媒体 |
-| POST | `/v1/push` | Baby、Record、Media、CustomItem 的严格 LWW push（兼容路径） |
+| POST | `/v1/push` | Baby、Record、Media、CustomItem 的当前 ordinary LWW push |
 | GET | `/v1/pull?cursor=&generation=` | 有界分页、单调 cursor 增量 pull |
-| PUT/GET | `/v1/media/{client_uuid}` | 上传或下载媒体字节（兼容路径） |
+| PUT/GET | `/v1/media/{client_uuid}` | ordinary 流程上传或下载媒体字节 |
 | POST | `/v1/bundles` | 原子包暂存：根实体 + 媒体清单（commit 前不可 pull） |
 | PUT | `/v1/bundles/{id}/media/{uuid}` | 原子包媒体字节暂存 |
 | POST | `/v1/bundles/{id}/commit` | 单事务发布完整包（幂等） |
@@ -227,17 +209,16 @@ Media 的 kind 与关联创建后不可改变；member 可以写日志媒体，�
 和字节只允许 owner 修改。
 
 `GET /v1/family/members` 返回 owner-first 的稳定列表：
-`{"members":[{"display_name":"妈妈","role":"owner","is_self":true,"device_id":"…","membership_id":"…"}]}`。
+`{"members":[{"display_name":"妈妈","role":"owner","is_self":true,"membership_id":"…"}]}`。
 服务端只按 Bearer principal 的 `family_id` 查询 active memberships，并按返回行的
 `membership_id` 是否等于 principal membership 计算 `is_self`；响应绝不包含 token、
 `token_hash` 或 `family_id`。
 `membership_id` 是服务端生成的**不可变** membership 公开身份（UUID），创建/加入时
 写入，token 轮换、地址变化或进程重启均不改变；供计划作者、自定义定义与履行冲突
-等 ACL 引用。`device_id` 仅作客户端把记录 `created_by_device_id` 解析为当前家庭
-称呼的**链路键**，产品 UI 不得展示。建家/加入时 `display_name`（家庭称呼）**必填**：
+等 ACL 引用。`device_id` 仍是建家/加入和 token 会话绑定的必填身份声明，但不是
+记录作者字段，也不从 members API 暴露。建家/加入时 `display_name`（家庭称呼）**必填**：
 trim 后空白、省略字段、或本机 UI 占位名“我（本机）”均返回 `422`，不再静默收成
-null；最长 128 个 Unicode 字符，并拒绝控制符与双向文本格式控制符。历史库中的空名
-或不安全名字在读取时降级为 `null`，客户端按角色/「家人」兜底。
+null；最长 128 个 Unicode 字符，并拒绝控制符与双向文本格式控制符。
 
 `POST /v1/family/display-name`（Auth：任一有效家庭 token）允许成员**仅更新自己的**
 `display_name`；body `{"display_name":"…"}`，校验规则同建家/加入；响应
@@ -255,10 +236,7 @@ null；最长 128 个 Unicode 字符，并拒绝控制符与双向文本格式�
 
 NAS 持久化将 membership 与 credential 分开：`memberships.membership_id` 是产品身份
 主键；`membership_credentials.token_hash` 只用于认证并指向 membership，同一
-membership 可持有多个可独立轮换/吊销的凭证。旧库升级在单一事务中仅一次按
-`(family_id, role, device_id)` 归并历史 active token，按 token hash 字典序稳定选择
-既有 membership ID 和首个安全非占位称呼；其它既有 ID 保留为 ACL alias，缺失 ID
-只生成一次。不同 role 永不合并。运行时 members 每个 active membership 投影一行，
+membership 可持有多个可独立轮换/吊销的凭证。运行时 members 每个 active membership 投影一行，
 新 join 即使声明相同 `device_id` 也创建独立 membership；退出标记当前 membership
 离开并吊销其全部凭证。管理员删除家庭时由外键级联清除全部 memberships 与凭证。
 
@@ -267,12 +245,11 @@ membership 可持有多个可独立轮换/吊销的凭证。旧库升级在单�
 身份只来自 Bearer principal：member 不能冒充 owner 调用邀请/改名等接口；push 中
 与 token 不符的 `device_id` 返回 `403`。
 
-pull 响应新增兼容字段 `has_more`。每页最多扫描 200 个实体，并以约 8 MiB
+pull 响应包含当前字段 `has_more`。每页最多扫描 200 个实体，并以约 8 MiB
 序列化实体为体积目标；响应 `cursor` 只前进到本页已扫描的 revision。客户端在
 该页实体和媒体全部落地后保存 cursor，再以新 cursor 连续请求，直到
 `has_more=false`。全量页会附带页内实体所需、但 revision 位于后页的 Baby/Record
-依赖；这些依赖后续可幂等重复。旧客户端虽然不会同轮连续拉取，但因收到的不是
-全局 cursor，下一次前台/下拉仍会继续，避免跳过数据。
+依赖；这些依赖后续可幂等重复。
 客户端执行 full-resync 时，重新 push 本地副本之前的权威拉取阶段会把分页 cursor
 只保存在内存；全部页与成员头像对账成功后才一次持久化，防止中途重启后用半份
 服务器快照提前 push。
@@ -295,14 +272,12 @@ pull 响应新增兼容字段 `has_more`。每页最多扫描 200 个实体，�
 - PUT 以临时文件写入并同步文件，原子替换后再同步父目录，确保成功响应前 rename
   已进入文件系统持久化边界。
 
-线协议字段形状不变，旧客户端只需不再收到不完整 media 即可前进 cursor。
-
 ### 原子同步包（`atomic_bundle`）
 
 `GET /health` 广告
-`capabilities: ["atomic_bundle", "record_membership_author"]`。新客户端在发布
-带照片的记录/计划前必须确认 `atomic_bundle`；**不得**对旧 NAS 静默回退到
-metadata-first push。`record_membership_author` 表示服务端接受并回执 membership
+`capabilities: ["atomic_bundle", "record_membership_author"]`。当前客户端在发布
+带照片的记录/计划前必须确认 `atomic_bundle`；不存在 metadata-first 回退路径。
+`record_membership_author` 表示服务端接受并回执 membership
 作者字段。
 
 典型发送流程：
@@ -324,16 +299,14 @@ metadata-first push。`record_membership_author` 表示服务端接受并回执 
 - 媒体优先进入持久化边界，SQLite 后发布引用；DB 失败或进程中断只会留下
   不可见字节，不会暴露缺字节的实体。已提交 bundle 在暂存清理后重试时会逐个
   核对已发布文件的摘要与尺寸，并再次 fsync 文件、家庭目录和 `media/` 根目录
-- 旧库中摘要为空的已提交 bundle 只在原暂存文件仍存在、且与已发布文件完全一致时
-  补写摘要；暂存已清理时无法追溯原始内容，重试会保守拒绝，不会信任仅尺寸相同的文件
 - 同一数据根优先用 hard link 做 no-replace 发布；NAS 文件系统不支持 hard link
   时，改用已 fsync 的暂存副本 + no-replace rename，不覆盖冲突字节
 - 编辑新版本：另开 `bundle_id` 暂存；commit 前 pull 仍返回旧完整版本
 - 根 `updated_at` 落后于已发布版本 → commit `409`
 - tombstone 包（root/media 带 `deleted_at`）不需上传字节即可 commit
 - 每包最多 8 个 media；每家庭最多 64 个 open staging bundle
-- `care_plan` 根类型与 `record` 共用契约；完整 CarePlan 字段/ACL 在后续票单扩展
-- 既有 `/v1/push` 与 `/v1/media` 保持兼容（头像与旧客户端）
+- `care_plan` 根类型与 `record` 共用原子发布契约，并执行当前字段、引用与成员 ACL 校验
+- ordinary `/v1/push` 与 `/v1/media` 仍用于 Baby、Record、Media、CustomItem 与头像流程
 
 家庭删除先提交 SQLite 外键级联删除，再清理该家庭媒体目录。数据库删除失败时
 媒体保持完整；数据库已删除但文件清理失败或进程中断时，该 UUID 目录作为孤儿

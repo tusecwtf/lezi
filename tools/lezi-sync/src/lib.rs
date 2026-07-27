@@ -76,8 +76,8 @@ pub struct ServerConfig {
     pub server_secret: Option<Vec<u8>>,
     pub generation: Option<String>,
     /// When set (non-empty), POST /v1/family/create requires matching
-    /// `X-Lezi-Bootstrap-Secret`. Empty/None keeps create open for Android
-    /// wire compatibility; production docs require setting this fail-closed.
+    /// `X-Lezi-Bootstrap-Secret`. Empty/None keeps local development open;
+    /// production docs require setting this fail-closed.
     pub bootstrap_secret: Option<String>,
     pub create_rate_limit: RateLimitConfig,
     pub join_rate_limit: RateLimitConfig,
@@ -292,7 +292,6 @@ pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
         );
     }
     let store = Store::open(database_path)?;
-    backfill_legacy_media_publications(&store, &media_root)?;
     collect_orphan_family_media(&store, &media_root)?;
     let state = AppState {
         store,
@@ -423,13 +422,7 @@ async fn create_invite(
     body: Result<Json<InviteRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
     let principal = require_owner(&state, &headers)?;
-    let request = json_body(body)?;
-    if request
-        .family_id
-        .is_some_and(|id| id.to_string() != principal.family_id)
-    {
-        return Err(ApiError::forbidden("family_id does not match token"));
-    }
+    let _ = json_body(body)?;
     let code = (state.invite_code_factory)();
     if !(8..=32).contains(&code.len())
         || !code
@@ -630,7 +623,6 @@ async fn push_entities(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PullQuery {
-    #[serde(default)]
     cursor: i64,
     #[serde(default)]
     generation: Option<String>,
@@ -721,7 +713,7 @@ async fn put_media(
         .is_media_bundle_owned(&principal.family_id, &client_uuid.to_string())?
     {
         return Err(ApiError::conflict(
-            "Atomic bundle media cannot be replaced via legacy upload",
+            "Atomic bundle media cannot be replaced via ordinary upload",
         ));
     }
     if metadata.kind == "avatar" && principal.role != "owner" {
@@ -769,10 +761,10 @@ async fn put_media(
     // the file replacement and this database transaction.
     let republished = state
         .store
-        .republish_media(&principal.family_id, &client_uuid.to_string())?;
+        .publish_ordinary_media(&principal.family_id, &client_uuid.to_string())?;
     if !republished {
         return Err(ApiError::conflict(
-            "Atomic bundle media cannot be replaced via legacy upload",
+            "Atomic bundle media cannot be replaced via ordinary upload",
         ));
     }
     Ok(Json(json!({"ok": true, "size": content.len()})))
@@ -863,11 +855,6 @@ async fn stage_bundle(
                 "bundle belongs to another family membership",
             ))
         }
-        Err(StoreError::LegacyBundleMembershipUnknown) => {
-            return Err(ApiError::conflict(
-                "legacy staging bundle has no verifiable membership",
-            ))
-        }
         Err(StoreError::BundleStagingLimit) => {
             return Err(ApiError::unprocessable(
                 "too many open staging bundles; commit or wait for cleanup",
@@ -916,18 +903,10 @@ async fn put_bundle_media(
             "committed bundle does not accept staged media",
         ));
     }
-    match bundle.staged_membership_id.as_deref() {
-        Some(staged_membership_id) if staged_membership_id == principal.membership_id => {}
-        Some(_) => {
-            return Err(ApiError::conflict(
-                "bundle belongs to another family membership",
-            ))
-        }
-        None => {
-            return Err(ApiError::conflict(
-                "legacy staging bundle has no verifiable membership",
-            ))
-        }
+    if bundle.staged_membership_id != principal.membership_id {
+        return Err(ApiError::conflict(
+            "bundle belongs to another family membership",
+        ));
     }
     if !bundle
         .media
@@ -1026,11 +1005,6 @@ async fn put_bundle_media(
                 "bundle belongs to another family membership",
             ))
         }
-        Err(StoreError::LegacyBundleMembershipUnknown) => {
-            return Err(ApiError::conflict(
-                "legacy staging bundle has no verifiable membership",
-            ))
-        }
         Err(StoreError::BundleNotFound) => return Err(ApiError::not_found("Bundle not found")),
         Err(error) => return Err(error.into()),
     };
@@ -1066,24 +1040,13 @@ async fn commit_bundle(
     // final-path media. Store::commit_bundle repeats this check as the
     // transactional authority; this early guard prevents rejected principals
     // from leaving claimable filesystem state.
-    match bundle.staged_membership_id.as_deref() {
-        Some(staged_membership_id) if staged_membership_id == principal.membership_id => {}
-        Some(_) => {
-            return Err(ApiError::conflict(
-                "bundle belongs to another family membership",
-            ))
-        }
-        None if bundle.status == "staging" => {
-            return Err(ApiError::conflict(
-                "legacy staging bundle has no verifiable membership",
-            ))
-        }
-        // Legacy committed rows are immutable and retain lost-response retries.
-        None => {}
+    if bundle.staged_membership_id != principal.membership_id {
+        return Err(ApiError::conflict(
+            "bundle belongs to another family membership",
+        ));
     }
 
     let mut media_ready = std::collections::BTreeMap::new();
-    let mut legacy_media_digests = Vec::new();
     let mut staged_publications = Vec::new();
     for media_uuid in &bundle.required_media {
         let media_id = Uuid::parse_str(media_uuid)
@@ -1094,58 +1057,37 @@ async fn commit_bundle(
             .ok_or_else(|| ApiError::internal("stored bundle media integrity is missing"))?;
         if bundle.status == "committed" {
             let final_path = state.media_path(&principal.family_id, media_id)?;
-            let digest = if let Some(expected_sha256) = integrity.staged_sha256.as_deref() {
-                media_file_integrity_sha256(
-                    &final_path,
-                    integrity.declared_byte_size,
-                    Some(expected_sha256),
-                    media_uuid,
-                )
-            } else {
-                // A committed legacy row has no trusted digest. Only recover it
-                // when the original staged source survived cleanup and exactly
-                // matches the published bytes; otherwise fail closed.
-                let staged_path =
-                    state.bundle_media_path(&principal.family_id, &bundle_id, &media_id)?;
-                media_file_integrity_sha256(
-                    &staged_path,
-                    integrity.declared_byte_size,
-                    None,
-                    media_uuid,
-                )
-                .and_then(|staged_digest| {
+            let digest = integrity
+                .staged_sha256
+                .as_deref()
+                .and_then(|expected_sha256| {
                     media_file_integrity_sha256(
                         &final_path,
                         integrity.declared_byte_size,
-                        Some(&staged_digest),
+                        Some(expected_sha256),
                         media_uuid,
                     )
-                })
-            };
-            if let Some(digest) = digest.as_deref() {
+                });
+            if digest.is_some() {
                 sync_published_media_file(&final_path)?;
-                if integrity.staged_sha256.is_none() {
-                    legacy_media_digests.push((media_uuid.clone(), digest.to_owned()));
-                }
             }
             media_ready.insert(media_uuid.clone(), digest.is_some());
             continue;
         }
         let staged_path = state.bundle_media_path(&principal.family_id, &bundle_id, &media_id)?;
-        let digest = media_file_integrity_sha256(
-            &staged_path,
-            integrity.declared_byte_size,
-            integrity.staged_sha256.as_deref(),
-            media_uuid,
-        );
-        if let Some(digest) = digest.as_deref() {
-            staged_publications.push((
-                media_uuid.clone(),
-                media_id,
-                staged_path,
-                digest.to_owned(),
-                integrity.staged_sha256.is_none(),
-            ));
+        let digest = integrity
+            .staged_sha256
+            .as_deref()
+            .and_then(|expected_sha256| {
+                media_file_integrity_sha256(
+                    &staged_path,
+                    integrity.declared_byte_size,
+                    Some(expected_sha256),
+                    media_uuid,
+                )
+            });
+        if digest.is_some() {
+            staged_publications.push((media_uuid.clone(), media_id, staged_path));
         }
         media_ready.insert(media_uuid.clone(), digest.is_some());
     }
@@ -1154,7 +1096,7 @@ async fn commit_bundle(
     // change. Incomplete/corrupt later entries must not leave earlier files
     // pre-published. The Store still returns the canonical 422 below.
     if bundle.status == "staging" && media_ready.values().all(|ready| *ready) {
-        for (media_uuid, media_id, staged_path, digest, is_legacy_digest) in staged_publications {
+        for (media_uuid, media_id, staged_path) in staged_publications {
             let final_path = state.media_path(&principal.family_id, media_id)?;
             prepare_published_media_file(&staged_path, &final_path)?;
             match state.store.mark_bundle_media_prepared(
@@ -1168,18 +1110,10 @@ async fn commit_bundle(
                         "bundle belongs to another family membership",
                     ))
                 }
-                Err(StoreError::LegacyBundleMembershipUnknown) => {
-                    return Err(ApiError::conflict(
-                        "legacy staging bundle has no verifiable membership",
-                    ))
-                }
                 Err(StoreError::BundleNotFound) => {
                     return Err(ApiError::not_found("Bundle not found"))
                 }
                 Err(error) => return Err(error.into()),
-            }
-            if is_legacy_digest {
-                legacy_media_digests.push((media_uuid, digest));
             }
         }
     }
@@ -1207,11 +1141,6 @@ async fn commit_bundle(
         Err(StoreError::BundleMembershipMismatch) => {
             return Err(ApiError::conflict(
                 "bundle belongs to another family membership",
-            ))
-        }
-        Err(StoreError::LegacyBundleMembershipUnknown) => {
-            return Err(ApiError::conflict(
-                "legacy staging bundle has no verifiable membership",
             ))
         }
         Err(StoreError::ForbiddenAvatar) => {
@@ -1246,15 +1175,6 @@ async fn commit_bundle(
         Err(StoreError::BundleNotFound) => return Err(ApiError::not_found("Bundle not found")),
         Err(error) => return Err(error.into()),
     };
-    for (media_uuid, digest) in legacy_media_digests {
-        state.store.pin_legacy_bundle_media_sha256(
-            &principal.family_id,
-            &bundle_id.to_string(),
-            &media_uuid,
-            &digest,
-        )?;
-    }
-
     // Best-effort staging cleanup; failed/abandoned dirs are bounded by open-bundle limits.
     let _ = fs::remove_dir_all(state.bundle_stage_dir(&principal.family_id, &bundle_id)?);
 
@@ -1560,28 +1480,6 @@ fn collect_orphan_family_media(store: &Store, media_root: &Path) -> Result<(), A
     }
     if removed_any {
         sync_directory(media_root)?;
-    }
-    Ok(())
-}
-
-fn backfill_legacy_media_publications(store: &Store, media_root: &Path) -> Result<(), ApiError> {
-    for (family_id, client_uuid, declared_size) in store.unowned_live_media()? {
-        let (Ok(parsed_family_id), Ok(media_id)) =
-            (Uuid::parse_str(&family_id), Uuid::parse_str(&client_uuid))
-        else {
-            tracing::error!(
-                %family_id,
-                %client_uuid,
-                "stored media identity is invalid; refusing ownership backfill"
-            );
-            continue;
-        };
-        let path = media_root
-            .join(parsed_family_id.to_string())
-            .join(media_id.to_string());
-        if media_file_is_ready(&path, declared_size, &client_uuid) {
-            store.backfill_legacy_media_publication(&family_id, &client_uuid)?;
-        }
     }
     Ok(())
 }
@@ -1988,7 +1886,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tokens_match_legacy_hmac_contract() {
+    fn tokens_match_hmac_contract() {
         let secret = vec![b'S'; 32];
         assert_eq!(
             derive_token(&secret, "join:abc:device"),
@@ -2047,7 +1945,7 @@ mod tests {
         connection
             .execute_batch(
                 "
-                PRAGMA user_version = 3;
+                PRAGMA user_version = 4;
                 CREATE TABLE future_sentinel(value TEXT NOT NULL);
                 ",
             )

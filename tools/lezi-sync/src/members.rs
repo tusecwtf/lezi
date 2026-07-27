@@ -7,7 +7,7 @@ use axum::Json;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::model::{normalize_display_name, UpdateDisplayNameRequest, LOCAL_DEVICE_DISPLAY_NAME};
+use crate::model::UpdateDisplayNameRequest;
 use crate::{authenticate, json_body, ApiError, AppState};
 
 #[derive(Debug, Serialize)]
@@ -15,9 +15,6 @@ struct MemberView {
     display_name: Option<String>,
     role: String,
     is_self: bool,
-    /// Client-only link key for mapping record `created_by_device_id` → 称呼.
-    /// Never show this value in product UI (see sync-home-lan §9.5).
-    device_id: String,
     /// Server-minted immutable membership identity. Safe public key for ACL.
     membership_id: String,
 }
@@ -34,16 +31,13 @@ pub(super) async fn list_family_members(
     let principal = authenticate(&state, &headers)?;
     let memberships = state.store.active_memberships(&principal.family_id)?;
 
-    // Legacy duplicate credentials are normalized once during migration.
-    // Runtime projection is one row per canonical membership; device_id never
-    // decides identity, so a new join that repeats a device claim stays distinct.
+    // Runtime projection is one row per server-minted membership.
     let mut members = memberships
         .into_iter()
         .map(|membership| MemberView {
-            display_name: display_name_for_view(membership.display_name.as_deref()),
+            display_name: membership.display_name,
             role: membership.role,
             is_self: membership.membership_id == principal.membership_id,
-            device_id: membership.device_id,
             membership_id: membership.membership_id,
         })
         .collect::<Vec<_>>();
@@ -56,7 +50,6 @@ pub(super) async fn list_family_members(
                     .cmp(&right.display_name.is_none())
             })
             .then_with(|| left.display_name.cmp(&right.display_name))
-            .then_with(|| left.device_id.cmp(&right.device_id))
             .then_with(|| left.membership_id.cmp(&right.membership_id))
     });
     Ok(Json(MembersResponse { members }))
@@ -78,17 +71,6 @@ pub(super) async fn update_my_display_name(
         "ok": true,
         "display_name": display_name,
     })))
-}
-
-/// Historical Android clients persisted their device-local fallback label as
-/// a shared member name. It is meaningful only to the originating device, so
-/// never project it to another family member. `is_self` lets each client apply
-/// its own local fallback after the privacy-safe response is received.
-fn display_name_for_view(value: Option<&str>) -> Option<String> {
-    normalize_display_name(value)
-        .ok()
-        .flatten()
-        .filter(|name| name != LOCAL_DEVICE_DISPLAY_NAME)
 }
 
 fn role_rank(role: &str) -> u8 {

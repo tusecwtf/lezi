@@ -182,7 +182,6 @@ fn baby_payload(nickname: &str, avatar_media_uuid: Option<&str>) -> Value {
         "nickname": nickname,
         "sex": "female",
         "birthday": "2025-01-02",
-        "due_date": null,
         "avatar_media_uuid": avatar_media_uuid,
         "birth_weight_grams": 3200,
     })
@@ -284,7 +283,7 @@ async fn liveness_and_readiness_initialize_private_single_data_root() {
 }
 
 #[tokio::test]
-async fn database_schema_version_is_explicit_and_legacy_zero_upgrade_preserves_data() {
+async fn current_schema_version_restarts_with_credentials_and_entities() {
     let rig = Rig::new();
     let owner = create_family(
         &rig.app,
@@ -300,47 +299,28 @@ async fn database_schema_version_is_explicit_and_legacy_zero_upgrade_preserves_d
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        2
+        3
     );
-    connection
-        .execute(
-            "ALTER TABLE sync_bundle_media DROP COLUMN staged_sha256",
-            [],
-        )
-        .unwrap();
-    connection.pragma_update(None, "user_version", 0).unwrap();
     drop(connection);
 
     let restarted = rig.restart("generation-b");
     let (pull_status, pull) = get_json(&restarted, "/v1/pull?cursor=0", Some(token)).await;
-    assert_eq!(
-        pull_status,
-        StatusCode::OK,
-        "legacy version-zero upgrade lost the existing family credentials"
-    );
+    assert_eq!(pull_status, StatusCode::OK);
     assert!(
         pull["entities"]
             .as_array()
             .unwrap()
             .iter()
             .any(|entity| entity["client_uuid"] == baby_id),
-        "legacy version-zero upgrade lost persisted family entities"
+        "same-version restart lost persisted family entities"
     );
     let connection = rusqlite::Connection::open(database_path).unwrap();
     assert_eq!(
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        2
+        3
     );
-    assert!(connection
-        .prepare("PRAGMA table_info(sync_bundle_media)")
-        .unwrap()
-        .query_map([], |row| row.get::<_, String>(1))
-        .unwrap()
-        .collect::<Result<std::collections::BTreeSet<_>, _>>()
-        .unwrap()
-        .contains("staged_sha256"));
 }
 
 #[test]
@@ -351,7 +331,7 @@ fn future_database_schema_version_fails_closed_without_mutation() {
     connection
         .execute_batch(
             "
-            PRAGMA user_version = 3;
+            PRAGMA user_version = 4;
             CREATE TABLE future_sentinel(value TEXT NOT NULL);
             INSERT INTO future_sentinel(value) VALUES ('preserve-me');
             ",
@@ -411,7 +391,7 @@ fn future_database_schema_version_fails_closed_without_mutation() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        3
+        4
     );
     assert_eq!(
         connection
@@ -664,6 +644,84 @@ async fn invite_join_roles_expiry_restart_and_leave_match_contract() {
 }
 
 #[tokio::test]
+async fn current_wire_rejects_removed_compatibility_fields() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "strict-wire-owner",
+        "strict-wire-owner-request-00000001",
+    )
+    .await;
+    let token = owner["token"].as_str().unwrap();
+    let (invite_status, invite_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/invite",
+        Some(token),
+        json!({"family_id": owner["family_id"]}),
+    )
+    .await;
+    assert_eq!(
+        invite_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{invite_body}"
+    );
+
+    let (pull_status, pull_body) = get_json(&rig.app, "/v1/pull", Some(token)).await;
+    assert_eq!(pull_status, StatusCode::UNPROCESSABLE_ENTITY, "{pull_body}");
+
+    let obsolete_baby_id = Uuid::new_v4().to_string();
+    let (due_date_status, due_date_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({
+            "device_id": "strict-wire-owner",
+            "entities": [{
+                "type": "baby",
+                "client_uuid": obsolete_baby_id,
+                "updated_at": 1,
+                "payload": {
+                    "nickname": "年年",
+                    "sex": "female",
+                    "birthday": "2025-01-02",
+                    "due_date": null,
+                    "avatar_media_uuid": null,
+                },
+            }],
+        }),
+    )
+    .await;
+    assert_eq!(
+        due_date_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{due_date_body}"
+    );
+
+    let baby_id = seed_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let mut obsolete_record = record_payload(&baby_id);
+    obsolete_record["created_by_device_id"] = json!("strict-wire-owner");
+    let (device_author_status, device_author_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({
+            "device_id": "strict-wire-owner",
+            "entities": [entity_wire("record", &record_id, 2, obsolete_record, None)],
+        }),
+    )
+    .await;
+    assert_eq!(
+        device_author_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{device_author_body}"
+    );
+}
+
+#[tokio::test]
 async fn family_members_are_authenticated_isolated_stable_and_redacted() {
     let rig = Rig::new();
     assert_eq!(
@@ -720,14 +778,12 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
                 "display_name":"妈妈",
                 "role":"owner",
                 "is_self":true,
-                "device_id":"owner-sensitive-device-id",
                 "membership_id": owner_membership_id,
             },
             {
                 "display_name":"陈爸爸 🌿",
                 "role":"member",
                 "is_self":false,
-                "device_id":"member-sensitive-device-id",
                 "membership_id": member_membership_id,
             },
         ]})
@@ -742,14 +798,12 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
                 "display_name":"妈妈",
                 "role":"owner",
                 "is_self":false,
-                "device_id":"owner-sensitive-device-id",
                 "membership_id": owner_membership_id,
             },
             {
                 "display_name":"陈爸爸 🌿",
                 "role":"member",
                 "is_self":true,
-                "device_id":"member-sensitive-device-id",
                 "membership_id": member_membership_id,
             },
         ]})
@@ -771,9 +825,8 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
     assert_eq!(visible_members(&owner_view), visible_members(&member_view));
 
     let serialized = owner_view.to_string();
-    // Tokens / token hashes must never appear; device_id is the intentional
-    // client link key for created_by_device_id → 称呼 resolution.
-    // membership_id is a public stable identity and may appear.
+    // Tokens, token hashes, and device identities must never appear.
+    // membership_id is the public stable identity and may appear.
     for secret in [
         owner_token,
         member_token,
@@ -787,8 +840,8 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
     }
     for row in owner_view["members"].as_array().unwrap() {
         let fields = row.as_object().unwrap();
-        assert_eq!(fields.len(), 5);
-        assert!(fields.contains_key("device_id"));
+        assert_eq!(fields.len(), 4);
+        assert!(!fields.contains_key("device_id"));
         assert!(fields.contains_key("membership_id"));
         assert!(!fields.contains_key("token_hash"));
         assert!(!fields.contains_key("token"));
@@ -838,10 +891,7 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
     assert_eq!(isolated_view["members"][0]["display_name"], "隔离家庭");
     assert_eq!(isolated_view["members"][0]["role"], "owner");
     assert_eq!(isolated_view["members"][0]["is_self"], true);
-    assert_eq!(
-        isolated_view["members"][0]["device_id"],
-        "isolated-raw-device-id"
-    );
+    assert!(isolated_view["members"][0].get("device_id").is_none());
     assert!(
         isolated_view["members"][0]["membership_id"]
             .as_str()
@@ -876,10 +926,7 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
     assert_eq!(after_leave["members"][0]["display_name"], "妈妈");
     assert_eq!(after_leave["members"][0]["role"], "owner");
     assert_eq!(after_leave["members"][0]["is_self"], true);
-    assert_eq!(
-        after_leave["members"][0]["device_id"],
-        "owner-sensitive-device-id"
-    );
+    assert!(after_leave["members"][0].get("device_id").is_none());
     assert_eq!(
         after_leave["members"][0]["membership_id"],
         owner_membership_id
@@ -1094,7 +1141,7 @@ async fn family_members_normalize_unicode_and_empty_names_and_reject_unsafe_join
     assert!(members["members"].as_array().unwrap().iter().any(|member| {
         member["display_name"] == "李爸爸 👨‍🍼" // placeholder replaced below
             && member["role"] == "member"
-            && member["device_id"] == "unicode-member"
+            && member.get("device_id").is_none()
     }));
 }
 
@@ -1157,7 +1204,7 @@ async fn family_create_uses_the_same_display_name_normalization_as_join() {
     )
     .await;
     assert_eq!(members["members"][0]["display_name"], "妈妈");
-    assert_eq!(members["members"][0]["device_id"], "trimmed-owner-device");
+    assert!(members["members"][0].get("device_id").is_none());
 }
 
 #[tokio::test]
@@ -1212,7 +1259,7 @@ async fn member_can_update_own_display_name_only() {
         .find(|row| row["is_self"] == false && row["role"] == "member")
         .unwrap();
     assert_eq!(member_row["display_name"], "干爹");
-    assert_eq!(member_row["device_id"], "rename-member-device");
+    assert!(member_row.get("device_id").is_none());
 
     // Owner rename still only touches self.
     assert_eq!(
@@ -1485,7 +1532,7 @@ async fn zero_entity_pull_reports_family_name_value_and_null_across_restart() {
     assert_eq!(null_pull["entities"], json!([]));
     assert!(
         null_pull.as_object().unwrap().contains_key("family_name"),
-        "new NAS must distinguish explicit null from an omitted legacy field: {null_pull}"
+        "current protocol must preserve explicit null family_name: {null_pull}"
     );
     assert!(null_pull["family_name"].is_null(), "{null_pull}");
 
@@ -1522,12 +1569,12 @@ async fn family_members_project_canonical_memberships_without_role_promotion() {
             "
             INSERT INTO memberships(
                 membership_id, family_id, role, device_id, display_name
-            ) VALUES (?1, ?2, 'member', 'same-legacy-device', '  历史成员  ')
+            ) VALUES (?1, ?2, 'member', 'same-device', '成员')
             ",
             rusqlite::params![duplicate_membership_id, family_id],
         )
         .unwrap();
-    for token in ["legacy-member-token-a", "legacy-member-token-b"] {
+    for token in ["member-token-a", "member-token-b"] {
         connection
             .execute(
                 "
@@ -1563,41 +1610,11 @@ async fn family_members_project_canonical_memberships_without_role_promotion() {
             ],
         )
         .unwrap();
-    for (token, device_id, display_name) in [
-        ("legacy-empty-token", "legacy-empty-device", Some("")),
-        (
-            "legacy-local-placeholder-token",
-            "legacy-local-placeholder-device",
-            Some("我（本机）"),
-        ),
-        ("legacy-null-token", "legacy-null-device", None),
-    ] {
-        let membership_id = Uuid::new_v4().to_string();
-        connection
-            .execute(
-                "
-                INSERT INTO memberships(
-                    membership_id, family_id, role, device_id, display_name
-                ) VALUES (?1, ?2, 'member', ?3, ?4)
-                ",
-                rusqlite::params![membership_id, family_id, device_id, display_name],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "
-                INSERT INTO membership_credentials(token_hash, membership_id)
-                VALUES (?1, ?2)
-                ",
-                rusqlite::params![token_hash(token), membership_id],
-            )
-            .unwrap();
-    }
     drop(connection);
 
     let (_, members) = get_json(&rig.app, "/v1/family/members", Some(owner_token)).await;
     let rows = members["members"].as_array().unwrap();
-    assert_eq!(rows.len(), 6);
+    assert_eq!(rows.len(), 3);
     // Structural projection without hard-coding minted membership_ids.
     let projection: Vec<_> = rows
         .iter()
@@ -1606,7 +1623,6 @@ async fn family_members_project_canonical_memberships_without_role_promotion() {
                 "display_name": row["display_name"],
                 "role": row["role"],
                 "is_self": row["is_self"],
-                "device_id": row["device_id"],
             })
         })
         .collect();
@@ -1617,514 +1633,40 @@ async fn family_members_project_canonical_memberships_without_role_promotion() {
                 "display_name":"妈妈",
                 "role":"owner",
                 "is_self":true,
-                "device_id":"duplicate-owner-device",
             }),
             json!({
                 "display_name":"伪装管理员",
                 "role":"member",
                 "is_self":false,
-                "device_id":"duplicate-owner-device",
             }),
             json!({
-                "display_name":"历史成员",
+                "display_name":"成员",
                 "role":"member",
                 "is_self":false,
-                "device_id":"same-legacy-device",
-            }),
-            json!({
-                "display_name":null,
-                "role":"member",
-                "is_self":false,
-                "device_id":"legacy-empty-device",
-            }),
-            json!({
-                "display_name":null,
-                "role":"member",
-                "is_self":false,
-                "device_id":"legacy-local-placeholder-device",
-            }),
-            json!({
-                "display_name":null,
-                "role":"member",
-                "is_self":false,
-                "device_id":"legacy-null-device",
             }),
         ]
     );
     // Self uses create-time membership_id; two credentials project one membership.
     assert_eq!(rows[0]["membership_id"], owner["membership_id"]);
-    let same_device_rows: Vec<_> = rows
+    let member_rows: Vec<_> = rows
         .iter()
-        .filter(|row| row["device_id"] == "same-legacy-device")
+        .filter(|row| row["display_name"] == "成员")
         .collect();
-    assert_eq!(same_device_rows.len(), 1);
-    assert!(same_device_rows[0]["membership_id"].as_str().unwrap().len() >= 32);
+    assert_eq!(member_rows.len(), 1);
+    assert!(member_rows[0]["membership_id"].as_str().unwrap().len() >= 32);
     for row in rows {
         assert!(row["membership_id"].as_str().unwrap().len() >= 32);
-        assert_eq!(row.as_object().unwrap().len(), 5);
+        assert_eq!(row.as_object().unwrap().len(), 4);
+        assert!(!row.as_object().unwrap().contains_key("device_id"));
     }
     let serialized = members.to_string();
-    assert!(!serialized.contains("我（本机）"));
-    assert!(!serialized.contains("legacy-member-token"));
+    assert!(!serialized.contains("member-token"));
     assert!(!serialized.contains("owner-device-collision"));
+    assert!(!serialized.contains("same-device"));
 }
 
 #[tokio::test]
-async fn legacy_duplicate_credentials_migrate_to_one_membership_principal() {
-    let directory = TempDir::new().unwrap();
-    let database_path = directory.path().join("lezi.db");
-    let family_id = Uuid::new_v4().to_string();
-    let owner_token = "legacy-normalization-owner-token";
-    let duplicate_tokens = [
-        "legacy-normalization-member-token-a",
-        "legacy-normalization-member-token-b",
-    ];
-    let mut ordered_duplicates = duplicate_tokens
-        .into_iter()
-        .map(|token| (token_hash(token), token))
-        .collect::<Vec<_>>();
-    ordered_duplicates.sort();
-    let canonical_membership_id = Uuid::new_v4().to_string();
-    let aliased_membership_id = Uuid::new_v4().to_string();
-    let owner_membership_id = Uuid::new_v4().to_string();
-    let role_collision_membership_id = Uuid::new_v4().to_string();
-    let connection = rusqlite::Connection::open(&database_path).unwrap();
-    connection
-        .execute_batch(
-            "
-            PRAGMA foreign_keys = ON;
-            CREATE TABLE families (
-                id TEXT PRIMARY KEY,
-                created_at INTEGER NOT NULL,
-                create_request_hash TEXT,
-                name TEXT
-            );
-            CREATE TABLE memberships (
-                token_hash TEXT PRIMARY KEY,
-                family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
-                role TEXT NOT NULL CHECK(role IN ('owner', 'member')),
-                device_id TEXT NOT NULL,
-                display_name TEXT,
-                revoked_at INTEGER,
-                membership_id TEXT
-            );
-            ",
-        )
-        .unwrap();
-    connection
-        .execute(
-            "INSERT INTO families(id, created_at, name) VALUES (?1, ?2, ?3)",
-            rusqlite::params![family_id, 1_753_418_400_i64, "迁移家庭"],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "
-            INSERT INTO memberships(
-                token_hash, family_id, role, device_id, display_name, membership_id
-            ) VALUES (?1, ?2, 'owner', 'shared-device', '妈妈', ?3)
-            ",
-            rusqlite::params![token_hash(owner_token), family_id, owner_membership_id],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "
-            INSERT INTO memberships(
-                token_hash, family_id, role, device_id, display_name, membership_id
-            ) VALUES (?1, ?2, 'member', 'shared-device', '伪装管理员', ?3)
-            ",
-            rusqlite::params![
-                token_hash("legacy-normalization-role-collision"),
-                family_id,
-                role_collision_membership_id
-            ],
-        )
-        .unwrap();
-    for (index, (hash, _)) in ordered_duplicates.iter().enumerate() {
-        connection
-            .execute(
-                "
-                INSERT INTO memberships(
-                    token_hash, family_id, role, device_id, display_name, membership_id
-                ) VALUES (?1, ?2, 'member', 'duplicate-device', ?3, ?4)
-                ",
-                rusqlite::params![
-                    hash,
-                    family_id,
-                    if index == 0 { "" } else { "保留称呼" },
-                    if index == 0 {
-                        &canonical_membership_id
-                    } else {
-                        &aliased_membership_id
-                    }
-                ],
-            )
-            .unwrap();
-    }
-    connection
-        .execute(
-            "
-            INSERT INTO memberships(
-                token_hash, family_id, role, device_id, display_name, membership_id
-            ) VALUES (?1, ?2, 'member', 'missing-id-device', '旧成员', NULL)
-            ",
-            rusqlite::params![
-                token_hash("legacy-normalization-missing-id-token"),
-                family_id
-            ],
-        )
-        .unwrap();
-    drop(connection);
-
-    let now = Arc::new(AtomicI64::new(1_753_418_400));
-    let app = app_for(
-        directory.path(),
-        "membership-normalization-a",
-        now.clone(),
-        8,
-        |_| {},
-    );
-
-    let (_, first_view) = get_json(&app, "/v1/family/members", Some(ordered_duplicates[0].1)).await;
-    let (_, second_view) =
-        get_json(&app, "/v1/family/members", Some(ordered_duplicates[1].1)).await;
-    let duplicate_id = |body: &Value| {
-        body["members"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|member| member["device_id"] == "duplicate-device")
-            .unwrap()["membership_id"]
-            .as_str()
-            .unwrap()
-            .to_owned()
-    };
-    assert_eq!(duplicate_id(&first_view), canonical_membership_id);
-    assert_eq!(duplicate_id(&second_view), canonical_membership_id);
-    let migrated_duplicate = first_view["members"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|member| member["membership_id"] == canonical_membership_id)
-        .unwrap();
-    assert_eq!(migrated_duplicate["display_name"], "保留称呼");
-
-    let (rename_status, rename_body) = json_request(
-        &app,
-        Method::POST,
-        "/v1/family/display-name",
-        Some(ordered_duplicates[1].1),
-        json!({"display_name": "统一新称呼"}),
-    )
-    .await;
-    assert_eq!(rename_status, StatusCode::OK, "{rename_body}");
-    for token in [
-        ordered_duplicates[0].1,
-        ordered_duplicates[1].1,
-        owner_token,
-    ] {
-        let (_, body) = get_json(&app, "/v1/family/members", Some(token)).await;
-        let duplicates = body["members"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|member| member["device_id"] == "duplicate-device")
-            .collect::<Vec<_>>();
-        assert_eq!(duplicates.len(), 1);
-        assert_eq!(duplicates[0]["membership_id"], canonical_membership_id);
-        assert_eq!(duplicates[0]["display_name"], "统一新称呼");
-    }
-
-    // Existing author references keep the historical id, while ACL resolves
-    // the durable alias back to the canonical authenticated membership.
-    let legacy_item_id = Uuid::new_v4().to_string();
-    let connection = rusqlite::Connection::open(&database_path).unwrap();
-    connection
-        .execute(
-            "INSERT INTO family_meta(family_id, rev) VALUES (?1, 1)",
-            rusqlite::params![family_id],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "
-            INSERT INTO entities(
-                family_id, entity_type, client_uuid, updated_at,
-                deleted_at, payload_json, rev
-            ) VALUES (?1, 'custom_item', ?2, 1, NULL, ?3, 1)
-            ",
-            rusqlite::params![
-                family_id,
-                legacy_item_id,
-                json!({
-                    "name": "旧项目",
-                    "icon_slot": 1,
-                    "created_by_membership_id": aliased_membership_id,
-                })
-                .to_string()
-            ],
-        )
-        .unwrap();
-    drop(connection);
-    let (alias_edit_status, alias_edit_body) = json_request(
-        &app,
-        Method::POST,
-        "/v1/push",
-        Some(ordered_duplicates[0].1),
-        json!({
-            "entities": [entity_wire(
-                "custom_item",
-                &legacy_item_id,
-                2,
-                json!({"name": "迁移后项目", "icon_slot": 2}),
-                None,
-            )]
-        }),
-    )
-    .await;
-    assert_eq!(alias_edit_status, StatusCode::OK, "{alias_edit_body}");
-    let (_, after_alias_edit) =
-        get_json(&app, "/v1/pull?cursor=0", Some(ordered_duplicates[1].1)).await;
-    let legacy_item = after_alias_edit["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entity| entity["client_uuid"] == legacy_item_id)
-        .unwrap();
-    assert_eq!(legacy_item["payload"]["name"], "迁移后项目");
-    assert_eq!(
-        legacy_item["payload"]["created_by_membership_id"],
-        aliased_membership_id
-    );
-
-    let restarted = app_for(
-        directory.path(),
-        "membership-normalization-b",
-        now,
-        8,
-        |_| {},
-    );
-    let (_, after_restart) = get_json(
-        &restarted,
-        "/v1/family/members",
-        Some(ordered_duplicates[0].1),
-    )
-    .await;
-    assert_eq!(duplicate_id(&after_restart), canonical_membership_id);
-    let missing_id = |body: &Value| {
-        body["members"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|member| member["device_id"] == "missing-id-device")
-            .unwrap()["membership_id"]
-            .as_str()
-            .unwrap()
-            .to_owned()
-    };
-    assert!(missing_id(&first_view).len() >= 32);
-    assert_eq!(missing_id(&after_restart), missing_id(&first_view));
-    assert!(after_restart["members"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|row| {
-            row["role"] == "owner"
-                && row["device_id"] == "shared-device"
-                && row["membership_id"] == owner_membership_id
-        }));
-    assert!(after_restart["members"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|row| {
-            row["role"] == "member"
-                && row["device_id"] == "shared-device"
-                && row["membership_id"] == role_collision_membership_id
-        }));
-
-    let (_, invitation) = json_request(
-        &restarted,
-        Method::POST,
-        "/v1/invite",
-        Some(owner_token),
-        json!({}),
-    )
-    .await;
-    let (attacker_status, attacker) = json_request(
-        &restarted,
-        Method::POST,
-        "/v1/join",
-        None,
-        json!({
-            "code": invitation["code"],
-            "device_id": "duplicate-device",
-            "display_name": "新加入者",
-        }),
-    )
-    .await;
-    assert_eq!(attacker_status, StatusCode::OK, "{attacker}");
-    assert_ne!(attacker["membership_id"], canonical_membership_id);
-    let (_, with_attacker) = get_json(&restarted, "/v1/family/members", Some(owner_token)).await;
-    assert_eq!(
-        with_attacker["members"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|member| member["device_id"] == "duplicate-device")
-            .count(),
-        2
-    );
-
-    // Credential rotation/revocation is credential-scoped and does not revoke
-    // the canonical membership while another credential remains active.
-    let rotation_connection = rusqlite::Connection::open(&database_path).unwrap();
-    rotation_connection
-        .execute(
-            "
-            UPDATE membership_credentials
-            SET revoked_at = ?1
-            WHERE token_hash = ?2
-            ",
-            rusqlite::params![1_753_418_401_i64, token_hash(ordered_duplicates[0].1)],
-        )
-        .unwrap();
-    drop(rotation_connection);
-    assert_eq!(
-        get_json(
-            &restarted,
-            "/v1/family/members",
-            Some(ordered_duplicates[0].1)
-        )
-        .await
-        .0,
-        StatusCode::UNAUTHORIZED
-    );
-    let (remaining_status, remaining_view) = get_json(
-        &restarted,
-        "/v1/family/members",
-        Some(ordered_duplicates[1].1),
-    )
-    .await;
-    assert_eq!(remaining_status, StatusCode::OK);
-    assert!(remaining_view["members"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|member| {
-            member["membership_id"] == canonical_membership_id && member["is_self"] == true
-        }));
-
-    assert_eq!(
-        json_request(
-            &restarted,
-            Method::POST,
-            "/v1/leave",
-            Some(ordered_duplicates[1].1),
-            json!({}),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    for token in [ordered_duplicates[0].1, ordered_duplicates[1].1] {
-        assert_eq!(
-            get_json(&restarted, "/v1/family/members", Some(token))
-                .await
-                .0,
-            StatusCode::UNAUTHORIZED
-        );
-    }
-    let (_, owner_after_leave) =
-        get_json(&restarted, "/v1/family/members", Some(owner_token)).await;
-    assert!(!owner_after_leave["members"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|member| member["membership_id"] == canonical_membership_id));
-
-    let connection = rusqlite::Connection::open(database_path).unwrap();
-    assert_eq!(
-        connection
-            .query_row(
-                "SELECT canonical_membership_id FROM membership_aliases WHERE alias_membership_id = ?1",
-                rusqlite::params![aliased_membership_id],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap(),
-        canonical_membership_id
-    );
-    assert_eq!(
-        connection
-            .query_row(
-                "SELECT COUNT(*) FROM membership_credentials WHERE membership_id = ?1",
-                rusqlite::params![canonical_membership_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap(),
-        2
-    );
-    assert_eq!(
-        connection
-            .query_row(
-                "
-                SELECT COUNT(*)
-                FROM membership_credentials
-                WHERE membership_id = ?1 AND revoked_at IS NOT NULL
-                ",
-                rusqlite::params![canonical_membership_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap(),
-        2
-    );
-    assert_eq!(
-        connection
-            .query_row(
-                "
-                SELECT COUNT(*)
-                FROM memberships
-                WHERE membership_id = ?1 AND left_at IS NOT NULL
-                ",
-                rusqlite::params![canonical_membership_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        connection
-            .query_row(
-                "SELECT name FROM families WHERE id = ?1",
-                rusqlite::params![family_id],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap(),
-        "迁移家庭"
-    );
-    let membership_columns = connection
-        .prepare("PRAGMA table_info(memberships)")
-        .unwrap()
-        .query_map([], |row| row.get::<_, String>(1))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    assert!(!membership_columns
-        .iter()
-        .any(|column| column == "token_hash"));
-    assert_eq!(
-        connection
-            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .unwrap(),
-        0
-    );
-}
-
-#[tokio::test]
-async fn push_lww_cursor_and_generation_recovery_are_wire_compatible() {
+async fn push_lww_cursor_and_generation_recovery_match_current_protocol() {
     let rig = Rig::new();
     let owner = create_family(
         &rig.app,
@@ -2234,7 +1776,6 @@ async fn ordinary_push_stamps_record_author_from_authenticated_membership() {
     let baby_id = seed_baby(&rig.app, owner_token).await;
     let record_id = Uuid::new_v4().to_string();
     let mut forged_payload = record_payload(&baby_id);
-    forged_payload["created_by_device_id"] = json!("record-author-member-device");
     forged_payload["created_by_membership_id"] = member["membership_id"].clone();
 
     let (push_status, push_body) = json_request(
@@ -2290,10 +1831,10 @@ async fn ordinary_push_stamps_record_author_from_authenticated_membership() {
         record["payload"]["created_by_membership_id"],
         owner["membership_id"]
     );
-    assert_eq!(
-        record["payload"]["created_by_device_id"],
-        "record-author-owner-device"
-    );
+    assert!(!record["payload"]
+        .as_object()
+        .unwrap()
+        .contains_key("created_by_device_id"));
 }
 
 #[tokio::test]
@@ -2336,7 +1877,6 @@ async fn ordinary_push_freezes_first_record_author_across_edit_delete_and_restor
     ] {
         let mut member_payload = record_payload(&baby_id);
         member_payload["note"] = json!(note);
-        member_payload["created_by_device_id"] = json!("record-freeze-member-device");
         member_payload["created_by_membership_id"] = member["membership_id"].clone();
         let (status, body) = json_request(
             &rig.app,
@@ -2368,264 +1908,11 @@ async fn ordinary_push_freezes_first_record_author_across_edit_delete_and_restor
             record["payload"]["created_by_membership_id"],
             owner["membership_id"]
         );
-        assert_eq!(
-            record["payload"]["created_by_device_id"],
-            "record-freeze-owner-device"
-        );
+        assert!(!record["payload"]
+            .as_object()
+            .unwrap()
+            .contains_key("created_by_device_id"));
     }
-}
-
-#[tokio::test]
-async fn legacy_record_without_membership_author_keeps_device_fallback_on_edit() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "legacy-author-owner-device",
-        "legacy-author-owner-request-000001",
-    )
-    .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let member = invite_and_join(&rig.app, owner_token, "legacy-author-member-device").await;
-    let member_token = member["token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, owner_token).await;
-    let record_id = Uuid::new_v4().to_string();
-    let (create_status, create_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(owner_token),
-        json!({
-            "entities": [entity_wire(
-                "record",
-                &record_id,
-                2,
-                record_payload(&baby_id),
-                None,
-            )]
-        }),
-    )
-    .await;
-    assert_eq!(create_status, StatusCode::OK, "{create_body}");
-
-    // Simulate a record persisted by the legacy protocol before membership authors
-    // existed. Database mutation is fixture setup; behavior is still asserted via HTTP.
-    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
-    let stored_payload: String = connection
-        .query_row(
-            "
-            SELECT payload_json
-            FROM entities
-            WHERE entity_type = 'record' AND client_uuid = ?1
-            ",
-            rusqlite::params![record_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let mut legacy_payload: Value = serde_json::from_str(&stored_payload).unwrap();
-    legacy_payload
-        .as_object_mut()
-        .unwrap()
-        .remove("created_by_membership_id");
-    connection
-        .execute(
-            "
-            UPDATE entities
-            SET payload_json = ?1
-            WHERE entity_type = 'record' AND client_uuid = ?2
-            ",
-            rusqlite::params![serde_json::to_string(&legacy_payload).unwrap(), record_id],
-        )
-        .unwrap();
-    drop(connection);
-
-    let mut forged_edit = record_payload(&baby_id);
-    forged_edit["note"] = json!("成员编辑旧记录");
-    forged_edit["created_by_device_id"] = json!("legacy-author-member-device");
-    forged_edit["created_by_membership_id"] = member["membership_id"].clone();
-    let (edit_status, edit_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(member_token),
-        json!({
-            "entities": [entity_wire("record", &record_id, 3, forged_edit, None)]
-        }),
-    )
-    .await;
-    assert_eq!(edit_status, StatusCode::OK, "{edit_body}");
-
-    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(member_token)).await;
-    let record = pull["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entity| entity["type"] == "record" && entity["client_uuid"] == record_id)
-        .expect("legacy record remains visible after edit");
-    assert_eq!(record["payload"]["note"], "成员编辑旧记录");
-    assert_eq!(
-        record["payload"]["created_by_device_id"],
-        "legacy-author-owner-device"
-    );
-    assert!(record["payload"].get("created_by_membership_id").is_none());
-}
-
-#[tokio::test]
-async fn restart_hydrates_only_unique_legacy_record_authors_and_advances_cursor_once() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "shared-legacy-device",
-        "hydrate-record-author-owner-request-000001",
-    )
-    .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let _same_device_member = invite_and_join(&rig.app, owner_token, "shared-legacy-device").await;
-    let _second_same_device_member =
-        invite_and_join(&rig.app, owner_token, "shared-legacy-device").await;
-    let unique_member = invite_and_join(&rig.app, owner_token, "unique-legacy-device").await;
-    let baby_id = seed_baby(&rig.app, owner_token).await;
-    let unique_record_id = Uuid::new_v4().to_string();
-    let ambiguous_record_id = Uuid::new_v4().to_string();
-    let unknown_record_id = Uuid::new_v4().to_string();
-    let empty_record_id = Uuid::new_v4().to_string();
-
-    let mut unique_payload = record_payload(&baby_id);
-    unique_payload["note"] = json!("唯一映射");
-    let mut ambiguous_payload = record_payload(&baby_id);
-    ambiguous_payload["note"] = json!("重复设备");
-    let mut unknown_payload = record_payload(&baby_id);
-    unknown_payload["note"] = json!("未知设备");
-    let mut empty_payload = record_payload(&baby_id);
-    empty_payload["note"] = json!("空设备");
-    let (push_status, push_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(owner_token),
-        json!({
-            "entities": [
-                entity_wire("record", &unique_record_id, 2, unique_payload, None),
-                entity_wire("record", &ambiguous_record_id, 3, ambiguous_payload, None),
-                entity_wire("record", &unknown_record_id, 4, unknown_payload, None),
-                entity_wire("record", &empty_record_id, 5, empty_payload, None),
-            ]
-        }),
-    )
-    .await;
-    assert_eq!(push_status, StatusCode::OK, "{push_body}");
-    let old_cursor = push_body["cursor"].as_i64().unwrap();
-    let family_id = owner["family_id"].as_str().unwrap();
-
-    // Simulate rows written before membership authors existed. The migration must
-    // use only the legacy device link and must not guess when that link is absent
-    // or shared by multiple historical memberships.
-    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
-    for (record_id, legacy_device_id) in [
-        (&unique_record_id, "unique-legacy-device"),
-        (&ambiguous_record_id, "shared-legacy-device"),
-        (&unknown_record_id, "unknown-legacy-device"),
-        (&empty_record_id, ""),
-    ] {
-        let stored_payload: String = connection
-            .query_row(
-                "
-                SELECT payload_json
-                FROM entities
-                WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?2
-                ",
-                rusqlite::params![family_id, record_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let mut legacy_payload: Value = serde_json::from_str(&stored_payload).unwrap();
-        let object = legacy_payload.as_object_mut().unwrap();
-        object.remove("created_by_membership_id");
-        object.insert("created_by_device_id".to_owned(), json!(legacy_device_id));
-        connection
-            .execute(
-                "
-                UPDATE entities
-                SET payload_json = ?1
-                WHERE family_id = ?2 AND entity_type = 'record' AND client_uuid = ?3
-                ",
-                rusqlite::params![
-                    serde_json::to_string(&legacy_payload).unwrap(),
-                    family_id,
-                    record_id
-                ],
-            )
-            .unwrap();
-    }
-    drop(connection);
-
-    let restarted = rig.restart("generation-b");
-    let (pull_status, pull_body) = get_json(
-        &restarted,
-        &format!("/v1/pull?cursor={old_cursor}"),
-        Some(owner_token),
-    )
-    .await;
-    assert_eq!(pull_status, StatusCode::OK, "{pull_body}");
-    let hydrated_cursor = pull_body["cursor"].as_i64().unwrap();
-    assert!(hydrated_cursor > old_cursor, "{pull_body}");
-    let hydrated_records = pull_body["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|entity| entity["type"] == "record")
-        .collect::<Vec<_>>();
-    assert_eq!(hydrated_records.len(), 1, "{pull_body}");
-    assert_eq!(hydrated_records[0]["client_uuid"], unique_record_id);
-    assert_eq!(hydrated_records[0]["updated_at"], 2);
-    assert_eq!(hydrated_records[0]["payload"]["note"], "唯一映射");
-    assert_eq!(
-        hydrated_records[0]["payload"]["created_by_membership_id"],
-        unique_member["membership_id"]
-    );
-    assert_eq!(
-        hydrated_records[0]["payload"]["created_by_device_id"],
-        "unique-legacy-device"
-    );
-
-    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
-    for record_id in [&ambiguous_record_id, &unknown_record_id, &empty_record_id] {
-        let stored_payload: String = connection
-            .query_row(
-                "
-                SELECT payload_json
-                FROM entities
-                WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?2
-                ",
-                rusqlite::params![family_id, record_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let payload: Value = serde_json::from_str(&stored_payload).unwrap();
-        assert!(
-            payload.get("created_by_membership_id").is_none(),
-            "ambiguous/unknown author was guessed for {record_id}: {payload}"
-        );
-    }
-    let stored_family_rev: i64 = connection
-        .query_row(
-            "SELECT rev FROM family_meta WHERE family_id = ?1",
-            rusqlite::params![family_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(stored_family_rev, hydrated_cursor);
-    drop(connection);
-
-    let restarted_again = rig.restart("generation-c");
-    let (second_pull_status, second_pull) = get_json(
-        &restarted_again,
-        &format!("/v1/pull?cursor={hydrated_cursor}"),
-        Some(owner_token),
-    )
-    .await;
-    assert_eq!(second_pull_status, StatusCode::OK, "{second_pull}");
-    assert_eq!(second_pull["cursor"], hydrated_cursor);
-    assert_eq!(second_pull["entities"], json!([]));
 }
 
 #[tokio::test]
@@ -4620,7 +3907,6 @@ async fn atomic_bundle_stamps_and_freezes_first_record_author() {
         let bundle_id = Uuid::new_v4().to_string();
         let mut forged_payload = record_payload(&baby_id);
         forged_payload["note"] = json!(note);
-        forged_payload["created_by_device_id"] = json!("bundle-author-member-device");
         forged_payload["created_by_membership_id"] = member["membership_id"].clone();
         let (stage_status, stage_body) = json_request(
             &rig.app,
@@ -4692,10 +3978,10 @@ async fn atomic_bundle_stamps_and_freezes_first_record_author() {
             record["payload"]["created_by_membership_id"],
             owner["membership_id"]
         );
-        assert_eq!(
-            record["payload"]["created_by_device_id"],
-            "bundle-author-owner-device"
-        );
+        assert!(!record["payload"]
+            .as_object()
+            .unwrap()
+            .contains_key("created_by_device_id"));
     }
 }
 
@@ -4716,7 +4002,6 @@ async fn atomic_bundle_commit_is_bound_to_the_staging_membership() {
     let media_id = Uuid::new_v4().to_string();
     let bundle_id = Uuid::new_v4().to_string();
     let mut forged_payload = record_payload(&baby_id);
-    forged_payload["created_by_device_id"] = json!("bundle-stager-member-device");
     forged_payload["created_by_membership_id"] = member["membership_id"].clone();
 
     let (stage_status, stage_body) = json_request(
@@ -4817,10 +4102,10 @@ async fn atomic_bundle_commit_is_bound_to_the_staging_membership() {
         record["payload"]["created_by_membership_id"],
         owner["membership_id"]
     );
-    assert_eq!(
-        record["payload"]["created_by_device_id"],
-        "bundle-stager-owner-device"
-    );
+    assert!(!record["payload"]
+        .as_object()
+        .unwrap()
+        .contains_key("created_by_device_id"));
 }
 
 #[tokio::test]
@@ -4952,7 +4237,7 @@ async fn foreign_bundle_commit_cannot_leave_claimable_final_bytes() {
             .unwrap()
             .iter()
             .any(|entity| entity["client_uuid"] == media_id),
-        "foreign commit left final bytes that restart claimed as legacy: {pull}"
+        "foreign commit left final bytes that restart claimed as ordinary media: {pull}"
     );
     assert_eq!(
         request(
@@ -5076,81 +4361,6 @@ async fn bundle_media_upload_requires_stager_membership_and_open_status() {
 }
 
 #[tokio::test]
-async fn ambiguous_legacy_bundle_rejects_media_before_writing() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "ambiguous-media-device",
-        "ambiguous-media-owner-request-001",
-    )
-    .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let member = invite_and_join(&rig.app, owner_token, "ambiguous-media-device").await;
-    let member_token = member["token"].as_str().unwrap();
-    let family_id = owner["family_id"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, owner_token).await;
-    let record_id = Uuid::new_v4().to_string();
-    let media_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-    let (stage_status, stage_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(owner_token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire(
-                "record",
-                &record_id,
-                2,
-                record_payload(&baby_id),
-                None,
-            ),
-            "media": [entity_wire(
-                "media",
-                &media_id,
-                2,
-                log_media_payload(&record_id),
-                None,
-            )],
-        }),
-    )
-    .await;
-    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
-    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
-    connection
-        .execute(
-            "ALTER TABLE sync_bundles DROP COLUMN staged_membership_id",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-    let restarted = rig.restart("generation-b");
-    let staged_path = rig
-        .directory
-        .path()
-        .join("media")
-        .join(family_id)
-        .join(".stage")
-        .join(&bundle_id)
-        .join(&media_id);
-
-    for token in [owner_token, member_token] {
-        let response = request(
-            &restarted,
-            Method::PUT,
-            &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
-            Some(token),
-            Body::from("img"),
-            Some("image/jpeg"),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        assert!(!staged_path.exists());
-    }
-}
-
-#[tokio::test]
 async fn equal_ordinary_push_before_commit_repairs_the_committed_bundle_package() {
     let rig = Rig::new();
     let owner = create_family(
@@ -5269,476 +4479,6 @@ async fn equal_ordinary_push_before_commit_repairs_the_committed_bundle_package(
 }
 
 #[tokio::test]
-async fn legacy_staged_root_author_is_canonicalized_before_committed_hash() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "legacy-root-owner-device",
-        "legacy-root-owner-request-000001",
-    )
-    .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, owner_token).await;
-    let record_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-    let root = entity_wire("record", &record_id, 2, record_payload(&baby_id), None);
-    let (stage_status, stage_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(owner_token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": root.clone(),
-            "media": [],
-        }),
-    )
-    .await;
-    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
-
-    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
-    let stored_payload: String = connection
-        .query_row(
-            "
-            SELECT root_payload_json
-            FROM sync_bundles
-            WHERE family_id = ?1 AND bundle_id = ?2
-            ",
-            rusqlite::params![owner["family_id"].as_str().unwrap(), bundle_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let mut legacy_payload: Value = serde_json::from_str(&stored_payload).unwrap();
-    legacy_payload
-        .as_object_mut()
-        .unwrap()
-        .remove("created_by_membership_id");
-    connection
-        .execute(
-            "
-            UPDATE sync_bundles
-            SET root_payload_json = ?1
-            WHERE family_id = ?2 AND bundle_id = ?3
-            ",
-            rusqlite::params![
-                serde_json::to_string(&legacy_payload).unwrap(),
-                owner["family_id"].as_str().unwrap(),
-                bundle_id
-            ],
-        )
-        .unwrap();
-    drop(connection);
-
-    let (commit_status, commit_body) = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(owner_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(commit_status, StatusCode::OK, "{commit_body}");
-    let (restage_status, restaged) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(owner_token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": root,
-            "media": [],
-        }),
-    )
-    .await;
-    assert_eq!(restage_status, StatusCode::OK, "{restaged}");
-    assert_eq!(restaged["status"], "committed");
-    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
-    let record = pull["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entity| entity["type"] == "record" && entity["client_uuid"] == record_id)
-        .expect("legacy staged root is published with a canonical author");
-    assert_eq!(
-        record["payload"]["created_by_membership_id"],
-        owner["membership_id"]
-    );
-}
-
-#[tokio::test]
-async fn legacy_committed_bundle_retry_acks_the_migrated_entity_author() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "legacy-committed-owner-device",
-        "legacy-committed-owner-request-000001",
-    )
-    .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let family_id = owner["family_id"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, owner_token).await;
-    let record_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-    let root = entity_wire("record", &record_id, 2, record_payload(&baby_id), None);
-    let (stage_status, stage_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(owner_token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": root.clone(),
-            "media": [],
-        }),
-    )
-    .await;
-    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
-    let (commit_status, commit_body) = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(owner_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(commit_status, StatusCode::OK, "{commit_body}");
-
-    // Simulate a bundle committed before membership authors existed: entity,
-    // committed snapshot, and the snapshot-derived content hash are all legacy.
-    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
-    let stored_payload: String = connection
-        .query_row(
-            "
-            SELECT payload_json
-            FROM entities
-            WHERE family_id = ?1 AND entity_type = 'record' AND client_uuid = ?2
-            ",
-            rusqlite::params![family_id, record_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let mut legacy_payload: Value = serde_json::from_str(&stored_payload).unwrap();
-    legacy_payload
-        .as_object_mut()
-        .unwrap()
-        .remove("created_by_membership_id");
-    let legacy_payload_json = serde_json::to_string(&legacy_payload).unwrap();
-    let legacy_content_hash = hex::encode(Sha256::digest(
-        serde_json::to_vec(&json!({
-            "root": {
-                "entity_type": "record",
-                "client_uuid": record_id,
-                "updated_at": 2,
-                "deleted_at": null,
-                "payload": legacy_payload,
-            },
-            "media": [],
-        }))
-        .unwrap(),
-    ));
-    connection
-        .execute(
-            "
-            UPDATE entities
-            SET payload_json = ?1
-            WHERE family_id = ?2 AND entity_type = 'record' AND client_uuid = ?3
-            ",
-            rusqlite::params![legacy_payload_json, family_id, record_id],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "
-            UPDATE sync_bundles
-            SET root_payload_json = ?1, content_hash = ?2
-            WHERE family_id = ?3 AND bundle_id = ?4
-            ",
-            rusqlite::params![
-                legacy_payload_json,
-                legacy_content_hash,
-                family_id,
-                bundle_id
-            ],
-        )
-        .unwrap();
-    drop(connection);
-
-    let restarted = rig.restart("generation-b");
-    let (_, pull) = get_json(&restarted, "/v1/pull?cursor=0", Some(owner_token)).await;
-    let migrated_record = pull["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entity| entity["type"] == "record" && entity["client_uuid"] == record_id)
-        .expect("migration keeps the committed record visible");
-    assert_eq!(
-        migrated_record["payload"]["created_by_membership_id"],
-        owner["membership_id"]
-    );
-
-    let (restage_status, restage_body) = json_request(
-        &restarted,
-        Method::POST,
-        "/v1/bundles",
-        Some(owner_token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": root,
-            "media": [],
-        }),
-    )
-    .await;
-    assert_eq!(restage_status, StatusCode::OK, "{restage_body}");
-    assert_eq!(restage_body["status"], "committed");
-
-    let (retry_status, retry_body) = json_request(
-        &restarted,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(owner_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(retry_status, StatusCode::OK, "{retry_body}");
-    assert_eq!(
-        retry_body["record_authors"],
-        json!([{
-            "client_uuid": record_id,
-            "created_by_membership_id": owner["membership_id"],
-        }])
-    );
-}
-
-#[tokio::test]
-async fn legacy_staging_bundle_backfills_only_its_unique_membership() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "legacy-bundle-owner-device",
-        "legacy-bundle-owner-request-000001",
-    )
-    .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let member = invite_and_join(&rig.app, owner_token, "legacy-bundle-member-device").await;
-    let member_token = member["token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, owner_token).await;
-    let record_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-
-    let (stage_status, stage_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(owner_token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire(
-                "record",
-                &record_id,
-                2,
-                record_payload(&baby_id),
-                None,
-            ),
-            "media": [],
-        }),
-    )
-    .await;
-    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
-
-    // Simulate a pre-migration staging row. Restart must derive a membership only
-    // when the stored family/device pair has exactly one active membership.
-    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
-    connection
-        .execute(
-            "ALTER TABLE sync_bundles DROP COLUMN staged_membership_id",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-    let restarted = rig.restart("generation-b");
-
-    let (foreign_status, foreign_body) = json_request(
-        &restarted,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(member_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(foreign_status, StatusCode::CONFLICT, "{foreign_body}");
-
-    let (owner_status, owner_commit) = json_request(
-        &restarted,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(owner_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(owner_status, StatusCode::OK, "{owner_commit}");
-    let (_, pull) = get_json(&restarted, "/v1/pull?cursor=0", Some(owner_token)).await;
-    let record = pull["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entity| entity["type"] == "record" && entity["client_uuid"] == record_id)
-        .expect("safely backfilled legacy bundle commits for its original membership");
-    assert_eq!(
-        record["payload"]["created_by_membership_id"],
-        owner["membership_id"]
-    );
-}
-
-#[tokio::test]
-async fn ambiguous_legacy_staging_membership_fails_closed() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "ambiguous-legacy-device",
-        "ambiguous-legacy-owner-request-001",
-    )
-    .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let member = invite_and_join(&rig.app, owner_token, "ambiguous-legacy-device").await;
-    let member_token = member["token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, owner_token).await;
-    let record_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-
-    let (stage_status, stage_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(owner_token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire(
-                "record",
-                &record_id,
-                2,
-                record_payload(&baby_id),
-                None,
-            ),
-            "media": [],
-        }),
-    )
-    .await;
-    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
-
-    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
-    connection
-        .execute(
-            "ALTER TABLE sync_bundles DROP COLUMN staged_membership_id",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-    let restarted = rig.restart("generation-b");
-
-    for token in [owner_token, member_token] {
-        let (status, body) = json_request(
-            &restarted,
-            Method::POST,
-            &format!("/v1/bundles/{bundle_id}/commit"),
-            Some(token),
-            json!({}),
-        )
-        .await;
-        assert_eq!(status, StatusCode::CONFLICT, "{body}");
-        assert_eq!(
-            body["detail"],
-            "legacy staging bundle has no verifiable membership"
-        );
-    }
-    let (_, pull) = get_json(&restarted, "/v1/pull?cursor=0", Some(owner_token)).await;
-    assert!(!pull["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entity| entity["client_uuid"] == record_id));
-}
-
-#[tokio::test]
-async fn legacy_staging_backfill_counts_left_memberships_before_same_device_rejoin() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "legacy-rejoin-owner-device",
-        "legacy-rejoin-owner-request-00001",
-    )
-    .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let first_member = invite_and_join(&rig.app, owner_token, "legacy-rejoin-shared-device").await;
-    let first_token = first_member["token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, owner_token).await;
-    let record_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-    let (stage_status, stage_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(first_token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire(
-                "record",
-                &record_id,
-                2,
-                record_payload(&baby_id),
-                None,
-            ),
-            "media": [],
-        }),
-    )
-    .await;
-    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
-    assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            "/v1/leave",
-            Some(first_token),
-            json!({}),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    let second_member = invite_and_join(&rig.app, owner_token, "legacy-rejoin-shared-device").await;
-    let second_token = second_member["token"].as_str().unwrap();
-
-    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
-    connection
-        .execute(
-            "ALTER TABLE sync_bundles DROP COLUMN staged_membership_id",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-    let restarted = rig.restart("generation-b");
-
-    let (status, body) = json_request(
-        &restarted,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(second_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{body}");
-    assert_eq!(
-        body["detail"],
-        "legacy staging bundle has no verifiable membership"
-    );
-    let (_, pull) = get_json(&restarted, "/v1/pull?cursor=0", Some(owner_token)).await;
-    assert!(!pull["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entity| entity["client_uuid"] == record_id));
-}
-
-#[tokio::test]
 async fn atomic_bundle_requires_uuid_bundle_id_in_body_and_paths() {
     let rig = Rig::new();
     let created = create_family(
@@ -5750,24 +4490,24 @@ async fn atomic_bundle_requires_uuid_bundle_id_in_body_and_paths() {
     let token = created["token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, token).await;
     let record_id = "11111111-2222-3333-8444-555555555555";
-    let legacy_bundle_id = format!("record:{record_id}:2");
+    let invalid_bundle_id = format!("record:{record_id}:2");
 
-    let (legacy_status, legacy_body) = json_request(
+    let (invalid_status, invalid_body) = json_request(
         &rig.app,
         Method::POST,
         "/v1/bundles",
         Some(token),
         json!({
-            "bundle_id": legacy_bundle_id,
+            "bundle_id": invalid_bundle_id,
             "root": entity_wire("record", record_id, 2, record_payload(&baby_id), None),
             "media": []
         }),
     )
     .await;
     assert_eq!(
-        legacy_status,
+        invalid_status,
         StatusCode::UNPROCESSABLE_ENTITY,
-        "{legacy_body}"
+        "{invalid_body}"
     );
 
     let invalid_path = request(
@@ -6242,7 +4982,7 @@ async fn committed_bundle_retry_revalidates_published_media_after_stage_cleanup(
         )
         .unwrap();
     drop(connection);
-    let unverifiable_legacy_retry = json_request(
+    let missing_digest_retry = json_request(
         &rig.app,
         Method::POST,
         &format!("/v1/bundles/{bundle_id}/commit"),
@@ -6251,58 +4991,10 @@ async fn committed_bundle_retry_revalidates_published_media_after_stage_cleanup(
     )
     .await;
     assert_ne!(
-        unverifiable_legacy_retry.0,
+        missing_digest_retry.0,
         StatusCode::OK,
-        "legacy committed retry trusted published bytes without a digest or staged source: {}",
-        unverifiable_legacy_retry.1
-    );
-
-    fs::create_dir_all(&stage_dir).unwrap();
-    fs::write(stage_dir.join(&media_id), b"img").unwrap();
-    let recoverable_legacy_retry = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(
-        recoverable_legacy_retry.0,
-        StatusCode::OK,
-        "legacy committed retry could not pin a digest from matching staged bytes: {}",
-        recoverable_legacy_retry.1
-    );
-    assert!(!stage_dir.exists(), "legacy retry left staging bytes");
-    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
-    let pinned_sha256: String = connection
-        .query_row(
-            "
-            SELECT staged_sha256
-            FROM sync_bundle_media
-            WHERE family_id = ?1 AND bundle_id = ?2 AND media_uuid = ?3
-            ",
-            rusqlite::params![family_id, bundle_id, media_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(pinned_sha256, hex::encode(Sha256::digest(b"img")));
-    drop(connection);
-
-    fs::write(&published, b"bad").unwrap();
-    let pinned_legacy_corrupt_retry = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(token),
-        json!({}),
-    )
-    .await;
-    assert_ne!(
-        pinned_legacy_corrupt_retry.0,
-        StatusCode::OK,
-        "pinned legacy digest accepted same-size corrupt bytes: {}",
-        pinned_legacy_corrupt_retry.1
+        "committed retry trusted published bytes without a digest: {}",
+        missing_digest_retry.1
     );
 }
 
@@ -6826,12 +5518,12 @@ async fn care_plan_member_acl_and_owner_override() {
 }
 
 #[tokio::test]
-async fn care_plan_rejected_on_legacy_push() {
+async fn care_plan_rejected_on_ordinary_push() {
     let rig = Rig::new();
     let created = create_family(
         &rig.app,
-        "legacy-plan-device",
-        "legacy-plan-request-0000000000001",
+        "ordinary-plan-device",
+        "ordinary-plan-request-000000000001",
     )
     .await;
     let token = created["token"].as_str().unwrap();
@@ -6843,6 +5535,7 @@ async fn care_plan_rejected_on_legacy_push() {
         "/v1/push",
         Some(token),
         json!({
+            "device_id": "ordinary-plan-device",
             "entities": [entity_wire(
                 "care_plan",
                 &plan_id,
@@ -7483,7 +6176,7 @@ async fn atomic_bundle_rejects_stale_root_when_published_is_newer() {
     let baby_id = seed_baby(&rig.app, token).await;
     let record_id = Uuid::new_v4().to_string();
 
-    // Legacy path publishes a newer record.
+    // Ordinary push publishes a newer record.
     let (status, _) = json_request(
         &rig.app,
         Method::POST,
@@ -7528,7 +6221,7 @@ async fn atomic_bundle_rejects_stale_root_when_published_is_newer() {
 }
 
 #[tokio::test]
-async fn pending_bundle_bytes_are_not_claimed_by_legacy_metadata_or_put_across_restart() {
+async fn pending_bundle_bytes_are_not_claimed_by_ordinary_metadata_or_put_across_restart() {
     let rig = Rig::new();
     let created = create_family(
         &rig.app,
@@ -7623,7 +6316,7 @@ async fn pending_bundle_bytes_are_not_claimed_by_legacy_metadata_or_put_across_r
 
     // A same-id refinement removes the old staging manifest. Quarantine
     // ownership must outlive that row, otherwise startup could mistake the
-    // pre-published final-path file for a historical legacy upload.
+    // pre-published final-path file for an ordinary upload.
     let (refine_status, refine_body) = json_request(
         &rig.app,
         Method::POST,
@@ -7644,7 +6337,7 @@ async fn pending_bundle_bytes_are_not_claimed_by_legacy_metadata_or_put_across_r
     .await;
     assert_eq!(refine_status, StatusCode::OK, "{refine_body}");
 
-    let (legacy_status, legacy_body) = json_request(
+    let (ordinary_status, ordinary_body) = json_request(
         &rig.app,
         Method::POST,
         "/v1/push",
@@ -7660,9 +6353,9 @@ async fn pending_bundle_bytes_are_not_claimed_by_legacy_metadata_or_put_across_r
         }),
     )
     .await;
-    assert_eq!(legacy_status, StatusCode::OK, "{legacy_body}");
+    assert_eq!(ordinary_status, StatusCode::OK, "{ordinary_body}");
 
-    let legacy_put = request(
+    let ordinary_put = request(
         &rig.app,
         Method::PUT,
         &format!("/v1/media/{media_id}"),
@@ -7672,14 +6365,14 @@ async fn pending_bundle_bytes_are_not_claimed_by_legacy_metadata_or_put_across_r
     )
     .await;
     assert_eq!(
-        legacy_put.status(),
+        ordinary_put.status(),
         StatusCode::CONFLICT,
-        "legacy PUT claimed media bytes reserved by an incomplete bundle"
+        "ordinary PUT claimed media bytes reserved by an incomplete bundle"
     );
     assert_eq!(
         fs::read(&final_path).unwrap(),
         b"old",
-        "rejected legacy PUT replaced quarantined bundle bytes"
+        "rejected ordinary PUT replaced quarantined bundle bytes"
     );
 
     for app in [&rig.app, &rig.restart("generation-b")] {
@@ -7690,7 +6383,7 @@ async fn pending_bundle_bytes_are_not_claimed_by_legacy_metadata_or_put_across_r
                 .unwrap()
                 .iter()
                 .any(|entity| entity["client_uuid"] == media_id),
-            "metadata-only legacy push claimed bytes from the rejected bundle: {pull}"
+            "metadata-only ordinary push claimed bytes from the rejected bundle: {pull}"
         );
         let response = request(
             app,
@@ -7866,177 +6559,12 @@ async fn losing_bundle_media_tombstone_does_not_publish_quarantined_bytes() {
 }
 
 #[tokio::test]
-async fn v1_staging_bytes_stay_quarantined_after_upgrade_and_manifest_refine() {
+async fn ordinary_push_pull_and_media_remain_available() {
     let rig = Rig::new();
     let created = create_family(
         &rig.app,
-        "v1-staging-media-owner",
-        "v1-staging-media-request-000000001",
-    )
-    .await;
-    let token = created["token"].as_str().unwrap();
-    let baby_id = seed_baby(&rig.app, token).await;
-    let record_id = Uuid::new_v4().to_string();
-    let media_id = Uuid::new_v4().to_string();
-    let bundle_id = Uuid::new_v4().to_string();
-
-    let (newer_status, newer_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({
-            "entities": [entity_wire(
-                "record",
-                &record_id,
-                100,
-                record_payload(&baby_id),
-                None,
-            )],
-        }),
-    )
-    .await;
-    assert_eq!(newer_status, StatusCode::OK, "{newer_body}");
-    let (stage_status, stage_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire(
-                "record",
-                &record_id,
-                50,
-                record_payload(&baby_id),
-                None,
-            ),
-            "media": [entity_wire(
-                "media",
-                &media_id,
-                50,
-                log_media_payload(&record_id),
-                None,
-            )],
-        }),
-    )
-    .await;
-    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
-    assert_eq!(
-        request(
-            &rig.app,
-            Method::PUT,
-            &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
-            Some(token),
-            Body::from("old"),
-            Some("image/jpeg"),
-        )
-        .await
-        .status(),
-        StatusCode::OK
-    );
-    let (commit_status, commit_body) = json_request(
-        &rig.app,
-        Method::POST,
-        &format!("/v1/bundles/{bundle_id}/commit"),
-        Some(token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(commit_status, StatusCode::CONFLICT, "{commit_body}");
-    let (legacy_status, legacy_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({
-            "entities": [entity_wire(
-                "media",
-                &media_id,
-                101,
-                log_media_payload(&record_id),
-                None,
-            )],
-        }),
-    )
-    .await;
-    assert_eq!(legacy_status, StatusCode::OK, "{legacy_body}");
-
-    // Simulate the persisted v1 state: final-path bytes and staging metadata
-    // existed before publication ownership was introduced.
-    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
-    connection
-        .execute_batch(
-            "
-            DROP TABLE media_publications;
-            PRAGMA user_version = 1;
-            ",
-        )
-        .unwrap();
-    drop(connection);
-
-    let upgraded = rig.restart("generation-b");
-    let (_, hidden_after_upgrade) = get_json(&upgraded, "/v1/pull?cursor=0", Some(token)).await;
-    assert!(!hidden_after_upgrade["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entity| entity["client_uuid"] == media_id));
-
-    // Refining the same staging bundle removes its old media manifest. The
-    // upgrade must already have persisted quarantine ownership independently.
-    let (refine_status, refine_body) = json_request(
-        &upgraded,
-        Method::POST,
-        "/v1/bundles",
-        Some(token),
-        json!({
-            "bundle_id": bundle_id,
-            "root": entity_wire(
-                "record",
-                &record_id,
-                50,
-                record_payload(&baby_id),
-                None,
-            ),
-            "media": [],
-        }),
-    )
-    .await;
-    assert_eq!(refine_status, StatusCode::OK, "{refine_body}");
-
-    let restarted = rig.restart("generation-c");
-    let (_, pull) = get_json(&restarted, "/v1/pull?cursor=0", Some(token)).await;
-    assert!(
-        !pull["entities"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entity| entity["client_uuid"] == media_id),
-        "v1 pre-published bytes were misclassified as legacy-owned: {pull}"
-    );
-    assert_eq!(
-        request(
-            &restarted,
-            Method::GET,
-            &format!("/v1/media/{media_id}"),
-            Some(token),
-            Body::empty(),
-            None,
-        )
-        .await
-        .status(),
-        StatusCode::NOT_FOUND
-    );
-}
-
-#[tokio::test]
-async fn legacy_push_pull_media_remain_available_alongside_bundles() {
-    let rig = Rig::new();
-    let created = create_family(
-        &rig.app,
-        "bundle-legacy-owner",
-        "bundle-legacy-request-0000000001",
+        "ordinary-media-owner",
+        "ordinary-media-request-0000000001",
     )
     .await;
     let token = created["token"].as_str().unwrap();
@@ -8049,6 +6577,7 @@ async fn legacy_push_pull_media_remain_available_alongside_bundles() {
         "/v1/push",
         Some(token),
         json!({
+            "device_id": "ordinary-media-owner",
             "entities": [
                 entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
                 entity_wire("media", &media_id, 2, log_media_payload(&record_id), None),
@@ -8076,28 +6605,8 @@ async fn legacy_push_pull_media_remain_available_alongside_bundles() {
         .unwrap()
         .iter()
         .any(|e| e["client_uuid"] == media_id));
-
-    // Upgrade a genuine pre-v2 legacy upload: the new ownership table did not
-    // exist, but its final-path bytes must remain available after migration.
-    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
-    connection
-        .execute_batch(
-            "
-            DROP TABLE media_publications;
-            PRAGMA user_version = 1;
-            ",
-        )
-        .unwrap();
-    drop(connection);
-    let restarted = rig.restart("generation-b");
-    let (_, migrated_pull) = get_json(&restarted, "/v1/pull?cursor=0", Some(token)).await;
-    assert!(migrated_pull["entities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entity| entity["client_uuid"] == media_id));
-    let migrated_bytes = request(
-        &restarted,
+    let bytes = request(
+        &rig.app,
         Method::GET,
         &format!("/v1/media/{media_id}"),
         Some(token),
@@ -8105,20 +6614,12 @@ async fn legacy_push_pull_media_remain_available_alongside_bundles() {
         None,
     )
     .await;
-    assert_eq!(migrated_bytes.status(), StatusCode::OK);
-    assert_eq!(
-        migrated_bytes
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes(),
-        "log"
-    );
+    assert_eq!(bytes.status(), StatusCode::OK);
+    assert_eq!(bytes.into_body().collect().await.unwrap().to_bytes(), "log");
 }
 
 #[tokio::test]
-async fn legacy_put_cannot_overwrite_committed_bundle_media() {
+async fn ordinary_put_cannot_overwrite_committed_bundle_media() {
     let rig = Rig::new();
     let created = create_family(
         &rig.app,
@@ -8207,7 +6708,7 @@ async fn legacy_put_cannot_overwrite_committed_bundle_media() {
 }
 
 // ---------------------------------------------------------------------------
-// Custom item family definitions (legacy push + ACL)
+// Custom item family definitions (ordinary push + ACL)
 // ---------------------------------------------------------------------------
 
 fn custom_item_payload(name: &str, icon_slot: i64) -> Value {
