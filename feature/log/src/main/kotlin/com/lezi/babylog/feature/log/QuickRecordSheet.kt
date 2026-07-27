@@ -57,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.lezi.babylog.core.model.MAX_RECORD_PHOTOS
+import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.ui.CameraCapture
 import com.lezi.babylog.core.ui.RecordTypeIcon
 import com.lezi.babylog.core.ui.presentation
@@ -110,6 +111,8 @@ internal fun QuickRecordSheet(
     val actionsEnabled = !saving && !deleting
     val busy = saving || deleting
     val nowMillis = RecordTime.currentTimeMillis()
+    val sleepPolicy = draft.takeIf { it.type == RecordType.SLEEP }
+        ?.let { sleepComposerPolicy(it, nowMillis) }
     val intervalPreview = draft.intervalDurationPreview(nowMillis)
     val validation = draft.validationResult(nowMillis)
     val canConfirm = validation == null
@@ -255,7 +258,7 @@ internal fun QuickRecordSheet(
                         Color.Unspecified
                     },
                 )
-                Text(sheetTitle(draft), style = LeziTypography.Title)
+                Text(sheetTitle(draft, nowMillis), style = LeziTypography.Title)
             }
             if (onDelete != null) {
                 TextButton(
@@ -293,6 +296,7 @@ internal fun QuickRecordSheet(
                 onStartNursingTimer = onStartNursingTimer,
                 highlightedField = confirmChrome.focusField,
                 fieldFocusRequester = fieldFocusRequester,
+                sleepPolicy = sleepPolicy,
             )
 
             TimeFields(
@@ -308,7 +312,7 @@ internal fun QuickRecordSheet(
                     clockError = null
                     clockTarget = QuickClockTarget.End
                 },
-                onToggleRecordWake = if (draft.sleepAction == SleepDraftAction.SleepDown) {
+                onToggleRecordWake = if (sleepPolicy?.showWakeToggle == true) {
                     { enabled ->
                         dismissKeyboard()
                         update(
@@ -327,6 +331,7 @@ internal fun QuickRecordSheet(
                 accentColor = if (draft.mode == QuickRecordMode.Sleep) typeColor else null,
                 intervalPreview = timeFeedback,
                 highlightedField = confirmChrome.focusField,
+                sleepPolicy = sleepPolicy,
             )
 
             SectionLabel("备注")

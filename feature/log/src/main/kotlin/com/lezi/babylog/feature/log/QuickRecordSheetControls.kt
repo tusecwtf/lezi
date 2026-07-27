@@ -33,6 +33,63 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
+internal data class SleepComposerPolicy(
+    val isPlanIntent: Boolean,
+    val sheetTitle: String,
+    val timeSectionLabel: String,
+    val primaryTimeLabel: String,
+    val showWakeToggle: Boolean,
+    val animationDescription: String,
+)
+
+/** Keep sleep plan chrome intent-only; state actions belong to facts and fulfillment. */
+internal fun sleepComposerPolicy(
+    draft: QuickRecordDraft,
+    nowMillis: Long = com.lezi.babylog.core.model.RecordTime.currentTimeMillis(),
+): SleepComposerPolicy {
+    require(draft.type == RecordType.SLEEP)
+    val workMode = draft.workMode(nowMillis)
+    if (
+        workMode == ComposerWorkMode.ScheduleCare ||
+        workMode == ComposerWorkMode.EditPlan
+    ) {
+        return SleepComposerPolicy(
+            isPlanIntent = true,
+            sheetTitle = "睡眠",
+            timeSectionLabel = "计划时间",
+            primaryTimeLabel = "睡眠",
+            showWakeToggle = false,
+            animationDescription = "月亮图标，安排睡眠",
+        )
+    }
+    return when (draft.sleepAction) {
+        SleepDraftAction.SleepDown -> SleepComposerPolicy(
+            isPlanIntent = false,
+            sheetTitle = "睡下",
+            timeSectionLabel = "睡下时间",
+            primaryTimeLabel = "睡下",
+            showWakeToggle = true,
+            animationDescription = "月亮轻轻摇动，准备睡下",
+        )
+        SleepDraftAction.WakeUp -> SleepComposerPolicy(
+            isPlanIntent = false,
+            sheetTitle = "醒来",
+            timeSectionLabel = "睡眠时间",
+            primaryTimeLabel = "醒来",
+            showWakeToggle = false,
+            animationDescription = "太阳轻轻闪动，准备醒来",
+        )
+        SleepDraftAction.Manual, null -> SleepComposerPolicy(
+            isPlanIntent = false,
+            sheetTitle = "睡眠",
+            timeSectionLabel = "起止时间",
+            primaryTimeLabel = "开始",
+            showWakeToggle = false,
+            animationDescription = "月亮图标，补记睡眠",
+        )
+    }
+}
+
 @Composable
 internal fun TimeFields(
     draft: QuickRecordDraft,
@@ -44,21 +101,31 @@ internal fun TimeFields(
     accentColor: Color? = null,
     intervalPreview: IntervalDurationPreview? = null,
     highlightedField: ComposerInvalidField? = null,
+    sleepPolicy: SleepComposerPolicy? = null,
 ) {
     val container = accentColor?.copy(alpha = 0.18f)
         ?: MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
     val accent = accentColor ?: MaterialTheme.colorScheme.primary
     val startHighlighted = highlightedField == ComposerInvalidField.StartTime
     val endHighlighted = highlightedField == ComposerInvalidField.EndTime
-    SectionLabel(
-        when (draft.sleepAction) {
-            SleepDraftAction.SleepDown -> "睡下时间"
-            SleepDraftAction.WakeUp -> "睡眠时间"
-            SleepDraftAction.Manual -> "起止时间"
-            null -> "记录时间"
-        },
-    )
+    val resolvedSleepPolicy = if (draft.type == RecordType.SLEEP) {
+        sleepPolicy ?: sleepComposerPolicy(draft)
+    } else {
+        null
+    }
+    SectionLabel(resolvedSleepPolicy?.timeSectionLabel ?: "记录时间")
     when {
+        resolvedSleepPolicy?.isPlanIntent == true -> {
+            TimeButton(
+                label = resolvedSleepPolicy.primaryTimeLabel,
+                millis = draft.timestamp,
+                zone = zone,
+                onClick = onOpenStart,
+                containerColor = container,
+                accentColor = accent,
+                highlighted = startHighlighted,
+            )
+        }
         draft.sleepAction == SleepDraftAction.WakeUp -> {
             TimeReadOnly("睡下", draft.timestamp, zone)
             val end = draft.endTimestamp
@@ -360,9 +427,11 @@ internal fun sheetKicker(
     else -> "记录事实"
 }
 
-internal fun sheetTitle(draft: QuickRecordDraft): String = when {
-    draft.sleepAction == SleepDraftAction.SleepDown -> "睡下"
-    draft.sleepAction == SleepDraftAction.WakeUp -> "醒来"
+internal fun sheetTitle(
+    draft: QuickRecordDraft,
+    nowMillis: Long = com.lezi.babylog.core.model.RecordTime.currentTimeMillis(),
+): String = when {
+    draft.type == RecordType.SLEEP -> sleepComposerPolicy(draft, nowMillis).sheetTitle
     draft.type == RecordType.CUSTOM ->
         draft.customTitle.trim().ifBlank { draft.type.presentation.label }
     draft.type == RecordType.OTHER ->

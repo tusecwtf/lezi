@@ -74,6 +74,7 @@ internal fun PurposeFields(
     onStartNursingTimer: () -> Unit,
     highlightedField: ComposerInvalidField? = null,
     fieldFocusRequester: FocusRequester? = null,
+    sleepPolicy: SleepComposerPolicy? = null,
 ) {
     when (draft.mode) {
         QuickRecordMode.Nursing -> NursingFields(
@@ -106,7 +107,10 @@ internal fun PurposeFields(
             PeeFields(draft, onDraftChange, highlightedField = highlightedField)
             StoolFields(draft, onDraftChange, highlightedField = highlightedField)
         }
-        QuickRecordMode.Sleep -> SleepFields(draft)
+        QuickRecordMode.Sleep -> SleepFields(
+            draft = draft,
+            policy = sleepPolicy ?: sleepComposerPolicy(draft),
+        )
         QuickRecordMode.Temperature -> TemperatureFields(
             draft = draft,
             birthdayEpochDay = birthdayEpochDay,
@@ -477,17 +481,26 @@ private fun ExcretionChoice(
 }
 
 @Composable
-private fun SleepFields(draft: QuickRecordDraft) {
+private fun SleepFields(
+    draft: QuickRecordDraft,
+    policy: SleepComposerPolicy,
+) {
     Column(
         Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        SleepActionAnimation(draft.sleepAction ?: SleepDraftAction.Manual)
+        SleepActionAnimation(
+            action = draft.sleepAction ?: SleepDraftAction.Manual,
+            animationDescription = policy.animationDescription,
+        )
     }
 }
 
 @Composable
-private fun SleepActionAnimation(action: SleepDraftAction) {
+private fun SleepActionAnimation(
+    action: SleepDraftAction,
+    animationDescription: String,
+) {
     val transition = rememberInfiniteTransition(label = "sleep-action")
     val bob by transition.animateFloat(
         initialValue = -2f,
@@ -514,11 +527,7 @@ private fun SleepActionAnimation(action: SleepDraftAction) {
         modifier = Modifier
             .size(72.dp)
             .semantics {
-                contentDescription = when (action) {
-                    SleepDraftAction.SleepDown -> "月亮轻轻摇动，准备睡下"
-                    SleepDraftAction.WakeUp -> "太阳轻轻闪动，准备醒来"
-                    SleepDraftAction.Manual -> "月亮图标，补记睡眠"
-                }
+                contentDescription = animationDescription
             }
             .graphicsLayer {
                 translationY = if (action == SleepDraftAction.WakeUp) 0f else bob

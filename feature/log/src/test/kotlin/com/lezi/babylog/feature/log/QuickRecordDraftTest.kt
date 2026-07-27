@@ -739,6 +739,47 @@ class QuickRecordDraftTest {
     }
 
     @Test
+    fun sleepPlanChromeIsNeutralWhileFactAndFulfillKeepStateActions() {
+        val schedule = QuickRecordDraft.create(
+            type = RecordType.SLEEP,
+            timestamp = tappedAt + 60_000L,
+            createIntent = ComposerCreateIntent.ScheduleCare,
+        )
+        val schedulePolicy = sleepComposerPolicy(schedule, nowMillis = tappedAt)
+
+        assertTrue(schedulePolicy.isPlanIntent)
+        assertEquals("睡眠", schedulePolicy.sheetTitle)
+        assertEquals("计划时间", schedulePolicy.timeSectionLabel)
+        assertEquals("睡眠", schedulePolicy.primaryTimeLabel)
+        assertFalse(schedulePolicy.showWakeToggle)
+        assertEquals("月亮图标，安排睡眠", schedulePolicy.animationDescription)
+
+        val derivedSchedule = schedule.copy(
+            createIntent = ComposerCreateIntent.DeriveFromTimestamp,
+        )
+        assertTrue(sleepComposerPolicy(derivedSchedule, nowMillis = tappedAt).isPlanIntent)
+
+        val editPlan = schedule.copy(
+            carePlanId = 9L,
+            editCarePlan = true,
+            timestamp = tappedAt - 1L,
+        )
+        assertTrue(sleepComposerPolicy(editPlan, nowMillis = tappedAt).isPlanIntent)
+
+        val fulfill = schedule.copy(
+            carePlanId = 9L,
+            editCarePlan = false,
+            timestamp = tappedAt,
+        )
+        val fulfillPolicy = sleepComposerPolicy(fulfill, nowMillis = tappedAt + 1L)
+        assertFalse(fulfillPolicy.isPlanIntent)
+        assertEquals("睡下", fulfillPolicy.sheetTitle)
+        assertEquals("睡下时间", fulfillPolicy.timeSectionLabel)
+        assertTrue(fulfillPolicy.showWakeToggle)
+        assertEquals("月亮轻轻摇动，准备睡下", fulfillPolicy.animationDescription)
+    }
+
+    @Test
     fun fromCarePlanHydratesPlanFieldSnapshotIntoFulfillDraft() {
         val plan = com.lezi.babylog.core.model.CarePlan(
             id = 9L,
