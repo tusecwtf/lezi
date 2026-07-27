@@ -17,7 +17,7 @@ use crate::model::{Entity, MAX_BUNDLE_MEDIA_ENTITIES, MAX_OPEN_STAGING_BUNDLES_P
 use crate::{PULL_ENTITY_TARGET_BYTES, PULL_PAGE_ENTITY_LIMIT, PULL_PAGE_TARGET_BYTES};
 
 const ENTITY_QUERY_CHUNK_SIZE: usize = 400;
-const DATABASE_SCHEMA_VERSION: i64 = 1;
+const DATABASE_SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, Clone)]
 pub struct Principal {
@@ -354,6 +354,15 @@ impl Store {
                 FOREIGN KEY (family_id, bundle_id)
                     REFERENCES sync_bundles(family_id, bundle_id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS media_publications (
+                family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+                media_uuid TEXT NOT NULL,
+                source TEXT NOT NULL
+                    CHECK(source IN ('legacy', 'bundle_pending', 'bundle')),
+                bundle_id TEXT,
+                PRIMARY KEY (family_id, media_uuid)
+            );
             ",
         )?;
 
@@ -438,6 +447,45 @@ impl Store {
             CREATE INDEX IF NOT EXISTS memberships_family
                 ON memberships(family_id);
             ",
+        )?;
+        // A committed bundle is authoritative ownership of its final-path
+        // bytes. Restore it first so committed ownership wins before remaining
+        // staging manifests are quarantined below.
+        connection.execute(
+            "
+            INSERT OR IGNORE INTO media_publications(
+                family_id, media_uuid, source, bundle_id
+            )
+            SELECT media.family_id, media.media_uuid, 'bundle', media.bundle_id
+            FROM sync_bundle_media AS media
+            JOIN sync_bundles AS bundle
+              ON bundle.family_id = media.family_id
+             AND bundle.bundle_id = media.bundle_id
+            WHERE bundle.status = 'committed'
+            ",
+            [],
+        )?;
+        // v1 could crash or fail validation after publishing final-path bytes,
+        // before any explicit ownership existed. Persist quarantine for every
+        // remaining staging manifest during upgrade so a later refine/cleanup
+        // cannot make those bytes look like an old legacy upload. Committed or
+        // pre-existing explicit legacy ownership always wins via OR IGNORE.
+        connection.execute(
+            "
+            INSERT OR IGNORE INTO media_publications(
+                family_id, media_uuid, source, bundle_id
+            )
+            SELECT media.family_id,
+                   media.media_uuid,
+                   'bundle_pending',
+                   media.bundle_id
+            FROM sync_bundle_media AS media
+            JOIN sync_bundles AS bundle
+              ON bundle.family_id = media.family_id
+             AND bundle.bundle_id = media.bundle_id
+            WHERE bundle.status = 'staging'
+            ",
+            [],
         )?;
         // Expand entities CHECK for care_plan, custom_item, fulfillment_candidate.
         ensure_entities_allow_care_plan_and_custom_item(&connection)?;
@@ -1078,8 +1126,203 @@ impl Store {
         }
     }
 
-    /// Bump a live media entity's revision after its bytes become available so
-    /// pull clients that advanced past the incomplete metadata rev see it again.
+    pub fn is_media_published(
+        &self,
+        family_id: &str,
+        client_uuid: &str,
+    ) -> Result<bool, StoreError> {
+        let connection = self.connect()?;
+        Ok(connection
+            .query_row(
+                "
+                SELECT 1 FROM media_publications
+                WHERE family_id = ?1 AND media_uuid = ?2
+                  AND source != 'bundle_pending'
+                ",
+                params![family_id, client_uuid],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    pub fn published_media(
+        &self,
+        family_id: &str,
+        client_uuids: &BTreeSet<String>,
+    ) -> Result<BTreeSet<String>, StoreError> {
+        if client_uuids.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        let connection = self.connect()?;
+        let ids = client_uuids.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut published = BTreeSet::new();
+        for chunk in ids.chunks(ENTITY_QUERY_CHUNK_SIZE) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let sql = format!(
+                "
+                SELECT media_uuid FROM media_publications
+                WHERE family_id = ?
+                  AND source != 'bundle_pending'
+                  AND media_uuid IN ({placeholders})
+                "
+            );
+            let mut parameters = Vec::with_capacity(chunk.len() + 1);
+            parameters.push(SqlValue::Text(family_id.to_owned()));
+            parameters.extend(
+                chunk
+                    .iter()
+                    .map(|client_uuid| SqlValue::Text((*client_uuid).to_owned())),
+            );
+            let mut statement = connection.prepare(&sql)?;
+            for media_uuid in
+                statement.query_map(params_from_iter(parameters), |row| row.get::<_, String>(0))?
+            {
+                published.insert(media_uuid?);
+            }
+        }
+        Ok(published)
+    }
+
+    /// Existing pre-v2 legacy uploads had no explicit ownership row. Startup
+    /// inspects their final-path bytes and calls this method to retain them, but
+    /// only when no uncommitted bundle reserves the same UUID. That exclusion
+    /// prevents a failed pre-publication from becoming legacy-owned on restart.
+    pub fn backfill_legacy_media_publication(
+        &self,
+        family_id: &str,
+        client_uuid: &str,
+    ) -> Result<bool, StoreError> {
+        let connection = self.connect()?;
+        let inserted = connection.execute(
+            "
+            INSERT OR IGNORE INTO media_publications(
+                family_id, media_uuid, source, bundle_id
+            )
+            SELECT ?1, ?2, 'legacy', NULL
+            WHERE EXISTS (
+                SELECT 1 FROM entities
+                WHERE family_id = ?1
+                  AND entity_type = 'media'
+                  AND client_uuid = ?2
+                  AND deleted_at IS NULL
+            )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM sync_bundle_media AS media
+                JOIN sync_bundles AS bundle
+                  ON bundle.family_id = media.family_id
+                 AND bundle.bundle_id = media.bundle_id
+                WHERE media.family_id = ?1
+                  AND media.media_uuid = ?2
+                  AND bundle.status = 'staging'
+            )
+            ",
+            params![family_id, client_uuid],
+        )?;
+        self.secure_database_files()?;
+        Ok(inserted > 0)
+    }
+
+    /// Persist quarantine ownership after the final-path file has been fsynced,
+    /// but before bundle validation and publication enter SQLite. A failed
+    /// commit therefore leaves durable bytes explicitly unservable across
+    /// restart; a successful commit promotes this row in its publish transaction.
+    pub fn mark_bundle_media_prepared(
+        &self,
+        principal: &Principal,
+        bundle_id: &str,
+        media_uuid: &str,
+    ) -> Result<(), StoreError> {
+        let family_id = &principal.family_id;
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row = load_bundle_row(&transaction, family_id, bundle_id)?
+            .ok_or(StoreError::BundleNotFound)?;
+        if row.status == "committed" {
+            return Ok(());
+        }
+        match row.staged_membership_id.as_deref() {
+            Some(staged_membership_id)
+                if staged_membership_id == principal.membership_id.as_str() => {}
+            Some(_) => return Err(StoreError::BundleMembershipMismatch),
+            None => return Err(StoreError::LegacyBundleMembershipUnknown),
+        }
+        let declared = transaction
+            .query_row(
+                "
+                SELECT 1 FROM sync_bundle_media
+                WHERE family_id = ?1 AND bundle_id = ?2 AND media_uuid = ?3
+                ",
+                params![family_id, bundle_id, media_uuid],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !declared {
+            return Err(StoreError::BundleMediaNotInManifest);
+        }
+        // Preserve an already committed legacy/bundle owner. Reusing identical
+        // bytes in a rejected bundle must not hide a previously valid upload.
+        transaction.execute(
+            "
+            INSERT OR IGNORE INTO media_publications(
+                family_id, media_uuid, source, bundle_id
+            ) VALUES (?1, ?2, 'bundle_pending', ?3)
+            ",
+            params![family_id, media_uuid, bundle_id],
+        )?;
+        transaction.commit()?;
+        self.secure_database_files()?;
+        Ok(())
+    }
+
+    pub fn unowned_live_media(&self) -> Result<Vec<(String, String, Option<usize>)>, StoreError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "
+            SELECT entities.family_id, entities.client_uuid, entities.payload_json
+            FROM entities
+            LEFT JOIN media_publications
+              ON media_publications.family_id = entities.family_id
+             AND media_publications.media_uuid = entities.client_uuid
+            WHERE entities.entity_type = 'media'
+              AND entities.deleted_at IS NULL
+              AND media_publications.media_uuid IS NULL
+            ORDER BY entities.family_id COLLATE BINARY,
+                     entities.client_uuid COLLATE BINARY
+            ",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(family_id, client_uuid, payload_json)| {
+                let payload = parse_payload(&payload_json)?;
+                let byte_size = payload
+                    .get("byte_size")
+                    .map(|value| {
+                        value
+                            .as_u64()
+                            .and_then(|size| usize::try_from(size).ok())
+                            .ok_or(StoreError::InvalidStoredPayload)
+                    })
+                    .transpose()?;
+                Ok((family_id, client_uuid, byte_size))
+            })
+            .collect()
+    }
+
+    /// Atomically claim final-path bytes for an explicit legacy PUT and bump the
+    /// live metadata revision so clients that skipped it see it again.
     pub fn republish_media(&self, family_id: &str, client_uuid: &str) -> Result<bool, StoreError> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1100,6 +1343,16 @@ impl Store {
         if !live {
             return Ok(false);
         }
+        transaction.execute(
+            "
+            INSERT INTO media_publications(family_id, media_uuid, source, bundle_id)
+            VALUES (?1, ?2, 'legacy', NULL)
+            ON CONFLICT(family_id, media_uuid) DO UPDATE SET
+                source = 'legacy',
+                bundle_id = NULL
+            ",
+            params![family_id, client_uuid],
+        )?;
         let mut cursor: i64 = transaction.query_row(
             "SELECT rev FROM family_meta WHERE family_id = ?1",
             params![family_id],
@@ -1631,6 +1884,41 @@ impl Store {
             "UPDATE family_meta SET rev = ?1 WHERE family_id = ?2",
             params![cursor, family_id],
         )?;
+        for entity in &media {
+            let published_deleted_at = transaction
+                .query_row(
+                    "
+                    SELECT deleted_at FROM entities
+                    WHERE family_id = ?1
+                      AND entity_type = 'media'
+                      AND client_uuid = ?2
+                    ",
+                    params![family_id, entity.client_uuid],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .optional()?;
+            if published_deleted_at != Some(None) {
+                transaction.execute(
+                    "
+                    DELETE FROM media_publications
+                    WHERE family_id = ?1 AND media_uuid = ?2
+                    ",
+                    params![family_id, entity.client_uuid],
+                )?;
+                continue;
+            }
+            transaction.execute(
+                "
+                INSERT INTO media_publications(
+                    family_id, media_uuid, source, bundle_id
+                ) VALUES (?1, ?2, 'bundle', ?3)
+                ON CONFLICT(family_id, media_uuid) DO UPDATE SET
+                    source = 'bundle',
+                    bundle_id = excluded.bundle_id
+                ",
+                params![family_id, entity.client_uuid, bundle_id],
+            )?;
+        }
         transaction.execute(
             "
             UPDATE sync_bundles
@@ -2707,7 +2995,113 @@ fn hydrate_legacy_record_authors(connection: &mut Connection) -> Result<(), Stor
             ],
         )?;
     }
+    normalize_committed_record_bundle_authors(&transaction)?;
     transaction.commit()?;
+    Ok(())
+}
+
+/// Keep historical committed bundle identity aligned with the canonical Record
+/// author hydrated into `entities`. Android retries stage before commit; both the
+/// immutable snapshot and its hash therefore must normalize in the same startup
+/// transaction or a semantically identical retry conflicts on `bundle_id`.
+fn normalize_committed_record_bundle_authors(
+    transaction: &Transaction<'_>,
+) -> Result<(), StoreError> {
+    let rows = {
+        let mut statement = transaction.prepare(
+            "
+            SELECT bundle.family_id,
+                   bundle.bundle_id,
+                   bundle.root_client_uuid,
+                   bundle.root_updated_at,
+                   bundle.root_deleted_at,
+                   bundle.root_payload_json,
+                   bundle.media_entities_json,
+                   entity.payload_json,
+                   bundle.content_hash
+            FROM sync_bundles AS bundle
+            JOIN entities AS entity
+              ON entity.family_id = bundle.family_id
+             AND entity.entity_type = 'record'
+             AND entity.client_uuid = bundle.root_client_uuid
+            WHERE bundle.status = 'committed'
+              AND bundle.root_type = 'record'
+            ORDER BY bundle.family_id COLLATE BINARY,
+                     bundle.bundle_id COLLATE BINARY
+            ",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+
+    for (
+        family_id,
+        bundle_id,
+        client_uuid,
+        updated_at,
+        deleted_at,
+        root_payload_json,
+        media_entities_json,
+        entity_payload_json,
+        stored_content_hash,
+    ) in rows
+    {
+        let entity_payload = parse_payload(&entity_payload_json)?;
+        let Some(membership_id) = entity_payload
+            .get("created_by_membership_id")
+            .and_then(Value::as_str)
+            .filter(|membership_id| !membership_id.is_empty())
+        else {
+            continue;
+        };
+        let mut root_payload = parse_payload(&root_payload_json)?;
+        root_payload.insert(
+            "created_by_membership_id".to_owned(),
+            Value::String(membership_id.to_owned()),
+        );
+        let root = Entity {
+            entity_type: "record".to_owned(),
+            client_uuid,
+            updated_at,
+            deleted_at,
+            payload: root_payload,
+        };
+        let media: Vec<Entity> = serde_json::from_str(&media_entities_json)?;
+        let normalized_payload_json = serde_json::to_string(&root.payload)?;
+        let normalized_content_hash = bundle_content_hash(&root, &media)?;
+        if root_payload_json == normalized_payload_json
+            && stored_content_hash == normalized_content_hash
+        {
+            continue;
+        }
+        transaction.execute(
+            "
+            UPDATE sync_bundles
+            SET root_payload_json = ?1, content_hash = ?2
+            WHERE family_id = ?3 AND bundle_id = ?4
+            ",
+            params![
+                normalized_payload_json,
+                normalized_content_hash,
+                family_id,
+                bundle_id
+            ],
+        )?;
+    }
     Ok(())
 }
 

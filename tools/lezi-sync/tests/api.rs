@@ -300,7 +300,7 @@ async fn database_schema_version_is_explicit_and_legacy_zero_upgrade_preserves_d
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        1
+        2
     );
     connection
         .execute(
@@ -331,7 +331,7 @@ async fn database_schema_version_is_explicit_and_legacy_zero_upgrade_preserves_d
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        1
+        2
     );
     assert!(connection
         .prepare("PRAGMA table_info(sync_bundle_media)")
@@ -351,7 +351,7 @@ fn future_database_schema_version_fails_closed_without_mutation() {
     connection
         .execute_batch(
             "
-            PRAGMA user_version = 2;
+            PRAGMA user_version = 3;
             CREATE TABLE future_sentinel(value TEXT NOT NULL);
             INSERT INTO future_sentinel(value) VALUES ('preserve-me');
             ",
@@ -411,7 +411,7 @@ fn future_database_schema_version_fails_closed_without_mutation() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        2
+        3
     );
     assert_eq!(
         connection
@@ -4414,6 +4414,7 @@ async fn atomic_bundle_commit_is_bound_to_the_staging_membership() {
     let member_token = member["token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, owner_token).await;
     let record_id = Uuid::new_v4().to_string();
+    let media_id = Uuid::new_v4().to_string();
     let bundle_id = Uuid::new_v4().to_string();
     let mut forged_payload = record_payload(&baby_id);
     forged_payload["created_by_device_id"] = json!("bundle-stager-member-device");
@@ -4427,11 +4428,30 @@ async fn atomic_bundle_commit_is_bound_to_the_staging_membership() {
         json!({
             "bundle_id": bundle_id,
             "root": entity_wire("record", &record_id, 2, forged_payload, None),
-            "media": [],
+            "media": [entity_wire(
+                "media",
+                &media_id,
+                2,
+                log_media_payload(&record_id),
+                None,
+            )],
         }),
     )
     .await;
     assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
+    assert_eq!(
+        request(
+            &rig.app,
+            Method::PUT,
+            &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
+            Some(owner_token),
+            Body::from("img"),
+            Some("image/jpeg"),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
 
     let (foreign_commit_status, foreign_commit_body) = json_request(
         &rig.app,
@@ -4452,6 +4472,19 @@ async fn atomic_bundle_commit_is_bound_to_the_staging_membership() {
         .unwrap()
         .iter()
         .any(|entity| entity["client_uuid"] == record_id));
+    assert_eq!(
+        request(
+            &rig.app,
+            Method::GET,
+            &format!("/v1/media/{media_id}"),
+            Some(owner_token),
+            Body::empty(),
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
 
     let (commit_status, committed) = json_request(
         &rig.app,
@@ -4901,6 +4934,7 @@ async fn legacy_committed_bundle_retry_acks_the_migrated_entity_author() {
     let baby_id = seed_baby(&rig.app, owner_token).await;
     let record_id = Uuid::new_v4().to_string();
     let bundle_id = Uuid::new_v4().to_string();
+    let root = entity_wire("record", &record_id, 2, record_payload(&baby_id), None);
     let (stage_status, stage_body) = json_request(
         &rig.app,
         Method::POST,
@@ -4908,13 +4942,7 @@ async fn legacy_committed_bundle_retry_acks_the_migrated_entity_author() {
         Some(owner_token),
         json!({
             "bundle_id": bundle_id,
-            "root": entity_wire(
-                "record",
-                &record_id,
-                2,
-                record_payload(&baby_id),
-                None,
-            ),
+            "root": root.clone(),
             "media": [],
         }),
     )
@@ -4930,9 +4958,8 @@ async fn legacy_committed_bundle_retry_acks_the_migrated_entity_author() {
     .await;
     assert_eq!(commit_status, StatusCode::OK, "{commit_body}");
 
-    // Simulate a bundle committed before membership authors existed. Startup
-    // migration repairs the published entity, but the immutable committed
-    // snapshot intentionally remains legacy for content-hash compatibility.
+    // Simulate a bundle committed before membership authors existed: entity,
+    // committed snapshot, and the snapshot-derived content hash are all legacy.
     let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
     let stored_payload: String = connection
         .query_row(
@@ -4951,6 +4978,19 @@ async fn legacy_committed_bundle_retry_acks_the_migrated_entity_author() {
         .unwrap()
         .remove("created_by_membership_id");
     let legacy_payload_json = serde_json::to_string(&legacy_payload).unwrap();
+    let legacy_content_hash = hex::encode(Sha256::digest(
+        serde_json::to_vec(&json!({
+            "root": {
+                "entity_type": "record",
+                "client_uuid": record_id,
+                "updated_at": 2,
+                "deleted_at": null,
+                "payload": legacy_payload,
+            },
+            "media": [],
+        }))
+        .unwrap(),
+    ));
     connection
         .execute(
             "
@@ -4965,10 +5005,15 @@ async fn legacy_committed_bundle_retry_acks_the_migrated_entity_author() {
         .execute(
             "
             UPDATE sync_bundles
-            SET root_payload_json = ?1
-            WHERE family_id = ?2 AND bundle_id = ?3
+            SET root_payload_json = ?1, content_hash = ?2
+            WHERE family_id = ?3 AND bundle_id = ?4
             ",
-            rusqlite::params![legacy_payload_json, family_id, bundle_id],
+            rusqlite::params![
+                legacy_payload_json,
+                legacy_content_hash,
+                family_id,
+                bundle_id
+            ],
         )
         .unwrap();
     drop(connection);
@@ -4985,6 +5030,21 @@ async fn legacy_committed_bundle_retry_acks_the_migrated_entity_author() {
         migrated_record["payload"]["created_by_membership_id"],
         owner["membership_id"]
     );
+
+    let (restage_status, restage_body) = json_request(
+        &restarted,
+        Method::POST,
+        "/v1/bundles",
+        Some(owner_token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": root,
+            "media": [],
+        }),
+    )
+    .await;
+    assert_eq!(restage_status, StatusCode::OK, "{restage_body}");
+    assert_eq!(restage_body["status"], "committed");
 
     let (retry_status, retry_body) = json_request(
         &restarted,
@@ -7023,6 +7083,329 @@ async fn atomic_bundle_rejects_stale_root_when_published_is_newer() {
 }
 
 #[tokio::test]
+async fn stale_bundle_bytes_are_not_claimed_by_legacy_metadata_after_restart() {
+    let rig = Rig::new();
+    let created = create_family(
+        &rig.app,
+        "bundle-stale-media-owner",
+        "bundle-stale-media-request-00001",
+    )
+    .await;
+    let token = created["token"].as_str().unwrap();
+    let family_id = created["family_id"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let media_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+
+    let (newer_status, newer_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({
+            "entities": [entity_wire(
+                "record",
+                &record_id,
+                100,
+                record_payload(&baby_id),
+                None,
+            )],
+        }),
+    )
+    .await;
+    assert_eq!(newer_status, StatusCode::OK, "{newer_body}");
+
+    let (stage_status, stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire(
+                "record",
+                &record_id,
+                50,
+                record_payload(&baby_id),
+                None,
+            ),
+            "media": [entity_wire(
+                "media",
+                &media_id,
+                50,
+                log_media_payload(&record_id),
+                None,
+            )],
+        }),
+    )
+    .await;
+    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
+    assert_eq!(
+        request(
+            &rig.app,
+            Method::PUT,
+            &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
+            Some(token),
+            Body::from("old"),
+            Some("image/jpeg"),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let (commit_status, commit_body) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(commit_status, StatusCode::CONFLICT, "{commit_body}");
+
+    let final_path = rig
+        .directory
+        .path()
+        .join("media")
+        .join(family_id)
+        .join(&media_id);
+    assert_eq!(
+        fs::read(&final_path).unwrap(),
+        b"old",
+        "bundle bytes must be durable before the SQLite publish attempt"
+    );
+
+    // A same-id refinement removes the old staging manifest. Quarantine
+    // ownership must outlive that row, otherwise startup could mistake the
+    // pre-published final-path file for a historical legacy upload.
+    let (refine_status, refine_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire(
+                "record",
+                &record_id,
+                50,
+                record_payload(&baby_id),
+                None,
+            ),
+            "media": [],
+        }),
+    )
+    .await;
+    assert_eq!(refine_status, StatusCode::OK, "{refine_body}");
+
+    let (legacy_status, legacy_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({
+            "entities": [entity_wire(
+                "media",
+                &media_id,
+                101,
+                log_media_payload(&record_id),
+                None,
+            )],
+        }),
+    )
+    .await;
+    assert_eq!(legacy_status, StatusCode::OK, "{legacy_body}");
+
+    for app in [&rig.app, &rig.restart("generation-b")] {
+        let (_, pull) = get_json(app, "/v1/pull?cursor=0", Some(token)).await;
+        assert!(
+            !pull["entities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entity| entity["client_uuid"] == media_id),
+            "metadata-only legacy push claimed bytes from the rejected bundle: {pull}"
+        );
+        let response = request(
+            app,
+            Method::GET,
+            &format!("/v1/media/{media_id}"),
+            Some(token),
+            Body::empty(),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+}
+
+#[tokio::test]
+async fn v1_staging_bytes_stay_quarantined_after_upgrade_and_manifest_refine() {
+    let rig = Rig::new();
+    let created = create_family(
+        &rig.app,
+        "v1-staging-media-owner",
+        "v1-staging-media-request-000000001",
+    )
+    .await;
+    let token = created["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let media_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+
+    let (newer_status, newer_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({
+            "entities": [entity_wire(
+                "record",
+                &record_id,
+                100,
+                record_payload(&baby_id),
+                None,
+            )],
+        }),
+    )
+    .await;
+    assert_eq!(newer_status, StatusCode::OK, "{newer_body}");
+    let (stage_status, stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire(
+                "record",
+                &record_id,
+                50,
+                record_payload(&baby_id),
+                None,
+            ),
+            "media": [entity_wire(
+                "media",
+                &media_id,
+                50,
+                log_media_payload(&record_id),
+                None,
+            )],
+        }),
+    )
+    .await;
+    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
+    assert_eq!(
+        request(
+            &rig.app,
+            Method::PUT,
+            &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
+            Some(token),
+            Body::from("old"),
+            Some("image/jpeg"),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let (commit_status, commit_body) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(commit_status, StatusCode::CONFLICT, "{commit_body}");
+    let (legacy_status, legacy_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({
+            "entities": [entity_wire(
+                "media",
+                &media_id,
+                101,
+                log_media_payload(&record_id),
+                None,
+            )],
+        }),
+    )
+    .await;
+    assert_eq!(legacy_status, StatusCode::OK, "{legacy_body}");
+
+    // Simulate the persisted v1 state: final-path bytes and staging metadata
+    // existed before publication ownership was introduced.
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute_batch(
+            "
+            DROP TABLE media_publications;
+            PRAGMA user_version = 1;
+            ",
+        )
+        .unwrap();
+    drop(connection);
+
+    let upgraded = rig.restart("generation-b");
+    let (_, hidden_after_upgrade) = get_json(&upgraded, "/v1/pull?cursor=0", Some(token)).await;
+    assert!(!hidden_after_upgrade["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entity| entity["client_uuid"] == media_id));
+
+    // Refining the same staging bundle removes its old media manifest. The
+    // upgrade must already have persisted quarantine ownership independently.
+    let (refine_status, refine_body) = json_request(
+        &upgraded,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire(
+                "record",
+                &record_id,
+                50,
+                record_payload(&baby_id),
+                None,
+            ),
+            "media": [],
+        }),
+    )
+    .await;
+    assert_eq!(refine_status, StatusCode::OK, "{refine_body}");
+
+    let restarted = rig.restart("generation-c");
+    let (_, pull) = get_json(&restarted, "/v1/pull?cursor=0", Some(token)).await;
+    assert!(
+        !pull["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entity| entity["client_uuid"] == media_id),
+        "v1 pre-published bytes were misclassified as legacy-owned: {pull}"
+    );
+    assert_eq!(
+        request(
+            &restarted,
+            Method::GET,
+            &format!("/v1/media/{media_id}"),
+            Some(token),
+            Body::empty(),
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
 async fn legacy_push_pull_media_remain_available_alongside_bundles() {
     let rig = Rig::new();
     let created = create_family(
@@ -7068,6 +7451,45 @@ async fn legacy_push_pull_media_remain_available_alongside_bundles() {
         .unwrap()
         .iter()
         .any(|e| e["client_uuid"] == media_id));
+
+    // Upgrade a genuine pre-v2 legacy upload: the new ownership table did not
+    // exist, but its final-path bytes must remain available after migration.
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute_batch(
+            "
+            DROP TABLE media_publications;
+            PRAGMA user_version = 1;
+            ",
+        )
+        .unwrap();
+    drop(connection);
+    let restarted = rig.restart("generation-b");
+    let (_, migrated_pull) = get_json(&restarted, "/v1/pull?cursor=0", Some(token)).await;
+    assert!(migrated_pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entity| entity["client_uuid"] == media_id));
+    let migrated_bytes = request(
+        &restarted,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(migrated_bytes.status(), StatusCode::OK);
+    assert_eq!(
+        migrated_bytes
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+        "log"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -4,7 +4,7 @@ mod rate_limit;
 mod readiness;
 mod store;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -292,6 +292,7 @@ pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
         );
     }
     let store = Store::open(database_path)?;
+    backfill_legacy_media_publications(&store, &media_root)?;
     collect_orphan_family_media(&store, &media_root)?;
     let state = AppState {
         store,
@@ -673,10 +674,26 @@ async fn pull_entities(
     };
     // Incomplete media (metadata without bytes) is omitted so clients can advance
     // the pull cursor without GET /media 404 loops. Successful PUT republishes.
+    let media_ids = page
+        .entities
+        .iter()
+        .filter(|entity| entity.entity_type == "media" && entity.deleted_at.is_none())
+        .map(|entity| entity.client_uuid.clone())
+        .collect::<BTreeSet<_>>();
+    let published_media = state
+        .store
+        .published_media(&principal.family_id, &media_ids)?;
     let entities = page
         .entities
         .into_iter()
-        .filter(|entity| media_entity_is_pullable(state.as_ref(), &principal.family_id, entity))
+        .filter(|entity| {
+            media_entity_is_pullable(
+                state.as_ref(),
+                &principal.family_id,
+                entity,
+                &published_media,
+            )
+        })
         .collect::<Vec<_>>();
     Ok(Json(json!({
         "entities": entities,
@@ -760,6 +777,12 @@ async fn get_media(
         .store
         .media_metadata(&principal.family_id, &client_uuid.to_string())?
         .ok_or_else(|| ApiError::not_found("Media metadata not found"))?;
+    if !state
+        .store
+        .is_media_published(&principal.family_id, &client_uuid.to_string())?
+    {
+        return Err(ApiError::not_found("Media bytes are not published"));
+    }
     let path = state.media_path(&principal.family_id, client_uuid)?;
     if !media_file_is_ready(&path, metadata.byte_size, &client_uuid.to_string()) {
         return Err(ApiError::not_found("Media bytes incomplete or invalid"));
@@ -1084,6 +1107,27 @@ async fn commit_bundle(
         if let Some(digest) = digest.as_deref() {
             let final_path = state.media_path(&principal.family_id, media_id)?;
             prepare_published_media_file(&staged_path, &final_path)?;
+            match state.store.mark_bundle_media_prepared(
+                &principal,
+                &bundle_id.to_string(),
+                media_uuid,
+            ) {
+                Ok(()) => {}
+                Err(StoreError::BundleMembershipMismatch) => {
+                    return Err(ApiError::conflict(
+                        "bundle belongs to another family membership",
+                    ))
+                }
+                Err(StoreError::LegacyBundleMembershipUnknown) => {
+                    return Err(ApiError::conflict(
+                        "legacy staging bundle has no verifiable membership",
+                    ))
+                }
+                Err(StoreError::BundleNotFound) => {
+                    return Err(ApiError::not_found("Bundle not found"))
+                }
+                Err(error) => return Err(error.into()),
+            }
             if integrity.staged_sha256.is_none() {
                 legacy_media_digests.push((media_uuid.clone(), digest.to_owned()));
             }
@@ -1213,10 +1257,12 @@ fn media_entity_is_pullable(
     state: &AppState,
     family_id: &str,
     entity: &store::PulledEntity,
+    published_media: &BTreeSet<String>,
 ) -> bool {
     if entity.entity_type != "media" || entity.deleted_at.is_some() {
         return true;
     }
+    let is_published = published_media.contains(&entity.client_uuid);
     let Ok(client_uuid) = Uuid::parse_str(&entity.client_uuid) else {
         return false;
     };
@@ -1234,7 +1280,7 @@ fn media_entity_is_pullable(
         },
     };
     match state.media_path(family_id, client_uuid) {
-        Ok(path) => media_file_is_ready(&path, declared_size, &entity.client_uuid),
+        Ok(path) => media_file_is_ready(&path, declared_size, &entity.client_uuid) && is_published,
         Err(_) => false,
     }
 }
@@ -1465,6 +1511,28 @@ fn collect_orphan_family_media(store: &Store, media_root: &Path) -> Result<(), A
     }
     if removed_any {
         sync_directory(media_root)?;
+    }
+    Ok(())
+}
+
+fn backfill_legacy_media_publications(store: &Store, media_root: &Path) -> Result<(), ApiError> {
+    for (family_id, client_uuid, declared_size) in store.unowned_live_media()? {
+        let (Ok(parsed_family_id), Ok(media_id)) =
+            (Uuid::parse_str(&family_id), Uuid::parse_str(&client_uuid))
+        else {
+            tracing::error!(
+                %family_id,
+                %client_uuid,
+                "stored media identity is invalid; refusing ownership backfill"
+            );
+            continue;
+        };
+        let path = media_root
+            .join(parsed_family_id.to_string())
+            .join(media_id.to_string());
+        if media_file_is_ready(&path, declared_size, &client_uuid) {
+            store.backfill_legacy_media_publication(&family_id, &client_uuid)?;
+        }
     }
     Ok(())
 }
@@ -1930,7 +1998,7 @@ mod tests {
         connection
             .execute_batch(
                 "
-                PRAGMA user_version = 2;
+                PRAGMA user_version = 3;
                 CREATE TABLE future_sentinel(value TEXT NOT NULL);
                 ",
             )
