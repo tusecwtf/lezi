@@ -1,9 +1,11 @@
 package com.lezi.babylog.feature.settings
 
+import com.lezi.babylog.core.model.RecordTime
 import java.time.Instant
 import java.time.LocalDate
 import java.time.YearMonth
 import java.time.ZoneId
+import java.time.ZonedDateTime
 
 internal data class CalendarMonthCell(
     val date: LocalDate,
@@ -61,6 +63,39 @@ internal fun calendarItemCountsByDate(
 ): Map<LocalDate, Int> = items.groupingBy { item ->
     Instant.ofEpochMilli(item.sortAt).atZone(zone).toLocalDate()
 }.eachCount()
+
+/** Restore the complete month selection from the saveable epoch-day primitive. */
+internal fun restoreCalendarMonthState(
+    selectedDateEpochDay: Long,
+    today: LocalDate,
+): CalendarMonthState = CalendarMonthState.initial(
+    initialDate = LocalDate.ofEpochDay(selectedDateEpochDay),
+    today = today,
+)
+
+/**
+ * Default a new care plan to the selected day without silently crossing dates.
+ * Past dates, and the last minute of today, remain browse-only.
+ */
+internal fun calendarDefaultCarePlanTimestamp(
+    selectedDate: LocalDate,
+    zone: ZoneId,
+    now: ZonedDateTime = ZonedDateTime.now(zone),
+): Long? {
+    val today = now.toLocalDate()
+    if (selectedDate.isBefore(today)) return null
+    val candidate = if (selectedDate == today) {
+        now.plusMinutes(1).withSecond(0).withNano(0)
+    } else {
+        Instant.ofEpochMilli(
+            RecordTime.defaultFutureEventTimestamp(selectedDate, zone, now),
+        ).atZone(zone)
+    }
+    return candidate
+        .takeIf { it.isAfter(now) && it.toLocalDate() == selectedDate }
+        ?.toInstant()
+        ?.toEpochMilli()
+}
 
 internal object CalendarUiTags {
     const val MonthGrid = "calendar_month_grid"

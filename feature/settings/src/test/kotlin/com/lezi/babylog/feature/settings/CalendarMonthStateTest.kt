@@ -9,10 +9,62 @@ import java.time.ZoneId
 import java.time.ZonedDateTime
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CalendarMonthStateTest {
+    @Test
+    fun savedSelectedDateRestoresTheBrowsedMonthAcrossRecreation() {
+        val today = LocalDate.of(2026, 7, 27)
+
+        val restored = restoreCalendarMonthState(
+            selectedDateEpochDay = LocalDate.of(2026, 9, 12).toEpochDay(),
+            today = today,
+        )
+
+        assertEquals(YearMonth.of(2026, 9), restored.visibleMonth)
+        assertEquals(LocalDate.of(2026, 9, 12), restored.selectedDate)
+        assertEquals(today, restored.today)
+    }
+
+    @Test
+    fun scheduleTargetStaysOnTodayOrFutureSelectionAndRejectsPastDates() {
+        val zone = ZoneId.of("Asia/Shanghai")
+        val now = ZonedDateTime.of(2026, 7, 27, 10, 30, 45, 0, zone)
+
+        assertNull(
+            calendarDefaultCarePlanTimestamp(
+                selectedDate = LocalDate.of(2026, 7, 26),
+                zone = zone,
+                now = now,
+            ),
+        )
+        assertEquals(
+            ZonedDateTime.of(2026, 7, 27, 10, 31, 0, 0, zone).toInstant().toEpochMilli(),
+            calendarDefaultCarePlanTimestamp(
+                selectedDate = LocalDate.of(2026, 7, 27),
+                zone = zone,
+                now = now,
+            ),
+        )
+        assertEquals(
+            ZonedDateTime.of(2026, 8, 2, 10, 30, 0, 0, zone).toInstant().toEpochMilli(),
+            calendarDefaultCarePlanTimestamp(
+                selectedDate = LocalDate.of(2026, 8, 2),
+                zone = zone,
+                now = now,
+            ),
+        )
+        assertNull(
+            calendarDefaultCarePlanTimestamp(
+                selectedDate = LocalDate.of(2026, 7, 27),
+                zone = zone,
+                now = ZonedDateTime.of(2026, 7, 27, 23, 59, 30, 0, zone),
+            ),
+        )
+    }
+
     @Test
     fun initialDateOwnsSelectionAndMonthNavigationClampsDayAtMonthBoundary() {
         val initial = CalendarMonthState.initial(

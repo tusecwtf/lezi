@@ -42,8 +42,10 @@ import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -502,8 +504,11 @@ fun CalendarRoute(
     val conflictBusy by vm.conflictBusy.collectAsStateWithLifecycle()
     val zone = ZoneId.systemDefault()
     val today = remember(zone) { RecordTime.today(zone) }
-    var monthState by remember(initialDate, today) {
-        mutableStateOf(CalendarMonthState.initial(initialDate, today))
+    var selectedDateEpochDay by rememberSaveable(initialDate) {
+        mutableLongStateOf(initialDate.toEpochDay())
+    }
+    val monthState = remember(selectedDateEpochDay, today) {
+        restoreCalendarMonthState(selectedDateEpochDay, today)
     }
     LaunchedEffect(monthState.visibleMonth) {
         vm.showMonth(monthState.visibleMonth)
@@ -544,8 +549,13 @@ fun CalendarRoute(
     val planableItems = remember(settings.hiddenItems, customItems) {
         calendarPlanableItems(settings.hiddenItems, customItems)
     }
+    val defaultCarePlanAt = calendarDefaultCarePlanTimestamp(
+        selectedDate = monthState.selectedDate,
+        zone = zone,
+    )
+    val canScheduleSelectedDate = defaultCarePlanAt != null
     val openPlanTypePicker = {
-        showPlanTypePicker = true
+        if (canScheduleSelectedDate) showPlanTypePicker = true
     }
     val openCalendarDraft = {
         // Legacy free-title draft is only used when editing an existing CalendarEvent.
@@ -586,22 +596,41 @@ fun CalendarRoute(
             CalendarMonthPicker(
                 state = monthState,
                 itemCountsByDate = itemCountsByDate,
-                onPreviousMonth = { monthState = monthState.previousMonth() },
-                onNextMonth = { monthState = monthState.nextMonth() },
-                onSelectDate = { date -> monthState = monthState.selectDate(date) },
+                onPreviousMonth = {
+                    selectedDateEpochDay = monthState.previousMonth().selectedDate.toEpochDay()
+                },
+                onNextMonth = {
+                    selectedDateEpochDay = monthState.nextMonth().selectedDate.toEpochDay()
+                },
+                onSelectDate = { date ->
+                    selectedDateEpochDay = monthState.selectDate(date).selectedDate.toEpochDay()
+                },
             )
             LeziPrimaryButton(
                 "＋ 安排护理",
                 onClick = openPlanTypePicker,
+                enabled = canScheduleSelectedDate,
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag(CalendarUiTags.ScheduleCare)
                     .semantics {
                         contentDescription =
-                            "在${monthState.selectedDate.monthValue}月" +
-                                "${monthState.selectedDate.dayOfMonth}日安排护理"
+                            if (canScheduleSelectedDate) {
+                                "在${monthState.selectedDate.monthValue}月" +
+                                    "${monthState.selectedDate.dayOfMonth}日安排护理"
+                            } else {
+                                "${monthState.selectedDate.monthValue}月" +
+                                    "${monthState.selectedDate.dayOfMonth}日没有可安排的未来时刻"
+                            }
                     },
             )
+            if (!canScheduleSelectedDate) {
+                Text(
+                    "该日期仅供查看；护理计划只能安排在未来时刻。",
+                    style = LeziTypography.Meta,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             reminderStatus?.let {
                 Text(
                     it,
@@ -747,11 +776,11 @@ fun CalendarRoute(
                     planableItems.forEach { item ->
                         TextButton(
                             onClick = {
+                                val at = calendarDefaultCarePlanTimestamp(
+                                    selectedDate = monthState.selectedDate,
+                                    zone = zone,
+                                ) ?: return@TextButton
                                 showPlanTypePicker = false
-                                val at = RecordTime.defaultFutureEventTimestamp(
-                                    monthState.selectedDate,
-                                    zone,
-                                )
                                 onScheduleCare(item.type, at, item.customItemId)
                             },
                             modifier = Modifier.fillMaxWidth(),
