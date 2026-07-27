@@ -3,13 +3,11 @@ package com.lezi.babylog.feature.timer
 import android.content.Context
 import android.os.SystemClock
 import android.provider.Settings
-import com.lezi.babylog.core.common.newClientUuid
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
@@ -46,6 +44,7 @@ data class TimerState(
         savedWall: Long = System.currentTimeMillis(),
         savedBootCount: Long? = null,
     ): String = buildJsonObject {
+        put("schemaVersion", TIMER_STATE_SCHEMA_VERSION)
         putNullableLong("babyId", babyId)
         if (completionClientUuid == null) {
             put("completionClientUuid", JsonNull)
@@ -64,7 +63,7 @@ data class TimerState(
         put("order", order)
         put("savedElapsed", savedElapsed)
         put("savedWall", savedWall)
-        savedBootCount?.let { put("savedBootCount", it) }
+        putNullableLong("savedBootCount", savedBootCount)
     }.toString()
 
     companion object {
@@ -77,9 +76,11 @@ data class TimerState(
             if (raw.isNullOrBlank()) return TimerState()
             return runCatching {
                 val o = Json.parseToJsonElement(raw).jsonObject
-                val savedElapsed = o.optionalLong("savedElapsed")
-                val savedWall = o.optionalLong("savedWall")
-                val savedBootCount = o.optionalLong("savedBootCount")?.takeIf { it >= 0L }
+                require(o.requiredLong("schemaVersion") == TIMER_STATE_SCHEMA_VERSION.toLong())
+                val savedElapsed = o.requiredLong("savedElapsed")
+                val savedWall = o.requiredLong("savedWall")
+                val savedBootCount = o.requiredNullableLong("savedBootCount")
+                    ?.also { require(it >= 0L) }
                 val drift = restoredRunningDelta(
                     savedElapsed = savedElapsed,
                     savedWall = savedWall,
@@ -88,39 +89,33 @@ data class TimerState(
                     savedBootCount = savedBootCount,
                     nowBootCount = nowBootCount,
                 )
-                var leftAccum = o.optionalLong("leftAccumMs") ?: 0L
-                var rightAccum = o.optionalLong("rightAccumMs") ?: 0L
-                val leftRunning = o.optionalBoolean("leftRunning")
-                val rightRunning = o.optionalBoolean("rightRunning")
+                var leftAccum = o.requiredLong("leftAccumMs").also { require(it >= 0L) }
+                var rightAccum = o.requiredLong("rightAccumMs").also { require(it >= 0L) }
+                val leftRunning = o.requiredBoolean("leftRunning")
+                val rightRunning = o.requiredBoolean("rightRunning")
                 // Freeze restored running sides into accumulated time.
                 if (leftRunning) leftAccum += drift
                 if (rightRunning) rightAccum += drift
                 TimerState(
-                    babyId = o.optionalLong("babyId"),
-                    completionClientUuid = o.optionalString("completionClientUuid")
+                    babyId = o.requiredNullableLong("babyId")?.also { require(it > 0L) },
+                    completionClientUuid = o.requiredNullableString("completionClientUuid")
                         ?.takeIf { it.isNotBlank() },
-                    carePlanId = o.optionalLong("carePlanId")?.takeIf { it > 0L },
+                    carePlanId = o.requiredNullableLong("carePlanId")?.also { require(it > 0L) },
                     leftRunning = false,
                     rightRunning = false,
                     leftAccumMs = leftAccum,
                     rightAccumMs = rightAccum,
                     leftStartedElapsed = null,
                     rightStartedElapsed = null,
-                    sessionStartedAt = o.optionalLong("sessionStartedAt"),
-                    lastSide = o.optionalString("lastSide")?.takeIf { it.isNotBlank() },
-                    order = o.optionalString("order").orEmpty(),
-                )
+                    sessionStartedAt = o.requiredNullableLong("sessionStartedAt"),
+                    lastSide = o.requiredNullableString("lastSide")?.takeIf { it.isNotBlank() },
+                    order = o.requiredString("order"),
+                ).also { restored ->
+                    require(!restored.hasTimerData() || restored.completionClientUuid != null)
+                }
             }.getOrDefault(TimerState())
         }
     }
-}
-
-internal fun TimerState.withStableCompletionId(
-    createId: () -> String = ::newClientUuid,
-): TimerState = if (hasTimerData() && completionClientUuid == null) {
-    copy(completionClientUuid = createId())
-} else {
-    this
 }
 
 internal fun TimerState.hasTimerData(): Boolean =
@@ -137,22 +132,46 @@ private fun kotlinx.serialization.json.JsonObjectBuilder.putNullableLong(
     if (value == null) put(key, JsonNull) else put(key, value)
 }
 
-private fun JsonObject.optionalLong(key: String): Long? =
+private fun JsonObject.requiredLong(key: String): Long =
     get(key)?.jsonPrimitive?.longOrNull
+        ?: throw IllegalArgumentException("Missing or invalid $key")
 
-private fun JsonObject.optionalBoolean(key: String): Boolean =
-    get(key)?.jsonPrimitive?.booleanOrNull ?: false
+private fun JsonObject.requiredNullableLong(key: String): Long? {
+    require(key in this) { "Missing $key" }
+    val value = get(key)
+    if (value === JsonNull) return null
+    return value?.jsonPrimitive?.longOrNull
+        ?: throw IllegalArgumentException("Invalid $key")
+}
 
-private fun JsonObject.optionalString(key: String): String? =
-    get(key)?.jsonPrimitive?.contentOrNull
+private fun JsonObject.requiredBoolean(key: String): Boolean =
+    get(key)?.jsonPrimitive?.booleanOrNull
+        ?: throw IllegalArgumentException("Missing or invalid $key")
+
+private fun JsonObject.requiredString(key: String): String {
+    val value = get(key)?.jsonPrimitive
+        ?: throw IllegalArgumentException("Missing or invalid $key")
+    require(value.isString) { "Invalid $key" }
+    return value.content
+}
+
+private fun JsonObject.requiredNullableString(key: String): String? {
+    require(key in this) { "Missing $key" }
+    val value = get(key)
+    if (value === JsonNull) return null
+    val primitive = value?.jsonPrimitive
+        ?: throw IllegalArgumentException("Invalid $key")
+    require(primitive.isString) { "Invalid $key" }
+    return primitive.content
+}
 
 /**
  * Calculates time accrued after the last persisted timer snapshot.
  *
  * elapsedRealtime is immune to wall-clock edits while the device remains
  * booted. Android's boot count identifies a reboot even when the new uptime is
- * already greater than the persisted uptime. Legacy snapshots without a boot
- * count retain the previous conservative uptime-rewind fallback.
+ * already greater than the persisted uptime. When boot identity is temporarily
+ * unavailable, the wall/elapsed pair provides a fail-closed degraded path.
  */
 internal fun restoredRunningDelta(
     savedElapsed: Long?,
@@ -163,9 +182,8 @@ internal fun restoredRunningDelta(
     nowBootCount: Long? = null,
 ): Long {
     if (savedBootCount == null && nowBootCount != null) {
-        // A pre-boot-count snapshot may already span a reboot even when the
-        // new uptime is larger. Its wall pair is the only cross-boot clock
-        // available, so migrate it conservatively on this first restore.
+        // A snapshot captured while boot identity was unavailable may span a
+        // reboot. Its wall pair is the only cross-boot clock available.
         return savedWall?.let { (nowWall - it).coerceAtLeast(0L) } ?: 0L
     }
     if (savedBootCount != null && nowBootCount != null) {
@@ -194,6 +212,8 @@ internal fun currentBootCount(context: Context): Long? =
             Settings.Global.BOOT_COUNT,
         )
     }
+
+internal const val TIMER_STATE_SCHEMA_VERSION = 1
 
 /**
  * Pure left-side toggle transition used by [TimerViewModel.toggleLeft].

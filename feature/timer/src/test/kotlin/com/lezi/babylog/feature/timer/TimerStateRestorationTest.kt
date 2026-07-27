@@ -8,6 +8,45 @@ import org.junit.Test
 
 class TimerStateRestorationTest {
     @Test
+    fun restore_rejectsUnversionedSnapshot() {
+        val raw = """{
+            "babyId":42,
+            "completionClientUuid":"old-session",
+            "leftAccumMs":60000,
+            "sessionStartedAt":1700000000000
+        }""".trimIndent()
+
+        val restored = TimerState.fromJson(
+            raw = raw,
+            nowElapsed = 120_000L,
+            nowWall = 1_700_000_010_000L,
+            nowBootCount = 12L,
+        )
+
+        assertEquals(TimerState(), restored)
+    }
+
+    @Test
+    fun restore_rejectsNonCurrentSchemaVersion() {
+        val raw = TimerState(
+            babyId = 42L,
+            completionClientUuid = "timer-session-42",
+            leftAccumMs = 60_000L,
+        ).toJson(savedElapsed = 120_000L, savedWall = 1_700_000_010_000L)
+            .replace("\"schemaVersion\":1", "\"schemaVersion\":2")
+
+        assertEquals(
+            TimerState(),
+            TimerState.fromJson(
+                raw = raw,
+                nowElapsed = 120_000L,
+                nowWall = 1_700_000_010_000L,
+                nowBootCount = 12L,
+            ),
+        )
+    }
+
+    @Test
     fun restore_usesElapsedRealtimeWhileDeviceStaysBooted() {
         assertEquals(
             45_000L,
@@ -38,7 +77,7 @@ class TimerStateRestorationTest {
     }
 
     @Test
-    fun restore_legacySnapshotKeepsConservativeUptimeFallback() {
+    fun restore_withoutBootIdentityUsesTheAvailableClockPair() {
         assertEquals(
             45_000L,
             restoredRunningDelta(
@@ -60,7 +99,7 @@ class TimerStateRestorationTest {
     }
 
     @Test
-    fun restore_legacySnapshotUsesWallWhenCurrentBootIdentityIsAvailable() {
+    fun restore_usesWallWhenBootIdentityBecomesAvailable() {
         assertEquals(
             90_000L,
             restoredRunningDelta(
@@ -127,7 +166,11 @@ class TimerStateRestorationTest {
 
     @Test
     fun roundTrip_missingCarePlanIdStaysNull() {
-        val state = TimerState(babyId = 1L, leftAccumMs = 500L)
+        val state = TimerState(
+            babyId = 1L,
+            completionClientUuid = "timer-session-1",
+            leftAccumMs = 500L,
+        )
         val restored = TimerState.fromJson(
             state.toJson(
                 savedElapsed = 1_000L,
@@ -184,19 +227,26 @@ class TimerStateRestorationTest {
     }
 
     @Test
-    fun legacyActiveSnapshotGetsOneStableCompletionIdBeforeReplay() {
-        val legacy = TimerState(
+    fun currentActiveSnapshotWithoutCompletionIdIsRejected() {
+        val raw = TimerState(
             babyId = 42L,
             leftAccumMs = 60_000L,
             sessionStartedAt = 1_700_000_000_000L,
+        ).toJson(
+            savedElapsed = 120_000L,
+            savedWall = 1_700_000_010_000L,
+            savedBootCount = 12L,
         )
 
-        val upgraded = legacy.withStableCompletionId { "stable-completion-id" }
-        val replay = upgraded.withStableCompletionId { "must-not-replace" }
-
-        assertEquals("stable-completion-id", upgraded.completionClientUuid)
-        assertEquals("stable-completion-id", replay.completionClientUuid)
-        assertNull(TimerState().withStableCompletionId { "unused" }.completionClientUuid)
+        assertEquals(
+            TimerState(),
+            TimerState.fromJson(
+                raw = raw,
+                nowElapsed = 120_000L,
+                nowWall = 1_700_000_010_000L,
+                nowBootCount = 12L,
+            ),
+        )
     }
 
     @Test

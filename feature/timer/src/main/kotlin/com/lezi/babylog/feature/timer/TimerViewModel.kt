@@ -54,16 +54,10 @@ class TimerViewModel @Inject constructor(
                     raw = settings.nursingTimerJson.first(),
                     nowBootCount = currentBootCount(app),
                 )
-                val ready = restored.withStableCompletionId()
-                if (ready != restored) {
-                    settings.setNursingTimerJson(
-                        ready.toJson(savedBootCount = currentBootCount(app)),
-                    )
-                }
-                _state.value = ready
+                _state.value = restored
                 // A restored running snapshot is deliberately frozen by fromJson; reconcile any
                 // surviving service notification with that authoritative paused state.
-                updateService(ready)
+                updateService(restored)
             }
         }
     }
@@ -165,8 +159,7 @@ class TimerViewModel @Inject constructor(
                     return@launch
                 }
                 toggleMutex.withLock {
-                    val stableState = _state.value.withStableCompletionId()
-                    if (stableState != _state.value) persist(stableState)
+                    val stableState = _state.value
                     val babyId = stableState.babyId ?: careLog.getCurrentBaby()?.id
                     if (babyId == null) {
                         onError("请先添加宝宝")
