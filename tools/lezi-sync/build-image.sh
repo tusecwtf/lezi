@@ -11,7 +11,7 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 # Compose bind mounts may be owned by the container uid and unreadable to the
-# host user. Stage only the immutable image inputs so even legacy Docker
+# host user. Stage only the immutable image inputs so restricted Docker
 # builders never traverse runtime data directories.
 mkdir "${build_context}/src"
 cp Cargo.toml Cargo.lock Dockerfile "${build_context}/"
