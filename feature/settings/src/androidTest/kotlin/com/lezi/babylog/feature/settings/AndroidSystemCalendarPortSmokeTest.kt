@@ -452,6 +452,48 @@ class AndroidSystemCalendarPortSmokeTest {
         assertThat(readAnyReminder(eventId)).isFalse()
     }
 
+    @Test
+    fun extraProviderReminderIsRemovedBeforeProjectionBecomesReady() = runBlocking<Unit> {
+        assumeTrue("Calendar permission not granted", port.hasCalendarPermission())
+        val calendarId = createWritableLocalCalendar()
+        assumeTrue("Cannot create writable local calendar", calendarId != null)
+        val calId = calendarId!!
+        val planUuid = "extra-reminder-${System.nanoTime()}"
+        val begin = System.currentTimeMillis() + 18_000_000L
+
+        val inserted = port.upsertEvent(
+            SystemCalendarUpsert(
+                calendarId = calId,
+                carePlanClientUuid = planUuid,
+                beginAtMillis = begin,
+                title = "before reminder repair",
+            ),
+        )
+        val eventId = checkNotNull(inserted.eventId).toLong()
+        createdEventIds += eventId
+        rawInsertReminder(eventId, minutes = 15)
+        assertThat(readReminderRows(eventId)).containsExactly(
+            0 to CalendarContract.Reminders.METHOD_ALERT,
+            15 to CalendarContract.Reminders.METHOD_ALERT,
+        )
+
+        val repaired = port.upsertEvent(
+            SystemCalendarUpsert(
+                calendarId = calId,
+                carePlanClientUuid = planUuid,
+                beginAtMillis = begin + 60_000L,
+                title = "after reminder repair",
+                existingEventId = eventId.toString(),
+            ),
+        )
+
+        assertThat(repaired.eventId).isEqualTo(eventId.toString())
+        assertThat(repaired.outcome).isEqualTo(SystemCalendarUpsertOutcome.CurrentReady)
+        assertThat(readReminderRows(eventId)).containsExactly(
+            0 to CalendarContract.Reminders.METHOD_ALERT,
+        )
+    }
+
     private fun readBeginReminder(eventId: Long): Boolean {
         context.contentResolver.query(
             CalendarContract.Reminders.CONTENT_URI,
@@ -478,6 +520,24 @@ class AndroidSystemCalendarPortSmokeTest {
             null,
         )?.use { cursor -> return cursor.moveToFirst() }
         return false
+    }
+
+    private fun readReminderRows(eventId: Long): List<Pair<Int, Int>> {
+        context.contentResolver.query(
+            CalendarContract.Reminders.CONTENT_URI,
+            arrayOf(
+                CalendarContract.Reminders.MINUTES,
+                CalendarContract.Reminders.METHOD,
+            ),
+            "${CalendarContract.Reminders.EVENT_ID}=?",
+            arrayOf(eventId.toString()),
+            null,
+        )?.use { cursor ->
+            return buildList {
+                while (cursor.moveToNext()) add(cursor.getInt(0) to cursor.getInt(1))
+            }
+        }
+        return emptyList()
     }
 
     private fun ensureWritableLocalCalendar(): String? {

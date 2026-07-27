@@ -203,7 +203,7 @@ class AndroidSystemCalendarPort @Inject constructor(
                         arrayOf(eventId),
                     )
                 }
-                if (queryReminderState(id, beginOnly = false) != SystemCalendarEventState.ABSENT) {
+                if (queryAnyReminderState(id) != SystemCalendarEventState.ABSENT) {
                     return false
                 }
             }
@@ -226,7 +226,7 @@ class AndroidSystemCalendarPort @Inject constructor(
         }
         return strictOwnedEventDeleteSucceeded(
             eventState = eventState(eventId, carePlanClientUuid),
-            reminderState = queryReminderState(id, beginOnly = false),
+            reminderState = queryAnyReminderState(id),
         )
     }
 
@@ -297,12 +297,12 @@ class AndroidSystemCalendarPort @Inject constructor(
                             arrayOf(eventId),
                         )
                     }
-                    queryReminderState(eventId.toLong(), beginOnly = false)
+                    queryAnyReminderState(eventId.toLong())
                 }
                 // Do not infer reminder absence from event absence. A failed or
                 // non-cascading provider delete may leave an orphan reminder row.
                 SystemCalendarEventState.ABSENT ->
-                    queryReminderState(eventId.toLong(), beginOnly = false)
+                    queryAnyReminderState(eventId.toLong())
                 SystemCalendarEventState.UNAVAILABLE -> SystemCalendarEventState.UNAVAILABLE
             }
         }
@@ -438,18 +438,11 @@ class AndroidSystemCalendarPort @Inject constructor(
         eventId: String,
         request: SystemCalendarUpsert,
     ): SystemCalendarUpsertResult {
-        val beginReminderState = queryReminderState(eventId.toLong(), beginOnly = true)
-        val anyReminderState = if (beginReminderState == SystemCalendarEventState.PRESENT) {
-            SystemCalendarEventState.PRESENT
-        } else {
-            queryReminderState(eventId.toLong(), beginOnly = false)
-        }
         return SystemCalendarUpsertResult(
             eventId = eventId,
             outcome = resolveSystemCalendarUpsertOutcome(
                 requestedEventState = queryRequestedEventState(eventId, request),
-                beginReminderState = beginReminderState,
-                anyReminderState = anyReminderState,
+                reminderSetState = queryReminderSetState(eventId.toLong()),
             ),
         )
     }
@@ -490,31 +483,14 @@ class AndroidSystemCalendarPort @Inject constructor(
         }.getOrDefault(SystemCalendarRequestedEventState.UNAVAILABLE)
     }
 
-    private fun queryReminderState(
+    private fun queryAnyReminderState(
         eventId: Long,
-        beginOnly: Boolean,
     ): SystemCalendarEventState = runCatching {
-        val selection = buildString {
-            append("${CalendarContract.Reminders.EVENT_ID}=?")
-            if (beginOnly) {
-                append(" AND ${CalendarContract.Reminders.MINUTES}=?")
-                append(" AND ${CalendarContract.Reminders.METHOD}=?")
-            }
-        }
-        val args = if (beginOnly) {
-            arrayOf(
-                eventId.toString(),
-                SystemCalendarProjectionContract.BEGIN_REMINDER_MINUTES.toString(),
-                CalendarContract.Reminders.METHOD_ALERT.toString(),
-            )
-        } else {
-            arrayOf(eventId.toString())
-        }
         val cursor = context.contentResolver.query(
             CalendarContract.Reminders.CONTENT_URI,
             arrayOf(CalendarContract.Reminders._ID),
-            selection,
-            args,
+            "${CalendarContract.Reminders.EVENT_ID}=?",
+            arrayOf(eventId.toString()),
             null,
         ) ?: return@runCatching SystemCalendarEventState.UNAVAILABLE
         cursor.use {
@@ -525,6 +501,36 @@ class AndroidSystemCalendarPort @Inject constructor(
             }
         }
     }.getOrDefault(SystemCalendarEventState.UNAVAILABLE)
+
+    private fun queryReminderSetState(
+        eventId: Long,
+    ): SystemCalendarReminderSetState = strictSystemCalendarReminderSetState(
+        eventId = eventId.toString(),
+        alertMethod = CalendarContract.Reminders.METHOD_ALERT,
+    ) { id ->
+        val cursor = context.contentResolver.query(
+            CalendarContract.Reminders.CONTENT_URI,
+            arrayOf(
+                CalendarContract.Reminders.MINUTES,
+                CalendarContract.Reminders.METHOD,
+            ),
+            "${CalendarContract.Reminders.EVENT_ID}=?",
+            arrayOf(id.toString()),
+            null,
+        ) ?: return@strictSystemCalendarReminderSetState null
+        cursor.use {
+            buildList {
+                while (it.moveToNext()) {
+                    add(
+                        SystemCalendarReminderRow(
+                            minutes = it.getInt(0),
+                            method = it.getInt(1),
+                        ),
+                    )
+                }
+            }
+        }
+    }
 
     private suspend fun convergeOwnedEvents(
         carePlanClientUuid: String,
@@ -545,7 +551,7 @@ class AndroidSystemCalendarPort @Inject constructor(
             ownedLookup = after,
             canonicalEventId = canonicalEventId,
             duplicateReminderStates = duplicateIds.map { duplicateId ->
-                queryReminderState(duplicateId.toLong(), beginOnly = false)
+                queryAnyReminderState(duplicateId.toLong())
             },
         )
     }
@@ -676,16 +682,44 @@ internal enum class SystemCalendarRequestedEventState {
     UNAVAILABLE,
 }
 
+internal data class SystemCalendarReminderRow(
+    val minutes: Int,
+    val method: Int,
+)
+
+internal enum class SystemCalendarReminderSetState {
+    EXACT_BEGIN_ALERT,
+    STALE,
+    ABSENT,
+    UNAVAILABLE,
+}
+
+/** A provider reminder set is ready only when its sole row is the begin-time alert. */
+internal fun strictSystemCalendarReminderSetState(
+    eventId: String,
+    alertMethod: Int,
+    query: (Long) -> List<SystemCalendarReminderRow>?,
+): SystemCalendarReminderSetState {
+    val id = eventId.toLongOrNull() ?: return SystemCalendarReminderSetState.UNAVAILABLE
+    val rows = runCatching { query(id) }.getOrNull()
+        ?: return SystemCalendarReminderSetState.UNAVAILABLE
+    return when {
+        rows.isEmpty() -> SystemCalendarReminderSetState.ABSENT
+        rows.size == 1 && rows.single().let { it.minutes == 0 && it.method == alertMethod } ->
+            SystemCalendarReminderSetState.EXACT_BEGIN_ALERT
+        else -> SystemCalendarReminderSetState.STALE
+    }
+}
+
 /** Resolves ownership from the exact requested generation, never from a reminder row alone. */
 internal fun resolveSystemCalendarUpsertOutcome(
     requestedEventState: SystemCalendarRequestedEventState,
-    beginReminderState: SystemCalendarEventState,
-    anyReminderState: SystemCalendarEventState,
+    reminderSetState: SystemCalendarReminderSetState,
 ): SystemCalendarUpsertOutcome = when {
     requestedEventState == SystemCalendarRequestedEventState.MATCH &&
-        beginReminderState == SystemCalendarEventState.PRESENT ->
+        reminderSetState == SystemCalendarReminderSetState.EXACT_BEGIN_ALERT ->
         SystemCalendarUpsertOutcome.CurrentReady
-    anyReminderState == SystemCalendarEventState.ABSENT ->
+    reminderSetState == SystemCalendarReminderSetState.ABSENT ->
         SystemCalendarUpsertOutcome.ReleasedOrAbsent
     else -> SystemCalendarUpsertOutcome.ProviderStillOwnsStale
 }

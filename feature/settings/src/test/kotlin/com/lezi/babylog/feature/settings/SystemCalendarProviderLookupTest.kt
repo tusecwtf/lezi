@@ -8,6 +8,89 @@ import org.junit.Test
 
 class SystemCalendarProviderLookupTest {
     @Test
+    fun extraProviderReminderIsNotAnExactBeginAlertSet() {
+        assertEquals(
+            SystemCalendarReminderSetState.STALE,
+            strictSystemCalendarReminderSetState(
+                eventId = "41",
+                alertMethod = 1,
+            ) {
+                listOf(
+                    SystemCalendarReminderRow(minutes = 0, method = 1),
+                    SystemCalendarReminderRow(minutes = 15, method = 1),
+                )
+            },
+        )
+    }
+
+    @Test
+    fun oneBeginAlertIsTheOnlyExactReminderSet() {
+        assertEquals(
+            SystemCalendarReminderSetState.EXACT_BEGIN_ALERT,
+            strictSystemCalendarReminderSetState(
+                eventId = "41",
+                alertMethod = 1,
+            ) {
+                listOf(SystemCalendarReminderRow(minutes = 0, method = 1))
+            },
+        )
+        assertEquals(
+            SystemCalendarReminderSetState.STALE,
+            strictSystemCalendarReminderSetState(
+                eventId = "41",
+                alertMethod = 1,
+            ) {
+                listOf(SystemCalendarReminderRow(minutes = 0, method = 2))
+            },
+        )
+        assertEquals(
+            SystemCalendarReminderSetState.STALE,
+            strictSystemCalendarReminderSetState(
+                eventId = "41",
+                alertMethod = 1,
+            ) {
+                listOf(
+                    SystemCalendarReminderRow(minutes = 0, method = 1),
+                    SystemCalendarReminderRow(minutes = 0, method = 1),
+                )
+            },
+        )
+    }
+
+    @Test
+    fun reminderSetAbsenceRequiresASuccessfulEmptyQuery() {
+        assertEquals(
+            SystemCalendarReminderSetState.ABSENT,
+            strictSystemCalendarReminderSetState("41", alertMethod = 1) { emptyList() },
+        )
+        assertEquals(
+            SystemCalendarReminderSetState.UNAVAILABLE,
+            strictSystemCalendarReminderSetState("41", alertMethod = 1) { null },
+        )
+        assertEquals(
+            SystemCalendarReminderSetState.UNAVAILABLE,
+            strictSystemCalendarReminderSetState("41", alertMethod = 1) {
+                error("provider failed")
+            },
+        )
+        assertEquals(
+            SystemCalendarReminderSetState.UNAVAILABLE,
+            strictSystemCalendarReminderSetState("not-an-id", alertMethod = 1) { emptyList() },
+        )
+    }
+
+    @Test
+    fun matchingEventWithAStaleReminderSetRemainsPending() {
+        assertEquals(
+            SystemCalendarUpsertOutcome.ProviderStillOwnsStale,
+            resolveSystemCalendarUpsertOutcome(
+                requestedEventState = SystemCalendarRequestedEventState.MATCH,
+                reminderSetState = SystemCalendarReminderSetState.STALE,
+            ),
+        )
+    }
+
+    @Test
     fun onlyAnEmptySuccessfulQueryIsConfirmedAbsent() {
         assertEquals(
             SystemCalendarEventState.PRESENT,
@@ -134,8 +217,7 @@ class SystemCalendarProviderLookupTest {
     fun updateZeroWithAnOldGenerationReminderIsNotCurrentReady() {
         val oldGeneration = resolveSystemCalendarUpsertOutcome(
             requestedEventState = SystemCalendarRequestedEventState.STALE,
-            beginReminderState = SystemCalendarEventState.PRESENT,
-            anyReminderState = SystemCalendarEventState.PRESENT,
+            reminderSetState = SystemCalendarReminderSetState.EXACT_BEGIN_ALERT,
         )
         assertEquals(
             SystemCalendarUpsertOutcome.ProviderStillOwnsStale,
@@ -153,8 +235,7 @@ class SystemCalendarProviderLookupTest {
             SystemCalendarUpsertOutcome.CurrentReady,
             resolveSystemCalendarUpsertOutcome(
                 requestedEventState = SystemCalendarRequestedEventState.MATCH,
-                beginReminderState = SystemCalendarEventState.PRESENT,
-                anyReminderState = SystemCalendarEventState.PRESENT,
+                reminderSetState = SystemCalendarReminderSetState.EXACT_BEGIN_ALERT,
             ),
         )
     }
@@ -165,24 +246,21 @@ class SystemCalendarProviderLookupTest {
             SystemCalendarUpsertOutcome.ProviderStillOwnsStale,
             resolveSystemCalendarUpsertOutcome(
                 requestedEventState = SystemCalendarRequestedEventState.MATCH,
-                beginReminderState = SystemCalendarEventState.ABSENT,
-                anyReminderState = SystemCalendarEventState.PRESENT,
+                reminderSetState = SystemCalendarReminderSetState.STALE,
             ),
         )
         assertEquals(
             SystemCalendarUpsertOutcome.ProviderStillOwnsStale,
             resolveSystemCalendarUpsertOutcome(
                 requestedEventState = SystemCalendarRequestedEventState.MATCH,
-                beginReminderState = SystemCalendarEventState.ABSENT,
-                anyReminderState = SystemCalendarEventState.UNAVAILABLE,
+                reminderSetState = SystemCalendarReminderSetState.UNAVAILABLE,
             ),
         )
         assertEquals(
             SystemCalendarUpsertOutcome.ReleasedOrAbsent,
             resolveSystemCalendarUpsertOutcome(
                 requestedEventState = SystemCalendarRequestedEventState.MATCH,
-                beginReminderState = SystemCalendarEventState.ABSENT,
-                anyReminderState = SystemCalendarEventState.ABSENT,
+                reminderSetState = SystemCalendarReminderSetState.ABSENT,
             ),
         )
     }
