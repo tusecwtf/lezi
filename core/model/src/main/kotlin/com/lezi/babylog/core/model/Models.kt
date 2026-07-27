@@ -60,7 +60,7 @@ data class Record(
      */
     val createdByDeviceId: String? = null,
     val payloadJson: String = "{}",
-    val schemaVersion: Int = 1,
+    val schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
     val updatedAt: Long,
     val deletedAt: Long? = null,
     /**
@@ -118,7 +118,7 @@ data class CarePlan(
     val scheduledZoneId: String,
     val note: String? = null,
     val payloadJson: String = "{}",
-    val schemaVersion: Int = 1,
+    val schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
     val status: CarePlanStatus = CarePlanStatus.PENDING,
     val createdByMembershipId: String = "",
     val fulfilledRecordClientUuid: String? = null,

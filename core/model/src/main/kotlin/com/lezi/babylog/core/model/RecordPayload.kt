@@ -259,8 +259,8 @@ data class RecordPayloadDraft(
 /**
  * The only module allowed to translate between storage JSON and typed payloads.
  *
- * Schema v1 and v2 are read compatibly. Future and malformed documents remain
- * [UnknownPayload] and encode back to their original JSON text.
+ * Only the current schema is decoded into a typed payload. Unsupported and malformed
+ * documents remain [UnknownPayload] and encode back to their original JSON text.
  */
 object RecordPayloadCodec {
     private val json = Json {
@@ -273,8 +273,13 @@ object RecordPayloadCodec {
         payloadJson: String,
         schemaVersion: Int,
     ): RecordPayloadDocument {
-        if (schemaVersion > CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION) {
-            return unknown(type, payloadJson, schemaVersion, "future schema")
+        if (schemaVersion != CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION) {
+            val reason = if (schemaVersion > CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION) {
+                "future schema"
+            } else {
+                "unsupported schema"
+            }
+            return unknown(type, payloadJson, schemaVersion, reason)
         }
         val objectValue = runCatching {
             json.parseToJsonElement(payloadJson).jsonObject

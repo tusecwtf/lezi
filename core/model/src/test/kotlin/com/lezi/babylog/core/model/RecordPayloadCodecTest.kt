@@ -5,9 +5,36 @@ import org.junit.Test
 
 class RecordPayloadCodecTest {
     @Test
+    fun newFactAndPlanModelsDefaultToCurrentPayloadSchema() {
+        val record = Record(
+            clientUuid = "record",
+            babyId = 1,
+            type = RecordType.PEE,
+            timestamp = 1_000,
+            createdByUserId = 1,
+            updatedAt = 1_000,
+        )
+        val plan = CarePlan(
+            clientUuid = "plan",
+            babyId = 1,
+            type = RecordType.PEE,
+            scheduledAt = 2_000,
+            scheduledZoneId = "Asia/Shanghai",
+            updatedAt = 1_000,
+        )
+
+        assertThat(record.schemaVersion).isEqualTo(CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION)
+        assertThat(plan.schemaVersion).isEqualTo(CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION)
+    }
+
+    @Test
     fun everyRecordTypeDecodesToItsMatchingTypedPayload() {
         val documents = RecordType.entries.associateWith { type ->
-            RecordPayloadCodec.decode(type, validV1Json(type), 1)
+            RecordPayloadCodec.decode(
+                type,
+                validV2Json(type),
+                CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+            )
         }
 
         assertThat(documents).hasSize(RecordType.entries.size)
@@ -19,11 +46,22 @@ class RecordPayloadCodecTest {
     }
 
     @Test
-    fun versionOneExtensionsSurviveAnEditedVersionTwoWrite() {
+    fun versionOnePayloadRemainsOpaqueAndByteStable() {
+        val rawJson = """{"amount_ml":120,"future":{"v":1}}"""
+
+        val document = RecordPayloadCodec.decode(RecordType.FORMULA, rawJson, 1)
+
+        assertThat(document.payload).isInstanceOf(UnknownPayload::class.java)
+        assertThat(document.schemaVersion).isEqualTo(1)
+        assertThat(RecordPayloadCodec.encode(document)).isEqualTo(rawJson)
+    }
+
+    @Test
+    fun versionTwoExtensionsSurviveTypedEdit() {
         val source = RecordPayloadCodec.decode(
             RecordType.FORMULA,
             """{"amount_ml":120,"future":{"v":2},"photos":["a.jpg"]}""",
-            1,
+            CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
         )
         val edited = source.copy(
             payload = MilkPayload(RecordType.FORMULA, amountMl = 135),
@@ -48,7 +86,7 @@ class RecordPayloadCodecTest {
         val source = RecordPayloadCodec.decode(
             RecordType.SLEEP,
             """{"is_nap":true,"scalar":"kept","object":{"v":2},"array":[1,2]}""",
-            1,
+            CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
         )
         val edited = source.copy(
             payload = SleepPayload(isNap = false, anomaly = true),
@@ -76,7 +114,11 @@ class RecordPayloadCodecTest {
         val malformed = """{"amount_ml":"""
         val future = """{"new_shape":[1,2,3]}"""
 
-        val malformedDocument = RecordPayloadCodec.decode(RecordType.FORMULA, malformed, 1)
+        val malformedDocument = RecordPayloadCodec.decode(
+            RecordType.FORMULA,
+            malformed,
+            CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+        )
         val futureDocument = RecordPayloadCodec.decode(RecordType.FORMULA, future, 99)
 
         assertThat(malformedDocument.payload).isInstanceOf(UnknownPayload::class.java)
@@ -142,7 +184,7 @@ class RecordPayloadCodecTest {
         ).containsExactly("体重需在 0–100 kg 之间")
     }
 
-    private fun validV1Json(type: RecordType): String = when (type) {
+    private fun validV2Json(type: RecordType): String = when (type) {
         RecordType.NURSING -> """{"left_min":1,"right_min":2}"""
         RecordType.FORMULA, RecordType.PUMPED_FEED, RecordType.PUMP_EXPRESS ->
             """{"amount_ml":120}"""
