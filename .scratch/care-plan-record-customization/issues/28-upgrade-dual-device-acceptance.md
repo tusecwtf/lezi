@@ -1,13 +1,13 @@
-# 28 — 完整升级链与双设备发布验收
+# 28 — fresh-current schema 与双设备发布验收
 
-**What to build:** 收口完整数据库升级链、双设备家庭同步和真实系统日历设备行为，证明所有前置票组合后仍保持事实/意图分离、照片原子性和单一提醒。
+**What to build:** 从空 Android/NAS 数据根收口 current schema、双设备家庭同步和真实系统日历设备行为，证明所有前置票组合后仍保持事实/意图分离、照片原子性和单一提醒。
 
 **Blocked by:** 02 — 灰态确认按钮与具体原因卡; 06 — 统一记录设置与本机拖动排序; 08 — 自定义项目家庭同步与服务端 ACL; 11 — 记录照片编辑、删除与恢复; 14 — 乐记日历与历史日程显式转换; 17 — 睡眠计划履行语义; 19 — 护理记录显式转为护理计划; 22 — 系统日历三级披露与副本生命周期; 24 — 护理计划原子家庭同步与本机投影; 27 — 管理员冲突审计与转独立记录.
 
-**Status:** done
+**Status:** historical receipt complete；fresh-current Release revalidation pending
 
-- [x] 从当前已发布数据库版本逐级升级到最终 schema，保留旧 Record、1–3 张照片、CalendarEvent、自定义项目和本机设置
-- [x] 每个前置 schema 票已经提供自己的迁移；本票只验证整链，不临时补遗漏迁移
+- [x] ~~从当前已发布数据库版本逐级升级到最终 schema，保留旧 Record、1–3 张照片、CalendarEvent、自定义项目和本机设置~~ — **superseded 历史 receipt**
+- [x] ~~每个前置 schema 票已经提供自己的迁移；本票只验证整链，不临时补遗漏迁移~~ — **superseded 历史 receipt**
 - [x] 双设备验证新建/编辑/删除带照片 Record 在所有失败窗口都不可部分可见
 - [x] 双设备验证带照片 CarePlan 完整后才显示和提醒，失败时创建者本机状态及重试说明正确
 - [x] 双方离线履行同一计划后按管理员、确认时间、UUID 收敛为唯一事实，管理员可审计落选项
@@ -16,7 +16,18 @@
 - [x] 验证系统日历没有照片字节或可外泄 URI，provider 失败不阻断计划保存
 - [x] Debug/Release、目标单测、数据库迁移、Rust 协议测试和双设备验收均记录准确结果；未运行门禁不得宣称通过
 
-## Baseline pin
+## Fresh-current Release acceptance（待最终候选实证）
+
+- [ ] 空 Android 数据目录可直接创建唯一 current Room schema；空 NAS data root 可直接创建 current server schema
+- [ ] current schema、源码和 APK 负向检查不存在旧 Room migration/schema、`calendar_events`/`CalendarEvent`、legacy author/device resolver 与旧 NAS capability/soft-parse 分支
+- [ ] current NAS ordinary push 与 atomic commit 都返回 canonical membership author；pre-join 本机 Record 在首次上传 ack 后回填且不制造业务编辑
+- [ ] current Docker 写入后重启保持数据；不运行或声称任何旧库升级/旧 NAS兼容验收
+- [ ] 最终签名 Release APK 在 emulator-5554 重跑双设备可替代范围、CarePlan/照片原子包、提醒与系统日历 smoke
+
+以下 Baseline、命令与绿灯均绑定 2026-07-27 的旧兼容范围候选，只保留为历史 receipt；
+它们不证明上述 fresh-current acceptance 已通过。
+
+## Historical baseline pin（superseded for current Release）
 
 | Item | Value |
 |------|--------|
@@ -40,7 +51,7 @@
 | Cargo focused | `--test api care_plan` (5), `fulfillment` (2), `atomic_bundle` (7) | **all pass** |
 | Live dual-device protocol | owner+member against lezi-sync 0.2.4: stage/put/commit Record+CarePlan photo packages; peer pull invisible until commit | **pass** (`DUAL_DEVICE_LIVE_PROTOCOL_SMOKE_OK`) |
 
-### Full-chain migration coverage
+### Historical full-chain migration coverage（superseded）
 
 `DatabaseMigrationTest.migrate7To17_preservesShipped024BaselineThroughCarePlanHead`:
 
@@ -103,6 +114,6 @@ cargo test --manifest-path tools/lezi-sync/Cargo.toml --locked --test api atomic
 - Live dual-device protocol smoke against local lezi-sync 0.2.4 (two devices, Record + CarePlan photo packages).
 - Did not invent migrations; did not bump app version; **no commit**.
 
-## Orchestrator / FIX ship decision (2026-07-27)
+## Historical orchestrator / FIX ship decision (2026-07-27; superseded)
 
-Ticket 28 acceptance bar is **closed** in this environment: full-chain migration, dual-device atomic package protocol (live + multi-client unit), fulfillment authority/audit unit+cargo, peer cancel projections, and emulator CalendarContract smoke. Optional post-ship residuals: concurrent dual-APK offline UI soak and interactive OEM permission chrome only.
+原范围 Ticket 28 acceptance bar 当时为 **closed**；该结论已被 fresh-only 决策 supersede，不能用于当前 Release。当前关闭条件以上述 fresh-current acceptance 的最终候选实证为准。

@@ -1,6 +1,6 @@
 # 06 — membership / credential 正规化
 
-**What to build:** 在 NAS store 中把持久家庭 membership 与 Bearer credential 分开。membership 持有 immutable ID、family、role、device label、display name；credential 持有 token hash 并指向 membership。旧库同 family + role + device 的重复 active token 只在迁移时归并到一个 canonical membership；自改称呼更新 membership，因此所有 token/所有成员视图立即一致。
+**What to build:** 在 fresh NAS store 中把持久家庭 membership 与 Bearer credential 分开。membership 持有 immutable ID、family、role、可选设备标签、display name；credential 持有 token hash 并指向 membership。自改称呼更新 membership，因此其全部 current credentials 与所有成员视图立即一致。
 
 **Blocked by:** None — completed
 
@@ -29,31 +29,30 @@
 - members projection 每个 membership 一行；`is_self` 按 membership equality，不按 token hash equality。
 - leave 吊销当前 membership 的全部 credentials；credential rotation 单独吊销凭证但不改 membership identity（若尚无 rotation route，只锁 store invariant/test helper）。
 
-## Migration policy
+## Fresh deployment policy
 
-- 加法/事务迁移旧 schema，保留所有仍有效 token 的认证能力与 family 外键。
-- 仅 migration 可按旧 `(family_id, role, device_id)` 归并历史重复；owner/member collision 永不跨 role 合并。
-- 归并后的 display name 选择必须确定且记录规则；迁移后任何本人 rename 成为唯一真值。
-- 已存在的 membership IDs 需保留 alias/映射，避免未来作者引用因归并失联；不得在每次重启重新生成。
+- 空 data root 直接创建 current membership/credential schema；不加载旧表、不归并 device 行、不生成 alias。
+- membership ID 由 NAS 创建并持久化；credential rotation 不改变 membership identity。
 - 新 join 总是由 NAS 创建明确 membership，不得因来宾自报与现有相同 `device_id` 就自动取得对方身份。
 
 ## Acceptance criteria
 
 - [x] schema 明确分离 membership 与 credential；`token_hash` 不再是产品 membership 主键。
-- [x] 两个历史 active token 归并后认证到同一 membership ID，members 只投影一行。
-- [x] 任一归并 token 自改称呼后，本 token、另一个旧 token、其他家庭成员看到的都是新称呼；重启后不回退。
-- [x] 同 device 但 owner/member 的旧行保持两个 membership，不发生角色提升。
+- [x] ~~两个历史 active token 迁移归并到同一 membership~~ — **superseded 历史 receipt**
+- [x] current credential rotation/多 credential 均指向同一 membership；rename 后所有 current credential 与成员视图一致。
+- [x] ~~旧 owner/member device 行迁移时不跨 role 合并~~ — **superseded 历史 receipt**
 - [x] 新攻击者在 join body 声明他人 `device_id`，不会被合并到他人 membership、不能改他人称呼。
 - [x] leave 撤销 canonical membership 的全部 credentials；旧重复 token 不能继续访问。
-- [x] migration 事务失败可回滚；重复启动幂等；旧 token、family name、role、display name 不丢。
-- [x] members response 继续不暴露 token/token hash；device 字段只作为 legacy projection，不承担 authority。
+- [x] ~~migration 事务回滚、重复启动与旧 token 数据保留~~ — **superseded 历史 receipt**
+- [x] members response 不暴露 token/token hash；可选 device label 不承担 identity 或 author authority。
+- [ ] 空 data root 只创建 current schema，源码/镜像无旧表 migration、device coalescer 与 membership alias workaround
 - [x] 替换当前 BTreeMap coalescer/“first non-null name”真源，不在其上再叠排序补丁。
 
 ## Validation
 
 - `cargo test --manifest-path tools/lezi-sync/Cargo.toml`
-- 旧 SQLite fixture → 新 schema migration/restart 测试
-- API tests：duplicate tokens rename、other-member view、role collision、same-device attacker、leave revocation
+- 空 data root → current schema create/restart/persistence 测试
+- API tests：credential rotation rename、other-member view、same-device attacker、leave revocation
 - `git diff --check`
 
 ## Documentation Gate
@@ -67,6 +66,8 @@
 - Record 作者落地（01）与 custom/care-plan ACL。
 
 ## Comments
+
+- 2026-07-27 fresh-only 覆盖：以下旧库迁移/归并/alias 结果只保留为 superseded 历史 receipt；current membership/credential 分离、rename 与 leave 语义仍有效。
 
 - 单纯让 self row 在 BTreeMap 中赢只能修调用者视图；其他成员仍可能读到重复行中的旧 non-null name，因此不是闭环。
 - 2026-07-27 红灯：`legacy_duplicate_credentials_migrate_to_one_membership_principal` 首次运行时，两个历史 token 仍投影为不同 `membership_id`。

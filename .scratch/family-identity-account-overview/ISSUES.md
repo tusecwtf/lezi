@@ -6,6 +6,11 @@ Source: grill-with-docs → to-spec → to-tickets · 多 agent 审查修订（5
 
 ## 依赖图
 
+Fresh-deployment override（2026-07-27）：记录上传者只按 current `membership_id` 解析；
+`createdByUserId`/`created_by_device_id` 与旧 NAS 字段省略兼容均已 superseded。Ticket 02 仍需
+current `family_name` value/null 双设备收敛；Ticket 05 的旧 device resolver 实现/证据不得作为
+Release 通过依据，fresh-only 负向检查由整改 tracker 01/02 收口。
+
 ```text
 01 称呼可认（含解析源） ──┬──► 03 账户首屏骨架 ──► 04 向导 + 邀请主行动
                          └──► 05 时间轴上传者
@@ -23,10 +28,10 @@ Source: grill-with-docs → to-spec → to-tickets · 多 agent 审查修订（5
 | ID | 标题 | Blocked by | Size | 状态 |
 |----|------|------------|------|------|
 | [01](./issues/01-member-display-name.md) | 家庭称呼可认 | — | L | done |
-| [02](./issues/02-shared-family-name.md) | 共享家庭名 | — | M | partial |
+| [02](./issues/02-shared-family-name.md) | 共享家庭名（current pull value/null） | — | M | partial |
 | [03](./issues/03-account-overview-shell.md) | 账户首屏骨架 | 01, 02 | M–L | done |
 | [04](./issues/04-family-wizard-and-invite.md) | 向导 + 邀请主行动 | 03 | M | done |
-| [05](./issues/05-timeline-uploader.md) | 时间轴上传者 | 01 | M | done |
+| [05](./issues/05-timeline-uploader.md) | 时间轴上传者 | 01 | M | done（current behavior）；legacy resolver evidence superseded |
 
 ## 过程纪律
 

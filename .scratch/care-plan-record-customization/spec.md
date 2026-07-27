@@ -1,11 +1,19 @@
 # Spec: 护理计划、记录自定义与照片原子同步
 
-Status: implementation-complete; final Release revalidation pending
+Status: implementation-complete; fresh-current Release revalidation pending
 Feature: care-plan-record-customization  
 Product: 乐记 (`com.lezi.babylog`)  
 Source: conversation grill 2026-07-26 · `/to-spec`  
 
 ---
+
+## Fresh-deployment Scope Override（2026-07-27）
+
+后续部署全部从空 Android 数据和空 NAS 数据根开始。旧 Room/NAS schema 升级、旧客户端/旧 NAS
+wire 软兼容、legacy author/device 回退及历史自由标题 `CalendarEvent` 的保留/转换均已
+**superseded/cancelled**。下文若仍保留相关完成记录，只是历史 receipt，不是本次 Release 通过证据。
+当前协议的 CarePlan、原子媒体包、membership 权威作者、canonical ack、pre-join 本机记录回填、
+family-name pull 和系统日历投影仍在范围内。
 
 ## Problem Statement
 
@@ -62,8 +70,7 @@ Source: conversation grill 2026-07-26 · `/to-spec`
 30. As a 跨时区家庭成员, I want 时区不同时同时看到本地换算与原计划时间, so that 我不会误解安排  
 31. As a 照护者, I want 所有计划始终进入乐记日历, so that 系统日历开关不影响应用内安排  
 32. As a 照护者, I want 乐记日历“＋”先选择具体记录项目, so that 新计划不再使用自由标题  
-33. As a 老用户, I want 历史自由标题日程继续可见、可编辑和提醒, so that 升级不丢旧数据  
-34. As a 老用户, I want 只有主动确认才把历史日程转换为护理计划, so that 旧数据语义不被自动改变  
+33–34. **Superseded：**历史自由标题 `CalendarEvent` 的保留、提醒与显式转换不再属于产品或 Release 范围
 35. As a 照护者, I want 安排时“同步到系统日历”默认开启, so that 常用提醒不需每次手开  
 36. As a 照护者, I want 首次主动启用时由应用申请权限并让我选择可写日历, so that 乐记不会静默写错账户  
 37. As a 照护者, I want 拒绝或取消日历配置后仍能保存计划, so that 可选集成不阻断核心功能  
@@ -94,7 +101,7 @@ Source: conversation grill 2026-07-26 · `/to-spec`
 62. As a 照护者, I want 任意已开启具体项目都能放入槽位且槽位跟随项目改名和图标, so that 快捷栏反映真实项目  
 63. As a 照护者, I want 睡眠槽位继续根据当前状态变化, so that 自定义不破坏睡下/醒来语义  
 64. As a 照护者, I want 关闭或删除槽位项目时不自动替换而显示“＋ 选择常用记录”, so that 快捷栏不擅自改变  
-65. As a 照护者, I want 可故意保留空槽且升级默认仍为尿尿、睡眠、母乳、配方奶, so that 兼顾自由与熟悉路径  
+65. As a 照护者, I want 可故意保留空槽且 fresh install 默认仍为尿尿、睡眠、母乳、配方奶, so that 兼顾自由与熟悉路径
 66. As a 照护者, I want 一个“记录与快捷设置”包含常用记录、所有记录项目、分项目设置、护理计划与日历, so that 配置入口统一  
 67. As a 照护者, I want 类别和类别内项目都可拖动排序但项目不可跨类别, so that 顺序可控且分类稳定  
 68. As a 照护者, I want 关闭项目后保留顺序并在重开时恢复, so that 暂时隐藏不破坏布局  
@@ -161,11 +168,11 @@ Source: conversation grill 2026-07-26 · `/to-spec`
 - 落选候选标记 `conflict-not-adopted`，保留内容、提交者、确认时间与计划关联；不进入正常 Record 查询、汇总、搜索或普通导出。
 - 管理员“转为独立记录”时创建新的 Record 身份并保留来源审计关联，不能把落选项直接翻成第二权威履行。
 
-### 项目、自定义定义与历史兼容
+### 项目、自定义定义与当前数据
 
 - 新建目录只包含已开启的具体内建项目与具体自定义项目。`memo`、`other`、泛化 `custom` 不再作为新建项目、计划类型或快捷候选。
 - 历史 `memo`、`other`、`custom` Record 保持可读和可编辑，不做破坏性迁移。
-- 历史自由标题 CalendarEvent 保持本机可见、可编辑和提醒，不进入家庭同步；显式转换才创建 CarePlan。
+- fresh-current 产品没有自由标题 `CalendarEvent` 实体、表、DAO、提醒或转换入口；乐记日历只呈现 CarePlan。
 - 自定义项目共享稳定 UUID、名称、图标、创建者和 tombstone；历史 Record/CarePlan 保存名称与图标快照，改名或删除不改写历史。
 - 任意成员可创建和使用自定义项目。普通成员仅管理自己创建的定义；管理员管理全部并接管离开成员的定义。
 - 自定义项目的本机启用、展示类别顺序、类别内顺序与快捷槽位不是家庭共享字段。
@@ -174,7 +181,7 @@ Source: conversation grill 2026-07-26 · `/to-spec`
 
 - 首页固定四个可配置槽位加一个“更多”。四槽整体靠偏好手一侧，“更多”位于远侧。
 - 槽位存稳定项目身份，可为空；名称或图标更新后跟随定义。睡眠等状态型项目继续根据领域状态生成动作外观和文案。
-- 项目关闭、删除或旧泛化入口移除时，槽位变为“＋ 选择常用记录”，不自动替换。迁移默认依次映射尿尿、睡眠、母乳、配方奶。
+- 项目关闭、删除或泛化入口移除时，槽位变为“＋ 选择常用记录”，不自动替换。fresh install 默认依次为尿尿、睡眠、母乳、配方奶。
 - 顶层只保留“记录与快捷设置”，二级固定为：常用记录、所有记录项目、分项目设置、护理计划与日历。
 - 类别可拖动；项目只在所属类别内拖动，不可跨类别。关闭项目保留排序，再次开启恢复原位。
 - 类别顺序、项目顺序、启用状态和快捷槽位均为设备本地设置。
@@ -182,7 +189,7 @@ Source: conversation grill 2026-07-26 · `/to-spec`
 ### 照片与本地事务
 
 - 所有 Record 类型与 CarePlan 共用备注附件概念，不再把新照片只嵌在 Memo/Diary payload。
-- 每个实体最多三张照片；Diary 同样执行三张限制。现有一至三张历史 payload 照片兼容读取并可在后续编辑时规范到公共附件。
+- 每个实体最多三张照片；Diary 同样执行三张限制。fresh-current payload 直接使用公共附件模型。
 - 编辑器提供缩略图、单张大图、最多三张左右滑动和删除/替换入口。照片导入失败不得破坏已有草稿。
 - Record/CarePlan 的本地保存与照片关联变更在同一数据库事务提交；软删除同时产生媒体 tombstone。
 - 转 Record 为 CarePlan 时附件所有权在同一事务转移或重建；任何失败都保留原 Record 完整可见。
@@ -238,7 +245,8 @@ Source: conversation grill 2026-07-26 · `/to-spec`
 - 通过公开领域/Composer seam 建立输入并观察输出，不直接拼 DAO 行证明业务规则，也不依赖 private Composable。
 - 时间测试使用可控时钟与显式 ZoneId；角色/冲突测试使用稳定 membership、确认时间和 UUID，不依赖真实墙钟或集合偶然顺序。
 - 原子同步测试必须证明失败中间态不可见，而不只是成功路径最终有照片。
-- 迁移测试从已发布 schema 构造旧数据，验证旧记录、旧照片、CalendarEvent 和快捷槽位兼容。
+- 数据库验收从空数据目录创建唯一 current schema，并核对 Room 导出与运行时 identity；不再运行旧 schema 升级链。
+- 负向验收必须证明不存在旧 migration/schema 入口、`calendar_events` 表、`CalendarEvent` model/DAO/DI、旧提醒 receiver/调度及显式转换 UI。
 
 ### 主 seam 1：CareLog
 
@@ -259,10 +267,10 @@ Source: conversation grill 2026-07-26 · `/to-spec`
 13. Record/CarePlan 附件最多三张、软删除 tombstone 与本地事务原子性  
 14. 系统日历失败不回滚计划；成功/失败选择唯一提醒来源  
 15. 被动同步不申请权限；本机已配置才建立副本  
-16. 历史 CalendarEvent 保持旧行为，显式转换才生成计划  
+16. 乐记日历只查询 CarePlan，代码与 APK 中不存在历史 `CalendarEvent` 表面
 17. 自定义项目权限、定义快照与本机隐藏边界  
 
-Prior art：既有 CareLog 测试已通过高层接口覆盖记录软删除不进汇总、睡眠状态事务、CalendarEvent 领域边界、自定义项目快照和同步触发。本功能延伸该风格，不另起只测 DAO 的平行套件。
+Prior art：既有 CareLog 测试已通过高层接口覆盖记录软删除不进汇总、睡眠状态事务、自定义项目快照和同步触发。本功能延伸该风格，不另起只测 DAO 的平行套件。
 
 ### 主 seam 2：RecordComposer
 
@@ -295,10 +303,10 @@ Prior art：既有 Composer SavedState 与 SessionGate 测试已覆盖请求匹�
 - Android adapter 契约验证只枚举可写日历、使用用户选择的 ID、写开始时提醒、保存稳定计划深链，且不写照片字节或可外泄照片 URI。
 - 设备 smoke 覆盖真实授权/拒绝、目标选择、创建/编辑/完成/删除副本与深链返回。厂商差异不把投影失败变成计划保存失败。
 
-### 设置、迁移与 UI smoke
+### 设置、fresh schema 与 UI smoke
 
-- 设置测试覆盖四槽默认迁移、空槽、旧泛化引用清空、禁用后顺序保留、类别排序、项目不可跨类别与本机偏好不进同步 payload。
-- 数据库迁移覆盖 CarePlan/履行/附件/定义字段和 tombstone，并证明旧 Record、旧一至三张照片、CalendarEvent 和自定义项目仍可读。
+- 设置测试覆盖 fresh 默认四槽、空槽、禁用后顺序保留、类别排序、项目不可跨类别与本机偏好不进同步 payload。
+- current schema 从空库创建 CarePlan/履行/附件/定义字段和 tombstone；旧 schema/migration 与 `CalendarEvent` surface 必须为负向搜索和 APK/Room schema 检查的空结果。
 - Compose 只保留少量 smoke：四槽加更多与偏好手布局、待履行分组颜色、三级披露、照片预览滑动、灰态按钮原因卡。像素由截图/人工验收补充，不把内部层级当契约。
 
 ## Out of Scope
@@ -310,11 +318,11 @@ Prior art：既有 Composer SavedState 与 SessionGate 测试已覆盖请求匹�
 - 后台常驻同步、轮询、FCM、P2P、家庭推送或为消除一次陈旧提醒新增实时通道  
 - 精确闹钟权限；乐记回退继续使用非精确提醒  
 - 云服务器或公网同步；继续遵守 NAS 中心、家庭 Wi-Fi 硬约束和前台同步  
-- 新建自由标题 CalendarEvent，或自动/批量转换历史 CalendarEvent  
-- 破坏性迁移或删除历史 memo、other、custom Record  
+- 任何自由标题 `CalendarEvent` 创建、保留或转换兼容层
+- 旧 Room/NAS schema 升级链、旧客户端/旧 NAS capability fallback
 - 新建泛化“备注”“其他”“自定义”项目  
 - 项目跨产品类别拖动或把本机项目布局同步给家庭成员  
-- 四至九张历史照片的特殊产品迁移场景；用户已确认不存在该场景  
+- 旧 payload/历史照片的版本迁移场景
 - 在普通时间轴、汇总、搜索或普通导出展示冲突未采纳履行  
 - 账号体系、跨设备同一人身份合并或改变现有 membership 角色模型  
 
@@ -322,7 +330,7 @@ Prior art：既有 Composer SavedState 与 SessionGate 测试已覆盖请求匹�
 
 - 本规格建立在“护理记录是事实、护理计划是意图”的术语边界上；实现与文案使用 `CONTEXT.md` 的统一词汇。
 - 已接受决策包括：未来计划与记录分离、停止新建泛化记录入口、照片作为通用附件、系统日历三级披露、记录/计划照片原子同步、共享自定义定义但不共享布局。
-- 当前实现已覆盖本规格的 28 张纵向票；Release 完成仍以最终候选的全量测试、迁移、设备、
+- 当前实现曾覆盖本规格的 28 张纵向票；Release 完成仍以最终候选的全量测试、fresh schema、设备、
   服务端端到端与双轴审查证据为准，不以文档状态或历史 targeted test 替代。
 - 用户已确认测试边界：CareLog 与 RecordComposer 是两个主要产品 seam；SyncPort 做 NAS 集成/契约；SystemCalendarPort 仅作为 Android provider adapter，并通过领域行为验证。
 - 实现可拆成纵向票单，但所有票单必须维护同一领域模型和原子包契约；不能长期发布“计划无照片”或“记录无照片”的元数据阶段。

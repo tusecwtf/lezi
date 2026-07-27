@@ -16,3 +16,7 @@
 - [x] 无法解析时用「家人」或角色兜底，不裸奔设备标识
 - [x] 不改全局顶栏；不做写入时名称快照
 - [x] S3 展示解析单测覆盖上述分支
+
+Fresh-deployment override（2026-07-27）：原勾选只证明用户可见行为，不证明 current-only identity surface。
+
+- [ ] 最终候选证明上传者只按 `createdByMembershipId` 解析，源码/wire/schema/APK 中不存在 `createdByUserId`/`created_by_device_id` author fallback 或 device resolver

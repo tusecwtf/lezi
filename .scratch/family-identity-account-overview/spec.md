@@ -18,6 +18,11 @@ Related:
 - 票 02 为 `partial`：create/join/owner rename 与跨设备 pull 收敛的实现和自动化已完成，等待最终候选双设备 UI/Docker smoke 后关闭。
 - 2026-07-26 只读 spec 审计后重开；2026-07-27 完成自动化整改。
 
+Fresh-deployment override（2026-07-27）：Android 与 NAS 只支持 current protocol。记录上传者只由
+server-owned `created_by_membership_id` 解析；`createdByUserId` / `created_by_device_id` author
+fallback 与旧 NAS `family_name` 字段省略软兼容已 superseded。current `family_name` 必须为 value
+或 explicit null；缺字段是协议错误。历史 completed receipt 不替代最终候选的负向 surface 验证。
+
 ---
 
 ## Problem Statement
@@ -151,7 +156,7 @@ Related:
 - 成员需能 **更新自己的 display_name**（`updateMyDisplayName` 或等价）；不能改他人。
 - 成员列表安全投影不变：仅 `display_name`、`role`、`is_self`（及客户端所需的展示派生）；管理员 UI 标 ★。
 - 本地 `LocalUser.displayName` 与当前 membership 称呼对齐缓存；未加入时可空。
-- 记录仍以 `createdByUserId` / wire `created_by_device_id` 归因；展示时解析为当前 membership 称呼（**无历史快照**）。
+- 记录只以 server-owned `createdByMembershipId` / wire `created_by_membership_id` 归因；展示时解析为当前 membership 称呼（**无历史快照**），不得回退 device key。
 
 ### SyncPort / 客户端模块（概念面，非文件清单）
 
@@ -202,7 +207,7 @@ Related:
 |----|------|------|
 | **S1** | 家庭 UI 文案/可见性策略 | 概览短句、人数摘要、★、主 CTA、网络细节不出现在概览输出 |
 | **S2** | SyncPort / HTTP 契约 | 称呼必填、家庭名可空与回显、改名、members 投影 |
-| **S3** | 记录展示解析 | 非本人显示当前称呼；本人不标；未加入不标 |
+| **S3** | 记录展示解析 | 仅 membership：非本人显示当前称呼；本人不标；未加入不标；无 device author fallback |
 | **S4** | lezi-sync API 集成 | `family_name` 持久化；空 `display_name` → 422；members 无 token/device |
 
 ### Prior art
@@ -220,6 +225,7 @@ Related:
 4. 改自己称呼 → 列表与后续上传者展示更新  
 5. 非本人记录在时间轴显示对方当前称呼；本人记录不显示  
 6. 网络设置仍可保存 SSID/服务器并立即同步（能力不丢）
+7. current response 缺 `family_name` 或 Record 缺 canonical membership author 时 fail closed/可重试，不走旧 NAS/device fallback
 
 ---
 
@@ -268,7 +274,7 @@ Related:
 
 ### 风险
 
-- 旧客户端/旧 membership 空名：必须角色兜底，避免空白行  
-- create/join 从可选 display_name 改为必填：旧测试夹具与假后端需同步  
-- 家庭名新字段：需兼容旧 NAS 无字段时客户端兜底  
+- current membership 引用暂时无法解析：使用角色/「家人」展示兜底，但不猜测 device→作者
+- create/join 的 `display_name` 必填；current 测试夹具与假后端保持同协议
+- current pull 的家庭名允许 explicit null；字段缺失必须作为协议错误处理
 - 向导与 onboarding「加入家庭」应共用规则，防止第三套加入表单

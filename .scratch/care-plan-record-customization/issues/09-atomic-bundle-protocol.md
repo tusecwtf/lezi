@@ -11,8 +11,8 @@
 - [x] commit 在一个服务端事务发布完整包；重复 commit 和 commit 响应丢失可安全重试
 - [x] 新版本编辑在 commit 前不覆盖当前已发布完整版本
 - [x] tombstone 包能表达根实体与媒体的逻辑删除，物理暂存清理可安全延后
-- [x] 客户端可通过能力协商识别不支持原子包的旧 NAS，不得静默回退到 metadata-first
-- [x] 旧 baby/record/media 协议继续兼容，扩展阶段不破坏当前客户端
+- [x] ~~客户端可通过能力协商识别不支持原子包的旧 NAS，不得静默回退到 metadata-first~~ — **superseded 历史 receipt**
+- [x] ~~旧 baby/record/media 协议继续兼容，扩展阶段不破坏当前客户端~~ — **superseded 历史 receipt**
 - [x] HTTP/Store 契约测试覆盖第 N 张中断、清单不一致、越界大小、重复提交、旧版本保留和不可见性
 
 ## Release correction · 2026-07-27
