@@ -168,12 +168,12 @@ internal fun QuickRecordDraft.writeDecision(nowMillis: Long): ComposerWriteDecis
     isEditingCarePlan -> ComposerWriteDecision.UpdateCarePlan
     carePlanId != null -> ComposerWriteDecision.FulfillCarePlan
     needsConvertToCarePlan(nowMillis) -> ComposerWriteDecision.ConvertRecordToCarePlan
+    workMode(nowMillis) == ComposerWorkMode.ScheduleCare -> ComposerWriteDecision.CreateCarePlan
     type == RecordType.SLEEP && sleepAction in setOf(
         SleepDraftAction.SleepDown,
         SleepDraftAction.WakeUp,
     ) -> ComposerWriteDecision.ConfirmSleep
     existingRecordId != null -> ComposerWriteDecision.UpdateRecord
-    workMode(nowMillis) == ComposerWorkMode.ScheduleCare -> ComposerWriteDecision.CreateCarePlan
     else -> ComposerWriteDecision.AddRecord
 }
 

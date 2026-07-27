@@ -714,6 +714,31 @@ class QuickRecordDraftTest {
     }
 
     @Test
+    fun scheduledSleepCreatesAPlanInsteadOfStartingAnOpenSleepFact() {
+        val scheduledAt = tappedAt + 60_000L
+        val explicit = QuickRecordDraft.create(
+            type = RecordType.SLEEP,
+            timestamp = scheduledAt,
+            createIntent = ComposerCreateIntent.ScheduleCare,
+        )
+        val timestampDerived = QuickRecordDraft.create(
+            type = RecordType.SLEEP,
+            timestamp = scheduledAt,
+        )
+
+        assertEquals(SleepDraftAction.SleepDown, explicit.sleepAction)
+        assertEquals(ComposerWorkMode.ScheduleCare, explicit.workMode(nowMillis = tappedAt))
+        assertEquals(
+            ComposerWriteDecision.CreateCarePlan,
+            explicit.writeDecision(nowMillis = tappedAt),
+        )
+        assertEquals(
+            ComposerWriteDecision.CreateCarePlan,
+            timestampDerived.writeDecision(nowMillis = tappedAt),
+        )
+    }
+
+    @Test
     fun fromCarePlanHydratesPlanFieldSnapshotIntoFulfillDraft() {
         val plan = com.lezi.babylog.core.model.CarePlan(
             id = 9L,
