@@ -1,4 +1,4 @@
-# 乐记 — 家庭局域网同步规格（V2）
+# 乐记 — 当前家庭局域网同步规格
 
 > 决策锁定：2026-07-25（grilling）
 > 主 PRD：[`README.md`](./README.md) · 数据契约：[`data-model.md`](./data-model.md) · Android：[`tech.md`](./tech.md)
@@ -48,9 +48,9 @@
 
 **已落地扩展与边界**
 
-- 家庭同步 `CustomItemDef`（`custom_item` legacy push）已落地：共享 UUID/名称/图标/创建者/tombstone；布局与槽位仍本机。
+- 家庭同步 `CustomItemDef`（`custom_item` ordinary push）已落地：共享 UUID/名称/图标/创建者/tombstone；布局与槽位仍本机。
 - 家庭同步 `CarePlan`、履行候选、计划照片以及 Record/计划原子包已落地；接收端完整包落地后才建立本机提醒。
-- 通用 `CalendarEvent` 不进入家庭同步；护理计划与 Android 系统日历副本是不同概念。
+- 乐记日历只呈现 `CarePlan`；护理计划与 Android 系统日历副本是不同概念。
 - 自定义项目显隐/排序/常用槽位、系统日历 ID/权限/披露级别与提醒偏好继续只存本机。
 
 ---
@@ -144,11 +144,10 @@ SSID 白名单 **仅存本机**，不随家庭同步到 NAS。两台手机可登
 
 - health 失败：指数退避（30s → 2min → 10min），禁止固定高频 ping。
 - 白名单已满 2 个时自动绑定新 SSID：**不覆盖**，提示用户手动改。
-- 已加入后改 host/port：**允许**；保留已确认的新端点与 SSID 配置，但必须原子清除旧
+- 已加入后改 host/port：**允许**；保留已确认的新端点与 SSID 配置，但必须原子清除原
   `token`、`family`、`membership`、`cursor/generation`，由用户在新 NAS 重新创建或加入家庭；
-  旧 NAS 凭据不得发送到新端点。
+  原端点凭据不得发送到新端点。
 - leave / owner 删除家庭成功：本机 **清空** host/port、SSID 白名单与会话。
-- 旧版仅 `sync_base_url` 迁移：解析 host/port；SSID 空 → 禁止同步直至用户绑定。
 - 不因同步失败回滚 Room 写入。
 - **不做** BSSID 绑定、多于 2 个 SSID、每 SSID 独立 IP。
 
@@ -201,11 +200,11 @@ SSID 白名单 **仅存本机**，不随家庭同步到 NAS。两台手机可登
 | Baby（含头像引用；头像写限 owner） | SettingsLocal 全部 |
 | Record（含软删） | 下次喂奶提醒、Widget |
 | CustomItemDef（不含布局、显隐与快捷槽位） | 本机-only 路径、主题与排序 |
-| CarePlan + FulfillmentCandidate | 通用 CalendarEvent、系统日历 ID/权限/披露与提醒偏好 |
+| CarePlan + FulfillmentCandidate | 系统日历 ID/权限/披露与提醒偏好 |
 | Record/计划 MediaAsset 元数据 + 字节 | Widget 配置与下次喂奶时刻 |
 
-`CustomItemDef`、`CarePlan`、`FulfillmentCandidate` 与计划媒体均为现行同步域；
-通用 `CalendarEvent` 仍不同步。带照片的 Record/CarePlan 必须在发送、服务端发布
+`CustomItemDef`、`CarePlan`、`FulfillmentCandidate` 与计划媒体均为现行同步域。
+带照片的 Record/CarePlan 必须在发送、服务端发布
 和接收应用阶段以完整照片包原子可见，不能先展示实体再补照片。
 
 ### 5.2 冲突
@@ -232,7 +231,7 @@ SSID 白名单 **仅存本机**，不随家庭同步到 NAS。两台手机可登
 
 ### 5.5 已加入家庭时清除本机记录
 
-「清除全部记录」清当前设备的 Record、CarePlan、履行候选、历史 `CalendarEvent` 及其
+「清除全部记录」清当前设备的 Record、CarePlan、履行候选及其
 本机副本媒体/提醒，保留宝宝、自定义项目和家庭会话；它不删除 NAS 上的家庭记录，也不
 代表退出或删除家庭。清除期间同步与本地事务共用屏障；一旦领域事务已提交，后续副本
 清理失败必须可恢复重试，且遗留 Outbox 不得把已清记录复活上传。由于服务器仍保留数据，
@@ -342,7 +341,7 @@ curl 或解释器。HTTPS 由 NAS 的 Caddy/Nginx/系统反向代理终止；容
 
 ```text
 $LEZI_DATA_DIR/                    # 例：/data 或 /volume1/docker/lezi
-├── lezi.db                        # SQLite（entities、invites、tokens、rev/cursor 元数据；user_version=2）
+├── lezi.db                        # SQLite（entities、invites、credentials、rev/cursor；user_version=3）
 ├── lezi.db-wal / lezi.db-shm      # 若启用 WAL
 ├── server.secret                  # token 幂等派生密钥；须保密并随整根备份
 └── media/
@@ -350,12 +349,11 @@ $LEZI_DATA_DIR/                    # 例：/data 或 /volume1/docker/lezi
         └── {media_client_uuid}     # 原始字节
 ```
 
-服务端必须显式管理 SQLite `PRAGMA user_version`：版本 0/1 原位幂等升级并保留家庭、
-凭证与实体；v1 的 `sync_bundle_media.staged_sha256` 列迁移保持幂等。v2 新增
-`media_publications`：已 committed bundle 恢复为可发布归属，仍在 staging 的清单
-恢复为持久隔离态；仅经尺寸校验且没有 bundle 归属的旧 final-path 媒体可回填为
-legacy 归属。数据卷版本高于 2 时，旧服务端必须在创建媒体目录、密钥、SQLite
-sidecar 或修改数据根权限前，以只读预检 fail closed。启动清理只允许删除
+服务端只支持 fresh-current SQLite schema v3。空数据目录、不存在的 `lezi.db` 或
+零字节空库初始化为精确 v3；已有数据库只有在 `user_version=3` 且表、索引、约束与
+当前 schema 完全匹配时才允许重启并保留家庭、凭证、实体、游标和媒体归属。已有数据库
+若版本不是精确 v3（包括更早或未来版本）或形状不匹配，则在只读预检阶段 fail closed；不得执行升级，
+也不得创建媒体目录、密钥、SQLite sidecar 或修改数据根/数据库权限。启动清理只允许删除
 `media/` 下名称为合法 UUID、且 SQLite 已无对应家庭的目录；非 UUID 运维项、
 符号链接和仍存家庭目录必须保留。
 
@@ -401,13 +399,10 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 
 - 无鉴权
 - `200 {"ok": true, "version": "<semver>", "capabilities": ["atomic_bundle", "record_membership_author"]}`
-- `capabilities` 为**加法**字段：旧客户端可忽略；新客户端用
-  `atomic_bundle` 识别原子同步包，用 `record_membership_author` 识别 NAS 是否接受并
-  权威化 Record 的 membership 作者字段
-- 不支持 `atomic_bundle` 的旧 NAS：客户端**不得**把带照片的记录/计划静默降级为 metadata-first 推送；应保留本机并提示升级服务端
-- 不支持 `record_membership_author` 的旧 NAS：客户端不得盲发未知
-  `created_by_membership_id` key；保留本机作者并发送旧 payload，时间轴仅在新字段
-  不可用时回退 legacy device 关联
+- 当前客户端要求能力集合包含 `atomic_bundle` 与 `record_membership_author`：前者标识
+  原子同步包，后者标识 NAS 以认证 membership 权威化 Record 作者。缺少任一能力的
+  服务端都不是受支持的 current endpoint，客户端停止同步并提示重新部署当前服务，
+  不降级为其它 wire。
 - 客户端门闩探测用；响应体保持小体积（健康探测上限 64 KiB）
 
 ### 9.2 `POST /v1/family/create`
@@ -424,12 +419,12 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 ### 9.3 `POST /v1/invite`
 
 - Auth：owner token
-- Body：`{ "family_id" }`（可从 token 推导则可不传）
+- Body：`{}`；家庭只从认证 principal 推导，未知字段返回 `422`
 - 响应：`{ "code", "expires_at" }`，`expires_at` 为 Unix epoch 秒
 - 客户端生成 QR：建议载荷 JSON（含 host/port 与本机已保存的 Wi‑Fi 名，便于对方预填）
   `{ "v":1, "baseUrl":"http://192.168.50.4:8765", "host":"192.168.50.4", "port":8765, "ssids":["Home-2.4G","Home-5G"], "code":"ABCD1234" }`
   - `ssids` 最多 2 个，可选；扫码端写入本机白名单（仍不上传服务器）
-  - 兼容旧载荷：仅 `baseUrl`+`code` 或纯邀请码
+  - 相机扫码只接受当前 `v=1` JSON；手动输入框接受当前邀请码字符串
 
 ### 9.4 `POST /v1/join`
 
@@ -449,21 +444,15 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 - 作用域：只查询 Bearer principal 所在家庭且 `left_at IS NULL` 的 membership；
   Bearer credential 本身必须 `revoked_at IS NULL`
 - 响应：
-  `{"members":[{"display_name":"妈妈","role":"owner","is_self":true,"device_id":"…","membership_id":"…"}]}`
+  `{"members":[{"display_name":"妈妈","role":"owner","is_self":true,"membership_id":"…"}]}`
 - 返回规范化后的 `display_name`、`role`、`is_self`、服务器生成的 `membership_id`
-  （不可变公开身份，供作者权限与冲突裁决引用），以及客户端链路键
-  `device_id`（只为旧 NAS/旧 Record 的 `created_by_device_id` 回退保留）。时间轴
-  优先以 `membership_id` 解析 Record 作者的**当前**家庭称呼；`device_id` 不承担
-  identity authority。`is_self` 由服务端比较返回行与当前 principal 的
-  `membership_id` 得出；**绝不**返回 token、`token_hash` 或 `family_id`。
-  `device_id` **不得**在产品 UI 中展示给用户
-- owner-first；其余按规范化名称与服务端内部稳定键排序。`display_name=null`
-  表示历史 null/空/不安全名称，客户端按角色/「家人」兜底（且不得把「我（本机）」
-  展示给其他成员）
+  （不可变公开身份，供作者权限与冲突裁决引用）。时间轴只以 `membership_id` 解析
+  Record 作者的**当前**家庭称呼。`is_self` 由服务端比较返回行与当前 principal 的
+  `membership_id` 得出；**绝不**返回 device、token、`token_hash` 或 `family_id`
+- owner-first；其余按规范化名称与服务端内部稳定键排序。当前建家/加入强制合法
+  `display_name`，响应中不得出现空称呼
 - membership 与 credential 分表；members 每个 active membership 只展示一行，
-  credential 轮换不会生成新身份。旧库仅在迁移事务中按 family + role + device
-  归并历史 active token，并保留其它既有 membership ID 为 alias；owner/member
-  role 冲突不合并。迁移后绝不按 `device_id` 合并，新 join 即使声明相同 device 也
+  credential 轮换不会生成新身份。运行时绝不按 `device_id` 合并，新 join 即使声明相同 device 也
   创建独立 membership。退出会标记当前 membership 离开并吊销其全部 credentials；
   单 credential 轮换/吊销不改变 membership identity
 
@@ -512,15 +501,12 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
   不应用任何实体
 - LWW：请求 `updated_at` 小于库中则 skip
 - Record 作者是 server-owned field：首次接受新 Record 时，NAS 从认证 principal
-  写入 `created_by_membership_id`，并保留 `created_by_device_id` 作为旧客户端回退；
-  客户端伪造的 membership/device claim 不会成为作者。后续编辑、软删与恢复保留
+  写入 `created_by_membership_id`；客户端伪造的 membership/device claim 不会成为作者。后续编辑、软删与恢复保留
   已存首次作者。ordinary push 与 atomic bundle 必须调用同一 canonicalization 规则
-- 旧数据只在同家庭的 legacy device 可唯一映射到一个历史 membership 时回填作者；
-  回填推进实体与家庭 revision 且重启幂等，重复/未知映射保持 unknown
 - avatar 类 media：非 owner → `403`
 - 响应：
   `{ "applied": N, "record_authors": [{ "client_uuid": "…", "created_by_membership_id": "…" }] }`
-  `record_authors` 是可忽略的加法字段，只列出已知 canonical 作者；equal/LWW skip 也可
+  `record_authors` 是当前响应字段，只列出已知 canonical 作者；equal/LWW skip 也可
   返回已存作者，使建家前本机 Record 无需等待下一次 pull 即可完成 metadata-only 回填
 
 ### 9.7 `GET /v1/pull?cursor=&generation=`
@@ -528,12 +514,12 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 - Auth：token
 - 响应：
   `{ "entities":[...], "cursor": <本页已扫描 rev>, "generation": "...", "has_more": true|false, "family_name": "…"|null }`
-- 新服务端每个成功页（包括零实体页）都返回 NAS 权威、已规范化的 `family_name`。
-  客户端要求同轮多页中所有 present 值一致；若并发改名导致页间值变化，本轮失败
-  并从最后完整检查点重试，不能静默采用最后一页。客户端必须区分三态：旧 NAS
-  省略字段时保留本地缓存；显式 `null` 清空缓存并让 UI 使用「我的家庭」/宝宝昵称兜底；字符串覆盖
+- 服务端每个成功页（包括零实体页）都返回 NAS 权威、已规范化的 `family_name`。
+  客户端要求同轮多页中的值一致；若并发改名导致页间值变化，本轮失败
+  并从最后完整检查点重试，不能静默采用最后一页。显式 `null` 清空缓存并让 UI 使用
+  「我的家庭」/宝宝昵称兜底；字符串覆盖
   缓存。家庭名与该页 `cursor` / `generation` 在同一次 DataStore edit 中发布，不能
-  用整份旧 session 覆盖并发更新的 membership、SSID 等字段。full-resync 延迟发布
+  用整份过期 session 覆盖并发更新的 membership、SSID 等字段。full-resync 延迟发布
   cursor 时，家庭名也随最终完整检查点一起发布；中途失败不发布半轮 metadata。
 - 服务端按实体数（默认最多 200）与序列化体积（目标最多 8 MiB）双重分页；
   `has_more=true` 时客户端必须用本页 `cursor` 继续拉取。每页 apply 与缺失媒体落盘
@@ -544,15 +530,12 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
   Media → Record → Baby 依赖组仍可完整放进一页；超限 push 以 `422` 原子拒绝。
 - 全量恢复时，若 Record/Media 所依赖的 Baby/Record 当前 revision 落在后页，
   服务端会在当前页附带该依赖（后页允许幂等重复），避免分页切断引用。
-- `has_more` 为向后兼容的增量字段：旧服务端缺少该字段且本页少于 200 个实体时，
-  新版客户端按单页处理；满 200 个实体却缺少该字段时失败关闭，不能把可能截断的
-  快照当作成功。单轮 pull 最多 500 页，触顶时失败并保留到最后完整落盘页的 cursor。
-  旧客户端忽略该字段时仍只推进到本页 cursor，下一次前台/下拉会继续而不会跳过。
+- `has_more` 是当前响应必需字段；缺失或类型错误时整页失败，不能把可能截断的快照
+  当作成功。单轮 pull 最多 500 页，触顶时失败并保留到最后完整落盘页的 cursor。
 - `cursor` 在一个服务进程代际内单调；客户端同时持久化 `cursor` 与 `generation`
-- 服务重启会更换 `generation`。客户端携带旧代际时服务端返回结构化 `409`
+- 服务重启会更换 `generation`。客户端携带前一代际时服务端返回结构化 `409`
   `generation_changed/full_resync`，避免备份恢复后 revision 恰好复用而漏拉。
-  既有安装若只有非零 cursor、尚无 generation，也会先从 cursor 0 校准。
-  因此恢复整个数据根后必须重启服务；普通重启也会触发一次安全的全量校准。
+  因此恢复整个 current v3 数据根后必须重启服务；普通重启也会触发一次安全的全量校准。
 
 ### 9.8 媒体字节
 
@@ -564,9 +547,9 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 
 ### 9.8.1 原子同步包（`atomic_bundle`）
 
-根实体（`record` 或 `care_plan`）与完整媒体清单只能一起对其它设备可见。旧的
-`/v1/push` + `/v1/media` metadata-first 路径**继续兼容**（头像、旧客户端）；
-带照片的护理记录/计划应走本协议。
+根实体（`record` 或 `care_plan`）与完整媒体清单只能一起对其它设备可见。
+`/v1/push` + `/v1/media` 是 Baby、无照片 Record、头像、CustomItemDef 和履行候选的
+当前 ordinary 路径；带照片的 Record 与全部 CarePlan 必须走本协议。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -587,22 +570,19 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
   文件的持久化摘要与尺寸，并再次 fsync 文件及上述两级目录。同一数据根优先 hard
   link，不支持时使用已 fsync 暂存副本的
   no-replace 原子 rename
-- **旧摘要保守恢复**：旧库中摘要为空的 committed bundle 仅在原暂存文件仍存在、
-  且与已发布文件完全一致时补写摘要；暂存已清理时拒绝重试，不把同尺寸现状当作原件
 - **幂等 commit**：重复 commit / 丢失响应可安全重试；已 commit 的 `bundle_id` 内容冲突 → `409`
 - **canonical 回执**：Record 根的首次 commit 与幂等 retry 都使用与 ordinary push
-  同形的 `record_authors` 加法数组；旧客户端忽略，Android 只在请求对应的本地版本仍
+  同形的 `record_authors` 数组；Android 只在请求对应的本地版本仍
   存在时合并 membership 作者，不改护理内容、dirty 状态或 Outbox
 - **提交者绑定**：暂存包绑定 stage 时认证到的 membership；其它 membership 不得代为
   commit，从而保证 server-owned Record/CarePlan 作者、内容 hash 与幂等重试一致
 - **稳定 UUID**：Android 以命名空间、根类型、根实体 `client_uuid` 与 `updated_at` 确定性生成合法 UUID；同一版本重试复用同一 `bundle_id`，Record 与 CarePlan 不共享身份
-- **旧版本保留**：新版本编辑在 commit 前不覆盖已发布完整版本；根 `updated_at` 落后于已发布 → commit `409`
-- **LWW 与 legacy**：commit 与 `/v1/push` 共享实体键 LWW；不得用半套 legacy 写穿破原子可见性
+- **已发布版本保留**：新编辑在 commit 前不覆盖当前已发布完整版本；根 `updated_at` 落后于已发布 → commit `409`
+- **LWW 与 ordinary**：commit 与 `/v1/push` 共享实体键 LWW；不得用半套 ordinary 写穿破原子可见性
 - **根类型通用**：`record` 与 `care_plan` 共用同一 HTTP/Store 契约
 - **CarePlan ACL**：创建时服务端从认证 principal 盖章 `created_by_membership_id`（忽略客户端伪造）；任意成员可创建；普通成员仅可修改/跳过/删除自己创建的计划，管理员可管理全部；作者离开后管理员仍可管理。计划媒体引用、宝宝、具体项目与家庭必须一致，跨家庭引用以冲突错误拒绝
-- **不经 legacy push**：`care_plan` 不得走 `/v1/push`，必须经 atomic bundle，避免半套包
-- **履行候选**（`fulfillment_candidate`，legacy push）：任意活动成员可提交；服务端在候选首次接受时固定认证 `submitter_membership_id`、`submitter_role` 与不可编辑 `confirmed_at`，后续请求/幂等重放不得改写；客户端用盖章字段按管理员 → 较早确认时间 → 候选 UUID 裁决唯一权威事实，落选标记 conflict-not-adopted 并排除于普通记录表面；管理员本机冲突审计与「转为独立记录」不改写候选盖章字段，也不通过 wire 同步 `adoptionStatus` / `convertedRecordClientUuid`
-- **旧客户端**：未知 `entity_type`（含 `care_plan` / `fulfillment_candidate`）应忽略整行，不得半应用
+- **不经 ordinary push**：`care_plan` 不得走 `/v1/push`，必须经 atomic bundle，避免半套包
+- **履行候选**（`fulfillment_candidate`，ordinary push）：任意活动成员可提交；服务端在候选首次接受时固定认证 `submitter_membership_id`、`submitter_role` 与不可编辑 `confirmed_at`，后续请求/幂等重放不得改写；客户端用盖章字段按管理员 → 较早确认时间 → 候选 UUID 裁决唯一权威事实，落选标记 conflict-not-adopted 并排除于普通记录表面；管理员本机冲突审计与「转为独立记录」不改写候选盖章字段，也不通过 wire 同步 `adoptionStatus` / `convertedRecordClientUuid`
 - **暂存上限**：每包最多 8 个 media；每家庭最多 64 个 open staging bundle（防 NAS 磁盘无界）
 
 ### 9.9 `POST /v1/family/delete`
@@ -622,7 +602,18 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 
 ---
 
-## 10. Entity payload 约定（首版）
+## 10. Current entity payload 约定
+
+Record 与 CarePlan 共享以下 current-wire 约束：
+
+- `schema_version` 是必填整数且必须精确为 `2`；省略、`1`、未来值或其它类型均返回 `422`。
+- `type` 只接受 `nursing`、`formula`、`pumped_feed`、`pump_express`、`pee`、`poop`、
+  `both_diaper`、`sleep`、`temperature`、`diary`、`bath`、`walk`、`cough`、`rash`、
+  `vomit`、`injury`、`medicine`、`hospital`、`height`、`weight`、`baby_food`、`snack`、
+  `drink`、`head`、`chest`、`foot_size`、`vaccine` 与 `custom`；`memo`、`other` 和未知值
+  均返回 `422`。
+- `type=custom` 时 `custom_item_client_uuid` 必须引用同家庭、未删除的 CustomItemDef；
+  其它类型必须省略或置空。该规则同时适用于 ordinary Record 和 atomic CarePlan 根。
 
 ### 10.1 `baby`
 
@@ -631,7 +622,6 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
   "nickname": "...",
   "sex": "...",
   "birthday": "...",
-  "due_date": null,
   "avatar_media_uuid": null
 }
 ```
@@ -639,8 +629,6 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 - 不含本机 `avatarPath`
 - `sort_order` 与 `theme_color` 为本机展示字段，不进入 wire payload
 - `avatar_media_uuid` 指向 `type=media` 且 `kind=avatar` 的实体
-- `due_date` 仅为滚动升级兼容字段；现行客户端不采集、展示或参与计算，
-  Android 仍发送旧值或 `null`，避免新旧 APK 与 NAS 服务混用时破坏同步
 
 ### 10.2 `record`
 
@@ -648,20 +636,20 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 {
   "baby_client_uuid": "...",
   "type": "formula",
+  "custom_item_client_uuid": null,
   "timestamp": 0,
   "end_timestamp": null,
   "note": null,
   "payload_json": {},
-  "created_by_membership_id": "...",
-  "created_by_device_id": "..."
+  "schema_version": 2,
+  "created_by_membership_id": "..."
 }
 ```
 
 - `created_by_membership_id` 是 NAS 在首次接受 Record 时从认证 principal 盖章并在
   后续版本中冻结的作者；客户端字段只是可被忽略/改写的 claim
-- `created_by_device_id` 只为旧 NAS/旧实体回退保留，不用于 membership authority
-- Android 仅在 health capability 含 `record_membership_author` 时发送 additive
-  membership key；旧服务缺 capability 时省略该 key
+- Android 与 NAS 均要求 current `record_membership_author` 能力；缺失时停止同步，
+  不发送降级 payload
 
 ### 10.3 `media`
 
@@ -712,19 +700,18 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 
 ---
 
-## 13. 与旧文档 / 原型的关系
+## 13. 当前权威关系
 
 | 项 | 关系 |
 |----|------|
-| `data-model.md` SyncPort | 仍成立；V2 规则以 **本文** 为网络与触发权威 |
-| 旧「约 60s 可见」 | **废止为后台 SLA**；改为 §5.4 前台验收 |
+| `data-model.md` SyncPort | 仍成立；当前规则以 **本文** 为网络与触发权威 |
 | `tools/lezi-sync` | 本文 NAS API 的交付实现；本机 Docker 已验，物理 NAS 生产部署未宣称 |
 | `RealSyncPort` | 已对齐持久会话、无默认 baseUrl、家网/前台门闩、Outbox 与媒体 |
 | 双端 P2P | 不在范围 |
 
 ---
 
-## 14. 分期实现清单（工程）
+## 14. 当前实现清单（工程）
 
 > **票单（issue tracker）：** [`.scratch/home-lan-sync/ISSUES.md`](../../.scratch/home-lan-sync/ISSUES.md)
 
@@ -736,7 +723,8 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 - [x] avatar 写权限
 - [x] README：部署、备份、示例 `192.168.50.4:8765`
 - [x] 在本机全局 Docker 构建并启动 Rust 镜像，核对单卷、非 root、`/health`
-  与旧数据卷升级兼容（未宣称 NAS 生产）
+  （未宣称 NAS 生产）
+- [x] 自动化覆盖空库初始化 v3、同版本重启持久化，以及非 current schema 只读拒绝且不修改数据根
 
 ### 14.2 Android
 
@@ -761,9 +749,10 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 
 | 日期 | 说明 |
 |------|------|
+| 2026-07-27 | ADR-0008 锁定全产品 fresh-current：NAS 仅接受精确 v3 schema 与 current wire；其它产品版本不在支持范围 |
 | 2026-07-27 | Release 持久化收敛：原子包媒体摘要与双层目录 fsync 后再发布 DB、committed retry 精确复核、SQLite 只读 future fail-closed、家庭删除孤儿目录启动回收 |
 | 2026-07-26 | 严格 live 服务端完成双模拟器建家、邀请码加入、双向协议与头像 ACL；Ticket 09 仍 partial |
-| 2026-07-25 | NAS 服务原位迁移为 Rust/Axum/Tokio/rusqlite；保留 HTTP、SQLite 与 token 派生兼容，删除重复原型入口 |
+| 2026-07-25 | 历史实施记录：NAS 服务切换为 Rust/Axum/Tokio/rusqlite；其中跨产品版本结论已由 ADR-0008 取代 |
 | 2026-07-25 | 验收校正：本机 Docker 与双模拟器 formula/pee 已验；Ticket 09 保持 partial |
 | 2026-07-25 | 实现收口：Android、`tools/lezi-sync` 与自动化完成；明确 NAS/完整设备环境验收待补 |
 | 2026-07-25 | grilling 锁定 Wi‑Fi/NAS 策略；DATA_DIR 合并 db+media；写入本规格 |

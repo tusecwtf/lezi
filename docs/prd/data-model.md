@@ -1,7 +1,7 @@
 # 乐记 — 数据模型与同步契约
 
-> V1：**仅本地**（Room）。  
-> V2：同一模型经 **`SyncPort`** 接家庭局域网 `lezi-sync`。
+> 当前 Android 以 **Room** 为本地真相源，并经 **`SyncPort`** 接家庭局域网 `lezi-sync`。
+> 只支持当前 Room schema、当前 payload 与当前 NAS wire；见 [ADR-0008](../adr/0008-support-only-fresh-current-product-contracts.md)。
 > 主 PRD：[`README.md`](./README.md)
 
 ---
@@ -21,15 +21,15 @@
 ```text
 LocalUser 1──* Membership *──1 Family
 Family 1──* Baby
-Family 1──* ShareInvite          # V2 可用
-Family 1──* CustomItemDef        # V2
+Family 1──* ShareInvite
+Family 1──* CustomItemDef
 Baby 1──* Record
 Record 1──* MediaAsset
 LocalUser 1──1 SettingsLocal     # 永不进家庭同步域
-Family 可选 Outbox               # V2 上行队列
+Family 可选 Outbox                  # 上行队列
 ```
 
-V1 最小路径：创建默认 `Family` + 当前 `LocalUser`（匿名）+ `Baby` + `Record`。
+最小路径：创建默认 `Family` + 当前 `LocalUser`（匿名）+ `Baby` + `Record`。
 
 ---
 
@@ -65,38 +65,33 @@ NAS 家庭记录须持久化共享 `name`（或等价字段），并在成员可
 | `membership_id` | NAS 生成的不可变 membership UUID，产品身份主键 |
 | `family_id` | 所属家庭 |
 | `role` | `owner` \| `member` |
-| `device_id` | 旧数据迁移提示与副本标签，不承担鉴权 |
+| `device_id` | 当前建家、加入与 token 会话绑定使用；不承担作者或 ACL 权威 |
 | `display_name` | 当前家庭称呼；所有指向该 membership 的凭证共享 |
 | `left_at` | 空表示 active；非空表示已退出 |
 
 NAS 将持久 membership 与 Bearer credential 分表。`memberships.membership_id` 是
 不可变公开身份；`membership_credentials.token_hash` 是可轮换、可单独吊销并指向
-membership 的访问凭证，不是成员主键。`membership_id` 在建家/加入时分配，升级旧库
-时保留既有 ID 或只生成一次；token 更新、地址变化或服务器重启不得改变它。角色、
+membership 的访问凭证，不是成员主键。`membership_id` 在建家/加入时分配一次；
+token 更新、地址变化或同一 current schema 的服务器重启不得改变它。角色、
 称呼与写者身份只由认证后的 canonical membership principal 决定，客户端 payload
 不得冒充管理员或其他成员。
 
 `display_name` 在产品层于建家/加入时**必填**；服务端 trim，拒绝控制字符与双向文本
 格式控制符，最长 128 个 Unicode 字符；空白、省略字段与本机占位名「我（本机）」均
 返回 `422`，不得静默收成 null。家庭成员视图返回规范化后的 `display_name`、`role`、
-`is_self`、`membership_id`，以及只为旧实体兼容保留的客户端链路键 `device_id`。
-时间轴优先用 Record 的 `created_by_membership_id` 关联当前称呼；仅当旧 NAS 或旧实体
-没有 membership 作者时才回退 `created_by_device_id`，且 **UI 永不展示 device id**。
+`is_self`、`membership_id`。时间轴只用 Record 的 `created_by_membership_id` 关联当前
+称呼，members response 与 Record payload 均不包含 `device_id`。
 服务端按当前 Bearer principal 计算 `is_self`，不返回 token、`token_hash` 或
 `family_id`。本人可
 通过 `POST /v1/family/display-name` 更新自己的称呼，不能改他人。客户端不得把本机
-UI 占位名“我（本机）”当成真实成员名上传。历史 null/空/不安全名称由客户端按角色
-兜底（如「家庭管理员」「家庭成员」或「家人」），且不得把「我（本机）」展示给其他
-成员。管理员在 UI 上以 ★ 标出。
+UI 占位名“我（本机）”当成真实成员名上传。管理员在 UI 上以 ★ 标出。
 
-旧库没有 `(family_id, device_id, role)` 唯一约束。升级事务仅在迁移时把同 family +
-role + device 的历史 active token 归并到一个 canonical membership，保留其它既有
-membership ID 为作者/ACL alias；owner/member 冲突不跨 role 合并。迁移后运行时不再
-按客户端声明的 `device_id` 合并，新 join 总是创建独立 membership。单凭证轮换/吊销
+运行时不按客户端声明的 `device_id` 合并，新 join 总是创建独立 membership。
+单凭证轮换/吊销
 不改变 membership；成员退出会标记该 membership 离开并吊销它的全部凭证。管理员
-删除家庭时由外键级联清除 membership、credential 与 alias。
+删除家庭时由外键级联清除 membership 与 credential。
 
-权限（V2）：
+权限（当前）：
 
 | | 管理员 | 成员 |
 |--|--------|------|
@@ -115,7 +110,6 @@ membership ID 为作者/ACL alias；owner/member 冲突不跨 role 合并。迁�
 | `nickname` | |
 | `sex` | 可选枚举 |
 | `birthday` | 日龄基准 |
-| `due_date` | 旧版本兼容字段；现行产品不采集、不展示、不参与计算 |
 | `theme_color` | 本机展示；是否同步主题 **默认不同步**（见设置） |
 | `sort_order` | 本机展示顺序；不同步 |
 | `client_uuid` | |
@@ -133,62 +127,53 @@ membership ID 为作者/ACL alias；owner/member 冲突不跨 role 合并。迁�
 | `end_timestamp` | 睡眠等区间 |
 | `note` | |
 | `created_by_user_id` | |
-| `created_by_membership_id` | NAS 认证 principal 在首次接受 Record 时盖章的不可变作者；离线/旧记录可空 |
-| `created_by_device_id` | 仅供旧 NAS/旧实体解析作者的兼容链路键，不承担身份权威 |
+| `created_by_membership_id` | NAS 认证 principal 在首次接受 Record 时盖章的不可变作者；尚未加入家庭的本机记录可空 |
 | `payload_json` | 类型扩展 |
-| `schema_version` | v1 兼容读取；新增/编辑写 v2 |
+| `schema_version` | 当前固定为 v2 |
 | `updated_at` / `deleted_at` | 软删 / LWW |
 
 **索引**：`(baby_id, timestamp)`、`(client_uuid)`、`(baby_id, type, timestamp)`。
 
-Room 17→18 仅为 `records` 加入默认空字符串的
-`createdByMembershipId`，保留旧记录及 `createdByDeviceId`。已加入家庭时，本机新建
-Record 会立即带当前 session membership；NAS 对 ordinary push 与 atomic bundle
-仍从已认证 principal 重新盖章。后续编辑、删除或恢复不得改写首次作者。客户端只有
-在 `/health` 宣告 `record_membership_author` 时才发送新 wire key；旧 NAS 继续收到
-不含该 key 的兼容 payload，并由 device 链路回退显示。
+已加入家庭时，本机新建 Record 立即带当前 session membership；NAS 对 ordinary push
+与 atomic bundle 仍从已认证 principal 重新盖章。后续编辑、删除或恢复不得改写首次
+作者。Android 与 NAS 都要求 current `record_membership_author` capability，缺失时停止
+同步，不发送降级 payload。
 
-Room 18→19 为既有 `pending_reminder_cleanup` 增加默认空集合的
-`carePlanIds`；Room 20→21 再加入默认 `{}` 的 `systemCalendarProjectionsJson`、默认 `0` 的
-`settingsSnapshotCaptured`，以及可空的 `currentBabyId` / `nextFeedAt` / `nextFeedEpoch`。
+当前 Room schema 的 `pending_reminder_cleanup` 持久化 `carePlanIds`、
+`systemCalendarProjectionsJson`、`settingsSnapshotCaptured`，以及可空的
+`currentBabyId` / `nextFeedAt` / `nextFeedEpoch`。
 `systemCalendarProjectionsJson` 是稳定护理计划 UUID 到 provider event ID（可空，表示只可按
 UID 查找）的精确映射。清除记录或全部本地数据时，领域事务按 scope 分别写入 pending 行，
-持久保存普通日程提醒 ID、护理计划提醒 ID、系统日历投影身份、设置 epoch 与家庭服务器保留
+持久保存护理计划提醒 ID、系统日历投影身份、设置 epoch 与家庭服务器保留
 标记。提交后必须依次确认系统日历副本已删除、scope 对应设置已清理、应用内提醒已取消，
 才可删除 pending 行并向界面返回成功；权限撤销或 provider 失败时保留该行，进程重启或用户
 重试后继续，不得遗失已删除护理计划的任一提醒身份。
 
-v20 遗留 pending 行没有可信设置 epoch：升级恢复只认领当前已无对应 CarePlan 的孤儿 UUID
-映射，并把 `nextFeedEpoch` 保持为空，因此不得消费恢复期间的当前喂养提醒。v21 新清除则只
-删除仍与捕获 UUID + event ID 精确相等的系统日历映射，以及 epoch 仍相等的喂养提醒；清除
+当前清除只删除仍与捕获 UUID + event ID 精确相等的系统日历映射，以及 epoch 仍相等的
+喂养提醒；清除
 提交后新写入的设置、映射及其 alarm 属于新 epoch，必须保留。
 
-NAS 升级时只回填可证明的历史作者：同家庭内一个 `created_by_device_id` 恰好对应一个
-历史 membership 时，写入该 membership 并推进 Record/family revision，使已经越过旧
-cursor 的客户端仍能重新拉到；同一 device 曾对应多个 membership、字段为空或无法映射
-时保持 unknown。迁移在重启时幂等，不为歧义数据选择排序第一项。
-
-ordinary push 与 atomic commit 都可在加法 `record_authors` 回执中返回本次请求涉及的
+ordinary push 与 atomic commit 都在 `record_authors` 回执中返回本次请求涉及的
 canonical Record membership 作者。Android 对同 `updatedAt` 的本地行只合并这一
 server-owned metadata；不修改护理内容、照片、删除状态或业务时间，不提高
-`updatedAt`，不改变 `syncDirty`，也不生成 Outbox。更旧的远端实体不能回退已知作者；
-旧 NAS 省略回执或字段时保留本地已有值并继续使用 legacy device fallback。
+`updatedAt`，不改变 `syncDirty`，也不生成 Outbox。响应缺少当前必需字段时整次 apply
+失败并保留本地行与检查点，不猜测作者。
 
-### 3.6 typed payload 与兼容约定
+### 3.6 typed payload 当前约定
 
 业务代码只通过 `RecordPayloadDocument` / `RecordPayloadCodec` 读取或写入
 `payload_json`。每个 `RecordType` 只接受匹配的 `RecordPayload`：
 
-- v1 JSON 兼容读取，不做批量破坏性迁移；旧记录仅在用户编辑确认后写成 v2。
-- 未识别字段进入 `extensions`，v2 再写时原样合并。
-- 畸形 JSON 或未来 `schema_version` 解码为 `UnknownPayload`，保留原始字节，
-  不允许静默清空或覆盖。
+- 只接受 schema v2；未知字段、其它 schema 版本和与 `RecordType` 不匹配的 payload
+  不得进入新写入或 wire。
+- 当前数据库中若因损坏出现无法解码的 payload，读取为不可编辑错误并保留原始字节，
+  不允许静默清空、覆盖或纳入汇总；这属于故障保护，不是旧格式兼容。
 - 搜索、时间轴、汇总、导出和 Widget 复用 typed payload 与同一中文摘要模块，
   不各自用正则或手写 JSON 解释业务字段。
 
 | type | JSON 字段 |
 |------|-----------|
-| `nursing` | `left_min`, `right_min`, `order`, `amount_ml?`, `record_mode=start|end` |
+| `nursing` | `left_min`, `right_min`, `order`, `amount_ml?`, `record_mode=start\|end` |
 | `formula` | `amount_ml`, `prepared_ml?`, `duration_min?` |
 | `pumped_feed` / `pump_express` | `amount_ml` |
 | `pee` | `pee_amount` 1=小 · 2=中 · 3=大（默认 2） |
@@ -198,13 +183,16 @@ server-owned metadata；不修改护理内容、照片、删除状态或业务�
 | `temperature` | `celsius` |
 | `height` / `weight` / … | `value`, `unit` |
 | `medicine` | `name`, `dose?` |
-| `diary` / `memo` | `body`；旧 `photos[]` 仅做历史兼容读取，新照片统一使用 Record 关联的 MediaAsset，最多 3 张 |
+| `diary` | `body`；照片统一使用 Record 关联的 MediaAsset，最多 3 张 |
 | `cough` / `rash` / `vomit` / `injury` | `severity` 1–3, `description?` |
 | `hospital` | `reason`, `advice?` |
 | `baby_food` / `snack` / `drink` | `content`, `amount?` |
 | `vaccine` | `name`, `batch?` |
-| `other` | `title`, `detail?` |
-| `custom` | `title`, `detail?`, `custom_item_id?`, `icon_slot?`；标题/图标为历史快照 |
+| `custom` | `title`, `detail?`, `custom_item_id`, `icon_slot?`；标题/图标为创建时快照 |
+
+Record wire 另带 `custom_item_client_uuid`：`type=custom` 时必须引用同家庭、未删除的
+CustomItemDef；其它类型必须省略或置空。服务端只接受上表当前类型，`memo`、`other` 与
+未知字符串均返回 `422`。
 
 **不做**：挤奶库存余额表。
 
@@ -223,7 +211,7 @@ server-owned metadata；不修改护理内容、照片、删除状态或业务�
 | `created_at` / `updated_at` / `deleted_at` | LWW 与 tombstone |
 | `sync_dirty` | 需快照入当前家庭 Outbox |
 
-仅图片（V1/V2 初版）；视频不做。
+当前仅支持图片；视频不做。
 
 ### 3.8 SettingsLocal（**不同步**）
 
@@ -253,9 +241,9 @@ server-owned metadata；不修改护理内容、照片、删除状态或业务�
 | `system_calendar_enabled` / `system_calendar_id` | 当前设备的系统日历副本开关与用户选择的可写日历 |
 | `system_calendar_disclosure` | `event_only` \| `baby_and_type`（默认）\| `details` |
 
-主题色存在 Baby 上，但 **同步策略默认：主题与排序属本机**（与参考产品一致）。若 V2 要共享主题，再单开开关。
+主题色存在 Baby 上，但 **同步策略默认：主题与排序属本机**（与参考产品一致）。若未来共享主题，再单开开关。
 
-### 3.9 ShareInvite（V2）
+### 3.9 ShareInvite
 
 | 字段 | 说明 |
 |------|------|
@@ -265,14 +253,14 @@ server-owned metadata；不修改护理内容、照片、删除状态或业务�
 | `created_by` | |
 | `used_count` / `max_uses` | |
 
-### 3.10 CustomItemDef（V2）
+### 3.10 CustomItemDef
 
 最多 10：`id`, `family_id`, `name`, `icon_slot` (0–7), `client_uuid`,
 `created_by_membership_id`, `updated_at`, `deleted_at`，本机 `syncDirty`。
 图标固定模板，不支持自定义图标资源；排序、显隐和常用槽位属于 SettingsLocal，
-不进入共享定义。家庭同步实体类型为 `custom_item`（legacy push），服务端在首次
+不进入共享定义。家庭同步实体类型为 `custom_item`（ordinary push），服务端在首次
 写入时从认证 membership 盖章创建者，普通成员仅可改自己的定义，管理员可改全部，
-tombstone 不可复活。删除目录项不级联删除或改写历史 `custom` 记录。
+tombstone 不可复活。删除目录项不级联删除或改写已存在的 `custom` 记录。
 
 ### 3.11 CarePlan（本机、NAS wire/ACL 与客户端家庭 apply 已落地）
 
@@ -282,24 +270,26 @@ tombstone 不可复活。删除目录项不级联删除或改写历史 `custom` 
 `created_by_membership_id`, `fulfilled_record_client_uuid?`, `fulfilled_at?`,
 `source_record_client_uuid?`, `updated_at`, `deleted_at`, `sync_dirty`。此外保留
 `system_calendar_projection_enabled`, `system_calendar_event_id?`,
-`system_calendar_reminder_ready`, `system_calendar_projection_pending` 与
-`legacy_care_plan_reminder_pending` 等设备本机副作用状态；这些字段不进入家庭 wire。
+`system_calendar_reminder_ready` 与 `system_calendar_projection_pending` 等当前设备
+副作用状态；这些字段不进入家庭 wire。
 远端 apply 保留本机投影选择与 event ID，但共享的时间、时区、标题内容或生命周期
-变化时会使旧 reminder generation 失效，并在已有 provider 身份时留下待收敛标记。
+变化时会使前一 reminder generation 失效，并在已有 provider 身份时留下待收敛标记。
 
 NAS 原子包根类型 `care_plan` 的 wire payload 为：
 `baby_client_uuid`, `type`, `custom_item_client_uuid?`, `scheduled_at`,
-`scheduled_zone_id`, `note?`, `payload_json`（object）, `schema_version?`,
+`scheduled_zone_id`, `note?`, `payload_json`（object）, `schema_version`（必填且精确为 `2`）,
 `status`（pending|missed|completed|skipped）,
 `created_by_membership_id`（服务端盖章）, `fulfilled_record_client_uuid?`,
 `fulfilled_at?`。计划媒体为 bundle 内 `media` 且 `care_plan_client_uuid` 指向根。
+`type` 使用与 Record 相同的当前类型集合；`type=custom` 时
+`custom_item_client_uuid` 必须引用同家庭、未删除的 CustomItemDef，其它类型必须省略或置空。
 
-首版状态为 `pending`, `missed`, `completed`, `skipped`，且只支持单次计划。
+当前状态为 `pending`, `missed`, `completed`, `skipped`，且只支持单次计划。
 `missed` 可由当前绝对时刻超过计划时刻且仍未完成/跳过派生。本机履行在同一事务
 中写入关联 Record 并将计划标为 `completed`。多候选时各设备用盖章证据稳定裁决
 唯一权威记录，并本地重链 `fulfilled_record_client_uuid`（不依赖计划 LWW 到达序）。
 
-### 3.11b FulfillmentCandidate（NAS 契约 + 本机）
+### 3.11.1 FulfillmentCandidate（NAS 契约 + 本机）
 
 `entity_type = fulfillment_candidate`：`care_plan_client_uuid`,
 `record_client_uuid`, `actual_timestamp?`, 以及服务端首次接受时盖章且不可改写的
@@ -311,7 +301,7 @@ NAS 原子包根类型 `care_plan` 的 wire payload 为：
 
 Android 本机表 `fulfillment_candidates` 在履行事务中写入稳定 `clientUuid` 与
 不可变本地 `confirmedAt`，并与 Record 原子包 + completed CarePlan 原子包一起出站
-（legacy push 候选）；接收端 completed 计划须已有关联 Record，候选须 plan+record
+（ordinary push 候选）；接收端 completed 计划须已有关联 Record，候选须 plan+record
 均已落地后才应用。全量候选就绪后裁决：赢家 `adoptionStatus=adopted` 并写入计划
 关联；落选 `conflict_not_adopted`，**不**软删除 Record/照片；落选记录不进入普通
 时间轴、汇总、搜索或普通导出。管理员可在本机审计落选并「转为独立记录」：创建**新的**
@@ -321,13 +311,7 @@ Android 本机表 `fulfillment_candidates` 在履行事务中写入稳定 `clien
 两台设备上各转一次且未共享指针时，产品接受两条独立普通记录。`adoptionStatus` 与
 `convertedRecordClientUuid` 均为本机派生字段，不进家庭 wire。
 
-### 3.11a CalendarEvent（历史兼容）
-
-`id`, `baby_id`, `family_id`, `title`, `start_at`, `end_at?`, `remind_at?`, `created_by`, `updated_at`, `deleted_at`
-
-不再新建自由标题 CalendarEvent，也不进入家庭同步；旧事件继续本机显示、编辑和提醒，用户确认后可转换为 CarePlan。
-
-### 3.12 Outbox（V2）
+### 3.12 Outbox
 
 | 字段 | 说明 |
 |------|------|
@@ -386,8 +370,8 @@ enum class SyncStatus {
 | pull 检查点 | `cursor` / `generation` / `familyName` 缓存；成功页原子更新 |
 
 `familyName` 是 NAS 权威共享家庭名的本机会话缓存：create/join/本机 rename 会立即
-写入；之后每次允许的前台/下拉 pull 都可刷新，即使该页没有实体。新版 NAS 显式
-返回 `null` 时清空缓存并走产品兜底；旧 NAS 省略字段时保留缓存。更新检查点只改
+写入；之后每次允许的前台/下拉 pull 都可刷新，即使该页没有实体。NAS 显式
+返回 `null` 时清空缓存并走产品兜底；缺少当前必需字段时 pull 失败并保留缓存。更新检查点只改
 `cursor`、`generation` 和 presence-aware `familyName`，不得覆盖并发变化的家庭身份
 或本机网络配置。
 
@@ -425,7 +409,7 @@ interface SyncPort {
   suspend fun leave(familyId: String): Result<Unit>
   suspend fun deleteFamily(): Result<Unit>
 
-  /** 清本机 Record/CarePlan/履行候选/历史日程及日志媒体；保留宝宝、自定义项目和家庭会话 */
+  /** 清本机 Record/CarePlan/履行候选及日志媒体；保留宝宝、自定义项目和家庭会话 */
   suspend fun clearLocalRecords(workflow: LocalClearWorkflow): Result<Unit>
   /** 全量 wipe（含 outbox/头像媒体），join 前用；使用同一耐久 workflow */
   suspend fun clearAllLocalData(workflow: LocalClearWorkflow): Result<Unit>
@@ -438,7 +422,7 @@ interface SyncPort {
 - 建家、加入、邀请前必须配置服务器；失败返回中文产品文案。
 - 只有已加入家庭的会话才会生成并上传 Outbox；服务器地址变化时原子清除旧 token/cursor。
 
-### 6.4 V2 规则（摘要）
+### 6.4 当前规则（摘要）
 
 > **网络拓扑、门闩、前台策略、NAS Docker 与 API 的权威说明见 [`sync-home-lan.md`](./sync-home-lan.md)。** 本节仅保留数据契约摘要。
 
@@ -450,7 +434,7 @@ interface SyncPort {
 | 同步域（现行） | **Baby + Record + CustomItemDef + CarePlan + FulfillmentCandidate + Record/计划 MediaAsset（含原子照片包）** |
 | 写权限 | 宝宝**头像**仅 owner；日志媒体家庭内可同步 |
 | 已落地扩展 | CustomItemDef、CarePlan、计划 MediaAsset、Record/CarePlan 原子照片包与履行候选 |
-| 继续不同步 | 通用 CalendarEvent、系统日历 ID/权限/披露级别、提醒偏好、快捷槽位与布局顺序 |
+| 继续不同步 | 系统日历 ID/权限/披露级别、提醒偏好、快捷槽位与布局顺序 |
 | 不同步 | SettingsLocal、Baby `theme_color`/`sort_order`、下次喂奶时刻、Widget 配置、本机路径 |
 | 共享粒度 | **全量**（同步域内）；不做字段白名单 |
 | 冲突 | 同 `client_uuid` 幂等；否则 `updated_at` LWW；删除 tombstone |
@@ -460,12 +444,12 @@ interface SyncPort {
 | 安全 | 默认家网 HTTP + family token；可选 HTTPS；加入前明示全量共享 |
 | 持久化 | NAS 单数据根：`DATA_DIR/lezi.db` + `DATA_DIR/media/` |
 
-Room schema v7 会把历史 `MediaAsset` 关联规范为二选一：`log` 仅保留
-`record_id`，`avatar` 仅保留 `baby_id`。
+当前 Room schema 强制 `MediaAsset` 只有一个归属：`log` 在 `record_id` 与 `plan_id`
+中恰选一个，`avatar` 只使用 `baby_id`。
 
 ### 6.5 本地备份（可选，不依赖 SyncPort）
 
-V1 可提供「导出数据库/JSON 到文件」便于换机；与家庭实时同步分开。
+当前产品可提供「导出数据库/JSON 到文件」便于换机；与家庭实时同步分开。
 
 ---
 
@@ -473,17 +457,16 @@ V1 可提供「导出数据库/JSON 到文件」便于换机；与家庭实时�
 
 | 操作 | 行为 |
 |------|------|
-| 删一条记录 | `deleted_at` 软删；V2 进 Outbox |
+| 删一条记录 | `deleted_at` 软删并进入 Outbox |
 | 成员退出 | membership 标记离开并吊销其全部 credentials；**NAS 业务数据保留** |
 | 清除本机全部 | 多重确认后清空本地库；**默认仅本地** |
 | 管理员删除家庭数据 | 多重确认后清空 NAS entities + `DATA_DIR/media/`（见 sync-home-lan） |
 
 ---
 
-## 8. 与主 PRD 分期对应
+## 8. 当前数据层
 
-| 版本 | 数据层 |
-|------|--------|
-| V1 | LocalUser, Family, Membership, Baby, Record, Media, SettingsLocal；SyncPort 空实现 |
-| V1.5 | 曲线包资源只读；导出读 Record |
-| V2（现行） | ShareInvite、Outbox、CustomItemDef、CarePlan、FulfillmentCandidate、Record/计划媒体原子包；SyncPort 真实现；CalendarEvent 保持历史本机兼容 |
+当前 fresh schema 包含 LocalUser、Family、Membership、Baby、Record、MediaAsset、
+SettingsLocal、ShareInvite、Outbox、CustomItemDef、CarePlan 与 FulfillmentCandidate，
+并使用真实 `SyncPort` 和 Record/计划媒体原子包。非 current Room schema 不属于支持输入；
+当前数据库在进程重启后必须完整保留业务数据、Outbox、计时与提醒恢复状态。
