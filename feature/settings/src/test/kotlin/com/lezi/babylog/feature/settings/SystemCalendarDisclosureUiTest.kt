@@ -19,10 +19,13 @@ class SystemCalendarDisclosureUiTest {
     }
 
     @Test
-    fun disclosureDetailsMentionPrivacyAndDefault() {
-        assertTrue(systemCalendarDisclosureDetail(2).contains("默认"))
-        assertTrue(systemCalendarDisclosureDetail(3).contains("从不上传照片"))
-        assertTrue(systemCalendarDisclosureDetail(3).contains("照片 N 张"))
+    fun disclosureDetailsStayConciseAndPreservePrivacy() {
+        assertEquals(
+            "标题显示「宝宝昵称 · 记录类型」。",
+            systemCalendarDisclosureDetail(2),
+        )
+        assertTrue(systemCalendarDisclosureDetail(3).contains("照片本身不会写入日历"))
+        assertTrue(systemCalendarDisclosureDetail(3).contains("返回乐记"))
         assertTrue(systemCalendarDisclosureDetail(1).contains("乐记 · 护理计划"))
     }
 }

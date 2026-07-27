@@ -61,9 +61,9 @@ fun systemCalendarDisclosureDetail(level: Int): String = when (
     SystemCalendarDisclosureLevel.EVENT_ONLY ->
         "标题仅显示「乐记 · 护理计划」，不写入宝宝或类型。"
     SystemCalendarDisclosureLevel.BABY_AND_TYPE ->
-        "标题「宝宝昵称 · 记录类型」。首次配置默认预选此项。"
+        "标题显示「宝宝昵称 · 记录类型」。"
     SystemCalendarDisclosureLevel.DETAILS ->
-        "标题同第二级；描述可含文字备注，有照片时写「照片 N 张，打开乐记查看」与深链，从不上传照片。"
+        "增加备注、照片数量和返回乐记的链接；照片本身不会写入日历。"
 }
 
 data class SystemCalendarSetupSelection(
@@ -194,7 +194,7 @@ fun SystemCalendarSetupDialog(
                 modifier = Modifier.verticalScroll(rememberScrollState()),
             ) {
                 Text(
-                    "仅本机有效，不随家庭同步。请选择可写日历与披露级别；默认预选第二级。",
+                    "仅本机有效，不随家庭同步。",
                     style = LeziTypography.Meta,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

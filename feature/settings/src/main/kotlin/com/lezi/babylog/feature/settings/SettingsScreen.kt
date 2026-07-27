@@ -553,7 +553,7 @@ fun SettingsRoute(
                         }
                     }
                     Text(
-                        "常用记录会固定在屏幕底部，并把最高频入口靠近所选拇指侧。",
+                        "常用入口会靠近所选拇指侧。",
                         style = LeziTypography.Meta,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -586,11 +586,6 @@ fun SettingsRoute(
                             )
                         }
                     }
-                    Text(
-                        "数字时钟为 0–23 点下拉；指针时钟为圆盘，上午/下午竖排在时分大按钮旁（位置跟随惯用手）。",
-                        style = LeziTypography.Meta,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
                     Text("时间选择分钟步进", style = LeziTypography.Label)
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
