@@ -112,7 +112,9 @@ class RealSyncPort @Inject constructor(
 
     init {
         processScope.launch {
-            preferences.migrateSecretsIfNeeded()
+            syncMutex.withLock {
+                recoverPendingLocalClearLocked()
+            }
         }
         processScope.launch {
             preferences.session.collect { session ->

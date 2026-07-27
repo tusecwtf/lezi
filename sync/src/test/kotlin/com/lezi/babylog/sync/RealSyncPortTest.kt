@@ -20,6 +20,7 @@ import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.model.SyncStatus
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
@@ -73,8 +74,51 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun startupCredentialRecoverySerializesJoinAndPreservesTheNewToken() = runTest {
+        val configured = SyncSession(
+            deviceId = "device-a",
+            serverHost = "192.168.1.20",
+            serverPort = 8787,
+            allowedSsids = listOf("Home"),
+        )
+        val preferences = MemorySyncPreferences(
+            initial = configured,
+            blockFirstSecretMigration = true,
+        )
+        val rig = SyncRig(
+            session = configured,
+            syncPreferences = preferences,
+        )
+        preferences.secretMigrationStarted.await()
+
+        val joining = async {
+            rig.port.joinFamily(
+                JoinFamilyCommand(
+                    invitation = "ABCD1234",
+                    homeLanConfig = configured.homeLanConfig,
+                    displayName = "妈妈",
+                ),
+            )
+        }
+
+        try {
+            runCurrent()
+            assertThat(joining.isCompleted).isFalse()
+            assertThat(rig.backend.joinCalls).isEqualTo(0)
+            assertThat(preferences.saveSessionCalls).isEqualTo(0)
+        } finally {
+            preferences.releaseSecretMigration.complete(Unit)
+        }
+
+        assertThat(joining.await().exceptionOrNull()).isNull()
+        assertThat(rig.port.session().first().familyToken).isEqualTo("member-token")
+    }
+
+    @Test
     fun unjoinedSyncRecoversDurableReplicaCleanupBeforeDisabledNoOp() = runTest {
         val rig = SyncRig(session = SyncSession())
+        rig.awaitStartupRecovery()
+        rig.pendingDomainRecovery.calls = 0
         rig.media.seed(
             MediaAssetEntity(
                 clientUuid = "stale-media",
@@ -104,6 +148,7 @@ class RealSyncPortTest {
     @Test
     fun failedDomainCleanupRecoveryBlocksReplicaAndBackendBeforeUnjoinedNoOp() = runTest {
         val rig = SyncRig(session = SyncSession())
+        rig.awaitStartupRecovery()
         rig.pendingReplicaCleanup.pending = pendingReplicaCleanup()
         rig.pendingDomainRecovery.failures += IllegalStateException("provider unavailable")
 
@@ -124,6 +169,7 @@ class RealSyncPortTest {
             allowedSsids = listOf("Home"),
         )
         val rig = SyncRig(session = configured)
+        rig.awaitStartupRecovery()
         rig.pendingDomainRecovery.failures += IllegalStateException("provider unavailable")
 
         val failure = rig.port.saveServer("http://192.168.1.99:8787").exceptionOrNull()
@@ -136,6 +182,7 @@ class RealSyncPortTest {
     @Test
     fun failedReplicaRecoveryBlocksBackendAndIsRetriedOnNextSync() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
+        rig.awaitStartupRecovery()
         rig.media.seed(
             MediaAssetEntity(
                 clientUuid = "stale-media",
@@ -173,6 +220,7 @@ class RealSyncPortTest {
             allowedSsids = listOf("Home"),
         )
         val rig = SyncRig(session = configured)
+        rig.awaitStartupRecovery()
         rig.pendingReplicaCleanup.pending = pendingReplicaCleanup()
         rig.pendingReplicaCleanup.loadFailures += IllegalStateException("marker unavailable")
 
@@ -196,6 +244,7 @@ class RealSyncPortTest {
             allowedSsids = listOf("Home"),
         )
         val rig = SyncRig(session = configured)
+        rig.awaitStartupRecovery()
         rig.pendingReplicaCleanup.pending = pendingReplicaCleanup()
         rig.pendingReplicaCleanup.loadFailures += IllegalStateException("marker unavailable")
 
@@ -854,6 +903,7 @@ class RealSyncPortTest {
     @Test
     fun resumedCommittedClearStillHonorsTheNewExplicitClearRequest() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
+        rig.awaitStartupRecovery()
         val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
         rig.records.seed(localRecord(babyId).copy(syncDirty = false))
         rig.pendingDomainRecovery.resumed = LocalClearRecoveryScope.RecordsOnly
@@ -4147,9 +4197,16 @@ internal class RecordingSyncBackend : SyncBackend {
     }
 }
 
-internal class MemorySyncPreferences(initial: SyncSession) : SyncPreferences {
+internal class MemorySyncPreferences(
+    initial: SyncSession,
+    blockFirstSecretMigration: Boolean = false,
+) : SyncPreferences {
     private val state = MutableStateFlow(initial)
     private var createRequestId: String? = null
+    private val shouldBlockSecretMigration = AtomicBoolean(blockFirstSecretMigration)
+    val secretMigrationStarted = CompletableDeferred<Unit>()
+    val releaseSecretMigration = CompletableDeferred<Unit>()
+    var saveSessionCalls = 0
     var failUpdateCursorAttempts = 0
     var clearCreateRequestIdFailure: Throwable? = null
     var clearCreateRequestIdCalls = 0
@@ -4195,8 +4252,16 @@ internal class MemorySyncPreferences(initial: SyncSession) : SyncPreferences {
     }
 
     override suspend fun saveSession(session: SyncSession) {
+        saveSessionCalls += 1
         createRequestId = null
         state.value = session
+    }
+
+    override suspend fun migrateSecretsIfNeeded() {
+        if (!shouldBlockSecretMigration.compareAndSet(true, false)) return
+        secretMigrationStarted.complete(Unit)
+        releaseSecretMigration.await()
+        state.value = state.value.copy(familyToken = "")
     }
 
     override suspend fun updateCursor(cursor: Long, generation: String) {
@@ -4326,9 +4391,10 @@ private class SyncRig(
     healthCapabilitiesSequence: List<Set<String>> = emptyList(),
     carePlanApplied: suspend (List<String>) -> Unit = {},
     syncBackend: SyncBackend? = null,
+    syncPreferences: MemorySyncPreferences? = null,
 ) {
     val backend = RecordingSyncBackend()
-    val preferences = MemorySyncPreferences(session)
+    val preferences = syncPreferences ?: MemorySyncPreferences(session)
     val outbox = MemoryOutboxDao()
     val records = MemoryRecordDao()
     val carePlans = MemoryCarePlanDao()
@@ -4383,6 +4449,10 @@ private class SyncRig(
         carePlanAppliedListener = CarePlanFamilyAppliedListener { carePlanApplied(it) },
         fulfillmentCandidateDao = fulfillmentCandidates,
     )
+
+    suspend fun awaitStartupRecovery() {
+        pendingReplicaCleanup.firstLoad.await()
+    }
 }
 
 internal class TestLocalClearRecoveryGate : LocalClearRecoveryGate {
@@ -4401,10 +4471,14 @@ internal class TestPendingReplicaCleanupStore :
     com.lezi.babylog.core.database.PendingReplicaCleanupStore {
     var pending: com.lezi.babylog.core.database.PendingReplicaCleanup? = null
     val loadFailures = ArrayDeque<Throwable>()
+    val firstLoad = CompletableDeferred<Unit>()
 
     override suspend fun load(): com.lezi.babylog.core.database.PendingReplicaCleanup? {
-        loadFailures.removeFirstOrNull()?.let { throw it }
-        return pending
+        val failure = loadFailures.removeFirstOrNull()
+        val current = pending
+        firstLoad.complete(Unit)
+        failure?.let { throw it }
+        return current
     }
 
     override suspend fun stage(
