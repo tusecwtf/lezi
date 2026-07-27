@@ -338,13 +338,20 @@ curl 或解释器。HTTPS 由 NAS 的 Caddy/Nginx/系统反向代理终止；容
 
 ```text
 $LEZI_DATA_DIR/                    # 例：/data 或 /volume1/docker/lezi
-├── lezi.db                        # SQLite（entities、invites、tokens、rev/cursor 元数据）
+├── lezi.db                        # SQLite（entities、invites、tokens、rev/cursor 元数据；user_version=1）
 ├── lezi.db-wal / lezi.db-shm      # 若启用 WAL
 ├── server.secret                  # token 幂等派生密钥；须保密并随整根备份
 └── media/
     └── {family_uuid}/
         └── {media_client_uuid}     # 原始字节
 ```
+
+服务端必须显式管理 SQLite `PRAGMA user_version`：版本 0 原位幂等升级并保留家庭、
+凭证与实体；当前未发布的 version 1 内以幂等列迁移补入
+`sync_bundle_media.staged_sha256`，不额外提升版本。数据卷版本高于当前支持版本时，
+旧服务端必须在创建媒体目录、密钥、SQLite sidecar 或修改数据根权限前，以只读预检
+fail closed。启动清理只允许删除 `media/` 下名称为合法 UUID、且 SQLite 已无
+对应家庭的目录；非 UUID 运维项、符号链接和仍存家庭目录必须保留。
 
 ### 8.1 Docker Compose 示例
 
@@ -561,7 +568,17 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 规则摘要：
 
 - **暂存不可见**：commit 前根实体与媒体均不出现在普通 `GET /v1/pull`
-- **清单完整**：live media 必须声明正 `byte_size`；commit 前全部字节校验通过；tombstone media 不需字节
+- **清单完整**：live media 必须声明正 `byte_size`；上传时持久化 SHA-256，commit
+  前尺寸与摘要均须匹配；tombstone media 不需字节
+- **持久化顺序**：live media 字节先以 no-replace 方式安装并 fsync 文件、家庭目录
+  和 `media/` 根目录，
+  SQLite 事务随后才发布 root/media 元数据与 cursor。DB 失败或进程中断不得产生
+  “引用已可 pull、字节尚不存在”的状态；暂存清理后的幂等重试须逐个核对已发布
+  文件的持久化摘要与尺寸，并再次 fsync 文件及上述两级目录。同一数据根优先 hard
+  link，不支持时使用已 fsync 暂存副本的
+  no-replace 原子 rename
+- **旧摘要保守恢复**：旧库中摘要为空的 committed bundle 仅在原暂存文件仍存在、
+  且与已发布文件完全一致时补写摘要；暂存已清理时拒绝重试，不把同尺寸现状当作原件
 - **幂等 commit**：重复 commit / 丢失响应可安全重试；已 commit 的 `bundle_id` 内容冲突 → `409`
 - **canonical 回执**：Record 根的首次 commit 与幂等 retry 都使用与 ordinary push
   同形的 `record_authors` 加法数组；旧客户端忽略，Android 只在请求对应的本地版本仍
@@ -581,7 +598,10 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 ### 9.9 `POST /v1/family/delete`
 
 - Auth：owner
-- 多重确认由客户端 UI；服务端执行后清空 entities、tokens、invites，并删除 `media/` 下文件（保留空目录）。
+- 多重确认由客户端 UI；服务端必须先以 SQLite 删除家庭并通过外键级联清空
+  entities、tokens、invites，再删除该家庭媒体目录。DB 删除失败时不得先删媒体。
+- DB 已成功但媒体目录清理失败或进程中断时，UUID 家庭目录保留为不可见孤儿；
+  后续启动按第 8 节有限 GC 规则重试并同步 `media/` 父目录。
 
 ### 9.10 `POST /v1/leave`
 
@@ -730,6 +750,7 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 
 | 日期 | 说明 |
 |------|------|
+| 2026-07-27 | Release 持久化收敛：原子包媒体摘要与双层目录 fsync 后再发布 DB、committed retry 精确复核、SQLite 只读 future fail-closed、家庭删除孤儿目录启动回收 |
 | 2026-07-26 | 严格 live 服务端完成双模拟器建家、邀请码加入、双向协议与头像 ACL；Ticket 09 仍 partial |
 | 2026-07-25 | NAS 服务原位迁移为 Rust/Axum/Tokio/rusqlite；保留 HTTP、SQLite 与 token 派生兼容，删除重复原型入口 |
 | 2026-07-25 | 验收校正：本机 Docker 与双模拟器 formula/pee 已验；Ticket 09 保持 partial |

@@ -268,6 +268,8 @@ impl AppState {
 
 pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
     config.validate().map_err(ApiError::internal)?;
+    let database_path = config.data_dir.join("lezi.db");
+    Store::preflight_existing_schema(&database_path)?;
     set_private_umask();
     fs::create_dir_all(&config.data_dir)?;
     secure_directory(&config.data_dir)?;
@@ -289,8 +291,10 @@ pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
             "LEZI_BOOTSTRAP_SECRET is unset; POST /v1/family/create is open to the LAN until a family exists (set a secret for production)"
         );
     }
+    let store = Store::open(database_path)?;
+    collect_orphan_family_media(&store, &media_root)?;
     let state = AppState {
-        store: Store::open(config.data_dir.join("lezi.db"))?,
+        store,
         data_root: config.data_dir,
         media_root,
         version: config.version,
@@ -518,10 +522,29 @@ async fn delete_family(
     let family_lock = state.family_lock(&principal.family_id).await;
     let _guard = family_lock.lock().await;
     let family_media = state.media_root.join(&principal.family_id);
-    if family_media.exists() {
-        fs::remove_dir_all(&family_media)?;
-    }
     state.store.delete_family(&principal.family_id)?;
+    if family_media.exists() {
+        match fs::remove_dir_all(&family_media) {
+            Ok(()) => {
+                if let Err(error) = sync_directory(&state.media_root) {
+                    tracing::error!(
+                        family_id = %principal.family_id,
+                        path = %state.media_root.display(),
+                        %error,
+                        "family metadata was deleted; media-root sync will be retried by startup cleanup"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::error!(
+                    family_id = %principal.family_id,
+                    path = %family_media.display(),
+                    %error,
+                    "family metadata was deleted; orphan media cleanup will retry on startup"
+                );
+            }
+        }
+    }
     Ok(Json(json!({"ok": true})))
 }
 
@@ -936,12 +959,14 @@ async fn put_bundle_media(
         secure_directory(parent)?;
     }
     write_private_file(&path, &content)?;
+    let staged_sha256 = hex::encode(Sha256::digest(&content));
 
     let status = match state.store.mark_bundle_media_staged(
         &principal,
         &bundle_id.to_string(),
         &client_uuid.to_string(),
         content.len(),
+        &staged_sha256,
         state.now(),
     ) {
         Ok(value) => value,
@@ -983,11 +1008,7 @@ async fn commit_bundle(
     body: Result<Json<BundleCommitRequest>, JsonRejection>,
 ) -> Result<Json<store::BundleCommitResult>, ApiError> {
     let principal = authenticate(&state, &headers)?;
-    // Empty `{}` or omitted optional generation; soft-default when body is empty.
-    let request = match body {
-        Ok(Json(value)) => value,
-        Err(_) => BundleCommitRequest { generation: None },
-    };
+    let request = json_body(body)?;
     request.validate()?;
     if request
         .generation
@@ -1006,27 +1027,75 @@ async fn commit_bundle(
         .ok_or_else(|| ApiError::not_found("Bundle not found"))?;
 
     let mut media_ready = std::collections::BTreeMap::new();
+    let mut legacy_media_digests = Vec::new();
     for media_uuid in &bundle.required_media {
         let media_id = Uuid::parse_str(media_uuid)
             .map_err(|_| ApiError::internal("stored media uuid is invalid"))?;
-        let path = state.bundle_media_path(&principal.family_id, &bundle_id, &media_id)?;
-        let entity = bundle
-            .media
-            .iter()
-            .find(|entity| entity.client_uuid == *media_uuid);
-        let declared = entity
-            .and_then(|entity| entity.payload.get("byte_size"))
-            .and_then(|value| value.as_u64())
-            .and_then(|size| usize::try_from(size).ok());
-        let ready = media_file_is_ready(&path, declared, media_uuid);
-        media_ready.insert(media_uuid.clone(), ready);
+        let integrity = bundle
+            .media_integrity
+            .get(media_uuid)
+            .ok_or_else(|| ApiError::internal("stored bundle media integrity is missing"))?;
+        if bundle.status == "committed" {
+            let final_path = state.media_path(&principal.family_id, media_id)?;
+            let digest = if let Some(expected_sha256) = integrity.staged_sha256.as_deref() {
+                media_file_integrity_sha256(
+                    &final_path,
+                    integrity.declared_byte_size,
+                    Some(expected_sha256),
+                    media_uuid,
+                )
+            } else {
+                // A committed legacy row has no trusted digest. Only recover it
+                // when the original staged source survived cleanup and exactly
+                // matches the published bytes; otherwise fail closed.
+                let staged_path =
+                    state.bundle_media_path(&principal.family_id, &bundle_id, &media_id)?;
+                media_file_integrity_sha256(
+                    &staged_path,
+                    integrity.declared_byte_size,
+                    None,
+                    media_uuid,
+                )
+                .and_then(|staged_digest| {
+                    media_file_integrity_sha256(
+                        &final_path,
+                        integrity.declared_byte_size,
+                        Some(&staged_digest),
+                        media_uuid,
+                    )
+                })
+            };
+            if let Some(digest) = digest.as_deref() {
+                sync_published_media_file(&final_path)?;
+                if integrity.staged_sha256.is_none() {
+                    legacy_media_digests.push((media_uuid.clone(), digest.to_owned()));
+                }
+            }
+            media_ready.insert(media_uuid.clone(), digest.is_some());
+            continue;
+        }
+        let staged_path = state.bundle_media_path(&principal.family_id, &bundle_id, &media_id)?;
+        let digest = media_file_integrity_sha256(
+            &staged_path,
+            integrity.declared_byte_size,
+            integrity.staged_sha256.as_deref(),
+            media_uuid,
+        );
+        if let Some(digest) = digest.as_deref() {
+            let final_path = state.media_path(&principal.family_id, media_id)?;
+            prepare_published_media_file(&staged_path, &final_path)?;
+            if integrity.staged_sha256.is_none() {
+                legacy_media_digests.push((media_uuid.clone(), digest.to_owned()));
+            }
+        }
+        media_ready.insert(media_uuid.clone(), digest.is_some());
     }
 
     let max_updated_at = state
         .now()
         .saturating_mul(1_000)
         .saturating_add(MAX_ENTITY_FUTURE_SKEW_MILLIS);
-    let (result, package) = match state.store.commit_bundle(
+    let (result, _package) = match state.store.commit_bundle(
         &principal,
         &bundle_id.to_string(),
         &media_ready,
@@ -1084,27 +1153,15 @@ async fn commit_bundle(
         Err(StoreError::BundleNotFound) => return Err(ApiError::not_found("Bundle not found")),
         Err(error) => return Err(error.into()),
     };
-
-    // Install staged bytes into the published media tree after entities are visible.
-    // Idempotent retries re-copy so a crash between commit and install heals.
-    for entity in package
-        .iter()
-        .filter(|entity| entity.entity_type == "media" && entity.deleted_at.is_none())
-    {
-        let media_id = Uuid::parse_str(&entity.client_uuid)
-            .map_err(|_| ApiError::internal("stored media uuid is invalid"))?;
-        let staged = state.bundle_media_path(&principal.family_id, &bundle_id, &media_id)?;
-        if !staged.is_file() {
-            continue;
-        }
-        let final_path = state.media_path(&principal.family_id, media_id)?;
-        if let Some(parent) = final_path.parent() {
-            fs::create_dir_all(parent)?;
-            secure_directory(parent)?;
-        }
-        let bytes = fs::read(&staged)?;
-        write_private_file(&final_path, &bytes)?;
+    for (media_uuid, digest) in legacy_media_digests {
+        state.store.pin_legacy_bundle_media_sha256(
+            &principal.family_id,
+            &bundle_id.to_string(),
+            &media_uuid,
+            &digest,
+        )?;
     }
+
     // Best-effort staging cleanup; failed/abandoned dirs are bounded by open-bundle limits.
     let _ = fs::remove_dir_all(state.bundle_stage_dir(&principal.family_id, &bundle_id)?);
 
@@ -1238,6 +1295,52 @@ fn media_file_is_ready(path: &Path, declared_size: Option<usize>, client_uuid: &
     false
 }
 
+fn media_file_integrity_sha256(
+    path: &Path,
+    declared_size: Option<usize>,
+    expected_sha256: Option<&str>,
+    client_uuid: &str,
+) -> Option<String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            tracing::error!(
+                %client_uuid,
+                path = %path.display(),
+                %error,
+                "cannot inspect atomic media integrity"
+            );
+            return None;
+        }
+    };
+    if !metadata.file_type().is_file() || metadata.len() == 0 {
+        return None;
+    }
+    if declared_size.is_some_and(|expected| u64::try_from(expected) != Ok(metadata.len())) {
+        return None;
+    }
+    match fs::read(path) {
+        Ok(bytes) => {
+            let actual = hex::encode(Sha256::digest(bytes));
+            if expected_sha256.is_none_or(|expected| expected == actual) {
+                Some(actual)
+            } else {
+                None
+            }
+        }
+        Err(error) => {
+            tracing::error!(
+                %client_uuid,
+                path = %path.display(),
+                %error,
+                "cannot hash atomic media"
+            );
+            None
+        }
+    }
+}
+
 fn require_owner(state: &AppState, headers: &HeaderMap) -> Result<Principal, ApiError> {
     let principal = authenticate(state, headers)?;
     if principal.role != "owner" {
@@ -1323,6 +1426,243 @@ fn write_private_file(path: &Path, content: &[u8]) -> Result<(), ApiError> {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+fn collect_orphan_family_media(store: &Store, media_root: &Path) -> Result<(), ApiError> {
+    let family_ids = store.family_ids()?;
+    let mut removed_any = false;
+    for entry in fs::read_dir(media_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Ok(family_id) = Uuid::parse_str(&name) else {
+            continue;
+        };
+        if family_ids.contains(&family_id.to_string()) {
+            continue;
+        }
+        match fs::remove_dir_all(entry.path()) {
+            Ok(()) => {
+                removed_any = true;
+                tracing::info!(
+                    family_id = %family_id,
+                    "removed orphan family media left by an interrupted deletion"
+                );
+            }
+            Err(error) => {
+                tracing::error!(
+                    family_id = %family_id,
+                    path = %entry.path().display(),
+                    %error,
+                    "failed to remove orphan family media; startup will retry"
+                );
+            }
+        }
+    }
+    if removed_any {
+        sync_directory(media_root)?;
+    }
+    Ok(())
+}
+
+fn prepare_published_media_file(staged: &Path, published: &Path) -> Result<(), ApiError> {
+    prepare_published_media_file_with_link(staged, published, |source, destination| {
+        fs::hard_link(source, destination)
+    })
+}
+
+fn prepare_published_media_file_with_link(
+    staged: &Path,
+    published: &Path,
+    link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), ApiError> {
+    prepare_published_media_file_with_link_and_sync(staged, published, link, |directory| {
+        sync_directory(directory)
+    })
+}
+
+fn prepare_published_media_file_with_link_and_sync(
+    staged: &Path,
+    published: &Path,
+    link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    sync_parent: impl Fn(&Path) -> std::io::Result<()>,
+) -> Result<(), ApiError> {
+    let parent = published
+        .parent()
+        .ok_or_else(|| ApiError::internal("media path has no parent directory"))?;
+    fs::create_dir_all(parent)?;
+    secure_directory(parent)?;
+
+    match link(staged, published) {
+        Ok(()) => {
+            secure_file(published)?;
+            fs::File::open(published)?.sync_all()?;
+            sync_published_media_directories(published, &sync_parent)?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            verify_existing_published_media(staged, published, &sync_parent)
+        }
+        Err(error) if hard_link_fallback_allowed(&error) => {
+            match atomic_copy_media_noreplace(staged, published) {
+                Ok(()) => {
+                    sync_published_media_directories(published, &sync_parent)?;
+                    Ok(())
+                }
+                Err(copy_error) if copy_error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    verify_existing_published_media(staged, published, &sync_parent)
+                }
+                Err(copy_error) => Err(copy_error.into()),
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn verify_existing_published_media(
+    staged: &Path,
+    published: &Path,
+    sync_parent: &impl Fn(&Path) -> std::io::Result<()>,
+) -> Result<(), ApiError> {
+    let metadata = fs::symlink_metadata(published)?;
+    if !metadata.file_type().is_file() || fs::read(staged)? != fs::read(published)? {
+        return Err(ApiError::conflict(
+            "published media bytes conflict with staged bundle",
+        ));
+    }
+    secure_file(published)?;
+    fs::File::open(published)?.sync_all()?;
+    sync_published_media_directories(published, sync_parent)?;
+    Ok(())
+}
+
+fn sync_published_media_file(published: &Path) -> Result<(), ApiError> {
+    secure_file(published)?;
+    fs::File::open(published)?.sync_all()?;
+    sync_published_media_directories(published, &|directory| sync_directory(directory))?;
+    Ok(())
+}
+
+fn sync_published_media_directories(
+    published: &Path,
+    sync: &impl Fn(&Path) -> std::io::Result<()>,
+) -> Result<(), ApiError> {
+    let family_directory = published
+        .parent()
+        .ok_or_else(|| ApiError::internal("media path has no family directory"))?;
+    let media_root = family_directory
+        .parent()
+        .ok_or_else(|| ApiError::internal("media path has no media root"))?;
+    sync(family_directory)?;
+    sync(media_root)?;
+    Ok(())
+}
+
+fn hard_link_fallback_allowed(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::Unsupported {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        matches!(
+            error.raw_os_error(),
+            Some(code)
+                if code == libc::EXDEV
+                    || code == libc::EPERM
+                    || code == libc::EACCES
+                    || code == libc::EOPNOTSUPP
+        )
+    }
+    #[cfg(not(unix))]
+    false
+}
+
+fn atomic_copy_media_noreplace(staged: &Path, published: &Path) -> std::io::Result<()> {
+    let temporary = staged.with_extension(format!("{}.publish.tmp", Uuid::new_v4()));
+    let result = (|| -> std::io::Result<()> {
+        let mut source = fs::File::open(staged)?;
+        let mut destination = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        std::io::copy(&mut source, &mut destination)?;
+        destination.sync_all()?;
+        secure_file(&temporary)?;
+        rename_noreplace(&temporary, published)?;
+        secure_file(published)?;
+        fs::File::open(published)?.sync_all()?;
+        let published_parent = published.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "media path has no parent directory",
+            )
+        })?;
+        sync_directory(published_parent)?;
+        if let Some(staging_parent) = temporary.parent() {
+            if staging_parent != published_parent {
+                sync_directory(staging_parent)?;
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn rename_noreplace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let source_c = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let destination_c = CString::new(destination.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    // SAFETY: both C strings are NUL-terminated and remain alive for the call.
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            source_c.as_ptr(),
+            libc::AT_FDCWD,
+            destination_c.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if matches!(
+        error.raw_os_error(),
+        Some(code) if code == libc::ENOSYS || code == libc::EINVAL || code == libc::EOPNOTSUPP
+    ) {
+        return rename_noreplace_single_process(source, destination);
+    }
+    Err(error)
+}
+
+#[cfg(target_os = "linux")]
+fn rename_noreplace_single_process(source: &Path, destination: &Path) -> std::io::Result<()> {
+    if destination.try_exists()? {
+        return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+    }
+    // The supported deployment is a single server process, so after the
+    // exclusive family lock this fallback has no competing publisher.
+    fs::rename(source, destination)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn rename_noreplace(source: &Path, destination: &Path) -> std::io::Result<()> {
+    if destination.try_exists()? {
+        return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+    }
+    fs::rename(source, destination)
 }
 
 fn sync_directory(path: &Path) -> std::io::Result<()> {
@@ -1577,6 +1917,141 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn future_schema_store_preflight_does_not_mutate_parent_or_create_sidecars() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("lezi.db");
+        let connection = rusqlite::Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(
+                "
+                PRAGMA user_version = 2;
+                CREATE TABLE future_sentinel(value TEXT NOT NULL);
+                ",
+            )
+            .unwrap();
+        drop(connection);
+        let mut directory_permissions = directory.path().metadata().unwrap().permissions();
+        directory_permissions.set_mode(0o751);
+        fs::set_permissions(directory.path(), directory_permissions).unwrap();
+        let mut database_permissions = database_path.metadata().unwrap().permissions();
+        database_permissions.set_mode(0o640);
+        fs::set_permissions(&database_path, database_permissions).unwrap();
+        let before_entries = fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(
+            Store::open(&database_path).is_err(),
+            "Store::open accepted a newer database schema"
+        );
+
+        assert_eq!(
+            fs::read_dir(directory.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<std::collections::BTreeSet<_>>(),
+            before_entries
+        );
+        assert_eq!(
+            directory.path().metadata().unwrap().permissions().mode() & 0o777,
+            0o751
+        );
+        assert_eq!(
+            database_path.metadata().unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        for unexpected in ["lezi.db-wal", "lezi.db-shm", "lezi.db-journal"] {
+            assert!(!directory.path().join(unexpected).exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_media_publish_falls_back_when_hard_links_are_unsupported() {
+        let directory = tempfile::tempdir().unwrap();
+        let staged = directory.path().join("staged");
+        let published = directory.path().join("published");
+        write_private_file(&staged, b"image-bytes").unwrap();
+
+        prepare_published_media_file_with_link(&staged, &published, |_from, _to| {
+            Err(std::io::Error::from_raw_os_error(libc::EOPNOTSUPP))
+        })
+        .unwrap();
+
+        assert_eq!(fs::read(&published).unwrap(), b"image-bytes");
+        write_private_file(&staged, b"different-bytes").unwrap();
+        let conflict = prepare_published_media_file_with_link(&staged, &published, |_from, _to| {
+            Err(std::io::Error::from_raw_os_error(libc::EOPNOTSUPP))
+        })
+        .unwrap_err();
+        assert_eq!(conflict.status, StatusCode::CONFLICT);
+        assert_eq!(fs::read(&published).unwrap(), b"image-bytes");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn atomic_media_publication_syncs_family_and_media_root_directories() {
+        let directory = tempfile::tempdir().unwrap();
+        let staged = directory.path().join("staged");
+        let media_root = directory.path().join("media");
+        let family_directory = media_root.join("11111111-2222-4333-8444-555555555555");
+        fs::create_dir_all(&family_directory).unwrap();
+        let published = family_directory.join("published");
+        write_private_file(&staged, b"same-bytes").unwrap();
+        let synced = std::cell::RefCell::new(std::collections::BTreeSet::new());
+
+        prepare_published_media_file_with_link_and_sync(
+            &staged,
+            &published,
+            |from, to| fs::hard_link(from, to),
+            |path| {
+                synced.borrow_mut().insert(path.to_path_buf());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&published).unwrap(), b"same-bytes");
+        assert_eq!(
+            synced.into_inner(),
+            std::collections::BTreeSet::from([family_directory, media_root])
+        );
+    }
+
+    #[test]
+    fn existing_atomic_media_retry_syncs_family_and_media_root_directories() {
+        let directory = tempfile::tempdir().unwrap();
+        let staged = directory.path().join("staged");
+        let media_root = directory.path().join("media");
+        let family_directory = media_root.join("11111111-2222-4333-8444-555555555555");
+        fs::create_dir_all(&family_directory).unwrap();
+        let published = family_directory.join("published");
+        write_private_file(&staged, b"same-bytes").unwrap();
+        write_private_file(&published, b"same-bytes").unwrap();
+        let synced = std::cell::RefCell::new(std::collections::BTreeSet::new());
+
+        prepare_published_media_file_with_link_and_sync(
+            &staged,
+            &published,
+            |_from, _to| Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists)),
+            |path| {
+                synced.borrow_mut().insert(path.to_path_buf());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            synced.into_inner(),
+            std::collections::BTreeSet::from([family_directory, media_root])
+        );
     }
 
     #[cfg(unix)]

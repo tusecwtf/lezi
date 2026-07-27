@@ -284,6 +284,146 @@ async fn liveness_and_readiness_initialize_private_single_data_root() {
 }
 
 #[tokio::test]
+async fn database_schema_version_is_explicit_and_legacy_zero_upgrade_preserves_data() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "schema-version-owner",
+        "schema-version-owner-request-000001",
+    )
+    .await;
+    let token = owner["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let database_path = rig.directory.path().join("lezi.db");
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    assert_eq!(
+        connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    connection
+        .execute(
+            "ALTER TABLE sync_bundle_media DROP COLUMN staged_sha256",
+            [],
+        )
+        .unwrap();
+    connection.pragma_update(None, "user_version", 0).unwrap();
+    drop(connection);
+
+    let restarted = rig.restart("generation-b");
+    let (pull_status, pull) = get_json(&restarted, "/v1/pull?cursor=0", Some(token)).await;
+    assert_eq!(
+        pull_status,
+        StatusCode::OK,
+        "legacy version-zero upgrade lost the existing family credentials"
+    );
+    assert!(
+        pull["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entity| entity["client_uuid"] == baby_id),
+        "legacy version-zero upgrade lost persisted family entities"
+    );
+    let connection = rusqlite::Connection::open(database_path).unwrap();
+    assert_eq!(
+        connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert!(connection
+        .prepare("PRAGMA table_info(sync_bundle_media)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()
+        .unwrap()
+        .contains("staged_sha256"));
+}
+
+#[test]
+fn future_database_schema_version_fails_closed_without_mutation() {
+    let directory = TempDir::new().unwrap();
+    let database_path = directory.path().join("lezi.db");
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    connection
+        .execute_batch(
+            "
+            PRAGMA user_version = 2;
+            CREATE TABLE future_sentinel(value TEXT NOT NULL);
+            INSERT INTO future_sentinel(value) VALUES ('preserve-me');
+            ",
+        )
+        .unwrap();
+    drop(connection);
+    let mut directory_permissions = directory.path().metadata().unwrap().permissions();
+    directory_permissions.set_mode(0o751);
+    fs::set_permissions(directory.path(), directory_permissions).unwrap();
+    let mut database_permissions = database_path.metadata().unwrap().permissions();
+    database_permissions.set_mode(0o640);
+    fs::set_permissions(&database_path, database_permissions).unwrap();
+    let before_entries = fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<std::collections::BTreeSet<_>>();
+    let before_directory_mode = directory.path().metadata().unwrap().permissions().mode() & 0o777;
+    let before_database_mode = database_path.metadata().unwrap().permissions().mode() & 0o777;
+
+    assert!(
+        build_app(ServerConfig::new(directory.path())).is_err(),
+        "a newer database schema must not be opened by an older server"
+    );
+
+    let after_entries = fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(after_entries, before_entries);
+    assert_eq!(
+        directory.path().metadata().unwrap().permissions().mode() & 0o777,
+        before_directory_mode
+    );
+    assert_eq!(
+        database_path.metadata().unwrap().permissions().mode() & 0o777,
+        before_database_mode
+    );
+    for unexpected in [
+        "media",
+        "server.secret",
+        "lezi.db-wal",
+        "lezi.db-shm",
+        "lezi.db-journal",
+    ] {
+        assert!(
+            !directory.path().join(unexpected).exists(),
+            "future-schema preflight created {unexpected}"
+        );
+    }
+
+    let connection = rusqlite::Connection::open_with_flags(
+        database_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    assert_eq!(
+        connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT value FROM future_sentinel", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+        "preserve-me"
+    );
+}
+
+#[tokio::test]
 async fn readiness_reports_degraded_when_database_is_not_queryable() {
     let rig = Rig::new();
     fs::write(
@@ -3465,6 +3605,185 @@ async fn owner_delete_cleans_family_media_and_allows_replacement() {
 }
 
 #[tokio::test]
+async fn family_delete_keeps_media_when_database_deletion_fails() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "delete-failure-owner",
+        "delete-failure-owner-request-00001",
+    )
+    .await;
+    let token = owner["token"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let baby_id = Uuid::new_v4().to_string();
+    let record_id = Uuid::new_v4().to_string();
+    let media_id = Uuid::new_v4().to_string();
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/push",
+            Some(token),
+            json!({"entities":[
+                {"type":"baby","client_uuid":baby_id,"updated_at":1,
+                 "payload":baby_payload("年年", None)},
+                {"type":"record","client_uuid":record_id,"updated_at":1,
+                 "payload":record_payload(&baby_id)},
+                {"type":"media","client_uuid":media_id,"updated_at":1,
+                 "payload":log_media_payload(&record_id)}
+            ]}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(
+            &rig.app,
+            Method::PUT,
+            &format!("/v1/media/{media_id}"),
+            Some(token),
+            Body::from("log"),
+            Some("image/jpeg"),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute_batch(
+            "
+            CREATE TRIGGER fail_family_delete
+            BEFORE DELETE ON families
+            BEGIN
+                SELECT RAISE(FAIL, 'injected family deletion failure');
+            END;
+            ",
+        )
+        .unwrap();
+    drop(connection);
+
+    let failed = request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/delete",
+        Some(token),
+        Body::from("{}"),
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(rig.directory.path().join("media").join(family_id).is_dir());
+    assert_eq!(
+        get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await.0,
+        StatusCode::OK
+    );
+    let media_response = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(media_response.status(), StatusCode::OK);
+    assert_eq!(
+        media_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+        "log"
+    );
+
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute("DROP TRIGGER fail_family_delete", [])
+        .unwrap();
+    drop(connection);
+    let restarted = rig.restart("generation-b");
+    assert_eq!(
+        json_request(
+            &restarted,
+            Method::POST,
+            "/v1/family/delete",
+            Some(token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert!(!rig.directory.path().join("media").join(family_id).exists());
+}
+
+#[tokio::test]
+async fn restart_collects_only_uuid_orphan_family_media_directories() {
+    let rig = Rig::new();
+    let deleted = create_family(
+        &rig.app,
+        "orphan-cleanup-owner",
+        "orphan-cleanup-owner-request-000001",
+    )
+    .await;
+    let deleted_token = deleted["token"].as_str().unwrap();
+    let deleted_family_id = deleted["family_id"].as_str().unwrap();
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/family/delete",
+            Some(deleted_token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    // Model a crash or remove_dir_all failure after the database deletion:
+    // the UUID family directory remains, but no family row references it.
+    let media_root = rig.directory.path().join("media");
+    let orphan = media_root.join(deleted_family_id);
+    fs::create_dir_all(&orphan).unwrap();
+    fs::write(orphan.join("orphan-bytes"), b"orphan").unwrap();
+
+    let active = create_family(
+        &rig.app,
+        "active-cleanup-owner",
+        "active-cleanup-owner-request-000001",
+    )
+    .await;
+    let active_dir = media_root.join(active["family_id"].as_str().unwrap());
+    fs::create_dir_all(&active_dir).unwrap();
+    fs::write(active_dir.join("active-marker"), b"active").unwrap();
+    let operational = media_root.join(".operator-owned");
+    fs::create_dir_all(&operational).unwrap();
+    fs::write(operational.join("keep"), b"keep").unwrap();
+
+    let _restarted = rig.restart("generation-b");
+
+    assert!(
+        !orphan.exists(),
+        "restart did not collect orphan family media"
+    );
+    assert_eq!(
+        fs::read(active_dir.join("active-marker")).unwrap(),
+        b"active",
+        "restart removed media for a live family"
+    );
+    assert_eq!(
+        fs::read(operational.join("keep")).unwrap(),
+        b"keep",
+        "startup GC must ignore non-UUID operator entries"
+    );
+}
+
+#[tokio::test]
 async fn bootstrap_secret_gates_family_create_when_configured() {
     let secret = "production-bootstrap-secret";
     let rig = Rig::with_config(|config| {
@@ -3918,6 +4237,64 @@ async fn health_advertises_record_membership_author_capability() {
         .unwrap()
         .iter()
         .any(|capability| capability == "record_membership_author"));
+}
+
+#[tokio::test]
+async fn atomic_bundle_commit_rejects_malformed_or_wrong_shape_json() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "bundle-json-owner-device",
+        "bundle-json-owner-request-0000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let bundle_id = Uuid::new_v4().to_string();
+    let record_id = Uuid::new_v4().to_string();
+    let (stage_status, stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(owner_token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire(
+                "record",
+                &record_id,
+                2,
+                record_payload(&baby_id),
+                None,
+            ),
+            "media": [],
+        }),
+    )
+    .await;
+    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
+
+    for body in [Body::from("{"), Body::from(r#"{"generation":42}"#)] {
+        let response = request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/bundles/{bundle_id}/commit"),
+            Some(owner_token),
+            body,
+            Some("application/json"),
+        )
+        .await;
+        assert!(
+            response.status().is_client_error(),
+            "invalid commit JSON was accepted with {}",
+            response.status()
+        );
+    }
+
+    let (_, before_commit) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
+    assert!(!before_commit["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entity| entity["client_uuid"] == record_id));
 }
 
 #[tokio::test]
@@ -5078,6 +5455,350 @@ async fn atomic_bundle_is_invisible_until_commit_and_publishes_atomically() {
         .await;
         assert_eq!(response.status(), StatusCode::OK, "{media_id}");
     }
+}
+
+#[tokio::test]
+async fn atomic_bundle_prepares_durable_media_before_database_publication() {
+    let rig = Rig::new();
+    let created = create_family(
+        &rig.app,
+        "bundle-durability-owner",
+        "bundle-durability-request-000001",
+    )
+    .await;
+    let token = created["token"].as_str().unwrap();
+    let family_id = created["family_id"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let media_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+    let (stage_status, stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire(
+                "record",
+                &record_id,
+                2,
+                record_payload(&baby_id),
+                None,
+            ),
+            "media": [entity_wire(
+                "media",
+                &media_id,
+                2,
+                log_media_payload(&record_id),
+                None,
+            )],
+        }),
+    )
+    .await;
+    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
+    assert_eq!(
+        request(
+            &rig.app,
+            Method::PUT,
+            &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
+            Some(token),
+            Body::from("img"),
+            Some("image/jpeg"),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute_batch(
+            "
+            CREATE TRIGGER fail_bundle_publish
+            BEFORE UPDATE OF status ON sync_bundles
+            WHEN NEW.status = 'committed'
+            BEGIN
+                SELECT RAISE(FAIL, 'injected bundle publish failure');
+            END;
+            ",
+        )
+        .unwrap();
+    drop(connection);
+
+    let failed = request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(token),
+        Body::from("{}"),
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let final_path = rig
+        .directory
+        .path()
+        .join("media")
+        .join(family_id)
+        .join(&media_id);
+    assert_eq!(
+        fs::read(&final_path).unwrap(),
+        b"img",
+        "durable bytes must exist before the database can expose their metadata"
+    );
+    let (_, hidden) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    assert!(!hidden["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entity| entity["client_uuid"] == record_id || entity["client_uuid"] == media_id));
+    assert_eq!(
+        request(
+            &rig.app,
+            Method::GET,
+            &format!("/v1/media/{media_id}"),
+            Some(token),
+            Body::empty(),
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute("DROP TRIGGER fail_bundle_publish", [])
+        .unwrap();
+    drop(connection);
+    let restarted = rig.restart("generation-b");
+    let (retry_status, retry_body) = json_request(
+        &restarted,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(retry_status, StatusCode::OK, "{retry_body}");
+    let media_response = request(
+        &restarted,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(media_response.status(), StatusCode::OK);
+    assert_eq!(
+        media_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+        "img"
+    );
+}
+
+#[tokio::test]
+async fn committed_bundle_retry_revalidates_published_media_after_stage_cleanup() {
+    let rig = Rig::new();
+    let created = create_family(
+        &rig.app,
+        "bundle-retry-media-owner",
+        "bundle-retry-media-request-000001",
+    )
+    .await;
+    let token = created["token"].as_str().unwrap();
+    let family_id = created["family_id"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let media_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+    let (stage_status, stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire(
+                "record",
+                &record_id,
+                2,
+                record_payload(&baby_id),
+                None,
+            ),
+            "media": [entity_wire(
+                "media",
+                &media_id,
+                2,
+                log_media_payload(&record_id),
+                None,
+            )],
+        }),
+    )
+    .await;
+    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
+    assert_eq!(
+        request(
+            &rig.app,
+            Method::PUT,
+            &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
+            Some(token),
+            Body::from("img"),
+            Some("image/jpeg"),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let persisted_sha256: String = connection
+        .query_row(
+            "
+            SELECT staged_sha256
+            FROM sync_bundle_media
+            WHERE family_id = ?1 AND bundle_id = ?2 AND media_uuid = ?3
+            ",
+            rusqlite::params![family_id, bundle_id, media_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        persisted_sha256,
+        hex::encode(Sha256::digest(b"img")),
+        "bundle upload did not persist its exact digest"
+    );
+    drop(connection);
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/bundles/{bundle_id}/commit"),
+            Some(token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    let family_media = rig.directory.path().join("media").join(family_id);
+    let stage_dir = family_media.join(".stage").join(&bundle_id);
+    let published = family_media.join(&media_id);
+    assert!(!stage_dir.exists(), "successful commit left staging bytes");
+    fs::remove_file(&published).unwrap();
+    let missing_retry = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(token),
+        json!({}),
+    )
+    .await;
+    assert_ne!(
+        missing_retry.0,
+        StatusCode::OK,
+        "committed retry accepted missing published bytes: {}",
+        missing_retry.1
+    );
+
+    fs::write(&published, b"bad").unwrap();
+    let corrupt_retry = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(token),
+        json!({}),
+    )
+    .await;
+    assert_ne!(
+        corrupt_retry.0,
+        StatusCode::OK,
+        "committed retry accepted same-size corrupt bytes: {}",
+        corrupt_retry.1
+    );
+
+    fs::write(&published, b"img").unwrap();
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute(
+            "
+            UPDATE sync_bundle_media
+            SET staged_sha256 = NULL
+            WHERE family_id = ?1 AND bundle_id = ?2 AND media_uuid = ?3
+            ",
+            rusqlite::params![family_id, bundle_id, media_id],
+        )
+        .unwrap();
+    drop(connection);
+    let unverifiable_legacy_retry = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(token),
+        json!({}),
+    )
+    .await;
+    assert_ne!(
+        unverifiable_legacy_retry.0,
+        StatusCode::OK,
+        "legacy committed retry trusted published bytes without a digest or staged source: {}",
+        unverifiable_legacy_retry.1
+    );
+
+    fs::create_dir_all(&stage_dir).unwrap();
+    fs::write(stage_dir.join(&media_id), b"img").unwrap();
+    let recoverable_legacy_retry = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        recoverable_legacy_retry.0,
+        StatusCode::OK,
+        "legacy committed retry could not pin a digest from matching staged bytes: {}",
+        recoverable_legacy_retry.1
+    );
+    assert!(!stage_dir.exists(), "legacy retry left staging bytes");
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let pinned_sha256: String = connection
+        .query_row(
+            "
+            SELECT staged_sha256
+            FROM sync_bundle_media
+            WHERE family_id = ?1 AND bundle_id = ?2 AND media_uuid = ?3
+            ",
+            rusqlite::params![family_id, bundle_id, media_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(pinned_sha256, hex::encode(Sha256::digest(b"img")));
+    drop(connection);
+
+    fs::write(&published, b"bad").unwrap();
+    let pinned_legacy_corrupt_retry = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(token),
+        json!({}),
+    )
+    .await;
+    assert_ne!(
+        pinned_legacy_corrupt_retry.0,
+        StatusCode::OK,
+        "pinned legacy digest accepted same-size corrupt bytes: {}",
+        pinned_legacy_corrupt_retry.1
+    );
 }
 
 #[tokio::test]

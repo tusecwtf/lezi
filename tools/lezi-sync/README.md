@@ -6,8 +6,13 @@ Docker 容器和一个持久化目录。
 
 ## 数据兼容性
 
-Rust 版本原位兼容既有数据根；升级会事务迁移 SQLite schema，但不改变既有有效
-token hash 或 `server.secret` 的 HMAC 派生规则：
+Rust 版本原位兼容既有数据根；当前 SQLite `PRAGMA user_version=1`。旧的
+`user_version=0` 数据根会幂等升级并保留既有家庭、实体、token hash 与
+`server.secret` 的 HMAC 派生规则。当前版本尚未正式发布，因此
+`sync_bundle_media.staged_sha256` 通过幂等列迁移补入，`user_version` 仍为 1。
+若数据卷版本高于服务端支持版本，启动会先对既有数据库执行只读预检并 fail
+closed；预检失败不会创建 `media/`、`server.secret`、SQLite sidecar，也不会
+修改数据根或数据库权限：
 
 ```text
 $LEZI_DATA_DIR/
@@ -20,6 +25,9 @@ $LEZI_DATA_DIR/
 
 从旧镜像升级前，停止旧容器并备份整个数据根。不要只复制 `lezi.db`，否则会
 遗漏 WAL/SHM、服务密钥或媒体字节。
+
+启动时服务只清理 `media/` 下名称为 UUID、且 SQLite 已无对应家庭的孤儿目录。
+非 UUID 运维目录、仍存在的家庭目录和符号链接不会被启动清理触碰。
 
 ## NAS / Docker Compose
 
@@ -300,18 +308,32 @@ pull 响应新增兼容字段 `has_more`。每页最多扫描 200 个实体，�
    live media 须带正 `byte_size`；响应
    `{bundle_id, status:"staging", missing_media, staged_media}`
 2. 对每个 missing media：`PUT /v1/bundles/{bundle_id}/media/{uuid}`（原始字节）
-3. `POST /v1/bundles/{bundle_id}/commit` — 单事务写入 entities + 提升 rev，再把
-   暂存字节安装到 `media/{family}/{uuid}`；重复 commit 安全幂等
+3. `POST /v1/bundles/{bundle_id}/commit` — 先把暂存字节原子安装到
+   `media/{family}/{uuid}` 并同步文件、家庭目录与 `media/` 根目录，再以单个 SQLite 事务写入
+   entities + 提升 rev；重复 commit 安全幂等
 
 规则：
 
 - commit 前普通 `GET /v1/pull` **看不到**包内任何实体
+- 每次 bundle media 上传同时持久化声明尺寸与 SHA-256；commit 必须同时匹配
+  精确摘要和尺寸
+- 媒体优先进入持久化边界，SQLite 后发布引用；DB 失败或进程中断只会留下
+  不可见字节，不会暴露缺字节的实体。已提交 bundle 在暂存清理后重试时会逐个
+  核对已发布文件的摘要与尺寸，并再次 fsync 文件、家庭目录和 `media/` 根目录
+- 旧库中摘要为空的已提交 bundle 只在原暂存文件仍存在、且与已发布文件完全一致时
+  补写摘要；暂存已清理时无法追溯原始内容，重试会保守拒绝，不会信任仅尺寸相同的文件
+- 同一数据根优先用 hard link 做 no-replace 发布；NAS 文件系统不支持 hard link
+  时，改用已 fsync 的暂存副本 + no-replace rename，不覆盖冲突字节
 - 编辑新版本：另开 `bundle_id` 暂存；commit 前 pull 仍返回旧完整版本
 - 根 `updated_at` 落后于已发布版本 → commit `409`
 - tombstone 包（root/media 带 `deleted_at`）不需上传字节即可 commit
 - 每包最多 8 个 media；每家庭最多 64 个 open staging bundle
 - `care_plan` 根类型与 `record` 共用契约；完整 CarePlan 字段/ACL 在后续票单扩展
 - 既有 `/v1/push` 与 `/v1/media` 保持兼容（头像与旧客户端）
+
+家庭删除先提交 SQLite 外键级联删除，再清理该家庭媒体目录。数据库删除失败时
+媒体保持完整；数据库已删除但文件清理失败或进程中断时，该 UUID 目录作为孤儿
+保留，并在下一次启动按上述有限规则重试清理。
 
 ## 备份与恢复
 

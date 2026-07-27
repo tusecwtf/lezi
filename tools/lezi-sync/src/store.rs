@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rusqlite::types::Value as SqlValue;
@@ -17,6 +17,7 @@ use crate::model::{Entity, MAX_BUNDLE_MEDIA_ENTITIES, MAX_OPEN_STAGING_BUNDLES_P
 use crate::{PULL_ENTITY_TARGET_BYTES, PULL_PAGE_ENTITY_LIMIT, PULL_PAGE_TARGET_BYTES};
 
 const ENTITY_QUERY_CHUNK_SIZE: usize = 400;
+const DATABASE_SCHEMA_VERSION: i64 = 1;
 
 #[derive(Debug, Clone)]
 pub struct Principal {
@@ -83,6 +84,8 @@ pub enum StoreError {
     Json(#[from] serde_json::Error),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("database schema version {found} is newer than supported version {supported}")]
+    UnsupportedSchemaVersion { found: i64, supported: i64 },
     #[error("family already exists")]
     FamilyAlreadyExists,
     #[error("invitation not found")]
@@ -154,8 +157,15 @@ pub struct BundleCommitResult {
 pub struct StoredBundle {
     pub media: Vec<Entity>,
     pub required_media: Vec<String>,
+    pub media_integrity: BTreeMap<String, BundleMediaIntegrity>,
     pub status: String,
     pub staged_membership_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BundleMediaIntegrity {
+    pub declared_byte_size: Option<usize>,
+    pub staged_sha256: Option<String>,
 }
 
 #[derive(Clone)]
@@ -174,11 +184,35 @@ type EntityKey = (String, String);
 /// (kind, record_client_uuid, baby_client_uuid, care_plan_client_uuid)
 type MediaAssociation = (String, Option<String>, Option<String>, Option<String>);
 
+fn ensure_supported_schema_version(schema_version: i64) -> Result<(), StoreError> {
+    if schema_version > DATABASE_SCHEMA_VERSION {
+        return Err(StoreError::UnsupportedSchemaVersion {
+            found: schema_version,
+            supported: DATABASE_SCHEMA_VERSION,
+        });
+    }
+    Ok(())
+}
+
 impl Store {
+    pub fn preflight_existing_schema(database_path: &Path) -> Result<(), StoreError> {
+        if !database_path.try_exists()? {
+            return Ok(());
+        }
+        let connection = Connection::open_with_flags(
+            database_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let schema_version =
+            connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
+        ensure_supported_schema_version(schema_version)
+    }
+
     pub fn open(database_path: impl Into<PathBuf>) -> Result<Self, StoreError> {
         let store = Self {
             database_path: database_path.into(),
         };
+        Self::preflight_existing_schema(&store.database_path)?;
         if let Some(parent) = store.database_path.parent() {
             fs::create_dir_all(parent)?;
             crate::secure_directory(parent)?;
@@ -220,8 +254,28 @@ impl Store {
         Ok(())
     }
 
+    pub fn family_ids(&self) -> Result<BTreeSet<String>, StoreError> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare("SELECT id FROM families")?;
+        let family_ids = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        Ok(family_ids)
+    }
+
     fn initialize(&self) -> Result<(), StoreError> {
-        let mut connection = self.connect()?;
+        let mut connection = Connection::open(&self.database_path)?;
+        connection.busy_timeout(Duration::from_secs(10))?;
+        let schema_version =
+            connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
+        ensure_supported_schema_version(schema_version)?;
+        crate::secure_file(&self.database_path)?;
+        connection.execute_batch(
+            "
+            PRAGMA foreign_keys = ON;
+            PRAGMA journal_mode = WAL;
+            ",
+        )?;
         connection.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS families (
@@ -294,6 +348,7 @@ impl Store {
                 media_uuid TEXT NOT NULL,
                 declared_byte_size INTEGER,
                 staged_byte_size INTEGER,
+                staged_sha256 TEXT,
                 staged_at INTEGER,
                 PRIMARY KEY (family_id, bundle_id, media_uuid),
                 FOREIGN KEY (family_id, bundle_id)
@@ -324,6 +379,13 @@ impl Store {
         if !bundle_columns.contains("staged_membership_id") {
             connection.execute(
                 "ALTER TABLE sync_bundles ADD COLUMN staged_membership_id TEXT",
+                [],
+            )?;
+        }
+        let bundle_media_columns = table_columns(&connection, "sync_bundle_media")?;
+        if !bundle_media_columns.contains("staged_sha256") {
+            connection.execute(
+                "ALTER TABLE sync_bundle_media ADD COLUMN staged_sha256 TEXT",
                 [],
             )?;
         }
@@ -387,6 +449,7 @@ impl Store {
             ",
             [],
         )?;
+        connection.pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)?;
         self.secure_database_files()?;
         Ok(())
     }
@@ -1246,9 +1309,11 @@ impl Store {
         };
         let media: Vec<Entity> = serde_json::from_str(&row.media_entities_json)?;
         let required = required_live_media_uuids(&media);
+        let media_integrity = load_bundle_media_integrity(&connection, family_id, bundle_id)?;
         Ok(Some(StoredBundle {
             media,
             required_media: required,
+            media_integrity,
             status: row.status,
             staged_membership_id: row.staged_membership_id,
         }))
@@ -1261,6 +1326,7 @@ impl Store {
         bundle_id: &str,
         media_uuid: &str,
         staged_byte_size: usize,
+        staged_sha256: &str,
         now: i64,
     ) -> Result<BundleStageStatus, StoreError> {
         let family_id = &principal.family_id;
@@ -1280,11 +1346,12 @@ impl Store {
         let updated = transaction.execute(
             "
             UPDATE sync_bundle_media
-            SET staged_byte_size = ?1, staged_at = ?2
-            WHERE family_id = ?3 AND bundle_id = ?4 AND media_uuid = ?5
+            SET staged_byte_size = ?1, staged_sha256 = ?2, staged_at = ?3
+            WHERE family_id = ?4 AND bundle_id = ?5 AND media_uuid = ?6
             ",
             params![
                 staged_byte_size as i64,
+                staged_sha256,
                 now,
                 family_id,
                 bundle_id,
@@ -1309,7 +1376,7 @@ impl Store {
                 transaction.execute(
                     "
                     UPDATE sync_bundle_media
-                    SET staged_byte_size = NULL, staged_at = NULL
+                    SET staged_byte_size = NULL, staged_sha256 = NULL, staged_at = NULL
                     WHERE family_id = ?1 AND bundle_id = ?2 AND media_uuid = ?3
                     ",
                     params![family_id, bundle_id, media_uuid],
@@ -1324,11 +1391,32 @@ impl Store {
             .ok_or(StoreError::BundleNotFound)
     }
 
+    pub fn pin_legacy_bundle_media_sha256(
+        &self,
+        family_id: &str,
+        bundle_id: &str,
+        media_uuid: &str,
+        sha256: &str,
+    ) -> Result<(), StoreError> {
+        let connection = self.connect()?;
+        connection.execute(
+            "
+            UPDATE sync_bundle_media
+            SET staged_sha256 = ?1
+            WHERE family_id = ?2 AND bundle_id = ?3 AND media_uuid = ?4
+              AND staged_sha256 IS NULL
+            ",
+            params![sha256, family_id, bundle_id, media_uuid],
+        )?;
+        self.secure_database_files()?;
+        Ok(())
+    }
+
     /// Publish a complete package in one transaction. Idempotent after success.
     ///
-    /// `media_ready` maps media_uuid → whether durable staged bytes match declared size.
-    /// Caller installs final media files after a successful first commit (or re-installs
-    /// on idempotent retry).
+    /// `media_ready` maps each live media UUID to an exact, durable filesystem check.
+    /// The caller publishes and fsyncs media before entering this transaction, and
+    /// revalidates already-committed retries against the persisted upload digest.
     pub fn commit_bundle(
         &self,
         principal: &Principal,
@@ -1359,10 +1447,23 @@ impl Store {
             None => {}
         }
 
+        let media: Vec<Entity> = serde_json::from_str(&row.media_entities_json)?;
+        for entity in &media {
+            if entity.deleted_at.is_some() {
+                continue;
+            }
+            if !media_ready
+                .get(&entity.client_uuid)
+                .copied()
+                .unwrap_or(false)
+            {
+                return Err(StoreError::BundleMediaIncomplete);
+            }
+        }
+
         if row.status == "committed" {
             let cursor = row.committed_cursor.unwrap_or(0);
             let applied = row.committed_applied.unwrap_or(0) as usize;
-            let media: Vec<Entity> = serde_json::from_str(&row.media_entities_json)?;
             let root = Entity {
                 entity_type: row.root_type,
                 client_uuid: row.root_client_uuid,
@@ -1392,7 +1493,6 @@ impl Store {
             ));
         }
 
-        let media: Vec<Entity> = serde_json::from_str(&row.media_entities_json)?;
         let root = Entity {
             entity_type: row.root_type.clone(),
             client_uuid: row.root_client_uuid.clone(),
@@ -1400,20 +1500,6 @@ impl Store {
             deleted_at: row.root_deleted_at,
             payload: parse_payload(&row.root_payload_json)?,
         };
-
-        // All live media must have ready bytes before any publish.
-        for entity in &media {
-            if entity.deleted_at.is_some() {
-                continue;
-            }
-            if !media_ready
-                .get(&entity.client_uuid)
-                .copied()
-                .unwrap_or(false)
-            {
-                return Err(StoreError::BundleMediaIncomplete);
-            }
-        }
 
         if root.updated_at > max_updated_at
             || media
@@ -1659,6 +1745,44 @@ fn bundle_stage_status_from_row(
         missing_media: missing,
         staged_media: staged,
     })
+}
+
+fn load_bundle_media_integrity(
+    connection: &Connection,
+    family_id: &str,
+    bundle_id: &str,
+) -> Result<BTreeMap<String, BundleMediaIntegrity>, StoreError> {
+    let mut statement = connection.prepare(
+        "
+        SELECT media_uuid, declared_byte_size, staged_sha256
+        FROM sync_bundle_media
+        WHERE family_id = ?1 AND bundle_id = ?2
+        ",
+    )?;
+    let rows = statement
+        .query_map(params![family_id, bundle_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.into_iter()
+        .map(|(media_uuid, declared_byte_size, staged_sha256)| {
+            let declared_byte_size = declared_byte_size
+                .map(usize::try_from)
+                .transpose()
+                .map_err(|_| StoreError::InvalidStoredPayload)?;
+            Ok((
+                media_uuid,
+                BundleMediaIntegrity {
+                    declared_byte_size,
+                    staged_sha256,
+                },
+            ))
+        })
+        .collect()
 }
 
 fn staged_media_uuids(
