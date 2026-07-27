@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -22,6 +23,8 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.sync.FamilyRole
+
+internal fun familyMemberRosterMinimumTouchHeight() = LeziSpacing.Touch
 
 /**
  * Account Tab family zone: overview family card + primary CTAs.
@@ -116,6 +119,7 @@ internal fun FamilySharingContent(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable(onClick = onOpenMembers)
+                    .heightIn(min = familyMemberRosterMinimumTouchHeight())
                     .padding(vertical = LeziSpacing.Xs)
                     .semantics { contentDescription = "打开家人名单" },
             )
