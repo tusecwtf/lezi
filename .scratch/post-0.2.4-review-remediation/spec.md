@@ -1,10 +1,14 @@
 # Spec: post-0.2.4 固定范围审查整改
 
-Status: in-progress
+Status: complete
 Feature: post-0.2.4-review-remediation
 Source: `$code-review` 固定范围 `afb0af7..81e9610`（20 commits / 15 tickets）
 Ticket count: 7
-Frontier count: 1
+Frontier count: 0
+
+Completion: 2026-07-27 — Tickets 01–07 are closed in the linked index; the
+Release fixed-point review subsequently hardened the committed join/create and
+local-clear recovery boundaries without reopening the original dependency graph.
 
 ---
 
