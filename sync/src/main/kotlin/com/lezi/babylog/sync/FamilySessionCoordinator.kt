@@ -10,7 +10,7 @@ internal sealed interface FamilySessionCommand {
     data class SaveServer(val baseUrl: String) : FamilySessionCommand
     data class SaveHomeLanConfig(val config: HomeLanServerConfig) : FamilySessionCommand
     data class CreateFamily(
-        val displayName: String?,
+        val displayName: String,
         val bootstrapSecret: String,
         val familyName: String?,
     ) : FamilySessionCommand

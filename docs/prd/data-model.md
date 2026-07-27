@@ -133,7 +133,7 @@ UI 占位名“我（本机）”当成真实成员名上传。管理员在 UI �
 
 **索引**：`(baby_id, timestamp)`、`(client_uuid)`、`(baby_id, type, timestamp)`。
 
-已加入家庭时，本机新建 Record 立即带当前 session membership；NAS 对 ordinary push
+已加入家庭时，本机新建 Record 立即带当前 session membership；NAS 对 atomic commit
 与 atomic bundle 仍从已认证 principal 重新盖章。后续编辑、删除或恢复不得改写首次
 作者。Android 与 NAS 都要求 current `record_membership_author` capability，缺失时停止
 同步，不发送降级 payload。
@@ -152,7 +152,7 @@ UID 查找）的精确映射。清除记录或全部本地数据时，领域事�
 喂养提醒；清除
 提交后新写入的设置、映射及其 alarm 属于新 epoch，必须保留。
 
-ordinary push 与 atomic commit 都在 `record_authors` 回执中返回本次请求涉及的
+atomic commit 在 `record_authors` 回执中返回本次请求涉及的
 canonical Record membership 作者。Android 对同 `updatedAt` 的本地行只合并这一
 server-owned metadata；不修改护理内容、照片、删除状态或业务时间，不提高
 `updatedAt`，不改变 `syncDirty`，也不生成 Outbox。响应缺少当前必需字段时整次 apply

@@ -401,6 +401,8 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 - `200 {"ok": true, "version": "<semver>", "capabilities": ["atomic_bundle", "record_membership_author"]}`
 - 当前客户端要求能力集合包含 `atomic_bundle` 与 `record_membership_author`：前者标识
   原子同步包，后者标识 NAS 以认证 membership 权威化 Record 作者。缺少任一能力的
+
+> 实现注记（2026-07-27）：Android `OutboxPushPipeline` 已对全部 Record 走 atomic bundle；NAS 仍暂时接受 ordinary record 以便存量 fixture 迁移，后续应 fail-closed。
   服务端都不是受支持的 current endpoint，客户端停止同步并提示重新部署当前服务，
   不降级为其它 wire。
 - 客户端门闩探测用；响应体保持小体积（健康探测上限 64 KiB）
@@ -496,7 +498,7 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 ```
 
 - `type`：`baby` | `record` | `media` | `custom_item` | `fulfillment_candidate`；
-  `care_plan` 不经 ordinary push，必须使用 §9.8.1 原子同步包
+  `record` 与 `care_plan` 不经 ordinary push，必须使用 §9.8.1 原子同步包
 - `generation`：客户端已知服务代际；不匹配时服务端先返回结构化 `409`，
   不应用任何实体
 - LWW：请求 `updated_at` 小于库中则 skip
@@ -581,7 +583,7 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 - **LWW 与 ordinary**：commit 与 `/v1/push` 共享实体键 LWW；不得用半套 ordinary 写穿破原子可见性
 - **根类型通用**：`record` 与 `care_plan` 共用同一 HTTP/Store 契约
 - **CarePlan ACL**：创建时服务端从认证 principal 盖章 `created_by_membership_id`（忽略客户端伪造）；任意成员可创建；普通成员仅可修改/跳过/删除自己创建的计划，管理员可管理全部；作者离开后管理员仍可管理。计划媒体引用、宝宝、具体项目与家庭必须一致，跨家庭引用以冲突错误拒绝
-- **不经 ordinary push**：`care_plan` 不得走 `/v1/push`，必须经 atomic bundle，避免半套包
+- **不经 ordinary push**：`record` 与 `care_plan` 不得走 `/v1/push`，必须经 atomic bundle，避免半套包
 - **履行候选**（`fulfillment_candidate`，ordinary push）：任意活动成员可提交；服务端在候选首次接受时固定认证 `submitter_membership_id`、`submitter_role` 与不可编辑 `confirmed_at`，后续请求/幂等重放不得改写；客户端用盖章字段按管理员 → 较早确认时间 → 候选 UUID 裁决唯一权威事实，落选标记 conflict-not-adopted 并排除于普通记录表面；管理员本机冲突审计与「转为独立记录」不改写候选盖章字段，也不通过 wire 同步 `adoptionStatus` / `convertedRecordClientUuid`
 - **暂存上限**：每包最多 8 个 media；每家庭最多 64 个 open staging bundle（防 NAS 磁盘无界）
 

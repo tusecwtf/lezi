@@ -246,6 +246,9 @@ impl RawEntity {
         }
         match (context, self.entity_type.as_str()) {
             (_, "baby") => validate_baby(&mut self.payload)?,
+            // Current Android client always publishes records via atomic bundles
+            // (OutboxPushPipeline). Ordinary record remains wire-valid for NAS
+            // fixtures until those tests are fully migrated to seed_record_with_id.
             (_, "record") => validate_record(&mut self.payload)?,
             (_, "media") => validate_media(
                 &mut self.payload,
@@ -262,15 +265,15 @@ impl RawEntity {
                 validate_care_plan(&mut self.payload)?
             }
             (EntityValidationContext::OrdinaryPush, "care_plan") => {
-                // Care plans use atomic bundles so plan and media package semantics
-                // cannot diverge.
                 return Err(ApiError::unprocessable(
                     "care_plan must be published via atomic bundle",
                 ));
             }
-            (EntityValidationContext::OrdinaryPush, _) => return Err(ApiError::unprocessable(
-                "entity type must be baby, record, media, custom_item, or fulfillment_candidate",
-            )),
+            (EntityValidationContext::OrdinaryPush, _) => {
+                return Err(ApiError::unprocessable(
+                    "entity type must be baby, record, media, custom_item, or fulfillment_candidate",
+                ))
+            }
             (EntityValidationContext::AtomicBundleRoot, _) => {
                 return Err(ApiError::unprocessable(
                     "bundle root type must be record or care_plan",
@@ -296,6 +299,7 @@ impl RawEntity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntityValidationContext {
     /// Ordinary `/v1/push` (baby | record | media | custom_item | fulfillment_candidate).
+    /// Android never uses ordinary record; atomic is the product path.
     OrdinaryPush,
     /// Root of an atomic bundle (`record` | `care_plan`).
     AtomicBundleRoot,
@@ -1354,22 +1358,33 @@ mod tests {
     #[test]
     fn record_requires_schema_version_two() {
         record(record_payload())
-            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
             .unwrap();
 
         for invalid in [Value::Null, json!(1), json!(3), json!("2")] {
             let mut payload = record_payload();
             payload["schema_version"] = invalid;
             assert!(record(payload)
-                .validate_as(1024, EntityValidationContext::OrdinaryPush)
+                .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
                 .is_err());
         }
 
         let mut missing = record_payload();
         missing.as_object_mut().unwrap().remove("schema_version");
         assert!(record(missing)
-            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
             .is_err());
+    }
+
+
+    #[test]
+    fn record_validates_on_ordinary_and_atomic_contexts() {
+        record(record_payload())
+            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .unwrap();
+        record(record_payload())
+            .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
+            .unwrap();
     }
 
     #[test]
@@ -1396,14 +1411,14 @@ mod tests {
     #[test]
     fn record_requires_current_nullable_keys() {
         record(record_payload())
-            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
             .unwrap();
 
         for key in ["custom_item_client_uuid", "end_timestamp", "note"] {
             let mut payload = record_payload();
             payload.as_object_mut().unwrap().remove(key);
             assert!(record(payload)
-                .validate_as(1024, EntityValidationContext::OrdinaryPush)
+                .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
                 .is_err());
         }
     }
@@ -1572,7 +1587,7 @@ mod tests {
         invalid_interval["timestamp"] = json!(100);
         invalid_interval["end_timestamp"] = json!(99);
         assert!(record(invalid_interval)
-            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
             .is_err());
 
         let mut invalid_zone = care_plan_payload();
@@ -1611,7 +1626,7 @@ mod tests {
             payload["type"] = json!(record_type);
             payload["payload_json"] = input;
             let canonical = record(payload)
-                .validate_as(1024, EntityValidationContext::OrdinaryPush)
+                .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
                 .unwrap();
             assert_eq!(canonical.payload["payload_json"], expected);
         }
@@ -1620,7 +1635,7 @@ mod tests {
         temperature["type"] = json!("temperature");
         temperature["payload_json"] = json!({"celsius": 37});
         let canonical_temperature = record(temperature)
-            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
             .unwrap();
         assert_eq!(
             serde_json::to_string(&canonical_temperature.payload["payload_json"]).unwrap(),
@@ -1676,7 +1691,7 @@ mod tests {
             record_payload["type"] = json!(record_type);
             record_payload["payload_json"] = valid_nested_payload(record_type);
             record(record_payload)
-                .validate_as(1024, EntityValidationContext::OrdinaryPush)
+                .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
                 .unwrap();
 
             let mut plan_payload = care_plan_payload();
@@ -1691,7 +1706,7 @@ mod tests {
             let mut record_payload = record_payload();
             record_payload["type"] = json!(record_type);
             assert!(record(record_payload)
-                .validate_as(1024, EntityValidationContext::OrdinaryPush)
+                .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
                 .is_err());
 
             let mut plan_payload = care_plan_payload();
@@ -1738,7 +1753,7 @@ mod tests {
             payload["type"] = json!(record_type);
             payload["payload_json"] = valid_nested_payload(record_type);
             record(payload)
-                .validate_as(1024, EntityValidationContext::OrdinaryPush)
+                .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
                 .unwrap();
 
             let mut payload = care_plan_payload();
@@ -1780,7 +1795,7 @@ mod tests {
             payload["type"] = json!(record_type);
             payload["payload_json"] = nested.clone();
             assert!(record(payload)
-                .validate_as(1024, EntityValidationContext::OrdinaryPush)
+                .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
                 .is_err());
 
             let mut payload = care_plan_payload();

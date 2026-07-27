@@ -78,11 +78,11 @@ interface SyncPort {
     /** Persists the host, port, and up to two SSIDs; form defaults are not applied here. */
     suspend fun saveHomeLanConfig(config: HomeLanServerConfig): Result<Unit>
     /**
-     * @param displayName 家庭称呼 (product-required)
+     * @param displayName 家庭称呼 (product-required; blank rejected at the session seam)
      * @param familyName shared family name (optional; blank → server null + client fallback)
      */
     suspend fun createFamily(
-        displayName: String? = null,
+        displayName: String,
         bootstrapSecret: String,
         familyName: String? = null,
     ): Result<SyncSession>
@@ -125,7 +125,7 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
     override suspend fun saveServer(baseUrl: String) = Result.success(Unit)
     override suspend fun saveHomeLanConfig(config: HomeLanServerConfig) = Result.success(Unit)
     override suspend fun createFamily(
-        displayName: String?,
+        displayName: String,
         bootstrapSecret: String,
         familyName: String?,
     ) = Result.failure<SyncSession>(SyncNotEnabledException())

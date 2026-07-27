@@ -161,6 +161,36 @@ class CareLog @Inject constructor(
     private val fulfillmentCandidateDao: FulfillmentCandidateDao,
     private val calendarReminderMutationGuard: CalendarReminderMutationGuard,
 ) {
+    private val fulfillmentSurface = FulfillmentSurface(fulfillmentCandidateDao)
+    private val reminderProjection = CarePlanReminderProjection(
+        carePlanDao = carePlanDao,
+        babyDao = babyDao,
+        mediaAssetDao = mediaAssetDao,
+        settings = settings,
+        reminderCleanup = reminderCleanup,
+        systemCalendar = systemCalendar,
+        calendarReminderMutationGuard = calendarReminderMutationGuard,
+    )
+    private val conflictAuditQueries = ConflictAuditQueries(
+        fulfillmentCandidateDao = fulfillmentCandidateDao,
+        carePlanDao = carePlanDao,
+        recordDao = recordDao,
+        mediaAssetDao = mediaAssetDao,
+        syncPort = syncPort,
+        listRecordPhotoPaths = ::listRecordPhotoPaths,
+    )
+    private val customItemCatalog = CustomItemCatalog(
+        customItemDao = customItemDao,
+        transactionRunner = transactionRunner,
+        syncPort = syncPort,
+        resolveFamilyId = {
+            getCurrentBaby()?.familyId
+                ?: listBabies().firstOrNull()?.familyId
+                ?: error("请先添加宝宝")
+        },
+        requestLocalSync = ::requestLocalSync,
+    )
+
     /**
      * Serializes record create, update, delete, and confirm operations that may
      * change active sleep state. Room transactions provide atomic writes; this
@@ -365,142 +395,28 @@ class CareLog @Inject constructor(
     }
 
     fun observeCustomItems(): Flow<List<CustomRecordItem>> =
-        customItemDao.observeAll().map { items -> items.map { it.toModel() } }
+        customItemCatalog.observeCustomItems()
 
-    suspend fun addCustomItem(name: String, iconSlot: Int): Long {
-        val normalized = name.trim()
-        require(normalized.isNotEmpty()) { "自定义项目名称不能为空" }
-        require(iconSlot in 0..7) { "图标槽必须在 0..7" }
-        val familyId = getCurrentBaby()?.familyId
-            ?: listBabies().firstOrNull()?.familyId
-            ?: error("请先添加宝宝")
-        val now = System.currentTimeMillis()
-        val creatorMembership = currentMembershipActorId()
-        // Limit/uniqueness check and insert share one DB transaction so concurrent
-        // adds cannot both pass the pre-check and create an 11th item / duplicate.
-        return transactionRunner.run {
-            val items = customItemDao.listAll()
-            if (items.size >= 10) throw CustomItemLimitException()
-            require(items.none { it.name == normalized }) { "自定义项目名称不可重复" }
-            customItemDao.upsert(
-                CustomItemEntity(
-                    clientUuid = newClientUuid(),
-                    familyId = familyId,
-                    name = normalized,
-                    iconSlot = iconSlot,
-                    sortOrder = items.size,
-                    updatedAt = now,
-                    createdByMembershipId = creatorMembership,
-                    syncDirty = true,
-                ),
-            )
-        }.also { requestLocalSync() }
-    }
+    suspend fun addCustomItem(name: String, iconSlot: Int): Long =
+        customItemCatalog.addCustomItem(name, iconSlot)
 
-    suspend fun updateCustomItem(item: CustomRecordItem) {
-        val existing = customItemDao.getById(item.id) ?: return
-        if (existing.deletedAt != null) return
-        requireCanManageCustomItem(existing)
-        val normalized = item.name.trim()
-        require(normalized.isNotEmpty()) { "自定义项目名称不能为空" }
-        require(item.iconSlot in 0..7) { "图标槽必须在 0..7" }
-        require(
-            customItemDao.listAll().none { it.id != item.id && it.name == normalized },
-        ) { "自定义项目名称不可重复" }
-        val sharedChanged =
-            existing.name != normalized || existing.iconSlot != item.iconSlot
-        // sortOrder is device-local layout — never dirty family sync by itself.
-        customItemDao.update(
-            existing.copy(
-                name = normalized,
-                iconSlot = item.iconSlot,
-                sortOrder = item.sortOrder.coerceAtLeast(0),
-                updatedAt = if (sharedChanged) {
-                    System.currentTimeMillis().coerceAtLeast(existing.updatedAt + 1)
-                } else {
-                    existing.updatedAt
-                },
-                syncDirty = existing.syncDirty || sharedChanged,
-            ),
-        )
-        if (sharedChanged) requestLocalSync()
-    }
+    suspend fun updateCustomItem(item: CustomRecordItem) =
+        customItemCatalog.updateCustomItem(item)
 
-    /**
-     * Local reorder only. Does not bump [CustomItemEntity.updatedAt] or mark
-     * [CustomItemEntity.syncDirty] so family LWW renames are not clobbered.
-     */
-    suspend fun moveCustomItem(id: Long, delta: Int) {
-        val items = customItemDao.listAll()
-        val from = items.indexOfFirst { it.id == id }
-        if (from < 0) return
-        requireCanManageCustomItem(items[from])
-        val to = (from + delta).coerceIn(0, items.lastIndex)
-        if (to == from) return
-        val reordered = items.toMutableList().apply {
-            add(to, removeAt(from))
-        }
-        reordered.forEachIndexed { index, item ->
-            if (item.sortOrder != index) {
-                customItemDao.update(item.copy(sortOrder = index))
-            }
-        }
-    }
+    suspend fun moveCustomItem(id: Long, delta: Int) =
+        customItemCatalog.moveCustomItem(id, delta)
 
-    /**
-     * Soft-delete (tombstone) a shared custom definition.
-     * Local hide via [SettingsLocal.hiddenItems] is separate and does not call this.
-     */
-    suspend fun deleteCustomItem(id: Long) {
-        val existing = customItemDao.getById(id) ?: return
-        if (existing.deletedAt != null) return
-        requireCanManageCustomItem(existing)
-        customItemDao.softDelete(id, System.currentTimeMillis())
-        requestLocalSync()
-    }
+    suspend fun deleteCustomItem(id: Long) =
+        customItemCatalog.deleteCustomItem(id)
 
-    /**
-     * Whether the current session may edit/delete this custom definition.
-     * - Owner/admin: all definitions (including after creator leave).
-     * - Member: only own membership stamp.
-     * - Offline / never-joined (empty membership on both sides): allow (single device).
-     */
     fun canManageCustomItem(
         item: CustomRecordItem,
         actorMembershipId: String,
         actorIsAdmin: Boolean,
-    ): Boolean = canManageCreatorOwnedFamilyEntity(
-        creatorMembershipId = item.createdByMembershipId,
-        actorMembershipId = actorMembershipId,
-        actorIsAdmin = actorIsAdmin,
-    )
+    ): Boolean = customItemCatalog.canManageCustomItem(item, actorMembershipId, actorIsAdmin)
 
-    suspend fun canManageCustomItem(item: CustomRecordItem): Boolean {
-        val session = syncPort.session().first()
-        return canManageCreatorOwnedFamilyEntity(
-            creatorMembershipId = item.createdByMembershipId,
-            actorMembershipId = session.membershipId.trim(),
-            actorIsAdmin = session.role == com.lezi.babylog.sync.FamilyRole.Owner,
-            creatorAcknowledgementPending = session.isCreatorAcknowledgementPending(
-                entityType = "custom_item",
-                clientUuid = item.clientUuid,
-            ),
-        )
-    }
-
-    private suspend fun requireCanManageCustomItem(existing: CustomItemEntity) {
-        val session = syncPort.session().first()
-        val allowed = canManageCreatorOwnedFamilyEntity(
-            creatorMembershipId = existing.createdByMembershipId,
-            actorMembershipId = session.membershipId.trim(),
-            actorIsAdmin = session.role == com.lezi.babylog.sync.FamilyRole.Owner,
-            creatorAcknowledgementPending = session.isCreatorAcknowledgementPending(
-                entityType = "custom_item",
-                clientUuid = existing.clientUuid,
-            ),
-        )
-        if (!allowed) throw CustomItemPermissionException()
-    }
+    suspend fun canManageCustomItem(item: CustomRecordItem): Boolean =
+        customItemCatalog.canManageCustomItem(item)
 
     private suspend fun currentMembershipActorId(): String =
         syncPort.session().first().membershipId.trim()
@@ -763,7 +679,7 @@ class CareLog @Inject constructor(
         }
         // Creator keeps full local plan + projection immediately; family wait on package.
         carePlanDao.get(planId)?.toModel()?.let { plan ->
-            projectOrScheduleCarePlanReminder(
+            reminderProjection.projectOrScheduleCarePlanReminder(
                 plan,
                 projectToSystemCalendar = projectToSystemCalendar,
             )
@@ -910,8 +826,8 @@ class CareLog @Inject constructor(
             inserted
         }
         if (carePlanId != null) {
-            cancelCarePlanReminderBestEffort(carePlanId)
-            removeSystemCalendarProjection(carePlanId)
+            reminderProjection.cancelCarePlanReminderBestEffort(carePlanId)
+            reminderProjection.removeSystemCalendarProjection(carePlanId)
         }
         requestLocalSync()
         return id
@@ -1214,7 +1130,7 @@ class CareLog @Inject constructor(
         }
         // Creator: full local plan + own reminders/calendar immediately (amber until publish).
         carePlanDao.get(id)?.toModel()?.let { plan ->
-            projectOrScheduleCarePlanReminder(
+            reminderProjection.projectOrScheduleCarePlanReminder(
                 plan,
                 projectToSystemCalendar = projectToSystemCalendar,
             )
@@ -1351,8 +1267,8 @@ class CareLog @Inject constructor(
         } else {
             writeFulfill()
         }
-        cancelCarePlanReminderBestEffort(carePlanId)
-        removeSystemCalendarProjection(carePlanId)
+        reminderProjection.cancelCarePlanReminderBestEffort(carePlanId)
+        reminderProjection.removeSystemCalendarProjection(carePlanId)
         requestLocalSync()
         return recordId
     }
@@ -1540,22 +1456,17 @@ class CareLog @Inject constructor(
         fulfillmentCandidateDao.listForCarePlan(carePlanClientUuid).map { it.toModel() }
 
     /**
-     * Ordinary-surface filter: drop records that lost multi-candidate fulfillment.
-     * Records and photos remain stored for audit / ticket 27 conversion.
+     * Timeline/export surface filter: drop records that lost multi-candidate
+     * fulfillment. Loser rows and photos remain stored for audit conversion.
+     *
+     * Not related to ordinary `/v1/push` transport.
      */
-    suspend fun filterOrdinaryRecords(records: List<Record>): List<Record> {
-        if (records.isEmpty()) return records
-        val blocked = fulfillmentCandidateDao.listConflictNotAdoptedRecordUuids().toSet()
-        if (blocked.isEmpty()) return records
-        return records.filter { it.clientUuid !in blocked }
-    }
+    suspend fun filterSurfaceRecords(records: List<Record>): List<Record> =
+        fulfillmentSurface.filterSurfaceRecords(records)
 
-    suspend fun isOrdinarySurfaceRecord(clientUuid: String): Boolean {
-        val linked = fulfillmentCandidateDao.listForRecord(clientUuid)
-            .filter { it.deletedAt == null }
-        if (linked.isEmpty()) return true
-        return linked.none { it.adoptionStatus == FulfillmentAdoptionStatus.CONFLICT_NOT_ADOPTED }
-    }
+    /** True when the record is visible on normal care surfaces (not a conflict loser). */
+    suspend fun isSurfaceRecord(clientUuid: String): Boolean =
+        fulfillmentSurface.isSurfaceRecord(clientUuid)
 
     /** True when the joined session is family owner/admin. */
     suspend fun isFamilyAdmin(): Boolean {
@@ -1563,44 +1474,17 @@ class CareLog @Inject constructor(
         return session.role == com.lezi.babylog.sync.FamilyRole.Owner
     }
 
-    /**
-     * Admin-only conflict-not-adopted audits for a plan (or all babies when [carePlanClientUuid]
-     * is null). Non-admins receive an empty list — button hide is not the only gate.
-     */
+
     suspend fun listConflictNotAdoptedAudits(
         carePlanClientUuid: String? = null,
         babyId: Long? = null,
-    ): List<ConflictNotAdoptedAudit> {
-        if (!isFamilyAdmin()) return emptyList()
-        val candidates = if (carePlanClientUuid != null) {
-            fulfillmentCandidateDao.listConflictNotAdoptedForCarePlan(carePlanClientUuid)
-        } else {
-            fulfillmentCandidateDao.listConflictNotAdopted()
-        }
-        if (candidates.isEmpty()) return emptyList()
-        val nameByMembership = resolveSubmitterDisplayNames(candidates)
-        return candidates.mapNotNull { candidate ->
-            buildConflictNotAdoptedAudit(candidate, nameByMembership)
-        }.filter { babyId == null || it.babyId == babyId }
-    }
+    ): List<ConflictNotAdoptedAudit> =
+        conflictAuditQueries.listConflictNotAdoptedAudits(carePlanClientUuid, babyId)
 
-    /**
-     * Admin-only single audit detail. Null when missing, not conflict-not-adopted,
-     * or the actor is not an admin (fail closed for deep links / direct calls).
-     */
     suspend fun getConflictNotAdoptedAudit(
         candidateClientUuid: String,
-    ): ConflictNotAdoptedAudit? {
-        if (!isFamilyAdmin()) return null
-        val candidate = fulfillmentCandidateDao.getByClientUuid(candidateClientUuid)
-            ?: return null
-        if (candidate.deletedAt != null) return null
-        if (candidate.adoptionStatus != FulfillmentAdoptionStatus.CONFLICT_NOT_ADOPTED) {
-            return null
-        }
-        val nameByMembership = resolveSubmitterDisplayNames(listOf(candidate))
-        return buildConflictNotAdoptedAudit(candidate, nameByMembership)
-    }
+    ): ConflictNotAdoptedAudit? =
+        conflictAuditQueries.getConflictNotAdoptedAudit(candidateClientUuid)
 
     /**
      * Admin-only: create a new ordinary Record from a conflict-not-adopted candidate.
@@ -1697,105 +1581,6 @@ class CareLog @Inject constructor(
         }
         requestLocalSync()
         return recordId
-    }
-
-    private suspend fun resolveSubmitterDisplayNames(
-        candidates: List<FulfillmentCandidateEntity>,
-    ): Map<String, String> {
-        val members = syncPort.listFamilyMembers().getOrNull().orEmpty()
-        val byMembership = members.mapNotNull { member ->
-            val id = member.membershipId?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
-            val name = member.displayName?.trim()?.takeIf { it.isNotEmpty() }
-                ?: if (member.role == com.lezi.babylog.sync.FamilyRole.Owner) {
-                    "家庭管理员"
-                } else {
-                    "家庭成员"
-                }
-            id to name
-        }.toMap()
-        // Ensure every candidate membership key exists for fallback labels.
-        return candidates.associate { candidate ->
-            val mid = candidate.submitterMembershipId.trim()
-            mid to (
-                byMembership[mid]
-                    ?: when {
-                        mid.isEmpty() -> "未知提交者"
-                        FulfillmentAuthority.isAdminRole(candidate.submitterRole) -> "家庭管理员"
-                        candidate.submitterRole.isNotBlank() -> "家庭成员"
-                        else -> mid
-                    }
-                )
-        }
-    }
-
-    private suspend fun buildConflictNotAdoptedAudit(
-        candidate: FulfillmentCandidateEntity,
-        nameByMembership: Map<String, String>,
-    ): ConflictNotAdoptedAudit? {
-        val plan = carePlanDao.getByClientUuid(candidate.carePlanClientUuid) ?: return null
-        val source = recordDao.getByClientUuid(candidate.recordClientUuid)
-        val type = source?.let { RecordType.fromKey(it.type) }
-            ?: RecordType.fromKey(plan.type)
-            ?: return null
-        val photos = when {
-            source != null && source.deletedAt == null -> listRecordPhotoPaths(source.id)
-            source != null -> mediaAssetDao.listForRecord(source.id)
-                .map(MediaAssetEntity::localUri)
-                .filter(String::isNotBlank)
-                .distinct()
-            else -> emptyList()
-        }
-        val live = fulfillmentCandidateDao.listForCarePlan(candidate.carePlanClientUuid)
-            .filter { it.deletedAt == null }
-        val evidences = live.map {
-            FulfillmentCandidateEvidence(
-                clientUuid = it.clientUuid,
-                recordClientUuid = it.recordClientUuid,
-                confirmedAt = it.confirmedAt,
-                submitterRole = it.submitterRole,
-            )
-        }
-        val winner = FulfillmentAuthority.selectWinner(evidences)
-        val loserEvidence = FulfillmentCandidateEvidence(
-            clientUuid = candidate.clientUuid,
-            recordClientUuid = candidate.recordClientUuid,
-            confirmedAt = candidate.confirmedAt,
-            submitterRole = candidate.submitterRole,
-        )
-        val reason = if (winner != null && winner.clientUuid != candidate.clientUuid) {
-            FulfillmentAuthority.notAdoptedReason(loserEvidence, winner)
-        } else {
-            "未采纳：履行冲突裁决落选"
-        }
-        val convertedUuid = candidate.convertedRecordClientUuid.trim()
-        val converted = convertedUuid.takeIf { it.isNotEmpty() }
-            ?.let { recordDao.getByClientUuid(it) }
-            ?.takeIf { it.deletedAt == null }
-        val typeLabel = when {
-            source != null -> source.toModel().displayLabel()
-            else -> plan.toModel().displayLabel()
-        }
-        val mid = candidate.submitterMembershipId.trim()
-        return ConflictNotAdoptedAudit(
-            candidateClientUuid = candidate.clientUuid,
-            carePlanClientUuid = candidate.carePlanClientUuid,
-            carePlanId = plan.id,
-            babyId = plan.babyId,
-            type = type,
-            typeLabel = typeLabel,
-            note = source?.note,
-            actualTimestamp = candidate.actualTimestamp ?: source?.timestamp,
-            confirmedAt = candidate.confirmedAt,
-            submitterMembershipId = candidate.submitterMembershipId,
-            submitterRole = candidate.submitterRole,
-            submitterDisplayName = nameByMembership[mid] ?: mid.ifBlank { "未知提交者" },
-            notAdoptedReason = reason,
-            photoLocalPaths = photos,
-            sourceRecordClientUuid = candidate.recordClientUuid,
-            sourceRecordId = source?.id,
-            convertedRecordClientUuid = converted?.clientUuid.orEmpty(),
-            convertedRecordId = converted?.id,
-        )
     }
 
     /**
@@ -1932,10 +1717,10 @@ class CareLog @Inject constructor(
         calendarReminderMutationGuard.withLock {
             carePlanDao.get(carePlanId)?.toModel()?.let { plan ->
                 if (plan.scheduledAt <= nowMillis) {
-                    cancelCarePlanReminderBestEffort(plan.id)
-                    removeSystemCalendarProjectionLocked(plan.id)
+                    reminderProjection.cancelCarePlanReminderBestEffort(plan.id)
+                    reminderProjection.removeSystemCalendarProjectionLocked(plan.id)
                 } else {
-                    projectOrScheduleCarePlanReminderLocked(
+                    reminderProjection.projectOrScheduleCarePlanReminderLocked(
                         plan,
                         projectToSystemCalendar = plan.systemCalendarProjectionEnabled,
                     )
@@ -1968,8 +1753,8 @@ class CareLog @Inject constructor(
                 ),
             )
         }
-        cancelCarePlanReminderBestEffort(carePlanId)
-        removeSystemCalendarProjection(carePlanId)
+        reminderProjection.cancelCarePlanReminderBestEffort(carePlanId)
+        reminderProjection.removeSystemCalendarProjection(carePlanId)
         requestLocalSync()
     }
 
@@ -1988,465 +1773,56 @@ class CareLog @Inject constructor(
             carePlanDao.softDelete(carePlanId, deletedAt)
             tombstoneCarePlanPhotos(carePlanId, deletedAt)
         }
-        cancelCarePlanReminderBestEffort(carePlanId)
-        removeSystemCalendarProjection(carePlanId)
+        reminderProjection.cancelCarePlanReminderBestEffort(carePlanId)
+        reminderProjection.removeSystemCalendarProjection(carePlanId)
         requestLocalSync()
     }
 
-    /**
-     * After a remote care_plan package is fully applied, schedule or cancel this
-     * device's own reminders / system calendar copies. Never requests calendar
-     * permission (passive receive). Local prefs never enter the family package.
-     */
+
     suspend fun onFamilyCarePlansApplied(
         planClientUuids: List<String>,
         nowMillis: Long = System.currentTimeMillis(),
-    ) {
-        if (planClientUuids.isEmpty()) return
-        calendarReminderMutationGuard.withLock {
-            for (uuid in planClientUuids) {
-                val plan = carePlanDao.getByClientUuid(uuid) ?: continue
-                val model = plan.toModel()
-                val terminal = plan.deletedAt != null ||
-                    model.status == CarePlanStatus.COMPLETED ||
-                    model.status == CarePlanStatus.SKIPPED
-                val expired = model.scheduledAt <= nowMillis
-                if (terminal || expired) {
-                    cancelCarePlanReminderBestEffort(plan.id)
-                    removeSystemCalendarProjectionLocked(plan.id)
-                } else {
-                    // Passive receive never requests permission; syncMutex → this guard.
-                    projectOrScheduleCarePlanReminderLocked(
-                        model,
-                        projectToSystemCalendar = model.systemCalendarProjectionEnabled,
-                    )
-                }
-            }
-        }
-    }
+    ) = reminderProjection.onFamilyCarePlansApplied(planClientUuids, nowMillis)
 
-    private suspend fun scheduleCarePlanReminder(plan: CarePlan) {
-        val scheduled = runCatching { reminderCleanup.scheduleCarePlan(plan) }.getOrDefault(false)
-        if (!scheduled) {
-            cancelCarePlanReminderBestEffort(plan.id)
-        }
-    }
-
-    /** AlarmManager cleanup must not roll back or mask an already-committed plan change. */
-    private suspend fun cancelCarePlanReminderBestEffort(carePlanId: Long) {
-        try {
-            reminderCleanup.cancelCarePlan(carePlanId)
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (_: Throwable) {
-            // Delivery is still fail-closed by shouldDeliverCarePlanReminder;
-            // startup/foreground reconciliation retries the physical cancel.
-        }
-    }
-
-    /** Persist and immediately reconcile the device-local Lezi reminder source. */
     suspend fun setCarePlanLocalRemindersEnabled(
         enabled: Boolean,
         nowMillis: Long = System.currentTimeMillis(),
-    ) = calendarReminderMutationGuard.withLock {
-        settings.setCarePlanLocalRemindersEnabled(enabled)
-        carePlanDao.listAllOpenFuture(nowMillis).forEach { entity ->
-            if (!enabled) {
-                cancelCarePlanReminderBestEffort(entity.id)
-            } else {
-                projectOrScheduleCarePlanReminderLocked(
-                    entity.toModel(),
-                    projectToSystemCalendar = entity.systemCalendarProjectionEnabled,
-                )
-            }
-        }
-    }
+    ) = reminderProjection.setCarePlanLocalRemindersEnabled(enabled, nowMillis)
 
-    /**
-     * Project to system calendar when the user configured a target; on success
-     * cancel the Lezi reminder (single-source). On deny/fail/missing target,
-     * fall back to Lezi reminders. Never throws — plan save already committed.
-     *
-     * Content follows [SystemCalendarDisclosureLevel] (prefs). When an existing
-     * mapped event was deleted externally, update fails and we rebuild via insert
-     * so the UUID→event map stays authoritative without dual Lezi reminders.
-     *
-     * @return true when a system event is present; false when Lezi reminder is used.
-     */
     suspend fun projectOrScheduleCarePlanReminder(
         plan: CarePlan,
         projectToSystemCalendar: Boolean = plan.systemCalendarProjectionEnabled,
-    ): Boolean = calendarReminderMutationGuard.withLock {
-        projectOrScheduleCarePlanReminderLocked(plan, projectToSystemCalendar)
-    }
+    ): Boolean = reminderProjection.projectOrScheduleCarePlanReminder(
+        plan,
+        projectToSystemCalendar,
+    )
 
-    private suspend fun projectOrScheduleCarePlanReminderLocked(
-        requestedPlan: CarePlan,
-        projectToSystemCalendar: Boolean,
-    ): Boolean {
-        val entity = carePlanDao.get(requestedPlan.id)
-            ?.takeIf { it.clientUuid == requestedPlan.clientUuid }
-            ?: return false
-        val plan = entity.toModel()
-        if (
-            plan.deletedAt != null ||
-            plan.status == CarePlanStatus.COMPLETED ||
-            plan.status == CarePlanStatus.SKIPPED
-        ) {
-            cancelCarePlanReminderBestEffort(plan.id)
-            removeSystemCalendarProjectionLocked(plan.id)
-            return false
-        }
-        if (!projectToSystemCalendar) {
-            val removed = removeSystemCalendarProjectionByClientUuidLocked(plan.clientUuid)
-            if (removed) scheduleCarePlanReminder(plan) else {
-                cancelCarePlanReminderBestEffort(plan.id)
-            }
-            return false
-        }
-        val prefs = settings.settings.first()
-        val calendarId = prefs.systemCalendarId?.takeIf { it.isNotBlank() }
-        val configured = prefs.systemCalendarEnabled && calendarId != null
-        if (!configured) {
-            val removed = removeSystemCalendarProjectionByClientUuidLocked(plan.clientUuid)
-            if (removed) scheduleCarePlanReminder(plan) else {
-                cancelCarePlanReminderBestEffort(plan.id)
-            }
-            return false
-        }
-        if (!systemCalendar.hasCalendarPermission()) {
-            if (entity.systemCalendarReminderReady || entity.systemCalendarProjectionPending) {
-                cancelCarePlanReminderBestEffort(plan.id)
-                return entity.systemCalendarReminderReady
-            }
-            scheduleCarePlanReminder(plan)
-            return false
-        }
-        val baby = babyDao.get(plan.babyId)
-        val nickname = baby?.nickname?.takeIf { it.isNotBlank() } ?: "宝宝"
-        val level = SystemCalendarDisclosureLevel.fromStored(prefs.systemCalendarDisclosureLevel)
-        val photoCount = listCarePlanPhotoPaths(plan.id).size.coerceAtMost(MAX_RECORD_PHOTOS)
-        val content = SystemCalendarDisclosurePolicy.build(
-            level = level,
-            babyNickname = nickname,
-            recordTypeLabel = plan.displayLabel(),
-            note = plan.note,
-            photoCount = photoCount,
-            carePlanClientUuid = plan.clientUuid,
-        )
-        val map = parseSystemCalendarEventMap(prefs.systemCalendarEventMapJson)
-        val existingEventId = entity.systemCalendarEventId ?: map[plan.clientUuid]
-        val wasPending = entity.systemCalendarProjectionPending
-        val providerHandoffMayExist = wasPending ||
-            entity.systemCalendarReminderReady ||
-            existingEventId != null
-        val handoffStored = runCatching {
-            carePlanDao.updateSystemCalendarProjection(
-                clientUuid = plan.clientUuid,
-                eventId = existingEventId,
-                reminderReady = entity.systemCalendarReminderReady,
-                pending = true,
-            )
-        }.isSuccess
-        if (!handoffStored) {
-            if (entity.systemCalendarReminderReady) {
-                cancelCarePlanReminderBestEffort(plan.id)
-                return true
-            }
-            scheduleCarePlanReminder(plan)
-            return false
-        }
-        val result = runCatching {
-            systemCalendar.upsertEvent(
-                SystemCalendarUpsert(
-                    calendarId = calendarId!!,
-                    carePlanClientUuid = plan.clientUuid,
-                    beginAtMillis = plan.scheduledAt,
-                    title = content.title,
-                    description = content.description,
-                    existingEventId = existingEventId,
-                    providerHandoffMayExist = providerHandoffMayExist,
-                    customAppUri = content.deepLinkUri,
-                ),
-            )
-        }.getOrNull()
-        if (result == null) {
-            // The hand-off was durably staged before the adapter call. An
-            // unexpected adapter exception leaves ownership indeterminate, so
-            // retain pending and never create a definite second reminder source.
-            cancelCarePlanReminderBestEffort(plan.id)
-            return false
-        }
-        val projectionPending =
-            result.outcome == SystemCalendarUpsertOutcome.ProviderStillOwnsStale
-        runCatching {
-            carePlanDao.updateSystemCalendarProjection(
-                clientUuid = plan.clientUuid,
-                eventId = result.eventId,
-                reminderReady = result.reminderReady,
-                pending = projectionPending,
-            )
-        }
-        if (result.eventId != null) {
-            runCatching { putSystemCalendarEventMapping(plan.clientUuid, result.eventId) }
-        } else if (result.outcome == SystemCalendarUpsertOutcome.ReleasedOrAbsent) {
-            runCatching {
-                removeSystemCalendarEventMapping(plan.clientUuid, existingEventId)
-            }
-        }
-        return when (result.outcome) {
-            SystemCalendarUpsertOutcome.CurrentReady -> {
-                cancelCarePlanReminderBestEffort(plan.id)
-                true
-            }
-            SystemCalendarUpsertOutcome.ProviderStillOwnsStale -> {
-                cancelCarePlanReminderBestEffort(plan.id)
-                false
-            }
-            SystemCalendarUpsertOutcome.ReleasedOrAbsent -> {
-                scheduleCarePlanReminder(plan)
-                false
-            }
-        }
-    }
-
-    /**
-     * Reproject still-open future plans after disclosure level (or target) change.
-     * Only [CarePlanDao.listAllOpenFuture] rows — never expands historical disclosure.
-     * Best-effort provider I/O; never throws into settings/CarePlan save paths.
-     */
     suspend fun reprojectOpenFutureSystemCalendarCopies(
         nowMillis: Long = System.currentTimeMillis(),
-    ) = calendarReminderMutationGuard.withLock {
-        reconcileTerminalSystemCalendarProjectionsLocked()
-        carePlanDao.listAllOpenFuture(nowMillis).forEach { entity ->
-            runCatching {
-                projectOrScheduleCarePlanReminderLocked(
-                    entity.toModel(),
-                    projectToSystemCalendar = entity.systemCalendarProjectionEnabled,
-                )
-            }
-        }
-    }
+    ) = reminderProjection.reprojectOpenFutureSystemCalendarCopies(nowMillis)
 
-    /**
-     * Whether the last projection for [carePlanId] is missing while the user
-     * wanted system calendar (for “未同步到系统日历” chrome). Best-effort.
-     * Detects permission revoke, vanished target calendar, missing map entry,
-     * and mapped events that no longer exist in the provider.
-     */
-    suspend fun isCarePlanSystemCalendarUnsynced(carePlanId: Long): Boolean {
-        val entity = carePlanDao.get(carePlanId) ?: return false
-        val plan = entity.toModel()
-        if (!plan.systemCalendarProjectionEnabled) return false
-        val prefs = settings.settings.first()
-        val calendarId = prefs.systemCalendarId
-        if (!prefs.systemCalendarEnabled || calendarId.isNullOrBlank()) {
-            return false
-        }
-        val hasPermission = systemCalendar.hasCalendarPermission()
-        val targetWritable = hasPermission && systemCalendar.isWritableCalendar(calendarId)
-        val map = parseSystemCalendarEventMap(prefs.systemCalendarEventMapJson)
-        val mappedEventId = entity.systemCalendarEventId ?: map[plan.clientUuid]
-        val eventExists = if (!mappedEventId.isNullOrBlank() && hasPermission) {
-            systemCalendar.eventExists(mappedEventId, plan.clientUuid)
-        } else {
-            false
-        }
-        return evaluateCarePlanSystemCalendarUnsynced(
-            systemCalendarEnabled = prefs.systemCalendarEnabled,
-            systemCalendarId = calendarId,
-            hasPermission = hasPermission,
-            targetWritable = targetWritable,
-            mappedEventId = mappedEventId,
-            eventExists = eventExists,
-            reminderReady = entity.systemCalendarReminderReady,
-            projectionPending = entity.systemCalendarProjectionPending,
-        )
-    }
+    suspend fun isCarePlanSystemCalendarUnsynced(carePlanId: Long): Boolean =
+        reminderProjection.isCarePlanSystemCalendarUnsynced(carePlanId)
 
-    private suspend fun removeSystemCalendarProjection(carePlanId: Long) =
-        calendarReminderMutationGuard.withLock {
-            removeSystemCalendarProjectionLocked(carePlanId)
-        }
+    suspend fun disableSystemCalendarProjection() =
+        reminderProjection.disableSystemCalendarProjection()
 
-    private suspend fun removeSystemCalendarProjectionLocked(carePlanId: Long): Boolean {
-        val plan = carePlanDao.get(carePlanId)
-        val clientUuid = plan?.clientUuid ?: return true
-        return removeSystemCalendarProjectionByClientUuidLocked(clientUuid)
-    }
-
-    /** Keep the durable map identity until provider deletion is confirmed. */
-    private suspend fun removeSystemCalendarProjectionByClientUuidLocked(
-        clientUuid: String,
-    ): Boolean {
-        val prefs = settings.settings.first()
-        val map = parseSystemCalendarEventMap(prefs.systemCalendarEventMapJson).toMutableMap()
-        val plan = carePlanDao.getByClientUuid(clientUuid)
-        val knownIds = linkedSetOf<String>().apply {
-            plan?.systemCalendarEventId?.let(::add)
-            map[clientUuid]?.let(::add)
-        }
-        // A current row with no identity, ready generation, or hand-off has
-        // provably never touched the provider.
-        val requiresProviderLookup = knownIds.isNotEmpty() ||
-            plan?.systemCalendarReminderReady == true ||
-            plan?.systemCalendarProjectionPending == true
-        suspend fun deleteKnown(eventId: String): Boolean {
-            val deleted = runCatching {
-                systemCalendar.deleteEvent(eventId, clientUuid)
-            }.getOrDefault(false)
-            return deleted || runCatching {
-                systemCalendar.eventState(eventId, clientUuid) == SystemCalendarEventState.ABSENT
-            }.getOrDefault(false)
-        }
-        knownIds.forEach { deleteKnown(it) }
-        var lookup = if (requiresProviderLookup) {
-            runCatching { systemCalendar.findOwnedEvent(clientUuid) }
-                .getOrDefault(SystemCalendarOwnedEventLookup.Unavailable)
-        } else {
-            SystemCalendarOwnedEventLookup.Absent
-        }
-        if (lookup is SystemCalendarOwnedEventLookup.Found) {
-            lookup.eventIds.forEach { deleteKnown(it) }
-            lookup = runCatching { systemCalendar.findOwnedEvent(clientUuid) }
-                .getOrDefault(SystemCalendarOwnedEventLookup.Unavailable)
-        }
-        val confirmedAbsent = lookup == SystemCalendarOwnedEventLookup.Absent
-        if (!confirmedAbsent) {
-            val found = lookup as? SystemCalendarOwnedEventLookup.Found
-            if (found != null && plan != null) {
-                runCatching {
-                    carePlanDao.updateSystemCalendarProjection(
-                        clientUuid = clientUuid,
-                        eventId = found.canonicalEventId,
-                        reminderReady = plan.systemCalendarReminderReady,
-                        pending = true,
-                    )
-                }
-            }
-            return false
-        }
-        if (plan != null) {
-            runCatching {
-                carePlanDao.updateSystemCalendarProjection(
-                    clientUuid = clientUuid,
-                    eventId = null,
-                    reminderReady = false,
-                    pending = false,
-                )
-            }
-        }
-        map.remove(clientUuid)
-        runCatching {
-            settings.setSystemCalendarEventMapJson(encodeSystemCalendarEventMap(map))
-        }
-        return true
-    }
-
-    private suspend fun reconcileTerminalSystemCalendarProjectionsLocked() {
-        val mappings = parseSystemCalendarEventMap(
-            settings.settings.first().systemCalendarEventMapJson,
-        )
-        val plans = carePlanDao.listAllIncludingDeleted()
-        val candidates = mappings.keys + plans.filter {
-            it.systemCalendarEventId != null || it.systemCalendarProjectionPending
-        }.map { it.clientUuid }
-        candidates.forEach { clientUuid ->
-            val plan = carePlanDao.getByClientUuid(clientUuid)
-            val terminal = plan == null ||
-                plan.deletedAt != null ||
-                CarePlanStatus.fromStorage(plan.status) == CarePlanStatus.COMPLETED ||
-                CarePlanStatus.fromStorage(plan.status) == CarePlanStatus.SKIPPED
-            if (terminal) removeSystemCalendarProjectionByClientUuidLocked(clientUuid)
-        }
-    }
-
-    /** Disable globally, delete every owned copy, then restore Lezi only after confirmed deletion. */
-    suspend fun disableSystemCalendarProjection() = calendarReminderMutationGuard.withLock {
-        val plans = carePlanDao.listAllIncludingDeleted()
-        val mappedUuids = parseSystemCalendarEventMap(
-            settings.settings.first().systemCalendarEventMapJson,
-        ).keys
-        (plans.map { it.clientUuid } + mappedUuids).distinct().forEach { clientUuid ->
-            val removed = removeSystemCalendarProjectionByClientUuidLocked(clientUuid)
-            val plan = carePlanDao.getByClientUuid(clientUuid) ?: return@forEach
-            val open = plan.deletedAt == null && plan.status in setOf("pending", "missed")
-            if (open && removed) {
-                scheduleCarePlanReminder(plan.toModel())
-            } else if (open) {
-                cancelCarePlanReminderBestEffort(plan.id)
-            }
-        }
-    }
-
-    private suspend fun putSystemCalendarEventMapping(clientUuid: String, eventId: String) {
-        val prefs = settings.settings.first()
-        val map = parseSystemCalendarEventMap(prefs.systemCalendarEventMapJson).toMutableMap()
-        map[clientUuid] = eventId
-        settings.setSystemCalendarEventMapJson(encodeSystemCalendarEventMap(map))
-    }
-
-    private suspend fun removeSystemCalendarEventMapping(
-        clientUuid: String,
-        expectedEventId: String?,
-    ) {
-        val prefs = settings.settings.first()
-        val map = parseSystemCalendarEventMap(prefs.systemCalendarEventMapJson).toMutableMap()
-        val current = map[clientUuid]
-        if (expectedEventId == null || current == expectedEventId) {
-            map.remove(clientUuid)
-            settings.setSystemCalendarEventMapJson(encodeSystemCalendarEventMap(map))
-        }
-    }
-
-    /** Reconcile every durable care-plan side effect after boot/process restart. */
     suspend fun rescheduleCarePlanReminders(
         nowMillis: Long = System.currentTimeMillis(),
-    ) = calendarReminderMutationGuard.withLock {
-        reconcileTerminalSystemCalendarProjectionsLocked()
-        carePlanDao.listAllIncludingDeleted().forEach { entity ->
-            val open = entity.deletedAt == null && entity.status in setOf("pending", "missed")
-            if (!open) return@forEach
-            if (entity.scheduledAt > nowMillis) {
-                projectOrScheduleCarePlanReminderLocked(
-                    entity.toModel(),
-                    projectToSystemCalendar = entity.systemCalendarProjectionEnabled,
-                )
-            } else {
-                // Missed plans remain visible in Lezi but no longer own a future
-                // notification. This also closes a crash after future -> past edit.
-                cancelCarePlanReminderBestEffort(entity.id)
-                removeSystemCalendarProjectionByClientUuidLocked(entity.clientUuid)
-            }
-        }
-    }
+    ) = reminderProjection.rescheduleCarePlanReminders(nowMillis)
 
-    suspend fun getCarePlanByClientUuid(clientUuid: String): CarePlan? =
-        carePlanDao.getByClientUuid(clientUuid)?.toModel()
-
-    /** Fail-closed gate for an already-delivered AlarmManager intent. */
     suspend fun shouldDeliverCarePlanReminder(
         carePlanId: Long,
         clientUuid: String,
         expectedScheduledAt: Long,
-    ): Boolean = calendarReminderMutationGuard.withLock {
-        val plan = carePlanDao.get(carePlanId) ?: return@withLock false
-        if (plan.clientUuid != clientUuid) {
-            return@withLock false
-        }
-        if (plan.scheduledAt != expectedScheduledAt) return@withLock false
-        if (plan.deletedAt != null || plan.status !in setOf("pending", "missed")) {
-            return@withLock false
-        }
-        if (!settings.settings.first().carePlanLocalRemindersEnabled) {
-            return@withLock false
-        }
-        if (plan.systemCalendarReminderReady || plan.systemCalendarProjectionPending) {
-            return@withLock false
-        }
-        true
-    }
+    ): Boolean = reminderProjection.shouldDeliverCarePlanReminder(
+        carePlanId,
+        clientUuid,
+        expectedScheduledAt,
+    )
+
+    suspend fun getCarePlanByClientUuid(clientUuid: String): CarePlan? =
+        carePlanDao.getByClientUuid(clientUuid)?.toModel()
 
     /** Active plan photo paths. MediaAsset is authoritative. */
     suspend fun listCarePlanPhotoPaths(carePlanId: Long): List<String> {
@@ -2657,64 +2033,9 @@ class CareLog @Inject constructor(
         if (settings.currentBabyId.first() == sourceBabyId) {
             settings.setCurrentBabyId(targetBabyId)
         }
-        reprojectMergedBabySystemCalendarCopies(movedCarePlanClientUuids)
+        reminderProjection.reprojectMergedBabySystemCalendarCopies(movedCarePlanClientUuids)
         requestLocalSync()
         return true
-    }
-
-    /**
-     * L2/L3 titles include the baby nickname, so an existing device-local copy must
-     * be refreshed after its CarePlan is rebound. Provider I/O stays outside the
-     * merge transaction; durable identity/handoff state makes failures retryable.
-     */
-    private suspend fun reprojectMergedBabySystemCalendarCopies(
-        movedCarePlanClientUuids: List<String>,
-    ) {
-        if (movedCarePlanClientUuids.isEmpty()) return
-        try {
-            calendarReminderMutationGuard.withLock {
-                val prefs = settings.settings.first()
-                if (
-                    SystemCalendarDisclosureLevel.fromStored(
-                        prefs.systemCalendarDisclosureLevel,
-                    ) == SystemCalendarDisclosureLevel.EVENT_ONLY
-                ) {
-                    return@withLock
-                }
-                val eventMap = parseSystemCalendarEventMap(prefs.systemCalendarEventMapJson)
-                movedCarePlanClientUuids.forEach { clientUuid ->
-                    try {
-                        val entity = carePlanDao.getByClientUuid(clientUuid)
-                            ?: return@forEach
-                        val open = entity.deletedAt == null &&
-                            entity.status in setOf("pending", "missed")
-                        val hasExistingProjection = entity.systemCalendarEventId != null ||
-                            entity.systemCalendarReminderReady ||
-                            entity.systemCalendarProjectionPending ||
-                            eventMap.containsKey(clientUuid)
-                        if (
-                            open &&
-                            entity.systemCalendarProjectionEnabled &&
-                            hasExistingProjection
-                        ) {
-                            projectOrScheduleCarePlanReminderLocked(
-                                entity.toModel(),
-                                projectToSystemCalendar = true,
-                            )
-                        }
-                    } catch (cancellation: CancellationException) {
-                        throw cancellation
-                    } catch (_: Throwable) {
-                        // The merge is already committed. Boot/foreground reminder
-                        // reconciliation retries from the retained event/map identity.
-                    }
-                }
-            }
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (_: Throwable) {
-            // Calendar/settings failures never turn a committed merge into failure.
-        }
     }
 
     private fun normalizeNickname(raw: String): String =
@@ -3027,7 +2348,7 @@ internal fun RecordEntity.toModel(): Record =
         syncDirty = syncDirty,
     )
 
-private fun CustomItemEntity.toModel(): CustomRecordItem =
+internal fun CustomItemEntity.toModel(): CustomRecordItem =
     CustomRecordItem(
         id = id,
         name = name,
@@ -3039,7 +2360,7 @@ private fun CustomItemEntity.toModel(): CustomRecordItem =
         deletedAt = deletedAt,
     )
 
-private fun CarePlanEntity.toModel(): CarePlan =
+internal fun CarePlanEntity.toModel(): CarePlan =
     CarePlan(
         id = id,
         clientUuid = clientUuid,

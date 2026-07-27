@@ -147,21 +147,43 @@ fun Record.visibleBusinessText(): String = listOf(
     note.orEmpty().trim(),
 ).filter(String::isNotBlank).joinToString(" · ")
 
-private fun peeAmountLabel(level: Int): String = when (level.coerceIn(1, 3)) {
+/** Shared pee amount copy for summaries, composer chips, and presentation. */
+fun peeAmountLabel(level: Int): String = when (level.coerceIn(1, 3)) {
     1 -> "小"
     2 -> "中"
     else -> "大"
 }
 
-private fun stoolSummary(amount: Int, consistency: Int, color: Int): String {
-    val amountLabel = listOf("一点", "偏少", "正常", "偏多")
-        .getOrElse(amount - 1) { "正常" }
-    val consistencyLabel = listOf("稀", "偏软", "正常", "偏硬")
-        .getOrElse(consistency - 1) { "正常" }
-    val colorLabel = listOf("未选", "白", "黄", "橙", "褐", "绿", "红", "黑")
-        .getOrElse(color) { "未选" }
-    return "便量$amountLabel · $consistencyLabel · $colorLabel"
+/** Shared stool amount copy (1–4). */
+fun stoolAmountLabel(level: Int): String = when (level.coerceIn(1, 4)) {
+    1 -> "一点"
+    2 -> "偏少"
+    3 -> "正常"
+    else -> "偏多"
 }
+
+/** Shared stool consistency copy (1–4). */
+fun stoolConsistencyLabel(level: Int): String = when (level.coerceIn(1, 4)) {
+    1 -> "稀"
+    2 -> "偏软"
+    3 -> "正常"
+    else -> "偏硬"
+}
+
+/** Shared stool color copy (0–7). */
+fun stoolColorLabel(index: Int): String = when (index.coerceIn(0, 7)) {
+    0 -> "未选"
+    1 -> "白"
+    2 -> "黄"
+    3 -> "橙"
+    4 -> "褐"
+    5 -> "绿"
+    6 -> "红"
+    else -> "黑"
+}
+
+private fun stoolSummary(amount: Int, consistency: Int, color: Int): String =
+    "便量${stoolAmountLabel(amount)} · ${stoolConsistencyLabel(consistency)} · ${stoolColorLabel(color)}"
 
 private fun formatDuration(minutes: Long): String {
     if (minutes <= 0) return "不足1分"

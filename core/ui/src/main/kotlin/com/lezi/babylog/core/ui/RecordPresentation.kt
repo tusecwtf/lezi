@@ -261,36 +261,18 @@ fun RecordSummaryStrip(
     }
 }
 
-fun peeAmountLabel(level: Int): String = when (level.coerceIn(1, 3)) {
-    1 -> "小"
-    2 -> "中"
-    else -> "大"
-}
+/** Re-export of model labels so UI modules keep a single presentation import path. */
+fun peeAmountLabel(level: Int): String =
+    com.lezi.babylog.core.model.peeAmountLabel(level)
 
-fun stoolAmountLabel(level: Int): String = when (level.coerceIn(1, 4)) {
-    1 -> "一点"
-    2 -> "偏少"
-    3 -> "正常"
-    else -> "偏多"
-}
+fun stoolAmountLabel(level: Int): String =
+    com.lezi.babylog.core.model.stoolAmountLabel(level)
 
-fun stoolConsistencyLabel(level: Int): String = when (level.coerceIn(1, 4)) {
-    1 -> "稀"
-    2 -> "偏软"
-    3 -> "正常"
-    else -> "偏硬"
-}
+fun stoolConsistencyLabel(level: Int): String =
+    com.lezi.babylog.core.model.stoolConsistencyLabel(level)
 
-fun stoolColorLabel(index: Int): String = when (index.coerceIn(0, 7)) {
-    0 -> "未选"
-    1 -> "白"
-    2 -> "黄"
-    3 -> "橙"
-    4 -> "褐"
-    5 -> "绿"
-    6 -> "红"
-    else -> "黑"
-}
+fun stoolColorLabel(index: Int): String =
+    com.lezi.babylog.core.model.stoolColorLabel(index)
 
 /** Readable record copy shared by the timeline and search results; raw JSON never escapes this seam. */
 fun Record.presentationSummary(): String {

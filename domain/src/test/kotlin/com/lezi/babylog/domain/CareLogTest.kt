@@ -2057,7 +2057,7 @@ class CareLogTest {
     }
 
     @Test
-    fun multiCandidateFulfillmentPicksAdminAndHidesLoserFromOrdinarySurfaces() = runTest {
+    fun multiCandidateFulfillmentPicksAdminAndHidesLoserFromSurfaces() = runTest {
         // Joined member session so fulfill stamps offline role/membership trails
         // (ticket 26 residual: originator adjudication before server freeze pull).
         val memberSync = RecordingSyncPort(
@@ -5577,7 +5577,7 @@ private class FakeRecordDao(
     private var txSnapshot: List<RecordEntity>? = null
     private var txSeq: Long? = null
 
-    private fun RecordEntity.isOrdinarySurface(): Boolean =
+    private fun RecordEntity.isSurfaceRecord(): Boolean =
         clientUuid !in conflictExcluded()
 
     fun beginTx() {
@@ -5606,7 +5606,7 @@ private class FakeRecordDao(
             list.filter {
                 it.babyId == babyId &&
                     it.deletedAt == null &&
-                    it.isOrdinarySurface() &&
+                    it.isSurfaceRecord() &&
                     it.overlapsRange(startInclusive, endExclusive)
             }.sortedByDescending { it.timestamp }
         }
@@ -5620,7 +5620,7 @@ private class FakeRecordDao(
             list.filter {
                 it.babyId == babyId &&
                     it.deletedAt == null &&
-                    it.isOrdinarySurface() &&
+                    it.isSurfaceRecord() &&
                     it.overlapsRange(startInclusive, endExclusive)
             }.sortedByDescending { it.timestamp }
         }
@@ -5633,7 +5633,7 @@ private class FakeRecordDao(
         items.value.filter {
             it.babyId == babyId &&
                 it.deletedAt == null &&
-                it.isOrdinarySurface() &&
+                it.isSurfaceRecord() &&
                 it.overlapsRange(startInclusive, endExclusive)
         }.sortedByDescending { it.timestamp }
 
@@ -5721,7 +5721,7 @@ private class FakeRecordDao(
 
     override suspend fun listForBaby(babyId: Long): List<RecordEntity> =
         items.value.filter {
-            it.babyId == babyId && it.deletedAt == null && it.isOrdinarySurface()
+            it.babyId == babyId && it.deletedAt == null && it.isSurfaceRecord()
         }.sortedByDescending { it.timestamp }
 
     override suspend fun searchCandidates(
@@ -5735,7 +5735,7 @@ private class FakeRecordDao(
         return items.value.filter {
             it.babyId == babyId &&
                 it.deletedAt == null &&
-                it.isOrdinarySurface() &&
+                it.isSurfaceRecord() &&
                 (
                     it.note?.lowercase()?.let { note ->
                         matchesSqlLike(note, escapedPattern)
@@ -5754,7 +5754,7 @@ private class FakeRecordDao(
         items.value.filter {
             it.babyId == babyId &&
                 it.deletedAt == null &&
-                it.isOrdinarySurface() &&
+                it.isSurfaceRecord() &&
                 it.overlapsRange(startInclusive, endExclusive)
         }.sortedBy { it.timestamp }
 
@@ -5762,7 +5762,7 @@ private class FakeRecordDao(
         items.value.filter {
             it.babyId == babyId &&
                 it.deletedAt == null &&
-                it.isOrdinarySurface() &&
+                it.isSurfaceRecord() &&
                 it.type == type
         }.sortedBy { it.timestamp }
 

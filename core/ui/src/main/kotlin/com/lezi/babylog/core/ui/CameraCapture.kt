@@ -9,7 +9,7 @@ import androidx.core.content.FileProvider
 import java.io.File
 
 /**
- * Shared helpers for in-app camera capture (diary photos, avatar, QR scan gate).
+ * Shared helpers for in-app camera capture (record photos, avatar, QR scan gate).
  * Output files live under cache/camera and are exposed via the app FileProvider.
  */
 object CameraCapture {

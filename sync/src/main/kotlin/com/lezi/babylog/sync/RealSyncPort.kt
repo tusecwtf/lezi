@@ -157,7 +157,7 @@ class RealSyncPort @Inject constructor(
         executeFamily(FamilySessionCommand.SaveHomeLanConfig(config)).map { Unit }
 
     override suspend fun createFamily(
-        displayName: String?,
+        displayName: String,
         bootstrapSecret: String,
         familyName: String?,
     ): Result<SyncSession> =
