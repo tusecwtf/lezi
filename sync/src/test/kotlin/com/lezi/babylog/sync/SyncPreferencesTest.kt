@@ -387,7 +387,15 @@ class SyncPreferencesTest {
         val restored = preferences(secondStore)
         assertThat(restored.ensureCreateRequestId()).isEqualTo(requestId)
 
-        restored.clearCreateRequestId()
+        restored.saveSession(
+            SyncSession(
+                serverHost = "nas",
+                familyId = "family",
+                familyToken = "token",
+                deviceId = "device",
+                role = FamilyRole.Owner,
+            ),
+        )
         assertThat(restored.ensureCreateRequestId()).isNotEqualTo(requestId)
         secondScope.cancel()
         file.delete()

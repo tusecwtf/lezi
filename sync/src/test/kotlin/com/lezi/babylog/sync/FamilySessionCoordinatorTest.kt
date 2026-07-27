@@ -607,6 +607,63 @@ class FamilySessionCoordinatorTest {
     }
 
     @Test
+    fun committedCreateDoesNotExposeSeparateRequestIdCleanupFailure() = runTest {
+        val preferences = MemorySyncPreferences(
+            SyncSession(
+                serverHost = "192.168.1.20",
+                serverPort = 8787,
+                allowedSsids = listOf("Home"),
+            ),
+        ).apply {
+            clearCreateRequestIdFailure = IllegalStateException("preferences unavailable")
+        }
+        val requested = mutableListOf<SyncTrigger>()
+        val coordinator = coordinator(
+            preferences = preferences,
+            requestSync = { requested += it },
+        )
+
+        val result = coordinator.execute(
+            FamilySessionCommand.CreateFamily(
+                displayName = "妈妈",
+                bootstrapSecret = "bootstrap-secret",
+                familyName = "乐乐一家",
+            ),
+        )
+
+        assertThat(result.getOrThrow()).isInstanceOf(FamilySessionOutcome.Joined::class.java)
+        assertThat(preferences.current().isJoined).isTrue()
+        assertThat(preferences.clearCreateRequestIdCalls).isEqualTo(0)
+        assertThat(requested).containsExactly(SyncTrigger.LocalWrite)
+    }
+
+    @Test
+    fun committedCreateStillReturnsJoinedWhenSyncSchedulingFails() = runTest {
+        val preferences = MemorySyncPreferences(
+            SyncSession(
+                serverHost = "192.168.1.20",
+                serverPort = 8787,
+                allowedSsids = listOf("Home"),
+            ),
+        )
+        val coordinator = coordinator(
+            preferences = preferences,
+            requestSync = { error("scheduler unavailable") },
+        )
+
+        val result = coordinator.execute(
+            FamilySessionCommand.CreateFamily(
+                displayName = "妈妈",
+                bootstrapSecret = "bootstrap-secret",
+                familyName = null,
+            ),
+        )
+
+        assertThat(result.getOrThrow()).isInstanceOf(FamilySessionOutcome.Joined::class.java)
+        assertThat(preferences.current().isJoined).isTrue()
+    }
+
+    @Test
     fun failedJoinDoesNotPublishTheConfirmedEndpointOrSession() = runTest {
         val previous = SyncSession()
         val preferences = MemorySyncPreferences(previous)

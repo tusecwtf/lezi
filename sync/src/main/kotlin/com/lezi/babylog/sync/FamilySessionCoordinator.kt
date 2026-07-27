@@ -164,8 +164,14 @@ internal class FamilySessionCoordinator(
                 deviceId = deviceId,
                 joined = joined,
             )
-            preferences.clearCreateRequestId()
-            requestSync(SyncTrigger.LocalWrite)
+            // saveSession atomically retires the create request id. Scheduling is
+            // post-commit notification: a closed signal must not turn a durable
+            // owner session into a user-visible create failure.
+            try {
+                requestSync(SyncTrigger.LocalWrite)
+            } catch (_: Exception) {
+                // A later foreground transition retries from the durable outbox.
+            }
             FamilySessionOutcome.Joined(session)
         }
     }

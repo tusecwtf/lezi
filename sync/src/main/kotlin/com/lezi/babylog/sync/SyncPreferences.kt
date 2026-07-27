@@ -185,6 +185,10 @@ class DataStoreSyncPreferences @Inject constructor(
             else prefs[Keys.ALLOWED_SSIDS] = ssidEncoded
             prefs[Keys.FAMILY_ID] = session.familyId
             prefs.remove(Keys.FAMILY_TOKEN)
+            // The owner session and retirement of its idempotency key are one
+            // durable commit. A separate post-commit edit can fail after the UI
+            // already owns a valid joined session.
+            prefs.remove(Keys.CREATE_REQUEST_ID)
             prefs[Keys.DEVICE_ID] = session.deviceId
             prefs[Keys.ROLE] = session.role.name
             prefs[Keys.PULL_CURSOR] = session.pullCursor

@@ -3856,6 +3856,8 @@ internal class MemorySyncPreferences(initial: SyncSession) : SyncPreferences {
     private val state = MutableStateFlow(initial)
     private var createRequestId: String? = null
     var failUpdateCursorAttempts = 0
+    var clearCreateRequestIdFailure: Throwable? = null
+    var clearCreateRequestIdCalls = 0
     override val session: Flow<SyncSession> = state
 
     fun current(): SyncSession = state.value
@@ -3898,6 +3900,7 @@ internal class MemorySyncPreferences(initial: SyncSession) : SyncPreferences {
     }
 
     override suspend fun saveSession(session: SyncSession) {
+        createRequestId = null
         state.value = session
     }
 
@@ -3945,6 +3948,8 @@ internal class MemorySyncPreferences(initial: SyncSession) : SyncPreferences {
         }
 
     override suspend fun clearCreateRequestId() {
+        clearCreateRequestIdCalls += 1
+        clearCreateRequestIdFailure?.let { throw it }
         createRequestId = null
     }
 
