@@ -3,7 +3,6 @@ package com.lezi.babylog.sync
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
-import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.google.common.truth.Truth.assertThat
 import java.io.File
@@ -125,7 +124,7 @@ class SyncPreferencesTest {
         preferences.updateCreatorAcknowledgements(
             add = setOf(CreatorAcknowledgementRef("care_plan", "plan-before-clear")),
         )
-        preferences.clearFamilySession()
+        preferences.clearAllLocalSyncConfig()
         assertThat(preferences.session.first().familyName).isNull()
         assertThat(preferences.session.first().familyId).isEmpty()
         assertThat(preferences.session.first().pendingCreatorAcknowledgements).isEmpty()
@@ -166,7 +165,7 @@ class SyncPreferencesTest {
             preferences.updatePullCheckpoint(
                 cursor = 5,
                 generation = "g1",
-                familyName = PullFamilyName.Present("  NAS 新名字  "),
+                familyName = "  NAS 新名字  ",
             )
 
             assertThat(preferences.session.first().pullCursor).isEqualTo(5)
@@ -181,21 +180,10 @@ class SyncPreferencesTest {
                 CreatorAcknowledgementRef("custom_item", "item-concurrent"),
             )
 
-            preferences.saveSession(
-                preferences.session.first().copy(familyName = "旧 NAS 本地缓存"),
-            )
-            preferences.updatePullCheckpoint(
-                cursor = 6,
-                generation = "g1",
-                familyName = PullFamilyName.Omitted,
-            )
-            assertThat(preferences.session.first().familyName).isEqualTo("旧 NAS 本地缓存")
-            assertThat(preferences.session.first().pullCursor).isEqualTo(6)
-
             preferences.updatePullCheckpoint(
                 cursor = 7,
                 generation = "g2",
-                familyName = PullFamilyName.Present(null),
+                familyName = null,
             )
             assertThat(preferences.session.first().familyName).isNull()
             assertThat(preferences.session.first().pullCursor).isEqualTo(7)
@@ -261,93 +249,10 @@ class SyncPreferencesTest {
         )
 
         val raw = store.data.first()
-        assertThat(raw[stringPreferencesKey("sync_base_url")]).isNull()
         assertThat(raw[stringPreferencesKey("sync_server_host")]).isEqualTo("nas")
-        assertThat(raw[stringPreferencesKey("sync_family_token")]).isNull()
         assertThat(tokens.getToken()).isEqualTo("secret-token")
         assertThat(preferences.session.first().familyToken).isEqualTo("secret-token")
         file.delete()
-    }
-
-    @Test
-    fun migratesLegacyPlaintextFamilyTokenIntoSecureStore() = runTest {
-        val file = File.createTempFile("lezi-sync-", ".preferences_pb").also { it.delete() }
-        val tokens = InMemorySecureFamilyTokenStore()
-        val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
-        store.edit { prefs ->
-            prefs[stringPreferencesKey("sync_base_url")] = "http://nas:8765"
-            prefs[stringPreferencesKey("sync_family_id")] = "family"
-            prefs[stringPreferencesKey("sync_family_token")] = "legacy-plaintext-token"
-            prefs[stringPreferencesKey("sync_device_id")] = "device"
-            prefs[stringPreferencesKey("sync_family_role")] = FamilyRole.Owner.name
-        }
-
-        val preferences = preferences(store, tokens)
-        // Readable immediately from legacy key before migration runs.
-        assertThat(preferences.session.first().familyToken).isEqualTo("legacy-plaintext-token")
-
-        preferences.migratePlaintextTokenIfPresent()
-
-        assertThat(tokens.getToken()).isEqualTo("legacy-plaintext-token")
-        assertThat(store.data.first()[stringPreferencesKey("sync_family_token")]).isNull()
-        assertThat(preferences.session.first().familyToken).isEqualTo("legacy-plaintext-token")
-        file.delete()
-    }
-
-    @Test
-    fun legacyBaseUrlMigratesToStructuredEndpointAndIsRemoved() = runTest {
-        val file = File.createTempFile("lezi-sync-", ".preferences_pb").also { it.delete() }
-        val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
-        store.edit { prefs ->
-            prefs[stringPreferencesKey("sync_base_url")] = "https://legacy.home:9443"
-            prefs[stringPreferencesKey("sync_family_id")] = "legacy-family"
-            prefs[stringPreferencesKey("sync_family_token")] = "legacy-token"
-            prefs[stringPreferencesKey("sync_device_id")] = "legacy-device"
-            prefs[stringPreferencesKey("sync_family_role")] = FamilyRole.Member.name
-        }
-        val preferences = preferences(store)
-
-        preferences.migrateSecretsIfNeeded()
-
-        val restored = preferences.session.first()
-        assertThat(restored.homeLanConfig).isEqualTo(
-            HomeLanServerConfig(
-                host = "legacy.home",
-                port = 9443,
-                scheme = "https",
-            ),
-        )
-        assertThat(restored.baseUrl).isEqualTo("https://legacy.home:9443")
-        assertThat(restored.isJoined).isTrue()
-        val raw = store.data.first()
-        assertThat(raw[stringPreferencesKey("sync_server_host")]).isEqualTo("legacy.home")
-        assertThat(raw[intPreferencesKey("sync_server_port")]).isEqualTo(9443)
-        assertThat(raw[stringPreferencesKey("sync_server_scheme")]).isEqualTo("https")
-        assertThat(raw[stringPreferencesKey("sync_base_url")]).isNull()
-        file.delete()
-    }
-
-    @Test
-    fun clearingFamilyKeepsConfiguredServer() = runTest {
-        val file = File.createTempFile("lezi-sync-", ".preferences_pb").also { it.delete() }
-        val tokens = InMemorySecureFamilyTokenStore()
-        val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
-        val preferences = preferences(store, tokens)
-        preferences.saveSession(
-            SyncSession(
-                serverHost = "nas",
-                familyId = "family",
-                familyToken = "token",
-                deviceId = "device",
-                role = FamilyRole.Member,
-            ),
-        )
-
-        preferences.clearFamilySession()
-
-        assertThat(preferences.session.first().baseUrl).isEqualTo("http://nas:8765")
-        assertThat(preferences.session.first().familyToken).isEmpty()
-        assertThat(tokens.getToken()).isEmpty()
     }
 
     @Test
@@ -422,7 +327,7 @@ class SyncPreferencesTest {
         val secondScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
         val secondStore = PreferenceDataStoreFactory.create(scope = secondScope) { file }
         val restored = preferences(secondStore, tokens)
-        restored.migrateSecretsIfNeeded()
+        restored.recoverPendingCredentialClear()
 
         assertThat(tokens.getToken()).isEmpty()
         assertThat(

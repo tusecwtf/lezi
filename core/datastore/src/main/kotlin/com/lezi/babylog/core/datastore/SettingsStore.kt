@@ -10,8 +10,7 @@ data class LocalClearSettingsSnapshot(
     /** Exact provider identity captured for each plan UUID; IDs alone are ABA-prone. */
     val systemCalendarProjections: Map<String, String> = emptyMap(),
     /** Stable identity of the next-feed write, so equal timestamps cannot form an ABA. */
-    /** Null only for a migrated v20 clear marker that must not consume current feed state. */
-    val nextFeedEpoch: String? = null,
+    val nextFeedEpoch: String = "",
 )
 
 data class LocalClearSettingsFinish(

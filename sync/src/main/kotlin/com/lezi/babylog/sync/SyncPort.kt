@@ -12,18 +12,19 @@ data class Invite(val code: String, val expiresAt: Long)
  * Privacy-preserving family member projection from the home server.
  *
  * [membershipId] is the server-minted immutable membership identity (UUID) and
- * the primary Record-author link. Soft-parsed as null for legacy NAS responses.
- *
- * [deviceId] is retained only to resolve legacy `created_by_device_id` rows.
- * Product UI must never display it or treat it as authority.
+ * the only Record-author link. Transport device ids are deliberately absent.
  */
 data class FamilyMember(
-    val displayName: String?,
+    val displayName: String,
     val role: FamilyRole,
     val isSelf: Boolean,
-    val deviceId: String? = null,
-    val membershipId: String? = null,
-)
+    val membershipId: String,
+) {
+    init {
+        require(displayName.isNotBlank()) { "家庭成员称呼不能为空" }
+        require(membershipId.isNotBlank()) { "家庭成员 membership_id 不能为空" }
+    }
+}
 
 enum class SyncTrigger { Foreground, PullToRefresh, LocalWrite }
 

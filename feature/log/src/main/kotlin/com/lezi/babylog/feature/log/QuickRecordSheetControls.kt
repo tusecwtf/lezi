@@ -456,8 +456,6 @@ internal fun sheetTitle(
     draft.type == RecordType.SLEEP -> sleepComposerPolicy(draft, nowMillis).sheetTitle
     draft.type == RecordType.CUSTOM ->
         draft.customTitle.trim().ifBlank { draft.type.presentation.label }
-    draft.type == RecordType.OTHER ->
-        draft.customTitle.trim().ifBlank { draft.type.presentation.label }
     else -> draft.type.presentation.label
 }
 

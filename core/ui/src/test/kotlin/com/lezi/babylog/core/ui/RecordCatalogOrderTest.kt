@@ -50,10 +50,10 @@ class RecordCatalogOrderTest {
     @Test
     fun mergeItemOrderPreservesHiddenAndAppendsNewKeys() {
         val known = listOf("pee", "sleep", "nursing", "custom:3")
-        val stored = encodeItemOrder(listOf("sleep", "pee", "memo", "unknown"))
+        val stored = encodeItemOrder(listOf("sleep", "pee", "removed_item", "unknown"))
         val merged = mergeItemOrder(stored, known)
         assertEquals(listOf("sleep", "pee", "nursing", "custom:3"), merged)
-        assertFalse(merged.contains("memo"))
+        assertFalse(merged.contains("removed_item"))
     }
 
     @Test

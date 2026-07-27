@@ -49,7 +49,6 @@ class RecordAuthorMergeRoomTest {
                 type = "formula",
                 timestamp = 50,
                 note = "本地内容",
-                createdByUserId = 1,
                 createdByMembershipId = "",
                 payloadJson = """{"amount_ml":120}""",
                 updatedAt = 50,

@@ -11,6 +11,11 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.Test
 
+private const val MEDIA_A = "10000000-0000-4000-8000-000000000001"
+private const val MEDIA_RECORD_DUAL = "10000000-0000-4000-8000-000000000002"
+private const val MEDIA_PLAN_DUAL = "10000000-0000-4000-8000-000000000003"
+private const val MEDIA_AVATAR = "10000000-0000-4000-8000-000000000004"
+
 class FakeSyncBackendTest {
     @Test
     fun ordinaryPushReturnsAndPersistsCanonicalRecordAuthor() = runBlocking {
@@ -94,7 +99,7 @@ class FakeSyncBackendTest {
         )
         val media = SyncEntity(
             type = "media",
-            clientUuid = "media-a",
+            clientUuid = MEDIA_A,
             payloadJson =
                 """{"kind":"log","record_client_uuid":"record-a","byte_size":3,"mime":"image/jpeg"}""",
             updatedAt = 10,
@@ -106,10 +111,10 @@ class FakeSyncBackendTest {
         )
         val staged = backend.stageBundle(session, draft)
         assertThat(staged.status).isEqualTo("staging")
-        assertThat(staged.missingMedia).containsExactly("media-a")
+        assertThat(staged.missingMedia).containsExactly(MEDIA_A)
         assertThat(backend.pull(session).entities.map { it.clientUuid }).containsExactly("baby-a")
 
-        backend.putBundleMedia(session, "bundle-1", "media-a", byteArrayOf(1, 2, 3), "image/jpeg")
+        backend.putBundleMedia(session, "bundle-1", MEDIA_A, byteArrayOf(1, 2, 3), "image/jpeg")
         val committed = backend.commitBundle(session, "bundle-1")
         assertThat(committed.status).isEqualTo("committed")
         assertThat(committed.applied).isEqualTo(2)
@@ -120,27 +125,8 @@ class FakeSyncBackendTest {
         assertThat(again.cursor).isEqualTo(committed.cursor)
         assertThat(again.recordAuthors).isEqualTo(committed.recordAuthors)
         val pulled = backend.pull(session).entities.map { it.clientUuid }
-        assertThat(pulled).containsAtLeast("baby-a", "record-a", "media-a")
-        assertThat(backend.getMedia(session, "media-a")).isEqualTo(byteArrayOf(1, 2, 3))
-    }
-
-    @Test
-    fun atomicBundleCapabilityFlagBlocksLegacyFallback() = runBlocking {
-        val backend = FakeSyncBackend().apply { supportsAtomicBundle = false }
-        val session = SyncSession(
-            familyId = "fam",
-            familyToken = "t",
-            deviceId = "d",
-            role = FamilyRole.Owner,
-            serverHost = "127.0.0.1",
-            serverPort = 8765,
-        )
-        val draft = AtomicBundleDraft(
-            bundleId = "b",
-            root = SyncEntity("record", "r", "{}", 1),
-        )
-        val error = runCatching { backend.stageBundle(session, draft) }.exceptionOrNull()
-        assertThat(error).isInstanceOf(AtomicBundleUnsupportedException::class.java)
+        assertThat(pulled).containsAtLeast("baby-a", "record-a", MEDIA_A)
+        assertThat(backend.getMedia(session, MEDIA_A)).isEqualTo(byteArrayOf(1, 2, 3))
     }
 
     @Test
@@ -210,7 +196,7 @@ class FakeSyncBackendTest {
         )
         val recordMedia = SyncEntity(
             type = "media",
-            clientUuid = "media-record-dual",
+            clientUuid = MEDIA_RECORD_DUAL,
             payloadJson =
                 """{"kind":"log","record_client_uuid":"record-dual","byte_size":4,"mime":"image/jpeg"}""",
             updatedAt = 10,
@@ -223,31 +209,31 @@ class FakeSyncBackendTest {
                 media = listOf(recordMedia),
             ),
         )
-        assertPeerDoesNotSee("record-dual", "media-record-dual")
+        assertPeerDoesNotSee("record-dual", MEDIA_RECORD_DUAL)
         // Upload one photo but do not commit → still invisible.
         backend.putBundleMedia(
             owner,
             "bundle-record-dual",
-            "media-record-dual",
+            MEDIA_RECORD_DUAL,
             byteArrayOf(9, 9, 9, 9),
             "image/jpeg",
         )
-        assertPeerDoesNotSee("record-dual", "media-record-dual")
+        assertPeerDoesNotSee("record-dual", MEDIA_RECORD_DUAL)
         backend.commitBundle(owner, "bundle-record-dual")
         val afterRecord = backend.pull(member).entities.map { it.clientUuid }.toSet()
-        assertThat(afterRecord).containsAtLeast("record-dual", "media-record-dual")
+        assertThat(afterRecord).containsAtLeast("record-dual", MEDIA_RECORD_DUAL)
 
         // CarePlan package: incomplete → invisible; full commit → visible.
         val plan = SyncEntity(
             type = "care_plan",
             clientUuid = "plan-dual",
             payloadJson =
-                """{"baby_client_uuid":"baby-dual","type":"formula","scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","status":"pending","payload_json":{},"schema_version":1,"created_by_membership_id":"${owner.membershipId}"}""",
+                """{"baby_client_uuid":"baby-dual","type":"formula","scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","status":"pending","payload_json":{},"schema_version":2,"created_by_membership_id":"${owner.membershipId}"}""",
             updatedAt = 20,
         )
         val planMedia = SyncEntity(
             type = "media",
-            clientUuid = "media-plan-dual",
+            clientUuid = MEDIA_PLAN_DUAL,
             payloadJson =
                 """{"kind":"log","care_plan_client_uuid":"plan-dual","byte_size":2,"mime":"image/jpeg"}""",
             updatedAt = 20,
@@ -260,18 +246,18 @@ class FakeSyncBackendTest {
                 media = listOf(planMedia),
             ),
         )
-        assertPeerDoesNotSee("plan-dual", "media-plan-dual")
+        assertPeerDoesNotSee("plan-dual", MEDIA_PLAN_DUAL)
         backend.putBundleMedia(
             owner,
             "bundle-plan-dual",
-            "media-plan-dual",
+            MEDIA_PLAN_DUAL,
             byteArrayOf(1, 2),
             "image/jpeg",
         )
-        assertPeerDoesNotSee("plan-dual", "media-plan-dual")
+        assertPeerDoesNotSee("plan-dual", MEDIA_PLAN_DUAL)
         backend.commitBundle(owner, "bundle-plan-dual")
         val afterPlan = backend.pull(member).entities.map { it.clientUuid }.toSet()
-        assertThat(afterPlan).containsAtLeast("plan-dual", "media-plan-dual")
+        assertThat(afterPlan).containsAtLeast("plan-dual", MEDIA_PLAN_DUAL)
     }
 
     @Test
@@ -309,14 +295,12 @@ class FakeSyncBackendTest {
             babyId = 41,
             type = "formula",
             timestamp = 1_000,
-            createdByUserId = 1,
             payloadJson = """{"amount_ml":120}""",
             updatedAt = 1_000,
         )
         val record = SyncWireMapper.record(
             localRecord,
             babyClientUuid = baby.clientUuid,
-            createdByDeviceId = "device-a",
         )
 
         assertThat(backend.push(family, "A", listOf(baby, record)).getOrThrow()).isEqualTo(2)
@@ -337,7 +321,6 @@ class FakeSyncBackendTest {
                 updatedAt = 2_000,
             ),
             babyClientUuid = baby.clientUuid,
-            createdByDeviceId = "device-b",
         )
         assertThat(backend.push(family, "B", listOf(bUpdate)).getOrThrow()).isEqualTo(1)
         val pullA = backend.pull(family, pullB.cursor).getOrThrow()
@@ -393,7 +376,7 @@ class FakeSyncBackendTest {
         assertThat(members).hasSize(1)
         assertThat(members.single().membershipId).isEqualTo(created.membershipId)
         assertThat(members.single().isSelf).isTrue()
-        assertThat(members.single().deviceId).isEqualTo("device-owner")
+        assertThat(members.single().displayName).isEqualTo("妈妈")
     }
 
     @Test
@@ -446,7 +429,7 @@ class FakeSyncBackendTest {
                     type = "care_plan",
                     clientUuid = "plan-f",
                     payloadJson =
-                        """{"baby_client_uuid":"baby-f","type":"bath","scheduled_at":9000000000000,"scheduled_zone_id":"UTC","status":"pending","payload_json":{},"schema_version":1,"created_by_membership_id":"${owner.membershipId}"}""",
+                        """{"baby_client_uuid":"baby-f","type":"bath","scheduled_at":9000000000000,"scheduled_zone_id":"UTC","status":"pending","payload_json":{},"schema_version":2,"created_by_membership_id":"${owner.membershipId}"}""",
                     updatedAt = 2,
                 ),
             ),
@@ -458,7 +441,7 @@ class FakeSyncBackendTest {
                     type = "record",
                     clientUuid = "rec-member-f",
                     payloadJson =
-                        """{"baby_client_uuid":"baby-f","type":"bath","timestamp":10,"created_by_device_id":"member-dev","payload_json":{},"schema_version":1}""",
+                        """{"baby_client_uuid":"baby-f","type":"bath","timestamp":10,"created_by_membership_id":"${member.membershipId}","payload_json":{},"schema_version":2}""",
                     updatedAt = 3,
                 ),
             ),
@@ -532,7 +515,7 @@ class FakeSyncBackendTest {
 
         val avatar = SyncEntity(
             type = "media",
-            clientUuid = "media-avatar",
+            clientUuid = MEDIA_AVATAR,
             payloadJson = """{"kind":"avatar","baby_client_uuid":"baby-a","mime":"image/jpeg"}""",
             updatedAt = 200,
         )
@@ -551,7 +534,7 @@ class FakeSyncBackendTest {
                   "type":"pee",
                   "timestamp":300,
                   "payload_json":{},
-                  "schema_version":1
+                  "schema_version":2
                 }
             """.trimIndent(),
             updatedAt = 300,

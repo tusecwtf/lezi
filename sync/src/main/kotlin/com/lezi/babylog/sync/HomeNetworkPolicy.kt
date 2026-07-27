@@ -26,6 +26,19 @@ private const val MAX_HEALTH_RESPONSE_BYTES = 64 * 1024
 /** Capability strings advertised by lezi-sync on `GET /health`. */
 const val CAPABILITY_ATOMIC_BUNDLE = "atomic_bundle"
 const val CAPABILITY_RECORD_MEMBERSHIP_AUTHOR = "record_membership_author"
+internal const val CURRENT_SYNC_SERVER_VERSION = "0.2.5"
+internal val REQUIRED_SYNC_SERVER_CAPABILITIES = setOf(
+    CAPABILITY_ATOMIC_BUNDLE,
+    CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+)
+
+internal class ServerContractMismatchException(
+    status: HealthStatus,
+) : IllegalStateException(
+    "家庭服务器协议不匹配：需要 lezi-sync $CURRENT_SYNC_SERVER_VERSION " +
+        "及能力 ${REQUIRED_SYNC_SERVER_CAPABILITIES.sorted().joinToString()}，" +
+        "实际版本 ${status.version ?: "缺失"}，能力 ${status.capabilities.sorted().joinToString()}",
+)
 
 enum class HomeNetworkDecision {
     Allowed,
@@ -42,20 +55,23 @@ enum class HomeNetworkDecision {
 /**
  * Result of probing NAS `/health`.
  *
- * [capabilities] is empty for legacy servers that omit the additive field;
- * clients that require atomic packages must treat missing
- * [CAPABILITY_ATOMIC_BUNDLE] as unsupported (no silent metadata-first fallback).
+ * The Android client accepts only the exact current version and capability set;
+ * missing, extra, or malformed contract fields fail before any sync API call.
  */
 data class HealthStatus(
     val ok: Boolean,
     val version: String? = null,
     val capabilities: Set<String> = emptySet(),
-) {
-    val supportsAtomicBundle: Boolean
-        get() = CAPABILITY_ATOMIC_BUNDLE in capabilities
+)
 
-    val supportsRecordMembershipAuthor: Boolean
-        get() = CAPABILITY_RECORD_MEMBERSHIP_AUTHOR in capabilities
+internal fun HealthStatus.isCurrentServerContract(): Boolean =
+    ok && version == CURRENT_SYNC_SERVER_VERSION &&
+        capabilities == REQUIRED_SYNC_SERVER_CAPABILITIES
+
+internal fun HealthStatus.requireCurrentServerContract() {
+    if (!isCurrentServerContract()) {
+        throw ServerContractMismatchException(this)
+    }
 }
 
 interface NetworkState {
@@ -67,7 +83,8 @@ fun interface HealthProbe {
     suspend fun probe(baseUrl: String): HealthStatus
 }
 
-suspend fun HealthProbe.isHealthy(baseUrl: String): Boolean = probe(baseUrl).ok
+suspend fun HealthProbe.isHealthy(baseUrl: String): Boolean =
+    probe(baseUrl).isCurrentServerContract()
 
 fun interface PolicyClock {
     fun nowMillis(): Long
@@ -103,12 +120,6 @@ class HomeNetworkPolicy @Inject constructor(
     @Volatile
     var lastHealthStatus: HealthStatus = HealthStatus(ok = false)
         private set
-
-    val supportsAtomicBundle: Boolean
-        get() = lastHealthStatus.supportsAtomicBundle
-
-    val supportsRecordMembershipAuthor: Boolean
-        get() = lastHealthStatus.supportsRecordMembershipAuthor
 
     /**
      * Gate for create / invite / join / push / pull.
@@ -150,12 +161,6 @@ class HomeNetworkPolicy @Inject constructor(
             retryAfterMillis = clock.nowMillis() + delay
             HomeNetworkDecision.ServerUnavailable
         }
-    }
-
-    /** Legacy helper: evaluate with baseUrl only (empty SSID list → MissingSsidAllowlist). */
-    suspend fun evaluate(baseUrl: String, isForeground: Boolean): HomeNetworkDecision {
-        val config = HomeLanServerConfig.fromBaseUrl(baseUrl)
-        return evaluate(config, isForeground)
     }
 
     companion object {
@@ -216,17 +221,25 @@ class HttpHealthProbe @Inject constructor() : HealthProbe {
 }
 
 internal fun parseHealthStatus(body: ByteArray): HealthStatus {
-    if (body.isEmpty()) return HealthStatus(ok = true)
+    if (body.isEmpty()) return HealthStatus(ok = false)
     return runCatching {
         val json = Json.parseToJsonElement(body.toString(Charsets.UTF_8)).jsonObject
-        val ok = json["ok"]?.jsonPrimitive?.booleanOrNull ?: true
-        val version = json["version"]?.jsonPrimitive?.contentOrNull
-        val capabilities = (json["capabilities"] as? JsonArray)
-            .orEmpty()
-            .mapNotNull { element -> (element as? JsonPrimitive)?.contentOrNull }
+        val ok = requireNotNull(json["ok"]?.jsonPrimitive?.booleanOrNull) {
+            "health 响应缺少 ok"
+        }
+        val version = requireNotNull(json["version"]?.jsonPrimitive?.contentOrNull) {
+            "health 响应缺少 version"
+        }
+        val capabilities = requireNotNull(json["capabilities"] as? JsonArray) {
+            "health 响应缺少 capabilities"
+        }.map { element ->
+            requireNotNull((element as? JsonPrimitive)?.contentOrNull) {
+                "health capabilities 包含无效值"
+            }
+        }
             .toSet()
         HealthStatus(ok = ok, version = version, capabilities = capabilities)
-    }.getOrDefault(HealthStatus(ok = true))
+    }.getOrDefault(HealthStatus(ok = false))
 }
 
 private fun HttpURLConnection.readBodyWithinLimit(limitBytes: Int): ByteArray? {

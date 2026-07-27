@@ -105,10 +105,6 @@ val RecordType.presentation: RecordTypePresentation
             "体温", "℃/℉", LeziRecordGlyph.Temperature,
             LeziRecordColorRole.Temperature, RecordSection.Routine, RecordChartMark.Triangle,
         )
-        RecordType.MEMO -> RecordTypePresentation(
-            "备注", "文字/照片", LeziRecordGlyph.Note,
-            LeziRecordColorRole.Care, RecordSection.Routine, RecordChartMark.Circle,
-        )
         RecordType.DIARY -> RecordTypePresentation(
             "日记", "正文/照片", LeziRecordGlyph.Note,
             LeziRecordColorRole.Care, RecordSection.Routine, RecordChartMark.Circle,
@@ -144,10 +140,6 @@ val RecordType.presentation: RecordTypePresentation
         RecordType.HOSPITAL -> RecordTypePresentation(
             "就医", "原因/医嘱", LeziRecordGlyph.Hospital,
             LeziRecordColorRole.Wake, RecordSection.Health, RecordChartMark.Circle,
-        )
-        RecordType.OTHER -> RecordTypePresentation(
-            "其他", "自由文本", LeziRecordGlyph.Other,
-            LeziRecordColorRole.Care, RecordSection.Health, RecordChartMark.Circle,
         )
         RecordType.HEIGHT -> RecordTypePresentation(
             "身高", "成长测量", LeziRecordGlyph.Growth,

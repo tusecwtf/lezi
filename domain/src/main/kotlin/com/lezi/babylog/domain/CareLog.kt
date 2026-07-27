@@ -3,8 +3,6 @@ package com.lezi.babylog.domain
 import com.lezi.babylog.core.common.newClientUuid
 import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.BabyEntity
-import com.lezi.babylog.core.database.CalendarEventDao
-import com.lezi.babylog.core.database.CalendarEventEntity
 import com.lezi.babylog.core.database.CarePlanDao
 import com.lezi.babylog.core.database.CarePlanEntity
 import com.lezi.babylog.core.database.CustomItemDao
@@ -48,9 +46,7 @@ import com.lezi.babylog.core.model.displayLabel
 import com.lezi.babylog.core.model.isPlanableCarePlanType
 import com.lezi.babylog.core.model.Sex
 import com.lezi.babylog.core.model.SleepPayload
-import com.lezi.babylog.core.model.localPhotoPaths
 import com.lezi.babylog.core.model.normalizeBabyNickname
-import com.lezi.babylog.core.model.withLocalPhotoPaths
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -104,16 +100,6 @@ data class TimeBarSegment(
     val kind: TimeBarKind,
 )
 
-data class CalendarEvent(
-    val id: Long,
-    val clientUuid: String,
-    val babyId: Long,
-    val title: String,
-    val note: String?,
-    val eventAt: Long,
-    val remindAt: Long?,
-)
-
 data class CustomRecordItem(
     val id: Long,
     val name: String,
@@ -154,7 +140,7 @@ data class BabyMergePreview(
     val targetBabyId: Long,
     val targetNickname: String,
     val recordCount: Int,
-    val calendarEventCount: Int,
+    val carePlanCount: Int,
 )
 
 @Singleton
@@ -162,7 +148,6 @@ class CareLog @Inject constructor(
     private val babyDao: BabyDao,
     private val recordDao: RecordDao,
     private val carePlanDao: CarePlanDao,
-    private val calendarEventDao: CalendarEventDao,
     private val customItemDao: CustomItemDao,
     private val localUserDao: LocalUserDao,
     private val familyDao: FamilyDao,
@@ -174,7 +159,6 @@ class CareLog @Inject constructor(
     private val transactionRunner: DatabaseTransactionRunner,
     private val systemCalendar: SystemCalendarPort = NoOpSystemCalendarPort(),
     private val fulfillmentCandidateDao: FulfillmentCandidateDao,
-    private val localDataClearCoordinator: LocalDataClearCoordinator,
     private val calendarReminderMutationGuard: CalendarReminderMutationGuard,
 ) {
     /**
@@ -272,7 +256,6 @@ class CareLog @Inject constructor(
 
     /** Soft-delete a baby profile. Reassigns current baby if needed. Keeps at least one baby. */
     suspend fun deleteBaby(babyId: Long): Boolean {
-        val reminderEventIds = calendarEventDao.listForBabyIncludingDeleted(babyId).map { it.id }
         var deleted = false
         val remaining = transactionRunner.run {
             val babies = babyDao.listAll()
@@ -284,7 +267,6 @@ class CareLog @Inject constructor(
             babyDao.listAll()
         }
         if (!deleted) return false
-        reminderCleanup.cancelForBabyDelete(reminderEventIds)
         val currentId = settings.currentBabyId.first()
         if (currentId == null || currentId == babyId || remaining.none { it.id == currentId }) {
             remaining.firstOrNull()?.let { settings.setCurrentBabyId(it.id) }
@@ -366,18 +348,6 @@ class CareLog @Inject constructor(
     fun observeOpenSleep(babyId: Long): Flow<Record?> =
         recordDao.observeOpenSleep(babyId).map { it?.toModel() }
 
-    fun observeCalendarEvents(
-        babyId: Long,
-        startInclusive: Long,
-        endExclusive: Long,
-    ): Flow<List<CalendarEvent>> {
-        require(startInclusive < endExclusive) {
-            "startInclusive must be before endExclusive"
-        }
-        return calendarEventDao.observeRange(babyId, startInclusive, endExclusive)
-            .map { events -> events.map { it.toModel() } }
-    }
-
     /**
      * All non-deleted care plans in an absolute window for the lezi calendar.
      * Independent of system-calendar projection flags.
@@ -392,116 +362,6 @@ class CareLog @Inject constructor(
         }
         return carePlanDao.observeRange(babyId, startInclusive, endExclusive)
             .map { rows -> rows.map { it.toModel() } }
-    }
-
-    /**
-     * Explicit conversion of a legacy free-title calendar event into a care plan.
-     * On success: soft-deletes the event and cancels its calendar reminder so there
-     * are never two active alarms. On failure: leaves the event intact.
-     *
-     * @return new care plan local id
-     */
-    suspend fun convertCalendarEventToCarePlan(
-        eventId: Long,
-        type: RecordType,
-        payloadJson: String = "{}",
-        schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-        customItemId: Long? = null,
-        photoLocalPaths: List<String> = emptyList(),
-        zone: ZoneId = ZoneId.systemDefault(),
-        nowMillis: Long = System.currentTimeMillis(),
-    ): Long = calendarReminderMutationGuard.withLock {
-        val liveEvent = resolveCalendarEvent(eventId) ?: error("日程不存在")
-        if (liveEvent.deletedAt != null) error("日程已删除")
-        val scheduledAt = liveEvent.eventAt
-        require(scheduledAt > nowMillis) {
-            "只能将未来的日程转换为护理计划"
-        }
-        // Create plan first; only soft-delete + cancel event reminder after success.
-        val planId = createCarePlan(
-            babyId = liveEvent.babyId,
-            type = type,
-            scheduledAt = scheduledAt,
-            note = listOfNotNull(liveEvent.title.takeIf { it.isNotBlank() }, liveEvent.note)
-                .joinToString(" · ")
-                .ifBlank { null },
-            payloadJson = payloadJson,
-            schemaVersion = schemaVersion,
-            customItemId = customItemId,
-            photoLocalPaths = photoLocalPaths,
-            zone = zone,
-            nowMillis = nowMillis,
-        )
-        calendarEventDao.softDelete(eventId, System.currentTimeMillis())
-        reminderCleanup.cancelCalendar(eventId)
-        planId
-    }
-
-    private suspend fun resolveCalendarEvent(eventId: Long): CalendarEventEntity? {
-        babyDao.listAllIncludingDeleted().forEach { baby ->
-            calendarEventDao.listForBabyIncludingDeleted(baby.id)
-                .firstOrNull { it.id == eventId }
-                ?.let { return it }
-        }
-        return null
-    }
-
-    suspend fun addCalendarEvent(
-        babyId: Long,
-        title: String,
-        eventAt: Long,
-        remindAt: Long?,
-        note: String? = null,
-    ): Long = calendarReminderMutationGuard.withLock {
-        val now = System.currentTimeMillis()
-        val entity = CalendarEventEntity(
-            clientUuid = newClientUuid(),
-            babyId = babyId,
-            title = title,
-            note = note,
-            eventAt = eventAt,
-            remindAt = remindAt,
-            updatedAt = now,
-        )
-        val id = calendarEventDao.upsert(entity)
-        reminderCleanup.scheduleCalendar(entity.copy(id = id).toModel())
-        id
-    }
-
-    suspend fun updateCalendarEvent(event: CalendarEvent): Boolean =
-        calendarReminderMutationGuard.withLock {
-            calendarEventDao.update(
-                CalendarEventEntity(
-                    id = event.id,
-                    clientUuid = event.clientUuid,
-                    babyId = event.babyId,
-                    title = event.title.trim(),
-                    note = event.note,
-                    eventAt = event.eventAt,
-                    remindAt = event.remindAt,
-                    updatedAt = System.currentTimeMillis(),
-                ),
-            )
-            val scheduled = reminderCleanup.scheduleCalendar(event)
-            if (!scheduled) reminderCleanup.cancelCalendar(event.id)
-            scheduled
-        }
-
-    suspend fun deleteCalendarEvent(id: Long) = calendarReminderMutationGuard.withLock {
-        calendarEventDao.softDelete(id, System.currentTimeMillis())
-        reminderCleanup.cancelCalendar(id)
-    }
-
-    suspend fun listCalendarEvents(babyId: Long): List<CalendarEvent> =
-        calendarEventDao.listForBaby(babyId).map { it.toModel() }
-
-    /** Rebuild alarms without racing a clear or a calendar write. */
-    suspend fun rescheduleCalendarReminders() = calendarReminderMutationGuard.withLock {
-        babyDao.listAll().forEach { baby ->
-            calendarEventDao.listForBaby(baby.id)
-                .map(CalendarEventEntity::toModel)
-                .forEach { reminderCleanup.scheduleCalendar(it) }
-        }
     }
 
     fun observeCustomItems(): Flow<List<CustomRecordItem>> =
@@ -688,7 +548,11 @@ class CareLog @Inject constructor(
     ): Long {
         validateSleepInterval(type, timestamp, endTimestamp)
         val photos = normalizePhotoPaths(photoLocalPaths)
-        val userId = ensureLocalUser(System.currentTimeMillis())
+        val persistedPayload = requireCurrentPayloadJson(
+            type = type,
+            payloadJson = payloadJson,
+            schemaVersion = schemaVersion,
+        )
         val now = System.currentTimeMillis()
         val clientUuid = newClientUuid()
         val record = RecordEntity(
@@ -698,9 +562,7 @@ class CareLog @Inject constructor(
             timestamp = timestamp,
             endTimestamp = endTimestamp,
             note = note,
-            createdByUserId = userId,
-            createdByDeviceId = writerDeviceId(),
-            payloadJson = withLocalPhotoPaths(payloadJson, photos),
+            payloadJson = persistedPayload,
             schemaVersion = schemaVersion,
             updatedAt = now,
         )
@@ -736,20 +598,27 @@ class CareLog @Inject constructor(
         note: String?,
         payloadJson: String,
         schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-        photoLocalPaths: List<String> = emptyList(),
+        /** Null preserves current photos; an explicit empty list clears them. */
+        photoLocalPaths: List<String>? = null,
         nowMillis: Long = System.currentTimeMillis(),
     ) {
         // Future time must use [convertRecordToCarePlan] after explicit UI confirm.
         RecordTime.pointError(timestamp, nowMillis)?.let {
             throw IllegalArgumentException(it)
         }
-        val photos = normalizePhotoPaths(photoLocalPaths)
+        val photos = photoLocalPaths?.let(::normalizePhotoPaths)
         val now = System.currentTimeMillis()
         sleepMutationMutex.withLock {
             transactionRunner.run {
                 val existing = recordDao.get(id) ?: return@run
                 requireActiveBaby(existing.babyId)
-                val type = RecordType.fromKey(existing.type)
+                val type = RecordType.fromKey(existing.type) ?: error("未知记录类型")
+                requireCurrentPayloadDocument(type, existing.payloadJson, existing.schemaVersion)
+                val persistedPayload = requireCurrentPayloadJson(
+                    type = type,
+                    payloadJson = payloadJson,
+                    schemaVersion = schemaVersion,
+                )
                 if (
                     type == RecordType.SLEEP &&
                     existing.endTimestamp != null &&
@@ -763,12 +632,12 @@ class CareLog @Inject constructor(
                         timestamp = timestamp,
                         endTimestamp = endTimestamp,
                         note = note,
-                        payloadJson = withLocalPhotoPaths(payloadJson, photos),
+                        payloadJson = persistedPayload,
                         schemaVersion = schemaVersion,
                         updatedAt = now,
                     ),
                 )
-                reconcileRecordPhotos(id, photos, now)
+                photos?.let { reconcileRecordPhotos(id, it, now) }
             }
         }
         requestLocalSync()
@@ -803,9 +672,7 @@ class CareLog @Inject constructor(
         val peek = recordDao.get(recordId) ?: error("记录不存在")
         if (peek.deletedAt != null) error("记录已删除")
         val type = RecordType.fromKey(peek.type) ?: error("未知记录类型")
-        require(type != RecordType.MEMO && type != RecordType.OTHER) {
-            "备注/其他不可转为护理计划"
-        }
+        requireCurrentPayloadDocument(type, peek.payloadJson, peek.schemaVersion)
         require(type.isPlanableCarePlanType || type == RecordType.CUSTOM) {
             "该项目不可转为护理计划"
         }
@@ -815,13 +682,16 @@ class CareLog @Inject constructor(
             if (existing.deletedAt != null) error("记录已删除")
             requireActiveBaby(existing.babyId)
             val resolvedType = RecordType.fromKey(existing.type) ?: error("未知记录类型")
-            require(resolvedType != RecordType.MEMO && resolvedType != RecordType.OTHER) {
-                "备注/其他不可转为护理计划"
-            }
+            requireCurrentPayloadDocument(
+                resolvedType,
+                existing.payloadJson,
+                existing.schemaVersion,
+            )
             require(resolvedType.isPlanableCarePlanType || resolvedType == RecordType.CUSTOM) {
                 "该项目不可转为护理计划"
             }
             val nextPayload = payloadJson ?: existing.payloadJson
+            requireCurrentPayloadDocument(resolvedType, nextPayload, schemaVersion)
             val resolvedCustomItemId: Long?
             val stampedPayload: String
             if (resolvedType == RecordType.CUSTOM) {
@@ -849,6 +719,11 @@ class CareLog @Inject constructor(
                 resolvedCustomItemId = null
                 stampedPayload = nextPayload
             }
+            val persistedPayload = requireCurrentPayloadJson(
+                type = resolvedType,
+                payloadJson = stampedPayload,
+                schemaVersion = schemaVersion,
+            )
 
             val at = nextSyncUpdatedAt(existing.updatedAt, System.currentTimeMillis())
             recordDao.softDelete(recordId, at)
@@ -866,7 +741,7 @@ class CareLog @Inject constructor(
                     scheduledAt = scheduledAt,
                     scheduledZoneId = zone.id,
                     note = note,
-                    payloadJson = withLocalPhotoPaths(stampedPayload, photos),
+                    payloadJson = persistedPayload,
                     schemaVersion = schemaVersion,
                     status = CarePlanStatus.PENDING.storageKey,
                     createdByMembershipId = currentMembershipActorId(),
@@ -915,20 +790,12 @@ class CareLog @Inject constructor(
         requestLocalSync()
     }
 
-    /**
-     * Active record photo local paths for [recordId].
-     *
-     * Prefers MediaAsset rows (common attachment). Falls back to the payload
-     * `photos[]` replica so historical diary/memo rows remain lossless until
-     * the next edit normalizes them onto media_assets.
-     */
+    /** Active record photo paths. MediaAsset is the sole current photo source. */
     suspend fun listRecordPhotoPaths(recordId: Long): List<String> {
         val active = mediaAssetDao.listActiveForRecord(recordId)
             .map(MediaAssetEntity::localUri)
             .filter { it.isNotBlank() }
-        if (active.isNotEmpty()) return active
-        val record = recordDao.get(recordId) ?: return emptyList()
-        return localPhotoPaths(record.payloadJson)
+        return active
     }
 
     /**
@@ -991,7 +858,6 @@ class CareLog @Inject constructor(
             ),
         )
         require(completionClientUuid.isNotBlank()) { "计时完成标识不能为空" }
-        val userId = ensureLocalUser(System.currentTimeMillis())
         val now = System.currentTimeMillis()
         val id = transactionRunner.run {
             val existing = recordDao.getByClientUuid(completionClientUuid)
@@ -1026,8 +892,6 @@ class CareLog @Inject constructor(
                     timestamp = recordTimestamp,
                     endTimestamp = endedAt.takeIf { recordMode == "start" },
                     note = note,
-                    createdByUserId = userId,
-                    createdByDeviceId = writerDeviceId(),
                     payloadJson = payload,
                     schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
                     updatedAt = now,
@@ -1070,6 +934,11 @@ class CareLog @Inject constructor(
         photoLocalPaths: List<String> = emptyList(),
     ): Long {
         val photos = normalizePhotoPaths(photoLocalPaths)
+        val persistedPayload = requireCurrentPayloadJson(
+            type = RecordType.SLEEP,
+            payloadJson = payloadJson,
+            schemaVersion = schemaVersion,
+        )
         val id = sleepMutationMutex.withLock {
             validateSleepInterval(RecordType.SLEEP, timestamp, endTimestamp)
             transactionRunner.run {
@@ -1087,9 +956,7 @@ class CareLog @Inject constructor(
                             timestamp = timestamp,
                             endTimestamp = endTimestamp,
                             note = note,
-                            createdByUserId = ensureLocalUser(now),
-                            createdByDeviceId = writerDeviceId(),
-                            payloadJson = withLocalPhotoPaths(payloadJson, photos),
+                            payloadJson = persistedPayload,
                             schemaVersion = schemaVersion,
                             updatedAt = now,
                         ),
@@ -1100,13 +967,18 @@ class CareLog @Inject constructor(
                     if (currentOpen?.id != expectedOpenSleepId) {
                         throw SleepStateChangedException()
                     }
+                    requireCurrentPayloadDocument(
+                        RecordType.SLEEP,
+                        currentOpen.payloadJson,
+                        currentOpen.schemaVersion,
+                    )
                     val now = System.currentTimeMillis()
                     updateRecordEntity(
                         currentOpen.copy(
                             timestamp = timestamp,
                             endTimestamp = endTimestamp,
                             note = note,
-                            payloadJson = withLocalPhotoPaths(payloadJson, photos),
+                            payloadJson = persistedPayload,
                             schemaVersion = schemaVersion,
                             updatedAt = now,
                         ),
@@ -1152,9 +1024,13 @@ class CareLog @Inject constructor(
                         timestamp = at,
                         endTimestamp = null,
                         note = null,
-                        createdByUserId = ensureLocalUser(now),
-                        createdByDeviceId = writerDeviceId(),
-                        payloadJson = "{}",
+                        payloadJson = RecordPayloadCodec.encode(
+                            RecordPayloadDocument(
+                                type = RecordType.SLEEP,
+                                payload = SleepPayload(),
+                                schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+                            ),
+                        ),
                         updatedAt = now,
                     ),
                 )
@@ -1194,8 +1070,6 @@ class CareLog @Inject constructor(
                         timestamp = start,
                         endTimestamp = at,
                         note = null,
-                        createdByUserId = ensureLocalUser(now),
-                        createdByDeviceId = writerDeviceId(),
                         payloadJson = RecordPayloadCodec.encode(
                             RecordPayloadDocument(
                                 type = RecordType.SLEEP,
@@ -1280,8 +1154,8 @@ class CareLog @Inject constructor(
          */
         projectToSystemCalendar: Boolean = true,
     ): Long {
-        require(type != RecordType.MEMO && type != RecordType.OTHER) {
-            "备注/其他不可新建护理计划"
+        require(schemaVersion == CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION) {
+            "仅支持当前 payload schema"
         }
         require(type.isPlanableCarePlanType || type == RecordType.CUSTOM) {
             "该项目不可新建护理计划"
@@ -1309,6 +1183,12 @@ class CareLog @Inject constructor(
             stampedPayload = payloadJson
         }
         val photos = normalizePhotoPaths(photoLocalPaths)
+        val persistedPayload = requireCurrentPayloadJson(
+            type = type,
+            payloadJson = stampedPayload,
+            schemaVersion = schemaVersion,
+        )
+        requireCustomPayloadMatches(type, persistedPayload, schemaVersion, resolvedCustomItemId)
         val now = System.currentTimeMillis()
         val id = transactionRunner.run {
             val planId = carePlanDao.upsert(
@@ -1320,7 +1200,7 @@ class CareLog @Inject constructor(
                     scheduledAt = scheduledAt,
                     scheduledZoneId = zone.id,
                     note = note,
-                    payloadJson = withLocalPhotoPaths(stampedPayload, photos),
+                    payloadJson = persistedPayload,
                     schemaVersion = schemaVersion,
                     status = CarePlanStatus.PENDING.storageKey,
                     createdByMembershipId = currentMembershipActorId(),
@@ -1369,7 +1249,6 @@ class CareLog @Inject constructor(
     ): Long {
         RecordTime.pointError(actualTimestamp, nowMillis)?.let { throw IllegalArgumentException(it) }
         val photos = normalizePhotoPaths(photoLocalPaths)
-        val userId = ensureLocalUser(System.currentTimeMillis())
         // Freeze confirm time once for the candidate; wall clock for writer bookkeeping.
         val confirmedAt = System.currentTimeMillis()
         val now = confirmedAt
@@ -1377,6 +1256,13 @@ class CareLog @Inject constructor(
         // Peek type to decide whether sleep mutex is required (fail closed on races).
         val planPeek = carePlanDao.get(carePlanId) ?: error("护理计划不存在")
         val planType = RecordType.fromKey(planPeek.type) ?: error("未知记录类型")
+        requireCurrentPayloadDocument(planType, planPeek.payloadJson, planPeek.schemaVersion)
+        requireCustomPayloadMatches(
+            planType,
+            planPeek.payloadJson,
+            planPeek.schemaVersion,
+            planPeek.customItemId,
+        )
 
         suspend fun writeFulfill(): Long = transactionRunner.run {
             val plan = carePlanDao.get(carePlanId)
@@ -1389,6 +1275,13 @@ class CareLog @Inject constructor(
             // Fulfill is allowed for any member; no author manage ACL here.
             requireActiveBaby(plan.babyId)
             val type = RecordType.fromKey(plan.type) ?: error("未知记录类型")
+            requireCurrentPayloadDocument(type, plan.payloadJson, plan.schemaVersion)
+            requireCustomPayloadMatches(
+                type,
+                plan.payloadJson,
+                plan.schemaVersion,
+                plan.customItemId,
+            )
             val resolvedEnd = endTimestamp
             if (type == RecordType.SLEEP) {
                 validateSleepInterval(RecordType.SLEEP, actualTimestamp, resolvedEnd)
@@ -1403,6 +1296,18 @@ class CareLog @Inject constructor(
                 // Non-sleep types do not use interval ends on fulfill.
                 error("该项目履行不支持结束时间")
             }
+            val nextPayload = payloadJson ?: plan.payloadJson
+            val persistedPayload = requireCurrentPayloadJson(
+                type = type,
+                payloadJson = nextPayload,
+                schemaVersion = schemaVersion,
+            )
+            requireCustomPayloadMatches(
+                type,
+                persistedPayload,
+                schemaVersion,
+                plan.customItemId,
+            )
             val recordClientUuid = newClientUuid()
             val record = RecordEntity(
                 clientUuid = recordClientUuid,
@@ -1411,9 +1316,7 @@ class CareLog @Inject constructor(
                 timestamp = actualTimestamp,
                 endTimestamp = resolvedEnd,
                 note = note ?: plan.note,
-                createdByUserId = userId,
-                createdByDeviceId = writerDeviceId(),
-                payloadJson = withLocalPhotoPaths(payloadJson ?: plan.payloadJson, photos),
+                payloadJson = persistedPayload,
                 schemaVersion = schemaVersion,
                 updatedAt = now,
             )
@@ -1472,6 +1375,13 @@ class CareLog @Inject constructor(
         if (plan.deletedAt != null) error("护理计划已删除")
         require(plan.babyId == babyId) { "护理计划与宝宝不匹配" }
         require(plan.type == expectedType.key) { "护理计划类型不匹配" }
+        requireCurrentPayloadDocument(expectedType, plan.payloadJson, plan.schemaVersion)
+        requireCustomPayloadMatches(
+            expectedType,
+            plan.payloadJson,
+            plan.schemaVersion,
+            plan.customItemId,
+        )
         val status = CarePlanStatus.fromStorage(plan.status)
         if (status == CarePlanStatus.COMPLETED) {
             require(plan.fulfilledRecordClientUuid == recordClientUuid) {
@@ -1728,15 +1638,17 @@ class CareLog @Inject constructor(
 
             val source = recordDao.getByClientUuid(candidate.recordClientUuid)
                 ?: error("未采纳履行对应的记录不存在")
-            // Prefer live loser photos; payload replica is fallback for historical rows.
+            // MediaAsset is the sole current photo source, including tombstoned facts.
             val photos = if (source.deletedAt == null) {
                 listRecordPhotoPaths(source.id)
             } else {
-                localPhotoPaths(source.payloadJson)
+                mediaAssetDao.listForRecord(source.id)
+                    .map(MediaAssetEntity::localUri)
+                    .filter(String::isNotBlank)
+                    .distinct()
             }
             val targetUuid = existingPointer.ifEmpty { newClientUuid() }
             val at = nowMillis.coerceAtLeast(source.updatedAt + 1)
-            val userId = ensureLocalUser(at)
             val type = RecordType.fromKey(source.type) ?: error("未知记录类型")
             if (type == RecordType.SLEEP) {
                 validateSleepInterval(type, source.timestamp, source.endTimestamp)
@@ -1758,9 +1670,7 @@ class CareLog @Inject constructor(
                 timestamp = source.timestamp,
                 endTimestamp = source.endTimestamp,
                 note = source.note,
-                createdByUserId = userId,
-                createdByDeviceId = writerDeviceId(),
-                payloadJson = withLocalPhotoPaths(source.payloadJson, photos),
+                payloadJson = source.payloadJson,
                 schemaVersion = source.schemaVersion,
                 updatedAt = at,
                 deletedAt = null,
@@ -1826,10 +1736,13 @@ class CareLog @Inject constructor(
         val source = recordDao.getByClientUuid(candidate.recordClientUuid)
         val type = source?.let { RecordType.fromKey(it.type) }
             ?: RecordType.fromKey(plan.type)
-            ?: RecordType.OTHER
+            ?: return null
         val photos = when {
             source != null && source.deletedAt == null -> listRecordPhotoPaths(source.id)
-            source != null -> localPhotoPaths(source.payloadJson)
+            source != null -> mediaAssetDao.listForRecord(source.id)
+                .map(MediaAssetEntity::localUri)
+                .filter(String::isNotBlank)
+                .distinct()
             else -> emptyList()
         }
         val live = fulfillmentCandidateDao.listForCarePlan(candidate.carePlanClientUuid)
@@ -1955,14 +1868,34 @@ class CareLog @Inject constructor(
             }
             requireCanManageCarePlan(plan)
             requireActiveBaby(plan.babyId)
+            val type = RecordType.fromKey(plan.type) ?: error("未知记录类型")
+            requireCurrentPayloadDocument(type, plan.payloadJson, plan.schemaVersion)
+            requireCustomPayloadMatches(
+                type,
+                plan.payloadJson,
+                plan.schemaVersion,
+                plan.customItemId,
+            )
             val at = nowMillis.coerceAtLeast(plan.updatedAt + 1)
-            val nextPayload = if (photos != null) {
-                withLocalPhotoPaths(payloadJson ?: plan.payloadJson, photos)
-            } else {
-                payloadJson ?: plan.payloadJson
-            }
-            val nextZoneId = zone?.id ?: plan.scheduledZoneId
             val nextSchemaVersion = schemaVersion ?: plan.schemaVersion
+            val rawNextPayload = payloadJson ?: plan.payloadJson
+            val nextPayload = if (photos != null) {
+                requireCurrentPayloadJson(
+                    type = type,
+                    payloadJson = rawNextPayload,
+                    schemaVersion = nextSchemaVersion,
+                )
+            } else {
+                requireCurrentPayloadDocument(type, rawNextPayload, nextSchemaVersion)
+                rawNextPayload
+            }
+            requireCustomPayloadMatches(
+                type,
+                nextPayload,
+                nextSchemaVersion,
+                plan.customItemId,
+            )
+            val nextZoneId = zone?.id ?: plan.scheduledZoneId
             val desiredProjection =
                 projectToSystemCalendar ?: plan.systemCalendarProjectionEnabled
             val sharedChanged =
@@ -2093,7 +2026,6 @@ class CareLog @Inject constructor(
     }
 
     private suspend fun scheduleCarePlanReminder(plan: CarePlan) {
-        runCatching { carePlanDao.markLegacyCarePlanReminderReplaced(plan.clientUuid) }
         val scheduled = runCatching { reminderCleanup.scheduleCarePlan(plan) }.getOrDefault(false)
         if (!scheduled) {
             cancelCarePlanReminderBestEffort(plan.id)
@@ -2207,8 +2139,7 @@ class CareLog @Inject constructor(
         val wasPending = entity.systemCalendarProjectionPending
         val providerHandoffMayExist = wasPending ||
             entity.systemCalendarReminderReady ||
-            existingEventId != null ||
-            entity.legacyCarePlanReminderPending
+            existingEventId != null
         val handoffStored = runCatching {
             carePlanDao.updateSystemCalendarProjection(
                 clientUuid = plan.clientUuid,
@@ -2262,9 +2193,6 @@ class CareLog @Inject constructor(
             runCatching {
                 removeSystemCalendarEventMapping(plan.clientUuid, existingEventId)
             }
-        }
-        if (result.outcome != SystemCalendarUpsertOutcome.ProviderStillOwnsStale) {
-            runCatching { carePlanDao.markLegacyCarePlanReminderReplaced(plan.clientUuid) }
         }
         return when (result.outcome) {
             SystemCalendarUpsertOutcome.CurrentReady -> {
@@ -2359,13 +2287,11 @@ class CareLog @Inject constructor(
             plan?.systemCalendarEventId?.let(::add)
             map[clientUuid]?.let(::add)
         }
-        // A new v21 row with no identity, ready generation, or hand-off has
-        // provably never touched the provider. Migrated rows retain the legacy
-        // side-effect marker until one strict lookup/reconciliation completes.
+        // A current row with no identity, ready generation, or hand-off has
+        // provably never touched the provider.
         val requiresProviderLookup = knownIds.isNotEmpty() ||
             plan?.systemCalendarReminderReady == true ||
-            plan?.systemCalendarProjectionPending == true ||
-            plan?.legacyCarePlanReminderPending == true
+            plan?.systemCalendarProjectionPending == true
         suspend fun deleteKnown(eventId: String): Boolean {
             val deleted = runCatching {
                 systemCalendar.deleteEvent(eventId, clientUuid)
@@ -2509,8 +2435,7 @@ class CareLog @Inject constructor(
         if (plan.clientUuid != clientUuid) {
             return@withLock false
         }
-        val legacyDelivery = expectedScheduledAt == Long.MIN_VALUE
-        if (!legacyDelivery && plan.scheduledAt != expectedScheduledAt) return@withLock false
+        if (plan.scheduledAt != expectedScheduledAt) return@withLock false
         if (plan.deletedAt != null || plan.status !in setOf("pending", "missed")) {
             return@withLock false
         }
@@ -2520,21 +2445,15 @@ class CareLog @Inject constructor(
         if (plan.systemCalendarReminderReady || plan.systemCalendarProjectionPending) {
             return@withLock false
         }
-        if (!legacyDelivery) return@withLock true
-        carePlanDao.consumeLegacyCarePlanReminder(carePlanId, clientUuid) == 1
+        true
     }
 
-    /**
-     * Active plan photo local paths for [carePlanId].
-     * Prefers MediaAsset rows; falls back to payload photos[] replica.
-     */
+    /** Active plan photo paths. MediaAsset is authoritative. */
     suspend fun listCarePlanPhotoPaths(carePlanId: Long): List<String> {
         val active = mediaAssetDao.listActiveForCarePlan(carePlanId)
             .map(MediaAssetEntity::localUri)
             .filter { it.isNotBlank() }
-        if (active.isNotEmpty()) return active
-        val plan = carePlanDao.get(carePlanId) ?: return emptyList()
-        return localPhotoPaths(plan.payloadJson)
+        return active
     }
 
     suspend fun weekSummary(
@@ -2631,18 +2550,6 @@ class CareLog @Inject constructor(
         .take(limit)
         .toList()
 
-    /** Compatibility façade; orchestration lives in [LocalDataClearCoordinator]. */
-    suspend fun clearRecordsOnly() =
-        localDataClearCoordinator.clear(LocalDataClearScope.RecordsOnly)
-
-    /** Compatibility façade for the clear-then-join path. */
-    suspend fun clearAllLocalData() =
-        localDataClearCoordinator.clear(LocalDataClearScope.AllLocalData)
-
-    /** Compatibility façade used by the process-start recovery hook. */
-    suspend fun recoverPendingRecordClearReminders() =
-        localDataClearCoordinator.recoverPendingReminderCleanup()
-
     suspend fun renameBaby(babyId: Long, nickname: String) {
         val name = normalizeNickname(nickname)
         val changed = transactionRunner.run {
@@ -2680,23 +2587,25 @@ class CareLog @Inject constructor(
             targetBabyId = target.id,
             targetNickname = target.nickname,
             recordCount = recordDao.listForBaby(source.id).size,
-            calendarEventCount = calendarEventDao.listForBaby(source.id).size,
+            carePlanCount = carePlanDao.listAllIncludingDeleted().count {
+                it.babyId == source.id && it.deletedAt == null
+            },
         )
     }
 
     /**
      * Apply a merge only after the UI has shown [previewBabyMerge].
-     * The target profile stays intact; source records (including tombstones),
-     * calendar events, and avatar media rows are re-bound to the target baby.
+     * The target profile stays intact; source records and care plans (including
+     * tombstones), plus avatar media rows, are re-bound to the target baby.
      */
     suspend fun mergeBabyProfiles(sourceBabyId: Long, targetBabyId: Long): Boolean {
         if (sourceBabyId == targetBabyId) return false
         val now = System.currentTimeMillis()
-        val merged = sleepMutationMutex.withLock {
+        val movedCarePlanClientUuids = sleepMutationMutex.withLock {
             transactionRunner.run {
-                val source = babyDao.get(sourceBabyId) ?: return@run false
-                val target = babyDao.get(targetBabyId) ?: return@run false
-                if (source.familyId != target.familyId) return@run false
+                val source = babyDao.get(sourceBabyId) ?: return@run null
+                val target = babyDao.get(targetBabyId) ?: return@run null
+                if (source.familyId != target.familyId) return@run null
                 // Include soft-deleted rows so tombstones stay with the keeper profile.
                 recordDao.listAllIncludingDeleted()
                     .filter { it.babyId == source.id }
@@ -2709,11 +2618,14 @@ class CareLog @Inject constructor(
                             ),
                         )
                     }
-                calendarEventDao.listForBabyIncludingDeleted(source.id).forEach { event ->
-                    calendarEventDao.update(
-                        event.copy(
+                val sourceCarePlans = carePlanDao.listAllIncludingDeleted()
+                    .filter { it.babyId == source.id }
+                sourceCarePlans.forEach { plan ->
+                    carePlanDao.update(
+                        plan.copy(
                             babyId = target.id,
-                            updatedAt = nextSyncUpdatedAt(event.updatedAt, now),
+                            updatedAt = nextSyncUpdatedAt(plan.updatedAt, now),
+                            syncDirty = true,
                         ),
                     )
                 }
@@ -2738,15 +2650,71 @@ class CareLog @Inject constructor(
                         )
                     },
                 )
-                true
+                sourceCarePlans.map { it.clientUuid }
             }
         }
-        if (!merged) return false
+        if (movedCarePlanClientUuids == null) return false
         if (settings.currentBabyId.first() == sourceBabyId) {
             settings.setCurrentBabyId(targetBabyId)
         }
+        reprojectMergedBabySystemCalendarCopies(movedCarePlanClientUuids)
         requestLocalSync()
         return true
+    }
+
+    /**
+     * L2/L3 titles include the baby nickname, so an existing device-local copy must
+     * be refreshed after its CarePlan is rebound. Provider I/O stays outside the
+     * merge transaction; durable identity/handoff state makes failures retryable.
+     */
+    private suspend fun reprojectMergedBabySystemCalendarCopies(
+        movedCarePlanClientUuids: List<String>,
+    ) {
+        if (movedCarePlanClientUuids.isEmpty()) return
+        try {
+            calendarReminderMutationGuard.withLock {
+                val prefs = settings.settings.first()
+                if (
+                    SystemCalendarDisclosureLevel.fromStored(
+                        prefs.systemCalendarDisclosureLevel,
+                    ) == SystemCalendarDisclosureLevel.EVENT_ONLY
+                ) {
+                    return@withLock
+                }
+                val eventMap = parseSystemCalendarEventMap(prefs.systemCalendarEventMapJson)
+                movedCarePlanClientUuids.forEach { clientUuid ->
+                    try {
+                        val entity = carePlanDao.getByClientUuid(clientUuid)
+                            ?: return@forEach
+                        val open = entity.deletedAt == null &&
+                            entity.status in setOf("pending", "missed")
+                        val hasExistingProjection = entity.systemCalendarEventId != null ||
+                            entity.systemCalendarReminderReady ||
+                            entity.systemCalendarProjectionPending ||
+                            eventMap.containsKey(clientUuid)
+                        if (
+                            open &&
+                            entity.systemCalendarProjectionEnabled &&
+                            hasExistingProjection
+                        ) {
+                            projectOrScheduleCarePlanReminderLocked(
+                                entity.toModel(),
+                                projectToSystemCalendar = true,
+                            )
+                        }
+                    } catch (cancellation: CancellationException) {
+                        throw cancellation
+                    } catch (_: Throwable) {
+                        // The merge is already committed. Boot/foreground reminder
+                        // reconciliation retries from the retained event/map identity.
+                    }
+                }
+            }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            // Calendar/settings failures never turn a committed merge into failure.
+        }
     }
 
     private fun normalizeNickname(raw: String): String =
@@ -2778,14 +2746,6 @@ class CareLog @Inject constructor(
         )
     }
 
-    /**
-     * Sync-session device id used as the record writer link key (`created_by_device_id`).
-     * Distinct from [LocalUserEntity.deviceId]; self detection on the timeline must use this.
-     * Null when the session has not allocated a device id yet (typically pre-join).
-     */
-    private suspend fun writerDeviceId(): String? =
-        syncPort.session().first().deviceId.trim().takeIf { it.isNotEmpty() }
-
     private suspend fun ensureFamily(userId: Long, now: Long): Long {
         val existing = familyDao.listAll().firstOrNull()
         if (existing != null) return existing.id
@@ -2804,6 +2764,8 @@ class CareLog @Inject constructor(
 
 
     private suspend fun insertRecord(record: RecordEntity): Long {
+        val type = RecordType.fromKey(record.type) ?: error("未知记录类型")
+        requireCurrentPayloadDocument(type, record.payloadJson, record.schemaVersion)
         val membershipId = currentMembershipActorId()
         return recordDao.upsert(
             if (record.createdByMembershipId.isBlank() && membershipId.isNotEmpty()) {
@@ -2815,6 +2777,8 @@ class CareLog @Inject constructor(
     }
 
     private suspend fun updateRecordEntity(record: RecordEntity) {
+        val type = RecordType.fromKey(record.type) ?: error("未知记录类型")
+        requireCurrentPayloadDocument(type, record.payloadJson, record.schemaVersion)
         val previous = recordDao.getIncludingDeleted(record.id)?.updatedAt
         recordDao.update(
             record.copy(
@@ -2835,7 +2799,7 @@ class CareLog @Inject constructor(
     }
 
     /**
-     * Keep MediaAsset log rows and the payload photos[] replica aligned for one record.
+     * Reconcile the authoritative MediaAsset rows for one record.
      * Callers must already be inside a domain transaction.
      */
     private suspend fun reconcileRecordPhotos(
@@ -2900,8 +2864,7 @@ class CareLog @Inject constructor(
     }
 
     /**
-     * Align plan-owned MediaAsset log rows and the payload photos[] replica.
-     * Plan photos never share ownership with record media rows (separate clientUuids).
+     * Reconcile plan-owned MediaAsset rows. Plan and record photos never share ownership.
      * Physical file cleanup is deferred until no active entity references the path.
      */
     private suspend fun reconcileCarePlanPhotos(
@@ -2950,11 +2913,6 @@ class CareLog @Inject constructor(
                 ),
             )
         }
-        // Keep payload photos[] replica aligned for export/compat.
-        val plan = carePlanDao.get(carePlanId) ?: return
-        carePlanDao.update(
-            plan.copy(payloadJson = withLocalPhotoPaths(plan.payloadJson, photoPaths)),
-        )
     }
 
     private suspend fun tombstoneCarePlanPhotos(carePlanId: Long, deletedAt: Long) {
@@ -3057,29 +3015,16 @@ internal fun RecordEntity.toModel(): Record =
         id = id,
         clientUuid = clientUuid,
         babyId = babyId,
-        type = RecordType.fromKey(type) ?: RecordType.OTHER,
+        type = RecordType.fromKey(type) ?: error("Unknown record type: $type"),
         timestamp = timestamp,
         endTimestamp = endTimestamp,
         note = note,
-        createdByUserId = createdByUserId,
         createdByMembershipId = createdByMembershipId,
-        createdByDeviceId = createdByDeviceId,
         payloadJson = payloadJson,
         schemaVersion = schemaVersion,
         updatedAt = updatedAt,
         deletedAt = deletedAt,
         syncDirty = syncDirty,
-    )
-
-private fun CalendarEventEntity.toModel(): CalendarEvent =
-    CalendarEvent(
-        id = id,
-        clientUuid = clientUuid,
-        babyId = babyId,
-        title = title,
-        note = note,
-        eventAt = eventAt,
-        remindAt = remindAt,
     )
 
 private fun CustomItemEntity.toModel(): CustomRecordItem =
@@ -3099,7 +3044,7 @@ private fun CarePlanEntity.toModel(): CarePlan =
         id = id,
         clientUuid = clientUuid,
         babyId = babyId,
-        type = RecordType.fromKey(type) ?: RecordType.OTHER,
+        type = RecordType.fromKey(type) ?: error("Unknown care plan type: $type"),
         customItemId = customItemId,
         scheduledAt = scheduledAt,
         scheduledZoneId = scheduledZoneId,
@@ -3159,16 +3104,50 @@ fun canManageCreatorOwnedFamilyEntity(
     return creator == actor
 }
 
-/** Historical name — same rule as [canManageCreatorOwnedFamilyEntity]. */
-fun canManageCustomItemDefinition(
-    creatorMembershipId: String,
-    actorMembershipId: String,
-    actorIsAdmin: Boolean,
-): Boolean = canManageCreatorOwnedFamilyEntity(
-    creatorMembershipId = creatorMembershipId,
-    actorMembershipId = actorMembershipId,
-    actorIsAdmin = actorIsAdmin,
-)
+private fun requireCurrentPayloadDocument(
+    type: RecordType,
+    payloadJson: String,
+    schemaVersion: Int,
+): RecordPayloadDocument {
+    require(schemaVersion == CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION) {
+        "仅支持当前 payload schema"
+    }
+    val document = RecordPayloadCodec.decode(type, payloadJson, schemaVersion)
+    require(!document.isUnknown) { "payload 与当前 $type 类型不匹配或格式损坏" }
+    require(document.type == type && document.payload.type == type) {
+        "payload 类型与记录类型不匹配"
+    }
+    if (type == RecordType.CUSTOM) {
+        require(document.payload is CustomPayload) { "CUSTOM 必须携带具体项目身份" }
+    }
+    return document
+}
+
+private fun requireCurrentPayloadJson(
+    type: RecordType,
+    payloadJson: String,
+    schemaVersion: Int,
+): String {
+    requireCurrentPayloadDocument(type, payloadJson, schemaVersion)
+    return payloadJson
+}
+
+private fun requireCustomPayloadMatches(
+    type: RecordType,
+    payloadJson: String,
+    schemaVersion: Int,
+    expectedCustomItemId: Long?,
+) {
+    if (type != RecordType.CUSTOM) {
+        require(expectedCustomItemId == null) { "内置项目不得携带 customItemId" }
+        return
+    }
+    val expected = expectedCustomItemId?.takeIf { it > 0L }
+        ?: throw IllegalArgumentException("CUSTOM 计划必须携带具体项目身份")
+    val payload = requireCurrentPayloadDocument(type, payloadJson, schemaVersion).payload
+        as CustomPayload
+    require(payload.customItemId == expected) { "CUSTOM payload 与计划项目身份不匹配" }
+}
 
 /**
  * Merge durable custom definition snapshot fields into a plan/record payload.
@@ -3180,12 +3159,16 @@ internal fun stampCustomItemSnapshotIntoPayload(
     titleSnapshot: String,
     iconSlot: Int,
 ): String {
-    val document = RecordPayloadCodec.decode(
-        RecordType.CUSTOM,
-        payloadJson,
-        CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-    )
-    val existing = document.payload as? CustomPayload
+    val existing = if (payloadJson.trim() == "{}") {
+        null
+    } else {
+        val document = requireCurrentPayloadDocument(
+            RecordType.CUSTOM,
+            payloadJson,
+            CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+        )
+        document.payload as CustomPayload
+    }
     val stamped = CustomPayload(
         titleSnapshot = titleSnapshot.trim().ifBlank {
             existing?.titleSnapshot.orEmpty()
@@ -3199,7 +3182,6 @@ internal fun stampCustomItemSnapshotIntoPayload(
             type = RecordType.CUSTOM,
             payload = stamped,
             schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-            extensions = document.extensions,
         ),
     )
 }

@@ -403,11 +403,11 @@ private fun decodePickedAvatar(context: Context, uri: Uri): Bitmap =
             }
         }
     } else {
-        decodeLegacyAvatar(context, uri)
+        decodeBitmapFactoryAvatar(context, uri)
     }
 
 @Suppress("DEPRECATION")
-private fun decodeLegacyAvatar(context: Context, uri: Uri): Bitmap {
+private fun decodeBitmapFactoryAvatar(context: Context, uri: Uri): Bitmap {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     context.contentResolver.openInputStream(uri).use { input ->
         checkNotNull(input) { "Photo picker returned an unreadable URI" }

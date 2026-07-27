@@ -51,7 +51,6 @@ class PendingReplicaCleanupRoomTest {
                 babyId = 1,
                 type = "formula",
                 timestamp = 100,
-                createdByUserId = 1,
                 payloadJson = "{}",
                 updatedAt = 100,
             ),

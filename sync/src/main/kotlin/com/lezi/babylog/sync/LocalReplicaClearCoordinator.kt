@@ -1,7 +1,6 @@
 package com.lezi.babylog.sync
 
 import com.lezi.babylog.core.database.BabyDao
-import com.lezi.babylog.core.database.CarePlanDao
 import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
@@ -9,7 +8,6 @@ import com.lezi.babylog.core.database.OutboxDao
 import com.lezi.babylog.core.database.PendingReplicaCleanup
 import com.lezi.babylog.core.database.PendingReplicaCleanupScope
 import com.lezi.babylog.core.database.PendingReplicaCleanupStore
-import com.lezi.babylog.core.database.RecordDao
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
@@ -35,8 +33,6 @@ internal class LocalReplicaClearCoordinator(
     private val barrier: Mutex,
     private val preferences: SyncPreferences,
     private val outboxDao: OutboxDao,
-    private val recordDao: RecordDao,
-    private val carePlanDao: CarePlanDao,
     private val babyDao: BabyDao,
     private val mediaDao: MediaAssetDao,
     private val mediaFiles: SyncMediaFileStore,
@@ -107,12 +103,6 @@ internal class LocalReplicaClearCoordinator(
         }
         val paths = buildSet {
             addAll(media.map(MediaAssetEntity::localUri))
-            recordDao.listAllIncludingDeleted().forEach { record ->
-                addAll(localPhotoPaths(record.payloadJson))
-            }
-            carePlanDao.listAllIncludingDeleted().forEach { plan ->
-                addAll(localPhotoPaths(plan.payloadJson))
-            }
             if (scope == LocalReplicaClearScope.AllLocal) {
                 babyDao.listAllIncludingDeleted().forEach { baby ->
                     baby.avatarPath?.takeIf(String::isNotBlank)?.let(::add)

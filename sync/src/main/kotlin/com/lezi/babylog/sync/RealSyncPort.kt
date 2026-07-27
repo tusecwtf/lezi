@@ -73,18 +73,14 @@ class RealSyncPort @Inject constructor(
                 foregroundState.isForeground(),
             )
             requireAllowed(decision)
+            policy.lastHealthStatus.requireCurrentServerContract()
             currentStatus.value = SyncStatus.Syncing
-        },
-        remoteCapabilities = {
-            policy.lastHealthStatus.capabilities.toSet()
         },
     )
     private val localReplicaClearCoordinator = LocalReplicaClearCoordinator(
         barrier = syncMutex,
         preferences = preferences,
         outboxDao = outboxDao,
-        recordDao = recordDao,
-        carePlanDao = carePlanDao,
         babyDao = babyDao,
         mediaDao = mediaDao,
         mediaFiles = mediaFiles,
@@ -100,6 +96,7 @@ class RealSyncPort @Inject constructor(
         requireRemoteAllowed = { config ->
             val decision = policy.evaluate(config, foregroundState.isForeground())
             requireAllowed(decision)
+            policy.lastHealthStatus.requireCurrentServerContract()
         },
         onSessionChanged = ::publishSession,
         onSessionObserved = { session -> cachedSession = session },
@@ -238,7 +235,7 @@ class RealSyncPort @Inject constructor(
 
     /** Caller owns [syncMutex]; lock order is sync mutex then domain mutation guard. */
     private suspend fun recoverPendingLocalClearLocked(): LocalClearRecoveryScope? {
-        preferences.migrateSecretsIfNeeded()
+        preferences.recoverPendingCredentialClear()
         val resumedDomain = localClearRecoveryGate.recoverPendingLocalClear()
         val resumedReplica = localReplicaClearCoordinator.recoverPendingLocked()
         return when {

@@ -29,12 +29,18 @@ class SummaryAggregationTest {
                 3,
                 RecordType.NURSING,
                 LocalDate.of(2026, 7, 17),
-                """{"left_min":10,"right_min":5,"amount_ml":20}""",
+                """{"left_min":10,"right_min":5,"order":"LR","amount_ml":20,"record_mode":"end"}""",
             ),
-            record(4, RecordType.TEMPERATURE, LocalDate.of(2026, 7, 22), """{"value":37.2}"""),
+            record(4, RecordType.TEMPERATURE, LocalDate.of(2026, 7, 22), """{"celsius":37.2}"""),
             record(5, RecordType.FORMULA, anchor, """{"amount_ml":100}"""),
             record(6, RecordType.PUMPED_FEED, anchor, """{"amount_ml":50}"""),
-            record(7, RecordType.SLEEP, anchor, endOffsetMinutes = 90),
+            record(
+                7,
+                RecordType.SLEEP,
+                anchor,
+                """{"is_nap":false,"anomaly_flag":false}""",
+                endOffsetMinutes = 90,
+            ),
             record(8, RecordType.PEE, anchor),
             record(9, RecordType.BOTH_DIAPER, anchor),
             record(10, RecordType.TEMPERATURE, anchor, """{"celsius":36.8}"""),
@@ -117,7 +123,7 @@ class SummaryAggregationTest {
                     1,
                     RecordType.NURSING,
                     anchor,
-                    """{"left_min":7,"right_min":8}""",
+                    """{"left_min":7,"right_min":8,"order":"LR","record_mode":"end"}""",
                 ),
             ),
             range = SummaryRange.Day,
@@ -138,7 +144,13 @@ class SummaryAggregationTest {
         val records = listOf(
             record(1, RecordType.FORMULA, anchor, """{"amount_ml":120}"""),
             record(2, RecordType.PEE, anchor),
-            record(3, RecordType.SLEEP, anchor, endOffsetMinutes = 45),
+            record(
+                3,
+                RecordType.SLEEP,
+                anchor,
+                """{"is_nap":false,"anomaly_flag":false}""",
+                endOffsetMinutes = 45,
+            ),
         )
         val day = CareAggregation.day(records, anchor, zone)
         val summary = buildSummaryUi(
@@ -180,7 +192,6 @@ class SummaryAggregationTest {
             type = type,
             timestamp = timestamp,
             endTimestamp = endOffsetMinutes?.let { timestamp + it * 60_000L },
-            createdByUserId = 1,
             payloadJson = payload,
             updatedAt = timestamp,
         )

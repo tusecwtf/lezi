@@ -150,12 +150,10 @@ internal class DefaultGrowthMeasurementLifecycle @Inject constructor(
         if (existing != null && existing.type != request.type) {
             return GrowthMeasurementSaveResult.Rejected("测量类型不匹配")
         }
-        val source = existing?.payload
         val document = RecordPayloadDocument(
             type = request.type,
             payload = payload,
             schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-            extensions = source?.extensions.orEmpty(),
         )
         val payloadJson = RecordPayloadCodec.encode(document)
         val id = if (existing == null) {

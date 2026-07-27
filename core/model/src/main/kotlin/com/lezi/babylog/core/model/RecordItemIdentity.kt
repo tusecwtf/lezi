@@ -7,11 +7,7 @@ package com.lezi.babylog.core.model
  * - Built-in items use [RecordType.key] (e.g. `"pee"`, `"nursing"`).
  * - Specific custom definitions use `"custom:<localId>"` (e.g. `"custom:12"`).
  *
- * Bare keys `"memo"`, `"other"`, and `"custom"` are **retired generic entry
- * points**: they remain valid [RecordType] values for historical rows, but
- * must not appear in new-entry catalogs or as bindable quick-slot references.
- * Use [isRetiredGenericCatalogKey] / [isInvalidNewEntryReference] so later
- * quick-slot work can blank stale slots without migrating old records.
+ * Bare `"custom"` is not a concrete identity and therefore never parses.
  */
 sealed class RecordItemIdentity : java.io.Serializable {
     /** A built-in [RecordType] that is still a concrete new-entry target. */
@@ -47,25 +43,7 @@ sealed class RecordItemIdentity : java.io.Serializable {
     companion object {
         private const val CUSTOM_KEY_PREFIX = "custom:"
 
-        /** Keys removed from every new-entry catalog and quick-slot binding. */
-        val RETIRED_GENERIC_CATALOG_KEYS: Set<String> = setOf(
-            RecordType.MEMO.key,
-            RecordType.OTHER.key,
-            RecordType.CUSTOM.key,
-        )
-
         fun customCatalogKey(customItemId: Long): String = "$CUSTOM_KEY_PREFIX$customItemId"
-
-        fun isRetiredGenericCatalogKey(key: String): Boolean =
-            key in RETIRED_GENERIC_CATALOG_KEYS
-
-        /**
-         * True when [key] must not bind a new-entry or quick slot.
-         * Currently only the three retired generic keys; unknown/missing custom
-         * ids are a runtime resolution concern for later tickets.
-         */
-        fun isInvalidNewEntryReference(key: String): Boolean =
-            isRetiredGenericCatalogKey(key)
 
         fun builtIn(type: RecordType): BuiltIn = BuiltIn(type)
 
@@ -73,12 +51,10 @@ sealed class RecordItemIdentity : java.io.Serializable {
 
         /**
          * Parse a catalog/settings key into a concrete identity.
-         * Returns null for retired generic keys, malformed custom keys, or
-         * unknown type keys.
+         * Returns null for bare/malformed custom keys or unknown type keys.
          */
         fun parseCatalogKey(key: String): RecordItemIdentity? {
             if (key.isBlank()) return null
-            if (isRetiredGenericCatalogKey(key)) return null
             if (key.startsWith(CUSTOM_KEY_PREFIX)) {
                 val id = key.removePrefix(CUSTOM_KEY_PREFIX).toLongOrNull() ?: return null
                 if (id <= 0L) return null
@@ -91,16 +67,10 @@ sealed class RecordItemIdentity : java.io.Serializable {
     }
 }
 
-/** Built-in types that may appear in new-entry catalogs (not memo/other/custom). */
+/** Built-in types that may appear in new-entry catalogs. */
 val RecordType.isAvailableForNewEntry: Boolean
-    get() = this !in RETIRED_GENERIC_NEW_ENTRY_TYPES
+    get() = this != RecordType.CUSTOM
 
 /** Ordered built-in types still offered when creating a new record or plan. */
 fun RecordType.Companion.availableForNewEntry(): List<RecordType> =
     RecordType.entries.filter { it.isAvailableForNewEntry }
-
-private val RETIRED_GENERIC_NEW_ENTRY_TYPES: Set<RecordType> = setOf(
-    RecordType.MEMO,
-    RecordType.OTHER,
-    RecordType.CUSTOM,
-)

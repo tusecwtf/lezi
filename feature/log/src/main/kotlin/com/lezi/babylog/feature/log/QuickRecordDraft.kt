@@ -12,7 +12,6 @@ import com.lezi.babylog.core.model.MeasurementPayload
 import com.lezi.babylog.core.model.MedicinePayload
 import com.lezi.babylog.core.model.MilkPayload
 import com.lezi.babylog.core.model.NursingPayload
-import com.lezi.babylog.core.model.OtherPayload
 import com.lezi.babylog.core.model.PeePayload
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordPayload
@@ -28,7 +27,6 @@ import com.lezi.babylog.core.model.TextPayload
 import com.lezi.babylog.core.model.UnknownPayload
 import com.lezi.babylog.core.model.VaccinePayload
 import com.lezi.babylog.core.model.isPlanableCarePlanType
-import com.lezi.babylog.core.model.localPhotoPaths
 import com.lezi.babylog.core.ui.formatRecordDuration
 
 internal const val FUTURE_TIME_WARNING = "不能选未来时刻"
@@ -90,14 +88,14 @@ internal val RecordType.quickRecordMode: QuickRecordMode
         RecordType.BOTH_DIAPER -> QuickRecordMode.BothDiaper
         RecordType.SLEEP -> QuickRecordMode.Sleep
         RecordType.TEMPERATURE -> QuickRecordMode.Temperature
-        RecordType.MEMO, RecordType.DIARY -> QuickRecordMode.Text
+        RecordType.DIARY -> QuickRecordMode.Text
         RecordType.BATH -> QuickRecordMode.Simple
         RecordType.WALK -> QuickRecordMode.Simple
         RecordType.COUGH, RecordType.RASH, RecordType.VOMIT, RecordType.INJURY ->
             QuickRecordMode.Symptom
         RecordType.MEDICINE -> QuickRecordMode.Medicine
         RecordType.HOSPITAL -> QuickRecordMode.Hospital
-        RecordType.OTHER, RecordType.CUSTOM -> QuickRecordMode.CustomText
+        RecordType.CUSTOM -> QuickRecordMode.CustomText
         RecordType.HEIGHT, RecordType.WEIGHT, RecordType.HEAD, RecordType.CHEST,
         RecordType.FOOT_SIZE,
         -> QuickRecordMode.Measurement
@@ -226,7 +224,6 @@ internal data class QuickRecordDraft(
         if (timestamp <= nowMillis) return false
         return when {
             type == RecordType.CUSTOM -> customItemId != null && customItemId > 0L
-            type == RecordType.MEMO || type == RecordType.OTHER -> false
             else -> type.isPlanableCarePlanType
         }
     }
@@ -399,6 +396,12 @@ internal data class QuickRecordDraft(
         if (existingRecordId != null && sourcePayloadDocument().isUnknown) {
             return ComposerValidationResult(
                 "此记录格式暂不支持安全编辑，原始数据已保留",
+                ComposerInvalidField.Unsupported,
+            )
+        }
+        if (type == RecordType.CUSTOM && customItemId?.takeIf { it > 0L } == null) {
+            return ComposerValidationResult(
+                "具体自定义项目无效",
                 ComposerInvalidField.Unsupported,
             )
         }
@@ -600,7 +603,6 @@ internal data class QuickRecordDraft(
         QuickRecordMode.Text -> TextPayload(
             type = type,
             body = body.trim(),
-            photos = photos,
         )
         QuickRecordMode.Simple -> EmptyPayload(type)
         QuickRecordMode.Symptom -> SymptomPayload(
@@ -616,19 +618,14 @@ internal data class QuickRecordDraft(
             reason = hospitalReason.trim(),
             advice = hospitalAdvice.trim().ifBlank { null },
         )
-        QuickRecordMode.CustomText -> if (type == RecordType.CUSTOM) {
-            CustomPayload(
-                titleSnapshot = customTitle.trim(),
-                detail = customDetail.trim().ifBlank { null },
-                customItemId = customItemId,
-                iconSlot = customIconSlot,
-            )
-        } else {
-            OtherPayload(
-                title = customTitle.trim(),
-                detail = customDetail.trim().ifBlank { null },
-            )
-        }
+        QuickRecordMode.CustomText -> CustomPayload(
+            titleSnapshot = customTitle.trim(),
+            detail = customDetail.trim().ifBlank { null },
+            customItemId = requireNotNull(customItemId?.takeIf { it > 0L }) {
+                "CUSTOM requires positive customItemId"
+            },
+            iconSlot = customIconSlot,
+        )
         QuickRecordMode.Measurement -> {
             val input = measurementValue.toDoubleOrNull() ?: 0.0
             GrowthMeasurementFacts.payload(type, input) ?: MeasurementPayload(type)
@@ -647,7 +644,6 @@ internal data class QuickRecordDraft(
             type = type,
             payload = payload,
             schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-            extensions = source.extensions,
         )
     }
 
@@ -666,34 +662,31 @@ internal data class QuickRecordDraft(
             customTitle: String = "",
             customIconSlot: Int? = null,
             createIntent: ComposerCreateIntent = ComposerCreateIntent.DeriveFromTimestamp,
-        ): QuickRecordDraft = QuickRecordDraft(
-            type = type,
-            timestamp = timestamp,
-            createIntent = createIntent,
-            amountMl = lastAmountMl?.takeIf { it in 1..999 }
-                ?: recentAmountMl.firstOrNull { it in 1..999 }
-                ?: if (type == RecordType.PUMP_EXPRESS) 60 else 120,
-            recentAmountMl = recentAmountMl.filter { it in 1..999 }.distinct().take(3),
-            recentNotes = recentNotes.map(String::trim).filter(String::isNotBlank).distinct().take(5),
-            sleepAction = if (type == RecordType.SLEEP) {
-                if (historical) SleepDraftAction.Manual else SleepDraftAction.SleepDown
-            } else {
-                null
-            },
-            customTitle = when {
-                customTitle.isNotBlank() -> customTitle
-                // No generic default label: concrete custom opens with definition name.
-                type == RecordType.CUSTOM -> ""
-                else -> ""
-            },
-            customItemId = customItemId,
-            customIconSlot = customIconSlot,
-        )
+        ): QuickRecordDraft {
+            require(type != RecordType.CUSTOM || customItemId?.takeIf { it > 0L } != null) {
+                "CUSTOM requires positive customItemId"
+            }
+            return QuickRecordDraft(
+                type = type,
+                timestamp = timestamp,
+                createIntent = createIntent,
+                amountMl = lastAmountMl?.takeIf { it in 1..999 }
+                    ?: recentAmountMl.firstOrNull { it in 1..999 }
+                    ?: if (type == RecordType.PUMP_EXPRESS) 60 else 120,
+                recentAmountMl = recentAmountMl.filter { it in 1..999 }.distinct().take(3),
+                recentNotes = recentNotes.map(String::trim).filter(String::isNotBlank).distinct().take(5),
+                sleepAction = if (type == RecordType.SLEEP) {
+                    if (historical) SleepDraftAction.Manual else SleepDraftAction.SleepDown
+                } else {
+                    null
+                },
+                customTitle = customTitle,
+                customItemId = customItemId,
+                customIconSlot = customIconSlot,
+            )
+        }
 
         fun wakeSleep(openSleep: Record, clickedAt: Long): QuickRecordDraft {
-            // Preserve common record photos attached when sleep started so confirming
-            // wake does not tombstone them via empty photoLocalPaths.
-            val photoPaths = localPhotoPaths(openSleep.payloadJson)
             return QuickRecordDraft(
                 type = RecordType.SLEEP,
                 timestamp = openSleep.timestamp,
@@ -704,8 +697,6 @@ internal data class QuickRecordDraft(
                 note = openSleep.note.orEmpty(),
                 sleepAction = SleepDraftAction.WakeUp,
                 isNap = (openSleep.payload.payload as? SleepPayload)?.isNap ?: false,
-                photos = photoPaths,
-                sourcePhotos = photoPaths,
             )
         }
 
@@ -729,7 +720,6 @@ internal data class QuickRecordDraft(
             val symptom = payload as? SymptomPayload
             val medicine = payload as? MedicinePayload
             val hospital = payload as? HospitalPayload
-            val other = payload as? OtherPayload
             val custom = payload as? CustomPayload
             val food = payload as? FoodPayload
             val vaccine = payload as? VaccinePayload
@@ -775,20 +765,14 @@ internal data class QuickRecordDraft(
                     ?.let(::trimNumber)?.toString()
                     ?: "36.5",
                 body = text?.body.orEmpty(),
-                // Prefer typed TextPayload.photos; otherwise the shared payload replica
-                // (extensions or raw JSON) so non-diary types and legacy rows load too.
-                photos = text?.photos?.takeIf { it.isNotEmpty() }
-                    ?: localPhotoPaths(record.payloadJson),
-                sourcePhotos = text?.photos?.takeIf { it.isNotEmpty() }
-                    ?: localPhotoPaths(record.payloadJson),
                 severity = symptom?.severity?.takeIf { it in 1..3 } ?: 2,
                 description = symptom?.description.orEmpty(),
                 medicineName = medicine?.name.orEmpty(),
                 medicineDose = medicine?.dose.orEmpty(),
                 hospitalReason = hospital?.reason.orEmpty(),
                 hospitalAdvice = hospital?.advice.orEmpty(),
-                customTitle = custom?.titleSnapshot ?: other?.title.orEmpty(),
-                customDetail = custom?.detail ?: other?.detail.orEmpty(),
+                customTitle = custom?.titleSnapshot.orEmpty(),
+                customDetail = custom?.detail.orEmpty(),
                 customItemId = custom?.customItemId,
                 customIconSlot = custom?.iconSlot,
                 measurementValue = measurementValue,
@@ -814,7 +798,6 @@ internal data class QuickRecordDraft(
                 type = plan.type,
                 timestamp = plan.scheduledAt,
                 note = plan.note,
-                createdByUserId = 0L,
                 payloadJson = plan.payloadJson,
                 schemaVersion = plan.schemaVersion,
                 updatedAt = plan.updatedAt,

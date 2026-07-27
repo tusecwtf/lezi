@@ -9,19 +9,13 @@ data class SyncEntity(
     val rev: Long = 0,
 )
 
-sealed interface PullFamilyName {
-    data object Omitted : PullFamilyName
-    data class Present(val value: String?) : PullFamilyName
-}
-
 data class PullResult(
     val entities: List<SyncEntity>,
     val cursor: Long,
-    val generation: String = "",
-    /** Null means a legacy response omitted the additive `has_more` field. */
-    val hasMore: Boolean? = null,
-    /** Presence-aware shared family name from the pull response envelope. */
-    val familyName: PullFamilyName = PullFamilyName.Omitted,
+    val generation: String,
+    val hasMore: Boolean,
+    /** Current wire always contains family_name; null explicitly clears it. */
+    val familyName: String? = null,
 )
 
 /** Server-owned Record author returned after an accepted push or atomic commit. */
@@ -39,16 +33,16 @@ data class JoinResult(
     val familyId: String,
     val token: String,
     val role: FamilyRole,
+    /** Create has no bootstrap entity page, while join may return one. */
     val entities: List<SyncEntity> = emptyList(),
+    /** Create starts from cursor zero; join publishes its explicit bootstrap cursor. */
     val cursor: Long = 0,
-    val generation: String = "",
-    /** Shared family name from create/join; null when empty or legacy NAS omits it. */
+    /** Required by both create and join in the current protocol. */
+    val generation: String,
+    /** Shared family name from create/join; null means the current server stores no name. */
     val familyName: String? = null,
-    /**
-     * Server-minted immutable membership identity.
-     * Null when a legacy NAS omits the field (client soft-parses).
-     */
-    val membershipId: String? = null,
+    /** Server-minted immutable membership identity. */
+    val membershipId: String,
 )
 
 /** Client-generated atomic package for record/care_plan + full media manifest. */
@@ -74,11 +68,6 @@ data class BundleCommitResult(
     val cursor: Long,
     val recordAuthors: List<CanonicalRecordAuthor> = emptyList(),
 )
-
-/** Thrown when a client that requires atomic packages hits a legacy NAS. */
-class AtomicBundleUnsupportedException(
-    message: String = "家庭服务器不支持原子同步包，请升级 NAS 上的 lezi-sync",
-) : IllegalStateException(message)
 
 interface SyncBackend {
     suspend fun create(

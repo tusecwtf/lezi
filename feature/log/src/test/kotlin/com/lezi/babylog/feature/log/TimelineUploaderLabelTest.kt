@@ -12,40 +12,40 @@ import org.junit.Test
 class TimelineUploaderLabelTest {
     private val members = listOf(
         UploaderMemberRef(
-            "device-a",
-            "妈妈",
-            FamilyRole.Owner,
+            displayName = "妈妈",
+            role = FamilyRole.Owner,
             isSelf = true,
             membershipId = "membership-a",
         ),
         UploaderMemberRef(
-            "device-b",
-            "爸爸",
-            FamilyRole.Member,
+            displayName = "爸爸",
+            role = FamilyRole.Member,
             isSelf = false,
             membershipId = "membership-b",
         ),
-        UploaderMemberRef("device-c", null, FamilyRole.Member, isSelf = false),
+        UploaderMemberRef(
+            displayName = null,
+            role = FamilyRole.Member,
+            isSelf = false,
+            membershipId = "membership-c",
+        ),
     )
 
     @Test
-    fun membershipAuthorDrivesTimelineEvenWhenLegacyDeviceConflicts() {
+    fun membershipAuthorDrivesTimeline() {
         val records = listOf(
             record(
                 id = 1,
-                deviceId = "device-b",
                 membershipId = "membership-a",
             ),
             record(
                 id = 2,
-                deviceId = "device-a",
                 membershipId = "membership-b",
             ),
         )
 
         val labels = buildUploaderLabels(
             records = records,
-            selfDeviceId = "device-a",
             isFamilyJoined = true,
             members = members,
             selfMembershipId = "membership-a",
@@ -58,13 +58,22 @@ class TimelineUploaderLabelTest {
     @Test
     fun hidesUploaderWhenNotJoinedOrSelf() {
         val records = listOf(
-            record(1, "device-a"),
-            record(2, "device-b"),
+            record(1, "membership-a"),
+            record(2, "membership-b"),
         )
         assertTrue(
-            buildUploaderLabels(records, "device-a", isFamilyJoined = false, members).isEmpty(),
+            buildUploaderLabels(
+                records,
+                isFamilyJoined = false,
+                members = members,
+            ).isEmpty(),
         )
-        val joinedSelf = buildUploaderLabels(records, "device-a", isFamilyJoined = true, members)
+        val joinedSelf = buildUploaderLabels(
+            records,
+            isFamilyJoined = true,
+            members = members,
+            selfMembershipId = "membership-a",
+        )
         assertFalse(joinedSelf.containsKey(1L))
         assertEquals("爸爸", joinedSelf[2L])
     }
@@ -72,12 +81,17 @@ class TimelineUploaderLabelTest {
     @Test
     fun mapsNonSelfToCurrentMembershipNameWithFallback() {
         val records = listOf(
-            record(1, "device-b"),
-            record(2, "device-c"),
-            record(3, "unknown"),
-            record(4, null),
+            record(1, "membership-b"),
+            record(2, "membership-c"),
+            record(3, "unknown-membership"),
+            record(4, ""),
         )
-        val labels = buildUploaderLabels(records, "device-a", isFamilyJoined = true, members)
+        val labels = buildUploaderLabels(
+            records,
+            isFamilyJoined = true,
+            members = members,
+            selfMembershipId = "membership-a",
+        )
         assertEquals("爸爸", labels[1L])
         assertEquals("家庭成员", labels[2L])
         assertEquals("家人", labels[3L])
@@ -116,17 +130,14 @@ class TimelineUploaderLabelTest {
 
     private fun record(
         id: Long,
-        deviceId: String?,
-        membershipId: String = "",
+        membershipId: String,
     ) = Record(
         id = id,
         clientUuid = "uuid-$id",
         babyId = 1,
         type = RecordType.FORMULA,
         timestamp = id * 1_000,
-        createdByUserId = 1,
         createdByMembershipId = membershipId,
-        createdByDeviceId = deviceId,
         payloadJson = """{"amount_ml":120}""",
         updatedAt = id * 1_000,
     )

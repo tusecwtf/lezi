@@ -613,7 +613,9 @@ Record 与 CarePlan 共享以下 current-wire 约束：
   `drink`、`head`、`chest`、`foot_size`、`vaccine` 与 `custom`；`memo`、`other` 和未知值
   均返回 `422`。
 - `type=custom` 时 `custom_item_client_uuid` 必须引用同家庭、未删除的 CustomItemDef；
-  其它类型必须省略或置空。该规则同时适用于 ordinary Record 和 atomic CarePlan 根。
+  wire 内的 `payload_json` 不得携带设备自增 `custom_item_id`；接收端以 UUID 解析自己的
+  本机 id 后再落库。其它类型必须省略或置空。该规则同时适用于 ordinary Record 和
+  atomic CarePlan 根。
 
 ### 10.1 `baby`
 

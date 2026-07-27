@@ -51,20 +51,20 @@ class QuickRecordDraftTest {
     }
 
     @Test
-    fun composerEditPreservesUnknownPayloadFields() {
+    fun composerEditReencodesCurrentPayloadFields() {
         val source = record(
             type = RecordType.FORMULA,
-            payload = """{"amount_ml":120,"scalar":"keep","object":{"v":2},"array":[1,2]}""",
+            payload = """{"amount_ml":120,"prepared_ml":135,"duration_min":8}""",
         )
 
         val command = QuickRecordDraft.fromRecord(source)
             .copy(amountMl = 135)
             .toSaveCommand()
 
-        assertTrue(command.payloadJson.contains("\"amount_ml\":135"))
-        assertTrue(command.payloadJson.contains("\"scalar\":\"keep\""))
-        assertTrue(command.payloadJson.contains("\"object\":{\"v\":2}"))
-        assertTrue(command.payloadJson.contains("\"array\":[1,2]"))
+        assertEquals(
+            """{"amount_ml":135,"prepared_ml":135,"duration_min":8}""",
+            command.payloadJson,
+        )
     }
 
     @Test
@@ -167,8 +167,7 @@ class QuickRecordDraftTest {
             timestamp = tappedAt,
             endTimestamp = null,
             note = null,
-            createdByUserId = 1L,
-            payloadJson = "{}",
+            payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
             updatedAt = tappedAt,
         )
         val wake = QuickRecordDraft.wakeSleep(
@@ -322,7 +321,6 @@ class QuickRecordDraftTest {
             timestamp = tappedAt - 3_600_000L,
             endTimestamp = null,
             note = "午睡",
-            createdByUserId = 1L,
             payloadJson = """{"is_nap":true,"anomaly_flag":false}""",
             updatedAt = tappedAt,
         )
@@ -335,13 +333,13 @@ class QuickRecordDraftTest {
         assertEquals(42L, command.existingRecordId)
         assertEquals(open.timestamp, command.timestamp)
         assertEquals(tappedAt, command.endTimestamp)
-        assertEquals("""{"is_nap":true}""", command.payloadJson)
+        assertEquals("""{"is_nap":true,"anomaly_flag":false}""", command.payloadJson)
         assertEquals(2, command.schemaVersion)
         assertEquals("午睡", command.note)
     }
 
     @Test
-    fun wakeConfirmationPersistsAnEditedNapFlagWithoutDroppingOtherPayload() {
+    fun wakeConfirmationPersistsAnEditedNapFlagWithoutDroppingExistingPayload() {
         val open = Record(
             id = 42L,
             clientUuid = "sleep-42",
@@ -350,7 +348,6 @@ class QuickRecordDraftTest {
             timestamp = tappedAt - 3_600_000L,
             endTimestamp = null,
             note = null,
-            createdByUserId = 1L,
             payloadJson = """{"is_nap":true,"anomaly_flag":true}""",
             updatedAt = tappedAt,
         )
@@ -363,31 +360,6 @@ class QuickRecordDraftTest {
             """{"is_nap":false,"anomaly_flag":true}""",
             command.payloadJson,
         )
-    }
-
-    @Test
-    fun wakeSleepKeepsCommonRecordPhotosFromOpenInterval() {
-        val open = Record(
-            id = 42L,
-            clientUuid = "sleep-42",
-            babyId = 7L,
-            type = RecordType.SLEEP,
-            timestamp = tappedAt - 3_600_000L,
-            endTimestamp = null,
-            note = "带图小睡",
-            createdByUserId = 1L,
-            payloadJson = """{"is_nap":true,"photos":["sleep-a.jpg","sleep-b.jpg"]}""",
-            updatedAt = tappedAt,
-        )
-
-        val draft = QuickRecordDraft.wakeSleep(open, tappedAt)
-
-        assertEquals(listOf("sleep-a.jpg", "sleep-b.jpg"), draft.photos)
-        assertEquals(listOf("sleep-a.jpg", "sleep-b.jpg"), draft.sourcePhotos)
-        // Save command keeps the shared photos[] replica so CareLog does not
-        // tombstone MediaAsset rows when confirming wake with unchanged photos.
-        assertTrue(draft.toSaveCommand().payloadJson.contains("\"photos\""))
-        assertTrue(draft.toSaveCommand().payloadJson.contains("sleep-a.jpg"))
     }
 
     @Test
@@ -407,7 +379,7 @@ class QuickRecordDraftTest {
     }
 
     @Test
-    fun editingRecordRoundTripsUnknownPayloadAndOriginalFields() {
+    fun editingUnknownCurrentPayloadIsFailClosed() {
         val source = Record(
             id = 88L,
             clientUuid = "formula-88",
@@ -416,44 +388,20 @@ class QuickRecordDraftTest {
             timestamp = tappedAt,
             endTimestamp = null,
             note = "原备注",
-            createdByUserId = 1L,
             payloadJson =
                 """{"amount_ml":120,"photos":["a.jpg"],"anomaly_flag":true,"future":{"v":2}}""",
             updatedAt = tappedAt,
         )
 
         val draft = QuickRecordDraft.fromRecord(source).copy(amountMl = 135)
-        val command = draft.toSaveCommand()
 
         assertTrue(draft.isEditing)
         assertEquals("保存修改", draft.confirmLabel())
-        assertEquals(88L, command.existingRecordId)
-        assertTrue(command.payloadJson.contains("\"amount_ml\":135"))
-        assertTrue(command.payloadJson.contains("\"photos\":[\"a.jpg\"]"))
-        assertTrue(command.payloadJson.contains("\"anomaly_flag\":true"))
-        assertTrue(command.payloadJson.contains("\"future\":{\"v\":2}"))
-        assertEquals(listOf("a.jpg"), draft.photos)
-        assertEquals(listOf("a.jpg"), draft.sourcePhotos)
-    }
-
-    @Test
-    fun nonTextRecordLoadsSharedPhotoReplicaFromPayload() {
-        val source = Record(
-            id = 12L,
-            clientUuid = "pee-12",
-            babyId = 7L,
-            type = RecordType.PEE,
-            timestamp = tappedAt,
-            endTimestamp = null,
-            note = null,
-            createdByUserId = 1L,
-            payloadJson = """{"pee_amount":2,"photos":["pee.jpg"]}""",
-            updatedAt = tappedAt,
+        assertEquals(
+            "此记录格式暂不支持安全编辑，原始数据已保留",
+            draft.validationError(nowMillis = tappedAt + 1L),
         )
-
-        val draft = QuickRecordDraft.fromRecord(source)
-        assertEquals(listOf("pee.jpg"), draft.photos)
-        assertEquals(listOf("pee.jpg"), draft.sourcePhotos)
+        assertFalse(draft.canConfirm(nowMillis = tappedAt + 1L))
     }
 
     @Test
@@ -466,8 +414,7 @@ class QuickRecordDraftTest {
             timestamp = tappedAt,
             endTimestamp = end,
             note = null,
-            createdByUserId = 1L,
-            payloadJson = """{"is_nap":false,"photos":["sleep.jpg"]}""",
+            payloadJson = """{"anomaly_flag":false,"is_nap":false}""",
             updatedAt = tappedAt,
         )
 
@@ -479,7 +426,6 @@ class QuickRecordDraftTest {
         assertTrue(openDraft.isEditing)
         assertEquals(SleepDraftAction.Manual, completeDraft.sleepAction)
         assertEquals(tappedAt + 20 * 60_000L, completeDraft.endTimestamp)
-        assertTrue(completeDraft.toSaveCommand().payloadJson.contains("\"photos\":[\"sleep.jpg\"]"))
     }
 
     @Test
@@ -492,8 +438,7 @@ class QuickRecordDraftTest {
             timestamp = tappedAt,
             endTimestamp = null,
             note = null,
-            createdByUserId = 1L,
-            payloadJson = "{}",
+            payloadJson = """{"anomaly_flag":false}""",
             updatedAt = tappedAt,
         )
 
@@ -876,7 +821,7 @@ class QuickRecordDraftTest {
             scheduledZoneId = "Asia/Shanghai",
             note = "换尿布",
             payloadJson = """{"pee_amount":1}""",
-            schemaVersion = 1,
+            schemaVersion = 2,
             updatedAt = tappedAt,
         )
         val draft = QuickRecordDraft.fromCarePlan(plan, actualTimestamp = tappedAt)
@@ -899,8 +844,8 @@ class QuickRecordDraftTest {
             scheduledAt = tappedAt + 60_000L,
             scheduledZoneId = "UTC",
             note = "记",
-            payloadJson = """{"body":"x","photos":["p1.jpg","p2.jpg"]}""",
-            schemaVersion = 1,
+            payloadJson = """{"body":"x"}""",
+            schemaVersion = 2,
             updatedAt = tappedAt,
         )
         // Composer fulfill path sets photos from listCarePlanPhotoPaths and sourcePhotos empty.
@@ -924,7 +869,7 @@ class QuickRecordDraftTest {
             scheduledZoneId = "UTC",
             note = "洗澡",
             payloadJson = "{}",
-            schemaVersion = 1,
+            schemaVersion = 2,
             updatedAt = tappedAt,
         )
         val draft = QuickRecordDraft.fromCarePlanForEdit(plan)
@@ -990,8 +935,8 @@ class QuickRecordDraftTest {
             type = RecordType.SLEEP,
             scheduledAt = tappedAt + 60_000L,
             scheduledZoneId = "UTC",
-            payloadJson = "{}",
-            schemaVersion = 1,
+            payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
+            schemaVersion = 2,
             updatedAt = tappedAt,
         )
         val draft = QuickRecordDraft.fromCarePlan(plan, actualTimestamp = tappedAt)
@@ -1022,54 +967,6 @@ class QuickRecordDraftTest {
     }
 
     @Test
-    fun historicalMemoAndBareCustomRemainEditable() {
-        val memo = Record(
-            id = 11L,
-            clientUuid = "memo-11",
-            babyId = 1L,
-            type = RecordType.MEMO,
-            timestamp = tappedAt,
-            createdByUserId = 1L,
-            payloadJson = """{"body":"旧备注"}""",
-            updatedAt = tappedAt,
-        )
-        val bareCustom = Record(
-            id = 12L,
-            clientUuid = "custom-12",
-            babyId = 1L,
-            type = RecordType.CUSTOM,
-            timestamp = tappedAt,
-            createdByUserId = 1L,
-            payloadJson = """{"title":"历史自定义"}""",
-            updatedAt = tappedAt,
-        )
-
-        val memoDraft = QuickRecordDraft.fromRecord(memo).copy(body = "改过的备注")
-        val customDraft = QuickRecordDraft.fromRecord(bareCustom).copy(customDetail = "补细节")
-
-        assertEquals(RecordType.MEMO, memoDraft.type)
-        assertTrue(memoDraft.isEditing)
-        assertTrue(memoDraft.toSaveCommand().payloadJson.contains("\"body\":\"改过的备注\""))
-
-        assertEquals(RecordType.CUSTOM, customDraft.type)
-        assertEquals("历史自定义", customDraft.customTitle)
-        assertNull(customDraft.customItemId)
-        assertTrue(customDraft.toSaveCommand().payloadJson.contains("\"title\":\"历史自定义\""))
-        assertTrue(customDraft.toSaveCommand().payloadJson.contains("\"detail\":\"补细节\""))
-    }
-
-    @Test
-    fun bareCustomCreateDoesNotInventADefaultTitle() {
-        val draft = QuickRecordDraft.create(RecordType.CUSTOM, tappedAt)
-        assertEquals("", draft.customTitle)
-        assertNull(draft.customItemId)
-        assertEquals(
-            "请填写标题",
-            draft.validationError(nowMillis = tappedAt + 1L),
-        )
-    }
-
-    @Test
     fun scheduleCareDefaultsProjectToSystemCalendarOn() {
         val now = 1_700_000_000_000L
         val draft = QuickRecordDraft.create(RecordType.FORMULA, now + 60_000L)
@@ -1089,7 +986,6 @@ class QuickRecordDraftTest {
             type = RecordType.FORMULA,
             timestamp = now - 60_000L,
             note = "原备注",
-            createdByUserId = 1L,
             payloadJson = """{"amount_ml":120}""",
             updatedAt = now - 60_000L,
         )
@@ -1110,17 +1006,6 @@ class QuickRecordDraftTest {
         assertEquals("保存修改", cancelled.confirmLabel(nowMillis = now))
         assertTrue(cancelled.canConfirm(nowMillis = now))
 
-        // Historical memo cannot convert even if time is future.
-        val memo = QuickRecordDraft.fromRecord(
-            source.copy(
-                id = 56L,
-                type = RecordType.MEMO,
-                payloadJson = """{"body":"旧"}""",
-            ),
-        ).copy(timestamp = now + 1L)
-        assertFalse(memo.needsConvertToCarePlan(nowMillis = now))
-        assertEquals("不能选未来时刻", memo.validationError(nowMillis = now))
-        assertFalse(memo.canConfirm(nowMillis = now))
     }
 
     @Test
@@ -1134,8 +1019,7 @@ class QuickRecordDraftTest {
             timestamp = now - 30_000L,
             endTimestamp = null,
             note = null,
-            createdByUserId = 1L,
-            payloadJson = """{"is_nap":true}""",
+            payloadJson = """{"is_nap":true,"anomaly_flag":false}""",
             updatedAt = now - 30_000L,
         )
         val sleepDraft = QuickRecordDraft.fromRecord(openSleep).copy(timestamp = now + 60_000L)
@@ -1150,8 +1034,8 @@ class QuickRecordDraftTest {
             babyId = 1L,
             type = RecordType.NURSING,
             timestamp = now - 10_000L,
-            createdByUserId = 1L,
-            payloadJson = """{"left_min":0,"right_min":0,"order":"LR"}""",
+            payloadJson =
+                """{"left_min":0,"right_min":0,"order":"LR","record_mode":"end"}""",
             updatedAt = now - 10_000L,
         )
         val nursingDraft = QuickRecordDraft.fromRecord(nursing).copy(
@@ -1173,9 +1057,8 @@ class QuickRecordDraftTest {
         babyId = 1,
         type = type,
         timestamp = tappedAt,
-        createdByUserId = 1,
         payloadJson = payload,
-        schemaVersion = 1,
+        schemaVersion = 2,
         updatedAt = tappedAt,
     )
 }

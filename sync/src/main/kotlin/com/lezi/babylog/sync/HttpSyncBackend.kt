@@ -52,10 +52,6 @@ internal fun requireMemberDisplayName(displayName: String?): String {
     return normalized
 }
 
-/** @deprecated Prefer [requireMemberDisplayName]; kept name for existing call sites. */
-internal fun memberDisplayNameForWire(displayName: String?): String =
-    requireMemberDisplayName(displayName)
-
 /**
  * Optional shared family name for create / owner rename.
  * Blank becomes null (server stores null; client applies fallback display).
@@ -91,43 +87,42 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
         post(baseUrl, "/v1/family/create", null, buildJsonObject {
             put("device_id", deviceId)
             put("create_request_id", createRequestId)
-            put("display_name", memberDisplayNameForWire(displayName))
+            put("display_name", requireMemberDisplayName(displayName))
             normalizeFamilyNameForWire(familyName)?.let { put("family_name", it) }
         }, extraHeaders = buildMap {
             bootstrapSecret?.takeIf(String::isNotBlank)?.let {
                 put(BOOTSTRAP_SECRET_HEADER, it)
             }
-        }).toJoinResult()
+        }).toCreateResult()
 
     override suspend fun push(session: SyncSession, entities: List<SyncEntity>): PushResult {
+        session.requireCurrentReplicaTransport()
         val json = post(session.baseUrl, "/v1/push", session.familyToken, buildJsonObject {
             put("device_id", session.deviceId)
-            session.pullGeneration.takeIf(String::isNotBlank)?.let {
-                put("generation", it)
-            }
+            put("generation", session.pullGeneration)
             put("entities", buildJsonArray { entities.forEach { add(it.toJson()) } })
         })
         return PushResult(
-            applied = json["applied"]?.jsonPrimitive?.longOrNull?.toInt() ?: 0,
+            applied = json.requiredLong("applied", "push").toInt(),
             recordAuthors = json.recordAuthors(),
         )
     }
 
     override suspend fun pull(session: SyncSession): PullResult {
-        val generation = session.pullGeneration
-            .takeIf(String::isNotBlank)
-            ?.let { "&generation=${URLEncoder.encode(it, Charsets.UTF_8.name())}" }
-            .orEmpty()
+        session.requireCurrentReplicaTransport()
+        val generation = URLEncoder.encode(session.pullGeneration, Charsets.UTF_8.name())
         val json = get(
             session.baseUrl,
-            "/v1/pull?cursor=${session.pullCursor}$generation",
+            "/v1/pull?cursor=${session.pullCursor}&generation=$generation",
             session.familyToken,
         )
         return PullResult(
-            entities = json.entities(),
-            cursor = json["cursor"]?.jsonPrimitive?.longOrNull ?: session.pullCursor,
-            generation = json["generation"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-            hasMore = json["has_more"]?.jsonPrimitive?.booleanOrNull,
+            entities = json.entities("pull"),
+            cursor = json.requiredLong("cursor", "pull"),
+            generation = json.requiredNonBlankString("generation", "pull"),
+            hasMore = requireNotNull(json["has_more"]?.jsonPrimitive?.booleanOrNull) {
+                "pull 响应缺少 has_more"
+            },
             familyName = json.pullFamilyName(),
         )
     }
@@ -146,7 +141,7 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
         post(baseUrl, "/v1/join", null, buildJsonObject {
             put("code", code)
             put("device_id", deviceId)
-            put("display_name", memberDisplayNameForWire(displayName))
+            put("display_name", requireMemberDisplayName(displayName))
         }).toJoinResult()
 
     override suspend fun updateMyDisplayName(session: SyncSession, displayName: String) {
@@ -155,7 +150,7 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
             "/v1/family/display-name",
             session.familyToken,
             buildJsonObject {
-                put("display_name", memberDisplayNameForWire(displayName))
+                put("display_name", requireMemberDisplayName(displayName))
             },
         )
     }
@@ -174,21 +169,21 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
 
     override suspend fun members(session: SyncSession): List<FamilyMember> {
         val json = get(session.baseUrl, "/v1/family/members", session.familyToken)
-        return (json["members"] as? JsonArray).orEmpty().mapNotNull { memberElement ->
-            val member = memberElement as? JsonObject ?: return@mapNotNull null
+        return json.requiredArray("members", "members").mapIndexed { index, memberElement ->
+            val member = memberElement as? JsonObject
+                ?: throw IllegalArgumentException("members[$index] 不是对象")
             FamilyMember(
-                displayName = (member["display_name"] as? JsonPrimitive)?.contentOrNull,
-                role = when ((member["role"] as? JsonPrimitive)?.contentOrNull) {
+                displayName = member.requiredNonBlankString("display_name", "members[$index]"),
+                role = when (member.requiredString("role", "members[$index]")) {
                     "owner" -> FamilyRole.Owner
-                    else -> FamilyRole.Member
+                    "member" -> FamilyRole.Member
+                    else -> throw IllegalArgumentException("members[$index].role 无效")
                 },
-                isSelf = (member["is_self"] as? JsonPrimitive)?.booleanOrNull ?: false,
-                // Link key for created_by_device_id → 称呼; never shown in UI.
-                deviceId = (member["device_id"] as? JsonPrimitive)?.contentOrNull,
-                // Soft-parse: legacy NAS may omit membership_id before upgrade.
-                membershipId = (member["membership_id"] as? JsonPrimitive)?.contentOrNull
-                    ?.trim()
-                    ?.takeIf { it.isNotEmpty() },
+                isSelf = member.requiredBoolean("is_self", "members[$index]"),
+                membershipId = member.requiredNonBlankString(
+                    "membership_id",
+                    "members[$index]",
+                ),
             )
         }
     }
@@ -222,13 +217,12 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
         session: SyncSession,
         draft: AtomicBundleDraft,
     ): BundleStageStatus {
+        session.requireCurrentReplicaTransport()
         val body = buildJsonObject {
             put("bundle_id", draft.bundleId)
             put("root", draft.root.toJson())
             put("media", buildJsonArray { draft.media.forEach { add(it.toJson()) } })
-            session.pullGeneration.takeIf(String::isNotBlank)?.let {
-                put("generation", it)
-            }
+            put("generation", session.pullGeneration)
         }
         return post(session.baseUrl, "/v1/bundles", session.familyToken, body).toBundleStageStatus()
     }
@@ -255,10 +249,9 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
         session: SyncSession,
         bundleId: String,
     ): BundleCommitResult {
+        session.requireCurrentReplicaTransport()
         val body = buildJsonObject {
-            session.pullGeneration.takeIf(String::isNotBlank)?.let {
-                put("generation", it)
-            }
+            put("generation", session.pullGeneration)
         }
         val json = post(
             session.baseUrl,
@@ -267,10 +260,10 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
             body,
         )
         return BundleCommitResult(
-            bundleId = json["bundle_id"]?.jsonPrimitive?.contentOrNull ?: bundleId,
-            status = json["status"]?.jsonPrimitive?.contentOrNull ?: "committed",
-            applied = json["applied"]?.jsonPrimitive?.longOrNull?.toInt() ?: 0,
-            cursor = json["cursor"]?.jsonPrimitive?.longOrNull ?: 0L,
+            bundleId = json.requiredNonBlankString("bundle_id", "bundle commit"),
+            status = json.requiredNonBlankString("status", "bundle commit"),
+            applied = json.requiredLong("applied", "bundle commit").toInt(),
+            cursor = json.requiredLong("cursor", "bundle commit"),
             recordAuthors = json.recordAuthors(),
         )
     }
@@ -359,7 +352,8 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
             )
             val text = bytes.toString(Charsets.UTF_8)
             if (code !in 200..299) throw SyncHttpException(code, text)
-            Json.parseToJsonElement(text.ifBlank { "{}" }).jsonObject
+            require(text.isNotBlank()) { "家庭服务器 JSON 响应为空" }
+            Json.parseToJsonElement(text).jsonObject
         } finally {
             connection.disconnect()
         }
@@ -390,7 +384,8 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
         )
         val text = bytes.toString(Charsets.UTF_8)
         if (code !in 200..299) throw SyncHttpException(code, text)
-        return text.ifBlank { "{}" }
+        require(text.isNotBlank()) { "家庭服务器 JSON 响应为空" }
+        return text
     }
 
     private fun readBoundedBody(
@@ -416,6 +411,12 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
         } ?: byteArrayOf()
         return code to bytes
     }
+}
+
+private fun SyncSession.requireCurrentReplicaTransport() {
+    require(isJoined) { "当前同步会话尚未加入家庭" }
+    require(deviceId.isNotBlank()) { "当前同步会话缺少 device_id" }
+    require(pullGeneration.isNotBlank()) { "当前同步会话缺少 generation" }
 }
 
 private fun InputStream.readBytesUpTo(
@@ -465,69 +466,78 @@ private fun SyncEntity.toJson() = buildJsonObject {
     deletedAt?.let { put("deleted_at", it) }
 }
 
-private fun JsonObject.entities(): List<SyncEntity> =
-    (get("entities") as? JsonArray).orEmpty().map { element ->
-        val value = element.jsonObject
+private fun JsonObject.entities(context: String): List<SyncEntity> =
+    requiredArray("entities", context).mapIndexed { index, element ->
+        val value = element as? JsonObject
+            ?: throw IllegalArgumentException("$context.entities[$index] 不是对象")
         SyncEntity(
-            type = value["type"]!!.jsonPrimitive.content,
-            clientUuid = value["client_uuid"]!!.jsonPrimitive.content,
-            payloadJson = value["payload"]?.toString() ?: "{}",
-            updatedAt = value["updated_at"]!!.jsonPrimitive.longOrNull ?: 0,
-            deletedAt = value["deleted_at"]?.jsonPrimitive?.longOrNull,
-            rev = value["rev"]?.jsonPrimitive?.longOrNull ?: 0,
+            type = value.requiredNonBlankString("type", "$context.entities[$index]"),
+            clientUuid = value.requiredNonBlankString(
+                "client_uuid",
+                "$context.entities[$index]",
+            ),
+            payloadJson = (value["payload"] as? JsonObject)?.toString()
+                ?: throw IllegalArgumentException("$context.entities[$index].payload 缺失或无效"),
+            updatedAt = value.requiredLong("updated_at", "$context.entities[$index]"),
+            deletedAt = value.requiredNullableLong("deleted_at", "$context.entities[$index]"),
+            rev = value.requiredLong("rev", "$context.entities[$index]"),
         )
     }
 
 private fun JsonObject.recordAuthors(): List<CanonicalRecordAuthor> =
-    (get("record_authors") as? JsonArray).orEmpty().mapNotNull { element ->
-        val value = element as? JsonObject ?: return@mapNotNull null
-        val clientUuid = (value["client_uuid"] as? JsonPrimitive)
-            ?.contentOrNull
-            ?.trim()
-            ?.takeIf(String::isNotEmpty)
-            ?: return@mapNotNull null
-        val membershipId = (value["created_by_membership_id"] as? JsonPrimitive)
-            ?.contentOrNull
-            ?.trim()
-            ?.takeIf(String::isNotEmpty)
-            ?: return@mapNotNull null
+    requiredArray("record_authors", "sync response").mapIndexed { index, element ->
+        val value = element as? JsonObject
+            ?: throw IllegalArgumentException("record_authors[$index] 不是对象")
+        val clientUuid = value.requiredNonBlankString(
+            "client_uuid",
+            "record_authors[$index]",
+        )
+        val membershipId = value.requiredNonBlankString(
+            "created_by_membership_id",
+            "record_authors[$index]",
+        )
         CanonicalRecordAuthor(clientUuid, membershipId)
     }
 
 private fun JsonObject.toBundleStageStatus(): BundleStageStatus = BundleStageStatus(
-    bundleId = get("bundle_id")?.jsonPrimitive?.contentOrNull.orEmpty(),
-    status = get("status")?.jsonPrimitive?.contentOrNull.orEmpty(),
-    missingMedia = (get("missing_media") as? JsonArray).orEmpty().mapNotNull {
-        (it as? JsonPrimitive)?.contentOrNull
-    },
-    stagedMedia = (get("staged_media") as? JsonArray).orEmpty().mapNotNull {
-        (it as? JsonPrimitive)?.contentOrNull
-    },
+    bundleId = requiredNonBlankString("bundle_id", "bundle stage"),
+    status = requiredNonBlankString("status", "bundle stage"),
+    missingMedia = requiredStringArray("missing_media", "bundle stage"),
+    stagedMedia = requiredStringArray("staged_media", "bundle stage"),
 )
 
-private fun JsonObject.toJoinResult(): JoinResult = JoinResult(
-    familyId = get("family_id")!!.jsonPrimitive.content,
-    token = get("token")!!.jsonPrimitive.content,
-    role = if (get("role")?.jsonPrimitive?.content == "owner") {
-        FamilyRole.Owner
-    } else {
-        FamilyRole.Member
-    },
-    entities = entities(),
-    cursor = get("cursor")?.jsonPrimitive?.longOrNull ?: 0,
-    generation = get("generation")?.jsonPrimitive?.contentOrNull.orEmpty(),
-    // Legacy NAS may omit the field or send null; treat blank as null for client fallbacks.
-    familyName = (get("family_name") as? JsonPrimitive)?.contentOrNull
-        ?.trim()
-        ?.takeIf { it.isNotEmpty() },
-    // Soft-parse: older NAS without membership_id must not crash mixed upgrade paths.
-    membershipId = (get("membership_id") as? JsonPrimitive)?.contentOrNull
-        ?.trim()
-        ?.takeIf { it.isNotEmpty() },
-)
+private fun JsonObject.toCreateResult(): JoinResult {
+    require(requiredString("role", "create") == "owner") { "create 响应 role 无效" }
+    return JoinResult(
+        familyId = requiredNonBlankString("family_id", "create"),
+        token = requiredNonBlankString("token", "create"),
+        role = FamilyRole.Owner,
+        generation = requiredNonBlankString("generation", "create"),
+        familyName = requiredFamilyName("create"),
+        membershipId = requiredNonBlankString("membership_id", "create"),
+    )
+}
 
-private fun JsonObject.pullFamilyName(): PullFamilyName {
-    if ("family_name" !in this) return PullFamilyName.Omitted
+private fun JsonObject.toJoinResult(): JoinResult {
+    require(requiredString("role", "join") == "member") { "join 响应 role 无效" }
+    return JoinResult(
+        familyId = requiredNonBlankString("family_id", "join"),
+        token = requiredNonBlankString("token", "join"),
+        role = FamilyRole.Member,
+        entities = entities("join"),
+        cursor = requiredLong("cursor", "join"),
+        generation = requiredNonBlankString("generation", "join"),
+        familyName = requiredFamilyName("join"),
+        membershipId = requiredNonBlankString("membership_id", "join"),
+    )
+}
+
+private fun JsonObject.pullFamilyName(): String? {
+    return requiredFamilyName("pull")
+}
+
+private fun JsonObject.requiredFamilyName(context: String): String? {
+    require("family_name" in this) { "$context 响应缺少 family_name" }
     val value = when (val raw = get("family_name")) {
         null, JsonNull -> null
         is JsonPrimitive -> {
@@ -536,8 +546,64 @@ private fun JsonObject.pullFamilyName(): PullFamilyName {
         }
         else -> error("family_name must be a string or null")
     }
-    return PullFamilyName.Present(normalizeFamilyNameForWire(value))
+    return normalizeFamilyNameForWire(value)
 }
+
+private fun JsonObject.requiredArray(key: String, context: String): JsonArray =
+    get(key) as? JsonArray
+        ?: throw IllegalArgumentException("$context 响应缺少或无效 $key")
+
+private fun JsonObject.requiredString(key: String, context: String): String {
+    val primitive = get(key) as? JsonPrimitive
+        ?: throw IllegalArgumentException("$context 响应缺少或无效 $key")
+    require(primitive.isString) { "$context 响应 $key 必须是字符串" }
+    return primitive.content
+}
+
+private fun JsonObject.requiredNonBlankString(key: String, context: String): String =
+    requiredString(key, context).trim().also {
+        require(it.isNotEmpty()) { "$context 响应 $key 为空" }
+    }
+
+private fun JsonObject.requiredLong(key: String, context: String): Long =
+    get(key)?.jsonPrimitive?.longOrNull
+        ?: throw IllegalArgumentException("$context 响应缺少或无效 $key")
+
+private fun JsonObject.requiredBoolean(key: String, context: String): Boolean =
+    get(key)?.jsonPrimitive?.booleanOrNull
+        ?: throw IllegalArgumentException("$context 响应缺少或无效 $key")
+
+private fun JsonObject.requiredNullableString(key: String, context: String): String? {
+    require(key in this) { "$context 响应缺少 $key" }
+    return when (val value = get(key)) {
+        JsonNull -> null
+        is JsonPrimitive -> {
+            require(value.isString) { "$context 响应 $key 必须是字符串或 null" }
+            value.content
+        }
+        else -> throw IllegalArgumentException("$context 响应 $key 必须是字符串或 null")
+    }
+}
+
+private fun JsonObject.requiredNullableLong(key: String, context: String): Long? {
+    require(key in this) { "$context 响应缺少 $key" }
+    return when (val value = get(key)) {
+        JsonNull -> null
+        is JsonPrimitive -> value.longOrNull
+            ?: throw IllegalArgumentException("$context 响应 $key 必须是整数或 null")
+        else -> throw IllegalArgumentException("$context 响应 $key 必须是整数或 null")
+    }
+}
+
+private fun JsonObject.requiredStringArray(key: String, context: String): List<String> =
+    requiredArray(key, context).mapIndexed { index, element ->
+        val value = element as? JsonPrimitive
+            ?: throw IllegalArgumentException("$context 响应 $key[$index] 不是字符串")
+        require(value.isString) { "$context 响应 $key[$index] 不是字符串" }
+        value.content.trim().also {
+            require(it.isNotEmpty()) { "$context 响应 $key[$index] 为空" }
+        }
+    }
 
 internal class SyncHttpException(
     val statusCode: Int,

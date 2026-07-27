@@ -25,7 +25,7 @@ enum class FamilyRole {
  *
  * This is provenance only: it never contains or implies a membership id. The
  * reference survives process death so a failed acknowledgement pull can retry
- * without treating every legacy blank creator as local ownership.
+ * without guessing creator ownership.
  */
 data class CreatorAcknowledgementRef(
     val entityType: String,
@@ -46,14 +46,13 @@ data class SyncSession(
     val serverScheme: String = DEFAULT_SERVER_SCHEME,
     /**
      * Shared family name cached from create/join/rename responses.
-     * Null when empty, unknown, or legacy NAS omitted the field — UI applies fallback.
+     * Null when the current family has no configured shared name.
      * Cold start relies on this local cache (no GET family-name path in this ticket).
      */
     val familyName: String? = null,
     /**
      * Server-minted immutable membership identity for this device's family session.
-     * Empty when not joined or when a legacy NAS omitted `membership_id` on create/join.
-     * Prefer members list projection to refresh after upgrade.
+     * Empty only while not joined; current create/join responses require this field.
      */
     val membershipId: String = "",
     val pendingCreatorAcknowledgements: Set<CreatorAcknowledgementRef> = emptySet(),
@@ -86,7 +85,7 @@ interface SyncPreferences {
     suspend fun updatePullCheckpoint(
         cursor: Long,
         generation: String,
-        familyName: PullFamilyName,
+        familyName: String?,
     )
     suspend fun updateCreatorAcknowledgements(
         add: Set<CreatorAcknowledgementRef> = emptySet(),
@@ -96,12 +95,10 @@ interface SyncPreferences {
     suspend fun ensureDeviceId(): String
     suspend fun ensureCreateRequestId(): String
     suspend fun clearCreateRequestId()
-    /** Clears family session only (legacy); prefer [clearAllLocalSyncConfig] for leave/delete. */
-    suspend fun clearFamilySession()
     /** Wipes the host, port, SSID allowlist, and family session. */
     suspend fun clearAllLocalSyncConfig()
-    /** Move legacy plaintext secrets into the secure store when present. */
-    suspend fun migrateSecretsIfNeeded() {}
+    /** Completes a same-version credential clear interrupted between durability domains. */
+    suspend fun recoverPendingCredentialClear() {}
 }
 
 @Singleton
@@ -114,26 +111,21 @@ class DataStoreSyncPreferences @Inject constructor(
     }
 
     private fun mapSession(prefs: Preferences): SyncSession {
-        val legacyUrl = prefs[Keys.BASE_URL].orEmpty()
-        val parsedLegacyUrl = runCatching { HomeLanServerConfig.fromBaseUrl(legacyUrl) }
-            .getOrNull()
         val rawScheme = prefs[Keys.SERVER_SCHEME].orEmpty()
-            .ifBlank { parsedLegacyUrl?.scheme.orEmpty() }
         val schemeIsValid = rawScheme.lowercase() == "http" || rawScheme.lowercase() == "https"
         val host = if (schemeIsValid) {
-            prefs[Keys.SERVER_HOST].orEmpty().ifBlank { parsedLegacyUrl?.host.orEmpty() }
+            prefs[Keys.SERVER_HOST].orEmpty()
         } else {
             ""
         }
         val port = prefs[Keys.SERVER_PORT]
-            ?: parsedLegacyUrl?.port?.takeIf { legacyUrl.isNotBlank() }
             ?: DEFAULT_SERVER_PORT
         val scheme = if (schemeIsValid) rawScheme.lowercase() else DEFAULT_SERVER_SCHEME
         val ssids = decodeSsids(prefs[Keys.ALLOWED_SSIDS])
         val credentialClearPending = prefs[Keys.PENDING_FAMILY_CREDENTIAL_CLEAR] == true
         return SyncSession(
             familyId = prefs[Keys.FAMILY_ID].orEmpty(),
-            familyToken = if (credentialClearPending) "" else resolveFamilyToken(prefs),
+            familyToken = if (credentialClearPending) "" else secureTokenStore.getToken(),
             deviceId = prefs[Keys.DEVICE_ID].orEmpty(),
             role = prefs[Keys.ROLE]?.let { runCatching { FamilyRole.valueOf(it) }.getOrNull() }
                 ?: FamilyRole.None,
@@ -177,13 +169,11 @@ class DataStoreSyncPreferences @Inject constructor(
             }
             if (normalized.host.isBlank()) {
                 prefs.remove(Keys.SERVER_HOST)
-                prefs.remove(Keys.BASE_URL)
                 prefs.remove(Keys.SERVER_SCHEME)
             } else {
                 prefs[Keys.SERVER_HOST] = normalized.host
                 prefs[Keys.SERVER_PORT] = normalized.port
                 prefs[Keys.SERVER_SCHEME] = normalized.scheme
-                prefs.remove(Keys.BASE_URL)
             }
             val ssidEncoded = encodeSsids(normalized.allowedSsids)
             if (ssidEncoded.isBlank()) {
@@ -204,9 +194,6 @@ class DataStoreSyncPreferences @Inject constructor(
                 prefs[Keys.SERVER_HOST] = config.host
                 prefs[Keys.SERVER_PORT] = config.port
                 prefs[Keys.SERVER_SCHEME] = config.scheme
-                prefs.remove(Keys.BASE_URL)
-            } else {
-                prefs.remove(Keys.BASE_URL)
             }
             val ssidEncoded = encodeSsids(config.allowedSsids.ifEmpty { session.allowedSsids })
             if (ssidEncoded.isBlank()) prefs.remove(Keys.ALLOWED_SSIDS)
@@ -215,7 +202,6 @@ class DataStoreSyncPreferences @Inject constructor(
             if (previousFamilyId != session.familyId) {
                 prefs.remove(Keys.PENDING_CREATOR_ACKNOWLEDGEMENTS)
             }
-            prefs.remove(Keys.FAMILY_TOKEN)
             // The owner session and retirement of its idempotency key are one
             // durable commit. A separate post-commit edit can fail after the UI
             // already owns a valid joined session.
@@ -249,7 +235,6 @@ class DataStoreSyncPreferences @Inject constructor(
     }
 
     override suspend fun updateCursor(cursor: Long, generation: String) {
-        migratePlaintextTokenIfPresent()
         dataStore.edit {
             it[Keys.PULL_CURSOR] = cursor.coerceAtLeast(0)
             if (generation.isBlank()) {
@@ -263,11 +248,9 @@ class DataStoreSyncPreferences @Inject constructor(
     override suspend fun updatePullCheckpoint(
         cursor: Long,
         generation: String,
-        familyName: PullFamilyName,
+        familyName: String?,
     ) {
-        migratePlaintextTokenIfPresent()
-        val normalizedFamilyName = (familyName as? PullFamilyName.Present)
-            ?.let { normalizeFamilyNameForWire(it.value) }
+        val normalizedFamilyName = normalizeFamilyNameForWire(familyName)
         dataStore.edit {
             it[Keys.PULL_CURSOR] = cursor.coerceAtLeast(0)
             if (generation.isBlank()) {
@@ -275,12 +258,10 @@ class DataStoreSyncPreferences @Inject constructor(
             } else {
                 it[Keys.PULL_GENERATION] = generation
             }
-            if (familyName is PullFamilyName.Present) {
-                if (normalizedFamilyName == null) {
-                    it.remove(Keys.FAMILY_NAME)
-                } else {
-                    it[Keys.FAMILY_NAME] = normalizedFamilyName
-                }
+            if (normalizedFamilyName == null) {
+                it.remove(Keys.FAMILY_NAME)
+            } else {
+                it[Keys.FAMILY_NAME] = normalizedFamilyName
             }
         }
     }
@@ -307,12 +288,10 @@ class DataStoreSyncPreferences @Inject constructor(
     }
 
     override suspend fun markSuccess(atMillis: Long) {
-        migratePlaintextTokenIfPresent()
         dataStore.edit { it[Keys.LAST_SUCCESS_AT] = atMillis }
     }
 
     override suspend fun ensureDeviceId(): String {
-        migratePlaintextTokenIfPresent()
         session.first().deviceId.takeIf { it.isNotBlank() }?.let { return it }
         val generated = UUID.randomUUID().toString()
         dataStore.edit { prefs ->
@@ -322,7 +301,6 @@ class DataStoreSyncPreferences @Inject constructor(
     }
 
     override suspend fun ensureCreateRequestId(): String {
-        migratePlaintextTokenIfPresent()
         dataStore.data.first()[Keys.CREATE_REQUEST_ID]
             ?.takeIf(String::isNotBlank)
             ?.let { return it }
@@ -339,19 +317,10 @@ class DataStoreSyncPreferences @Inject constructor(
         dataStore.edit { it.remove(Keys.CREATE_REQUEST_ID) }
     }
 
-    override suspend fun clearFamilySession() {
-        dataStore.edit { prefs ->
-            clearFamilyValues(prefs)
-            prefs[Keys.PENDING_FAMILY_CREDENTIAL_CLEAR] = true
-        }
-        finishPendingFamilyCredentialClear()
-    }
-
     override suspend fun clearAllLocalSyncConfig() {
         dataStore.edit { prefs ->
             clearFamilyValues(prefs)
             prefs[Keys.PENDING_FAMILY_CREDENTIAL_CLEAR] = true
-            prefs.remove(Keys.BASE_URL)
             prefs.remove(Keys.SERVER_HOST)
             prefs.remove(Keys.SERVER_PORT)
             prefs.remove(Keys.SERVER_SCHEME)
@@ -360,9 +329,8 @@ class DataStoreSyncPreferences @Inject constructor(
         finishPendingFamilyCredentialClear()
     }
 
-    override suspend fun migrateSecretsIfNeeded() {
+    override suspend fun recoverPendingCredentialClear() {
         finishPendingFamilyCredentialClear()
-        migratePlaintextTokenIfPresent()
     }
 
     private suspend fun finishPendingFamilyCredentialClear() {
@@ -373,52 +341,12 @@ class DataStoreSyncPreferences @Inject constructor(
         // state and a later foreground operation can finish idempotently.
         secureTokenStore.clearToken()
         dataStore.edit { prefs ->
-            prefs.remove(Keys.FAMILY_TOKEN)
             prefs.remove(Keys.PENDING_FAMILY_CREDENTIAL_CLEAR)
         }
     }
 
-    suspend fun migratePlaintextTokenIfPresent() {
-        dataStore.edit { prefs ->
-            val legacy = prefs[Keys.FAMILY_TOKEN]
-            if (!legacy.isNullOrBlank()) {
-                if (secureTokenStore.getToken().isBlank()) {
-                    secureTokenStore.setToken(legacy)
-                }
-                prefs.remove(Keys.FAMILY_TOKEN)
-            }
-            // Populate any missing structured endpoint fields from the legacy
-            // URL, then retire the legacy key once a usable host exists.
-            val base = prefs[Keys.BASE_URL].orEmpty()
-            if (base.isNotBlank()) {
-                val parsed = runCatching { HomeLanServerConfig.fromBaseUrl(base) }.getOrNull()
-                if (parsed != null && parsed.host.isNotBlank()) {
-                    if (prefs[Keys.SERVER_HOST].isNullOrBlank()) {
-                        prefs[Keys.SERVER_HOST] = parsed.host
-                    }
-                    if (prefs[Keys.SERVER_PORT] == null) {
-                        prefs[Keys.SERVER_PORT] = parsed.port
-                    }
-                    if (prefs[Keys.SERVER_SCHEME].isNullOrBlank()) {
-                        prefs[Keys.SERVER_SCHEME] = parsed.scheme
-                    }
-                }
-                if (!prefs[Keys.SERVER_HOST].isNullOrBlank()) {
-                    prefs.remove(Keys.BASE_URL)
-                }
-            }
-        }
-    }
-
-    private fun resolveFamilyToken(prefs: Preferences): String {
-        val secure = secureTokenStore.getToken()
-        if (secure.isNotBlank()) return secure
-        return prefs[Keys.FAMILY_TOKEN].orEmpty()
-    }
-
     private fun clearFamilyValues(prefs: androidx.datastore.preferences.core.MutablePreferences) {
         prefs.remove(Keys.FAMILY_ID)
-        prefs.remove(Keys.FAMILY_TOKEN)
         prefs.remove(Keys.ROLE)
         prefs.remove(Keys.PULL_CURSOR)
         prefs.remove(Keys.PULL_GENERATION)
@@ -482,13 +410,11 @@ class DataStoreSyncPreferences @Inject constructor(
     }
 
     private object Keys {
-        val BASE_URL = stringPreferencesKey("sync_base_url")
         val SERVER_HOST = stringPreferencesKey("sync_server_host")
         val SERVER_PORT = intPreferencesKey("sync_server_port")
         val SERVER_SCHEME = stringPreferencesKey("sync_server_scheme")
         val ALLOWED_SSIDS = stringPreferencesKey("sync_allowed_ssids")
         val FAMILY_ID = stringPreferencesKey("sync_family_id")
-        val FAMILY_TOKEN = stringPreferencesKey("sync_family_token")
         val DEVICE_ID = stringPreferencesKey("sync_device_id")
         val ROLE = stringPreferencesKey("sync_family_role")
         val PULL_CURSOR = longPreferencesKey("sync_pull_cursor")

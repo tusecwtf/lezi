@@ -182,6 +182,5 @@ private fun searchRecord(id: Long) = Record(
     type = RecordType.MEDICINE,
     timestamp = 1_700_000_000_000L,
     note = "布洛芬",
-    createdByUserId = 1,
     updatedAt = 1_700_000_000_000L,
 )

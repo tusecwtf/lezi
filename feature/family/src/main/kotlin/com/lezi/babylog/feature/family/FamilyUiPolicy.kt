@@ -158,9 +158,6 @@ internal fun canEditFamilyAvatar(role: FamilyRole): Boolean = role != FamilyRole
 internal fun familyStorageCopy(enabled: Boolean): String =
     if (enabled) "本机 + 家庭服务器" else "仅本机"
 
-internal fun familyDeviceId(syncDeviceId: String, localDeviceId: String): String =
-    syncDeviceId.ifBlank { localDeviceId }
-
 /** Controls for network settings ops (invite stays overview-primary; leave/delete live here). */
 internal data class FamilyControlVisibility(
     val showJoin: Boolean,
@@ -291,14 +288,9 @@ internal fun familyRoleLabel(role: FamilyRole): String = when (role) {
 }
 
 internal fun familyMemberDisplayName(member: FamilyMember): String =
-    member.displayName
-        ?.trim()
-        ?.takeIf { it.isNotEmpty() && (member.isSelf || it != LOCAL_FAMILY_DISPLAY_NAME) }
-        ?: when {
-            member.isSelf -> LOCAL_FAMILY_DISPLAY_NAME
-            member.role == FamilyRole.Owner -> "家庭管理员"
-            else -> "家庭成员"
-        }
+    member.displayName.trim()
+        .takeIf { member.isSelf || it != LOCAL_FAMILY_DISPLAY_NAME }
+        ?: if (member.role == FamilyRole.Owner) "家庭管理员" else "家庭成员"
 
 /** Owner ★ marker for list / overview lines (never applied to non-owners). */
 internal fun familyMemberTitle(member: FamilyMember): String {
@@ -328,7 +320,7 @@ internal fun validateFamilyDisplayNameInput(raw: String): String? =
     com.lezi.babylog.sync.memberDisplayNameValidationError(raw)
 
 /**
- * Shared family name for display. Empty/legacy →「我的家庭」or「{宝宝昵称}的家庭」.
+ * Shared family name for display. Empty →「我的家庭」or「{宝宝昵称}的家庭」.
  */
 internal fun displayFamilyName(
     familyName: String?,
@@ -370,16 +362,20 @@ internal fun familyMembersForDisplay(
     members: List<FamilyMember>,
     localDisplayName: String,
     localRole: FamilyRole,
+    localMembershipId: String,
     membersLoaded: Boolean,
 ): List<FamilyMember> {
     val bounded = members.take(50)
     if (bounded.any(FamilyMember::isSelf)) return bounded
     if (membersLoaded) return bounded
+    val membershipId = localMembershipId.trim()
+    if (membershipId.isEmpty()) return bounded
     return listOf(
         FamilyMember(
             displayName = localDisplayName.ifBlank { LOCAL_FAMILY_DISPLAY_NAME },
             role = localRole.takeUnless { it == FamilyRole.None } ?: FamilyRole.Member,
             isSelf = true,
+            membershipId = membershipId,
         ),
     ) + bounded
 }

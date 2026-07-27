@@ -1,7 +1,6 @@
 package com.lezi.babylog.domain
 
 import com.lezi.babylog.core.database.BabyDao
-import com.lezi.babylog.core.database.CalendarEventDao
 import com.lezi.babylog.core.database.CarePlanDao
 import com.lezi.babylog.core.database.CustomItemDao
 import com.lezi.babylog.core.database.DatabaseTransactionRunner
@@ -74,8 +73,6 @@ internal interface LocalDataClearPersistence {
         settingsSnapshot: LocalClearSettingsSnapshot,
     )
 
-    /** Current rows protect post-v20-clear projections from legacy snapshot adoption. */
-    suspend fun currentCarePlanClientUuids(): Set<String>
 }
 
 @Singleton
@@ -83,7 +80,6 @@ internal class DaoLocalDataClearPersistence @Inject constructor(
     private val babyDao: BabyDao,
     private val recordDao: RecordDao,
     private val carePlanDao: CarePlanDao,
-    private val calendarEventDao: CalendarEventDao,
     private val customItemDao: CustomItemDao,
     private val localUserDao: LocalUserDao,
     private val familyDao: FamilyDao,
@@ -97,7 +93,6 @@ internal class DaoLocalDataClearPersistence @Inject constructor(
         familyServerRetained: Boolean,
         settingsSnapshot: LocalClearSettingsSnapshot,
     ) = transactionRunner.run {
-        val calendarEventIds = allCalendarEventIds()
         val carePlans = carePlanDao.listAllIncludingDeleted()
         val carePlanIds = carePlans.map { it.id }.toSet()
         val systemCalendarProjections = linkedMapOf<String, String?>().apply {
@@ -112,7 +107,6 @@ internal class DaoLocalDataClearPersistence @Inject constructor(
         }
 
         recordDao.deleteAll()
-        calendarEventDao.deleteAll()
         fulfillmentCandidateDao.deleteAll()
         carePlanDao.deleteAll()
         if (scope == LocalDataClearScope.AllLocalData) {
@@ -125,10 +119,8 @@ internal class DaoLocalDataClearPersistence @Inject constructor(
         pendingReminderCleanupStore.upsert(
             PendingReminderCleanup(
                 operation = scope.pendingCleanupOperation,
-                calendarEventIds = calendarEventIds.toSet(),
                 carePlanIds = carePlanIds,
                 systemCalendarProjections = systemCalendarProjections,
-                settingsSnapshotCaptured = true,
                 currentBabyId = settingsSnapshot.currentBabyId,
                 nextFeedAt = settingsSnapshot.nextFeedAt,
                 nextFeedEpoch = settingsSnapshot.nextFeedEpoch,
@@ -137,14 +129,6 @@ internal class DaoLocalDataClearPersistence @Inject constructor(
         )
     }
 
-    override suspend fun currentCarePlanClientUuids(): Set<String> =
-        carePlanDao.listAllIncludingDeleted().mapTo(linkedSetOf()) { it.clientUuid }
-
-    private suspend fun allCalendarEventIds(): List<Long> =
-        babyDao.listAllIncludingDeleted()
-            .flatMap { baby -> calendarEventDao.listForBabyIncludingDeleted(baby.id) }
-            .map { it.id }
-            .distinct()
 }
 
 /** Internal settings adapter keeps the scope-specific key set out of orchestration. */
@@ -264,41 +248,30 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
                 }
             }
 
-            var settingsSnapshotReady = loaded.settingsSnapshotCaptured
-            var pending = loaded
-            if (!settingsSnapshotReady) {
-                attempt {
-                    pending = ensureDurableSettingsSnapshot(loaded)
-                    settingsSnapshotReady = true
-                }
-            }
             val settingsSnapshot = LocalClearSettingsSnapshot(
-                currentBabyId = pending.currentBabyId,
-                nextFeedAt = pending.nextFeedAt,
-                systemCalendarProjections = pending.systemCalendarProjections.mapNotNull {
+                currentBabyId = loaded.currentBabyId,
+                nextFeedAt = loaded.nextFeedAt,
+                systemCalendarProjections = loaded.systemCalendarProjections.mapNotNull {
                     (clientUuid, eventId) -> eventId?.let { clientUuid to it }
                 }.toMap(),
-                nextFeedEpoch = pending.nextFeedEpoch,
+                nextFeedEpoch = loaded.nextFeedEpoch,
             )
-            pending.systemCalendarProjections.forEach { (clientUuid, eventId) ->
+            loaded.systemCalendarProjections.forEach { (clientUuid, eventId) ->
                 attempt { deleteSystemCalendarProjection(clientUuid, eventId) }
             }
             var settingsFinish: LocalClearSettingsFinish? = null
-            if (settingsSnapshotReady) {
-                attempt {
-                    settingsFinish = settings.finish(
-                        operation.localClearScope,
-                        settingsSnapshot,
-                    )
-                }
+            attempt {
+                settingsFinish = settings.finish(
+                    operation.localClearScope,
+                    settingsSnapshot,
+                )
             }
             attempt {
                 reminderCleanup.cancelForRecordsClear(
-                    calendarEventIds = pending.calendarEventIds,
                     cancelNextFeed = settingsFinish?.cancelNextFeedAlarm == true,
                 )
             }
-            pending.carePlanIds.forEach { carePlanId ->
+            loaded.carePlanIds.forEach { carePlanId ->
                 attempt { reminderCleanup.cancelCarePlan(carePlanId) }
             }
             if (!operationFailed) {
@@ -306,30 +279,6 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
             }
         }
         return PendingLocalClearFinish(recoveredScope = recoveredScope, failure = failure)
-    }
-
-    /**
-     * Room v20 rows have no settings epoch. Only orphaned calendar-map entries
-     * can be attributed to that old clear; current feed and current-plan entries
-     * may have been created after the failure and must survive the upgrade.
-     */
-    private suspend fun ensureDurableSettingsSnapshot(
-        pending: PendingReminderCleanup,
-    ): PendingReminderCleanup {
-        if (pending.settingsSnapshotCaptured) return pending
-        val snapshot = settings.capture()
-        val currentCarePlanClientUuids = persistence.currentCarePlanClientUuids()
-        val orphanedLegacyProjections = snapshot.systemCalendarProjections.filterKeys {
-            it !in currentCarePlanClientUuids
-        }
-        return pending.copy(
-            systemCalendarProjections =
-                pending.systemCalendarProjections + orphanedLegacyProjections,
-            settingsSnapshotCaptured = true,
-            currentBabyId = snapshot.currentBabyId,
-            nextFeedAt = null,
-            nextFeedEpoch = null,
-        ).also { pendingReminderCleanupStore.upsert(it) }
     }
 
     private suspend fun deleteSystemCalendarProjection(

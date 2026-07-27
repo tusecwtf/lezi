@@ -183,7 +183,6 @@ class LogViewModel @Inject constructor(
                 .map {
                     it.isJoined to SelfUploaderIdentity(
                         membershipId = it.membershipId,
-                        legacyDeviceId = it.deviceId,
                     )
                 }
                 .distinctUntilChanged()
@@ -248,7 +247,6 @@ class LogViewModel @Inject constructor(
                 val lanes = buildLanes(records, start, end)
                 val labels = buildUploaderLabels(
                     records = records,
-                    selfDeviceId = selfIdentity.legacyDeviceId,
                     isFamilyJoined = joined,
                     members = members,
                     selfMembershipId = selfIdentity.membershipId,
@@ -336,7 +334,6 @@ class LogViewModel @Inject constructor(
 /** Pure map of record id → uploader display label (S3 seam for timeline composition). */
 internal fun buildUploaderLabels(
     records: List<Record>,
-    selfDeviceId: String,
     isFamilyJoined: Boolean,
     members: List<UploaderMemberRef>,
     selfMembershipId: String = "",
@@ -345,8 +342,6 @@ internal fun buildUploaderLabels(
     val out = LinkedHashMap<Long, String>()
     for (record in records) {
         val label = resolveRecordUploaderLabel(
-            createdByDeviceId = record.createdByDeviceId,
-            selfDeviceId = selfDeviceId,
             isFamilyJoined = true,
             members = members,
             createdByMembershipId = record.createdByMembershipId,
@@ -359,7 +354,6 @@ internal fun buildUploaderLabels(
 
 private data class SelfUploaderIdentity(
     val membershipId: String = "",
-    val legacyDeviceId: String = "",
 )
 
 /** Compose payload summary with optional uploader 称呼 for the secondary line. */

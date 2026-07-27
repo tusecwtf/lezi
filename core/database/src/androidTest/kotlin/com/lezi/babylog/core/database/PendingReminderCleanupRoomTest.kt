@@ -6,7 +6,6 @@ import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -14,7 +13,6 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class PendingReminderCleanupRoomTest {
     private lateinit var database: LeziDatabase
-    private lateinit var dao: PendingReminderCleanupDao
     private lateinit var store: PendingReminderCleanupStore
 
     @Before
@@ -23,8 +21,7 @@ class PendingReminderCleanupRoomTest {
             InstrumentationRegistry.getInstrumentation().targetContext,
             LeziDatabase::class.java,
         ).build()
-        dao = database.pendingReminderCleanupDao()
-        store = RoomPendingReminderCleanupStore(dao)
+        store = RoomPendingReminderCleanupStore(database.pendingReminderCleanupDao())
     }
 
     @After
@@ -33,20 +30,17 @@ class PendingReminderCleanupRoomTest {
     }
 
     @Test
-    fun roomAdapterStrictlyLoadsAndMergesLegacyRow() = runBlocking {
-        dao.upsert(
-            PendingReminderCleanupEntity(
-                operation = "records_clear",
-                calendarEventIds = "9,3,9",
-                carePlanIds = "8,4,8",
-                familyServerRetained = false,
-            ),
-        )
-
+    fun roomAdapterRoundTripsAndMergesCurrentReminderSnapshot() = runBlocking {
         store.upsert(
             PendingReminderCleanup(
                 operation = PendingReminderCleanupOperation.RECORDS_CLEAR,
-                calendarEventIds = setOf(2L, 3L),
+                carePlanIds = setOf(8L, 4L),
+                familyServerRetained = false,
+            ),
+        )
+        store.upsert(
+            PendingReminderCleanup(
+                operation = PendingReminderCleanupOperation.RECORDS_CLEAR,
                 carePlanIds = setOf(2L, 4L),
                 nextFeedAt = 8L,
                 nextFeedEpoch = "feed-epoch-1",
@@ -57,7 +51,6 @@ class PendingReminderCleanupRoomTest {
         assertEquals(
             PendingReminderCleanup(
                 operation = PendingReminderCleanupOperation.RECORDS_CLEAR,
-                calendarEventIds = setOf(2L, 3L, 9L),
                 carePlanIds = setOf(2L, 4L, 8L),
                 nextFeedAt = 8L,
                 nextFeedEpoch = "feed-epoch-1",
@@ -65,34 +58,5 @@ class PendingReminderCleanupRoomTest {
             ),
             store.load(PendingReminderCleanupOperation.RECORDS_CLEAR),
         )
-        assertEquals(
-            PendingReminderCleanupEntity(
-                operation = "records_clear",
-                calendarEventIds = "2,3,9",
-                carePlanIds = "2,4,8",
-                settingsSnapshotCaptured = true,
-                nextFeedAt = 8L,
-                nextFeedEpoch = "feed-epoch-1",
-                familyServerRetained = true,
-            ),
-            dao.get("records_clear"),
-        )
-    }
-
-    @Test
-    fun corruptLegacyRowRemainsPendingAfterLoadFailure() = runBlocking {
-        val original = PendingReminderCleanupEntity(
-            operation = "records_clear",
-            calendarEventIds = "3,broken,9",
-            familyServerRetained = true,
-        )
-        dao.upsert(original)
-
-        val failure = runCatching {
-            store.load(PendingReminderCleanupOperation.RECORDS_CLEAR)
-        }.exceptionOrNull()
-
-        assertTrue(failure is CorruptPendingReminderCleanupException)
-        assertEquals(original, dao.get("records_clear"))
     }
 }

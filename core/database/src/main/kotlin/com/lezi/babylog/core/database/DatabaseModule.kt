@@ -2,6 +2,8 @@ package com.lezi.babylog.core.database
 
 import android.content.Context
 import androidx.room.Room
+import androidx.room.RoomDatabase
+import androidx.sqlite.db.SupportSQLiteDatabase
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -19,7 +21,41 @@ import javax.inject.Singleton
 internal fun buildLeziDatabase(
     context: Context,
     name: String = "lezi.db",
-): LeziDatabase = Room.databaseBuilder(context, LeziDatabase::class.java, name).build()
+): LeziDatabase = Room.databaseBuilder(context, LeziDatabase::class.java, name)
+    .addCallback(CurrentSchemaCallback)
+    .build()
+
+private object CurrentSchemaCallback : RoomDatabase.Callback() {
+    override fun onCreate(db: SupportSQLiteDatabase) {
+        db.execSQL(mediaAssetOwnerTrigger("media_assets_owner_insert", "INSERT"))
+        db.execSQL(mediaAssetOwnerTrigger("media_assets_owner_update", "UPDATE"))
+    }
+}
+
+private fun mediaAssetOwnerTrigger(name: String, operation: String): String =
+    """
+    CREATE TRIGGER $name
+    BEFORE $operation ON media_assets
+    WHEN NOT (
+        (
+            NEW.kind = 'log'
+            AND NEW.babyId IS NULL
+            AND (
+                (NEW.recordId IS NOT NULL AND NEW.carePlanId IS NULL)
+                OR (NEW.recordId IS NULL AND NEW.carePlanId IS NOT NULL)
+            )
+        )
+        OR (
+            NEW.kind = 'avatar'
+            AND NEW.babyId IS NOT NULL
+            AND NEW.recordId IS NULL
+            AND NEW.carePlanId IS NULL
+        )
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'invalid media asset ownership');
+    END
+    """.trimIndent()
 
 @Module
 @InstallIn(SingletonComponent::class)
@@ -40,7 +76,6 @@ object DatabaseModule {
     @Provides fun mediaAssetDao(db: LeziDatabase): MediaAssetDao = db.mediaAssetDao()
     @Provides fun outboxDao(db: LeziDatabase): OutboxDao = db.outboxDao()
     @Provides fun customItemDao(db: LeziDatabase): CustomItemDao = db.customItemDao()
-    @Provides fun calendarEventDao(db: LeziDatabase): CalendarEventDao = db.calendarEventDao()
     @Provides
     @Singleton
     fun pendingReminderCleanupStore(db: LeziDatabase): PendingReminderCleanupStore =

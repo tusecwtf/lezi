@@ -133,7 +133,7 @@ private fun MergePreviewDialog(
                 FamilyScopeRow(
                     "迁移",
                     "关联数据",
-                    "${preview.recordCount} 条记录 · ${preview.calendarEventCount} 条日程",
+                    mergeDataSummary(preview),
                 )
                 Text("操作不可撤销", color = MaterialTheme.colorScheme.error)
             }
@@ -146,3 +146,6 @@ private fun MergePreviewDialog(
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }
+
+internal fun mergeDataSummary(preview: BabyMergePreview): String =
+    "${preview.recordCount} 条记录 · ${preview.carePlanCount} 个护理计划"

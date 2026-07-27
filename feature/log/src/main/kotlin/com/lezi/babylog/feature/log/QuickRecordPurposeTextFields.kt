@@ -26,51 +26,15 @@ import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.designsystem.LeziShapes
 import com.lezi.babylog.designsystem.LeziTypography
-import com.lezi.babylog.domain.CustomRecordItem
 
 @Composable
 internal fun CustomTextFields(
     draft: QuickRecordDraft,
-    customItems: List<CustomRecordItem>,
     onDraftChange: (QuickRecordDraft) -> Unit,
     highlightedField: ComposerInvalidField? = null,
     fieldFocusRequester: FocusRequester? = null,
 ) {
     val titleError = highlightedField == ComposerInvalidField.CustomTitle
-    // New-entry paths open a concrete custom definition; keep identity fixed and
-    // only allow free reassignment when editing a historical bare-custom row.
-    val lockedToDefinition = draft.type == RecordType.CUSTOM &&
-        draft.customItemId != null &&
-        draft.existingRecordId == null
-    val showDefinitionPicker = draft.type == RecordType.CUSTOM &&
-        !lockedToDefinition &&
-        customItems.isNotEmpty() &&
-        (draft.existingRecordId == null || draft.customItemId == null)
-    if (showDefinitionPicker) {
-        Text("选择自定义项目", style = LeziTypography.Label)
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            customItems.forEach { item ->
-                FilterChip(
-                    selected = draft.customItemId == item.id,
-                    onClick = {
-                        onDraftChange(
-                            draft.copy(
-                                customTitle = item.name,
-                                customItemId = item.id,
-                                customIconSlot = item.iconSlot,
-                            ),
-                        )
-                    },
-                    label = { Text(item.name) },
-                )
-            }
-        }
-    }
     OutlinedTextField(
         value = draft.customTitle,
         onValueChange = { onDraftChange(draft.copy(customTitle = it.take(30))) },
@@ -85,16 +49,12 @@ internal fun CustomTextFields(
             ),
         label = {
             Text(
-                when {
-                    draft.type == RecordType.CUSTOM && lockedToDefinition -> "项目名称"
-                    draft.type == RecordType.CUSTOM -> "自定义项目名称"
-                    else -> "标题"
-                },
+                "项目名称",
             )
         },
         isError = titleError,
         singleLine = true,
-        // Snapshot title remains editable so history can be corrected; identity stays fixed.
+        // Snapshot title remains editable; the concrete definition identity stays fixed.
     )
     OutlinedTextField(
         value = draft.customDetail,

@@ -13,16 +13,15 @@ import org.junit.Test
 
 class SyncWireMapperTest {
     @Test
-    fun recordUsesPortableBabyIdAndObjectPayloadWithoutLocalPhotoPaths() {
+    fun recordUsesPortableBabyIdAndCurrentTypedObjectPayload() {
         val entity = RecordEntity(
             clientUuid = "record-uuid",
             babyId = 7,
             type = "diary",
             timestamp = 123,
             note = "今天",
-            createdByUserId = 1,
             createdByMembershipId = "membership-a",
-            payloadJson = """{"body":"好","photos":["/data/user/0/lezi/files/private.jpg"],"future":{"v":2}}""",
+            payloadJson = """{"body":"好"}""",
             schemaVersion = 2,
             updatedAt = 456,
         )
@@ -30,65 +29,150 @@ class SyncWireMapperTest {
         val wire = SyncWireMapper.record(
             entity,
             babyClientUuid = "baby-uuid",
-            createdByDeviceId = "device-a",
-            includeMembershipAuthor = true,
         )
         val payload = Json.parseToJsonElement(wire.payloadJson).jsonObject
 
+        assertThat(payload.keys).containsExactly(
+            "baby_client_uuid",
+            "created_by_membership_id",
+            "type",
+            "custom_item_client_uuid",
+            "timestamp",
+            "end_timestamp",
+            "note",
+            "payload_json",
+            "schema_version",
+        )
         assertThat(payload["baby_client_uuid"].toString()).isEqualTo("\"baby-uuid\"")
-        assertThat(payload["created_by_device_id"].toString()).isEqualTo("\"device-a\"")
         assertThat(payload["created_by_membership_id"].toString()).isEqualTo("\"membership-a\"")
-        assertThat(payload["baby_id"]).isNull()
+        assertThat(payload["custom_item_client_uuid"].toString()).isEqualTo("null")
         assertThat(payload["schema_version"].toString()).isEqualTo("2")
         assertThat(payload["payload_json"]).isInstanceOf(
             kotlinx.serialization.json.JsonObject::class.java,
         )
         assertThat(payload["payload_json"].toString()).contains("\"body\":\"好\"")
-        assertThat(payload["payload_json"].toString()).contains("\"future\":{\"v\":2}")
-        assertThat(payload["payload_json"].toString()).doesNotContain("private.jpg")
     }
 
     @Test
-    fun recordOmitsMembershipAuthorForLegacyServerCapability() {
+    fun customRecordUsesPortableRootReferenceAndNeverLeaksLocalId() {
         val entity = RecordEntity(
-            clientUuid = "record-uuid",
+            clientUuid = "record-custom",
             babyId = 7,
-            type = "pee",
+            type = "custom",
             timestamp = 123,
-            createdByUserId = 1,
             createdByMembershipId = "membership-a",
-            createdByDeviceId = "device-a",
+            payloadJson =
+                """{"title":"体操","detail":"十分钟","custom_item_id":7,"icon_slot":2}""",
+            schemaVersion = 2,
             updatedAt = 456,
         )
 
         val payload = Json.parseToJsonElement(
             SyncWireMapper.record(
-                entity = entity,
+                entity,
                 babyClientUuid = "baby-uuid",
-                createdByDeviceId = "device-a",
-                includeMembershipAuthor = false,
+                customItemClientUuid = "custom-definition-uuid",
             ).payloadJson,
         ).jsonObject
 
-        assertThat(payload["created_by_membership_id"]).isNull()
-        assertThat(payload["created_by_device_id"]?.jsonPrimitive?.contentOrNull)
-            .isEqualTo("device-a")
+        assertThat(payload["custom_item_client_uuid"]?.jsonPrimitive?.contentOrNull)
+            .isEqualTo("custom-definition-uuid")
+        assertThat(payload["payload_json"].toString()).doesNotContain("custom_item_id")
+        assertThat(
+            SyncWireMapper.localPayloadFromWire(
+                type = com.lezi.babylog.core.model.RecordType.CUSTOM,
+                payload = payload["payload_json"]!!.jsonObject,
+                customItemId = 19,
+            ),
+        ).contains("\"custom_item_id\":19")
     }
 
     @Test
-    fun pulledRecordAcceptsObjectAndLegacyStringPayloads() {
+    fun recordMapperRejectsCustomReferenceMismatchAndNonCanonicalPayloadAlias() {
+        val builtIn = RecordEntity(
+            clientUuid = "record-built-in",
+            babyId = 7,
+            type = "temperature",
+            timestamp = 123,
+            createdByMembershipId = "membership-a",
+            payloadJson = """{"celsius":36.5}""",
+            updatedAt = 456,
+        )
+        assertThat(runCatching {
+            SyncWireMapper.record(builtIn, "baby", "custom-definition")
+        }.isFailure).isTrue()
+
+        assertThat(runCatching {
+            SyncWireMapper.record(
+                builtIn.copy(payloadJson = """{"value":36.5}"""),
+                "baby",
+            )
+        }.isFailure).isTrue()
+        assertThat(runCatching {
+            SyncWireMapper.record(
+                builtIn.copy(
+                    type = "diary",
+                    payloadJson = """{"body":"好","photos":["private.jpg"]}""",
+                ),
+                "baby",
+            )
+        }.isFailure).isTrue()
+    }
+
+    @Test
+    fun pulledRecordRequiresCurrentObjectPayload() {
         val objectPayload = Json.parseToJsonElement(
             """{"payload_json":{"amount_ml":120},"schema_version":2}""",
         ).jsonObject
-        val legacyPayload = Json.parseToJsonElement(
-            """{"payload_json":"{\"amount_ml\":90}"}""",
-        ).jsonObject
-
         assertThat(SyncWireMapper.recordPayloadJson(objectPayload))
             .isEqualTo("""{"amount_ml":120}""")
         assertThat(SyncWireMapper.recordSchemaVersion(objectPayload)).isEqualTo(2)
-        assertThat(SyncWireMapper.recordPayloadJson(legacyPayload))
-            .isEqualTo("""{"amount_ml":90}""")
+    }
+
+    @Test
+    fun pulledRecordRejectsMissingOrNonCurrentSchema() {
+        listOf(
+            """{"payload_json":{"amount_ml":120}}""",
+            """{"payload_json":{"amount_ml":120},"schema_version":1}""",
+            """{"payload_json":{"amount_ml":120},"schema_version":3}""",
+        ).forEach { raw ->
+            val payload = Json.parseToJsonElement(raw).jsonObject
+            assertThat(runCatching { SyncWireMapper.recordSchemaVersion(payload) }.isFailure)
+                .isTrue()
+        }
+    }
+
+    @Test
+    fun pulledCarePlanRequiresCurrentObjectPayload() {
+        val stringPayload = Json.parseToJsonElement(
+            """{"payload_json":"{\"amount_ml\":120}"}""",
+        ).jsonObject
+
+        assertThat(runCatching { SyncWireMapper.carePlanPayloadJson(stringPayload) }.isFailure)
+            .isTrue()
+    }
+
+    @Test
+    fun pulledCarePlanRejectsMissingOrNonCurrentSchema() {
+        listOf(
+            """{"payload_json":{}}""",
+            """{"payload_json":{},"schema_version":1}""",
+            """{"payload_json":{},"schema_version":3}""",
+        ).forEach { raw ->
+            val payload = Json.parseToJsonElement(raw).jsonObject
+            assertThat(runCatching { SyncWireMapper.carePlanSchemaVersion(payload) }.isFailure)
+                .isTrue()
+        }
+    }
+
+    @Test
+    fun pulledBabyRejectsRemovedEpochDayAlias() {
+        val removedAlias = Json.parseToJsonElement(
+            """{"birthday_epoch_day":20000}""",
+        ).jsonObject
+
+        assertThat(runCatching { SyncWireMapper.birthdayEpochDay(removedAlias) }.isFailure)
+            .isTrue()
     }
 
     @Test
@@ -105,7 +189,7 @@ class SyncWireMapperTest {
         val media = MediaAssetEntity(
             id = 8,
             recordId = 11,
-            clientUuid = "media-uuid",
+            clientUuid = "10000000-0000-4000-8000-000000000005",
             kind = "log",
             localUri = "/private/photo.jpg",
             mime = "image/jpeg",
@@ -113,17 +197,22 @@ class SyncWireMapperTest {
             createdAt = 100,
         )
 
-        val babyPayload = SyncWireMapper.baby(baby, "avatar-uuid").payloadJson
+        val babyPayload = Json.parseToJsonElement(
+            SyncWireMapper.baby(baby, "avatar-uuid").payloadJson,
+        ).jsonObject
         val mediaPayload = SyncWireMapper.media(
             media,
             recordClientUuid = "record-uuid",
             babyClientUuid = "baby-uuid",
         ).payloadJson
 
-        assertThat(babyPayload).doesNotContain("\"id\"")
-        assertThat(babyPayload).doesNotContain("familyId")
-        assertThat(babyPayload).doesNotContain("sort_order")
-        assertThat(babyPayload).contains("\"due_date\":null")
+        assertThat(babyPayload.keys).containsExactly(
+            "nickname",
+            "sex",
+            "birthday",
+            "birth_weight_grams",
+            "avatar_media_uuid",
+        )
         assertThat(mediaPayload).contains("\"record_client_uuid\":\"record-uuid\"")
         assertThat(mediaPayload).doesNotContain("/private/photo.jpg")
     }

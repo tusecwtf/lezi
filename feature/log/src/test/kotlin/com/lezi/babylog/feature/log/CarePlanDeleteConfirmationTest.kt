@@ -28,10 +28,14 @@ class CarePlanDeleteConfirmationTest {
 
     @Test
     fun customPlanUsesItsVisibleName() {
-        val draft = QuickRecordDraft.create(RecordType.CUSTOM, scheduledAt).copy(
+        val draft = QuickRecordDraft.create(
+            RecordType.CUSTOM,
+            scheduledAt,
+            customItemId = 43L,
+            customTitle = "补充维生素 D",
+        ).copy(
             carePlanId = 43L,
             editCarePlan = true,
-            customTitle = "补充维生素 D",
         )
 
         val confirmation = carePlanDeleteConfirmation(draft, shanghai)

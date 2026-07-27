@@ -18,16 +18,12 @@ enum class PendingReminderCleanupOperation {
 
 data class PendingReminderCleanup(
     val operation: PendingReminderCleanupOperation,
-    val calendarEventIds: Set<Long>,
     val carePlanIds: Set<Long> = emptySet(),
     /** Exact stable plan UUID -> provider event ID; null means recover through UID lookup only. */
     val systemCalendarProjections: Map<String, String?> = emptyMap(),
-    /** False only for a row migrated from Room v20 before these settings fields existed. */
-    val settingsSnapshotCaptured: Boolean = true,
     val currentBabyId: Long? = null,
     val nextFeedAt: Long? = null,
-    /** Null only for v20 rows; legacy recovery must not consume current feed state. */
-    val nextFeedEpoch: String? = null,
+    val nextFeedEpoch: String = "",
     val familyServerRetained: Boolean,
 )
 
@@ -37,7 +33,7 @@ interface PendingReminderCleanupStore {
     /**
      * Merge a new hand-off into pending work.
      *
-     * Reminder ids are deduplicated and retention can only be promoted to true.
+     * Care-plan reminder ids are deduplicated and retention can only be promoted to true.
      */
     suspend fun upsert(pending: PendingReminderCleanup)
 
@@ -63,9 +59,6 @@ internal class RoomPendingReminderCleanupStore(
         dao.get(operation.storageKey)?.toSnapshot(operation)
 
     override suspend fun upsert(pending: PendingReminderCleanup) {
-        require(pending.calendarEventIds.all { it > 0L }) {
-            "Pending reminder cleanup calendar event ids must be positive"
-        }
         require(pending.carePlanIds.all { it > 0L }) {
             "Pending reminder cleanup care-plan ids must be positive"
         }
@@ -77,18 +70,9 @@ internal class RoomPendingReminderCleanupStore(
             "Pending reminder cleanup projection identities must not be blank"
         }
         val existing = load(pending.operation)
-        val latestSettingsSnapshot = when {
-            pending.settingsSnapshotCaptured -> pending
-            existing?.settingsSnapshotCaptured == true -> existing
-            else -> pending
-        }
         dao.upsert(
             PendingReminderCleanupEntity(
                 operation = pending.operation.storageKey,
-                calendarEventIds =
-                    (existing?.calendarEventIds.orEmpty() + pending.calendarEventIds)
-                        .sorted()
-                        .joinToString(","),
                 carePlanIds =
                     (existing?.carePlanIds.orEmpty() + pending.carePlanIds)
                         .sorted()
@@ -97,12 +81,9 @@ internal class RoomPendingReminderCleanupStore(
                     existing?.systemCalendarProjections.orEmpty() +
                         pending.systemCalendarProjections,
                 ),
-                settingsSnapshotCaptured =
-                    existing?.settingsSnapshotCaptured == true ||
-                        pending.settingsSnapshotCaptured,
-                currentBabyId = latestSettingsSnapshot.currentBabyId,
-                nextFeedAt = latestSettingsSnapshot.nextFeedAt,
-                nextFeedEpoch = latestSettingsSnapshot.nextFeedEpoch,
+                currentBabyId = pending.currentBabyId,
+                nextFeedAt = pending.nextFeedAt,
+                nextFeedEpoch = pending.nextFeedEpoch,
                 familyServerRetained =
                     existing?.familyServerRetained == true || pending.familyServerRetained,
             ),
@@ -118,12 +99,6 @@ internal class RoomPendingReminderCleanupStore(
     ): PendingReminderCleanup =
         PendingReminderCleanup(
             operation = typedOperation,
-            calendarEventIds = decodeReminderIds(
-                encoded = calendarEventIds,
-                operation = typedOperation,
-                familyServerRetained = familyServerRetained,
-                reminderKind = "calendar event",
-            ),
             carePlanIds = decodeReminderIds(
                 encoded = carePlanIds,
                 operation = typedOperation,
@@ -135,7 +110,6 @@ internal class RoomPendingReminderCleanupStore(
                 operation = typedOperation,
                 familyServerRetained = familyServerRetained,
             ),
-            settingsSnapshotCaptured = settingsSnapshotCaptured,
             currentBabyId = currentBabyId,
             nextFeedAt = nextFeedAt,
             nextFeedEpoch = nextFeedEpoch,

@@ -94,9 +94,6 @@
             </intent-filter>
         </receiver>
         <receiver
-            android:name="com.lezi.babylog.feature.settings.CalendarReminderReceiver"
-            android:exported="false" />
-        <receiver
             android:name="com.lezi.babylog.feature.settings.CarePlanReminderReceiver"
             android:exported="false" />
         <receiver

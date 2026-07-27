@@ -2,7 +2,6 @@ package com.lezi.babylog.feature.settings
 
 import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.core.model.RecordType
-import com.lezi.babylog.domain.CalendarEvent
 import java.time.LocalDate
 import java.time.YearMonth
 import java.time.ZoneId
@@ -125,10 +124,10 @@ class CalendarMonthStateTest {
     }
 
     @Test
-    fun selectedDayFiltersPlansAndLegacyEventsUsingDeviceZoneAcrossDst() {
+    fun selectedDayFiltersCarePlansUsingDeviceZoneAcrossDst() {
         val newYork = ZoneId.of("America/New_York")
         val selected = LocalDate.of(2024, 3, 10)
-        val legacyAt = ZonedDateTime.of(2024, 3, 10, 1, 30, 0, 0, newYork)
+        val earlyPlanAt = ZonedDateTime.of(2024, 3, 10, 1, 30, 0, 0, newYork)
             .toInstant()
             .toEpochMilli()
         val planAt = ZonedDateTime.of(2024, 3, 10, 23, 30, 0, 0, newYork)
@@ -139,23 +138,23 @@ class CalendarMonthStateTest {
             .toEpochMilli()
         val items = listOf(
             CalendarDayItem.Plan(plan(id = 2L, scheduledAt = planAt)),
-            CalendarDayItem.LegacyEvent(event(id = 1L, eventAt = legacyAt)),
+            CalendarDayItem.Plan(plan(id = 1L, scheduledAt = earlyPlanAt)),
             CalendarDayItem.Plan(plan(id = 3L, scheduledAt = nextDayAt)),
         )
 
         val newYorkItems = calendarItemsForDate(items, selected, newYork)
         assertEquals(
             listOf(
-                CalendarDayItem.LegacyEvent::class,
+                CalendarDayItem.Plan::class,
                 CalendarDayItem.Plan::class,
             ),
             newYorkItems.map { it::class },
         )
-        assertEquals(listOf(legacyAt, planAt), newYorkItems.map { it.sortAt })
+        assertEquals(listOf(earlyPlanAt, planAt), newYorkItems.map { it.sortAt })
 
         // 23:30 after the spring-forward transition is already March 11 in Shanghai.
         val shanghaiItems = calendarItemsForDate(items, selected, ZoneId.of("Asia/Shanghai"))
-        assertEquals(listOf(legacyAt), shanghaiItems.map { it.sortAt })
+        assertEquals(listOf(earlyPlanAt), shanghaiItems.map { it.sortAt })
     }
 
     @Test
@@ -185,13 +184,4 @@ class CalendarMonthStateTest {
         updatedAt = scheduledAt,
     )
 
-    private fun event(id: Long, eventAt: Long) = CalendarEvent(
-        id = id,
-        clientUuid = "event-$id",
-        babyId = 1L,
-        title = "event-$id",
-        note = null,
-        eventAt = eventAt,
-        remindAt = null,
-    )
 }

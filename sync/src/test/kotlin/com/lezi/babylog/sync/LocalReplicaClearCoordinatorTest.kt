@@ -336,8 +336,6 @@ class LocalReplicaClearCoordinatorTest {
         assertThat(rig.mediaFiles.deleted).containsExactly(
             "photos/record.jpg",
             "photos/plan.jpg",
-            "photos/record-inline.jpg",
-            "photos/plan-inline.jpg",
         )
         assertThat(rig.outbox.peek("family-a", 10).map(OutboxEntity::clientUuid))
             .containsExactly("avatar-media", "baby-local")
@@ -390,6 +388,11 @@ class LocalReplicaClearCoordinatorTest {
         assertThat(rig.preferences.current().pullCursor).isEqualTo(0)
         assertThat(rig.preferences.current().pullGeneration).isEmpty()
         assertThat(rig.media.listAllIncludingDeleted()).isEmpty()
+        assertThat(rig.mediaFiles.deleted).containsExactly(
+            "photos/log.jpg",
+            "avatars/baby.jpg",
+        )
+        assertThat(rig.mediaFiles.deleted).doesNotContain("photos/inline.jpg")
         assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
         assertThat(rig.outbox.peek("family-b", 10)).isEmpty()
         assertThat(rig.pending.pending).isNull()
@@ -529,8 +532,6 @@ private class ClearRig(
         barrier = barrier,
         preferences = preferences,
         outboxDao = outbox,
-        recordDao = records,
-        carePlanDao = carePlans,
         babyDao = babies,
         mediaDao = media,
         mediaFiles = mediaFiles,
@@ -626,6 +627,7 @@ private fun media(
     kind = kind,
     recordId = if (carePlanId == null && kind == "log") 1 else null,
     carePlanId = carePlanId,
+    babyId = 1L.takeIf { kind == "avatar" },
     localUri = localUri,
     createdAt = 1,
 )
@@ -638,7 +640,6 @@ private fun record(
     babyId = babyId,
     type = "formula",
     timestamp = 120,
-    createdByUserId = 1,
     payloadJson = payloadJson,
     updatedAt = 120,
 )

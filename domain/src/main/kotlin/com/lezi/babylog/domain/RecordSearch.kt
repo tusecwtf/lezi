@@ -36,7 +36,6 @@ private fun RecordType.searchTerms(): List<String> = when (this) {
     RecordType.BOTH_DIAPER -> listOf("尿+便", "尿便", "换尿布", "both diaper")
     RecordType.SLEEP -> listOf("睡眠", "睡觉", "午睡", "sleep")
     RecordType.TEMPERATURE -> listOf("体温", "温度", "temperature")
-    RecordType.MEMO -> listOf("备注", "备忘", "memo")
     RecordType.DIARY -> listOf("日记", "正文", "diary")
     RecordType.BATH -> listOf("洗澡", "沐浴", "bath")
     RecordType.WALK -> listOf("散步", "外出", "walk")
@@ -46,7 +45,6 @@ private fun RecordType.searchTerms(): List<String> = when (this) {
     RecordType.INJURY -> listOf("受伤", "外伤", "injury")
     RecordType.MEDICINE -> listOf("用药", "药物", "medicine")
     RecordType.HOSPITAL -> listOf("就医", "医院", "看医生", "hospital")
-    RecordType.OTHER -> listOf("其他", "自由文本", "other")
     RecordType.HEIGHT -> listOf("身高", "height")
     RecordType.WEIGHT -> listOf("体重", "weight")
     RecordType.BABY_FOOD -> listOf("辅食", "baby food")
@@ -82,12 +80,10 @@ internal fun RecordType.candidateSearchTerms(): List<String> = searchTerms() + w
         listOf("cm", "厘米")
     RecordType.WEIGHT -> listOf("g", "kg", "克", "公斤", "千克")
     RecordType.WALK -> listOf("分", "分钟")
-    RecordType.MEMO,
     RecordType.DIARY,
     RecordType.BATH,
     RecordType.MEDICINE,
     RecordType.HOSPITAL,
-    RecordType.OTHER,
     RecordType.BABY_FOOD,
     RecordType.SNACK,
     RecordType.DRINK,

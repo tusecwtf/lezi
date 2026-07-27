@@ -1,9 +1,6 @@
 package com.lezi.babylog.core.model
 
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -11,7 +8,6 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -20,40 +16,6 @@ const val CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION = 2
 
 /** Maximum photos attachable to one care record (or care plan) via the shared note area. */
 const val MAX_RECORD_PHOTOS = 3
-
-/**
- * Local-path photo replica stored in payload JSON for historical diary/memo rows and
- * for current sync materialization/export until atomic media bundles land.
- */
-fun localPhotoPaths(payloadJson: String): List<String> {
-    val obj = runCatching { Json.parseToJsonElement(payloadJson).jsonObject }
-        .getOrNull()
-        ?: return emptyList()
-    return runCatching {
-        obj["photos"]?.jsonArray
-            ?.mapNotNull { element ->
-                element.jsonPrimitive.contentOrNull?.takeIf(String::isNotBlank)
-            }
-            .orEmpty()
-    }.getOrDefault(emptyList())
-}
-
-/** Rewrite the top-level `photos` array while leaving every other payload field intact. */
-fun withLocalPhotoPaths(payloadJson: String, photoPaths: List<String>): String {
-    val obj = runCatching { Json.parseToJsonElement(payloadJson).jsonObject }
-        .getOrDefault(JsonObject(emptyMap()))
-    val normalized = photoPaths.filter { it.isNotBlank() }.distinct()
-    val next = if (normalized.isEmpty()) {
-        JsonObject(obj - "photos")
-    } else {
-        JsonObject(
-            obj + (
-                "photos" to JsonArray(normalized.map(::JsonPrimitive))
-                ),
-        )
-    }
-    return next.toString()
-}
 
 sealed interface RecordPayload {
     val type: RecordType
@@ -115,10 +77,9 @@ data class TemperaturePayload(val celsius: Double = 36.5) : RecordPayload {
 data class TextPayload(
     override val type: RecordType,
     val body: String = "",
-    val photos: List<String> = emptyList(),
 ) : RecordPayload {
     init {
-        require(type == RecordType.MEMO || type == RecordType.DIARY) {
+        require(type == RecordType.DIARY) {
             "$type does not accept TextPayload"
         }
     }
@@ -156,13 +117,6 @@ data class HospitalPayload(
     override val type: RecordType = RecordType.HOSPITAL
 }
 
-data class OtherPayload(
-    val title: String = "",
-    val detail: String? = null,
-) : RecordPayload {
-    override val type: RecordType = RecordType.OTHER
-}
-
 data class MeasurementPayload(
     override val type: RecordType,
     val value: Double = 0.0,
@@ -193,10 +147,14 @@ data class VaccinePayload(
 data class CustomPayload(
     val titleSnapshot: String = "",
     val detail: String? = null,
-    val customItemId: Long? = null,
+    val customItemId: Long,
     val iconSlot: Int? = null,
 ) : RecordPayload {
     override val type: RecordType = RecordType.CUSTOM
+
+    init {
+        require(customItemId > 0L) { "customItemId must be positive" }
+    }
 }
 
 data class UnknownPayload(
@@ -206,15 +164,11 @@ data class UnknownPayload(
     val reason: String,
 ) : RecordPayload
 
-/**
- * Decoded storage document. [extensions] contains every field not understood
- * by the matching payload type and is merged back unchanged on a version-2 write.
- */
+/** Decoded current storage document or an opaque fail-closed document. */
 data class RecordPayloadDocument(
     val type: RecordType,
     val payload: RecordPayload,
     val schemaVersion: Int,
-    val extensions: Map<String, JsonElement> = emptyMap(),
     val rawJson: String? = null,
 ) {
     init {
@@ -225,12 +179,10 @@ data class RecordPayloadDocument(
 }
 
 /**
- * Typed edit draft used by Composer adapters. The payload shape is explicit;
- * storage-only extensions never leak into feature-specific fields.
+ * Typed edit draft used by Composer adapters.
  */
 data class RecordPayloadDraft(
     val payload: RecordPayload,
-    val extensions: Map<String, JsonElement> = emptyMap(),
     val sourceSchemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
     val rawJson: String? = null,
 ) {
@@ -242,14 +194,12 @@ data class RecordPayloadDraft(
         } else {
             CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
         },
-        extensions = extensions,
         rawJson = rawJson,
     )
 
     companion object {
         fun from(document: RecordPayloadDocument): RecordPayloadDraft = RecordPayloadDraft(
             payload = document.payload,
-            extensions = document.extensions,
             sourceSchemaVersion = document.schemaVersion,
             rawJson = document.rawJson,
         )
@@ -287,7 +237,9 @@ object RecordPayloadCodec {
             return unknown(type, payloadJson, schemaVersion, "malformed JSON")
         }
         val knownKeys = knownKeys(type)
-        val extensions = objectValue.filterKeys { it !in knownKeys }
+        if (objectValue.keys.any { it !in knownKeys }) {
+            return unknown(type, payloadJson, schemaVersion, "unknown fields")
+        }
         val payload = runCatching { decodeKnown(type, objectValue) }.getOrElse {
             return unknown(type, payloadJson, schemaVersion, "invalid typed payload")
         }
@@ -295,7 +247,6 @@ object RecordPayloadCodec {
             type = type,
             payload = payload,
             schemaVersion = schemaVersion,
-            extensions = extensions,
             rawJson = payloadJson,
         )
     }
@@ -304,13 +255,7 @@ object RecordPayloadCodec {
         val unknown = document.payload as? UnknownPayload
         if (unknown != null) return document.rawJson ?: unknown.rawJson
         require(document.payload.type == document.type)
-        val known = encodeKnown(document.payload)
-        return JsonObject(
-            LinkedHashMap<String, JsonElement>().apply {
-                putAll(document.extensions.filterKeys { it !in knownKeys(document.type) })
-                putAll(known)
-            },
-        ).toString()
+        return encodeKnown(document.payload).toString()
     }
 
     fun validate(payload: RecordPayload): List<String> = buildList {
@@ -350,7 +295,6 @@ object RecordPayloadCodec {
             is FoodPayload -> if (payload.content.isBlank()) add("内容不能为空")
             is VaccinePayload -> if (payload.name.isBlank()) add("疫苗名称不能为空")
             is CustomPayload -> if (payload.titleSnapshot.isBlank()) add("自定义标题不能为空")
-            is OtherPayload -> if (payload.title.isBlank()) add("标题不能为空")
             is EmptyPayload, is SleepPayload, is UnknownPayload -> Unit
         }
     }
@@ -363,78 +307,87 @@ object RecordPayloadCodec {
 
     private fun decodeKnown(type: RecordType, value: JsonObject): RecordPayload = when (type) {
         RecordType.NURSING -> NursingPayload(
-            leftMinutes = value.int("left_min"),
-            rightMinutes = value.int("right_min"),
-            order = value.string("order").ifBlank { "LR" },
+            leftMinutes = value.requiredInt("left_min"),
+            rightMinutes = value.requiredInt("right_min"),
+            order = value.requiredString("order").also {
+                require(it in setOf("L", "R", "LR", "RL"))
+            },
             amountMl = value.optionalInt("amount_ml"),
-            recordMode = value.string("record_mode").ifBlank { "end" },
+            recordMode = value.requiredString("record_mode").also {
+                require(it in setOf("start", "end"))
+            },
         )
         in MILK_TYPES -> MilkPayload(
             type = type,
-            amountMl = value.int("amount_ml"),
-            preparedMl = value.optionalInt("prepared_ml"),
-            durationMinutes = value.optionalInt("duration_min"),
+            amountMl = value.requiredInt("amount_ml"),
+            preparedMl = if (type == RecordType.FORMULA) {
+                value.optionalInt("prepared_ml")
+            } else {
+                null
+            },
+            durationMinutes = if (type == RecordType.FORMULA) {
+                value.optionalInt("duration_min")
+            } else {
+                null
+            },
         )
-        RecordType.PEE -> PeePayload(value.int("pee_amount", 2))
+        RecordType.PEE -> PeePayload(value.optionalInt("pee_amount") ?: 2)
         RecordType.POOP -> StoolPayload(
-            amount = value.int("stool_amount", 3),
-            consistency = value.int("stool_consistency", 3),
-            color = value.int("stool_color"),
+            amount = value.optionalInt("stool_amount") ?: 3,
+            consistency = value.optionalInt("stool_consistency") ?: 3,
+            color = value.optionalInt("stool_color") ?: 0,
         )
         RecordType.BOTH_DIAPER -> BothDiaperPayload(
-            peeAmount = value.int("pee_amount", 2),
-            stoolAmount = value.int("stool_amount", 3),
-            stoolConsistency = value.int("stool_consistency", 3),
-            stoolColor = value.int("stool_color"),
+            peeAmount = value.optionalInt("pee_amount") ?: 2,
+            stoolAmount = value.optionalInt("stool_amount") ?: 3,
+            stoolConsistency = value.optionalInt("stool_consistency") ?: 3,
+            stoolColor = value.optionalInt("stool_color") ?: 0,
         )
         RecordType.SLEEP -> SleepPayload(
-            isNap = value.boolean("is_nap"),
-            anomaly = value.boolean("anomaly_flag"),
+            isNap = value.optionalBoolean("is_nap") ?: false,
+            anomaly = value.requiredBoolean("anomaly_flag"),
         )
         RecordType.TEMPERATURE -> TemperaturePayload(
-            celsius = value.double("celsius", value.double("value", 36.5)),
+            celsius = value.requiredDouble("celsius"),
         )
-        RecordType.MEMO, RecordType.DIARY -> TextPayload(
+        RecordType.DIARY -> TextPayload(
             type = type,
-            body = value.string("body"),
-            photos = value.stringList("photos"),
+            body = value.requiredString("body"),
         )
         RecordType.BATH, RecordType.WALK -> EmptyPayload(type)
         in SYMPTOM_TYPES -> SymptomPayload(
             type = type,
-            severity = value.int("severity", 2),
+            severity = value.requiredInt("severity"),
             description = value.optionalString("description"),
         )
         RecordType.MEDICINE -> MedicinePayload(
-            name = value.string("name"),
+            name = value.requiredString("name"),
             dose = value.optionalString("dose"),
         )
         RecordType.HOSPITAL -> HospitalPayload(
-            reason = value.string("reason"),
+            reason = value.requiredString("reason"),
             advice = value.optionalString("advice"),
-        )
-        RecordType.OTHER -> OtherPayload(
-            title = value.string("title"),
-            detail = value.optionalString("detail"),
         )
         in MEASUREMENT_TYPES -> MeasurementPayload(
             type = type,
-            value = value.double("value"),
-            unit = value.string("unit").ifBlank { if (type == RecordType.WEIGHT) "g" else "cm" },
+            value = value.requiredDouble("value"),
+            unit = value.requiredString("unit"),
         )
         in FOOD_TYPES -> FoodPayload(
             type = type,
-            content = value.string("content"),
+            content = value.requiredString("content"),
             amount = value.optionalString("amount"),
         )
         RecordType.VACCINE -> VaccinePayload(
-            name = value.string("name"),
+            name = value.requiredString("name"),
             batch = value.optionalString("batch"),
         )
         RecordType.CUSTOM -> CustomPayload(
-            titleSnapshot = value.string("title"),
+            titleSnapshot = value.requiredString("title"),
             detail = value.optionalString("detail"),
-            customItemId = value.optionalLong("custom_item_id"),
+            customItemId = value.requiredLong("custom_item_id")
+                .takeIf { it > 0L }
+                ?: error("CUSTOM requires positive custom_item_id"),
             iconSlot = value.optionalInt("icon_slot"),
         )
         else -> error("No payload decoder registered for $type")
@@ -462,15 +415,10 @@ object RecordPayloadCodec {
             }
             is SleepPayload -> {
                 put("is_nap", payload.isNap)
-                if (payload.anomaly) put("anomaly_flag", true)
+                put("anomaly_flag", payload.anomaly)
             }
             is TemperaturePayload -> put("celsius", payload.celsius)
-            is TextPayload -> {
-                put("body", payload.body)
-                if (payload.photos.isNotEmpty()) {
-                    put("photos", JsonArray(payload.photos.map(::JsonPrimitive)))
-                }
-            }
+            is TextPayload -> put("body", payload.body)
             is SymptomPayload -> {
                 put("severity", payload.severity)
                 payload.description?.let { put("description", it) }
@@ -482,10 +430,6 @@ object RecordPayloadCodec {
             is HospitalPayload -> {
                 put("reason", payload.reason)
                 payload.advice?.let { put("advice", it) }
-            }
-            is OtherPayload -> {
-                put("title", payload.title)
-                payload.detail?.let { put("detail", it) }
             }
             is MeasurementPayload -> {
                 put("value", payload.value.normalizedNumber())
@@ -502,7 +446,7 @@ object RecordPayloadCodec {
             is CustomPayload -> {
                 put("title", payload.titleSnapshot)
                 payload.detail?.let { put("detail", it) }
-                payload.customItemId?.let { put("custom_item_id", it) }
+                put("custom_item_id", payload.customItemId)
                 payload.iconSlot?.let { put("icon_slot", it) }
             }
             is EmptyPayload -> Unit
@@ -522,18 +466,18 @@ object RecordPayloadCodec {
 
     private fun knownKeys(type: RecordType): Set<String> = when (type) {
         RecordType.NURSING -> setOf("left_min", "right_min", "order", "amount_ml", "record_mode")
-        in MILK_TYPES -> setOf("amount_ml", "prepared_ml", "duration_min")
+        RecordType.FORMULA -> setOf("amount_ml", "prepared_ml", "duration_min")
+        RecordType.PUMPED_FEED, RecordType.PUMP_EXPRESS -> setOf("amount_ml")
         RecordType.PEE -> setOf("pee_amount")
         RecordType.POOP -> STOOL_KEYS
         RecordType.BOTH_DIAPER -> STOOL_KEYS + "pee_amount"
         RecordType.SLEEP -> setOf("is_nap", "anomaly_flag")
-        RecordType.TEMPERATURE -> setOf("celsius", "value")
-        RecordType.MEMO, RecordType.DIARY -> setOf("body", "photos")
+        RecordType.TEMPERATURE -> setOf("celsius")
+        RecordType.DIARY -> setOf("body")
         RecordType.BATH, RecordType.WALK -> emptySet()
         in SYMPTOM_TYPES -> setOf("severity", "description")
         RecordType.MEDICINE -> setOf("name", "dose")
         RecordType.HOSPITAL -> setOf("reason", "advice")
-        RecordType.OTHER -> setOf("title", "detail")
         in MEASUREMENT_TYPES -> setOf("value", "unit")
         in FOOD_TYPES -> setOf("content", "amount")
         RecordType.VACCINE -> setOf("name", "batch")
@@ -554,31 +498,45 @@ object RecordPayloadCodec {
     )
 }
 
-private fun JsonObject.int(key: String, default: Int = 0): Int =
-    get(key)?.jsonPrimitive?.intOrNull ?: default
+private fun JsonObject.requiredInt(key: String): Int =
+    get(key)?.jsonPrimitive?.intOrNull ?: error("$key must be an integer")
 
-private fun JsonObject.optionalInt(key: String): Int? =
-    get(key)?.takeUnless { it is JsonNull }?.jsonPrimitive?.intOrNull
+private fun JsonObject.optionalInt(key: String): Int? = if (key !in this) {
+    null
+} else {
+    getValue(key).jsonPrimitive.intOrNull ?: error("$key must be an integer")
+}
 
-private fun JsonObject.optionalLong(key: String): Long? =
-    get(key)?.takeUnless { it is JsonNull }?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+private fun JsonObject.requiredLong(key: String): Long =
+    get(key)?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+        ?: error("$key must be an integer")
 
-private fun JsonObject.double(key: String, default: Double = 0.0): Double =
-    get(key)?.jsonPrimitive?.doubleOrNull ?: default
+private fun JsonObject.requiredDouble(key: String): Double =
+    get(key)?.jsonPrimitive?.doubleOrNull?.takeIf(Double::isFinite)
+        ?: error("$key must be a finite number")
 
-private fun JsonObject.boolean(key: String, default: Boolean = false): Boolean =
-    get(key)?.jsonPrimitive?.booleanOrNull ?: default
+private fun JsonObject.requiredBoolean(key: String): Boolean =
+    get(key)?.jsonPrimitive?.booleanOrNull ?: error("$key must be a boolean")
 
-private fun JsonObject.string(key: String): String =
-    get(key)?.jsonPrimitive?.contentOrNull.orEmpty()
+private fun JsonObject.optionalBoolean(key: String): Boolean? = if (key !in this) {
+    null
+} else {
+    getValue(key).jsonPrimitive.booleanOrNull ?: error("$key must be a boolean")
+}
 
-private fun JsonObject.optionalString(key: String): String? =
-    get(key)?.takeUnless { it is JsonNull }?.jsonPrimitive?.contentOrNull
+private fun JsonObject.requiredString(key: String): String {
+    val primitive = get(key)?.jsonPrimitive ?: error("$key must be a string")
+    require(primitive.isString) { "$key must be a string" }
+    return primitive.content
+}
 
-private fun JsonObject.stringList(key: String): List<String> =
-    runCatching {
-        get(key)?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }.orEmpty()
-    }.getOrDefault(emptyList())
+private fun JsonObject.optionalString(key: String): String? = if (key !in this) {
+    null
+} else {
+    val primitive = getValue(key).jsonPrimitive
+    require(primitive.isString) { "$key must be a string" }
+    primitive.content
+}
 
 private fun Double.normalizedNumber(): JsonPrimitive =
     if (this % 1.0 == 0.0) JsonPrimitive(toLong()) else JsonPrimitive(this)

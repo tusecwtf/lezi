@@ -171,7 +171,6 @@ class NextFeedReceiver : BroadcastReceiver() {
 @AndroidEntryPoint
 class BootReceiver : BroadcastReceiver() {
     @Inject lateinit var scheduler: NextFeedScheduler
-    @Inject lateinit var calendarScheduler: CalendarReminderScheduler
     @Inject lateinit var carePlanScheduler: CarePlanReminderScheduler
 
     override fun onReceive(context: Context, intent: Intent?) {
@@ -180,7 +179,6 @@ class BootReceiver : BroadcastReceiver() {
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 scheduler.rescheduleFromStore()
-                calendarScheduler.rescheduleAll()
                 carePlanScheduler.rescheduleAll()
             } finally {
                 pending.finish()

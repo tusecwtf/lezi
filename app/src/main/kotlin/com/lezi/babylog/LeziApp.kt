@@ -5,6 +5,7 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.lezi.babylog.domain.CareLog
+import com.lezi.babylog.domain.LocalDataClearCoordinator
 import com.lezi.babylog.feature.export.ExportCacheCleanup
 import com.lezi.babylog.feature.widget.CareWidgetAutoRefresh
 import com.lezi.babylog.sync.ForegroundState
@@ -24,6 +25,7 @@ class LeziApp : Application(), DefaultLifecycleObserver {
     @Inject lateinit var foregroundState: ForegroundState
     @Inject lateinit var widgetAutoRefresh: CareWidgetAutoRefresh
     @Inject lateinit var careLog: CareLog
+    @Inject lateinit var localDataClearCoordinator: LocalDataClearCoordinator
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     override fun onCreate() {
@@ -34,7 +36,7 @@ class LeziApp : Application(), DefaultLifecycleObserver {
         }
         applicationScope.launch(Dispatchers.IO) {
             try {
-                careLog.recoverPendingRecordClearReminders()
+                localDataClearCoordinator.recoverPendingReminderCleanup()
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (_: Throwable) {

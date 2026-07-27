@@ -15,7 +15,7 @@ class OnboardingJoinConfigTest {
         val draft = JoinFamilyDraft.fromConfig(
             HomeLanServerConfig.noviceUiDefaults("CurrentHome"),
         ).prefillInvitation(
-            """{"v":1,"baseUrl":"https://lezi.home:443","code":"ABCD1234","ssids":["Home"]}""",
+            """{"v":1,"baseUrl":"https://lezi.home:443","host":"lezi.home","port":443,"code":"ABCD1234","ssids":["Home"]}""",
         )
 
         val config = draft.toCommand(displayName = "妈妈").homeLanConfig

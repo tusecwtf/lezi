@@ -18,7 +18,7 @@ class QuickRecordSlotsTest {
     )
 
     @Test
-    fun defaultMigrationIsPeeSleepNursingFormula() {
+    fun firstRunDefaultIsPeeSleepNursingFormula() {
         assertEquals(
             listOf("pee", "sleep", "nursing", "formula"),
             defaultQuickRecordSlots(),
@@ -30,7 +30,7 @@ class QuickRecordSlotsTest {
     @Test
     fun emptyAndInvalidRefsBlankWithoutAutoFill() {
         val slots = resolveQuickSlots(
-            storedSlots = listOf("", "memo", "custom", "custom:999"),
+            storedSlots = listOf("", "removed_item", "custom", "custom:999"),
             hiddenItems = emptySet(),
             customItems = listOf(customTouch),
         )
@@ -182,7 +182,7 @@ class QuickRecordSlotsTest {
     }
 
     @Test
-    fun candidatesExcludeHiddenAndRetiredGenerics() {
+    fun candidatesExcludeHiddenItemsAndBareCustom() {
         val candidates = quickSlotCandidates(
             hiddenItems = setOf("pee", "custom:12"),
             customItems = listOf(customTouch, CustomRecordItem(3, "药", 0, 1)),
@@ -190,8 +190,6 @@ class QuickRecordSlotsTest {
         val keys = candidates.map { it.catalogKey }
         assertTrue("pee" !in keys)
         assertTrue("custom:12" !in keys)
-        assertTrue("memo" !in keys)
-        assertTrue("other" !in keys)
         assertTrue("custom" !in keys)
         assertTrue("custom:3" in keys)
         assertTrue("formula" in keys)

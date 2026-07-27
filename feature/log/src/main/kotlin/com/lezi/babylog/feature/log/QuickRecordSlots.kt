@@ -108,7 +108,7 @@ internal fun normalizeStoredQuickSlots(slots: List<String>): List<String> {
 
 /**
  * Resolve one stored catalog key against enabled built-ins and concrete custom items.
- * Does **not** auto-fill replacements when the ref is missing, hidden, retired, or deleted.
+ * Does **not** auto-fill replacements when the ref is missing, hidden, or deleted.
  */
 internal fun resolveQuickSlot(
     catalogKey: String?,
@@ -117,7 +117,6 @@ internal fun resolveQuickSlot(
 ): QuickDockCell {
     val key = catalogKey?.trim().orEmpty()
     if (key.isEmpty()) return QuickDockCell.Empty
-    if (RecordItemIdentity.isInvalidNewEntryReference(key)) return QuickDockCell.Empty
     if (key in hiddenItems) return QuickDockCell.Empty
 
     val identity = RecordItemIdentity.parseCatalogKey(key) ?: return QuickDockCell.Empty
@@ -185,7 +184,7 @@ internal fun oneHandQuickDockOrder(
     }
 }
 
-/** Enabled concrete items available as slot candidates (not memo/other/bare custom). */
+/** Enabled built-ins and concrete custom definitions available as slot candidates. */
 internal fun quickSlotCandidates(
     hiddenItems: Set<String>,
     customItems: List<CustomRecordItem>,
@@ -227,5 +226,5 @@ internal fun swapQuickRecordSlots(
     return normalized
 }
 
-/** Default migration value for first-run / missing preference. */
+/** Default value for first-run / missing preference. */
 internal fun defaultQuickRecordSlots(): List<String> = DEFAULT_QUICK_RECORD_SLOTS

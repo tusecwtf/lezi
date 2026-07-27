@@ -271,8 +271,7 @@ class SettingsDataSource @Inject constructor(
                 prefs.remove(Keys.CURRENT_BABY_ID)
             }
             val sameNextFeedEpoch =
-                snapshot.nextFeedEpoch != null &&
-                    prefs[Keys.NEXT_FEED_EPOCH].orEmpty() == snapshot.nextFeedEpoch
+                prefs[Keys.NEXT_FEED_EPOCH].orEmpty() == snapshot.nextFeedEpoch
             cancelNextFeedAlarm = sameNextFeedEpoch
             if (sameNextFeedEpoch) {
                 prefs.remove(Keys.NEXT_FEED_AT)
@@ -348,7 +347,7 @@ internal fun encodeSystemCalendarEventMap(map: Map<String, String>): String =
  */
 internal fun parseQuickRecordSlots(raw: String?): List<String> {
     if (raw == null) return DEFAULT_QUICK_RECORD_SLOTS
-    // Empty stored string still means "user cleared all" once written; only null is migrate.
+    // Empty stored string means "user cleared all"; only null selects first-run defaults.
     val parts = raw.split(',')
     return normalizeQuickRecordSlots(parts)
 }

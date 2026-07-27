@@ -1,11 +1,6 @@
 package com.lezi.babylog.feature.settings
 
-import android.Manifest
-import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
-import android.os.Build
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
@@ -20,7 +15,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.pager.HorizontalPager
@@ -28,17 +22,12 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -53,34 +42,26 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
-import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.ConflictNotAdoptedAudit
 import com.lezi.babylog.core.model.RecordTime
-import com.lezi.babylog.core.model.RecordTimeDecision
-import com.lezi.babylog.core.model.FutureEventError
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.businessLabel
 import com.lezi.babylog.core.model.displayLabel
 import com.lezi.babylog.core.model.SettingsLocal
-import com.lezi.babylog.designsystem.LeziClockDialDialog
-import com.lezi.babylog.designsystem.LeziDatePicker
 import com.lezi.babylog.designsystem.LeziDetailTopBar
 import com.lezi.babylog.designsystem.LeziCard
 import com.lezi.babylog.designsystem.LeziPrimaryButton
@@ -88,9 +69,7 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
-import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.domain.CareLog
-import com.lezi.babylog.domain.CalendarEvent
 import com.lezi.babylog.domain.CustomRecordItem
 import com.lezi.babylog.domain.SYSTEM_CALENDAR_UNSYNCED_LABEL
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -100,11 +79,9 @@ import java.time.LocalTime
 import java.time.YearMonth
 import kotlinx.coroutines.flow.combine
 import java.time.ZoneId
-import java.time.ZoneOffset
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import javax.inject.Inject
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
@@ -117,86 +94,11 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
-/** Row on the lezi calendar: either a care plan or a legacy free-title event. */
+/** Current lezi-calendar row backed only by a care plan. */
 sealed class CalendarDayItem {
     abstract val sortAt: Long
     data class Plan(val plan: CarePlan) : CalendarDayItem() {
         override val sortAt: Long get() = plan.scheduledAt
-    }
-    data class LegacyEvent(val event: CalendarEvent) : CalendarDayItem() {
-        override val sortAt: Long get() = event.eventAt
-    }
-}
-
-internal data class LegacyCalendarDeleteState(
-    val target: CalendarEvent? = null,
-    val deleting: Boolean = false,
-    val error: String? = null,
-)
-
-internal sealed interface LegacyCalendarDeleteAction {
-    data class Request(val event: CalendarEvent) : LegacyCalendarDeleteAction
-    data object Cancel : LegacyCalendarDeleteAction
-    data object Confirm : LegacyCalendarDeleteAction
-    data class Finished(val error: String?) : LegacyCalendarDeleteAction
-}
-
-internal data class LegacyCalendarDeleteCommand(
-    val event: CalendarEvent,
-)
-
-internal data class LegacyCalendarDeleteTransition(
-    val state: LegacyCalendarDeleteState,
-    val command: LegacyCalendarDeleteCommand? = null,
-)
-
-internal fun reduceLegacyCalendarDelete(
-    state: LegacyCalendarDeleteState,
-    action: LegacyCalendarDeleteAction,
-): LegacyCalendarDeleteTransition = when (action) {
-    is LegacyCalendarDeleteAction.Request ->
-        LegacyCalendarDeleteTransition(
-            state.copy(target = action.event, deleting = false, error = null),
-        )
-    LegacyCalendarDeleteAction.Cancel ->
-        if (state.deleting) {
-            LegacyCalendarDeleteTransition(state)
-        } else {
-            LegacyCalendarDeleteTransition(LegacyCalendarDeleteState())
-        }
-    LegacyCalendarDeleteAction.Confirm -> {
-        val target = state.target
-        if (target == null || state.deleting) {
-            LegacyCalendarDeleteTransition(state)
-        } else {
-            LegacyCalendarDeleteTransition(
-                state = state.copy(deleting = true, error = null),
-                command = LegacyCalendarDeleteCommand(target),
-            )
-        }
-    }
-    is LegacyCalendarDeleteAction.Finished -> {
-        if (action.error == null) {
-            LegacyCalendarDeleteTransition(LegacyCalendarDeleteState())
-        } else {
-            LegacyCalendarDeleteTransition(
-                state.copy(deleting = false, error = action.error),
-            )
-        }
-    }
-}
-
-internal suspend fun executeLegacyCalendarDelete(
-    event: CalendarEvent,
-    deleteById: suspend (Long) -> Unit,
-): String? {
-    try {
-        deleteById(event.id)
-        return null
-    } catch (cancelled: CancellationException) {
-        throw cancelled
-    } catch (error: Throwable) {
-        return legacyCalendarDeleteFailureCopy(error)
     }
 }
 
@@ -227,14 +129,6 @@ class CalendarViewModel @Inject constructor(
 
     private val _conflictBusy = MutableStateFlow(false)
     val conflictBusy = _conflictBusy.asStateFlow()
-
-    @OptIn(ExperimentalCoroutinesApi::class)
-    val events = combine(careLog.observeCurrentBaby(), visibleMonth) { baby, month ->
-        baby to calendarMonthWindow(month, zone)
-    }.flatMapLatest { (baby, window) ->
-        if (baby == null) flowOf(emptyList())
-        else careLog.observeCalendarEvents(baby.id, window.startInclusive, window.endExclusive)
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val carePlans = combine(careLog.observeCurrentBaby(), visibleMonth) { baby, month ->
@@ -273,9 +167,8 @@ class CalendarViewModel @Inject constructor(
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
-    val dayItems = combine(events, carePlans) { legacy, plans ->
-        (plans.map { CalendarDayItem.Plan(it) } + legacy.map { CalendarDayItem.LegacyEvent(it) })
-            .sortedBy { it.sortAt }
+    val dayItems = carePlans.map { plans ->
+        plans.map { CalendarDayItem.Plan(it) }.sortedBy { it.sortAt }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     fun loadConflictAuditsForPlan(carePlanClientUuid: String, onLoaded: (Int) -> Unit = {}) {
@@ -357,124 +250,12 @@ class CalendarViewModel @Inject constructor(
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
 
-    val timeStepMin = settingsStore.settings
-        .map { it.timeStepMin }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 1)
-
-    val timePickerStyle = settingsStore.settings
-        .map { it.timePickerStyle }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "dropdown")
-
-    val preferredHand = settingsStore.settings
-        .map { it.preferredHand }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "right")
-
     val settings = settingsStore.settings
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsLocal())
 
     val customItems = careLog.observeCustomItems()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    /**
-     * Legacy free-title create is retired from the calendar ＋ entry.
-     * Kept for tests / migration tooling that still call through ViewModel.
-     */
-    fun add(
-        title: String,
-        eventAt: Long,
-        remindAt: Long?,
-        onResult: (String?) -> Unit,
-    ) {
-        viewModelScope.launch {
-            val baby = careLog.getCurrentBaby()
-            if (baby == null) {
-                onResult("请先添加宝宝")
-                return@launch
-            }
-            val now = RecordTime.currentTimeMillis()
-            calendarEventError(title, eventAt, remindAt, now)?.let {
-                onResult(it)
-                return@launch
-            }
-            careLog.addCalendarEvent(
-                babyId = baby.id,
-                title = title,
-                eventAt = eventAt,
-                remindAt = remindAt,
-            )
-            val scheduled = remindAt != null
-            _status.value = scheduleStatus(scheduled, remindAt != null)
-            onResult(null)
-        }
-    }
-
-    fun convertEventToCarePlan(
-        event: CalendarEvent,
-        type: RecordType,
-        customItemId: Long? = null,
-        onResult: (String?) -> Unit,
-    ) {
-        viewModelScope.launch {
-            runCatching {
-                careLog.convertCalendarEventToCarePlan(
-                    eventId = event.id,
-                    type = type,
-                    customItemId = customItemId,
-                )
-            }.onSuccess {
-                _status.value = "已转换为护理计划；原日程提醒已取消"
-                onResult(null)
-            }.onFailure { err ->
-                onResult(err.message ?: "转换失败，原日程保持不变")
-            }
-        }
-    }
-
-    fun update(
-        event: CalendarEvent,
-        title: String,
-        eventAt: Long,
-        remindAt: Long?,
-        onResult: (String?) -> Unit,
-    ) {
-        viewModelScope.launch {
-            calendarEventError(title, eventAt, remindAt)?.let {
-                onResult(it)
-                return@launch
-            }
-            val updated = event.copy(
-                title = title.trim(),
-                eventAt = eventAt,
-                remindAt = remindAt,
-            )
-            val scheduled = careLog.updateCalendarEvent(updated)
-            _status.value = scheduleStatus(scheduled, remindAt != null)
-            onResult(null)
-        }
-    }
-
-    fun delete(event: CalendarEvent, onResult: (String?) -> Unit) {
-        viewModelScope.launch {
-            onResult(
-                executeLegacyCalendarDelete(event) { eventId ->
-                    careLog.deleteCalendarEvent(eventId)
-                },
-            )
-        }
-    }
-
-    fun setPermissionDegraded() {
-        _status.value = "通知权限未开启；日程已保存，但本机不会显示通知"
-    }
-
-    private fun scheduleStatus(
-        scheduled: Boolean,
-        reminderEnabled: Boolean,
-    ): String? = when {
-        !reminderEnabled -> "日程已保存，未设置提醒"
-        scheduled -> "日程与普通本地提醒已保存；系统可能因省电策略延后通知"
-        else -> "日程已保存；提醒时刻已过，未安排通知"
-    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -492,9 +273,6 @@ fun CalendarRoute(
     vm: CalendarViewModel = hiltViewModel(),
 ) {
     val dayItems by vm.dayItems.collectAsStateWithLifecycle()
-    val timeStepMin by vm.timeStepMin.collectAsStateWithLifecycle()
-    val timePickerStyle by vm.timePickerStyle.collectAsStateWithLifecycle()
-    val preferredHand by vm.preferredHand.collectAsStateWithLifecycle()
     val reminderStatus by vm.status.collectAsStateWithLifecycle()
     val settings by vm.settings.collectAsStateWithLifecycle()
     val customItems by vm.customItems.collectAsStateWithLifecycle()
@@ -531,34 +309,13 @@ fun CalendarRoute(
     val itemCountsByDate = remember(dayItems, zone) {
         calendarItemCountsByDate(dayItems, zone)
     }
-    val context = LocalContext.current
-    var showAdd by remember { mutableStateOf(false) }
     var showPlanTypePicker by remember { mutableStateOf(false) }
-    var convertEvent by remember { mutableStateOf<CalendarEvent?>(null) }
-    var editingEvent by remember { mutableStateOf<CalendarEvent?>(null) }
-    var deleteState by remember { mutableStateOf(LegacyCalendarDeleteState()) }
     var showConflictList by remember { mutableStateOf(false) }
     var confirmConvertCandidate by remember { mutableStateOf<String?>(null) }
     var conflictError by remember { mutableStateOf<String?>(null) }
     var previewPhotos by remember { mutableStateOf<List<String>?>(null) }
     var previewStartIndex by remember { mutableStateOf(0) }
     var scheduleError by remember { mutableStateOf<String?>(null) }
-    var title by remember { mutableStateOf("") }
-    var eventAt by remember(initialDate) {
-        mutableStateOf(RecordTime.defaultFutureEventTimestamp(initialDate, zone))
-    }
-    var reminderEnabled by remember { mutableStateOf(true) }
-    var remindAt by remember(initialDate) { mutableStateOf(eventAt - 60 * 60_000L) }
-    var dateTarget by remember { mutableStateOf<CalendarClockTarget?>(null) }
-    var clockTarget by remember { mutableStateOf<CalendarClockTarget?>(null) }
-    var addError by remember { mutableStateOf<String?>(null) }
-    var saveAfterPermission by remember { mutableStateOf<((Boolean) -> Unit)?>(null) }
-    val notificationPermission = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        saveAfterPermission?.invoke(granted)
-        saveAfterPermission = null
-    }
     val planableItems = remember(settings.hiddenItems, customItems) {
         calendarPlanableItems(settings.hiddenItems, customItems)
     }
@@ -587,28 +344,6 @@ fun CalendarRoute(
     }
     LaunchedEffect(monthState.selectedDate) {
         scheduleError = null
-    }
-    val openCalendarDraft = {
-        // Legacy free-title draft is only used when editing an existing CalendarEvent.
-        editingEvent = null
-        eventAt = RecordTime.defaultFutureEventTimestamp(initialDate, zone)
-        remindAt = eventAt - 60 * 60_000L
-        title = ""
-        reminderEnabled = true
-        dateTarget = null
-        clockTarget = null
-        addError = null
-        deleteState = LegacyCalendarDeleteState()
-        showAdd = true
-    }
-    val closeCalendarDraft = {
-        showAdd = false
-        dateTarget = null
-        clockTarget = null
-        title = ""
-        editingEvent = null
-        addError = null
-        deleteState = LegacyCalendarDeleteState()
     }
     Scaffold(
         topBar = {
@@ -748,43 +483,6 @@ fun CalendarRoute(
                                     }
                                 }
                             }
-                            is CalendarDayItem.LegacyEvent -> {
-                                val e = item.event
-                                LeziCard(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    onClick = {
-                                        editingEvent = e
-                                        title = e.title
-                                        eventAt = e.eventAt
-                                        reminderEnabled = e.remindAt != null
-                                        remindAt = e.remindAt ?: (e.eventAt - 60 * 60_000L)
-                                        addError = null
-                                        deleteState = LegacyCalendarDeleteState()
-                                        showAdd = true
-                                    },
-                                ) {
-                                    Text(
-                                        e.title,
-                                        style = LeziTypography.BodyStrong,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                    Text(
-                                        formatCalendarDateTime(e.eventAt, zone),
-                                        style = LeziTypography.Meta,
-                                    )
-                                    e.remindAt?.let {
-                                        Text(
-                                            "提醒 ${formatCalendarDateTime(it, zone)}",
-                                            style = LeziTypography.Meta,
-                                        )
-                                    }
-                                    Text("历史日程 · 可编辑或转为护理计划", style = LeziTypography.Meta)
-                                    TextButton(onClick = { convertEvent = e }) {
-                                        Text("转为护理计划")
-                                    }
-                                }
-                            }
                         }
                     }
                 }
@@ -837,354 +535,6 @@ fun CalendarRoute(
             },
         )
     }
-    convertEvent?.let { event ->
-        AlertDialog(
-            onDismissRequest = { convertEvent = null },
-            title = { Text("转为护理计划") },
-            text = {
-                Column(
-                    Modifier
-                        .heightIn(max = 420.dp)
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Text("选择具体项目后将创建护理计划并取消原日程提醒。")
-                    planableItems.forEach { item ->
-                        TextButton(
-                            onClick = {
-                                vm.convertEventToCarePlan(
-                                    event,
-                                    item.type,
-                                    customItemId = item.customItemId,
-                                ) { err ->
-                                    if (err == null) convertEvent = null
-                                    else addError = err
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text(item.label)
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { convertEvent = null }) { Text("取消") }
-            },
-        )
-    }
-    if (showAdd) {
-        AlertDialog(
-            onDismissRequest = {
-                if (deleteState.target == null) {
-                    closeCalendarDraft()
-                }
-            },
-            modifier = Modifier.imePadding(),
-            properties = DialogProperties(decorFitsSystemWindows = false),
-            title = { Text(if (editingEvent == null) "编辑历史日程" else "编辑日程") },
-            text = {
-                Column(
-                    Modifier
-                        .heightIn(max = 520.dp)
-                        .verticalScroll(rememberScrollState())
-                        .imePadding()
-                        .dismissKeyboardOnTap(),
-                    verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
-                ) {
-                    OutlinedTextField(
-                        value = title,
-                        onValueChange = {
-                            title = limitCalendarTitleInput(it)
-                            addError = null
-                        },
-                        label = { Text("标题") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    Text("日程时间", style = LeziTypography.Label)
-                    Text(
-                        formatCalendarDateTime(eventAt, zone),
-                        style = LeziTypography.BodyStrong,
-                    )
-                    FlowRow(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        OutlinedButton(onClick = { dateTarget = CalendarClockTarget.Event }) {
-                            Text("修改日期")
-                        }
-                        OutlinedButton(onClick = { clockTarget = CalendarClockTarget.Event }) {
-                            Text("选择时间")
-                        }
-                    }
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text("提前提醒", style = LeziTypography.Label)
-                        Switch(
-                            checked = reminderEnabled,
-                            onCheckedChange = {
-                                reminderEnabled = it
-                                if (it) {
-                                    remindAt = eventAt - 60 * 60_000L
-                                }
-                            },
-                        )
-                    }
-                    if (reminderEnabled) {
-                        Text(
-                            formatCalendarDateTime(remindAt, zone),
-                            style = LeziTypography.BodyStrong,
-                        )
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
-                        ) {
-                            OutlinedButton(onClick = { dateTarget = CalendarClockTarget.Reminder }) {
-                                Text("提醒日期")
-                            }
-                            OutlinedButton(onClick = { clockTarget = CalendarClockTarget.Reminder }) {
-                                Text("提醒时刻")
-                            }
-                        }
-                    }
-                    addError?.let {
-                        Text(
-                            it,
-                            style = LeziTypography.Meta,
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    val selectedReminder = remindAt.takeIf { reminderEnabled }
-                    val error = calendarEventError(
-                        title = title,
-                        eventAt = eventAt,
-                        remindAt = selectedReminder,
-                    )
-                    if (error != null) {
-                        addError = error
-                    } else {
-                        val persist: (Boolean) -> Unit = { permissionGranted ->
-                            val onSaved: (String?) -> Unit = { saveError ->
-                                if (saveError == null) {
-                                    if (!permissionGranted && selectedReminder != null) {
-                                        vm.setPermissionDegraded()
-                                    }
-                                    closeCalendarDraft()
-                                } else {
-                                    addError = saveError
-                                }
-                            }
-                            val existing = editingEvent
-                            if (existing == null) {
-                                vm.add(title.trim(), eventAt, selectedReminder, onSaved)
-                            } else {
-                                vm.update(
-                                    existing,
-                                    title.trim(),
-                                    eventAt,
-                                    selectedReminder,
-                                    onSaved,
-                                )
-                            }
-                        }
-                        val needsPermission = selectedReminder != null &&
-                            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                            ContextCompat.checkSelfPermission(
-                                context,
-                                Manifest.permission.POST_NOTIFICATIONS,
-                            ) != PackageManager.PERMISSION_GRANTED
-                        if (needsPermission) {
-                            saveAfterPermission = persist
-                            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-                        } else {
-                            persist(true)
-                        }
-                    }
-                }) { Text("保存") }
-            },
-            dismissButton = {
-                Row {
-                    editingEvent?.let { event ->
-                        TextButton(
-                            onClick = {
-                                deleteState = reduceLegacyCalendarDelete(
-                                    state = deleteState,
-                                    action = LegacyCalendarDeleteAction.Request(event),
-                                ).state
-                            },
-                        ) {
-                            Text("删除", color = MaterialTheme.colorScheme.error)
-                        }
-                    }
-                    TextButton(onClick = closeCalendarDraft) { Text("取消") }
-                }
-            },
-        )
-    }
-
-    deleteState.target?.let { target ->
-        AlertDialog(
-            onDismissRequest = {
-                deleteState = reduceLegacyCalendarDelete(
-                    state = deleteState,
-                    action = LegacyCalendarDeleteAction.Cancel,
-                ).state
-            },
-            modifier = Modifier.testTag("legacy_calendar_delete_confirmation"),
-            title = { Text("删除这条历史日程？") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
-                    Text(legacyCalendarDeleteImpactCopy(target, zone))
-                    deleteState.error?.let { error ->
-                        Text(
-                            error,
-                            style = LeziTypography.Meta,
-                            color = MaterialTheme.colorScheme.error,
-                        )
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    enabled = !deleteState.deleting,
-                    onClick = {
-                        val transition = reduceLegacyCalendarDelete(
-                            state = deleteState,
-                            action = LegacyCalendarDeleteAction.Confirm,
-                        )
-                        deleteState = transition.state
-                        transition.command?.let { command ->
-                            vm.delete(command.event) { deleteError ->
-                                deleteState = reduceLegacyCalendarDelete(
-                                    state = deleteState,
-                                    action = LegacyCalendarDeleteAction.Finished(deleteError),
-                                ).state
-                                if (deleteError == null) {
-                                    closeCalendarDraft()
-                                }
-                            }
-                        }
-                    },
-                    modifier = Modifier.testTag("legacy_calendar_delete_confirm"),
-                ) {
-                    Text(
-                        if (deleteState.deleting) "删除中…" else "确认删除",
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-            },
-            dismissButton = {
-                TextButton(
-                    enabled = !deleteState.deleting,
-                    onClick = {
-                        deleteState = reduceLegacyCalendarDelete(
-                            state = deleteState,
-                            action = LegacyCalendarDeleteAction.Cancel,
-                        ).state
-                    },
-                ) {
-                    Text("取消")
-                }
-            },
-        )
-    }
-
-    dateTarget?.let { target ->
-        val value = if (target == CalendarClockTarget.Event) eventAt else remindAt
-        val current = Instant.ofEpochMilli(value).atZone(zone)
-        val initialUtc = current.toLocalDate()
-            .atStartOfDay(ZoneOffset.UTC)
-            .toInstant()
-            .toEpochMilli()
-        val dateState = rememberDatePickerState(initialSelectedDateMillis = initialUtc)
-        DatePickerDialog(
-            onDismissRequest = { dateTarget = null },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        dateState.selectedDateMillis?.let { millis ->
-                            val date = Instant.ofEpochMilli(millis)
-                                .atZone(ZoneOffset.UTC)
-                                .toLocalDate()
-                            val decision = RecordTime.resolve(
-                                date = date,
-                                time = current.toLocalTime(),
-                                zone = zone,
-                                preferredOffset = current.offset,
-                            )
-                            when (decision) {
-                                RecordTimeDecision.RejectedGap -> {
-                                    addError = "所选日期不存在当前时刻，请改用其他时刻"
-                                }
-                                is RecordTimeDecision.Accepted -> {
-                                    val changed = decision.value.toInstant().toEpochMilli()
-                                    if (target == CalendarClockTarget.Event) {
-                                        val priorEvent = eventAt
-                                        eventAt = changed
-                                        if (reminderEnabled) {
-                                            remindAt = RecordTime.reminderAfterEventChange(
-                                                priorEventAt = priorEvent,
-                                                newEventAt = eventAt,
-                                                priorReminderAt = remindAt,
-                                            )
-                                        }
-                                    } else {
-                                        remindAt = changed
-                                    }
-                                    addError = null
-                                }
-                            }
-                        }
-                        dateTarget = null
-                    },
-                ) { Text("确定") }
-            },
-            dismissButton = {
-                TextButton(onClick = { dateTarget = null }) { Text("取消") }
-            },
-        ) {
-            LeziDatePicker(state = dateState)
-        }
-    }
-
-    clockTarget?.let { target ->
-        val value = if (target == CalendarClockTarget.Event) eventAt else remindAt
-        LeziClockDialDialog(
-            title = if (target == CalendarClockTarget.Event) "选择日程时刻" else "选择提醒时刻",
-            value = Instant.ofEpochMilli(value).atZone(zone),
-            minuteStep = timeStepMin,
-            timePickerStyle = timePickerStyle,
-            preferredHand = preferredHand,
-            onConfirm = { picked ->
-                val changed = picked.toInstant().toEpochMilli()
-                if (target == CalendarClockTarget.Event) {
-                    val priorEvent = eventAt
-                    eventAt = changed
-                    if (reminderEnabled) {
-                        remindAt = RecordTime.reminderAfterEventChange(
-                            priorEventAt = priorEvent,
-                            newEventAt = eventAt,
-                            priorReminderAt = remindAt,
-                        )
-                    }
-                } else {
-                    remindAt = changed
-                }
-                addError = null
-                clockTarget = null
-            },
-            onDismiss = { clockTarget = null },
-        )
-    }
-
     if (showConflictList) {
         AlertDialog(
             onDismissRequest = {
@@ -1584,8 +934,6 @@ private fun CalendarMonthPicker(
     }
 }
 
-private enum class CalendarClockTarget { Event, Reminder }
-
 /** Pure entry policy: completed/history + admin + conflicts → audit sheet. */
 internal fun shouldOpenConflictAudit(
     isFamilyAdmin: Boolean,
@@ -1597,49 +945,10 @@ internal fun shouldOpenConflictAudit(
     return isFamilyAdmin && conflictCount > 0
 }
 
-internal fun calendarEventError(
-    title: String,
-    eventAt: Long,
-    remindAt: Long?,
-    now: Long = RecordTime.currentTimeMillis(),
-): String? {
-    if (title.isBlank()) return "请填写日程标题"
-    if (calendarTitleLength(title.trim()) > MAX_CALENDAR_TITLE_CODE_POINTS) {
-        return "日程标题最多 $MAX_CALENDAR_TITLE_CODE_POINTS 个字符"
-    }
-    return when (RecordTime.futureEventError(eventAt, remindAt, now)) {
-        FutureEventError.EventNotFuture -> "日程时间必须晚于现在"
-        FutureEventError.ReminderNotFuture -> "提醒时间必须晚于现在"
-        FutureEventError.ReminderNotBeforeEvent -> "提醒时间必须早于日程时间"
-        null -> null
-    }
-}
-
-private const val MAX_CALENDAR_TITLE_CODE_POINTS = 40
-
-private fun calendarTitleLength(value: String): Int =
-    value.codePointCount(0, value.length)
-
-private fun limitCalendarTitleInput(value: String): String {
-    if (calendarTitleLength(value) <= MAX_CALENDAR_TITLE_CODE_POINTS) return value
-    return value.substring(0, value.offsetByCodePoints(0, MAX_CALENDAR_TITLE_CODE_POINTS))
-}
-
 private fun formatCalendarDateTime(timestamp: Long, zone: ZoneId): String =
     Instant.ofEpochMilli(timestamp)
         .atZone(zone)
         .format(DateTimeFormatter.ofPattern("M月d日 HH:mm"))
-
-internal fun legacyCalendarDeleteImpactCopy(
-    event: CalendarEvent,
-    zone: ZoneId,
-): String =
-    "「${event.title} · ${formatCalendarDateTime(event.eventAt, zone)}」" +
-        "只会从本机乐记日历移除，并取消这条日程的乐记提醒；" +
-        "不会改动家庭护理计划或系统日历。删除后不可撤销。"
-
-internal fun legacyCalendarDeleteFailureCopy(error: Throwable): String =
-    productUiError(error, "删除失败，请重试")
 
 /**
  * Local device time + status, and original plan-zone clock when zones differ

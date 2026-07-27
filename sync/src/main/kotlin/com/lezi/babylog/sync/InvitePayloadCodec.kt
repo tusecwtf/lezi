@@ -67,18 +67,22 @@ object InvitePayloadCodec {
         }
         val json = Json.parseToJsonElement(value).jsonObject
         val version = json["v"]?.jsonPrimitive?.intOrNull
-        require(version == null || version == 1) { "不支持的邀请版本" }
+        require(version == 1) { "不支持的邀请版本" }
         val ssids = json["ssids"]?.jsonArray
-            ?.mapNotNull { el -> runCatching { el.jsonPrimitive.content }.getOrNull() }
+            ?.map { el -> el.jsonPrimitive.content }
             .orEmpty()
+        val baseUrl = json["baseUrl"]?.jsonPrimitive?.content.orEmpty()
         val host = json["host"]?.jsonPrimitive?.content.orEmpty()
         val port = json["port"]?.jsonPrimitive?.intOrNull
+        require(baseUrl.isNotBlank() && host.isNotBlank() && port != null) {
+            "当前邀请缺少服务器地址字段"
+        }
         return normalize(
             InvitePayload(
-                baseUrl = json["baseUrl"]?.jsonPrimitive?.content.orEmpty(),
+                baseUrl = baseUrl,
                 code = json["code"]?.jsonPrimitive?.content.orEmpty(),
                 host = host,
-                port = port ?: DEFAULT_SERVER_PORT,
+                port = port,
                 ssids = ssids,
             ),
         )

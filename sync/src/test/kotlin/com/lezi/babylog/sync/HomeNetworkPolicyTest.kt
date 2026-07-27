@@ -116,7 +116,7 @@ class HomeNetworkPolicyTest {
                     val reader = socket.getInputStream().bufferedReader()
                     while (!reader.readLine().isNullOrEmpty()) Unit
                     val body =
-                        """{"ok":true,"version":"0.2.4","capabilities":["atomic_bundle"]}"""
+                        """{"ok":true,"version":"0.2.5","capabilities":["atomic_bundle","record_membership_author"]}"""
                             .toByteArray(Charsets.UTF_8)
                     socket.getOutputStream().use { output ->
                         output.write(
@@ -138,8 +138,8 @@ class HomeNetworkPolicyTest {
                 "http://${server.inetAddress.hostAddress}:${server.localPort}",
             )
             assertThat(status.ok).isTrue()
-            assertThat(status.supportsAtomicBundle).isTrue()
-            assertThat(status.version).isEqualTo("0.2.4")
+            assertThat(status.isCurrentServerContract()).isTrue()
+            assertThat(status.version).isEqualTo("0.2.5")
         } finally {
             server.close()
             responder.join(2_000)
@@ -147,9 +147,9 @@ class HomeNetworkPolicyTest {
     }
 
     @Test
-    fun httpHealthProbeTreatsLegacyBodyWithoutCapabilitiesAsHealthyButUnsupported() = runTest {
+    fun httpHealthProbeRejectsBodyWithoutCurrentCapabilities() = runTest {
         val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
-        val responder = thread(name = "lezi-health-legacy-test-server") {
+        val responder = thread(name = "lezi-health-incompatible-test-server") {
             runCatching {
                 server.accept().use { socket ->
                     val reader = socket.getInputStream().bufferedReader()
@@ -174,8 +174,8 @@ class HomeNetworkPolicyTest {
             val status = HttpHealthProbe().probe(
                 "http://${server.inetAddress.hostAddress}:${server.localPort}",
             )
-            assertThat(status.ok).isTrue()
-            assertThat(status.supportsAtomicBundle).isFalse()
+            assertThat(status.ok).isFalse()
+            assertThat(status.isCurrentServerContract()).isFalse()
         } finally {
             server.close()
             responder.join(2_000)
@@ -183,7 +183,7 @@ class HomeNetworkPolicyTest {
     }
 
     @Test
-    fun policyCachesAtomicBundleCapabilityFromSuccessfulProbe() = runTest {
+    fun policyCachesCurrentServerContractFromSuccessfulProbe() = runTest {
         val probe = RecordingHealthProbe(
             result = true,
             capabilities = setOf(
@@ -198,8 +198,7 @@ class HomeNetworkPolicyTest {
         )
         assertThat(policy.evaluate(config(), isForeground = true))
             .isEqualTo(HomeNetworkDecision.Allowed)
-        assertThat(policy.supportsAtomicBundle).isTrue()
-        assertThat(policy.supportsRecordMembershipAuthor).isTrue()
+        assertThat(policy.lastHealthStatus.isCurrentServerContract()).isTrue()
     }
 
     @Test
@@ -434,13 +433,14 @@ private class FakeNetworkState(
 
 private class RecordingHealthProbe(
     var result: Boolean,
-    var capabilities: Set<String> = setOf(CAPABILITY_ATOMIC_BUNDLE),
+    var capabilities: Set<String> = REQUIRED_SYNC_SERVER_CAPABILITIES,
 ) : HealthProbe {
     val calls = mutableListOf<String>()
     override suspend fun probe(baseUrl: String): HealthStatus {
         calls += baseUrl
         return HealthStatus(
             ok = result,
+            version = if (result) CURRENT_SYNC_SERVER_VERSION else null,
             capabilities = if (result) capabilities else emptySet(),
         )
     }

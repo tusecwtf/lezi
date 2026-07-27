@@ -4,6 +4,7 @@ import androidx.room.Entity
 import androidx.room.ColumnInfo
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
 
 @Entity(tableName = "local_users")
 data class LocalUserEntity(
@@ -49,8 +50,6 @@ data class BabyEntity(
     val birthdayEpochDay: Long,
     /** Birth weight in grams; null when not set. */
     val birthWeightGrams: Int? = null,
-    /** Legacy Room/sync v1 compatibility only; never expose to product or domain code. */
-    val dueDateEpochDay: Long? = null,
     val themeColorArgb: Int,
     val sortOrder: Int = 0,
     val clientUuid: String,
@@ -82,10 +81,8 @@ data class RecordEntity(
     val timestamp: Long,
     val endTimestamp: Long? = null,
     val note: String? = null,
-    val createdByUserId: Long,
-    val createdByDeviceId: String? = null,
     val payloadJson: String = "{}",
-    val schemaVersion: Int = 1,
+    val schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
     val updatedAt: Long,
     val deletedAt: Long? = null,
     @ColumnInfo(defaultValue = "1")
@@ -118,7 +115,7 @@ data class CarePlanEntity(
     val scheduledZoneId: String,
     val note: String? = null,
     val payloadJson: String = "{}",
-    val schemaVersion: Int = 1,
+    val schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
     /** Storage: pending | missed | completed | skipped */
     val status: String = "pending",
     val createdByMembershipId: String = "",
@@ -149,9 +146,6 @@ data class CarePlanEntity(
     /** Durable hand-off set before external provider I/O; closes insert-before-id crashes. */
     @ColumnInfo(defaultValue = "0")
     val systemCalendarProjectionPending: Boolean = false,
-    /** True only for a pre-v21 AlarmManager intent that has no scheduled-time lease. */
-    @ColumnInfo(defaultValue = "1")
-    val legacyCarePlanReminderPending: Boolean = false,
 )
 
 /**
@@ -252,4 +246,22 @@ data class MediaAssetEntity(
     val deletedAt: Long? = null,
     @ColumnInfo(defaultValue = "1")
     val syncDirty: Boolean = true,
-)
+) {
+    init {
+        when (kind) {
+            "log" -> {
+                require((recordId != null) xor (carePlanId != null)) {
+                    "log media must belong to exactly one record or care plan"
+                }
+                require(babyId == null) { "log media must not belong directly to a baby" }
+            }
+            "avatar" -> {
+                require(babyId != null) { "avatar media must belong to a baby" }
+                require(recordId == null && carePlanId == null) {
+                    "avatar media must not belong to a record or care plan"
+                }
+            }
+            else -> throw IllegalArgumentException("unsupported media kind: $kind")
+        }
+    }
+}

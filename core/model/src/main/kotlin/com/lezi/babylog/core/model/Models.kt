@@ -53,12 +53,6 @@ data class Record(
     val timestamp: Long,
     val endTimestamp: Long? = null,
     val note: String? = null,
-    val createdByUserId: Long,
-    /**
-     * Legacy sync-session device link (wire `created_by_device_id`).
-     * Used only when membership authorship is unavailable; never shown raw.
-     */
-    val createdByDeviceId: String? = null,
     val payloadJson: String = "{}",
     val schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
     val updatedAt: Long,
@@ -68,7 +62,7 @@ data class Record(
      * Creator-local complete visibility uses this for amber “仅本机” chrome.
      */
     val syncDirty: Boolean = false,
-    /** Server-minted membership that first created this record; empty for legacy/offline rows. */
+    /** Server-minted membership that first created this record; empty before joining a family. */
     val createdByMembershipId: String = "",
 ) {
     val payload: RecordPayloadDocument

@@ -79,12 +79,6 @@ class CarePlanReminderAlarm @Inject constructor(
             .cancel(pendingIntent(context, carePlanId, "", ""))
     }
 
-    fun cancelByClientUuid(clientUuid: String) {
-        // Domain still keys cancel by local id; clientUuid cancel is a no-op fallback
-        // when the row is already gone.
-        if (clientUuid.isBlank()) return
-    }
-
     companion object {
         const val EXTRA_PLAN_ID = "care_plan_id"
         const val EXTRA_PLAN_UUID = "care_plan_client_uuid"
@@ -158,10 +152,11 @@ class CarePlanReminderReceiver : BroadcastReceiver() {
             .ifBlank { "护理计划" }
         val planId = intent?.getLongExtra(CarePlanReminderAlarm.EXTRA_PLAN_ID, 0L) ?: 0L
         val planUuid = intent?.getStringExtra(CarePlanReminderAlarm.EXTRA_PLAN_UUID).orEmpty()
+        if (intent?.hasExtra(CarePlanReminderAlarm.EXTRA_SCHEDULED_AT) != true) return
         val expectedScheduledAt = intent?.getLongExtra(
             CarePlanReminderAlarm.EXTRA_SCHEDULED_AT,
-            Long.MIN_VALUE,
-        ) ?: Long.MIN_VALUE
+            0L,
+        ) ?: 0L
         if (planId <= 0L || planUuid.isBlank()) return
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {

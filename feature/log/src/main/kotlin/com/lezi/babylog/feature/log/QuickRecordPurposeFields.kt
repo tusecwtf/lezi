@@ -54,7 +54,6 @@ import com.lezi.babylog.designsystem.LeziStoolAmountMark
 import com.lezi.babylog.designsystem.LeziStoolColorMark
 import com.lezi.babylog.designsystem.LeziStoolConsistencyMark
 import com.lezi.babylog.designsystem.LeziTypography
-import com.lezi.babylog.domain.CustomRecordItem
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -67,7 +66,6 @@ internal fun PurposeFields(
     amountStepMl: Int,
     birthdayEpochDay: Long? = null,
     infantFeverAdviceEnabled: Boolean = true,
-    customItems: List<CustomRecordItem> = emptyList(),
     canStartNursingTimer: Boolean,
     actionsEnabled: Boolean,
     onDraftChange: (QuickRecordDraft) -> Unit,
@@ -145,7 +143,6 @@ internal fun PurposeFields(
         )
         QuickRecordMode.CustomText -> CustomTextFields(
             draft,
-            customItems,
             onDraftChange,
             highlightedField = highlightedField,
             fieldFocusRequester = fieldFocusRequester,

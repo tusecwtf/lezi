@@ -348,8 +348,8 @@ class FamilySessionCoordinatorTest {
     }
 
     @Test
-    fun membersRefreshesLegacySelfMembershipThroughTheReplicaSeam() = runTest {
-        val previous = joinedFamilySession().copy(membershipId = "")
+    fun membersValidatesCurrentSelfMembershipThroughTheReplicaSeam() = runTest {
+        val previous = joinedFamilySession().copy(membershipId = "membership-self")
         val preferences = MemorySyncPreferences(previous)
         val members = listOf(
             FamilyMember(
@@ -376,9 +376,7 @@ class FamilySessionCoordinatorTest {
                 onPersistMembership = { session, projected ->
                     assertThat(session).isEqualTo(previous)
                     assertThat(projected).containsExactlyElementsIn(members).inOrder()
-                    session.copy(membershipId = "membership-self").also {
-                        preferences.saveSession(it)
-                    }
+                    session
                 },
             ),
             onSessionObserved = { observed += it },
@@ -391,7 +389,7 @@ class FamilySessionCoordinatorTest {
         assertThat(outcome).isEqualTo(FamilySessionOutcome.MembersListed(members))
         assertThat(preferences.current().membershipId).isEqualTo("membership-self")
         assertThat(observed)
-            .containsExactly(previous, preferences.current())
+            .containsExactly(previous, previous)
             .inOrder()
         assertThat(backend.memberCalls).isEqualTo(1)
     }

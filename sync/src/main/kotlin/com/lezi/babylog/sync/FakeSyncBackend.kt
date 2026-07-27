@@ -33,10 +33,6 @@ class FakeSyncBackend : SyncBackend {
     private val bundles = mutableMapOf<String, MutableMap<String, StagedBundle>>()
     private val bundleMediaBytes =
         mutableMapOf<String, MutableMap<String, MutableMap<String, ByteArray>>>()
-    /** When false, atomic bundle calls throw [AtomicBundleUnsupportedException]. */
-    var supportsAtomicBundle: Boolean = true
-    /** Set false to simulate a legacy NAS that omits pull `family_name`. */
-    var includesFamilyNameInPull: Boolean = true
     private var revision = 0L
     private var membershipSeq = 0
 
@@ -77,6 +73,7 @@ class FakeSyncBackend : SyncBackend {
             role = FamilyRole.Member,
             entities = pull.entities,
             cursor = pull.cursor,
+            generation = FAKE_SYNC_GENERATION,
             familyName = familyNames[invite.first],
             membershipId = membershipIdFor(invite.first, deviceId),
         )
@@ -99,6 +96,7 @@ class FakeSyncBackend : SyncBackend {
             familyId = familyId,
             token = "owner-token",
             role = FamilyRole.Owner,
+            generation = FAKE_SYNC_GENERATION,
             familyName = sharedName,
             membershipId = membershipIdFor(familyId, deviceId),
         )
@@ -131,10 +129,9 @@ class FakeSyncBackend : SyncBackend {
     override suspend fun members(session: SyncSession) = listOf(
         FamilyMember(
             displayName = membershipNames["${session.familyId}:${session.deviceId}"]
-                ?: if (session.role == FamilyRole.Owner) "管理员" else null,
+                ?: if (session.role == FamilyRole.Owner) "管理员" else "家庭成员",
             role = session.role,
             isSelf = true,
-            deviceId = session.deviceId,
             membershipId = session.membershipId.ifBlank {
                 membershipIdFor(session.familyId, session.deviceId)
             },
@@ -179,7 +176,6 @@ class FakeSyncBackend : SyncBackend {
         session: SyncSession,
         draft: AtomicBundleDraft,
     ): BundleStageStatus {
-        requireAtomicBundle()
         require(draft.root.type == "record" || draft.root.type == "care_plan") {
             "bundle root type must be record or care_plan"
         }
@@ -202,7 +198,6 @@ class FakeSyncBackend : SyncBackend {
         bytes: ByteArray,
         mime: String?,
     ): BundleStageStatus {
-        requireAtomicBundle()
         val staged = bundles[session.familyId]?.get(bundleId)
             ?: throw SyncHttpException(404, "Bundle not found")
         if (staged.committed) return staged.toStatus()
@@ -226,7 +221,6 @@ class FakeSyncBackend : SyncBackend {
         session: SyncSession,
         bundleId: String,
     ): BundleCommitResult {
-        requireAtomicBundle()
         val staged = bundles[session.familyId]?.get(bundleId)
             ?: throw SyncHttpException(404, "Bundle not found")
         if (staged.committed) {
@@ -279,10 +273,6 @@ class FakeSyncBackend : SyncBackend {
                 listOf(staged.draft.root),
             ),
         )
-    }
-
-    private fun requireAtomicBundle() {
-        if (!supportsAtomicBundle) throw AtomicBundleUnsupportedException()
     }
 
     private fun StagedBundle.toStatus(): BundleStageStatus {
@@ -619,11 +609,11 @@ class FakeSyncBackend : SyncBackend {
         return PullResult(
             changed.map { it.entity.copy(rev = it.rev) },
             changed.lastOrNull()?.rev ?: cursor,
-            familyName = if (includesFamilyNameInPull) {
-                PullFamilyName.Present(familyNames[familyId])
-            } else {
-                PullFamilyName.Omitted
-            },
+            generation = FAKE_SYNC_GENERATION,
+            hasMore = false,
+            familyName = familyNames[familyId],
         )
     }
 }
+
+private const val FAKE_SYNC_GENERATION = "fake-generation"

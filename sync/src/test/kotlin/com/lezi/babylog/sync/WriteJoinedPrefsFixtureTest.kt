@@ -1,8 +1,6 @@
 package com.lezi.babylog.sync
 
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
-import androidx.datastore.preferences.core.edit
-import androidx.datastore.preferences.core.stringPreferencesKey
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
@@ -41,10 +39,6 @@ class WriteJoinedPrefsFixtureTest {
                 allowedSsids = listOf("AndroidWifi"),
             ),
         )
-        // Leave plaintext token so device can migrate into EncryptedSharedPreferences on first launch.
-        store.edit {
-            it[stringPreferencesKey("sync_family_token")] = "fixture-token-for-ui-layout-only"
-        }
         scope.cancel()
         advanceUntilIdle()
         check(out.exists() && out.length() > 0) { "fixture not written" }

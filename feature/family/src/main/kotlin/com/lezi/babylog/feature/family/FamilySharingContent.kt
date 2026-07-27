@@ -50,6 +50,7 @@ internal fun FamilySharingContent(
             ui.members,
             ui.displayName,
             ui.role,
+            ui.membershipId,
             ui.membersLoaded,
         )
     } else {

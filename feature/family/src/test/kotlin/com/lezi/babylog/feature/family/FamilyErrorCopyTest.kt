@@ -1,6 +1,7 @@
 package com.lezi.babylog.feature.family
 
 import com.lezi.babylog.core.model.SyncStatus
+import com.lezi.babylog.domain.BabyMergePreview
 import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.PUBLIC_CLEARTEXT_WARNING
@@ -13,6 +14,23 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FamilyErrorCopyTest {
+    @Test
+    fun babyMergeSummaryIncludesRecordsAndCarePlans() {
+        assertEquals(
+            "3 条记录 · 2 个护理计划",
+            mergeDataSummary(
+                BabyMergePreview(
+                    sourceBabyId = 1,
+                    sourceNickname = "临时",
+                    targetBabyId = 2,
+                    targetNickname = "年年",
+                    recordCount = 3,
+                    carePlanCount = 2,
+                ),
+            ),
+        )
+    }
+
     @Test
     fun networkSaveContinuationUsesExplicitOutcomeInsteadOfMessageCopy() {
         val messages = mutableListOf<String>()
@@ -46,8 +64,10 @@ class FamilyErrorCopyTest {
         )
         assertEquals("我（本机）", LOCAL_FAMILY_DISPLAY_NAME)
         assertEquals(
-            LOCAL_FAMILY_DISPLAY_NAME,
-            familyMemberDisplayName(FamilyMember(null, FamilyRole.Owner, isSelf = true)),
+            "妈妈",
+            familyMemberDisplayName(
+                FamilyMember("妈妈", FamilyRole.Owner, isSelf = true, membershipId = "self"),
+            ),
         )
     }
 
@@ -57,28 +77,39 @@ class FamilyErrorCopyTest {
             members = emptyList(),
             localDisplayName = "我（本机）",
             localRole = FamilyRole.Owner,
+            localMembershipId = "self-membership",
             membersLoaded = false,
         )
 
         assertEquals(1, fallback.size)
         assertTrue(fallback.single().isSelf)
+        assertEquals("self-membership", fallback.single().membershipId)
         assertEquals("我（本机）", familyMemberDisplayName(fallback.single()))
 
         val serverMembers = listOf(
-            FamilyMember("妈妈", FamilyRole.Owner, isSelf = true),
-            FamilyMember(null, FamilyRole.Member, isSelf = false),
+            FamilyMember("妈妈", FamilyRole.Owner, isSelf = true, membershipId = "owner"),
+            FamilyMember("爸爸", FamilyRole.Member, isSelf = false, membershipId = "member"),
         )
         assertEquals(
             serverMembers,
-            familyMembersForDisplay(serverMembers, "忽略", FamilyRole.Owner, membersLoaded = true),
+            familyMembersForDisplay(
+                serverMembers,
+                "忽略",
+                FamilyRole.Owner,
+                localMembershipId = "ignored",
+                membersLoaded = true,
+            ),
         )
-        val loadedWithoutSelf = listOf(FamilyMember("家人", FamilyRole.Member, isSelf = false))
+        val loadedWithoutSelf = listOf(
+            FamilyMember("家人", FamilyRole.Member, isSelf = false, membershipId = "other"),
+        )
         assertEquals(
             loadedWithoutSelf,
             familyMembersForDisplay(
                 loadedWithoutSelf,
                 "不应合成",
                 FamilyRole.Owner,
+                localMembershipId = "self",
                 membersLoaded = true,
             ),
         )
@@ -87,29 +118,36 @@ class FamilyErrorCopyTest {
                 emptyList(),
                 "不应合成",
                 FamilyRole.Owner,
+                localMembershipId = "self",
                 membersLoaded = true,
             ).isEmpty(),
         )
-        assertEquals("家庭成员", familyMemberDisplayName(serverMembers.last()))
+        assertEquals("爸爸", familyMemberDisplayName(serverMembers.last()))
         assertEquals(
             "家庭管理员",
-            familyMemberDisplayName(FamilyMember(null, FamilyRole.Owner, isSelf = false)),
+            familyMemberDisplayName(
+                FamilyMember("我（本机）", FamilyRole.Owner, false, "owner-placeholder"),
+            ),
         )
         assertEquals(
             "家庭成员",
-            familyMemberDisplayName(FamilyMember("我（本机）", FamilyRole.Member, isSelf = false)),
+            familyMemberDisplayName(
+                FamilyMember("我（本机）", FamilyRole.Member, false, "member-placeholder"),
+            ),
         )
         assertEquals(
             "家庭管理员",
-            familyMemberDisplayName(FamilyMember("我（本机）", FamilyRole.Owner, isSelf = false)),
+            familyMemberDisplayName(
+                FamilyMember("我（本机）", FamilyRole.Owner, false, "owner-placeholder-2"),
+            ),
         )
         assertEquals(
             "妈妈 ★",
-            familyMemberTitle(FamilyMember("妈妈", FamilyRole.Owner, isSelf = true)),
+            familyMemberTitle(FamilyMember("妈妈", FamilyRole.Owner, true, "self")),
         )
         assertEquals(
             "爸爸",
-            familyMemberTitle(FamilyMember("爸爸", FamilyRole.Member, isSelf = false)),
+            familyMemberTitle(FamilyMember("爸爸", FamilyRole.Member, false, "other")),
         )
         assertEquals("请填写家庭称呼", validateFamilyDisplayNameInput("  "))
         assertEquals(
@@ -429,18 +467,6 @@ class FamilyErrorCopyTest {
         // Scan is not a primary CTA string — it lives inside the join wizard only.
         assertFalse(unjoined.joinLabel.contains("扫码"))
         assertFalse(unjoined.joinLabel.contains("邀请码"))
-    }
-
-    @Test
-    fun syncSessionDeviceIdIsTheDisplayedReplicationIdentity() {
-        assertEquals(
-            "sync-device",
-            familyDeviceId(syncDeviceId = "sync-device", localDeviceId = "legacy-device"),
-        )
-        assertEquals(
-            "legacy-device",
-            familyDeviceId(syncDeviceId = "", localDeviceId = "legacy-device"),
-        )
     }
 
     @Test

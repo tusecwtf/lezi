@@ -30,20 +30,20 @@ class InvitePayloadCodecTest {
     }
 
     @Test
-    fun legacyBaseUrlOnlyStillDecodes() {
-        val decoded = InvitePayloadCodec.decode(
-            """{"v":1,"baseUrl":"http://192.168.50.4:8765","code":"ABCD1234"}""",
-        )
-        assertThat(decoded.host).isEqualTo("192.168.50.4")
-        assertThat(decoded.port).isEqualTo(8765)
-        assertThat(decoded.ssids).isEmpty()
-        assertThat(decoded.code).isEqualTo("ABCD1234")
+    fun baseUrlOnlyInviteIsRejected() {
+        val result = runCatching {
+            InvitePayloadCodec.decode(
+                """{"v":1,"baseUrl":"http://192.168.50.4:8765","code":"ABCD1234"}""",
+            )
+        }
+
+        assertThat(result.isFailure).isTrue()
     }
 
     @Test
     fun httpsInviteKeepsSchemeInHomeLanConfig() {
         val decoded = InvitePayloadCodec.decode(
-            """{"v":1,"baseUrl":"https://lezi.home:443","code":"ABCD1234"}""",
+            """{"v":1,"baseUrl":"https://lezi.home:443","host":"lezi.home","port":443,"code":"ABCD1234"}""",
         )
 
         assertThat(decoded.homeLanConfig.baseUrl).isEqualTo("https://lezi.home:443")

@@ -217,7 +217,6 @@ private class FakeGrowthMeasurementRecordStore : GrowthMeasurementRecordStore {
                 type = type,
                 timestamp = timestamp,
                 note = note,
-                createdByUserId = 1,
                 payloadJson = payloadJson,
                 schemaVersion = 2,
                 updatedAt = timestamp,

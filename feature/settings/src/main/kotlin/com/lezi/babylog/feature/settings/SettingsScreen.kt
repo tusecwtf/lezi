@@ -73,6 +73,8 @@ import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
 import com.lezi.babylog.domain.CustomRecordItem
 import com.lezi.babylog.domain.LocalRecordsClearCommittedException
+import com.lezi.babylog.domain.LocalDataClearCoordinator
+import com.lezi.babylog.domain.LocalDataClearScope
 import com.lezi.babylog.domain.SystemCalendarConfigurationCoordinator
 import com.lezi.babylog.domain.SystemCalendarPort
 import com.lezi.babylog.sync.SyncPort
@@ -142,6 +144,7 @@ class SettingsViewModel @Inject constructor(
     private val syncPort: SyncPort,
     private val systemCalendarPort: SystemCalendarPort,
     private val systemCalendarConfiguration: SystemCalendarConfigurationCoordinator,
+    private val localDataClearCoordinator: LocalDataClearCoordinator,
 ) : ViewModel() {
     private val settingsWithCalendarTarget = settingsStore.settings.map { settings ->
         val hasPermission = systemCalendarPort.hasCalendarPermission()
@@ -305,7 +308,9 @@ class SettingsViewModel @Inject constructor(
     /** Clears records only — babies are never deleted from settings. */
     fun clearRecords(onDone: (String?) -> Unit) {
         viewModelScope.launch {
-            val result = runCatching { careLog.clearRecordsOnly() }
+            val result = runCatching {
+                localDataClearCoordinator.clear(LocalDataClearScope.RecordsOnly)
+            }
             onDone(result.exceptionOrNull()?.let(::clearRecordsFailureCopy))
         }
     }

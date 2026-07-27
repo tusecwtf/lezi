@@ -72,7 +72,6 @@ import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.designsystem.leziRecordColor
 import com.lezi.babylog.designsystem.rememberDismissKeyboard
-import com.lezi.babylog.domain.CustomRecordItem
 import java.time.Instant
 import java.time.ZoneId
 
@@ -91,7 +90,6 @@ internal fun QuickRecordSheet(
     preferredHand: String = "right",
     birthdayEpochDay: Long? = null,
     infantFeverAdviceEnabled: Boolean = true,
-    customItems: List<CustomRecordItem> = emptyList(),
     saving: Boolean,
     deleting: Boolean,
     saveError: String?,
@@ -289,7 +287,6 @@ internal fun QuickRecordSheet(
                 amountStepMl = amountStepMl,
                 birthdayEpochDay = birthdayEpochDay,
                 infantFeverAdviceEnabled = infantFeverAdviceEnabled,
-                customItems = customItems,
                 canStartNursingTimer = canStartNursingTimer,
                 actionsEnabled = actionsEnabled,
                 onDraftChange = ::update,

@@ -3,7 +3,6 @@ package com.lezi.babylog.core.ui
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.displayLabel
-import com.lezi.babylog.core.model.isAvailableForNewEntry
 import com.lezi.babylog.designsystem.LeziRecordGlyph
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -15,7 +14,7 @@ class RecordPresentationTest {
     fun everyRecordTypeHasAnExplicitUsefulPresentation() {
         val presentations = RecordType.entries.associateWith { it.presentation }
 
-        assertEquals(30, presentations.size)
+        assertEquals(28, presentations.size)
         presentations.forEach { (type, presentation) ->
             assertTrue("$type label", presentation.label.isNotBlank())
             assertTrue("$type tip", presentation.tip.isNotBlank())
@@ -39,7 +38,7 @@ class RecordPresentationTest {
         )
         assertEquals(RecordSection.Feeding, RecordType.SNACK.presentation.section)
         assertEquals(RecordSection.Feeding, RecordType.DRINK.presentation.section)
-        // Retired bare CUSTOM presentation lives under the 自定义 section.
+        // Concrete custom definitions share the CUSTOM presentation.
         assertEquals(RecordSection.Custom, RecordType.CUSTOM.presentation.section)
     }
 
@@ -71,18 +70,10 @@ class RecordPresentationTest {
 
     @Test
     fun emptySpecializedPayloadUsesHelpfulCopy() {
-        assertEquals("自由文本", record(RecordType.OTHER).presentationSummary())
-        assertEquals("正文/照片", record(RecordType.DIARY).presentationSummary())
-    }
-
-    @Test
-    fun presentationStillCoversRetiredGenericTypesForHistoricalRows() {
-        assertTrue(RecordType.MEMO.presentation.label.isNotBlank())
-        assertTrue(RecordType.OTHER.presentation.label.isNotBlank())
-        assertTrue(RecordType.CUSTOM.presentation.label.isNotBlank())
-        assertFalse(RecordType.MEMO.isAvailableForNewEntry)
-        assertFalse(RecordType.OTHER.isAvailableForNewEntry)
-        assertFalse(RecordType.CUSTOM.isAvailableForNewEntry)
+        assertEquals(
+            "正文/照片",
+            record(RecordType.DIARY, """{"body":""}""").presentationSummary(),
+        )
     }
 
     @Test
@@ -118,7 +109,10 @@ class RecordPresentationTest {
     fun activeNapSummaryKeepsBothNapAndRunningState() {
         assertEquals(
             "午睡 · 进行中",
-            record(RecordType.SLEEP, """{"is_nap":true}""").presentationSummary(),
+            record(
+                RecordType.SLEEP,
+                """{"anomaly_flag":false,"is_nap":true}""",
+            ).presentationSummary(),
         )
     }
 
@@ -128,6 +122,7 @@ class RecordPresentationTest {
             "时长 不足1分",
             record(
                 type = RecordType.SLEEP,
+                payload = """{"anomaly_flag":false}""",
                 endTimestamp = 1_000L + 30_000L,
             ).presentationSummary(),
         )
@@ -164,7 +159,6 @@ class RecordPresentationTest {
         timestamp = 1_000,
         endTimestamp = endTimestamp,
         note = note,
-        createdByUserId = 1,
         payloadJson = payload,
         updatedAt = 1_000,
     )

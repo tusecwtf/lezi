@@ -6,6 +6,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -28,7 +29,7 @@ class FreshDatabaseTest {
         val db = openDatabase("fresh-schema")
         val sqlite = db.openHelper.writableDatabase
 
-        assertEquals(21, sqlite.version)
+        assertEquals(22, sqlite.version)
         val tables = buildSet {
             sqlite.query("SELECT name FROM sqlite_master WHERE type = 'table'").use { cursor ->
                 while (cursor.moveToNext()) add(cursor.getString(0))
@@ -47,12 +48,75 @@ class FreshDatabaseTest {
                     "media_assets",
                     "outbox",
                     "custom_items",
-                    "calendar_events",
                     "pending_reminder_cleanup",
                     "pending_replica_cleanup",
                 ),
             ),
         )
+        assertFalse(tables.contains("calendar_events"))
+
+        val recordColumns = buildSet {
+            sqlite.query("PRAGMA table_info(records)").use { cursor ->
+                val nameIndex = cursor.getColumnIndexOrThrow("name")
+                while (cursor.moveToNext()) add(cursor.getString(nameIndex))
+            }
+        }
+        assertFalse(recordColumns.contains("createdByUserId"))
+        assertFalse(recordColumns.contains("createdByDeviceId"))
+        assertTrue(recordColumns.contains("createdByMembershipId"))
+    }
+
+    @Test
+    fun freshDatabaseRejectsInvalidMediaOwnershipAtSqlBoundary() {
+        val db = openDatabase("media-owner-check")
+        val sqlite = db.openHelper.writableDatabase
+
+        val triggers = buildSet {
+            sqlite.query(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'media_assets'",
+            ).use { cursor ->
+                while (cursor.moveToNext()) add(cursor.getString(0))
+            }
+        }
+        assertTrue(triggers.contains("media_assets_owner_insert"))
+        assertTrue(triggers.contains("media_assets_owner_update"))
+
+        val ownerless = runCatching {
+            sqlite.execSQL(
+                """
+                INSERT INTO media_assets (clientUuid, kind, localUri, createdAt)
+                VALUES ('invalid-ownerless', 'log', 'media/a.jpg', 1)
+                """.trimIndent(),
+            )
+        }.exceptionOrNull()
+        val doubleOwned = runCatching {
+            sqlite.execSQL(
+                """
+                INSERT INTO media_assets
+                    (recordId, carePlanId, clientUuid, kind, localUri, createdAt)
+                VALUES (1, 2, 'invalid-double-owner', 'log', 'media/b.jpg', 1)
+                """.trimIndent(),
+            )
+        }.exceptionOrNull()
+        sqlite.execSQL(
+            """
+            INSERT INTO media_assets
+                (recordId, clientUuid, kind, localUri, createdAt)
+            VALUES (1, 'valid-record-owner', 'log', 'media/c.jpg', 1)
+            """.trimIndent(),
+        )
+        val invalidUpdate = runCatching {
+            sqlite.execSQL(
+                """
+                UPDATE media_assets SET carePlanId = 2
+                WHERE clientUuid = 'valid-record-owner'
+                """.trimIndent(),
+            )
+        }.exceptionOrNull()
+
+        assertNotNull(ownerless)
+        assertNotNull(doubleOwned)
+        assertNotNull(invalidUpdate)
     }
 
     @Test
@@ -80,10 +144,10 @@ class FreshDatabaseTest {
     }
 
     @Test
-    fun legacySchemaFailsWithoutMigrationOrDestructiveFallback() {
-        val name = uniqueName("legacy-rejected")
+    fun nonCurrentSchemaFailsWithoutMutation() {
+        val name = uniqueName("non-current-rejected")
         context.openOrCreateDatabase(name, Context.MODE_PRIVATE, null).use { sqlite ->
-            sqlite.version = 20
+            sqlite.version = 21
         }
         database = buildLeziDatabase(context, name)
 
@@ -92,11 +156,11 @@ class FreshDatabaseTest {
         }.exceptionOrNull()
 
         assertNotNull(failure)
-        assertTrue(failure!!.message.orEmpty().contains("migration from 20 to 21"))
+        assertTrue(failure!!.message.orEmpty().contains("migration from 21 to 22"))
         database!!.close()
         database = null
         context.openOrCreateDatabase(name, Context.MODE_PRIVATE, null).use { sqlite ->
-            assertEquals(20, sqlite.version)
+            assertEquals(21, sqlite.version)
         }
     }
 

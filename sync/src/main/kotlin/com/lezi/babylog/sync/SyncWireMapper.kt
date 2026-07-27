@@ -6,6 +6,9 @@ import com.lezi.babylog.core.database.CustomItemEntity
 import com.lezi.babylog.core.database.FulfillmentCandidateEntity
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.RecordEntity
+import com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
+import com.lezi.babylog.core.model.RecordPayloadCodec
+import com.lezi.babylog.core.model.RecordType
 import java.time.LocalDate
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -32,16 +35,10 @@ object SyncWireMapper {
         type = "baby",
         clientUuid = entity.clientUuid,
         payloadJson = buildJsonObject {
-            val dueDateEpochDay = entity.dueDateEpochDay
             val birthWeightGrams = entity.birthWeightGrams
             put("nickname", entity.nickname)
             if (entity.sex == null) put("sex", JsonNull) else put("sex", entity.sex)
             put("birthday", LocalDate.ofEpochDay(entity.birthdayEpochDay).toString())
-            if (dueDateEpochDay == null) {
-                put("due_date", JsonNull)
-            } else {
-                put("due_date", LocalDate.ofEpochDay(dueDateEpochDay).toString())
-            }
             if (birthWeightGrams == null) {
                 put("birth_weight_grams", JsonNull)
             } else {
@@ -60,18 +57,32 @@ object SyncWireMapper {
     fun record(
         entity: RecordEntity,
         babyClientUuid: String,
-        createdByDeviceId: String,
-        includeMembershipAuthor: Boolean = false,
-    ): SyncEntity = SyncEntity(
+        customItemClientUuid: String? = null,
+    ): SyncEntity {
+        val type = requireCurrentRecordType(entity.type, "record type")
+        require(entity.schemaVersion == CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION) {
+            "record schema_version 必须是 $CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION"
+        }
+        val localPayload = localPayloadForWire(
+            raw = entity.payloadJson,
+            type = type,
+            localCustomItemId = null,
+            customItemClientUuid = customItemClientUuid,
+        )
+        return SyncEntity(
         type = "record",
         clientUuid = entity.clientUuid,
         payloadJson = buildJsonObject {
             put("baby_client_uuid", babyClientUuid)
-            put("created_by_device_id", createdByDeviceId)
-            if (includeMembershipAuthor && entity.createdByMembershipId.isNotBlank()) {
+            if (entity.createdByMembershipId.isNotBlank()) {
                 put("created_by_membership_id", entity.createdByMembershipId)
             }
             put("type", entity.type)
+            if (customItemClientUuid == null) {
+                put("custom_item_client_uuid", JsonNull)
+            } else {
+                put("custom_item_client_uuid", customItemClientUuid)
+            }
             put("timestamp", entity.timestamp)
             if (entity.endTimestamp == null) {
                 put("end_timestamp", JsonNull)
@@ -79,12 +90,13 @@ object SyncWireMapper {
                 put("end_timestamp", entity.endTimestamp)
             }
             if (entity.note == null) put("note", JsonNull) else put("note", entity.note)
-            put("payload_json", localPayloadForWire(entity.payloadJson))
+            put("payload_json", localPayload)
             put("schema_version", entity.schemaVersion)
         }.toString(),
         updatedAt = entity.updatedAt,
         deletedAt = entity.deletedAt,
     )
+    }
 
     /**
      * Shared custom definition wire payload. Device layout (sortOrder / hide / slots)
@@ -115,7 +127,18 @@ object SyncWireMapper {
         entity: CarePlanEntity,
         babyClientUuid: String,
         customItemClientUuid: String?,
-    ): SyncEntity = SyncEntity(
+    ): SyncEntity {
+        val type = requireCurrentRecordType(entity.type, "care plan type")
+        require(entity.schemaVersion == CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION) {
+            "care plan schema_version 必须是 $CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION"
+        }
+        val localPayload = localPayloadForWire(
+            raw = entity.payloadJson,
+            type = type,
+            localCustomItemId = entity.customItemId,
+            customItemClientUuid = customItemClientUuid,
+        )
+        return SyncEntity(
         type = "care_plan",
         clientUuid = entity.clientUuid,
         payloadJson = buildJsonObject {
@@ -129,7 +152,7 @@ object SyncWireMapper {
             put("scheduled_at", entity.scheduledAt)
             put("scheduled_zone_id", entity.scheduledZoneId)
             if (entity.note == null) put("note", JsonNull) else put("note", entity.note)
-            put("payload_json", localPayloadForWire(entity.payloadJson))
+            put("payload_json", localPayload)
             put("schema_version", entity.schemaVersion)
             put("status", entity.status)
             if (entity.createdByMembershipId.isBlank()) {
@@ -151,9 +174,10 @@ object SyncWireMapper {
         updatedAt = entity.updatedAt,
         deletedAt = entity.deletedAt,
     )
+    }
 
     /**
-     * Fulfillment candidate legacy-push payload. Server re-stamps submitter
+     * Fulfillment candidate push payload. Server re-stamps submitter
      * membership/role and confirmed_at; client sends plan/record links and the
      * local confirm trail (ignored as authority after first server accept).
      */
@@ -226,54 +250,110 @@ object SyncWireMapper {
     )
 
     fun carePlanPayloadJson(payload: JsonObject): String {
-        val value = payload["payload_json"] ?: return "{}"
-        return when (value) {
-            is JsonObject -> value.toString()
-            is JsonPrimitive -> {
-                val raw = value.contentOrNull ?: return "{}"
-                runCatching { Json.parseToJsonElement(raw).jsonObject.toString() }
-                    .getOrDefault(raw)
-            }
-            else -> value.toString()
-        }
+        return requireNotNull(payload["payload_json"] as? JsonObject) {
+            "care plan payload_json 必须是对象"
+        }.toString()
     }
 
     fun carePlanSchemaVersion(payload: JsonObject): Int =
-        payload["schema_version"]?.jsonPrimitive?.intOrNull ?: 1
+        requireCurrentSchemaVersion(payload, "care plan")
 
     fun recordPayloadJson(payload: JsonObject): String {
-        val value = payload["payload_json"] ?: return "{}"
-        return when (value) {
-            is JsonObject -> value.toString()
-            is JsonPrimitive -> {
-                val raw = value.contentOrNull ?: return "{}"
-                runCatching { Json.parseToJsonElement(raw).jsonObject.toString() }
-                    .getOrDefault(raw)
-            }
-            else -> value.toString()
-        }
+        return requireNotNull(payload["payload_json"] as? JsonObject) {
+            "record payload_json 必须是对象"
+        }.toString()
     }
 
     fun recordSchemaVersion(payload: JsonObject): Int =
-        payload["schema_version"]?.jsonPrimitive?.intOrNull ?: 1
+        requireCurrentSchemaVersion(payload, "record")
 
-    fun birthdayEpochDay(payload: JsonObject): Long? =
-        payload.string("birthday")
-            ?.let { runCatching { LocalDate.parse(it).toEpochDay() }.getOrNull() }
-            ?: payload.long("birthday_epoch_day")
+    fun birthdayEpochDay(payload: JsonObject): Long =
+        requireNotNull(
+            payload.string("birthday")
+                ?.let { runCatching { LocalDate.parse(it).toEpochDay() }.getOrNull() },
+        ) {
+            "baby birthday 必须是 ISO-8601 日期"
+        }
 
-    fun dueDateEpochDay(payload: JsonObject): Long? =
-        payload.string("due_date")
-            ?.let { runCatching { LocalDate.parse(it).toEpochDay() }.getOrNull() }
-            ?: payload.long("due_date_epoch_day")
-
-    private fun localPayloadForWire(raw: String): JsonObject {
-        val parsed = runCatching { Json.parseToJsonElement(raw).jsonObject }
-            .getOrDefault(JsonObject(emptyMap()))
-        // `photos` contains app-private paths. Media entities carry the portable
-        // references and downloaded paths are restored after pull.
-        return JsonObject(parsed - "photos")
+    internal fun localPayloadFromWire(
+        type: RecordType,
+        payload: JsonObject,
+        customItemId: Long?,
+    ): String {
+        require("photos" !in payload && "custom_item_id" !in payload) {
+            "payload_json 包含设备本地字段"
+        }
+        val local = JsonObject(
+            if (type == RecordType.CUSTOM) {
+                require(customItemId != null && customItemId > 0) {
+                    "custom type 缺少本地定义"
+                }
+                payload + ("custom_item_id" to JsonPrimitive(customItemId))
+            } else {
+                require(customItemId == null) { "built-in type 不得引用自定义定义" }
+                payload
+            },
+        )
+        return requireStrictCurrentPayload(type, local.toString()).toString()
     }
+
+    private fun localPayloadForWire(
+        raw: String,
+        type: RecordType,
+        localCustomItemId: Long?,
+        customItemClientUuid: String?,
+    ): JsonObject {
+        val parsed = requireStrictCurrentPayload(type, raw)
+        val payloadCustomItemId = parsed["custom_item_id"]
+            ?.jsonPrimitive
+            ?.longOrNull
+            ?.takeIf { it > 0L }
+        if (type == RecordType.CUSTOM) {
+            require(!customItemClientUuid.isNullOrBlank()) {
+                "custom type requires custom_item_client_uuid"
+            }
+            val expectedLocalId = localCustomItemId ?: payloadCustomItemId
+            require(expectedLocalId != null && payloadCustomItemId == expectedLocalId) {
+                "custom payload requires matching positive custom_item_id"
+            }
+        } else {
+            require(customItemClientUuid == null && localCustomItemId == null) {
+                "custom_item_client_uuid is only valid for custom type"
+            }
+        }
+        // Device-local photo paths and Room ids never cross the wire. Media rows
+        // and the portable root custom-item UUID are their sole wire identities.
+        return JsonObject(parsed - "photos" - "custom_item_id")
+    }
+
+    private fun requireStrictCurrentPayload(type: RecordType, raw: String): JsonObject {
+        val parsed = runCatching { Json.parseToJsonElement(raw).jsonObject }
+            .getOrElse { throw IllegalArgumentException("payload_json 必须是 JSON 对象", it) }
+        val document = RecordPayloadCodec.decode(
+            type = type,
+            payloadJson = parsed.toString(),
+            schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+        )
+        require(!document.isUnknown) { "payload_json 不是 current typed payload" }
+        val errors = RecordPayloadCodec.validate(document.payload)
+        require(errors.isEmpty()) { "payload_json 无效: ${errors.joinToString()}" }
+        val canonical = Json.parseToJsonElement(RecordPayloadCodec.encode(document)).jsonObject
+        require(canonical == parsed) { "payload_json 不是 current canonical shape" }
+        return canonical
+    }
+
+    private fun requireCurrentSchemaVersion(payload: JsonObject, context: String): Int {
+        val version = payload["schema_version"]?.jsonPrimitive?.intOrNull
+        require(version == CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION) {
+            "$context schema_version 必须是 $CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION"
+        }
+        return version
+    }
+
+    internal fun requireCurrentRecordType(raw: String?, context: String): RecordType =
+        requireNotNull(raw?.let(RecordType::fromKey)) {
+            "$context 不是 current RecordType"
+        }
 }
 
 internal fun JsonObject.string(key: String): String? =

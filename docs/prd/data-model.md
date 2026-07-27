@@ -126,7 +126,6 @@ UI 占位名“我（本机）”当成真实成员名上传。管理员在 UI �
 | `timestamp` | 主时间 |
 | `end_timestamp` | 睡眠等区间 |
 | `note` | |
-| `created_by_user_id` | |
 | `created_by_membership_id` | NAS 认证 principal 在首次接受 Record 时盖章的不可变作者；尚未加入家庭的本机记录可空 |
 | `payload_json` | 类型扩展 |
 | `schema_version` | 当前固定为 v2 |
@@ -140,8 +139,8 @@ UI 占位名“我（本机）”当成真实成员名上传。管理员在 UI �
 同步，不发送降级 payload。
 
 当前 Room schema 的 `pending_reminder_cleanup` 持久化 `carePlanIds`、
-`systemCalendarProjectionsJson`、`settingsSnapshotCaptured`，以及可空的
-`currentBabyId` / `nextFeedAt` / `nextFeedEpoch`。
+`systemCalendarProjectionsJson`、可空的 `currentBabyId` / `nextFeedAt`、
+非空 `nextFeedEpoch`，以及 `familyServerRetained`。
 `systemCalendarProjectionsJson` 是稳定护理计划 UUID 到 provider event ID（可空，表示只可按
 UID 查找）的精确映射。清除记录或全部本地数据时，领域事务按 scope 分别写入 pending 行，
 持久保存护理计划提醒 ID、系统日历投影身份、设置 epoch 与家庭服务器保留
@@ -190,9 +189,10 @@ server-owned metadata；不修改护理内容、照片、删除状态或业务�
 | `vaccine` | `name`, `batch?` |
 | `custom` | `title`, `detail?`, `custom_item_id`, `icon_slot?`；标题/图标为创建时快照 |
 
-Record wire 另带 `custom_item_client_uuid`：`type=custom` 时必须引用同家庭、未删除的
-CustomItemDef；其它类型必须省略或置空。服务端只接受上表当前类型，`memo`、`other` 与
-未知字符串均返回 `422`。
+Record 的本机 Room payload 使用正数 `custom_item_id`。家庭 wire 不发送这个设备自增 id，
+而是在实体根携带 `custom_item_client_uuid`：`type=custom` 时必须引用同家庭、未删除的
+CustomItemDef；接收端以该 UUID 解析自己的本机 id 后再写入 Room。其它类型必须省略或置空。
+服务端只接受上表当前类型，`memo`、`other` 与未知字符串均返回 `422`。
 
 **不做**：挤奶库存余额表。
 

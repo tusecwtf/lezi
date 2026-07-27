@@ -36,12 +36,12 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 data class FamilyUi(
-    val deviceId: String = "",
     val displayName: String = LOCAL_FAMILY_DISPLAY_NAME,
     val status: SyncStatus = SyncStatus.Disabled,
     val enabled: Boolean = false,
     val hasLocalBaby: Boolean = false,
     val familyId: String = "1",
+    val membershipId: String = "",
     val current: Baby? = null,
     val babies: List<Baby> = emptyList(),
     val baseUrl: String = "",
@@ -58,7 +58,7 @@ data class FamilyUi(
     val membersLoading: Boolean = false,
     val membersError: String? = null,
 ) {
-    /** Resolved label with empty/legacy fallback (not the full account-card redesign). */
+    /** Resolved label when the current optional family name is empty. */
     val familyNameLabel: String
         get() = displayFamilyName(familyName, current?.nickname)
 }
@@ -100,15 +100,12 @@ class FamilyViewModel @Inject constructor(
     ) { st, hasBaby, current, babies, session ->
         val identity = careLog.localFamilyIdentity()
         FamilyUi(
-            deviceId = familyDeviceId(
-                syncDeviceId = session.deviceId,
-                localDeviceId = identity.deviceId,
-            ),
             displayName = identity.displayName,
             status = st,
             enabled = session.isJoined,
             hasLocalBaby = hasBaby,
             familyId = session.familyId.ifBlank { identity.familyId.toString() },
+            membershipId = session.membershipId,
             current = current,
             babies = babies,
             baseUrl = session.baseUrl,

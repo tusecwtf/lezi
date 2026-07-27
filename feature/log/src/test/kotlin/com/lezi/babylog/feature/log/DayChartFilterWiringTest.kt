@@ -134,7 +134,6 @@ class DayChartFilterWiringTest {
         type = type,
         timestamp = 1_700_000_000_000L + id,
         endTimestamp = null,
-        createdByUserId = 1,
         payloadJson = "{}",
         updatedAt = 1_700_000_000_000L + id,
         deletedAt = null,

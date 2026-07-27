@@ -11,7 +11,6 @@ class RecordPayloadCodecTest {
             babyId = 1,
             type = RecordType.PEE,
             timestamp = 1_000,
-            createdByUserId = 1,
             updatedAt = 1_000,
         )
         val plan = CarePlan(
@@ -57,56 +56,61 @@ class RecordPayloadCodecTest {
     }
 
     @Test
-    fun versionTwoExtensionsSurviveTypedEdit() {
-        val source = RecordPayloadCodec.decode(
+    fun currentUnknownFieldsFailClosedAndRemainByteStable() {
+        val rawJson =
+            """{"amount_ml":120,"future":{"v":2},"photos":["a.jpg"]}"""
+        val document = RecordPayloadCodec.decode(
             RecordType.FORMULA,
-            """{"amount_ml":120,"future":{"v":2},"photos":["a.jpg"]}""",
-            CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-        )
-        val edited = source.copy(
-            payload = MilkPayload(RecordType.FORMULA, amountMl = 135),
-            schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-        )
-
-        val encoded = RecordPayloadCodec.encode(edited)
-        val roundTrip = RecordPayloadCodec.decode(
-            RecordType.FORMULA,
-            encoded,
+            rawJson,
             CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
         )
 
-        assertThat(encoded).contains("\"amount_ml\":135")
-        assertThat(encoded).contains("\"future\":{\"v\":2}")
-        assertThat(encoded).contains("\"photos\":[\"a.jpg\"]")
-        assertThat(roundTrip.extensions.keys).containsExactly("future", "photos")
+        assertThat(document.payload).isInstanceOf(UnknownPayload::class.java)
+        assertThat(RecordPayloadCodec.encode(document)).isEqualTo(rawJson)
     }
 
     @Test
-    fun unknownScalarObjectAndArrayFieldsSurviveTypedEdit() {
-        val source = RecordPayloadCodec.decode(
-            RecordType.SLEEP,
-            """{"is_nap":true,"scalar":"kept","object":{"v":2},"array":[1,2]}""",
+    fun removedTemperatureAliasAndDiaryPhotoFieldFailClosed() {
+        val temperature = RecordPayloadCodec.decode(
+            RecordType.TEMPERATURE,
+            """{"value":36.8}""",
             CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
         )
-        val edited = source.copy(
-            payload = SleepPayload(isNap = false, anomaly = true),
-            schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-        )
-
-        val encoded = RecordPayloadCodec.encode(edited)
-        val roundTrip = RecordPayloadCodec.decode(
-            RecordType.SLEEP,
-            encoded,
+        val diary = RecordPayloadCodec.decode(
+            RecordType.DIARY,
+            """{"body":"正文","photos":["a.jpg"]}""",
             CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
         )
 
-        assertThat(encoded).contains("\"is_nap\":false")
-        assertThat(encoded).contains("\"anomaly_flag\":true")
-        assertThat(encoded).contains("\"scalar\":\"kept\"")
-        assertThat(encoded).contains("\"object\":{\"v\":2}")
-        assertThat(encoded).contains("\"array\":[1,2]")
-        assertThat(roundTrip.extensions.keys)
-            .containsExactly("scalar", "object", "array")
+        assertThat(temperature.payload).isInstanceOf(UnknownPayload::class.java)
+        assertThat(diary.payload).isInstanceOf(UnknownPayload::class.java)
+    }
+
+    @Test
+    fun missingRequiredCurrentFieldsFailClosed() {
+        val missing = listOf(
+            RecordType.NURSING,
+            RecordType.FORMULA,
+            RecordType.PUMPED_FEED,
+            RecordType.SLEEP,
+            RecordType.TEMPERATURE,
+            RecordType.DIARY,
+            RecordType.MEDICINE,
+            RecordType.HOSPITAL,
+            RecordType.HEIGHT,
+            RecordType.BABY_FOOD,
+            RecordType.VACCINE,
+            RecordType.CUSTOM,
+        )
+
+        missing.forEach { type ->
+            val document = RecordPayloadCodec.decode(
+                type,
+                "{}",
+                CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+            )
+            assertThat(document.payload).isInstanceOf(UnknownPayload::class.java)
+        }
     }
 
     @Test
@@ -128,6 +132,20 @@ class RecordPayloadCodecTest {
     }
 
     @Test
+    fun currentCustomPayloadRequiresConcreteDefinitionIdentity() {
+        val bare = """{"title":"仅标题"}"""
+
+        val document = RecordPayloadCodec.decode(
+            RecordType.CUSTOM,
+            bare,
+            CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+        )
+
+        assertThat(document.payload).isInstanceOf(UnknownPayload::class.java)
+        assertThat(RecordPayloadCodec.encode(document)).isEqualTo(bare)
+    }
+
+    @Test
     fun documentRejectsMismatchedRecordType() {
         val failure = runCatching {
             RecordPayloadDocument(
@@ -138,23 +156,6 @@ class RecordPayloadCodecTest {
         }.exceptionOrNull()
 
         assertThat(failure).isInstanceOf(IllegalArgumentException::class.java)
-    }
-
-    @Test
-    fun localPhotoPathsReplicaRoundTripsAndClears() {
-        assertThat(localPhotoPaths("""{"body":"x","photos":["a.jpg","b.jpg"]}"""))
-            .containsExactly("a.jpg", "b.jpg")
-            .inOrder()
-        assertThat(localPhotoPaths("""{"amount_ml":120}""")).isEmpty()
-        assertThat(MAX_RECORD_PHOTOS).isEqualTo(3)
-
-        val withPhotos = withLocalPhotoPaths("""{"pee_amount":2}""", listOf("p1.jpg", "p1.jpg", ""))
-        assertThat(withPhotos).contains("\"photos\"")
-        assertThat(localPhotoPaths(withPhotos)).containsExactly("p1.jpg")
-
-        val cleared = withLocalPhotoPaths(withPhotos, emptyList())
-        assertThat(cleared).doesNotContain("photos")
-        assertThat(cleared).contains("\"pee_amount\":2")
     }
 
     @Test
@@ -185,7 +186,8 @@ class RecordPayloadCodecTest {
     }
 
     private fun validV2Json(type: RecordType): String = when (type) {
-        RecordType.NURSING -> """{"left_min":1,"right_min":2}"""
+        RecordType.NURSING ->
+            """{"left_min":1,"right_min":2,"order":"LR","record_mode":"end"}"""
         RecordType.FORMULA, RecordType.PUMPED_FEED, RecordType.PUMP_EXPRESS ->
             """{"amount_ml":120}"""
         RecordType.PEE -> """{"pee_amount":2}"""
@@ -193,21 +195,20 @@ class RecordPayloadCodecTest {
             """{"stool_amount":3,"stool_consistency":3,"stool_color":2}"""
         RecordType.BOTH_DIAPER ->
             """{"pee_amount":2,"stool_amount":3,"stool_consistency":3,"stool_color":2}"""
-        RecordType.SLEEP -> """{"is_nap":false}"""
+        RecordType.SLEEP -> """{"anomaly_flag":false}"""
         RecordType.TEMPERATURE -> """{"celsius":36.8}"""
-        RecordType.MEMO, RecordType.DIARY -> """{"body":"正文"}"""
+        RecordType.DIARY -> """{"body":"正文"}"""
         RecordType.BATH, RecordType.WALK -> "{}"
         RecordType.COUGH, RecordType.RASH, RecordType.VOMIT, RecordType.INJURY ->
             """{"severity":2}"""
         RecordType.MEDICINE -> """{"name":"药"}"""
         RecordType.HOSPITAL -> """{"reason":"复诊"}"""
-        RecordType.OTHER -> """{"title":"其他"}"""
         RecordType.HEIGHT, RecordType.HEAD, RecordType.CHEST, RecordType.FOOT_SIZE ->
             """{"value":66.5,"unit":"cm"}"""
         RecordType.WEIGHT -> """{"value":6350,"unit":"g"}"""
         RecordType.BABY_FOOD, RecordType.SNACK, RecordType.DRINK ->
             """{"content":"内容"}"""
         RecordType.VACCINE -> """{"name":"乙肝"}"""
-        RecordType.CUSTOM -> """{"title":"自定义"}"""
+        RecordType.CUSTOM -> """{"title":"自定义","custom_item_id":1}"""
     }
 }

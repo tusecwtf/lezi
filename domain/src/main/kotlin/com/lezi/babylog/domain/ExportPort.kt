@@ -70,7 +70,6 @@ class TxtExportPort @Inject constructor(
         RecordType.POOP -> "便便"
         RecordType.SLEEP -> "睡眠"
         RecordType.TEMPERATURE -> "体温"
-        RecordType.MEMO -> "备注"
         RecordType.DIARY -> "日记"
         RecordType.HEIGHT -> "身高"
         RecordType.WEIGHT -> "体重"

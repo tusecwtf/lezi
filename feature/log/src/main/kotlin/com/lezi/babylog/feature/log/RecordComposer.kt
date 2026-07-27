@@ -69,8 +69,7 @@ sealed interface RecordComposerRequest : java.io.Serializable {
      * [customItemId] identifies the specific custom definition (required for new
      * catalog picks). [createIntent] freezes an explicit Calendar scheduling path;
      * otherwise the shared Composer derives fact versus plan from [timestamp].
-     * Bare CUSTOM without an id is no longer offered as a create path; historical
-     * edit still uses [Edit].
+     * CUSTOM creation always carries a concrete definition id.
      */
     data class New(
         val babyId: Long,
@@ -84,14 +83,17 @@ sealed interface RecordComposerRequest : java.io.Serializable {
         /** Explicit Calendar scheduling remains a plan even if its initial time expires. */
         val createIntent: ComposerCreateIntent = ComposerCreateIntent.DeriveFromTimestamp,
     ) : RecordComposerRequest {
-        fun itemIdentity(): RecordItemIdentity? =
-            when {
-                type == RecordType.CUSTOM && customItemId != null && customItemId > 0L ->
-                    RecordItemIdentity.custom(customItemId)
-                type != RecordType.CUSTOM ->
-                    RecordItemIdentity.BuiltIn(type)
-                else -> null
+        init {
+            require(type != RecordType.CUSTOM || customItemId?.takeIf { it > 0L } != null) {
+                "CUSTOM requires positive customItemId"
             }
+        }
+
+        fun itemIdentity(): RecordItemIdentity = if (type == RecordType.CUSTOM) {
+            RecordItemIdentity.custom(requireNotNull(customItemId))
+        } else {
+            RecordItemIdentity.BuiltIn(type)
+        }
     }
 
     data class Edit(val recordId: Long) : RecordComposerRequest
@@ -239,7 +241,7 @@ class RecordComposerViewModel @Inject constructor(
                             ) {
                                 "睡眠状态已变化，请关闭后重试"
                             }
-                            // Prefer MediaAsset paths over payload replica (same as Edit).
+                            // Record photos are hydrated exclusively from MediaAsset rows.
                             val photoPaths = careLog.listRecordPhotoPaths(openSleep.id)
                             QuickRecordDraft.wakeSleep(openSleep, request.timestamp).copy(
                                 photos = photoPaths,
@@ -270,8 +272,7 @@ class RecordComposerViewModel @Inject constructor(
                                 customItemId = request.customItemId,
                                 createIntent = request.createIntent,
                             ).let { created ->
-                                // Bind the concrete custom definition from the request;
-                                // never fall back to "first custom item" for bare CUSTOM.
+                                // Bind the concrete custom definition from the request.
                                 if (request.type == RecordType.CUSTOM) {
                                     val requestedId = request.customItemId
                                     val item = requestedId?.let { id ->
@@ -824,7 +825,6 @@ fun RecordComposerHost(
                     preferredHand = state.preferredHand,
                     birthdayEpochDay = state.birthdayEpochDay,
                     infantFeverAdviceEnabled = state.infantFeverAdviceEnabled,
-                    customItems = state.customItems,
                     saving = state.saving,
                     deleting = state.deleting,
                     saveError = state.error,

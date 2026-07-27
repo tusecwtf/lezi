@@ -62,7 +62,7 @@ class RecordComposerSavedStateTest {
         val handle = SavedStateHandle()
         val request = RecordComposerRequest.Edit(recordId = 9L)
         val saved = RecordComposerSavedState(handle)
-        saved.save(request, QuickRecordDraft.create(RecordType.MEMO, 1_000L))
+        saved.save(request, QuickRecordDraft.create(RecordType.DIARY, 1_000L))
 
         saved.clear()
 

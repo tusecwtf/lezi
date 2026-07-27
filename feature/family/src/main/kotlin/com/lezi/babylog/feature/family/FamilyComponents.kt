@@ -69,6 +69,7 @@ internal fun FamilyMembersListSheet(
         ui.members,
         ui.displayName,
         ui.role,
+        ui.membershipId,
         ui.membersLoaded,
     )
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
@@ -267,4 +268,3 @@ internal fun FamilyScopeRow(
         }
     }
 }
-

@@ -403,19 +403,6 @@ interface RecordDao {
     @Query(
         """
         UPDATE records
-        SET payloadJson = :payloadJson
-        WHERE id = :id AND payloadJson = :expectedPayloadJson
-        """,
-    )
-    suspend fun updatePayloadReplica(
-        id: Long,
-        expectedPayloadJson: String,
-        payloadJson: String,
-    ): Int
-
-    @Query(
-        """
-        UPDATE records
         SET deletedAt = :deletedAt, updatedAt = :deletedAt, syncDirty = 1
         WHERE id = :id
         """,
@@ -567,42 +554,6 @@ interface CarePlanDao {
         """,
     )
     suspend fun updateSystemCalendarProjectionEnabled(clientUuid: String, enabled: Boolean)
-
-    @Query(
-        """
-        UPDATE care_plans
-        SET legacyCarePlanReminderPending = 0
-        WHERE clientUuid = :clientUuid
-        """,
-    )
-    suspend fun markLegacyCarePlanReminderReplaced(clientUuid: String)
-
-    @Query(
-        """
-        UPDATE care_plans
-        SET legacyCarePlanReminderPending = 0
-        WHERE id = :id AND clientUuid = :clientUuid
-          AND legacyCarePlanReminderPending = 1
-        """,
-    )
-    suspend fun consumeLegacyCarePlanReminder(id: Long, clientUuid: String): Int
-
-    /**
-     * Device-local payload replica (e.g. photos[] paths) without advancing
-     * [CarePlanEntity.updatedAt] or [CarePlanEntity.syncDirty].
-     */
-    @Query(
-        """
-        UPDATE care_plans
-        SET payloadJson = :payloadJson
-        WHERE id = :id AND payloadJson = :expectedPayloadJson
-        """,
-    )
-    suspend fun updatePayloadReplica(
-        id: Long,
-        expectedPayloadJson: String,
-        payloadJson: String,
-    ): Int
 
     @Query(
         """

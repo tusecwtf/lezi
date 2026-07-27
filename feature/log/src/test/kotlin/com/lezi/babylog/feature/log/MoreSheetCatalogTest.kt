@@ -11,7 +11,7 @@ import org.junit.Test
 
 class MoreSheetCatalogTest {
     @Test
-    fun catalogExcludesMemoOtherAndBareCustomAndIncludesConcreteCustom() {
+    fun catalogIncludesCurrentBuiltInsAndConcreteCustoms() {
         val settings = SettingsLocal(hiddenItems = emptySet())
         val customs = listOf(
             CustomRecordItem(id = 3, name = "抚触", iconSlot = 1, sortOrder = 0),
@@ -21,8 +21,6 @@ class MoreSheetCatalogTest {
         val catalog = moreSheetCatalog(settings, customs)
         val keys = catalog.map { it.identity.catalogKey }
 
-        assertFalse(keys.contains("memo"))
-        assertFalse(keys.contains("other"))
         assertFalse(keys.contains("custom"))
         assertTrue(keys.contains("diary"))
         assertTrue(keys.contains("pee"))
@@ -52,12 +50,10 @@ class MoreSheetCatalogTest {
     }
 
     @Test
-    fun quickSuggestionsNoLongerOfferMemo() {
+    fun quickSuggestionsOnlyOfferConcreteBuiltIns() {
         val suggestions = moreSheetQuickSuggestions(SettingsLocal(), emptyList())
         val types = suggestions.filterIsInstance<MoreCatalogEntry.BuiltIn>().map { it.type }
 
-        assertFalse(types.contains(RecordType.MEMO))
-        assertFalse(types.contains(RecordType.OTHER))
         assertFalse(types.contains(RecordType.CUSTOM))
         assertTrue(types.contains(RecordType.DIARY) || types.contains(RecordType.POOP))
     }

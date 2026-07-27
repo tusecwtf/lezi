@@ -157,7 +157,7 @@ internal class FamilySessionCoordinator(
                 backend.create(
                     baseUrl = current.homeLanConfig.baseUrl,
                     deviceId = deviceId,
-                    displayName = memberDisplayNameForWire(command.displayName),
+                    displayName = requireMemberDisplayName(command.displayName),
                     createRequestId = createRequestId,
                     bootstrapSecret = command.bootstrapSecret,
                     familyName = normalizeFamilyNameForWire(command.familyName),
@@ -203,7 +203,7 @@ internal class FamilySessionCoordinator(
             baseUrl = config.baseUrl,
             code = decoded.code,
             deviceId = deviceId,
-            displayName = memberDisplayNameForWire(command.displayName),
+            displayName = requireMemberDisplayName(command.displayName),
         )
         FamilySessionOutcome.Joined(
             persistJoin(
@@ -249,7 +249,7 @@ internal class FamilySessionCoordinator(
     ): FamilySessionOutcome = withAllowedSession { session ->
         backend.updateMyDisplayName(
             session,
-            memberDisplayNameForWire(displayName),
+            requireMemberDisplayName(displayName),
         )
         FamilySessionOutcome.Completed
     }
@@ -314,7 +314,7 @@ internal class FamilySessionCoordinator(
             allowedSsids = config.allowedSsids,
             serverScheme = if (config.host.isNotBlank()) config.scheme else previous.serverScheme,
             familyName = joined.familyName?.trim()?.takeIf { it.isNotEmpty() },
-            membershipId = joined.membershipId?.trim().orEmpty(),
+            membershipId = joined.membershipId.trim(),
         )
         replica.resetLocalSyncReceipts(
             previous,

@@ -9,7 +9,7 @@ class JoinFamilyDraftTest {
         val draft = JoinFamilyDraft.fromConfig(
             HomeLanServerConfig.noviceUiDefaults("CurrentHome"),
         ).prefillInvitation(
-            """{"v":1,"baseUrl":"https://qr.home:443","code":"ABCD1234","ssids":["QrHome"]}""",
+            """{"v":1,"baseUrl":"https://qr.home:443","host":"qr.home","port":443,"code":"ABCD1234","ssids":["QrHome"]}""",
         ).copy(
             host = "edited.home",
             portText = "9443",

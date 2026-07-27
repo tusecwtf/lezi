@@ -38,6 +38,22 @@ import org.junit.Test
 
 class RealSyncPortTest {
     @Test
+    fun missingCurrentServerCapabilityFailsBeforeAnyRemoteSyncApiCall() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(membershipId = "membership-a"),
+            healthCapabilities = setOf(CAPABILITY_ATOMIC_BUNDLE),
+        )
+
+        val failure = rig.port.sync(SyncTrigger.PullToRefresh).exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(ServerContractMismatchException::class.java)
+        assertThat(rig.backend.memberCalls).isEqualTo(0)
+        assertThat(rig.backend.pushAttempts).isEmpty()
+        assertThat(rig.backend.pullCount).isEqualTo(0)
+        assertThat(rig.backend.stagedBundles).isEmpty()
+    }
+
+    @Test
     fun atomicBundleIdIsStableUuidAndIncludesRootTypeEntityAndVersion() {
         val entityUuid = "11111111-2222-3333-8444-555555555555"
 
@@ -289,26 +305,25 @@ class RealSyncPortTest {
         val result = rig.port.sync(SyncTrigger.LocalWrite)
         assertThat(result.exceptionOrNull()).isNull()
 
-        // Baby residual still uses legacy push; record packages use atomic bundles.
+        // A zero-photo Record shares the current ordinary push with its Baby.
         val pushed = rig.backend.pushes.single()
         assertThat(pushed.session.familyId).isEqualTo("family-a")
-        assertThat(pushed.entities.map(SyncEntity::type)).containsExactly("baby")
-        val staged = rig.backend.stagedBundles.single()
-        assertThat(staged.root.type).isEqualTo("record")
-        val recordPayload = Json.parseToJsonElement(staged.root.payloadJson).jsonObject
+        assertThat(pushed.entities.map(SyncEntity::type)).containsExactly("baby", "record")
+        val pushedRecord = pushed.entities.single { it.type == "record" }
+        val recordPayload = Json.parseToJsonElement(pushedRecord.payloadJson).jsonObject
         assertThat(recordPayload["baby_client_uuid"].toString()).isEqualTo("\"baby-local\"")
         assertThat(recordPayload["baby_id"]).isNull()
         assertThat(recordPayload["payload_json"]).isInstanceOf(
             kotlinx.serialization.json.JsonObject::class.java,
         )
-        assertThat(rig.backend.committedBundles).isNotEmpty()
+        assertThat(rig.backend.committedBundles).isEmpty()
         assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
         assertThat(rig.outbox.peek("family-b", 100).map(OutboxEntity::clientUuid))
             .containsExactly("other-family-record")
     }
 
     @Test
-    fun freshFamilyPushesBabyBeforeStagingRecordBundle() = runTest {
+    fun freshFamilyPushesBabyAndZeroPhotoRecordInOneOrdinaryBatch() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         rig.backend.enforceBundleReferences = true
         val babyId = rig.babies.seed(localBaby())
@@ -318,13 +333,12 @@ class RealSyncPortTest {
 
         assertThat(result.exceptionOrNull()).isNull()
         assertThat(rig.backend.operationOrder)
-            .containsExactly("push:baby", "stage:record")
-            .inOrder()
+            .containsExactly("push:baby,record")
         assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
     }
 
     @Test
-    fun freshFamilyUploadsBabyAvatarBeforeStagingRecordBundle() = runTest {
+    fun freshFamilyUploadsBabyAvatarWithZeroPhotoRecordOrdinaryBatch() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         rig.backend.enforceBundleReferences = true
         val avatarUuid = "11111111-1111-4111-8111-111111111111"
@@ -354,9 +368,8 @@ class RealSyncPortTest {
         assertThat(result.exceptionOrNull()).isNull()
         assertThat(rig.backend.operationOrder)
             .containsExactly(
-                "push:baby,media",
+                "push:baby,record,media",
                 "put_media:$avatarUuid",
-                "stage:record",
             )
             .inOrder()
         assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
@@ -376,7 +389,14 @@ class RealSyncPortTest {
                 updatedAt = 100,
             ),
         )
-        rig.carePlans.seed(localCarePlan(babyId).copy(customItemId = customItemId))
+        rig.carePlans.seed(
+            localCarePlan(babyId).copy(
+                type = "custom",
+                customItemId = customItemId,
+                payloadJson =
+                    """{"title":"抚触","custom_item_id":$customItemId}""",
+            ),
+        )
 
         val result = rig.port.sync(SyncTrigger.LocalWrite)
 
@@ -415,6 +435,8 @@ class RealSyncPortTest {
                 clientUuid = planUuid,
                 type = "custom",
                 customItemId = customItemId,
+                payloadJson =
+                    """{"title":"抚触","custom_item_id":$customItemId}""",
                 fulfilledRecordClientUuid = recordUuid,
                 fulfilledAt = 120,
                 status = "completed",
@@ -440,7 +462,7 @@ class RealSyncPortTest {
         assertThat(rig.backend.operationOrder)
             .containsExactly(
                 "push:baby,custom_item",
-                "stage:record",
+                "push:record",
                 "stage:care_plan",
                 "push:fulfillment_candidate",
             )
@@ -484,7 +506,10 @@ class RealSyncPortTest {
         rig.carePlans.seed(
             localCarePlan(babyId).copy(
                 clientUuid = planUuid,
+                type = "custom",
                 customItemId = customItemId,
+                payloadJson =
+                    """{"title":"抚触","custom_item_id":$customItemId}""",
                 status = "completed",
                 fulfilledRecordClientUuid = recordUuid,
                 fulfilledAt = 121,
@@ -523,18 +548,20 @@ class RealSyncPortTest {
                     type = "care_plan",
                     clientUuid = planUuid,
                     payloadJson =
-                        """{"created_by_membership_id":"membership-new"}""",
+                        """{"baby_client_uuid":"baby-local","type":"custom","custom_item_client_uuid":"custom-family-stamp","scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","note":null,"payload_json":{"title":"抚触"},"schema_version":2,"status":"completed","created_by_membership_id":"membership-new","fulfilled_record_client_uuid":"$recordUuid","fulfilled_at":121}""",
                     updatedAt = 121,
                 ),
                 SyncEntity(
                     type = "fulfillment_candidate",
                     clientUuid = "candidate-family-stamp",
                     payloadJson =
-                        """{"care_plan_client_uuid":"$planUuid","record_client_uuid":"$recordUuid","confirmed_at":121,"submitter_membership_id":"membership-new","submitter_role":"owner"}""",
+                        """{"care_plan_client_uuid":"$planUuid","record_client_uuid":"$recordUuid","actual_timestamp":120,"submitter_membership_id":"membership-new","submitter_role":"owner","confirmed_at":121}""",
                     updatedAt = 121,
                 ),
             ),
             cursor = 2,
+            generation = "current-generation",
+            hasMore = false,
         )
 
         val result = rig.port.sync(SyncTrigger.LocalWrite)
@@ -580,11 +607,13 @@ class RealSyncPortTest {
                     type = "care_plan",
                     clientUuid = "plan-family-stamp-only",
                     payloadJson =
-                        """{"created_by_membership_id":"membership-new"}""",
+                        """{"baby_client_uuid":"baby-local","type":"formula","custom_item_client_uuid":null,"scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","note":null,"payload_json":{"amount_ml":120},"schema_version":2,"status":"pending","created_by_membership_id":"membership-new","fulfilled_record_client_uuid":null,"fulfilled_at":null}""",
                     updatedAt = 100,
                 ),
             ),
             cursor = 1,
+            generation = "current-generation",
+            hasMore = false,
         )
 
         val result = rig.port.sync(SyncTrigger.LocalWrite)
@@ -597,7 +626,7 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun atomicRecordMembershipAuthorKeyFollowsHealthCapability() = runTest {
+    fun ordinaryRecordAlwaysPublishesCurrentMembershipAuthor() = runTest {
         val modernRig = SyncRig(
             session = joinedSession("family-a").copy(membershipId = "membership-a"),
             healthCapabilities = setOf(
@@ -612,118 +641,17 @@ class RealSyncPortTest {
 
         assertThat(modernRig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
         val modernPayload = Json.parseToJsonElement(
-            modernRig.backend.stagedBundles.single().root.payloadJson,
+            modernRig.backend.pushes
+                .flatMap(PushedBatch::entities)
+                .single { it.type == "record" }
+                .payloadJson,
         ).jsonObject
         assertThat(modernPayload["created_by_membership_id"]?.jsonPrimitive?.content)
             .isEqualTo("membership-a")
 
-        val legacyRig = SyncRig(
-            session = joinedSession("family-a").copy(membershipId = "membership-a"),
-            healthCapabilities = setOf(CAPABILITY_ATOMIC_BUNDLE),
-        )
-        val legacyBabyId = legacyRig.babies.seed(localBaby())
-        legacyRig.records.seed(
-            localRecord(legacyBabyId).copy(createdByMembershipId = "membership-a"),
-        )
-
-        assertThat(legacyRig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
-        val legacyPayload = Json.parseToJsonElement(
-            legacyRig.backend.stagedBundles.single().root.payloadJson,
-        ).jsonObject
-        assertThat(legacyPayload["created_by_membership_id"]).isNull()
     }
-
     @Test
-    fun firstHealthProbePersistsBlankCreatorIntentBeforeCanonicalPush() = runTest {
-        val rig = SyncRig(
-            session = joinedSession("family-a").copy(
-                role = FamilyRole.Member,
-                membershipId = "",
-            ),
-            healthCapabilities = setOf(
-                CAPABILITY_ATOMIC_BUNDLE,
-                CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
-            ),
-        )
-        rig.backend.nextMembers = listOf(
-            FamilyMember(
-                displayName = "爸爸",
-                role = FamilyRole.Member,
-                isSelf = true,
-                membershipId = "membership-canonical",
-            ),
-        )
-        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
-        rig.carePlans.seed(
-            CarePlanEntity(
-                clientUuid = "plan-first-health",
-                babyId = babyId,
-                type = "pee",
-                scheduledAt = 10_000,
-                scheduledZoneId = "Asia/Shanghai",
-                updatedAt = 100,
-                createdByMembershipId = "",
-                syncDirty = true,
-            ),
-        )
-        rig.customItems.seed(
-            CustomItemEntity(
-                clientUuid = "item-first-health",
-                familyId = 1,
-                name = "抚触",
-                iconSlot = 0,
-                sortOrder = 0,
-                updatedAt = 100,
-                createdByMembershipId = "",
-                syncDirty = true,
-            ),
-        )
-        rig.backend.pullFailures += SyncHttpException(statusCode = 503)
-
-        val failure = rig.port.sync(SyncTrigger.LocalWrite).exceptionOrNull()
-
-        assertThat(failure).isInstanceOf(SyncHttpException::class.java)
-        assertThat(rig.healthProbeCalls).isGreaterThan(0)
-        assertThat(rig.backend.pullCount).isEqualTo(1)
-        assertThat(rig.preferences.current().membershipId).isEqualTo("membership-canonical")
-        assertThat(rig.preferences.current().pendingCreatorAcknowledgements).containsExactly(
-            CreatorAcknowledgementRef("care_plan", "plan-first-health"),
-            CreatorAcknowledgementRef("custom_item", "item-first-health"),
-        )
-    }
-
-    @Test
-    fun atomicRecordUsesLastPreStageCapabilitySnapshotForMembershipAuthorKey() = runTest {
-        val modernCapabilities = setOf(
-            CAPABILITY_ATOMIC_BUNDLE,
-            CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
-        )
-        val legacyCapabilities = setOf(CAPABILITY_ATOMIC_BUNDLE)
-        val rig = SyncRig(
-            session = joinedSession("family-a").copy(membershipId = "membership-a"),
-            healthCapabilities = legacyCapabilities,
-            healthCapabilitiesSequence = listOf(
-                modernCapabilities,
-                modernCapabilities,
-                legacyCapabilities,
-            ),
-        )
-        val babyId = rig.babies.seed(localBaby())
-        rig.records.seed(
-            localRecord(babyId).copy(createdByMembershipId = "membership-a"),
-        )
-
-        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
-
-        val payload = Json.parseToJsonElement(
-            rig.backend.stagedBundles.single().root.payloadJson,
-        ).jsonObject
-        assertThat(payload["created_by_membership_id"]).isNull()
-        assertThat(rig.healthProbeCalls).isAtLeast(3)
-    }
-
-    @Test
-    fun atomicRecordCommitAckHydratesPreJoinAuthorWithoutChangingTheRecordRevision() = runTest {
+    fun ordinaryRecordPushAckHydratesPreJoinAuthorWithoutChangingTheRecordRevision() = runTest {
         val rig = SyncRig(
             session = joinedSession("family-a").copy(membershipId = "membership-a"),
             healthCapabilities = setOf(
@@ -732,6 +660,7 @@ class RealSyncPortTest {
             ),
         )
         val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        rig.backend.remember("baby", "baby-local")
         rig.records.seed(
             localRecord(babyId).copy(
                 clientUuid = "pre-join-record",
@@ -741,7 +670,7 @@ class RealSyncPortTest {
                 syncDirty = true,
             ),
         )
-        rig.backend.nextCommitRecordAuthors = listOf(
+        rig.backend.nextPushRecordAuthors = listOf(
             CanonicalRecordAuthor(
                 clientUuid = "pre-join-record",
                 createdByMembershipId = "membership-a",
@@ -802,6 +731,8 @@ class RealSyncPortTest {
                 ),
             ),
             cursor = 3,
+            generation = "current-generation",
+            hasMore = false,
         )
         val pullResult = rig.port.sync(SyncTrigger.PullToRefresh)
         assertThat(pullResult.exceptionOrNull()).isNull()
@@ -842,6 +773,8 @@ class RealSyncPortTest {
                 ),
             ),
             cursor = 4,
+            generation = "current-generation",
+            hasMore = false,
         )
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
         val tombstoned = rig.customItems.get("custom-tomb")!!
@@ -861,6 +794,8 @@ class RealSyncPortTest {
                 ),
             ),
             cursor = 5,
+            generation = "current-generation",
+            hasMore = false,
         )
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
         val stillDead = rig.customItems.get("custom-tomb")!!
@@ -985,7 +920,7 @@ class RealSyncPortTest {
                         kind = "avatar",
                         babyId = babyId,
                         localUri = "avatars/first.jpg",
-                        remoteUri = avatarUuid,
+                        remoteUri = rig.preferences.current().expectedMediaReceipt(avatarUuid),
                         mime = "image/jpeg",
                         byteSize = 12,
                         createdAt = 1,
@@ -1001,33 +936,6 @@ class RealSyncPortTest {
         assertThat(firstBatch.map(SyncEntity::clientUuid)).contains(avatarUuid)
         assertThat(rig.outbox.peek("family-a", 300)).isEmpty()
     }
-
-    @Test
-    fun normalSyncPersistsAuthenticatedSelfMembershipAfterNasUpgrade() = runTest {
-        val rig = SyncRig(
-            session = joinedSession("family-a").copy(membershipId = ""),
-            healthCapabilities = setOf(
-                CAPABILITY_ATOMIC_BUNDLE,
-                CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
-            ),
-        )
-        rig.backend.nextMembers = listOf(
-            FamilyMember(
-                "妈妈",
-                FamilyRole.Owner,
-                isSelf = true,
-                deviceId = "device-a",
-                membershipId = "membership-self",
-            ),
-        )
-
-        val result = rig.port.sync(SyncTrigger.LocalWrite)
-
-        assertThat(result.isSuccess).isTrue()
-        assertThat(rig.preferences.current().membershipId).isEqualTo("membership-self")
-        assertThat(rig.backend.memberCalls).isEqualTo(1)
-    }
-
     @Test
     fun familyMemberListDoesNotReachBackendAwayFromHomeWifi() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"), wifi = false, ssid = null)
@@ -1037,7 +945,7 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun zeroEntityPullAppliesFamilyNameTriStateWithoutOverwritingConcurrentSessionFields() =
+    fun zeroEntityPullAppliesCurrentFamilyNameWithoutOverwritingConcurrentSessionFields() =
         runTest {
             val valueRig = SyncRig(
                 session = joinedSession("family-a").copy(
@@ -1051,7 +959,8 @@ class RealSyncPortTest {
                 entities = emptyList(),
                 cursor = 5,
                 generation = "g0",
-                familyName = PullFamilyName.Present("  NAS 新名字  "),
+                familyName = "  NAS 新名字  ",
+                hasMore = false,
             )
             valueRig.backend.beforePullReturn = {
                 valueRig.preferences.saveSession(
@@ -1079,29 +988,16 @@ class RealSyncPortTest {
             nullRig.backend.nextPull = PullResult(
                 entities = emptyList(),
                 cursor = 1,
-                generation = "g1",
-                familyName = PullFamilyName.Present(null),
+                generation = "current-generation",
+                familyName = null,
+                hasMore = false,
             )
 
             assertThat(nullRig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
             assertThat(nullRig.preferences.current().familyName).isNull()
             assertThat(nullRig.preferences.current().pullCursor).isEqualTo(1)
-            assertThat(nullRig.preferences.current().pullGeneration).isEqualTo("g1")
-
-            val omittedRig = SyncRig(
-                session = joinedSession("family-a").copy(familyName = "旧名字"),
-            )
-            omittedRig.backend.nextPull = PullResult(
-                entities = emptyList(),
-                cursor = 1,
-                generation = "g1",
-                familyName = PullFamilyName.Omitted,
-            )
-
-            assertThat(omittedRig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
-            assertThat(omittedRig.preferences.current().familyName).isEqualTo("旧名字")
-            assertThat(omittedRig.preferences.current().pullCursor).isEqualTo(1)
-            assertThat(omittedRig.preferences.current().pullGeneration).isEqualTo("g1")
+            assertThat(nullRig.preferences.current().pullGeneration)
+                .isEqualTo("current-generation")
         }
 
     @Test
@@ -1120,7 +1016,8 @@ class RealSyncPortTest {
             deviceId = "owner-device",
             role = ownerJoin.role,
             familyName = ownerJoin.familyName,
-            membershipId = ownerJoin.membershipId.orEmpty(),
+            membershipId = ownerJoin.membershipId,
+            pullGeneration = ownerJoin.generation,
         )
         val invite = sharedBackend.invite(ownerSession)
         val memberJoin = sharedBackend.join(
@@ -1134,7 +1031,8 @@ class RealSyncPortTest {
             deviceId = "member-device",
             role = memberJoin.role,
             familyName = memberJoin.familyName,
-            membershipId = memberJoin.membershipId.orEmpty(),
+            membershipId = memberJoin.membershipId,
+            pullGeneration = memberJoin.generation,
         )
         val ownerRig = SyncRig(ownerSession, syncBackend = sharedBackend)
         val memberRig = SyncRig(memberSession, syncBackend = sharedBackend)
@@ -1149,18 +1047,10 @@ class RealSyncPortTest {
         assertThat(memberRig.preferences.current().familyName).isNull()
         assertThat(memberRig.records.listPendingSync()).isEmpty()
 
-        memberRig.preferences.saveSession(
-            memberRig.preferences.current().copy(familyName = "旧 NAS 本地缓存"),
-        )
-        sharedBackend.includesFamilyNameInPull = false
-        assertThat(ownerRig.port.renameFamily("NAS 未下发名字").isSuccess).isTrue()
-
-        assertThat(memberRig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
-        assertThat(memberRig.preferences.current().familyName).isEqualTo("旧 NAS 本地缓存")
     }
 
     @Test
-    fun multiPagePullKeepsFamilyNameFromEarlierPresentEnvelope() = runTest {
+    fun multiPagePullKeepsConsistentCurrentFamilyNameEnvelope() = runTest {
         val rig = SyncRig(
             session = joinedSession("family-a").copy(
                 familyName = "旧名字",
@@ -1172,14 +1062,14 @@ class RealSyncPortTest {
             cursor = 1,
             generation = "g1",
             hasMore = true,
-            familyName = PullFamilyName.Present("  分页新名字  "),
+            familyName = "  分页新名字  ",
         )
         rig.backend.pullResults += PullResult(
             entities = emptyList(),
             cursor = 1,
             generation = "g1",
             hasMore = false,
-            familyName = PullFamilyName.Omitted,
+            familyName = "分页新名字",
         )
 
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
@@ -1202,14 +1092,14 @@ class RealSyncPortTest {
             cursor = 1,
             generation = "g1",
             hasMore = true,
-            familyName = PullFamilyName.Present("第一页名字"),
+            familyName = "第一页名字",
         )
         rig.backend.pullResults += PullResult(
             entities = emptyList(),
             cursor = 1,
             generation = "g1",
             hasMore = false,
-            familyName = PullFamilyName.Present("第二页名字"),
+            familyName = "第二页名字",
         )
 
         val result = rig.port.sync(SyncTrigger.PullToRefresh)
@@ -1276,6 +1166,8 @@ class RealSyncPortTest {
         rig.backend.nextPull = PullResult(
             entities = listOf(remoteBaby(), remoteRecord()),
             cursor = 2,
+            generation = "current-generation",
+            hasMore = false,
         )
         rig.backend.pullStarted = CompletableDeferred()
         rig.backend.releasePull = CompletableDeferred()
@@ -1321,7 +1213,7 @@ class RealSyncPortTest {
                 kind = "avatar",
                 babyId = babyId,
                 localUri = "baby_avatars/stale.jpg",
-                remoteUri = avatarUuid,
+                remoteUri = rig.preferences.current().expectedMediaReceipt(avatarUuid),
                 createdAt = 100,
                 updatedAt = 100,
                 syncDirty = false,
@@ -1341,7 +1233,8 @@ class RealSyncPortTest {
                         "code":"generation_changed",
                         "action":"full_resync",
                         "reset_cursor":0,
-                        "server_cursor":1
+                        "server_cursor":1,
+                        "server_generation":"new-generation"
                       }
                     }
                 """.trimIndent(),
@@ -1355,7 +1248,9 @@ class RealSyncPortTest {
                         payloadJson = """
                             {
                               "nickname":"服务器宝宝",
+                              "sex":null,
                               "birthday":"2024-01-01",
+                              "birth_weight_grams":null,
                               "avatar_media_uuid":null
                             }
                         """.trimIndent(),
@@ -1364,10 +1259,11 @@ class RealSyncPortTest {
                 ),
                 cursor = 1,
                 generation = "new-generation",
+                hasMore = false,
             ),
         )
         rig.backend.pullResults.add(
-            PullResult(emptyList(), cursor = 1, generation = "new-generation"),
+            PullResult(emptyList(), cursor = 1, generation = "new-generation", hasMore = false),
         )
 
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
@@ -1401,13 +1297,19 @@ class RealSyncPortTest {
                         "code":"generation_changed",
                         "action":"full_resync",
                         "reset_cursor":0,
-                        "server_cursor":1
+                        "server_cursor":1,
+                        "server_generation":"new-generation"
                       }
                     }
                 """.trimIndent(),
             ),
         )
-        rig.backend.nextPull = PullResult(emptyList(), cursor = 1)
+        rig.backend.nextPull = PullResult(
+            emptyList(),
+            cursor = 1,
+            generation = "new-generation",
+            hasMore = false,
+        )
 
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
 
@@ -1417,7 +1319,7 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun legacyNonzeroCursorWithoutGenerationCalibratesFromZeroBeforePush() = runTest {
+    fun nonzeroCursorWithoutGenerationFailsBeforePullOrPush() = runTest {
         val rig = SyncRig(
             session = joinedSession("family-a").copy(
                 pullCursor = 7,
@@ -1429,14 +1331,16 @@ class RealSyncPortTest {
             emptyList(),
             cursor = 2,
             generation = "first-generation",
+            hasMore = false,
         )
 
-        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val result = rig.port.sync(SyncTrigger.LocalWrite)
 
-        assertThat(rig.backend.pullCursors).containsExactly(0L, 2L).inOrder()
-        assertThat(rig.backend.pushes.flatMap(PushedBatch::entities).map(SyncEntity::clientUuid))
-            .contains("baby-local")
-        assertThat(rig.preferences.current().pullGeneration).isEqualTo("first-generation")
+        assertThat(result.isFailure).isTrue()
+        assertThat(rig.backend.pullCursors).isEmpty()
+        assertThat(rig.backend.pushes).isEmpty()
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(7)
+        assertThat(rig.preferences.current().pullGeneration).isEmpty()
     }
 
     @Test
@@ -1461,7 +1365,7 @@ class RealSyncPortTest {
                 kind = "avatar",
                 babyId = babyId,
                 localUri = "baby_avatars/stale.jpg",
-                remoteUri = avatarUuid,
+                remoteUri = rig.preferences.current().expectedMediaReceipt(avatarUuid),
                 createdAt = 100,
                 updatedAt = 100,
                 syncDirty = false,
@@ -1477,7 +1381,8 @@ class RealSyncPortTest {
                         "code":"generation_changed",
                         "action":"full_resync",
                         "reset_cursor":0,
-                        "server_cursor":1
+                        "server_cursor":1,
+                        "server_generation":"new-generation"
                       }
                     }
                 """.trimIndent(),
@@ -1491,7 +1396,9 @@ class RealSyncPortTest {
                         payloadJson = """
                             {
                               "nickname":"服务器宝宝",
+                              "sex":null,
                               "birthday":"2024-01-01",
+                              "birth_weight_grams":null,
                               "avatar_media_uuid":null
                             }
                         """.trimIndent(),
@@ -1500,10 +1407,11 @@ class RealSyncPortTest {
                 ),
                 cursor = 1,
                 generation = "new-generation",
+                hasMore = false,
             ),
         )
         rig.backend.pullResults.add(
-            PullResult(emptyList(), cursor = 1, generation = "new-generation"),
+            PullResult(emptyList(), cursor = 1, generation = "new-generation", hasMore = false),
         )
 
         val result = rig.port.sync(SyncTrigger.PullToRefresh)
@@ -1552,7 +1460,8 @@ class RealSyncPortTest {
                       "detail":{
                         "code":"generation_changed",
                         "action":"full_resync",
-                        "reset_cursor":0
+                        "reset_cursor":0,
+                        "server_generation":"new-generation"
                       }
                     }
                 """.trimIndent(),
@@ -1566,7 +1475,9 @@ class RealSyncPortTest {
                         payloadJson = """
                             {
                               "nickname":"第一页宝宝",
+                              "sex":null,
                               "birthday":"2024-01-01",
+                              "birth_weight_grams":null,
                               "avatar_media_uuid":null
                             }
                         """.trimIndent(),
@@ -1610,7 +1521,8 @@ class RealSyncPortTest {
                       "detail":{
                         "code":"generation_changed",
                         "action":"full_resync",
-                        "reset_cursor":0
+                        "reset_cursor":0,
+                        "server_generation":"new-generation"
                       }
                     }
                 """.trimIndent(),
@@ -1637,7 +1549,7 @@ class RealSyncPortTest {
 
         assertThat(rig.babies.getByClientUuid("baby-remote")).isNotNull()
         assertThat(rig.preferences.current().pullCursor).isEqualTo(0)
-        assertThat(rig.preferences.current().pullGeneration).isEmpty()
+        assertThat(rig.preferences.current().pullGeneration).isEqualTo("new-generation")
     }
 
     @Test
@@ -1667,12 +1579,12 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun recordMediaMaterializationSkipsAStalePhotoSnapshot() = runTest {
+    fun recordMediaSnapshotUsesMediaAssetRowsOnly() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
         val recordId = rig.records.seed(
             localRecord(babyId).copy(
-                payloadJson = """{"photos":["photos/snapshot-old.jpg"]}""",
+                payloadJson = """{"amount_ml":120}""",
             ),
         )
         val mediaUuid = "32323232-3232-3232-3232-323232323232"
@@ -1682,7 +1594,7 @@ class RealSyncPortTest {
                 clientUuid = mediaUuid,
                 kind = "log",
                 localUri = "photos/user-new.jpg",
-                remoteUri = mediaUuid,
+                remoteUri = rig.preferences.current().expectedMediaReceipt(mediaUuid),
                 mime = "image/jpeg",
                 byteSize = 12,
                 createdAt = 100,
@@ -1693,23 +1605,13 @@ class RealSyncPortTest {
         rig.backend.remember("baby", "baby-local")
         rig.backend.remember("record", "record-local")
         rig.backend.remember("media", mediaUuid)
-        rig.mediaFiles.afterInspect = {
-            val current = requireNotNull(rig.records.getIncludingDeleted(recordId))
-            rig.records.update(
-                current.copy(
-                    payloadJson = """{"photos":["photos/user-new.jpg"]}""",
-                    updatedAt = current.updatedAt + 1,
-                    syncDirty = true,
-                ),
-            )
-        }
-
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
 
         val record = requireNotNull(rig.records.getIncludingDeleted(recordId))
-        assertThat(record.payloadJson).contains("photos/user-new.jpg")
-        assertThat(record.updatedAt).isEqualTo(121)
-        assertThat(record.syncDirty).isTrue()
+        assertThat(record.payloadJson).isEqualTo("""{"amount_ml":120}""")
+        assertThat(record.note).isNull()
+        assertThat(record.updatedAt).isEqualTo(120)
+        assertThat(record.syncDirty).isFalse()
         assertThat(rig.media.getByClientUuid(mediaUuid)?.deletedAt).isNull()
         assertThat(rig.media.listAllIncludingDeleted().map(MediaAssetEntity::localUri))
             .containsExactly("photos/user-new.jpg")
@@ -1733,7 +1635,7 @@ class RealSyncPortTest {
                 clientUuid = mediaUuid,
                 kind = "log",
                 localUri = "",
-                remoteUri = mediaUuid,
+                remoteUri = rig.preferences.current().expectedMediaReceipt(mediaUuid),
                 mime = "image/jpeg",
                 byteSize = 12,
                 createdAt = 100,
@@ -1749,9 +1651,6 @@ class RealSyncPortTest {
             rig.records.update(
                 current.copy(
                     note = "并发补充说明",
-                    payloadJson = """
-                        {"amount_ml":120,"photos":["photos/user-new.jpg"]}
-                    """.trimIndent(),
                     updatedAt = current.updatedAt + 1,
                     syncDirty = true,
                 ),
@@ -1761,6 +1660,7 @@ class RealSyncPortTest {
             emptyList(),
             cursor = 1,
             generation = "current-generation",
+            hasMore = false,
         )
 
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
@@ -1769,8 +1669,7 @@ class RealSyncPortTest {
         assertThat(record.note).isEqualTo("并发补充说明")
         assertThat(record.updatedAt).isEqualTo(121)
         assertThat(record.syncDirty).isTrue()
-        assertThat(record.payloadJson).contains("photos/user-new.jpg")
-        assertThat(record.payloadJson).doesNotContain("downloaded/$mediaUuid")
+        assertThat(record.payloadJson).isEqualTo("""{"amount_ml":120}""")
         assertThat(rig.media.getByClientUuid(mediaUuid)?.localUri)
             .isEqualTo("downloaded/$mediaUuid")
     }
@@ -1789,7 +1688,7 @@ class RealSyncPortTest {
                 clientUuid = mediaUuid,
                 kind = "log",
                 localUri = "",
-                remoteUri = mediaUuid,
+                remoteUri = rig.preferences.current().expectedMediaReceipt(mediaUuid),
                 mime = "image/jpeg",
                 byteSize = 12,
                 createdAt = 100,
@@ -1801,9 +1700,7 @@ class RealSyncPortTest {
             val current = requireNotNull(rig.records.getIncludingDeleted(recordId))
             rig.records.update(
                 current.copy(
-                    payloadJson = """
-                        {"amount_ml":120,"photos":["photos/during-pull.jpg"]}
-                    """.trimIndent(),
+                    note = "拉取期间编辑",
                     updatedAt = current.updatedAt + 1,
                     syncDirty = true,
                 ),
@@ -1813,13 +1710,14 @@ class RealSyncPortTest {
             emptyList(),
             cursor = 1,
             generation = "current-generation",
+            hasMore = false,
         )
 
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
 
         val record = requireNotNull(rig.records.getIncludingDeleted(recordId))
-        assertThat(record.payloadJson).contains("photos/during-pull.jpg")
-        assertThat(record.payloadJson).doesNotContain("downloaded/$mediaUuid")
+        assertThat(record.payloadJson).isEqualTo("""{"amount_ml":120}""")
+        assertThat(record.note).isEqualTo("拉取期间编辑")
         assertThat(rig.media.getByClientUuid(mediaUuid)?.localUri)
             .isEqualTo("downloaded/$mediaUuid")
     }
@@ -1842,7 +1740,7 @@ class RealSyncPortTest {
                     clientUuid = mediaUuid,
                     kind = "log",
                     localUri = "",
-                    remoteUri = mediaUuid,
+                    remoteUri = rig.preferences.current().expectedMediaReceipt(mediaUuid),
                     mime = "image/jpeg",
                     byteSize = 12,
                     createdAt = 100,
@@ -1852,12 +1750,10 @@ class RealSyncPortTest {
             )
         }
         rig.mediaFiles.afterSaveDownloaded = {
-            val current = requireNotNull(rig.records.getIncludingDeleted(recordId))
-            rig.records.update(
+            val current = requireNotNull(rig.media.getByClientUuid(mediaUuids.last()))
+            rig.media.update(
                 current.copy(
-                    payloadJson = """
-                        {"amount_ml":120,"photos":["photos/between-downloads.jpg"]}
-                    """.trimIndent(),
+                    localUri = "photos/between-downloads.jpg",
                     updatedAt = current.updatedAt + 1,
                     syncDirty = true,
                 ),
@@ -1867,17 +1763,17 @@ class RealSyncPortTest {
             emptyList(),
             cursor = 1,
             generation = "current-generation",
+            hasMore = false,
         )
 
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
 
-        val record = requireNotNull(rig.records.getIncludingDeleted(recordId))
-        assertThat(record.payloadJson).contains("photos/between-downloads.jpg")
-        mediaUuids.forEach { mediaUuid ->
-            assertThat(record.payloadJson).doesNotContain("downloaded/$mediaUuid")
-            assertThat(rig.media.getByClientUuid(mediaUuid)?.localUri)
-                .isEqualTo("downloaded/$mediaUuid")
-        }
+        assertThat(rig.records.getIncludingDeleted(recordId)?.payloadJson)
+            .isEqualTo("""{"amount_ml":120}""")
+        assertThat(rig.media.getByClientUuid(mediaUuids.first())?.localUri)
+            .isEqualTo("downloaded/${mediaUuids.first()}")
+        assertThat(rig.media.getByClientUuid(mediaUuids.last())?.localUri)
+            .isEqualTo("photos/between-downloads.jpg")
     }
 
     @Test
@@ -1897,7 +1793,7 @@ class RealSyncPortTest {
                 kind = "avatar",
                 babyId = babyId,
                 localUri = "",
-                remoteUri = mediaUuid,
+                remoteUri = rig.preferences.current().expectedMediaReceipt(mediaUuid),
                 mime = "image/jpeg",
                 byteSize = 12,
                 createdAt = 100,
@@ -1921,6 +1817,7 @@ class RealSyncPortTest {
             emptyList(),
             cursor = 1,
             generation = "current-generation",
+            hasMore = false,
         )
 
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
@@ -1947,7 +1844,7 @@ class RealSyncPortTest {
                 clientUuid = mediaUuid,
                 kind = "log",
                 localUri = "",
-                remoteUri = mediaUuid,
+                remoteUri = rig.preferences.current().expectedMediaReceipt(mediaUuid),
                 mime = "image/jpeg",
                 byteSize = 12,
                 createdAt = 100,
@@ -1972,6 +1869,7 @@ class RealSyncPortTest {
             emptyList(),
             cursor = 1,
             generation = "current-generation",
+            hasMore = false,
         )
 
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
@@ -1979,12 +1877,12 @@ class RealSyncPortTest {
 
         val record = requireNotNull(rig.records.getIncludingDeleted(recordId))
         assertThat(record.note).isEqualTo("只改备注")
-        assertThat(record.payloadJson).contains("downloaded/$mediaUuid")
+        assertThat(record.payloadJson).isEqualTo("""{"amount_ml":120}""")
         val localMedia = requireNotNull(rig.media.getByClientUuid(mediaUuid))
         assertThat(localMedia.deletedAt).isNull()
         assertThat(localMedia.localUri).isEqualTo("downloaded/$mediaUuid")
         // Record packages go through atomic bundles; residual media may still use
-        // legacy push. Either path must never re-publish a tombstone for the
+        // ordinary push. Either path must never re-publish a tombstone for the
         // photo we just accepted during download.
         val residualMedia = rig.backend.pushes
             .flatMap(PushedBatch::entities)
@@ -2012,7 +1910,7 @@ class RealSyncPortTest {
                 kind = "avatar",
                 babyId = babyId,
                 localUri = "",
-                remoteUri = mediaUuid,
+                remoteUri = rig.preferences.current().expectedMediaReceipt(mediaUuid),
                 mime = "image/jpeg",
                 byteSize = 12,
                 createdAt = 100,
@@ -2036,6 +1934,7 @@ class RealSyncPortTest {
             emptyList(),
             cursor = 1,
             generation = "current-generation",
+            hasMore = false,
         )
 
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
@@ -2078,8 +1977,10 @@ class RealSyncPortTest {
                     payloadJson = """
                         {
                           "nickname":"远端同戳",
+                          "sex":null,
                           "birthday":"2024-01-01",
-                          "sort_order":0
+                          "birth_weight_grams":null,
+                          "avatar_media_uuid":null
                         }
                     """.trimIndent(),
                     updatedAt = 200,
@@ -2089,17 +1990,21 @@ class RealSyncPortTest {
                         {
                           "baby_client_uuid":"baby-remote",
                           "created_by_membership_id":"membership-b",
-                          "created_by_device_id":"device-b",
                           "type":"formula",
+                          "custom_item_client_uuid":null,
                           "timestamp":210,
+                          "end_timestamp":null,
+                          "note":null,
                           "payload_json":{"amount_ml":90},
-                          "schema_version":1
+                          "schema_version":2
                         }
                     """.trimIndent(),
                     updatedAt = 210,
                 ),
             ),
             cursor = 9,
+            generation = "current-generation",
+            hasMore = false,
         )
 
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
@@ -2108,7 +2013,6 @@ class RealSyncPortTest {
         val record = requireNotNull(rig.records.getByClientUuid("record-remote"))
         assertThat(record.payloadJson).isEqualTo("""{"amount_ml":120}""")
         assertThat(record.createdByMembershipId).isEqualTo("membership-b")
-        assertThat(record.createdByDeviceId).isNull()
         assertThat(record.updatedAt).isEqualTo(210)
         assertThat(record.syncDirty).isFalse()
         assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
@@ -2135,17 +2039,21 @@ class RealSyncPortTest {
                         {
                           "baby_client_uuid":"baby-local",
                           "created_by_membership_id":"membership-stale",
-                          "created_by_device_id":"device-stale",
                           "type":"formula",
+                          "custom_item_client_uuid":null,
                           "timestamp":299,
+                          "end_timestamp":null,
+                          "note":null,
                           "payload_json":{"amount_ml":1},
-                          "schema_version":1
+                          "schema_version":2
                         }
                     """.trimIndent(),
                     updatedAt = 299,
                 ),
             ),
             cursor = 10,
+            generation = "current-generation",
+            hasMore = false,
         )
 
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
@@ -2157,12 +2065,12 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun equalLegacyRecordWithoutMembershipAuthorKeepsKnownMetadataAndBusinessFields() = runTest {
+    fun recordWithoutMembershipAuthorFailsBeforeCursorAdvance() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
         rig.records.seed(
             localRecord(babyId).copy(
-                clientUuid = "record-legacy-equal",
+                clientUuid = "record-missing-author",
                 createdByMembershipId = "membership-current",
                 updatedAt = 300,
                 syncDirty = false,
@@ -2171,30 +2079,34 @@ class RealSyncPortTest {
         rig.backend.nextPull = PullResult(
             entities = listOf(
                 remoteRecord().copy(
-                    clientUuid = "record-legacy-equal",
+                    clientUuid = "record-missing-author",
                     payloadJson = """
                         {
                           "baby_client_uuid":"baby-local",
-                          "created_by_device_id":"legacy-device",
                           "type":"formula",
+                          "custom_item_client_uuid":null,
                           "timestamp":300,
+                          "end_timestamp":null,
+                          "note":null,
                           "payload_json":{"amount_ml":1},
-                          "schema_version":1
+                          "schema_version":2
                         }
                     """.trimIndent(),
                     updatedAt = 300,
                 ),
             ),
             cursor = 11,
+            generation = "current-generation",
+            hasMore = false,
         )
 
-        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isFailure).isTrue()
 
-        val record = requireNotNull(rig.records.getByClientUuid("record-legacy-equal"))
+        val record = requireNotNull(rig.records.getByClientUuid("record-missing-author"))
         assertThat(record.createdByMembershipId).isEqualTo("membership-current")
-        assertThat(record.createdByDeviceId).isNull()
         assertThat(record.payloadJson).isEqualTo("""{"amount_ml":120}""")
         assertThat(record.updatedAt).isEqualTo(300)
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(0)
     }
 
     @Test
@@ -2208,6 +2120,8 @@ class RealSyncPortTest {
         rig.backend.nextPull = PullResult(
             entities = listOf(remoteRecord()),
             cursor = 8,
+            generation = "current-generation",
+            hasMore = false,
         )
 
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isFailure).isTrue()
@@ -2217,6 +2131,8 @@ class RealSyncPortTest {
         rig.backend.nextPull = PullResult(
             entities = listOf(remoteBaby(), remoteRecord()),
             cursor = 8,
+            generation = "current-generation",
+            hasMore = false,
         )
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
 
@@ -2226,7 +2142,6 @@ class RealSyncPortTest {
         assertThat(applied?.babyId).isEqualTo(rig.babies.getByClientUuid("baby-remote")?.id)
         assertThat(applied?.payloadJson).isEqualTo("""{"amount_ml":90}""")
         assertThat(applied?.createdByMembershipId).isEqualTo("membership-b")
-        assertThat(applied?.createdByDeviceId).isEqualTo("device-b")
         assertThat(rig.transactions.runCount).isEqualTo(2)
     }
 
@@ -2246,6 +2161,7 @@ class RealSyncPortTest {
                 entities = listOf(remoteRecord()),
                 cursor = 2,
                 generation = "current-generation",
+                hasMore = false,
             ),
         )
 
@@ -2264,6 +2180,7 @@ class RealSyncPortTest {
             PullResult(
                 entities = listOf(remoteBaby()),
                 cursor = 1,
+                generation = "current-generation",
                 hasMore = true,
             ),
         )
@@ -2282,6 +2199,8 @@ class RealSyncPortTest {
                     ),
                 ),
                 cursor = 2,
+                generation = "current-generation",
+                hasMore = false,
             ),
         )
 
@@ -2300,7 +2219,6 @@ class RealSyncPortTest {
                 clientUuid = "baby-remote",
                 sex = "female",
                 birthWeightGrams = 3_200,
-                dueDateEpochDay = 20_030,
                 sortOrder = 7,
                 syncDirty = false,
             ),
@@ -2314,8 +2232,6 @@ class RealSyncPortTest {
                           "sex":null,
                           "birthday":"2024-01-01",
                           "birth_weight_grams":null,
-                          "due_date":null,
-                          "sort_order":99,
                           "avatar_media_uuid":null
                         }
                     """.trimIndent(),
@@ -2323,6 +2239,8 @@ class RealSyncPortTest {
                 ),
             ),
             cursor = 1,
+            generation = "current-generation",
+            hasMore = false,
         )
 
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
@@ -2330,7 +2248,6 @@ class RealSyncPortTest {
         val baby = rig.babies.getByClientUuid("baby-remote")
         assertThat(baby?.sex).isNull()
         assertThat(baby?.birthWeightGrams).isNull()
-        assertThat(baby?.dueDateEpochDay).isNull()
         assertThat(baby?.sortOrder).isEqualTo(7)
     }
 
@@ -2353,7 +2270,7 @@ class RealSyncPortTest {
                 kind = "avatar",
                 babyId = babyId,
                 localUri = "avatars/selected.jpg",
-                remoteUri = selectedUuid,
+                remoteUri = rig.preferences.current().expectedMediaReceipt(selectedUuid),
                 createdAt = 100,
                 updatedAt = 100,
                 syncDirty = false,
@@ -2365,7 +2282,7 @@ class RealSyncPortTest {
                 kind = "avatar",
                 babyId = babyId,
                 localUri = "avatars/newer.jpg",
-                remoteUri = newerUuid,
+                remoteUri = rig.preferences.current().expectedMediaReceipt(newerUuid),
                 createdAt = 200,
                 updatedAt = 200,
                 syncDirty = false,
@@ -2377,8 +2294,9 @@ class RealSyncPortTest {
                     payloadJson = """
                         {
                           "nickname":"远端宝宝",
+                          "sex":null,
                           "birthday":"2024-01-01",
-                          "sort_order":0,
+                          "birth_weight_grams":null,
                           "avatar_media_uuid":"$selectedUuid"
                         }
                     """.trimIndent(),
@@ -2386,6 +2304,8 @@ class RealSyncPortTest {
                 ),
             ),
             cursor = 1,
+            generation = "current-generation",
+            hasMore = false,
         )
 
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
@@ -2454,7 +2374,7 @@ class RealSyncPortTest {
                 kind = "avatar",
                 babyId = babyId,
                 localUri = "baby_avatars/remote.jpg",
-                remoteUri = avatarUuid,
+                remoteUri = rig.preferences.current().expectedMediaReceipt(avatarUuid),
                 createdAt = 100,
                 updatedAt = 100,
                 syncDirty = false,
@@ -2487,7 +2407,7 @@ class RealSyncPortTest {
         )
         val recordId = rig.records.seed(
             localRecord(targetBabyId).copy(
-                payloadJson = """{"photos":["photos/merged.jpg"]}""",
+                payloadJson = """{"amount_ml":120}""",
             ),
         )
         val mediaUuid = "22222222-2222-2222-2222-222222222222"
@@ -2496,9 +2416,9 @@ class RealSyncPortTest {
                 recordId = recordId,
                 clientUuid = mediaUuid,
                 kind = "log",
-                babyId = sourceBabyId,
+                babyId = null,
                 localUri = "photos/merged.jpg",
-                remoteUri = mediaUuid,
+                remoteUri = rig.preferences.current().expectedMediaReceipt(mediaUuid),
                 mime = "image/jpeg",
                 byteSize = 12,
                 createdAt = 100,
@@ -2508,7 +2428,7 @@ class RealSyncPortTest {
 
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
 
-        // Record packages publish via atomic bundle (not legacy /v1/push).
+        // Record packages publish via atomic bundle (not ordinary /v1/push).
         val mediaPayload = rig.backend.stagedBundles
             .flatMap { it.media }
             .single { it.clientUuid == mediaUuid }
@@ -2521,21 +2441,18 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun atomicRecordCreateStagesZeroOneAndThreePhotosThenCommits() = runTest {
+    fun recordCreateUsesOrdinaryWithoutPhotosAndAtomicWithPhotos() = runTest {
         suspend fun runCase(photoCount: Int) {
             val rig = SyncRig(session = joinedSession("family-a"))
-            // Warm health probe so policy.supportsAtomicBundle is true.
+            // Warm the current-server health contract before staging the local bundle.
             assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
             val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+            rig.backend.remember("baby", "baby-local")
             val photos = (0 until photoCount).map { "photos/p$it.jpg" }
             val recordId = rig.records.seed(
                 localRecord(babyId).copy(
                     clientUuid = "record-photos-$photoCount",
-                    payloadJson = if (photos.isEmpty()) {
-                        """{"amount_ml":120}"""
-                    } else {
-                        """{"amount_ml":120,"photos":[${photos.joinToString(",") { "\"$it\"" }}]}"""
-                    },
+                    payloadJson = """{"amount_ml":120}""",
                     syncDirty = true,
                 ),
             )
@@ -2543,7 +2460,7 @@ class RealSyncPortTest {
                 rig.media.seed(
                     MediaAssetEntity(
                         recordId = recordId,
-                        clientUuid = "media-$photoCount-$index",
+                        clientUuid = testMediaUuid("media-$photoCount-$index"),
                         kind = "log",
                         localUri = path,
                         mime = "image/jpeg",
@@ -2555,7 +2472,20 @@ class RealSyncPortTest {
                 )
             }
             // Snapshot dirty entities into outbox via a sync cycle.
-            assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+            val result = rig.port.sync(SyncTrigger.LocalWrite)
+            assertThat(result.exceptionOrNull()).isNull()
+            if (photoCount == 0) {
+                val pushedRecord = rig.backend.pushes
+                    .flatMap(PushedBatch::entities)
+                    .single { it.clientUuid == "record-photos-0" }
+                assertThat(pushedRecord.type).isEqualTo("record")
+                assertThat(rig.backend.stagedBundles).isEmpty()
+                assertThat(rig.backend.bundleMediaUploads).isEmpty()
+                assertThat(rig.backend.committedBundles).isEmpty()
+                assertThat(rig.records.getByClientUuid("record-photos-0")?.syncDirty)
+                    .isFalse()
+                return
+            }
             val draft = rig.backend.stagedBundles.last()
             assertThat(draft.root.type).isEqualTo("record")
             assertThat(draft.root.clientUuid).isEqualTo("record-photos-$photoCount")
@@ -2581,14 +2511,14 @@ class RealSyncPortTest {
         val recordId = rig.records.seed(
             localRecord(babyId).copy(
                 clientUuid = "record-fail-upload",
-                payloadJson = """{"amount_ml":90,"photos":["photos/fail.jpg"]}""",
+                payloadJson = """{"amount_ml":90}""",
                 syncDirty = true,
             ),
         )
         rig.media.seed(
             MediaAssetEntity(
                 recordId = recordId,
-                clientUuid = "media-fail",
+                clientUuid = testMediaUuid("media-fail"),
                 kind = "log",
                 localUri = "photos/fail.jpg",
                 mime = "image/jpeg",
@@ -2672,14 +2602,14 @@ class RealSyncPortTest {
             localRecord(babyId).copy(
                 clientUuid = recordUuid,
                 updatedAt = 100,
-                payloadJson = """{"amount_ml":100,"photos":["photos/a.jpg"]}""",
+                payloadJson = """{"amount_ml":100}""",
                 syncDirty = true,
             ),
         )
         rig.media.seed(
             MediaAssetEntity(
                 recordId = recordId,
-                clientUuid = "media-a",
+                clientUuid = testMediaUuid("media-a"),
                 kind = "log",
                 localUri = "photos/a.jpg",
                 mime = "image/jpeg",
@@ -2717,13 +2647,14 @@ class RealSyncPortTest {
         val afterText = rig.records.getByClientUuid(recordUuid)!!
         rig.records.update(
             afterText.copy(
-                payloadJson = """{"amount_ml":100,"photos":["photos/b.jpg"]}""",
+                payloadJson = """{"amount_ml":100}""",
                 updatedAt = 300,
                 syncDirty = true,
             ),
         )
         // Ensure prior photo still exists as a tombstonable row (re-seed if drained).
-        val existingOld = rig.media.listForRecord(recordId).firstOrNull { it.clientUuid == "media-a" }
+        val existingOld = rig.media.listForRecord(recordId)
+            .firstOrNull { it.clientUuid == testMediaUuid("media-a") }
         if (existingOld != null) {
             rig.media.update(
                 existingOld.copy(deletedAt = 300, updatedAt = 300, syncDirty = true),
@@ -2732,7 +2663,7 @@ class RealSyncPortTest {
             rig.media.seed(
                 MediaAssetEntity(
                     recordId = recordId,
-                    clientUuid = "media-a",
+                    clientUuid = testMediaUuid("media-a"),
                     kind = "log",
                     localUri = "photos/a.jpg",
                     mime = "image/jpeg",
@@ -2747,7 +2678,7 @@ class RealSyncPortTest {
         rig.media.seed(
             MediaAssetEntity(
                 recordId = recordId,
-                clientUuid = "media-b",
+                clientUuid = testMediaUuid("media-b"),
                 kind = "log",
                 localUri = "photos/b.jpg",
                 mime = "image/jpeg",
@@ -2778,6 +2709,15 @@ class RealSyncPortTest {
                 syncDirty = true,
             ),
         )
+        rig.media.listActiveForRecord(recordId).forEach { media ->
+            rig.media.update(
+                media.copy(
+                    updatedAt = 400,
+                    deletedAt = 400,
+                    syncDirty = true,
+                ),
+            )
+        }
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
         val deleteDraft = rig.backend.stagedBundles.last { it.root.updatedAt == 400L }
         assertThat(rig.backend.committedBundles).contains(deleteDraft.bundleId)
@@ -2804,7 +2744,7 @@ class RealSyncPortTest {
             localRecord(babyId).copy(
                 clientUuid = "record-prior",
                 updatedAt = 100,
-                payloadJson = """{"amount_ml":80,"photos":["old.jpg"]}""",
+                payloadJson = """{"amount_ml":80}""",
                 note = "旧完整",
                 syncDirty = false,
             ),
@@ -2812,7 +2752,7 @@ class RealSyncPortTest {
         rig.media.seed(
             MediaAssetEntity(
                 recordId = recordId,
-                clientUuid = "media-old",
+                clientUuid = testMediaUuid("media-old"),
                 kind = "log",
                 localUri = "old.jpg",
                 mime = "image/jpeg",
@@ -2820,7 +2760,8 @@ class RealSyncPortTest {
                 createdAt = 100,
                 updatedAt = 100,
                 syncDirty = false,
-                remoteUri = "lezi-sync:x:media-old",
+                remoteUri = rig.preferences.current()
+                    .expectedMediaReceipt(testMediaUuid("media-old")),
             ),
         )
         // Incomplete mutation package: record meta + missing media download.
@@ -2830,19 +2771,20 @@ class RealSyncPortTest {
                     type = "record",
                     clientUuid = "record-prior",
                     payloadJson =
-                        """{"baby_client_uuid":"baby-local","type":"formula","timestamp":1000,"note":"新版本","payload":{"amount_ml":90},"photos":["new.jpg"]}""",
+                        """{"baby_client_uuid":"baby-local","created_by_membership_id":"member-b","type":"formula","custom_item_client_uuid":null,"timestamp":1000,"end_timestamp":null,"note":"新版本","payload_json":{"amount_ml":90},"schema_version":2}""",
                     updatedAt = 200,
                 ),
                 SyncEntity(
                     type = "media",
-                    clientUuid = "media-new",
+                    clientUuid = testMediaUuid("media-new"),
                     payloadJson =
-                        """{"kind":"log","record_client_uuid":"record-prior","mime":"image/jpeg","byte_size":4}""",
+                        """{"kind":"log","record_client_uuid":"record-prior","care_plan_client_uuid":null,"baby_client_uuid":null,"mime":"image/jpeg","width":null,"height":null,"byte_size":4}""",
                     updatedAt = 200,
                 ),
             ),
             cursor = 60,
             generation = "g1",
+            hasMore = false,
         )
         rig.backend.getMediaFailure = IllegalStateException("download aborted")
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isFalse()
@@ -2851,7 +2793,7 @@ class RealSyncPortTest {
         assertThat(kept.note).isEqualTo("旧完整")
         assertThat(kept.updatedAt).isEqualTo(100)
         assertThat(rig.media.listActiveForRecord(recordId).map { it.clientUuid })
-            .containsExactly("media-old")
+            .containsExactly(testMediaUuid("media-old"))
         assertThat(rig.preferences.current().pullCursor).isEqualTo(50)
     }
 
@@ -2860,6 +2802,7 @@ class RealSyncPortTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
         val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        rig.backend.remember("baby", "baby-local")
         // Local dirty revision is newer than the remote package. Pull still pushes
         // first, so leave a higher local updatedAt so LWW keeps the edit even if
         // push drains the dirty bit; also seed a second device-only dirty mid-edit
@@ -2878,12 +2821,13 @@ class RealSyncPortTest {
                     type = "record",
                     clientUuid = "record-dirty",
                     payloadJson =
-                        """{"baby_client_uuid":"baby-local","type":"formula","timestamp":1000,"note":"远端迟到","payload":{"amount_ml":1}}""",
+                        """{"baby_client_uuid":"baby-local","created_by_membership_id":"member-b","type":"formula","custom_item_client_uuid":null,"timestamp":1000,"end_timestamp":null,"note":"远端迟到","payload_json":{"amount_ml":1},"schema_version":2}""",
                     updatedAt = 200,
                 ),
             ),
             cursor = 99,
-            generation = "g9",
+            generation = "current-generation",
+            hasMore = false,
         )
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
         val local = rig.records.getByClientUuid("record-dirty")!!
@@ -2925,12 +2869,13 @@ class RealSyncPortTest {
                     type = "record",
                     clientUuid = "record-hold",
                     payloadJson =
-                        """{"baby_client_uuid":"baby-local","type":"formula","timestamp":1000,"note":"远端更新","payload":{"amount_ml":2}}""",
+                        """{"baby_client_uuid":"baby-local","created_by_membership_id":"member-b","type":"formula","custom_item_client_uuid":null,"timestamp":1000,"end_timestamp":null,"note":"远端更新","payload_json":{"amount_ml":2},"schema_version":2}""",
                     updatedAt = 300,
                 ),
             ),
             cursor = 40,
             generation = "g2",
+            hasMore = false,
         )
         // PullToRefresh capture re-queues dirty → push succeeds → dirty cleared →
         // remote applies. To keep dirty across capture we would need to not
@@ -2956,7 +2901,7 @@ class RealSyncPortTest {
         rig.preferences.saveSession(
             rig.preferences.current().copy(pullCursor = 10, pullGeneration = "g0"),
         )
-        val mediaUuid = "media-dl-fail"
+        val mediaUuid = testMediaUuid("media-dl-fail")
         val recordUuid = "record-dl-fail"
         rig.backend.nextPull = PullResult(
             entities = listOf(
@@ -2964,19 +2909,20 @@ class RealSyncPortTest {
                     type = "record",
                     clientUuid = recordUuid,
                     payloadJson =
-                        """{"baby_client_uuid":"baby-local","type":"formula","timestamp":1000,"payload":{"amount_ml":80},"photos":["x.jpg"]}""",
+                        """{"baby_client_uuid":"baby-local","created_by_membership_id":"member-b","type":"formula","custom_item_client_uuid":null,"timestamp":1000,"end_timestamp":null,"note":null,"payload_json":{"amount_ml":80},"schema_version":2}""",
                     updatedAt = 200,
                 ),
                 SyncEntity(
                     type = "media",
                     clientUuid = mediaUuid,
                     payloadJson =
-                        """{"kind":"log","record_client_uuid":"$recordUuid","mime":"image/jpeg","byte_size":4}""",
+                        """{"kind":"log","record_client_uuid":"$recordUuid","care_plan_client_uuid":null,"baby_client_uuid":null,"mime":"image/jpeg","width":null,"height":null,"byte_size":4}""",
                     updatedAt = 200,
                 ),
             ),
             cursor = 20,
-            generation = "g1",
+            generation = "current-generation",
+            hasMore = false,
         )
         // Baby must exist for record apply dependency chain when download succeeds;
         // failure happens before apply, so seed baby for a realistic package.
@@ -3001,7 +2947,7 @@ class RealSyncPortTest {
         rig.preferences.saveSession(
             rig.preferences.current().copy(pullCursor = 5, pullGeneration = "g0"),
         )
-        val mediaUuid = "media-apply-fail"
+        val mediaUuid = testMediaUuid("media-apply-fail")
         val recordUuid = "record-apply-fail"
         // No baby on device → record apply fails after media bytes are staged.
         rig.backend.nextPull = PullResult(
@@ -3010,87 +2956,26 @@ class RealSyncPortTest {
                     type = "record",
                     clientUuid = recordUuid,
                     payloadJson =
-                        """{"baby_client_uuid":"missing-baby","type":"formula","timestamp":1000,"payload":{"amount_ml":80},"photos":["x.jpg"]}""",
+                        """{"baby_client_uuid":"missing-baby","created_by_membership_id":"member-b","type":"formula","custom_item_client_uuid":null,"timestamp":1000,"end_timestamp":null,"note":null,"payload_json":{"amount_ml":80},"schema_version":2}""",
                     updatedAt = 200,
                 ),
                 SyncEntity(
                     type = "media",
                     clientUuid = mediaUuid,
                     payloadJson =
-                        """{"kind":"log","record_client_uuid":"$recordUuid","mime":"image/jpeg","byte_size":4}""",
+                        """{"kind":"log","record_client_uuid":"$recordUuid","care_plan_client_uuid":null,"baby_client_uuid":null,"mime":"image/jpeg","width":null,"height":null,"byte_size":4}""",
                     updatedAt = 200,
                 ),
             ),
             cursor = 15,
-            generation = "g1",
+            generation = "current-generation",
+            hasMore = false,
         )
 
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isFalse()
         assertThat(rig.records.getByClientUuid(recordUuid)).isNull()
         assertThat(rig.media.getByClientUuid(mediaUuid)).isNull()
         assertThat(rig.preferences.current().pullCursor).isEqualTo(5)
-    }
-
-    @Test
-    fun atomicUnsupportedNasKeepsLocalRecordAndDoesNotLegacyFallback() = runTest {
-        val rig = SyncRig(
-            session = joinedSession("family-a"),
-            healthCapabilities = emptySet(),
-        )
-        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
-        val recordId = rig.records.seed(
-            localRecord(babyId).copy(
-                clientUuid = "record-legacy-nas",
-                payloadJson = """{"amount_ml":60,"photos":["photos/a.jpg"]}""",
-                syncDirty = true,
-            ),
-        )
-        rig.media.seed(
-            MediaAssetEntity(
-                recordId = recordId,
-                clientUuid = "media-legacy-nas",
-                kind = "log",
-                localUri = "photos/a.jpg",
-                mime = "image/jpeg",
-                byteSize = 4,
-                createdAt = 100,
-                updatedAt = 100,
-                syncDirty = true,
-            ),
-        )
-
-        val result = rig.port.sync(SyncTrigger.LocalWrite)
-        assertThat(result.isFailure).isTrue()
-        assertThat(result.exceptionOrNull())
-            .isInstanceOf(AtomicBundleUnsupportedException::class.java)
-        assertThat(rig.backend.committedBundles).isEmpty()
-        assertThat(rig.backend.stagedBundles).isEmpty()
-        // No metadata-first legacy push of the record package.
-        assertThat(
-            rig.backend.pushes.flatMap(PushedBatch::entities).none { it.type == "record" },
-        ).isTrue()
-        assertThat(rig.records.getByClientUuid("record-legacy-nas")?.syncDirty).isTrue()
-        assertThat(rig.media.listForRecord(recordId).single().localUri)
-            .isEqualTo("photos/a.jpg")
-    }
-
-    @Test
-    fun atomicUnsupportedNasDoesNotPublishFreshBundlePrerequisites() = runTest {
-        val rig = SyncRig(
-            session = joinedSession("family-a"),
-            healthCapabilities = emptySet(),
-        )
-        val babyId = rig.babies.seed(localBaby())
-        rig.records.seed(localRecord(babyId))
-
-        val result = rig.port.sync(SyncTrigger.LocalWrite)
-
-        assertThat(result.exceptionOrNull())
-            .isInstanceOf(AtomicBundleUnsupportedException::class.java)
-        assertThat(rig.backend.pushes).isEmpty()
-        assertThat(rig.backend.stagedBundles).isEmpty()
-        assertThat(rig.outbox.peek("family-a", 100).map(OutboxEntity::entityType))
-            .containsExactly("baby", "record")
     }
 
     @Test
@@ -3102,14 +2987,14 @@ class RealSyncPortTest {
             localRecord(babyId).copy(
                 clientUuid = "record-retry",
                 updatedAt = 777,
-                payloadJson = """{"amount_ml":50,"photos":["photos/r.jpg"]}""",
+                payloadJson = """{"amount_ml":50}""",
                 syncDirty = true,
             ),
         )
         rig.media.seed(
             MediaAssetEntity(
                 recordId = recordId,
-                clientUuid = "media-retry",
+                clientUuid = testMediaUuid("media-retry"),
                 kind = "log",
                 localUri = "photos/r.jpg",
                 mime = "image/jpeg",
@@ -3154,8 +3039,7 @@ class RealSyncPortTest {
             localRecord(babyId).copy(
                 clientUuid = "record-committed-retry",
                 createdByMembershipId = "",
-                payloadJson =
-                    """{"amount_ml":50,"photos":["photos/committed-record.jpg"]}""",
+                payloadJson = """{"amount_ml":50}""",
                 syncDirty = true,
             ),
         )
@@ -3200,7 +3084,7 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun stagingRecordBundleRetryUsesProgressAndFallsBackForLegacyEmptyStatus() = runTest {
+    fun stagingRecordBundleRetryUsesCurrentMissingAndStagedProgress() = runTest {
         suspend fun runCase(
             suffix: String,
             missingIndexes: List<Int>,
@@ -3217,10 +3101,7 @@ class RealSyncPortTest {
             val recordId = rig.records.seed(
                 localRecord(babyId).copy(
                     clientUuid = "record-$suffix-retry",
-                    payloadJson =
-                        """{"amount_ml":50,"photos":[${
-                            paths.joinToString(",") { "\"$it\"" }
-                        }]}""",
+                    payloadJson = """{"amount_ml":50}""",
                     syncDirty = true,
                 ),
             )
@@ -3265,18 +3146,6 @@ class RealSyncPortTest {
             stagedIndexes = listOf(0, 2),
             expectedUploadIndexes = listOf(1),
         )
-        runCase(
-            suffix = "staged",
-            missingIndexes = emptyList(),
-            stagedIndexes = listOf(0, 2),
-            expectedUploadIndexes = listOf(1),
-        )
-        runCase(
-            suffix = "legacy",
-            missingIndexes = emptyList(),
-            stagedIndexes = emptyList(),
-            expectedUploadIndexes = listOf(0, 1, 2),
-        )
     }
 
     @Test
@@ -3289,11 +3158,7 @@ class RealSyncPortTest {
             val planId = rig.carePlans.seed(
                 localCarePlan(babyId).copy(
                     clientUuid = "plan-photos-$photoCount",
-                    payloadJson = if (photos.isEmpty()) {
-                        "{}"
-                    } else {
-                        """{"photos":[${photos.joinToString(",") { "\"$it\"" }}]}"""
-                    },
+                    payloadJson = """{"amount_ml":120}""",
                     syncDirty = true,
                 ),
             )
@@ -3302,7 +3167,7 @@ class RealSyncPortTest {
                     MediaAssetEntity(
                         carePlanId = planId,
                         recordId = null,
-                        clientUuid = "plan-media-$photoCount-$index",
+                        clientUuid = testMediaUuid("plan-media-$photoCount-$index"),
                         kind = "log",
                         localUri = path,
                         mime = "image/jpeg",
@@ -3345,8 +3210,7 @@ class RealSyncPortTest {
         val planId = rig.carePlans.seed(
             localCarePlan(babyId).copy(
                 clientUuid = "plan-committed-retry",
-                payloadJson =
-                    """{"photos":["photos/committed-plan.jpg"]}""",
+                payloadJson = """{"amount_ml":120}""",
                 syncDirty = true,
             ),
         )
@@ -3390,7 +3254,7 @@ class RealSyncPortTest {
         val planId = rig.carePlans.seed(
             localCarePlan(babyId).copy(
                 clientUuid = "plan-fail-upload",
-                payloadJson = """{"photos":["photos/fail-plan.jpg"]}""",
+                payloadJson = """{"amount_ml":120}""",
                 syncDirty = true,
             ),
         )
@@ -3398,7 +3262,7 @@ class RealSyncPortTest {
             MediaAssetEntity(
                 carePlanId = planId,
                 recordId = null,
-                clientUuid = "plan-media-fail",
+                clientUuid = testMediaUuid("plan-media-fail"),
                 kind = "log",
                 localUri = "photos/fail-plan.jpg",
                 mime = "image/jpeg",
@@ -3433,21 +3297,22 @@ class RealSyncPortTest {
                     type = "care_plan",
                     clientUuid = "remote-plan-1",
                     payloadJson =
-                        """{"baby_client_uuid":"$babyUuid","type":"formula","scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","status":"pending","payload_json":{},"schema_version":1,"created_by_membership_id":"member-a"}""",
+                        """{"baby_client_uuid":"$babyUuid","type":"formula","custom_item_client_uuid":null,"scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","note":null,"status":"pending","payload_json":{"amount_ml":120},"schema_version":2,"created_by_membership_id":"member-a","fulfilled_record_client_uuid":null,"fulfilled_at":null}""",
                     updatedAt = 500,
                     deletedAt = null,
                 ),
                 SyncEntity(
                     type = "media",
-                    clientUuid = "remote-plan-media-1",
+                    clientUuid = testMediaUuid("remote-plan-media-1"),
                     payloadJson =
-                        """{"kind":"log","record_client_uuid":null,"care_plan_client_uuid":"remote-plan-1","baby_client_uuid":null,"mime":"image/jpeg","byte_size":3}""",
+                        """{"kind":"log","record_client_uuid":null,"care_plan_client_uuid":"remote-plan-1","baby_client_uuid":null,"mime":"image/jpeg","width":null,"height":null,"byte_size":3}""",
                     updatedAt = 500,
                     deletedAt = null,
                 ),
             ),
             cursor = 20,
-            generation = "g1",
+            generation = "current-generation",
+            hasMore = false,
         )
         rig.backend.mediaBytes = byteArrayOf(1, 2, 3)
         assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
@@ -3456,7 +3321,8 @@ class RealSyncPortTest {
         assertThat(plan!!.syncDirty).isFalse()
         assertThat(plan.status).isEqualTo("pending")
         val media = rig.media.listForCarePlan(plan.id).single()
-        assertThat(media.localUri).isEqualTo("downloaded/remote-plan-media-1")
+        assertThat(media.localUri)
+            .isEqualTo("downloaded/${testMediaUuid("remote-plan-media-1")}")
         assertThat(media.recordId).isNull()
         assertThat(applied).containsExactly("remote-plan-1")
     }
@@ -3491,13 +3357,14 @@ class RealSyncPortTest {
                     type = "care_plan",
                     clientUuid = "remote-plan-revision",
                     payloadJson =
-                        """{"baby_client_uuid":"$babyUuid","type":"sleep","scheduled_at":2000,"scheduled_zone_id":"Asia/Shanghai","note":"新备注","status":"pending","payload_json":{},"schema_version":1,"created_by_membership_id":"member-a"}""",
+                        """{"baby_client_uuid":"$babyUuid","type":"sleep","custom_item_client_uuid":null,"scheduled_at":2000,"scheduled_zone_id":"Asia/Shanghai","note":"新备注","status":"pending","payload_json":{"is_nap":false,"anomaly_flag":false},"schema_version":2,"created_by_membership_id":"member-a","fulfilled_record_client_uuid":null,"fulfilled_at":null}""",
                     updatedAt = 200,
                     deletedAt = null,
                 ),
             ),
             cursor = 20,
-            generation = "g1",
+            generation = "current-generation",
+            hasMore = false,
         )
 
         assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
@@ -3531,7 +3398,6 @@ class RealSyncPortTest {
                 systemCalendarEventId = null,
                 systemCalendarReminderReady = false,
                 systemCalendarProjectionPending = false,
-                legacyCarePlanReminderPending = false,
             ),
         )
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
@@ -3541,13 +3407,14 @@ class RealSyncPortTest {
                     type = "care_plan",
                     clientUuid = "remote-plan-never-projected",
                     payloadJson =
-                        """{"baby_client_uuid":"$babyUuid","type":"formula","scheduled_at":2000,"scheduled_zone_id":"Asia/Shanghai","status":"pending","payload_json":{},"schema_version":1,"created_by_membership_id":"member-a"}""",
+                        """{"baby_client_uuid":"$babyUuid","type":"formula","custom_item_client_uuid":null,"scheduled_at":2000,"scheduled_zone_id":"Asia/Shanghai","note":null,"status":"pending","payload_json":{"amount_ml":120},"schema_version":2,"created_by_membership_id":"member-a","fulfilled_record_client_uuid":null,"fulfilled_at":null}""",
                     updatedAt = 200,
                     deletedAt = null,
                 ),
             ),
             cursor = 20,
-            generation = "g1",
+            generation = "current-generation",
+            hasMore = false,
         )
 
         assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
@@ -3585,13 +3452,14 @@ class RealSyncPortTest {
                     type = "care_plan",
                     clientUuid = "remote-plan-terminal",
                     payloadJson =
-                        """{"baby_client_uuid":"$babyUuid","type":"formula","scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","status":"skipped","payload_json":{},"schema_version":1,"created_by_membership_id":"member-a"}""",
+                        """{"baby_client_uuid":"$babyUuid","type":"formula","custom_item_client_uuid":null,"scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","note":null,"status":"skipped","payload_json":{"amount_ml":120},"schema_version":2,"created_by_membership_id":"member-a","fulfilled_record_client_uuid":null,"fulfilled_at":null}""",
                     updatedAt = 200,
                     deletedAt = null,
                 ),
             ),
             cursor = 20,
-            generation = "g1",
+            generation = "current-generation",
+            hasMore = false,
         )
 
         assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
@@ -3626,21 +3494,22 @@ class RealSyncPortTest {
                     type = "care_plan",
                     clientUuid = "remote-plan-dl-fail",
                     payloadJson =
-                        """{"baby_client_uuid":"$babyUuid","type":"pee","scheduled_at":9000000000000,"scheduled_zone_id":"UTC","status":"pending","payload_json":{},"schema_version":1}""",
+                        """{"baby_client_uuid":"$babyUuid","type":"pee","custom_item_client_uuid":null,"scheduled_at":9000000000000,"scheduled_zone_id":"UTC","note":null,"status":"pending","payload_json":{"pee_amount":2},"schema_version":2,"created_by_membership_id":"member-a","fulfilled_record_client_uuid":null,"fulfilled_at":null}""",
                     updatedAt = 600,
                     deletedAt = null,
                 ),
                 SyncEntity(
                     type = "media",
-                    clientUuid = "remote-plan-media-fail",
+                    clientUuid = testMediaUuid("remote-plan-media-fail"),
                     payloadJson =
-                        """{"kind":"log","care_plan_client_uuid":"remote-plan-dl-fail","record_client_uuid":null,"mime":"image/jpeg","byte_size":4}""",
+                        """{"kind":"log","record_client_uuid":null,"care_plan_client_uuid":"remote-plan-dl-fail","baby_client_uuid":null,"mime":"image/jpeg","width":null,"height":null,"byte_size":4}""",
                     updatedAt = 600,
                     deletedAt = null,
                 ),
             ),
             cursor = 20,
-            generation = "g1",
+            generation = "current-generation",
+            hasMore = false,
         )
         rig.backend.getMediaFailure = IllegalStateException("download aborted")
         assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isFalse()
@@ -3666,13 +3535,14 @@ class RealSyncPortTest {
                     type = "care_plan",
                     clientUuid = "remote-custom-plan",
                     payloadJson =
-                        """{"baby_client_uuid":"$babyUuid","type":"custom","custom_item_client_uuid":"custom-def-1","scheduled_at":9000000000000,"scheduled_zone_id":"UTC","status":"pending","payload_json":{},"schema_version":1}""",
+                        """{"baby_client_uuid":"$babyUuid","type":"custom","custom_item_client_uuid":"custom-def-1","scheduled_at":9000000000000,"scheduled_zone_id":"UTC","note":null,"status":"pending","payload_json":{"title":"抚触"},"schema_version":2,"created_by_membership_id":"member-a","fulfilled_record_client_uuid":null,"fulfilled_at":null}""",
                     updatedAt = 700,
                     deletedAt = null,
                 ),
             ),
             cursor = 20,
-            generation = "g1",
+            generation = "current-generation",
+            hasMore = false,
         )
         assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isFalse()
         assertThat(rig.carePlans.getByClientUuid("remote-custom-plan")).isNull()
@@ -3693,13 +3563,14 @@ class RealSyncPortTest {
                     type = "care_plan",
                     clientUuid = "remote-custom-plan",
                     payloadJson =
-                        """{"baby_client_uuid":"$babyUuid","type":"custom","custom_item_client_uuid":"custom-def-1","scheduled_at":9000000000000,"scheduled_zone_id":"UTC","status":"pending","payload_json":{},"schema_version":1}""",
+                        """{"baby_client_uuid":"$babyUuid","type":"custom","custom_item_client_uuid":"custom-def-1","scheduled_at":9000000000000,"scheduled_zone_id":"UTC","note":null,"status":"pending","payload_json":{"title":"抚触"},"schema_version":2,"created_by_membership_id":"member-a","fulfilled_record_client_uuid":null,"fulfilled_at":null}""",
                     updatedAt = 700,
                     deletedAt = null,
                 ),
             ),
             cursor = 30,
-            generation = "g1",
+            generation = "current-generation",
+            hasMore = false,
         )
         assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
         val plan = rig.carePlans.getByClientUuid("remote-custom-plan")
@@ -3775,6 +3646,7 @@ class RealSyncPortTest {
             val rig = SyncRig(session = joinedSession("family-a"))
             assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
             val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+            rig.backend.remember("baby", "baby-local")
             val photos = (0 until photoCount).map { "photos/fulfill$it.jpg" }
             val recordUuid = "fulfill-record-$photoCount"
             val planUuid = "fulfill-plan-$photoCount"
@@ -3782,11 +3654,7 @@ class RealSyncPortTest {
             val recordId = rig.records.seed(
                 localRecord(babyId).copy(
                     clientUuid = recordUuid,
-                    payloadJson = if (photos.isEmpty()) {
-                        """{"amount_ml":90}"""
-                    } else {
-                        """{"amount_ml":90,"photos":[${photos.joinToString(",") { "\"$it\"" }}]}"""
-                    },
+                    payloadJson = """{"amount_ml":90}""",
                     updatedAt = 500,
                     syncDirty = true,
                 ),
@@ -3796,7 +3664,7 @@ class RealSyncPortTest {
                     MediaAssetEntity(
                         recordId = recordId,
                         carePlanId = null,
-                        clientUuid = "fulfill-media-$photoCount-$index",
+                        clientUuid = testMediaUuid("fulfill-media-$photoCount-$index"),
                         kind = "log",
                         localUri = path,
                         mime = "image/jpeg",
@@ -3830,20 +3698,29 @@ class RealSyncPortTest {
             )
             assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
 
-            // Fulfill Record commits before completed care_plan so a page that ends
-            // after the record still applies the fact before co-gating the plan.
-            val recordDraft = rig.backend.stagedBundles.first {
-                it.root.type == "record" && it.root.clientUuid == recordUuid
-            }
+            // The fact publishes before the completed plan: ordinary with no
+            // photos, atomic when MediaAsset rows are present.
             val planDraft = rig.backend.stagedBundles.first {
                 it.root.type == "care_plan" && it.root.clientUuid == planUuid
             }
-            val recordCommitIdx = rig.backend.committedBundles.indexOf(recordDraft.bundleId)
             val planCommitIdx = rig.backend.committedBundles.indexOf(planDraft.bundleId)
-            assertThat(recordCommitIdx).isAtLeast(0)
             assertThat(planCommitIdx).isAtLeast(0)
-            assertThat(recordCommitIdx).isLessThan(planCommitIdx)
-            assertThat(recordDraft.media.filter { it.deletedAt == null }).hasSize(photoCount)
+            if (photoCount == 0) {
+                assertThat(rig.backend.stagedBundles.none { it.root.type == "record" }).isTrue()
+                val recordPushIdx = rig.backend.operationOrder.indexOf("push:record")
+                val planStageIdx = rig.backend.operationOrder.indexOf("stage:care_plan")
+                assertThat(recordPushIdx).isAtLeast(0)
+                assertThat(recordPushIdx).isLessThan(planStageIdx)
+            } else {
+                val recordDraft = rig.backend.stagedBundles.first {
+                    it.root.type == "record" && it.root.clientUuid == recordUuid
+                }
+                val recordCommitIdx = rig.backend.committedBundles.indexOf(recordDraft.bundleId)
+                assertThat(recordCommitIdx).isAtLeast(0)
+                assertThat(recordCommitIdx).isLessThan(planCommitIdx)
+                assertThat(recordDraft.media.filter { it.deletedAt == null })
+                    .hasSize(photoCount)
+            }
 
             val candidatePush = rig.backend.pushes
                 .flatMap { it.entities }
@@ -3870,9 +3747,22 @@ class RealSyncPortTest {
         val recordUuid = "retry-fulfill-record"
         val planUuid = "retry-fulfill-plan"
         val candUuid = "retry-fulfill-cand"
-        rig.records.seed(
+        val recordId = rig.records.seed(
             localRecord(babyId).copy(
                 clientUuid = recordUuid,
+                updatedAt = 700,
+                syncDirty = true,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = testMediaUuid("retry-fulfill-media"),
+                kind = "log",
+                localUri = "photos/retry-fulfill.jpg",
+                mime = "image/jpeg",
+                byteSize = 4,
+                createdAt = 700,
                 updatedAt = 700,
                 syncDirty = true,
             ),
@@ -3945,7 +3835,7 @@ class RealSyncPortTest {
                     type = "record",
                     clientUuid = "remote-fulfill-record",
                     payloadJson =
-                        """{"baby_client_uuid":"$babyUuid","type":"formula","timestamp":200,"created_by_device_id":"dev-b","payload_json":{"amount_ml":80},"schema_version":1}""",
+                        """{"baby_client_uuid":"$babyUuid","created_by_membership_id":"member-b","type":"formula","custom_item_client_uuid":null,"timestamp":200,"end_timestamp":null,"note":null,"payload_json":{"amount_ml":80},"schema_version":2}""",
                     updatedAt = 800,
                     deletedAt = null,
                 ),
@@ -3953,7 +3843,7 @@ class RealSyncPortTest {
                     type = "care_plan",
                     clientUuid = "remote-fulfill-plan",
                     payloadJson =
-                        """{"baby_client_uuid":"$babyUuid","type":"formula","scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","status":"completed","payload_json":{},"schema_version":1,"created_by_membership_id":"member-a","fulfilled_record_client_uuid":"remote-fulfill-record","fulfilled_at":800}""",
+                        """{"baby_client_uuid":"$babyUuid","type":"formula","custom_item_client_uuid":null,"scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","note":null,"status":"completed","payload_json":{"amount_ml":120},"schema_version":2,"created_by_membership_id":"member-a","fulfilled_record_client_uuid":"remote-fulfill-record","fulfilled_at":800}""",
                     updatedAt = 801,
                     deletedAt = null,
                 ),
@@ -3967,7 +3857,8 @@ class RealSyncPortTest {
                 ),
             ),
             cursor = 99,
-            generation = "gen",
+            generation = "current-generation",
+            hasMore = false,
         )
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
         assertThat(rig.records.getByClientUuid("remote-fulfill-record")).isNotNull()
@@ -4028,7 +3919,7 @@ class RealSyncPortTest {
                 type = "record",
                 clientUuid = "rec-owner",
                 payloadJson =
-                    """{"baby_client_uuid":"$babyUuid","type":"formula","timestamp":200,"created_by_device_id":"dev-o","payload_json":{"amount_ml":80},"schema_version":1}""",
+                    """{"baby_client_uuid":"$babyUuid","created_by_membership_id":"m-owner","type":"formula","custom_item_client_uuid":null,"timestamp":200,"end_timestamp":null,"note":null,"payload_json":{"amount_ml":80},"schema_version":2}""",
                 updatedAt = 800,
                 deletedAt = null,
             )
@@ -4046,7 +3937,7 @@ class RealSyncPortTest {
                 type = "care_plan",
                 clientUuid = planUuid,
                 payloadJson =
-                    """{"baby_client_uuid":"$babyUuid","type":"formula","scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","status":"completed","payload_json":{},"schema_version":1,"created_by_membership_id":"member-a","fulfilled_record_client_uuid":"rec-member","fulfilled_at":500}""",
+                    """{"baby_client_uuid":"$babyUuid","type":"formula","custom_item_client_uuid":null,"scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","note":null,"status":"completed","payload_json":{"amount_ml":120},"schema_version":2,"created_by_membership_id":"member-a","fulfilled_record_client_uuid":"rec-member","fulfilled_at":500}""",
                 updatedAt = 10_000,
                 deletedAt = null,
             )
@@ -4058,7 +3949,8 @@ class RealSyncPortTest {
             rig.backend.nextPull = PullResult(
                 entities = order.map { byKey.getValue(it) },
                 cursor = 120,
-                generation = "gen",
+                generation = "current-generation",
+                hasMore = false,
             )
             assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
             assertThat(rig.carePlans.getByClientUuid(planUuid)?.fulfilledRecordClientUuid)
@@ -4098,44 +3990,54 @@ class RealSyncPortTest {
                 type = "record",
                 clientUuid = "rec-z",
                 payloadJson =
-                    """{"baby_client_uuid":"$babyUuid","type":"formula","timestamp":1,"created_by_device_id":"d","payload_json":{},"schema_version":1}""",
+                    """{"baby_client_uuid":"$babyUuid","created_by_membership_id":"m-z","type":"formula","custom_item_client_uuid":null,"timestamp":1,"end_timestamp":null,"note":null,"payload_json":{"amount_ml":80},"schema_version":2}""",
                 updatedAt = 20,
             ),
             SyncEntity(
                 type = "record",
                 clientUuid = "rec-a",
                 payloadJson =
-                    """{"baby_client_uuid":"$babyUuid","type":"formula","timestamp":2,"created_by_device_id":"d","payload_json":{},"schema_version":1}""",
+                    """{"baby_client_uuid":"$babyUuid","created_by_membership_id":"m-a","type":"formula","custom_item_client_uuid":null,"timestamp":2,"end_timestamp":null,"note":null,"payload_json":{"amount_ml":80},"schema_version":2}""",
                 updatedAt = 21,
             ),
             SyncEntity(
                 type = "care_plan",
                 clientUuid = planUuid,
                 payloadJson =
-                    """{"baby_client_uuid":"$babyUuid","type":"formula","scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","status":"completed","payload_json":{},"schema_version":1,"created_by_membership_id":"m","fulfilled_record_client_uuid":"rec-z","fulfilled_at":50}""",
+                    """{"baby_client_uuid":"$babyUuid","type":"formula","custom_item_client_uuid":null,"scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","note":null,"status":"completed","payload_json":{"amount_ml":120},"schema_version":2,"created_by_membership_id":"m","fulfilled_record_client_uuid":"rec-z","fulfilled_at":50}""",
                 updatedAt = 30,
             ),
             SyncEntity(
                 type = "fulfillment_candidate",
                 clientUuid = "uuid-zzz",
                 payloadJson =
-                    """{"care_plan_client_uuid":"$planUuid","record_client_uuid":"rec-z","submitter_role":"member","confirmed_at":50}""",
+                    """{"care_plan_client_uuid":"$planUuid","record_client_uuid":"rec-z","actual_timestamp":1,"submitter_membership_id":"m-z","submitter_role":"member","confirmed_at":50}""",
                 updatedAt = 40,
             ),
             SyncEntity(
                 type = "fulfillment_candidate",
                 clientUuid = "uuid-aaa",
                 payloadJson =
-                    """{"care_plan_client_uuid":"$planUuid","record_client_uuid":"rec-a","submitter_role":"member","confirmed_at":50}""",
+                    """{"care_plan_client_uuid":"$planUuid","record_client_uuid":"rec-a","actual_timestamp":2,"submitter_membership_id":"m-a","submitter_role":"member","confirmed_at":50}""",
                 updatedAt = 41,
             ),
         )
-        rig.backend.nextPull = PullResult(entities = entities, cursor = 200, generation = "g")
+        rig.backend.nextPull = PullResult(
+            entities = entities,
+            cursor = 200,
+            generation = "current-generation",
+            hasMore = false,
+        )
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
         assertThat(rig.carePlans.getByClientUuid(planUuid)?.fulfilledRecordClientUuid)
             .isEqualTo("rec-a")
         // Idempotent full-page replay with same entities (cursor advance already done).
-        rig.backend.nextPull = PullResult(entities = entities, cursor = 200, generation = "g")
+        rig.backend.nextPull = PullResult(
+            entities = entities,
+            cursor = 200,
+            generation = "current-generation",
+            hasMore = false,
+        )
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
         assertThat(rig.carePlans.getByClientUuid(planUuid)?.fulfilledRecordClientUuid)
             .isEqualTo("rec-a")
@@ -4172,7 +4074,6 @@ class RealSyncPortTest {
                 babyId = babyId,
                 type = "formula",
                 timestamp = 90,
-                createdByUserId = 1L,
                 payloadJson = """{"amount_ml":80}""",
                 updatedAt = 100,
                 syncDirty = false,
@@ -4204,7 +4105,8 @@ class RealSyncPortTest {
                 ),
             ),
             cursor = 10,
-            generation = "g",
+            generation = "current-generation",
+            hasMore = false,
         )
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
         val cand = rig.fulfillmentCandidates.getByClientUuid(candUuid)!!
@@ -4242,7 +4144,7 @@ class RealSyncPortTest {
                     type = "care_plan",
                     clientUuid = "gated-plan",
                     payloadJson =
-                        """{"baby_client_uuid":"$babyUuid","type":"formula","scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","status":"completed","payload_json":{},"schema_version":1,"created_by_membership_id":"member-a","fulfilled_record_client_uuid":"missing-record","fulfilled_at":900}""",
+                        """{"baby_client_uuid":"$babyUuid","type":"formula","custom_item_client_uuid":null,"scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","note":null,"status":"completed","payload_json":{"amount_ml":120},"schema_version":2,"created_by_membership_id":"member-a","fulfilled_record_client_uuid":"missing-record","fulfilled_at":900}""",
                     updatedAt = 900,
                     deletedAt = null,
                 ),
@@ -4250,13 +4152,14 @@ class RealSyncPortTest {
                     type = "fulfillment_candidate",
                     clientUuid = "gated-cand",
                     payloadJson =
-                        """{"care_plan_client_uuid":"gated-plan","record_client_uuid":"missing-record","confirmed_at":900}""",
+                        """{"care_plan_client_uuid":"gated-plan","record_client_uuid":"missing-record","actual_timestamp":null,"submitter_membership_id":"member-a","submitter_role":"member","confirmed_at":900}""",
                     updatedAt = 901,
                     deletedAt = null,
                 ),
             ),
             cursor = 55,
-            generation = "gen",
+            generation = "current-generation",
+            hasMore = false,
         )
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isFalse()
         assertThat(rig.carePlans.getByClientUuid("gated-plan")?.status).isEqualTo("pending")
@@ -4281,6 +4184,7 @@ class RealSyncPortTest {
         type = "formula",
         scheduledAt = 9_000_000_000_000L,
         scheduledZoneId = "Asia/Shanghai",
+        payloadJson = """{"amount_ml":120}""",
         status = "pending",
         createdByMembershipId = "member-local",
         updatedAt = 100,
@@ -4292,7 +4196,6 @@ class RealSyncPortTest {
         babyId = babyId,
         type = "formula",
         timestamp = 120,
-        createdByUserId = 1,
         payloadJson = """{"amount_ml":120}""",
         updatedAt = 120,
     )
@@ -4303,8 +4206,10 @@ class RealSyncPortTest {
         payloadJson = """
             {
               "nickname":"远端宝宝",
+              "sex":null,
               "birthday":"2024-01-01",
-              "sort_order":0
+              "birth_weight_grams":null,
+              "avatar_media_uuid":null
             }
         """.trimIndent(),
         updatedAt = 200,
@@ -4317,18 +4222,20 @@ class RealSyncPortTest {
             {
               "baby_client_uuid":"baby-remote",
               "created_by_membership_id":"membership-b",
-              "created_by_device_id":"device-b",
               "type":"formula",
+              "custom_item_client_uuid":null,
               "timestamp":210,
+              "end_timestamp":null,
+              "note":null,
               "payload_json":{"amount_ml":90},
-              "schema_version":1
+              "schema_version":2
             }
         """.trimIndent(),
         updatedAt = 210,
     )
 
     @Test
-    fun mediaGet404DoesNotBlockPullCursorAdvance() = runTest {
+    fun clientUuidAloneIsNotAcceptedAsMediaReceipt() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
         val recordId = rig.records.seed(localRecord(babyId).copy(syncDirty = false))
@@ -4347,21 +4254,48 @@ class RealSyncPortTest {
                 syncDirty = false,
             ),
         )
-        rig.backend.getMediaFailure = SyncHttpException(404, "not found")
+        rig.backend.getMediaFailure = SyncHttpException(401, "must not download")
         rig.backend.nextPull = PullResult(
             emptyList(),
             cursor = 42,
-            generation = "gen-after-missing-media",
+            generation = "current-generation",
+            hasMore = false,
         )
 
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
 
         assertThat(rig.preferences.current().pullCursor).isEqualTo(42)
         assertThat(rig.preferences.current().pullGeneration)
-            .isEqualTo("gen-after-missing-media")
+            .isEqualTo("current-generation")
         assertThat(rig.media.getByClientUuid(mediaUuid)?.localUri).isEmpty()
         assertThat(rig.media.listMissingLocalBytes().map(MediaAssetEntity::clientUuid))
             .containsExactly(mediaUuid)
+    }
+
+    @Test
+    fun nonUuidLocalMediaFailsBeforeBundleNetworkIo() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val recordId = rig.records.seed(localRecord(babyId).copy(syncDirty = true))
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = "not-a-uuid",
+                kind = "log",
+                localUri = "photos/not-portable.jpg",
+                mime = "image/jpeg",
+                byteSize = 12,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+
+        val result = rig.port.sync(SyncTrigger.LocalWrite)
+
+        assertThat(result.isFailure).isTrue()
+        assertThat(rig.backend.stagedBundles).isEmpty()
+        assertThat(rig.media.getByClientUuid("not-a-uuid")).isNotNull()
     }
 
     @Test
@@ -4370,14 +4304,14 @@ class RealSyncPortTest {
             val rig = SyncRig(session = joinedSession("family-a"))
             val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
             val recordId = rig.records.seed(localRecord(babyId).copy(syncDirty = false))
-            val mediaUuid = "auth-media-$statusCode"
+            val mediaUuid = testMediaUuid("auth-media-$statusCode")
             rig.media.seed(
                 MediaAssetEntity(
                     recordId = recordId,
                     clientUuid = mediaUuid,
                     kind = "log",
                     localUri = "",
-                    remoteUri = mediaUuid,
+                    remoteUri = rig.preferences.current().expectedMediaReceipt(mediaUuid),
                     mime = "image/jpeg",
                     byteSize = 12,
                     createdAt = 100,
@@ -4389,7 +4323,8 @@ class RealSyncPortTest {
             rig.backend.nextPull = PullResult(
                 emptyList(),
                 cursor = 42,
-                generation = "gen-after-auth-failure",
+                generation = "current-generation",
+                hasMore = false,
             )
 
             val result = rig.port.sync(SyncTrigger.PullToRefresh)
@@ -4399,7 +4334,8 @@ class RealSyncPortTest {
             assertThat((result.exceptionOrNull() as SyncHttpException).statusCode)
                 .isEqualTo(statusCode)
             assertThat(rig.preferences.current().pullCursor).isEqualTo(0)
-            assertThat(rig.preferences.current().pullGeneration).isEmpty()
+            assertThat(rig.preferences.current().pullGeneration)
+                .isEqualTo("current-generation")
             assertThat(rig.preferences.current().lastSuccessAt).isNull()
         }
     }
@@ -4416,7 +4352,7 @@ class RealSyncPortTest {
                 clientUuid = mediaUuid,
                 kind = "log",
                 localUri = "",
-                remoteUri = mediaUuid,
+                remoteUri = rig.preferences.current().expectedMediaReceipt(mediaUuid),
                 mime = "image/jpeg",
                 byteSize = 12,
                 createdAt = 100,
@@ -4428,14 +4364,15 @@ class RealSyncPortTest {
         rig.backend.nextPull = PullResult(
             emptyList(),
             cursor = 43,
-            generation = "gen-after-invalid-media",
+            generation = "current-generation",
+            hasMore = false,
         )
 
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
 
         assertThat(rig.preferences.current().pullCursor).isEqualTo(43)
         assertThat(rig.preferences.current().pullGeneration)
-            .isEqualTo("gen-after-invalid-media")
+            .isEqualTo("current-generation")
         assertThat(rig.media.getByClientUuid(mediaUuid)?.localUri).isEmpty()
         assertThat(rig.media.listMissingLocalBytes().map(MediaAssetEntity::clientUuid))
             .containsExactly(mediaUuid)
@@ -4453,10 +4390,13 @@ class RealSyncPortTest {
                     payloadJson = """
                         {
                           "baby_client_uuid":"baby-remote",
-                          "created_by_device_id":"device-b",
+                          "created_by_membership_id":"membership-b",
                           "type":"sleep",
+                          "custom_item_client_uuid":null,
                           "timestamp":1000,
-                          "payload_json":{},
+                          "end_timestamp":null,
+                          "note":null,
+                          "payload_json":{"is_nap":false,"anomaly_flag":false},
                           "schema_version":2
                         }
                     """.trimIndent(),
@@ -4468,10 +4408,13 @@ class RealSyncPortTest {
                     payloadJson = """
                         {
                           "baby_client_uuid":"baby-remote",
-                          "created_by_device_id":"device-b",
+                          "created_by_membership_id":"membership-b",
                           "type":"sleep",
+                          "custom_item_client_uuid":null,
                           "timestamp":2000,
-                          "payload_json":{},
+                          "end_timestamp":null,
+                          "note":null,
+                          "payload_json":{"is_nap":false,"anomaly_flag":false},
                           "schema_version":2
                         }
                     """.trimIndent(),
@@ -4479,7 +4422,8 @@ class RealSyncPortTest {
                 ),
             ),
             cursor = 7,
-            generation = "gen-sleep",
+            generation = "current-generation",
+            hasMore = false,
         )
 
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
@@ -4509,7 +4453,7 @@ internal class RecordingSyncBackend : SyncBackend {
     val operationOrder = mutableListOf<String>()
     val mediaUploads = mutableListOf<String>()
     var pullCount = 0
-    var nextPull = PullResult(emptyList(), 0)
+    var nextPull: PullResult? = null
     val pullResults = ArrayDeque<PullResult>()
     val pullFailures = ArrayDeque<Throwable>()
     val pushFailures = ArrayDeque<Throwable>()
@@ -4527,9 +4471,7 @@ internal class RecordingSyncBackend : SyncBackend {
     var createFailure: Throwable? = null
     var joinFailure: Throwable? = null
     var membersFailure: Throwable? = null
-    var nextMembers = listOf(
-        FamilyMember("我（本机）", FamilyRole.Owner, isSelf = true),
-    )
+    var nextMembers: List<FamilyMember>? = null
     var rejectMemberAvatarPointers = false
     var enforceBundleReferences = false
     var beforeGetMediaReturn: (suspend () -> Unit)? = null
@@ -4547,6 +4489,7 @@ internal class RecordingSyncBackend : SyncBackend {
     val updatedDisplayNames = mutableListOf<String>()
     val renamedFamilyNames = mutableListOf<String?>()
     var renameFamilyFailure: Throwable? = null
+    var nextPushRecordAuthors: List<CanonicalRecordAuthor> = emptyList()
     var nextCreateFamilyName: String? = null
     var nextCreateEntities: List<SyncEntity> = emptyList()
     var nextJoinFamilyName: String? = null
@@ -4579,6 +4522,7 @@ internal class RecordingSyncBackend : SyncBackend {
             familyId = "family-created",
             token = "owner-token",
             role = FamilyRole.Owner,
+            generation = "current-generation",
             entities = nextCreateEntities,
             familyName = nextCreateFamilyName ?: familyName,
             membershipId = "membership-created",
@@ -4622,7 +4566,10 @@ internal class RecordingSyncBackend : SyncBackend {
         pushes += PushedBatch(session, entities)
         knownEntities += entities.map { it.type to it.clientUuid }
         afterPush?.invoke()
-        return PushResult(applied = entities.size)
+        return PushResult(
+            applied = entities.size,
+            recordAuthors = nextPushRecordAuthors,
+        )
     }
 
     override suspend fun pull(session: SyncSession): PullResult {
@@ -4632,7 +4579,12 @@ internal class RecordingSyncBackend : SyncBackend {
         releasePull?.await()
         pullFailures.removeFirstOrNull()?.let { throw it }
         beforePullReturn?.also { beforePullReturn = null }?.invoke()
-        return pullResults.removeFirstOrNull() ?: nextPull
+        return pullResults.removeFirstOrNull() ?: nextPull ?: PullResult(
+            entities = emptyList(),
+            cursor = session.pullCursor,
+            generation = session.pullGeneration,
+            hasMore = false,
+        )
     }
 
     override suspend fun invite(session: SyncSession): Invite {
@@ -4654,6 +4606,7 @@ internal class RecordingSyncBackend : SyncBackend {
             familyId = "family-joined",
             token = "member-token",
             role = FamilyRole.Member,
+            generation = "current-generation",
             entities = nextJoinEntities,
             familyName = nextJoinFamilyName,
             membershipId = "membership-joined",
@@ -4663,7 +4616,14 @@ internal class RecordingSyncBackend : SyncBackend {
     override suspend fun members(session: SyncSession): List<FamilyMember> {
         memberCalls++
         membersFailure?.let { throw it }
-        return nextMembers
+        return nextMembers ?: listOf(
+            FamilyMember(
+                "管理员",
+                session.role,
+                isSelf = true,
+                membershipId = session.membershipId,
+            ),
+        )
     }
 
     override suspend fun updateMyDisplayName(session: SyncSession, displayName: String) {
@@ -4850,7 +4810,7 @@ internal class MemorySyncPreferences(
         )
     }
 
-    override suspend fun migrateSecretsIfNeeded() {
+    override suspend fun recoverPendingCredentialClear() {
         if (!shouldBlockSecretMigration.compareAndSet(true, false)) return
         secretMigrationStarted.complete(Unit)
         releaseSecretMigration.await()
@@ -4871,16 +4831,13 @@ internal class MemorySyncPreferences(
     override suspend fun updatePullCheckpoint(
         cursor: Long,
         generation: String,
-        familyName: PullFamilyName,
+        familyName: String?,
     ) {
         val current = state.value
         state.value = current.copy(
             pullCursor = cursor,
             pullGeneration = generation,
-            familyName = when (familyName) {
-                PullFamilyName.Omitted -> current.familyName
-                is PullFamilyName.Present -> normalizeFamilyNameForWire(familyName.value)
-            },
+            familyName = normalizeFamilyNameForWire(familyName),
         )
     }
 
@@ -4914,19 +4871,6 @@ internal class MemorySyncPreferences(
         clearCreateRequestIdCalls += 1
         clearCreateRequestIdFailure?.let { throw it }
         createRequestId = null
-    }
-
-    override suspend fun clearFamilySession() {
-        state.value = state.value.copy(
-            familyId = "",
-            familyToken = "",
-            role = FamilyRole.None,
-            pullCursor = 0,
-            pullGeneration = "",
-            lastSuccessAt = null,
-            familyName = null,
-            pendingCreatorAcknowledgements = emptySet(),
-        )
     }
 
     override suspend fun clearAllLocalSyncConfig() {
@@ -4991,7 +4935,8 @@ private class SyncRig(
     session: SyncSession,
     wifi: Boolean = true,
     ssid: String? = "Home",
-    healthCapabilities: Set<String> = setOf(CAPABILITY_ATOMIC_BUNDLE),
+    healthCapabilities: Set<String> = REQUIRED_SYNC_SERVER_CAPABILITIES,
+    healthVersion: String = CURRENT_SYNC_SERVER_VERSION,
     healthCapabilitiesSequence: List<Set<String>> = emptyList(),
     carePlanApplied: suspend (List<String>) -> Unit = {},
     syncBackend: SyncBackend? = null,
@@ -5027,6 +4972,7 @@ private class SyncRig(
             healthProbeCalls++
             HealthStatus(
                 ok = true,
+                version = healthVersion,
                 capabilities = queuedHealthCapabilities.removeFirstOrNull()
                     ?: healthCapabilities,
             )
@@ -5318,42 +5264,6 @@ internal class MemoryCarePlanDao : CarePlanDao {
         }
     }
 
-    override suspend fun markLegacyCarePlanReminderReplaced(clientUuid: String) {
-        rows.value = rows.value.map {
-            if (it.clientUuid == clientUuid) it.copy(legacyCarePlanReminderPending = false) else it
-        }
-    }
-
-    override suspend fun consumeLegacyCarePlanReminder(id: Long, clientUuid: String): Int {
-        var changed = 0
-        rows.value = rows.value.map {
-            if (it.id == id && it.clientUuid == clientUuid && it.legacyCarePlanReminderPending) {
-                changed = 1
-                it.copy(legacyCarePlanReminderPending = false)
-            } else {
-                it
-            }
-        }
-        return changed
-    }
-
-    override suspend fun updatePayloadReplica(
-        id: Long,
-        expectedPayloadJson: String,
-        payloadJson: String,
-    ): Int {
-        var changed = 0
-        rows.value = rows.value.map {
-            if (it.id == id && it.payloadJson == expectedPayloadJson) {
-                changed = 1
-                it.copy(payloadJson = payloadJson)
-            } else {
-                it
-            }
-        }
-        return changed
-    }
-
     override suspend fun softDelete(id: Long, deletedAt: Long) {
         rows.value = rows.value.map {
             if (it.id == id) {
@@ -5453,6 +5363,8 @@ private fun joinedSession(familyId: String) = SyncSession(
     familyToken = "token",
     deviceId = "device-a",
     role = FamilyRole.Owner,
+    pullGeneration = "current-generation",
+    membershipId = "membership-a",
     serverHost = "192.168.1.20",
     serverPort = 8787,
     allowedSsids = listOf("Home"),
@@ -5464,6 +5376,9 @@ private fun SyncSession.expectedMediaReceipt(clientUuid: String): String {
     )
     return "lezi-sync:$namespace:$clientUuid"
 }
+
+private fun testMediaUuid(seed: String): String =
+    UUID.nameUUIDFromBytes(seed.toByteArray(Charsets.UTF_8)).toString()
 
 private fun pendingReplicaCleanup(
     familyId: String = "family-a",
@@ -5832,23 +5747,6 @@ internal class MemoryRecordDao : RecordDao {
 
     override suspend fun update(record: RecordEntity) {
         rows.value = rows.value.map { if (it.id == record.id) record else it }
-    }
-
-    override suspend fun updatePayloadReplica(
-        id: Long,
-        expectedPayloadJson: String,
-        payloadJson: String,
-    ): Int {
-        var changed = 0
-        rows.value = rows.value.map {
-            if (it.id == id && it.payloadJson == expectedPayloadJson) {
-                changed = 1
-                it.copy(payloadJson = payloadJson)
-            } else {
-                it
-            }
-        }
-        return changed
     }
 
     override suspend fun softDelete(id: Long, deletedAt: Long) {

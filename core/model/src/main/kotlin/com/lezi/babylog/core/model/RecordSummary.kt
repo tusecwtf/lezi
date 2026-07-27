@@ -16,7 +16,6 @@ fun RecordType.businessLabel(): String = when (this) {
     RecordType.BOTH_DIAPER -> "尿+便"
     RecordType.SLEEP -> "睡眠"
     RecordType.TEMPERATURE -> "体温"
-    RecordType.MEMO -> "备注"
     RecordType.DIARY -> "日记"
     RecordType.BATH -> "洗澡"
     RecordType.WALK -> "散步"
@@ -26,7 +25,6 @@ fun RecordType.businessLabel(): String = when (this) {
     RecordType.INJURY -> "受伤"
     RecordType.MEDICINE -> "用药"
     RecordType.HOSPITAL -> "就医"
-    RecordType.OTHER -> "其他"
     RecordType.HEIGHT -> "身高"
     RecordType.WEIGHT -> "体重"
     RecordType.BABY_FOOD -> "辅食"
@@ -41,12 +39,11 @@ fun RecordType.businessLabel(): String = when (this) {
 
 /**
  * User-visible project title for timeline, search, and export.
- * Concrete custom (and free-title other) rows prefer their saved snapshot so
- * renamed/deleted definitions do not rewrite history.
+ * Concrete custom rows prefer their saved snapshot so renamed/deleted definitions
+ * do not rewrite recorded facts.
  */
 fun Record.displayLabel(): String = when (val value = payload.payload) {
     is CustomPayload -> value.titleSnapshot.trim().ifBlank { type.businessLabel() }
-    is OtherPayload -> value.title.trim().ifBlank { type.businessLabel() }
     else -> type.businessLabel()
 }
 
@@ -71,21 +68,19 @@ val RecordType.isPlanableNonStateful: Boolean
 
 /**
  * Concrete built-in types that may be scheduled as a CarePlan.
- * Includes intent-only nursing/sleep; excludes retired memo/other/bare custom.
+ * Includes intent-only nursing/sleep; bare custom is not a schedulable item.
  */
 val RecordType.isPlanableCarePlanType: Boolean
     get() = isAvailableForNewEntry
 
 /**
  * Concrete item identity recovered from a saved row when present.
- * Title-only historical custom rows (no custom_item_id) return null.
- * Memo/other keep a built-in identity for edit/display even though they are
- * retired from new-entry catalogs.
+ * Malformed custom payloads return null.
  */
 fun Record.itemIdentity(): RecordItemIdentity? = when (type) {
     RecordType.CUSTOM -> {
         val id = (payload.payload as? CustomPayload)?.customItemId
-        if (id != null && id > 0L) RecordItemIdentity.custom(id) else null
+        if (id != null) RecordItemIdentity.custom(id) else null
     }
     else -> RecordItemIdentity.BuiltIn(type)
 }
@@ -131,8 +126,6 @@ fun Record.payloadSummary(): String = when (val value = payload.payload) {
     is MedicinePayload -> listOf(value.name, value.dose.orEmpty())
         .filter(String::isNotBlank).joinToString(" · ")
     is HospitalPayload -> listOf(value.reason, value.advice.orEmpty())
-        .filter(String::isNotBlank).joinToString(" · ")
-    is OtherPayload -> listOf(value.title, value.detail.orEmpty())
         .filter(String::isNotBlank).joinToString(" · ")
     is MeasurementPayload -> if (value.type == RecordType.WEIGHT) {
         val kilograms = if (value.unit == "g") value.value / 1_000.0 else value.value
