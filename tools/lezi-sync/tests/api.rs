@@ -4240,6 +4240,200 @@ async fn health_advertises_record_membership_author_capability() {
 }
 
 #[tokio::test]
+async fn atomic_bundles_wait_for_baby_without_leaving_staging_rows() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "bundle-missing-baby-owner",
+        "bundle-missing-baby-request-00001",
+    )
+    .await;
+    let token = owner["token"].as_str().unwrap();
+    let baby_id = Uuid::new_v4().to_string();
+    let cases = [
+        (
+            "record",
+            Uuid::new_v4().to_string(),
+            Uuid::new_v4().to_string(),
+            record_payload(&baby_id),
+        ),
+        (
+            "care_plan",
+            Uuid::new_v4().to_string(),
+            Uuid::new_v4().to_string(),
+            care_plan_payload(&baby_id, "bath"),
+        ),
+    ];
+
+    for (root_type, root_id, bundle_id, payload) in &cases {
+        let (missing_status, missing_body) = json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/bundles",
+            Some(token),
+            json!({
+                "bundle_id": bundle_id,
+                "root": entity_wire(root_type, root_id, 2, payload.clone(), None),
+                "media": [],
+            }),
+        )
+        .await;
+        assert_eq!(missing_status, StatusCode::CONFLICT, "{missing_body}");
+        assert_eq!(
+            missing_body["detail"],
+            format!("{root_type} baby_client_uuid does not exist")
+        );
+        let (lookup_status, lookup_body) =
+            get_json(&rig.app, &format!("/v1/bundles/{bundle_id}"), Some(token)).await;
+        assert_eq!(lookup_status, StatusCode::NOT_FOUND, "{lookup_body}");
+    }
+
+    let (push_status, push_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({
+            "entities": [entity_wire(
+                "baby",
+                &baby_id,
+                1,
+                baby_payload("年年", None),
+                None,
+            )],
+        }),
+    )
+    .await;
+    assert_eq!(push_status, StatusCode::OK, "{push_body}");
+
+    for (root_type, root_id, bundle_id, payload) in cases {
+        let (ready_status, ready_body) = json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/bundles",
+            Some(token),
+            json!({
+                "bundle_id": bundle_id,
+                "root": entity_wire(root_type, &root_id, 2, payload, None),
+                "media": [],
+            }),
+        )
+        .await;
+        assert_eq!(ready_status, StatusCode::OK, "{ready_body}");
+    }
+}
+
+#[tokio::test]
+async fn atomic_care_plan_waits_for_its_custom_item_definition() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "bundle-custom-plan-owner",
+        "bundle-custom-plan-request-00001",
+    )
+    .await;
+    let token = owner["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let custom_item_id = Uuid::new_v4().to_string();
+    let other_family_id = Uuid::new_v4().to_string();
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute(
+            "INSERT INTO families(id, created_at) VALUES (?1, ?2)",
+            rusqlite::params![other_family_id, rig.now.load(Ordering::SeqCst)],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO family_meta(family_id, rev) VALUES (?1, 1)",
+            rusqlite::params![other_family_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "
+            INSERT INTO entities(
+                family_id, entity_type, client_uuid, updated_at,
+                deleted_at, payload_json, rev
+            ) VALUES (?1, 'custom_item', ?2, 1, NULL, ?3, 1)
+            ",
+            rusqlite::params![
+                other_family_id,
+                custom_item_id,
+                json!({
+                    "name": "跨家庭定义",
+                    "icon_slot": 3,
+                    "created_by_membership_id": Uuid::new_v4().to_string(),
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+    drop(connection);
+    let plan_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+    let mut plan_payload = care_plan_payload(&baby_id, "custom");
+    plan_payload["custom_item_client_uuid"] = json!(custom_item_id);
+
+    let (missing_status, missing_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire("care_plan", &plan_id, 2, plan_payload.clone(), None),
+            "media": [],
+        }),
+    )
+    .await;
+    assert_eq!(missing_status, StatusCode::CONFLICT, "{missing_body}");
+    assert_eq!(
+        missing_body["detail"],
+        "care_plan custom_item_client_uuid does not exist"
+    );
+    let (lookup_status, lookup_body) =
+        get_json(&rig.app, &format!("/v1/bundles/{bundle_id}"), Some(token)).await;
+    assert_eq!(lookup_status, StatusCode::NOT_FOUND, "{lookup_body}");
+
+    let (push_status, push_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({
+            "entities": [entity_wire(
+                "custom_item",
+                &custom_item_id,
+                1,
+                json!({
+                    "name": "抚触",
+                    "icon_slot": 2,
+                    "created_by_membership_id": null,
+                }),
+                None,
+            )],
+        }),
+    )
+    .await;
+    assert_eq!(push_status, StatusCode::OK, "{push_body}");
+
+    let (ready_status, ready_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire("care_plan", &plan_id, 2, plan_payload, None),
+            "media": [],
+        }),
+    )
+    .await;
+    assert_eq!(ready_status, StatusCode::OK, "{ready_body}");
+}
+
+#[tokio::test]
 async fn atomic_bundle_commit_rejects_malformed_or_wrong_shape_json() {
     let rig = Rig::new();
     let owner = create_family(

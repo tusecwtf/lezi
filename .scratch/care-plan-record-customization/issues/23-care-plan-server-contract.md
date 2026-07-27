@@ -18,3 +18,7 @@
 Notes (residual fix 2026-07-26):
 - API: care_plan_creator_leave_admin_still_manages_member_does_not + care_plan_media_integrity_rejects_bad_refs_and_baby_mismatch.
 - FIX re-verified: cargo test --test api care_plan (5) + fulfillment (1) all green; no further gaps.
+
+Notes (Release revalidation 2026-07-27):
+- Fresh-family device smoke exposed the atomic-stage reference contract directly. Store now rejects a CarePlan whose `custom_item_client_uuid` is missing or belongs only to another family; the failed stage leaves no bundle row.
+- API regressions `atomic_bundles_wait_for_baby_without_leaving_staging_rows` and `atomic_care_plan_waits_for_its_custom_item_definition` cover Record/CarePlan Baby prerequisites, CustomItem family isolation, no partial staging, and successful retry after prerequisites publish.

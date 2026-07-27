@@ -3300,6 +3300,17 @@ fn validate_push(
             .filter(|entity| entity.entity_type == "baby")
             .map(|entity| entity.client_uuid.clone()),
     );
+    let mut custom_item_ids = existing
+        .keys()
+        .filter(|(entity_type, _)| entity_type == "custom_item")
+        .map(|(_, id)| id.clone())
+        .collect::<BTreeSet<_>>();
+    custom_item_ids.extend(
+        entities
+            .iter()
+            .filter(|entity| entity.entity_type == "custom_item")
+            .map(|entity| entity.client_uuid.clone()),
+    );
 
     let mut effective_records = existing
         .iter()
@@ -3338,6 +3349,17 @@ fn validate_push(
             return Err(StoreError::UnresolvedReference(
                 "care_plan baby_client_uuid does not exist".to_owned(),
             ));
+        }
+        if let Some(custom_item_id) = entity
+            .payload
+            .get("custom_item_client_uuid")
+            .and_then(Value::as_str)
+        {
+            if !custom_item_ids.contains(custom_item_id) {
+                return Err(StoreError::UnresolvedReference(
+                    "care_plan custom_item_client_uuid does not exist".to_owned(),
+                ));
+            }
         }
         effective_care_plans.insert(entity.client_uuid.clone(), entity.payload.clone());
     }
