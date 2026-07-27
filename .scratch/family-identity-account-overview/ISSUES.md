@@ -12,7 +12,7 @@ Source: grill-with-docs → to-spec → to-tickets · 多 agent 审查修订（5
 02 共享家庭名 ────────────► 03
 ```
 
-**可立即继续（frontier）：** 02（补齐家庭改名后的跨设备收敛）  
+**可立即继续（frontier）：** 无实现票；02 等待最终候选双设备 UI/Docker smoke
 
 **已完成：** 01 · 03 · 04 · 05  
 

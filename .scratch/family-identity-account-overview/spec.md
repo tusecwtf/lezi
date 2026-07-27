@@ -15,8 +15,8 @@ Related:
 实施状态：
 
 - 票 01 / 03 / 04 / 05 已实现。
-- 票 02 为 `partial`：create/join/owner rename 的持久化已实现，但 owner 改名尚不会收敛到已经加入家庭的其他设备。
-- 2026-07-26 只读 spec 审计后重开。
+- 票 02 为 `partial`：create/join/owner rename 与跨设备 pull 收敛的实现和自动化已完成，等待最终候选双设备 UI/Docker smoke 后关闭。
+- 2026-07-26 只读 spec 审计后重开；2026-07-27 完成自动化整改。
 
 ---
 

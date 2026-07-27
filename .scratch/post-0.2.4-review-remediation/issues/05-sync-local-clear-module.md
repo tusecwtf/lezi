@@ -22,7 +22,7 @@
 
 - [x] module 的小 interface 同时支持 records-only 与 all-local，但 Outbox/media/file 差异由内部 scope policy 隐藏。
 - [x] 权威领域删除仍与 pull/apply 共用同一 barrier；不得出现删除中间被 pull 复活的窗口。
-- [x] callback 未确认 commit 时 fail closed。
+- [x] 副本 marker 与领域删除同一 Room 事务提交；事务未提交时 fail closed。
 - [x] commit 后任何收尾失败均转换为带 `familyServerRetained` 的 `LocalClearCommittedException`，并保留 suppressed failure。
 - [x] retries 幂等：重复删除 Outbox、receipt、media row/file 不会转为假失败。
 - [x] `RealSyncPort.clearLocalRecords/clearAllLocalData` 只做委托或由新 module 直接满足既有 interface。
@@ -68,3 +68,7 @@
 - Documentation Gate：N/A。`SyncPort` interface、`LocalClearCommittedException`
   类型/分类、产品文案、wire 与可观察清除范围均未改变；本票只收口既有 sync 清除
   implementation，并让真实文件失败遵守原 committed-failure 契约。
+- 2026-07-27 Release 复验补强：内存 callback commit 标志已被 Room
+  `pending_replica_cleanup` write-ahead marker 取代；marker 与领域删除同事务，文件、
+  DataStore、跨 family Outbox 和精确媒体 UUID 收尾可跨进程恢复。该说明取代上方初始
+  callback 方案，但不改变只清本机、保留家庭服务器历史的产品范围。

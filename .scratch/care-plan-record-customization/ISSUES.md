@@ -6,7 +6,7 @@ Tracker: `.scratch/care-plan-record-customization/issues/`
 ## 依赖
 
 ```text
-初始 frontier：01、02、03、04、09
+历史初始 frontier：01、02、03、04、09（28 票均已完成）
 
 01 ──> 05 ──> 06
 01,03 ──> 07
@@ -32,7 +32,7 @@ Tracker: `.scratch/care-plan-record-customization/issues/`
 02,06,08,11,14,17,19,22,24,27 ──> 28
 ```
 
-Frontier：当前可立即开始 **01、02、03、04、09**。按编号从 frontier 中一次领取一票；完成后重新计算其后继票是否解锁。
+Frontier：无；28 票均已完成，等待最终 Release 全量回归与设备证据复验。
 
 ## 票列表
 

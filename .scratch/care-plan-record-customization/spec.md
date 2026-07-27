@@ -1,6 +1,6 @@
 # Spec: 护理计划、记录自定义与照片原子同步
 
-Status: ready-for-agent  
+Status: implementation-complete; final Release revalidation pending
 Feature: care-plan-record-customization  
 Product: 乐记 (`com.lezi.babylog`)  
 Source: conversation grill 2026-07-26 · `/to-spec`  
@@ -326,4 +326,3 @@ Prior art：既有 Composer SavedState 与 SessionGate 测试已覆盖请求匹�
 - 用户已确认测试边界：CareLog 与 RecordComposer 是两个主要产品 seam；SyncPort 做 NAS 集成/契约；SystemCalendarPort 仅作为 Android provider adapter，并通过领域行为验证。
 - 实现可拆成纵向票单，但所有票单必须维护同一领域模型和原子包契约；不能长期发布“计划无照片”或“记录无照片”的元数据阶段。
 - 发布位置：本地 issue tracker `.scratch/care-plan-record-customization/spec.md`。
-

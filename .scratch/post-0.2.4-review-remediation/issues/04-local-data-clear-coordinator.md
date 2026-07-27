@@ -58,3 +58,6 @@
 - `CareLog` 仅保留三个兼容 façade，并与日程写入共享同一 mutation guard；删除重复 helper 与八个内部白盒用例，保留实际 DAO façade、提醒效果、跨锁并发及全量清除测试。`CareLog.kt` 从 3148 行降至 2959 行。
 - 验证：`./gradlew :domain:testDebugUnitTest :app:testDebugUnitTest --rerun-tasks --no-daemon` BUILD SUCCESSFUL（321 tasks executed）；精确 coordinator 测试 5 项通过；两个 clear 搜索仅命中 `CareLog` façade；`git diff --check` 通过。
 - Documentation Gate：产品语义、异常文案与可观察恢复行为均未改变，因此 `docs/prd/ui.md` / `docs/prd/data-model.md` N/A。
+- 2026-07-27 Release 复验补强：pending hand-off 现在按 `RecordsOnly` / `AllLocalData`
+  使用独立 operation，并在删除 marker 前恢复完成系统日历副本、scope 设置和应用提醒；
+  该可观察恢复语义已同步到 `docs/prd/ui.md` 与 `docs/prd/data-model.md`，取代上一条 N/A。
