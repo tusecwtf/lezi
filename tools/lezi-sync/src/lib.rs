@@ -1057,8 +1057,29 @@ async fn commit_bundle(
         .load_bundle(&principal.family_id, &bundle_id.to_string())?
         .ok_or_else(|| ApiError::not_found("Bundle not found"))?;
 
+    // Preflight authenticated ownership before inspecting or changing any
+    // final-path media. Store::commit_bundle repeats this check as the
+    // transactional authority; this early guard prevents rejected principals
+    // from leaving claimable filesystem state.
+    match bundle.staged_membership_id.as_deref() {
+        Some(staged_membership_id) if staged_membership_id == principal.membership_id => {}
+        Some(_) => {
+            return Err(ApiError::conflict(
+                "bundle belongs to another family membership",
+            ))
+        }
+        None if bundle.status == "staging" => {
+            return Err(ApiError::conflict(
+                "legacy staging bundle has no verifiable membership",
+            ))
+        }
+        // Legacy committed rows are immutable and retain lost-response retries.
+        None => {}
+    }
+
     let mut media_ready = std::collections::BTreeMap::new();
     let mut legacy_media_digests = Vec::new();
+    let mut staged_publications = Vec::new();
     for media_uuid in &bundle.required_media {
         let media_id = Uuid::parse_str(media_uuid)
             .map_err(|_| ApiError::internal("stored media uuid is invalid"))?;
@@ -1113,12 +1134,28 @@ async fn commit_bundle(
             media_uuid,
         );
         if let Some(digest) = digest.as_deref() {
+            staged_publications.push((
+                media_uuid.clone(),
+                media_id,
+                staged_path,
+                digest.to_owned(),
+                integrity.staged_sha256.is_none(),
+            ));
+        }
+        media_ready.insert(media_uuid.clone(), digest.is_some());
+    }
+
+    // Validate the complete staging manifest before the first final-path
+    // change. Incomplete/corrupt later entries must not leave earlier files
+    // pre-published. The Store still returns the canonical 422 below.
+    if bundle.status == "staging" && media_ready.values().all(|ready| *ready) {
+        for (media_uuid, media_id, staged_path, digest, is_legacy_digest) in staged_publications {
             let final_path = state.media_path(&principal.family_id, media_id)?;
             prepare_published_media_file(&staged_path, &final_path)?;
             match state.store.mark_bundle_media_prepared(
                 &principal,
                 &bundle_id.to_string(),
-                media_uuid,
+                &media_uuid,
             ) {
                 Ok(()) => {}
                 Err(StoreError::BundleMembershipMismatch) => {
@@ -1136,11 +1173,10 @@ async fn commit_bundle(
                 }
                 Err(error) => return Err(error.into()),
             }
-            if integrity.staged_sha256.is_none() {
-                legacy_media_digests.push((media_uuid.clone(), digest.to_owned()));
+            if is_legacy_digest {
+                legacy_media_digests.push((media_uuid, digest));
             }
         }
-        media_ready.insert(media_uuid.clone(), digest.is_some());
     }
 
     let max_updated_at = state

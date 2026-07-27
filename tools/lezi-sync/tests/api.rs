@@ -4525,6 +4525,152 @@ async fn atomic_bundle_commit_is_bound_to_the_staging_membership() {
 }
 
 #[tokio::test]
+async fn foreign_bundle_commit_cannot_leave_claimable_final_bytes() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "foreign-commit-owner-device",
+        "foreign-commit-owner-request-00001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let member = invite_and_join(&rig.app, owner_token, "foreign-commit-member-device").await;
+    let member_token = member["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let media_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+
+    let (record_status, record_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(owner_token),
+        json!({
+            "entities": [entity_wire(
+                "record",
+                &record_id,
+                1,
+                record_payload(&baby_id),
+                None,
+            )],
+        }),
+    )
+    .await;
+    assert_eq!(record_status, StatusCode::OK, "{record_body}");
+    let (stage_status, stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(owner_token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire(
+                "record",
+                &record_id,
+                2,
+                record_payload(&baby_id),
+                None,
+            ),
+            "media": [entity_wire(
+                "media",
+                &media_id,
+                2,
+                log_media_payload(&record_id),
+                None,
+            )],
+        }),
+    )
+    .await;
+    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
+    assert_eq!(
+        request(
+            &rig.app,
+            Method::PUT,
+            &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
+            Some(owner_token),
+            Body::from("old"),
+            Some("image/jpeg"),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+
+    let (foreign_status, foreign_body) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(member_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(foreign_status, StatusCode::CONFLICT, "{foreign_body}");
+
+    let (metadata_status, metadata_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(owner_token),
+        json!({
+            "entities": [entity_wire(
+                "media",
+                &media_id,
+                3,
+                log_media_payload(&record_id),
+                None,
+            )],
+        }),
+    )
+    .await;
+    assert_eq!(metadata_status, StatusCode::OK, "{metadata_body}");
+
+    let (refine_status, refine_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(owner_token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire(
+                "record",
+                &record_id,
+                2,
+                record_payload(&baby_id),
+                None,
+            ),
+            "media": [],
+        }),
+    )
+    .await;
+    assert_eq!(refine_status, StatusCode::OK, "{refine_body}");
+
+    let restarted = rig.restart("generation-b");
+    let (_, pull) = get_json(&restarted, "/v1/pull?cursor=0", Some(owner_token)).await;
+    assert!(
+        !pull["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entity| entity["client_uuid"] == media_id),
+        "foreign commit left final bytes that restart claimed as legacy: {pull}"
+    );
+    assert_eq!(
+        request(
+            &restarted,
+            Method::GET,
+            &format!("/v1/media/{media_id}"),
+            Some(owner_token),
+            Body::empty(),
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
 async fn bundle_media_upload_requires_stager_membership_and_open_status() {
     let rig = Rig::new();
     let owner = create_family(
