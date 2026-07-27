@@ -753,6 +753,10 @@ class QuickRecordDraftTest {
         assertEquals("睡眠", schedulePolicy.primaryTimeLabel)
         assertFalse(schedulePolicy.showWakeToggle)
         assertEquals("月亮图标，安排睡眠", schedulePolicy.animationDescription)
+        assertEquals(
+            "选择睡眠时刻",
+            clockDialogTitle(schedule, selectingEnd = false, nowMillis = tappedAt),
+        )
 
         val derivedSchedule = schedule.copy(
             createIntent = ComposerCreateIntent.DeriveFromTimestamp,
@@ -766,6 +770,22 @@ class QuickRecordDraftTest {
         )
         assertTrue(sleepComposerPolicy(editPlan, nowMillis = tappedAt).isPlanIntent)
 
+        val convert = QuickRecordDraft.create(
+            type = RecordType.SLEEP,
+            timestamp = tappedAt - 60_000L,
+        ).copy(
+            existingRecordId = 10L,
+            timestamp = tappedAt + 60_000L,
+        )
+        val convertPolicy = sleepComposerPolicy(convert, nowMillis = tappedAt)
+        assertTrue(convertPolicy.isPlanIntent)
+        assertEquals("睡眠", convertPolicy.sheetTitle)
+        assertFalse(convertPolicy.showWakeToggle)
+        assertEquals(
+            "选择睡眠时刻",
+            clockDialogTitle(convert, selectingEnd = false, nowMillis = tappedAt),
+        )
+
         val fulfill = schedule.copy(
             carePlanId = 9L,
             editCarePlan = false,
@@ -777,6 +797,72 @@ class QuickRecordDraftTest {
         assertEquals("睡下时间", fulfillPolicy.timeSectionLabel)
         assertTrue(fulfillPolicy.showWakeToggle)
         assertEquals("月亮轻轻摇动，准备睡下", fulfillPolicy.animationDescription)
+        assertEquals(
+            "选择睡下时刻",
+            clockDialogTitle(fulfill, selectingEnd = false, nowMillis = tappedAt + 1L),
+        )
+    }
+
+    @Test
+    fun startTimePickerUsesDraftAwarePlanAndFactRules() {
+        val schedule = QuickRecordDraft.create(
+            type = RecordType.SLEEP,
+            timestamp = tappedAt + 60_000L,
+            createIntent = ComposerCreateIntent.ScheduleCare,
+        )
+        assertNull(
+            schedule.startTimeRejectionMessage(
+                candidateStartTimestamp = tappedAt + 120_000L,
+                candidateEndTimestamp = null,
+                nowMillis = tappedAt,
+            ),
+        )
+        assertEquals(
+            CARE_PLAN_TIME_NOT_FUTURE_WARNING,
+            schedule.startTimeRejectionMessage(
+                candidateStartTimestamp = tappedAt - 1L,
+                candidateEndTimestamp = null,
+                nowMillis = tappedAt,
+            ),
+        )
+
+        val editPlan = schedule.copy(carePlanId = 11L, editCarePlan = true)
+        assertNull(
+            editPlan.startTimeRejectionMessage(
+                candidateStartTimestamp = tappedAt - 1L,
+                candidateEndTimestamp = null,
+                nowMillis = tappedAt,
+            ),
+        )
+        assertNull(
+            editPlan.startTimeRejectionMessage(
+                candidateStartTimestamp = tappedAt + 180_000L,
+                candidateEndTimestamp = null,
+                nowMillis = tappedAt,
+            ),
+        )
+
+        val convert = QuickRecordDraft.create(
+            type = RecordType.SLEEP,
+            timestamp = tappedAt - 60_000L,
+        ).copy(existingRecordId = 12L)
+        assertNull(
+            convert.startTimeRejectionMessage(
+                candidateStartTimestamp = tappedAt + 240_000L,
+                candidateEndTimestamp = null,
+                nowMillis = tappedAt,
+            ),
+        )
+
+        val fulfill = schedule.copy(carePlanId = 13L, editCarePlan = false)
+        assertEquals(
+            FUTURE_TIME_WARNING,
+            fulfill.startTimeRejectionMessage(
+                candidateStartTimestamp = tappedAt + 300_000L,
+                candidateEndTimestamp = null,
+                nowMillis = tappedAt,
+            ),
+        )
     }
 
     @Test

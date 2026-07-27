@@ -591,19 +591,12 @@ internal fun QuickRecordSheet(
             QuickClockTarget.Start -> draft.timestamp
             QuickClockTarget.End -> draft.endTimestamp ?: draft.timestamp
         }
-        val isSleep = draft.mode == QuickRecordMode.Sleep
         LeziClockDialDialog(
-            title = when {
-                target == QuickClockTarget.Start &&
-                    draft.sleepAction == SleepDraftAction.SleepDown -> "选择睡下时刻"
-                target == QuickClockTarget.End &&
-                    draft.sleepAction in setOf(
-                        SleepDraftAction.SleepDown,
-                        SleepDraftAction.WakeUp,
-                    ) -> "选择醒来时刻"
-                target == QuickClockTarget.End -> "选择结束时刻"
-                else -> "选择记录时刻"
-            },
+            title = clockDialogTitle(
+                draft = draft,
+                selectingEnd = target == QuickClockTarget.End,
+                nowMillis = nowMillis,
+            ),
             value = Instant.ofEpochMilli(initialMillis).atZone(zone),
             minuteStep = timeStepMin,
             timePickerStyle = timePickerStyle,
@@ -618,28 +611,25 @@ internal fun QuickRecordSheet(
                             oldEndMillis = draft.endTimestamp,
                             newStartMillis = pickedMillis,
                         )
-                        when {
-                            pickedMillis > nowMillis -> {
-                                isDirty = true
-                                clockError = FUTURE_TIME_WARNING
-                                confirmChrome = reduceConfirmChrome(
-                                    confirmChrome,
-                                    ComposerConfirmChromeEvent.DraftEdited,
-                                )
-                            }
-                            shiftedEnd != null && shiftedEnd > nowMillis -> {
-                                isDirty = true
-                                clockError = FUTURE_TIME_WARNING
-                                confirmChrome = reduceConfirmChrome(
-                                    confirmChrome,
-                                    ComposerConfirmChromeEvent.DraftEdited,
-                                )
-                            }
-                            else -> update(
+                        val candidateEnd = shiftedEnd ?: draft.endTimestamp
+                        val rejection = draft.startTimeRejectionMessage(
+                            candidateStartTimestamp = pickedMillis,
+                            candidateEndTimestamp = candidateEnd,
+                            nowMillis = nowMillis,
+                        )
+                        if (rejection == null) {
+                            update(
                                 draft.copy(
                                     timestamp = pickedMillis,
-                                    endTimestamp = shiftedEnd ?: draft.endTimestamp,
+                                    endTimestamp = candidateEnd,
                                 ),
+                            )
+                        } else {
+                            isDirty = true
+                            clockError = rejection
+                            confirmChrome = reduceConfirmChrome(
+                                confirmChrome,
+                                ComposerConfirmChromeEvent.DraftEdited,
                             )
                         }
                     }

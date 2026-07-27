@@ -231,6 +231,31 @@ internal data class QuickRecordDraft(
         }
     }
 
+    /** Validate a proposed start time against the write mode it would create. */
+    fun startTimeRejectionMessage(
+        candidateStartTimestamp: Long,
+        candidateEndTimestamp: Long?,
+        nowMillis: Long = RecordTime.currentTimeMillis(),
+    ): String? {
+        val candidate = copy(
+            timestamp = candidateStartTimestamp,
+            endTimestamp = candidateEndTimestamp,
+        )
+        val work = candidate.workMode(nowMillis)
+        val planIntent =
+            work == ComposerWorkMode.ScheduleCare ||
+                work == ComposerWorkMode.EditPlan ||
+                candidate.needsConvertToCarePlan(nowMillis)
+        return when {
+            work == ComposerWorkMode.ScheduleCare && candidateStartTimestamp <= nowMillis ->
+                CARE_PLAN_TIME_NOT_FUTURE_WARNING
+            !planIntent && candidateStartTimestamp > nowMillis -> FUTURE_TIME_WARNING
+            !planIntent && candidateEndTimestamp != null && candidateEndTimestamp > nowMillis ->
+                FUTURE_TIME_WARNING
+            else -> null
+        }
+    }
+
     fun workModeTitle(nowMillis: Long = RecordTime.currentTimeMillis()): String = when {
         needsConvertToCarePlan(nowMillis) -> "转为护理计划"
         else -> when (workMode(nowMillis)) {

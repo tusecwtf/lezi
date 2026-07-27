@@ -51,7 +51,8 @@ internal fun sleepComposerPolicy(
     val workMode = draft.workMode(nowMillis)
     if (
         workMode == ComposerWorkMode.ScheduleCare ||
-        workMode == ComposerWorkMode.EditPlan
+        workMode == ComposerWorkMode.EditPlan ||
+        draft.needsConvertToCarePlan(nowMillis)
     ) {
         return SleepComposerPolicy(
             isPlanIntent = true,
@@ -87,6 +88,27 @@ internal fun sleepComposerPolicy(
             showWakeToggle = false,
             animationDescription = "月亮图标，补记睡眠",
         )
+    }
+}
+
+internal fun clockDialogTitle(
+    draft: QuickRecordDraft,
+    selectingEnd: Boolean,
+    nowMillis: Long = com.lezi.babylog.core.model.RecordTime.currentTimeMillis(),
+): String {
+    val sleepPolicy = draft.takeIf { it.type == RecordType.SLEEP }
+        ?.let { sleepComposerPolicy(it, nowMillis) }
+    return when {
+        !selectingEnd && sleepPolicy?.isPlanIntent == true ->
+            "选择${sleepPolicy.primaryTimeLabel}时刻"
+        !selectingEnd && draft.sleepAction == SleepDraftAction.SleepDown ->
+            "选择睡下时刻"
+        selectingEnd && draft.sleepAction in setOf(
+            SleepDraftAction.SleepDown,
+            SleepDraftAction.WakeUp,
+        ) -> "选择醒来时刻"
+        selectingEnd -> "选择结束时刻"
+        else -> "选择记录时刻"
     }
 }
 
