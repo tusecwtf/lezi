@@ -156,3 +156,31 @@ interface PendingReminderCleanupDao {
     @Query("DELETE FROM pending_reminder_cleanup WHERE operation = :operation")
     suspend fun delete(operation: String)
 }
+
+/**
+ * Durable write-ahead marker for post-commit local replica cleanup.
+ *
+ * The marker is inserted in the same Room transaction as the domain clear and
+ * deleted only after file, DataStore, outbox, and media cleanup succeeds.
+ */
+@Entity(tableName = "pending_replica_cleanup")
+data class PendingReplicaCleanupEntity(
+    @PrimaryKey val operation: String,
+    val scope: String,
+    val familyId: String,
+    val pullGeneration: String,
+    val mediaClientUuidsJson: String,
+    val localMediaPathsJson: String,
+)
+
+@Dao
+interface PendingReplicaCleanupDao {
+    @Query("SELECT * FROM pending_replica_cleanup WHERE operation = :operation LIMIT 1")
+    suspend fun get(operation: String): PendingReplicaCleanupEntity?
+
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insert(pending: PendingReplicaCleanupEntity)
+
+    @Query("DELETE FROM pending_replica_cleanup WHERE operation = :operation")
+    suspend fun delete(operation: String)
+}

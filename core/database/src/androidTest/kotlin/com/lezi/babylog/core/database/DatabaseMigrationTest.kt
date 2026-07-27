@@ -549,7 +549,51 @@ class DatabaseMigrationTest {
     }
 
     @Test
-    fun migrate8To19_preservesLegacyPendingReminderCleanupRow() {
+    fun migrate19To20_createsPendingReplicaCleanupWithoutChangingRoom19Data() {
+        helper.createDatabase(PENDING_REPLICA_V20_DATABASE, 19).apply {
+            execSQL(
+                """
+                INSERT INTO pending_reminder_cleanup (
+                    operation, calendarEventIds, carePlanIds, familyServerRetained
+                ) VALUES ('records_clear', '9,3', '8,4', 1)
+                """.trimIndent(),
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            PENDING_REPLICA_V20_DATABASE,
+            20,
+            true,
+            MIGRATION_19_20,
+        ).apply {
+            query(
+                """
+                SELECT calendarEventIds, carePlanIds, familyServerRetained
+                FROM pending_reminder_cleanup
+                WHERE operation = 'records_clear'
+                """.trimIndent(),
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("9,3", cursor.getString(0))
+                assertEquals("8,4", cursor.getString(1))
+                assertEquals(1, cursor.getInt(2))
+            }
+            query(
+                """
+                SELECT COUNT(*) FROM sqlite_master
+                WHERE type = 'table' AND name = 'pending_replica_cleanup'
+                """.trimIndent(),
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(1L, cursor.getLong(0))
+            }
+            close()
+        }
+    }
+
+    @Test
+    fun migrate8To20_preservesLegacyPendingReminderCleanupRow() {
         helper.createDatabase(PENDING_REMINDER_DATABASE, 8).apply {
             execSQL(
                 """
@@ -563,7 +607,7 @@ class DatabaseMigrationTest {
 
         helper.runMigrationsAndValidate(
             PENDING_REMINDER_DATABASE,
-            19,
+            20,
             true,
             MIGRATION_8_9,
             MIGRATION_9_10,
@@ -576,6 +620,7 @@ class DatabaseMigrationTest {
             MIGRATION_16_17,
             MIGRATION_17_18,
             MIGRATION_18_19,
+            MIGRATION_19_20,
         ).apply {
             query(
                 """
@@ -595,14 +640,14 @@ class DatabaseMigrationTest {
 
     /**
      * Full upgrade chain from the shipped 0.2.4 Room schema (v7) through every
-     * published migration to the current feature head (v19).
+     * published migration to the current feature head (v20).
      *
      * Seeds a realistic pre-feature DB: facts with 1–3 log photos, free-title
      * calendar events, and a custom item. Asserts row preservation and that
      * feature tables/columns exist — does not invent missing migrations.
      */
     @Test
-    fun migrate7To19_preservesShipped024BaselineThroughCurrentHead() {
+    fun migrate7To20_preservesShipped024BaselineThroughCurrentHead() {
         helper.createDatabase(SHIPPED_024_DATABASE, 7).apply {
             execSQL(
                 """
@@ -716,7 +761,7 @@ class DatabaseMigrationTest {
 
         helper.runMigrationsAndValidate(
             SHIPPED_024_DATABASE,
-            19,
+            20,
             true,
             MIGRATION_7_8,
             MIGRATION_8_9,
@@ -730,6 +775,7 @@ class DatabaseMigrationTest {
             MIGRATION_16_17,
             MIGRATION_17_18,
             MIGRATION_18_19,
+            MIGRATION_19_20,
         ).apply {
             // Local identity preserved.
             query(
@@ -837,6 +883,7 @@ class DatabaseMigrationTest {
             // Feature tables introduced by the chain are present and empty on upgrade.
             listOf(
                 "pending_reminder_cleanup",
+                "pending_replica_cleanup",
                 "care_plans",
                 "fulfillment_candidates",
             ).forEach { table ->
@@ -897,6 +944,7 @@ class DatabaseMigrationTest {
             "lezi-record-membership-author-migration-test"
         const val PENDING_REMINDER_DATABASE = "lezi-pending-reminder-migration-test"
         const val PENDING_REMINDER_V19_DATABASE = "lezi-pending-reminder-v19-migration-test"
+        const val PENDING_REPLICA_V20_DATABASE = "lezi-pending-replica-v20-migration-test"
         /** Shipped product 0.2.4 Room head (see dist/lezi-0.2.4-release.apk + schema 7.json). */
         const val SHIPPED_024_DATABASE = "lezi-shipped-0.2.4-full-chain-migration-test"
     }

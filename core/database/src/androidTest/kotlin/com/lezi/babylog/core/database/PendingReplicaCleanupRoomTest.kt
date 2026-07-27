@@ -1,0 +1,70 @@
+package com.lezi.babylog.core.database
+
+import android.content.Context
+import androidx.room.Room
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import kotlinx.coroutines.runBlocking
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Test
+import org.junit.runner.RunWith
+
+@RunWith(AndroidJUnit4::class)
+class PendingReplicaCleanupRoomTest {
+    private val context: Context = InstrumentationRegistry.getInstrumentation().targetContext
+    private var database: LeziDatabase? = null
+
+    @After
+    fun tearDown() {
+        database?.close()
+        context.deleteDatabase(DATABASE_NAME)
+    }
+
+    @Test
+    fun stagedMarkerSurvivesDatabaseReopenUntilExplicitlyDeleted() = runBlocking {
+        val pending = PendingReplicaCleanup(
+            scope = PendingReplicaCleanupScope.RECORDS_ONLY,
+            familyId = "family-a",
+            pullGeneration = "generation-a",
+            mediaClientUuids = setOf("media-b", "media-a"),
+            localMediaPaths = setOf("photos/逗号,照片.jpg", "photos/line\nbreak.jpg"),
+        )
+        openStore().stage(pending)
+        database?.close()
+        database = null
+
+        val reopened = openStore()
+
+        assertEquals(pending, reopened.load())
+        reopened.delete()
+        assertNull(reopened.load())
+    }
+
+    private fun openStore(): PendingReplicaCleanupStore {
+        val db = Room.databaseBuilder(context, LeziDatabase::class.java, DATABASE_NAME)
+            .addMigrations(
+                MIGRATION_7_8,
+                MIGRATION_8_9,
+                MIGRATION_9_10,
+                MIGRATION_10_11,
+                MIGRATION_11_12,
+                MIGRATION_12_13,
+                MIGRATION_13_14,
+                MIGRATION_14_15,
+                MIGRATION_15_16,
+                MIGRATION_16_17,
+                MIGRATION_17_18,
+                MIGRATION_18_19,
+                MIGRATION_19_20,
+            )
+            .build()
+        database = db
+        return RoomPendingReplicaCleanupStore(db.pendingReplicaCleanupDao())
+    }
+
+    private companion object {
+        const val DATABASE_NAME = "pending-replica-cleanup-room-test"
+    }
+}

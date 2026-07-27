@@ -380,6 +380,25 @@ internal val MIGRATION_18_19 = object : Migration(18, 19) {
     }
 }
 
+/** Write-ahead marker for crash-safe local replica cleanup. */
+internal val MIGRATION_19_20 = object : Migration(19, 20) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `pending_replica_cleanup` (
+                `operation` TEXT NOT NULL,
+                `scope` TEXT NOT NULL,
+                `familyId` TEXT NOT NULL,
+                `pullGeneration` TEXT NOT NULL,
+                `mediaClientUuidsJson` TEXT NOT NULL,
+                `localMediaPathsJson` TEXT NOT NULL,
+                PRIMARY KEY(`operation`)
+            )
+            """.trimIndent(),
+        )
+    }
+}
+
 @Module
 @InstallIn(SingletonComponent::class)
 object DatabaseModule {
@@ -406,6 +425,7 @@ object DatabaseModule {
                 MIGRATION_16_17,
                 MIGRATION_17_18,
                 MIGRATION_18_19,
+                MIGRATION_19_20,
             )
             .build()
 
@@ -425,6 +445,11 @@ object DatabaseModule {
     @Singleton
     fun pendingReminderCleanupStore(db: LeziDatabase): PendingReminderCleanupStore =
         RoomPendingReminderCleanupStore(db.pendingReminderCleanupDao())
+
+    @Provides
+    @Singleton
+    fun pendingReplicaCleanupStore(db: LeziDatabase): PendingReplicaCleanupStore =
+        RoomPendingReplicaCleanupStore(db.pendingReplicaCleanupDao())
 
     @Provides
     @Singleton
