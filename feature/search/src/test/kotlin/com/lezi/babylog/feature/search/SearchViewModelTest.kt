@@ -3,8 +3,12 @@ package com.lezi.babylog.feature.search
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestDispatcher
@@ -14,6 +18,7 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withContext
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TestWatcher
@@ -46,6 +51,52 @@ class SearchViewModelTest {
             assertThat(viewModel.ui.value.searching).isFalse()
             assertThat(viewModel.ui.value.errorMessage).isEqualTo("搜索失败，请重试")
             assertThat(viewModel.ui.value.query).isEqualTo("发烧")
+        }
+
+    @Test
+    fun cancelledEarlierQueryCannotClearSearchingForReplacementQuery() =
+        runTest(mainDispatcherRule.testDispatcher) {
+            val releaseCancelledQuery = CompletableDeferred<Unit>()
+            val completeReplacementQuery = CompletableDeferred<List<Record>>()
+            val staleResult = searchRecord(id = 99)
+            val viewModel = SearchViewModel(
+                repository = SearchRepository { query ->
+                    if (query == "A") {
+                        try {
+                            awaitCancellation()
+                        } catch (error: CancellationException) {
+                            withContext(NonCancellable) {
+                                releaseCancelledQuery.await()
+                            }
+                            listOf(staleResult)
+                        }
+                    } else {
+                        completeReplacementQuery.await()
+                    }
+                },
+            )
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+                viewModel.ui.collect {}
+            }
+
+            viewModel.onQuery("A")
+            advanceTimeBy(200)
+            runCurrent()
+
+            viewModel.onQuery("B")
+            runCurrent()
+            assertThat(viewModel.ui.value.searching).isTrue()
+
+            releaseCancelledQuery.complete(Unit)
+            runCurrent()
+
+            assertThat(viewModel.ui.value.query).isEqualTo("B")
+            assertThat(viewModel.ui.value.searching).isTrue()
+            assertThat(viewModel.ui.value.errorMessage).isNull()
+            assertThat(viewModel.ui.value.results).isEmpty()
+
+            completeReplacementQuery.complete(emptyList())
+            runCurrent()
         }
 
     @Test

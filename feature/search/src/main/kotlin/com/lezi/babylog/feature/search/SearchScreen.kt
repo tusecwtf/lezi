@@ -66,6 +66,7 @@ class SearchViewModel @Inject constructor(
     private val searching = MutableStateFlow(false)
     private val errorMessage = MutableStateFlow<String?>(null)
     private var job: Job? = null
+    private var queryGeneration = 0L
 
     val ui = combine(query, results, searching, errorMessage) { q, r, s, error ->
         SearchUi(q, r, s, error)
@@ -73,6 +74,7 @@ class SearchViewModel @Inject constructor(
 
     fun onQuery(q: String) {
         val limited = limitSearchQuery(q)
+        val generation = ++queryGeneration
         query.value = limited
         job?.cancel()
         errorMessage.value = null
@@ -80,13 +82,20 @@ class SearchViewModel @Inject constructor(
             searching.value = true
             try {
                 delay(200)
-                results.value = repository.search(limited)
+                val found = repository.search(limited)
+                if (generation == queryGeneration) {
+                    results.value = found
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Throwable) {
-                errorMessage.value = SEARCH_ERROR_MESSAGE
+                if (generation == queryGeneration) {
+                    errorMessage.value = SEARCH_ERROR_MESSAGE
+                }
             } finally {
-                searching.value = false
+                if (generation == queryGeneration) {
+                    searching.value = false
+                }
             }
         }
     }
