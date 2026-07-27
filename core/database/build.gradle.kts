@@ -23,10 +23,6 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
-
-    sourceSets {
-        getByName("androidTest").assets.srcDir("$projectDir/schemas")
-    }
 }
 
 ksp {
@@ -47,5 +43,4 @@ dependencies {
     testImplementation(libs.truth)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.test.runner)
-    androidTestImplementation(libs.androidx.room.testing)
 }
