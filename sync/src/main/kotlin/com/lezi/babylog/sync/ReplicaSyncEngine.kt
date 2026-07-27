@@ -85,6 +85,7 @@ internal class ReplicaSyncEngine(
         session: SyncSession,
         trigger: SyncTrigger,
     ): ReplicaSyncOutcome {
+        cleanupPendingTombstonedMedia()
         val mediaEditGuard = captureLocalMediaEditGuard()
         captureLocalChanges(session)
         requireRemoteAllowed(session)
@@ -131,6 +132,7 @@ internal class ReplicaSyncEngine(
         session: SyncSession,
         entities: List<SyncEntity>,
     ) {
+        cleanupPendingTombstonedMedia()
         applyRemote(session, entities)
     }
 
@@ -591,7 +593,7 @@ internal class ReplicaSyncEngine(
         entities: List<SyncEntity>,
         mediaEditGuard: LocalMediaEditGuard? = null,
     ) {
-        val deletedLocalUris = mutableListOf<String>()
+        val deletedMediaClientUuids = mutableListOf<String>()
         // Atomic receive: download all log media bytes for new/updated packages into
         // a staging map BEFORE any Room apply, so partial failure never exposes a
         // record/plan with placeholder media or advances past an incomplete package.
@@ -619,7 +621,7 @@ internal class ReplicaSyncEngine(
                 }
             }
             for (entity in entities.filter { it.type == "media" }) {
-                if (!applyMedia(session, entity, deletedLocalUris, stagedLogMediaBytes)) {
+                if (!applyMedia(session, entity, deletedMediaClientUuids, stagedLogMediaBytes)) {
                     unresolved += entity
                 }
             }
@@ -684,7 +686,7 @@ internal class ReplicaSyncEngine(
                     refreshBabyAvatar(it, mediaEditGuard)
                 }
         }
-        deletedLocalUris.forEach { mediaFiles.delete(it) }
+        cleanupPendingTombstonedMedia(deletedMediaClientUuids.toSet())
         // Side effects only after full package apply — never during partial download.
         if (appliedCarePlanUuids.isNotEmpty()) {
             carePlanAppliedListener.onFamilyCarePlansApplied(appliedCarePlanUuids.distinct())
@@ -1216,7 +1218,7 @@ internal class ReplicaSyncEngine(
     private suspend fun applyMedia(
         session: SyncSession,
         entity: SyncEntity,
-        deletedLocalUris: MutableList<String>,
+        deletedMediaClientUuids: MutableList<String>,
         stagedLogMediaBytes: Map<String, String> = emptyMap(),
     ): Boolean {
         val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
@@ -1270,12 +1272,56 @@ internal class ReplicaSyncEngine(
             ),
         )
         if (entity.deletedAt != null && !existing?.localUri.isNullOrBlank()) {
-            deletedLocalUris += existing!!.localUri
-            mediaDao.update(
-                requireNotNull(mediaDao.getByClientUuid(entity.clientUuid)).copy(localUri = ""),
-            )
+            // Keep the exact path on the tombstoned row until physical cleanup
+            // succeeds. The row is the durable hand-off across process death;
+            // clearing it before deletion would make an equal LWW retry skip the
+            // only remaining file identity.
+            deletedMediaClientUuids += entity.clientUuid
         }
         return true
+    }
+
+    /**
+     * Finish durable media-tombstone cleanup.
+     *
+     * File deletion and clearing the tombstone path share the Room transaction
+     * lease. A delete failure or process stop leaves [MediaAssetEntity.localUri]
+     * intact for the next synchronization. If a new live row has taken ownership
+     * of the same path, only the stale tombstone reference is cleared.
+     */
+    private suspend fun cleanupPendingTombstonedMedia(
+        clientUuids: Set<String>? = null,
+    ) {
+        val pendingClientUuids = mediaDao.listAllIncludingDeleted()
+            .asSequence()
+            .filter { media ->
+                media.deletedAt != null &&
+                    media.localUri.isNotBlank() &&
+                    (clientUuids == null || media.clientUuid in clientUuids)
+            }
+            .map(MediaAssetEntity::clientUuid)
+            .distinct()
+            .toList()
+        pendingClientUuids.forEach { clientUuid ->
+            transactionRunner.run {
+                val current = mediaDao.getByClientUuid(clientUuid)
+                    ?.takeIf { it.deletedAt != null && it.localUri.isNotBlank() }
+                    ?: return@run
+                val path = current.localUri
+                val pathHasLiveOwner = mediaDao.listAllIncludingDeleted().any { media ->
+                    media.clientUuid != current.clientUuid &&
+                        media.deletedAt == null &&
+                        media.localUri == path
+                }
+                if (!pathHasLiveOwner) {
+                    mediaFiles.delete(path)
+                }
+                val stillPending = mediaDao.getByClientUuid(clientUuid)
+                if (stillPending?.deletedAt != null && stillPending.localUri == path) {
+                    mediaDao.update(stillPending.copy(localUri = ""))
+                }
+            }
+        }
     }
 
     override suspend fun persistAuthenticatedSelfMembershipIfMissing(

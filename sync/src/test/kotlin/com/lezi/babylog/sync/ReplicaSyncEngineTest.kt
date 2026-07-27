@@ -3,6 +3,8 @@ package com.lezi.babylog.sync
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.BabyEntity
 import com.lezi.babylog.core.database.FamilyEntity
+import com.lezi.babylog.core.database.MediaAssetEntity
+import com.lezi.babylog.core.database.RecordEntity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
@@ -189,6 +191,122 @@ class ReplicaSyncEngineTest {
         assertThat(rig.records.getByClientUuid(recordUuid)).isNotNull()
         assertThat(rig.media.getByClientUuid(mediaUuid)?.localUri)
             .isEqualTo("downloaded/$mediaUuid")
+    }
+
+    @Test
+    fun remoteMediaTombstoneRetriesFileCleanupAfterProcessStops() = runTest {
+        val rig = ReplicaEngineRig(joinedReplicaSession())
+        val babyId = rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
+        val recordUuid = "record-with-remote-tombstone"
+        val recordId = rig.records.seed(
+            RecordEntity(
+                clientUuid = recordUuid,
+                babyId = babyId,
+                type = "formula",
+                timestamp = 100,
+                createdByUserId = 1,
+                payloadJson = "{\"amount_ml\":90}",
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+        val mediaUuid = "56565656-5656-5656-5656-565656565657"
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = mediaUuid,
+                localUri = "photos/tombstoned.jpg",
+                remoteUri = "sync://family-a/$mediaUuid",
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+        rig.backend.nextPull = remoteReplicaMedia(mediaUuid, recordUuid).copy(
+            updatedAt = 220,
+            deletedAt = 220,
+        ).let { PullResult(listOf(it), cursor = 1, generation = "generation-a") }
+        rig.mediaFiles.deleteFailures += IllegalStateException("process stopped")
+
+        val firstFailure = runCatching {
+            rig.engine.synchronize(
+                session = rig.preferences.current(),
+                trigger = SyncTrigger.PullToRefresh,
+            )
+        }.exceptionOrNull()
+
+        assertThat(firstFailure).hasMessageThat().contains("process stopped")
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.deletedAt).isEqualTo(220)
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.localUri)
+            .isEqualTo("photos/tombstoned.jpg")
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(0)
+
+        val outcome = rig.engine.synchronize(
+            session = rig.preferences.current(),
+            trigger = SyncTrigger.PullToRefresh,
+        )
+
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
+        assertThat(rig.mediaFiles.deleted)
+            .containsExactly("photos/tombstoned.jpg", "photos/tombstoned.jpg")
+            .inOrder()
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.localUri).isEmpty()
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(1)
+    }
+
+    @Test
+    fun remoteMediaTombstoneDoesNotDeletePathReusedByLiveMedia() = runTest {
+        val rig = ReplicaEngineRig(joinedReplicaSession())
+        val babyId = rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
+        val recordUuid = "record-with-reused-media-path"
+        val recordId = rig.records.seed(
+            RecordEntity(
+                clientUuid = recordUuid,
+                babyId = babyId,
+                type = "formula",
+                timestamp = 100,
+                createdByUserId = 1,
+                payloadJson = "{\"amount_ml\":90}",
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+        val tombstoneUuid = "56565656-5656-5656-5656-565656565658"
+        val reusedPath = "photos/reused.jpg"
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = tombstoneUuid,
+                localUri = reusedPath,
+                remoteUri = "sync://family-a/$tombstoneUuid",
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = "67676767-6767-6767-6767-676767676767",
+                localUri = reusedPath,
+                createdAt = 210,
+                updatedAt = 210,
+                syncDirty = false,
+            ),
+        )
+        rig.backend.nextPull = remoteReplicaMedia(tombstoneUuid, recordUuid).copy(
+            updatedAt = 220,
+            deletedAt = 220,
+        ).let { PullResult(listOf(it), cursor = 1, generation = "generation-a") }
+
+        val outcome = rig.engine.synchronize(
+            session = rig.preferences.current(),
+            trigger = SyncTrigger.PullToRefresh,
+        )
+
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
+        assertThat(rig.mediaFiles.deleted).doesNotContain(reusedPath)
+        assertThat(rig.media.getByClientUuid(tombstoneUuid)?.localUri).isEmpty()
     }
 
     @Test
