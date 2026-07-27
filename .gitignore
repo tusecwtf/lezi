@@ -26,6 +26,9 @@ keystore.properties
 .pytest_cache/
 **/.pytest_cache/
 
+# Local release artifacts and emulator evidence (not source)
+/dist/
+
 # Generated review and research artifacts
 /.grok/
 /docs/reviews/

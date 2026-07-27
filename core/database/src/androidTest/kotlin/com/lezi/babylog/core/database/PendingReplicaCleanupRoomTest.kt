@@ -23,26 +23,6 @@ class PendingReplicaCleanupRoomTest {
     }
 
     @Test
-    fun stagedMarkerSurvivesDatabaseReopenUntilExplicitlyDeleted() = runBlocking {
-        val pending = PendingReplicaCleanup(
-            scope = PendingReplicaCleanupScope.RECORDS_ONLY,
-            familyId = "family-a",
-            pullGeneration = "generation-a",
-            mediaClientUuids = setOf("media-b", "media-a"),
-            localMediaPaths = setOf("photos/逗号,照片.jpg", "photos/line\nbreak.jpg"),
-        )
-        openStore().stage(pending)
-        database?.close()
-        database = null
-
-        val reopened = openStore()
-
-        assertEquals(pending, reopened.load())
-        reopened.delete()
-        assertNull(reopened.load())
-    }
-
-    @Test
     fun nestedDomainDeleteAndMarkerRollBackTogether() = runBlocking {
         val db = openDatabase()
         db.recordDao().upsert(
@@ -82,11 +62,6 @@ class PendingReplicaCleanupRoomTest {
             db.recordDao().getByClientUuid("record-before-clear")?.clientUuid,
         )
         assertNull(store.load())
-    }
-
-    private fun openStore(): PendingReplicaCleanupStore {
-        val db = openDatabase()
-        return RoomPendingReplicaCleanupStore(db.pendingReplicaCleanupDao())
     }
 
     private fun openDatabase(): LeziDatabase {

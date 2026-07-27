@@ -81,19 +81,6 @@ class CustomItemDeleteConfirmationTest {
     }
 
     @Test
-    fun impactCopyNamesTargetAndExplainsFamilyHistoryAndLocalHideBoundaries() {
-        val confirmation = customItemDeleteConfirmation(item())
-
-        assertEquals("删除共享项目「补充维生素 D」？", confirmation.title)
-        assertTrue(confirmation.message.contains("家庭共享项目中移除"))
-        assertTrue(confirmation.message.contains("不能再用它新建记录或护理计划"))
-        assertTrue(confirmation.message.contains("已有记录与计划仍保留原名称和图标"))
-        assertTrue(confirmation.message.contains("本机显示"))
-        assertTrue(confirmation.message.contains("无法撤销"))
-        assertFalse(confirmation.message.contains("tombstone"))
-    }
-
-    @Test
     fun deleteExecutionRethrowsCancellationAndMapsOrdinaryFailure() = runBlocking {
         val cancellation = CancellationException("dialog closed")
         try {

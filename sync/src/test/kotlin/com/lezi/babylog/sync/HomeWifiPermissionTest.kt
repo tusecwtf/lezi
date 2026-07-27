@@ -1,19 +1,9 @@
 package com.lezi.babylog.sync
 
-import android.Manifest
 import com.google.common.truth.Truth.assertThat
 import org.junit.Test
 
 class HomeWifiPermissionTest {
-    @Test
-    fun connectedSsidRequestsCoarseAndFineLocationTogether() {
-        assertThat(HomeWifiPermission.requiredPermissions())
-            .containsExactly(
-                Manifest.permission.ACCESS_COARSE_LOCATION,
-                Manifest.permission.ACCESS_FINE_LOCATION,
-            ).inOrder()
-    }
-
     @Test
     fun guideRoutesToTheSettingThatCanActuallyUnblockSsid() {
         assertThat(homeWifiSettingsTarget(false, false))

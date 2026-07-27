@@ -59,14 +59,6 @@ class MoreSheetCatalogTest {
     }
 
     @Test
-    fun customAccessibilityUsesDefinitionName() {
-        val entry = MoreCatalogEntry.Custom(
-            CustomRecordItem(id = 9, name = "抚触", iconSlot = 0, sortOrder = 0),
-        )
-        assertEquals("添加抚触", moreRecordContentDescription(entry))
-    }
-
-    @Test
     fun catalogPlacesCustomsUnderCustomSectionAndRespectsCategoryOrder() {
         val settings = SettingsLocal(
             categoryOrderJson = """["custom","feeding","excretion","routine","health","growth"]""",

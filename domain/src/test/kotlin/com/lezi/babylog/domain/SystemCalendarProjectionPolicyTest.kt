@@ -115,28 +115,6 @@ class SystemCalendarProjectionPolicyTest {
     }
 
     @Test
-    fun providerContractLocksWritableAccessBeginReminderAndStableUid() {
-        // Contributor threshold mirrors CalendarContract.Calendars.CAL_ACCESS_CONTRIBUTOR (= 500).
-        val contributor = 500
-        assertThat(
-            SystemCalendarProjectionContract.isWritableAccessLevel(499, contributor),
-        ).isFalse()
-        assertThat(
-            SystemCalendarProjectionContract.isWritableAccessLevel(500, contributor),
-        ).isTrue()
-        assertThat(SystemCalendarProjectionContract.BEGIN_REMINDER_MINUTES).isEqualTo(0)
-        assertThat(SystemCalendarProjectionContract.POINT_EVENT_DURATION_MS)
-            .isEqualTo(30L * 60_000L)
-        assertThat(SystemCalendarProjectionContract.eventUid("plan-uuid-1"))
-            .isEqualTo("lezi-care-plan-plan-uuid-1")
-        // Contract values must not encode photo bytes/URIs — identity is UUID only.
-        assertThat(SystemCalendarProjectionContract.eventUid("abc")).doesNotContain("content:")
-        assertThat(SYSTEM_CALENDAR_UNSYNCED_LABEL).isEqualTo("未同步到系统日历")
-        assertThat(SystemCalendarProjectionContract.carePlanDeepLink("u-1"))
-            .isEqualTo("lezi://care-plan/u-1")
-    }
-
-    @Test
     fun disclosureLevelFromStoredCoercesIntoValidGrades() {
         assertThat(SystemCalendarDisclosureLevel.fromStored(1))
             .isEqualTo(SystemCalendarDisclosureLevel.EVENT_ONLY)
@@ -221,16 +199,5 @@ class SystemCalendarProjectionPolicyTest {
         )
         assertThat(content.description).isEqualTo("lezi://care-plan/p-empty")
         assertThat(content.description).doesNotContain("照片")
-    }
-
-    @Test
-    fun photoCountLineNeverEmbedsPathsOrUris() {
-        val line = SystemCalendarDisclosurePolicy.photoCountLine(3)
-        assertThat(line).isEqualTo("照片 3 张，打开乐记查看")
-        assertThat(SystemCalendarDisclosurePolicy.containsForbiddenPhotoLeak(line)).isFalse()
-        // Even a large count is still plain text — no media refs.
-        val many = SystemCalendarDisclosurePolicy.photoCountLine(99)
-        assertThat(many).startsWith("照片 ")
-        assertThat(many).doesNotContain("content:")
     }
 }

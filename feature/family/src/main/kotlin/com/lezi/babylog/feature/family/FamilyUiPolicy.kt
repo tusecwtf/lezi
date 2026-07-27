@@ -1,19 +1,17 @@
 package com.lezi.babylog.feature.family
 
-import com.lezi.babylog.core.common.looksTechnicalDetail
-import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.domain.BabyMergePreview
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.FamilyRole
-import com.lezi.babylog.sync.SyncNotEnabledException
+import com.lezi.babylog.sync.LOCAL_DEVICE_DISPLAY_NAME
 
 /**
- * Local-only display placeholder. Keep this literal aligned with the server-side
- * member projection placeholder; it must never be treated as a caregiver name.
+ * Local-only display placeholder. Same literal as [LOCAL_DEVICE_DISPLAY_NAME];
+ * must never be treated as a caregiver name.
  */
-internal const val LOCAL_FAMILY_DISPLAY_NAME = "我（本机）"
+internal const val LOCAL_FAMILY_DISPLAY_NAME = LOCAL_DEVICE_DISPLAY_NAME
 
 internal sealed interface NetworkSaveResult {
     val message: String
@@ -103,16 +101,8 @@ internal fun familyDialogAfterDismiss(dialog: FamilyDialog): FamilyDialog? = whe
     else -> null
 }
 
-internal fun familySyncError(error: Throwable, fallback: String): String {
-    if (error is SyncNotEnabledException) {
-        return "请先填写家庭服务器地址并绑定 Wi‑Fi 名称后加入家庭"
-    }
-    val message = error.message.orEmpty()
-    if (looksTechnicalDetail(message)) {
-        return "家庭同步服务暂未连接，请稍后重试"
-    }
-    return productUiError(error, fallback)
-}
+internal fun familySyncError(error: Throwable, fallback: String): String =
+    com.lezi.babylog.sync.familySyncError(error, fallback)
 
 /**
  * Result-oriented sync phrase for the account **overview** family card (S1).
@@ -263,24 +253,6 @@ internal fun buildFamilyOverviewCard(
     )
 }
 
-/** True when [text] looks like overview-forbidden network/tech detail. */
-internal fun overviewCopyLooksTechnical(text: String): Boolean {
-    if (text.isBlank()) return false
-    val lower = text.lowercase()
-    if (looksTechnicalDetail(text)) return true
-    if (Regex("""\b(idle|blockedofflinehome|syncing|disabled)\b""", RegexOption.IGNORE_CASE)
-            .containsMatchIn(text)
-    ) {
-        return true
-    }
-    if (text.contains("空闲") || text.contains("SSID") || text.contains("ssid")) return true
-    if (text.contains("设备 ID") || text.contains("设备ID")) return true
-    // host:port or raw IPv4-ish fragments that must not land on overview phrases
-    if (Regex("""\d{1,3}(\.\d{1,3}){3}""").containsMatchIn(text)) return true
-    if (lower.contains("http://") || lower.contains("https://")) return true
-    return false
-}
-
 internal fun familyRoleLabel(role: FamilyRole): String = when (role) {
     FamilyRole.Owner -> "管理员"
     FamilyRole.Member -> "成员"
@@ -378,16 +350,6 @@ internal fun familyMembersForDisplay(
             membershipId = membershipId,
         ),
     ) + bounded
-}
-
-/** Network-sheet compact status (not for overview). */
-internal fun compactSyncStatusLabel(status: SyncStatus, isJoined: Boolean): String = when {
-    !isJoined -> "等待完成网络配置"
-    status == SyncStatus.BlockedOfflineHome -> "等待家庭 Wi-Fi"
-    status == SyncStatus.Idle -> "已就绪"
-    status == SyncStatus.Syncing -> "同步中"
-    status == SyncStatus.Error -> "需要重试"
-    else -> "等待同步"
 }
 
 internal fun formatLastSuccessAt(lastSuccessAt: Long?): String =

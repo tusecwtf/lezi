@@ -18,8 +18,8 @@ import java.time.temporal.TemporalAdjusters
  * The single in-process module that owns care-record window semantics.
  *
  * Callers provide one already baby-scoped record set and receive day buckets,
- * range totals, the 24-hour time bar, and widget facts from the same interface.
- * Compose geometry and storage queries deliberately stay outside this module.
+ * range totals, and widget facts from the same interface. Compose geometry and
+ * storage queries deliberately stay outside this module.
  */
 object CareAggregation {
     fun day(
@@ -60,45 +60,6 @@ object CareAggregation {
     ): WeekSummary {
         val days = range(records, weekStart, 7, zone, now).days.map(CareDay::bucket)
         return WeekSummary(weekStart = weekStart, days = days)
-    }
-
-    fun timeBar(
-        records: List<Record>,
-        date: LocalDate,
-        zone: ZoneId = ZoneId.systemDefault(),
-        now: Long = RecordTime.currentTimeMillis(),
-    ): List<TimeBarSegment> {
-        val dayStart = date.atStartOfDay(zone).toInstant().toEpochMilli()
-        val dayEnd = date.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-        return records.asSequence()
-            .filter { it.deletedAt == null && it.timestamp < dayEnd }
-            .mapNotNull { record ->
-                val kind = when (record.type) {
-                    RecordType.SLEEP -> TimeBarKind.SLEEP
-                    RecordType.FORMULA, RecordType.NURSING, RecordType.PUMPED_FEED ->
-                        TimeBarKind.FEED
-                    else -> return@mapNotNull null
-                }
-                val intervalEnd = when {
-                    record.endTimestamp != null -> record.endTimestamp
-                    kind == TimeBarKind.SLEEP -> now
-                    else -> record.timestamp + DEFAULT_FEED_BAR_MILLIS
-                } ?: return@mapNotNull null
-                val clippedStart = maxOf(record.timestamp, dayStart)
-                val clippedEnd = minOf(intervalEnd, dayEnd)
-                if (clippedEnd <= clippedStart) return@mapNotNull null
-                TimeBarSegment(
-                    startMinOfDay = ((clippedStart - dayStart) / MINUTE_MILLIS)
-                        .toInt()
-                        .coerceIn(0, MINUTES_PER_DAY - 1),
-                    endMinOfDay = ((clippedEnd - dayStart) / MINUTE_MILLIS)
-                        .toInt()
-                        .coerceIn(1, MINUTES_PER_DAY),
-                    kind = kind,
-                )
-            }
-            .sortedBy(TimeBarSegment::startMinOfDay)
-            .toList()
     }
 
     fun widget(
@@ -301,8 +262,6 @@ fun weekStartFor(day: LocalDate, weekStartSetting: Int): LocalDate {
 }
 
 private const val MINUTE_MILLIS = 60_000L
-private const val MINUTES_PER_DAY = 24 * 60
-private const val DEFAULT_FEED_BAR_MILLIS = 15 * MINUTE_MILLIS
 
 private fun MutableList<Float>.incrementFor(timestamp: Long, zone: ZoneId) {
     val hour = Instant.ofEpochMilli(timestamp).atZone(zone).hour

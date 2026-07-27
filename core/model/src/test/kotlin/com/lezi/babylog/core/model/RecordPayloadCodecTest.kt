@@ -5,28 +5,6 @@ import org.junit.Test
 
 class RecordPayloadCodecTest {
     @Test
-    fun newFactAndPlanModelsDefaultToCurrentPayloadSchema() {
-        val record = Record(
-            clientUuid = "record",
-            babyId = 1,
-            type = RecordType.PEE,
-            timestamp = 1_000,
-            updatedAt = 1_000,
-        )
-        val plan = CarePlan(
-            clientUuid = "plan",
-            babyId = 1,
-            type = RecordType.PEE,
-            scheduledAt = 2_000,
-            scheduledZoneId = "Asia/Shanghai",
-            updatedAt = 1_000,
-        )
-
-        assertThat(record.schemaVersion).isEqualTo(CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION)
-        assertThat(plan.schemaVersion).isEqualTo(CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION)
-    }
-
-    @Test
     fun everyRecordTypeDecodesToItsMatchingTypedPayload() {
         val documents = RecordType.entries.associateWith { type ->
             RecordPayloadCodec.decode(

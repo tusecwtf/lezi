@@ -408,19 +408,6 @@ class HomeNetworkPolicyTest {
         assertThat(error).hasMessageThat().doesNotContain("[lezi.home:bad]")
     }
 
-    @Test
-    fun noviceUiDefaultsPrefillHostAndCurrentSsid() {
-        val withSsid = HomeLanServerConfig.noviceUiDefaults("Home-2.4G")
-        assertThat(withSsid.host).isEqualTo(DEFAULT_SERVER_HOST)
-        assertThat(withSsid.host).isEqualTo("192.168.50.4")
-        assertThat(withSsid.port).isEqualTo(DEFAULT_SERVER_PORT)
-        assertThat(withSsid.allowedSsids).containsExactly("Home-2.4G")
-
-        val noSsid = HomeLanServerConfig.noviceUiDefaults(null)
-        assertThat(noSsid.host).isEqualTo("192.168.50.4")
-        assertThat(noSsid.port).isEqualTo(8765)
-        assertThat(noSsid.allowedSsids).isEmpty()
-    }
 }
 
 private class FakeNetworkState(

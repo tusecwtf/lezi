@@ -30,7 +30,8 @@ private const val MAX_SYNC_ERROR_RESPONSE_BYTES = 64 * 1024
 private const val MILLIS_PER_SECOND = 1_000L
 
 /** Local-only UI placeholder; must never be uploaded as a real family 称呼. */
-internal const val LOCAL_DEVICE_DISPLAY_NAME = "我（本机）"
+/** Local-only display placeholder; never treated as a real caregiver name. */
+const val LOCAL_DEVICE_DISPLAY_NAME = "我（本机）"
 
 /**
  * Product-required family 称呼 for create / join / self-rename.

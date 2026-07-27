@@ -81,7 +81,7 @@ class NursingTimerService : Service() {
             launch,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val text = "左 ${fmt(leftMs)} · 右 ${fmt(rightMs)}"
+        val text = "左 ${formatTimerMs(leftMs)} · 右 ${formatTimerMs(rightMs)}"
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("乐记 · 喂奶计时中")
             .setContentText(text)
@@ -90,13 +90,6 @@ class NursingTimerService : Service() {
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .build()
-    }
-
-    private fun fmt(ms: Long): String {
-        val totalSec = ms / 1000
-        val m = totalSec / 60
-        val s = totalSec % 60
-        return "%d:%02d".format(m, s)
     }
 
     companion object {

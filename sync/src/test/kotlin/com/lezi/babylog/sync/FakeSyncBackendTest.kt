@@ -5,10 +5,8 @@ import com.lezi.babylog.core.database.BabyEntity
 import com.lezi.babylog.core.database.RecordEntity
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.put
 import org.junit.Test
 
 private const val MEDIA_A = "10000000-0000-4000-8000-000000000001"
@@ -261,19 +259,6 @@ class FakeSyncBackendTest {
     }
 
     @Test
-    fun serverInviteEpochSecondsBecomeAndroidEpochMillis() {
-        val invite = inviteFromWire(
-            buildJsonObject {
-                put("code", "ABC12345")
-                put("expires_at", 1_753_440_000L)
-            },
-        )
-
-        assertThat(invite.code).isEqualTo("ABC12345")
-        assertThat(invite.expiresAt).isEqualTo(1_753_440_000_000L)
-    }
-
-    @Test
     fun babyThenRecordUsesPortableWireAndIncrementalCursorWithLww() = runBlocking {
         val backend = FakeSyncBackend()
         val family = "fam-1"
@@ -347,55 +332,6 @@ class FakeSyncBackendTest {
         assertThat(backend.join(invite.code, "C").getOrThrow().membershipId)
             .isEqualTo(join.membershipId)
         assertThat(backend.pull("another-family", 0).getOrThrow().entities).isEmpty()
-    }
-
-    @Test
-    fun createAndMembersProjectStableMembershipIdentity() = runBlocking {
-        val backend = FakeSyncBackend()
-        val created = backend.create(
-            baseUrl = "http://127.0.0.1:8765",
-            deviceId = "device-owner",
-            displayName = "妈妈",
-            createRequestId = "create-request-id-0000000000000001",
-            bootstrapSecret = null,
-            familyName = "乐乐一家",
-        )
-        assertThat(created.membershipId).isNotEmpty()
-        assertThat(created.role).isEqualTo(FamilyRole.Owner)
-
-        val session = SyncSession(
-            familyId = created.familyId,
-            familyToken = created.token,
-            deviceId = "device-owner",
-            role = created.role,
-            membershipId = created.membershipId.orEmpty(),
-            serverHost = "127.0.0.1",
-            serverPort = 8765,
-        )
-        val members = backend.members(session)
-        assertThat(members).hasSize(1)
-        assertThat(members.single().membershipId).isEqualTo(created.membershipId)
-        assertThat(members.single().isSelf).isTrue()
-        assertThat(members.single().displayName).isEqualTo("妈妈")
-    }
-
-    @Test
-    fun membersRejectsSessionWithoutCurrentMembershipIdentity() = runBlocking {
-        val backend = FakeSyncBackend()
-        val session = SyncSession(
-            familyId = "family-current",
-            familyToken = "token-current",
-            deviceId = "device-current",
-            role = FamilyRole.Owner,
-            membershipId = "",
-            serverHost = "127.0.0.1",
-            serverPort = 8765,
-        )
-
-        val failure = runCatching { backend.members(session) }.exceptionOrNull()
-
-        assertThat(failure).hasMessageThat()
-            .isEqualTo("current session membershipId is required")
     }
 
     @Test

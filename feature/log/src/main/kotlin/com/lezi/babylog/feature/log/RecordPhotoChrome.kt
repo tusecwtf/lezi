@@ -4,8 +4,8 @@ import com.lezi.babylog.core.model.MAX_RECORD_PHOTOS
 
 /**
  * Pure photo chrome rules for the common 0–3 record photos seam.
- * Kept free of Compose so unit tests can cover max slots, fourth-photo rejection,
- * and preview paging without instrumented UI.
+ * Kept free of Compose so unit tests can cover max slots and fourth-photo
+ * rejection without instrumented UI.
  */
 object RecordPhotoChrome {
     fun canAddPhoto(currentCount: Int): Boolean = currentCount < MAX_RECORD_PHOTOS
@@ -17,10 +17,5 @@ object RecordPhotoChrome {
     fun previewStartIndex(requested: Int, photoCount: Int): Int? {
         if (photoCount <= 0) return null
         return requested.coerceIn(0, photoCount - 1)
-    }
-
-    fun pageAfterSwipe(current: Int, photoCount: Int, delta: Int): Int {
-        if (photoCount <= 0) return 0
-        return ((current + delta) % photoCount + photoCount) % photoCount
     }
 }

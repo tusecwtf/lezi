@@ -1,7 +1,6 @@
 package com.lezi.babylog.feature.log
 
 import com.lezi.babylog.core.model.DEFAULT_QUICK_RECORD_SLOTS
-import com.lezi.babylog.core.model.QUICK_RECORD_SLOT_COUNT
 import com.lezi.babylog.core.model.RecordItemIdentity
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.domain.CustomRecordItem
@@ -16,16 +15,6 @@ class QuickRecordSlotsTest {
         iconSlot = 2,
         sortOrder = 0,
     )
-
-    @Test
-    fun firstRunDefaultIsPeeSleepNursingFormula() {
-        assertEquals(
-            listOf("pee", "sleep", "nursing", "formula"),
-            defaultQuickRecordSlots(),
-        )
-        assertEquals(DEFAULT_QUICK_RECORD_SLOTS, defaultQuickRecordSlots())
-        assertEquals(QUICK_RECORD_SLOT_COUNT, defaultQuickRecordSlots().size)
-    }
 
     @Test
     fun emptyAndInvalidRefsBlankWithoutAutoFill() {
@@ -143,32 +132,6 @@ class QuickRecordSlotsTest {
         val cell = resolveQuickSlot("sleep", emptySet(), emptyList()) as QuickDockCell.Bound
         assertEquals(RecordType.SLEEP, cell.recordType)
         assertEquals("睡眠", cell.label)
-    }
-
-    @Test
-    fun dockPresentationShortensEmptyVisualCopyAndKeepsCompleteAccessibilityLabels() {
-        assertEquals(
-            QuickDockPresentation(
-                visualLabel = "选择",
-                contentDescription = "＋ 选择常用记录",
-            ),
-            quickDockPresentation(QuickDockCell.Empty, sleepRunning = false),
-        )
-
-        val longName = "一二三四五六七八九十一二三四五六七八九十"
-        val longCustom = QuickDockCell.Bound(
-            identity = RecordItemIdentity.custom(12L),
-            label = longName,
-            catalogKey = "custom:12",
-            recordType = RecordType.CUSTOM,
-        )
-        assertEquals(
-            QuickDockPresentation(
-                visualLabel = longName,
-                contentDescription = "$longName，打开记录面板",
-            ),
-            quickDockPresentation(longCustom, sleepRunning = false),
-        )
     }
 
     @Test

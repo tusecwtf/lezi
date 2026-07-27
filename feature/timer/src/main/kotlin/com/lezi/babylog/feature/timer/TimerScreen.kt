@@ -209,7 +209,7 @@ fun TimerRoute(
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "合计 ${fmtMs(leftMs + rightMs)}",
+                    "合计 ${formatTimerMs(leftMs + rightMs)}",
                     style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -227,7 +227,7 @@ fun TimerRoute(
                 ) {
                     SideButton(
                         label = "左",
-                        time = fmtMs(leftMs),
+                        time = formatTimerMs(leftMs),
                         running = state.leftRunning,
                         color = MaterialTheme.colorScheme.primary,
                         runningContentColor = MaterialTheme.colorScheme.onPrimary,
@@ -236,7 +236,7 @@ fun TimerRoute(
                     )
                     SideButton(
                         label = "右",
-                        time = fmtMs(rightMs),
+                        time = formatTimerMs(rightMs),
                         running = state.rightRunning,
                         color = MaterialTheme.colorScheme.tertiary,
                         runningContentColor = MaterialTheme.colorScheme.onTertiary,
@@ -432,9 +432,3 @@ private fun SideButton(
     }
 }
 
-private fun fmtMs(ms: Long): String {
-    val totalSec = (ms / 1000).coerceAtLeast(0)
-    val m = totalSec / 60
-    val s = totalSec % 60
-    return "%d:%02d".format(m, s)
-}

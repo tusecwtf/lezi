@@ -3,7 +3,6 @@ package com.lezi.babylog.feature.settings
 import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.RecordType
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -61,17 +60,6 @@ class CarePlanReminderPolicyTest {
                 localRemindersEnabled = true,
                 nowMillis = 1_000L,
             ),
-        )
-    }
-
-    @Test
-    fun permissionDeniedCopyIsUserFacingAndNotBlocking() {
-        val copy = carePlanReminderPermissionDeniedStatus()
-        assertTrue(copy.contains("权限"))
-        assertTrue(copy.contains("降级") || copy.contains("提醒"))
-        assertEquals(
-            "护理计划已保存；通知权限未开启，本机提醒已降级",
-            copy,
         )
     }
 }

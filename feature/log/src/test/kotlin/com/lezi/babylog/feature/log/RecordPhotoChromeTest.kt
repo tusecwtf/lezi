@@ -26,12 +26,4 @@ class RecordPhotoChromeTest {
         assertEquals(2, RecordPhotoChrome.previewStartIndex(99, photoCount = 3))
         assertEquals(1, RecordPhotoChrome.previewStartIndex(1, photoCount = 3))
     }
-
-    @Test
-    fun previewSwipeWrapsAround() {
-        assertEquals(1, RecordPhotoChrome.pageAfterSwipe(current = 0, photoCount = 3, delta = 1))
-        assertEquals(0, RecordPhotoChrome.pageAfterSwipe(current = 2, photoCount = 3, delta = 1))
-        assertEquals(2, RecordPhotoChrome.pageAfterSwipe(current = 0, photoCount = 3, delta = -1))
-        assertEquals(0, RecordPhotoChrome.pageAfterSwipe(current = 0, photoCount = 0, delta = 1))
-    }
 }

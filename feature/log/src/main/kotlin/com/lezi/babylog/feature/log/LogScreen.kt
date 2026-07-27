@@ -1452,13 +1452,6 @@ private fun formatMinutes(min: Long): String {
 
 private fun toneOf(type: RecordType): LeziTone = type.presentationTone()
 
-internal fun typeLabel(type: RecordType): String = type.presentation.label
-
-internal fun typeGlyph(type: RecordType): LeziRecordGlyph = type.presentation.glyph
-
-internal fun moreRecordContentDescription(type: RecordType): String =
-    "添加${type.presentation.label}"
-
 internal fun moreRecordContentDescription(entry: MoreCatalogEntry): String =
     "添加${entry.label}"
 

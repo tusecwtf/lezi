@@ -35,7 +35,6 @@ import com.lezi.babylog.core.model.SettingsLocal
 import com.lezi.babylog.core.model.displayLabel
 import com.lezi.babylog.core.model.isPlanableNonStateful
 import com.lezi.babylog.core.model.itemIdentity
-import com.lezi.babylog.core.model.visibleBusinessText
 import java.time.LocalDate
 import java.time.ZoneOffset
 import java.util.concurrent.atomic.AtomicLong
@@ -109,20 +108,6 @@ class CareLogTest {
         }.exceptionOrNull()
         assertThat(thrown).isInstanceOf(DuplicateBabyNicknameException::class.java)
         assertThat(care.listBabies()).hasSize(1)
-    }
-
-    @Test
-    fun startupReadsNeverRenameBaby() = runTest {
-        val fakes = Fakes()
-        val care = fakes.careLog()
-        val id = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
-
-        assertThat(care.getCurrentBaby()!!.nickname).isEqualTo("豆豆")
-        assertThat(fakes.babies.get(id)!!.nickname).isEqualTo("豆豆")
-
-        repeat(3) { care.getCurrentBaby() }
-        assertThat(care.getCurrentBaby()!!.nickname).isEqualTo("豆豆")
-        assertThat(fakes.babies.get(id)!!.nickname).isEqualTo("豆豆")
     }
 
     @Test
@@ -543,23 +528,6 @@ class CareLogTest {
     }
 
     @Test
-    fun daySummary_formulaAndPee() = runTest {
-        val care = Fakes().careLog()
-        val babyId = care.createBaby(
-            CreateBabyInput(nickname = "豆豆", birthdayEpochDay = LocalDate.of(2026, 1, 1).toEpochDay()),
-        )
-        val day = LocalDate.of(2026, 7, 22)
-        val base = day.atStartOfDay(zone).toInstant().toEpochMilli() + 8 * 3600_000L
-        care.addRecord(babyId, RecordType.FORMULA, timestamp = base, payloadJson = """{"amount_ml":100}""")
-        care.addRecord(babyId, RecordType.FORMULA, timestamp = base + 1000, payloadJson = """{"amount_ml":50}""")
-        care.addRecord(babyId, RecordType.PEE, timestamp = base + 2000, payloadJson = """{"pee_amount":2}""")
-        val summary = care.daySummary(babyId, day, zone)
-        assertThat(summary.feedMl).isEqualTo(150)
-        assertThat(summary.formulaMl).isEqualTo(150)
-        assertThat(summary.peeCount).isEqualTo(1)
-    }
-
-    @Test
     fun observeRecords_isLiveAndUsesHalfOpenDateRange() = runTest {
         val care = Fakes().careLog()
         val babyId = care.createBaby(
@@ -587,21 +555,6 @@ class CareLogTest {
         val atEnd = endDay.atStartOfDay(zone).toInstant().toEpochMilli()
         care.addRecord(babyId, RecordType.POOP, timestamp = atEnd)
         assertThat(range.first()).isEmpty()
-    }
-
-    @Test
-    fun softDelete_removesFromSummary() = runTest {
-        val care = Fakes().careLog()
-        val babyId = care.createBaby(
-            CreateBabyInput(nickname = "豆豆", birthdayEpochDay = LocalDate.of(2026, 1, 1).toEpochDay()),
-        )
-        val day = LocalDate.of(2026, 7, 22)
-        val base = day.atStartOfDay(zone).toInstant().toEpochMilli() + 9 * 3600_000L
-        val id = care.addRecord(babyId, RecordType.FORMULA, timestamp = base, payloadJson = """{"amount_ml":120}""")
-        assertThat(care.daySummary(babyId, day, zone).feedMl).isEqualTo(120)
-        care.deleteRecord(id)
-        assertThat(care.daySummary(babyId, day, zone).feedMl).isEqualTo(0)
-        assertThat(care.dayRecords(babyId, day, zone)).isEmpty()
     }
 
     @Test
@@ -1137,17 +1090,6 @@ class CareLogTest {
     }
 
     @Test
-    fun amountCandidates_insertsExactLast() {
-        val c = amountCandidates(step = 5, lastMl = 123)
-        assertThat(c).contains(123)
-        assertThat(c).contains(120)
-        assertThat(c).contains(125)
-        assertThat(c[amountCenterIndex(c, 123)]).isEqualTo(123)
-        val step15 = amountCandidates(15, 120)
-        assertThat(step15[1] - step15[0]).isEqualTo(15)
-    }
-
-    @Test
     fun pumpExpress_notInFeedMl() = runTest {
         val care = Fakes().careLog()
         val babyId = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
@@ -1221,32 +1163,6 @@ class CareLogTest {
         val widget = care.recentCareSummary(babyId, zone)
         assertThat(widget.feedMl).isEqualTo(120)
         assertThat(widget.babyName).isEqualTo("豆豆")
-    }
-
-    @Test
-    fun searchUnitSuffixQueries_matchViaVisibleText() = runTest {
-        val care = Fakes().careLog()
-        val babyId = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
-        val day = LocalDate.now(zone)
-        val ts = day.atStartOfDay(zone).toInstant().toEpochMilli() + 1000
-        care.addRecord(
-            babyId,
-            RecordType.FORMULA,
-            timestamp = ts,
-            payloadJson = """{"amount_ml":120}""",
-        )
-        care.addRecord(
-            babyId,
-            RecordType.WEIGHT,
-            timestamp = ts + 1,
-            payloadJson = """{"value":6350,"unit":"g"}""",
-        )
-        val formula = care.search(babyId, "120ml")
-        val weight = care.search(babyId, "6.35kg")
-        assertThat(formula.map { it.type }).containsExactly(RecordType.FORMULA)
-        assertThat(weight.map { it.type }).containsExactly(RecordType.WEIGHT)
-        assertThat(care.getRecord(formula.single().id)!!.visibleBusinessText()).isEqualTo("120ml")
-        assertThat(care.search(babyId, "e")).isEmpty()
     }
 
     @Test

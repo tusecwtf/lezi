@@ -1,8 +1,6 @@
 package com.lezi.babylog.core.model
 
 import com.google.common.truth.Truth.assertThat
-import java.time.Clock
-import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
@@ -29,16 +27,6 @@ class RecordTimeDecisionTest {
         assertThat(gap).isEqualTo(RecordTimeDecision.RejectedGap)
         assertThat((overlap as RecordTimeDecision.Accepted).value.offset)
             .isEqualTo(ZoneOffset.ofHours(-5))
-    }
-
-    @Test
-    fun fixedClockIsTheSingleNowSource() {
-        val instant = Instant.parse("2026-07-23T02:30:00Z")
-        assertThat(
-            RecordTime.currentTimeMillis(
-                Clock.fixed(instant, ZoneOffset.UTC),
-            ),
-        ).isEqualTo(instant.toEpochMilli())
     }
 
     @Test

@@ -92,14 +92,6 @@ class DuplicateBabyNicknameException(val nickname: String) :
 class SleepStateChangedException :
     IllegalStateException("睡眠状态已变化，请重新打开睡眠菜单")
 
-enum class TimeBarKind { FEED, SLEEP }
-
-data class TimeBarSegment(
-    val startMinOfDay: Int,
-    val endMinOfDay: Int,
-    val kind: TimeBarKind,
-)
-
 data class CustomRecordItem(
     val id: Long,
     val name: String,
@@ -325,20 +317,21 @@ class CareLog @Inject constructor(
         return LocalFamilyIdentity(
             deviceId = user?.deviceId ?: "—",
             // Cache of membership 家庭称呼 when joined; local-only placeholder otherwise.
-            displayName = user?.displayName?.takeIf { it.isNotBlank() } ?: "我（本机）",
+            displayName = user?.displayName?.takeIf { it.isNotBlank() }
+                ?: com.lezi.babylog.sync.LOCAL_DEVICE_DISPLAY_NAME,
             familyId = family?.id ?: 1L,
         )
     }
 
     /**
      * Cache the current membership 家庭称呼 on [LocalUserEntity] after create/join/self-rename.
-     * Blank / 「我（本机）」 clear the cache so UI falls back to the local placeholder.
+     * Blank / local placeholder clear the cache so UI falls back to the default.
      */
     suspend fun updateLocalDisplayName(displayName: String?) {
         val existing = localUserDao.get() ?: return
         val normalized = displayName?.trim().orEmpty()
         val stored = normalized.takeIf {
-            it.isNotEmpty() && it != "我（本机）"
+            it.isNotEmpty() && it != com.lezi.babylog.sync.LOCAL_DEVICE_DISPLAY_NAME
         }
         localUserDao.upsert(existing.copy(displayName = stored))
     }
@@ -441,15 +434,6 @@ class CareLog @Inject constructor(
         val end = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
         val records = recordDao.listDay(babyId, start, end).map { it.toModel() }
         return CareAggregation.day(records, day, zone, now).toDailySummary()
-    }
-
-    suspend fun dayTimeBar(
-        babyId: Long,
-        day: LocalDate,
-        zone: ZoneId = ZoneId.systemDefault(),
-    ): List<TimeBarSegment> {
-        val records = dayRecords(babyId, day, zone)
-        return CareAggregation.timeBar(records, day, zone)
     }
 
     suspend fun addRecord(

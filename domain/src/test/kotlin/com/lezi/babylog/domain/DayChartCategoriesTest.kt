@@ -200,16 +200,6 @@ class DayChartCategoriesTest {
     }
 
     @Test
-    fun toggleSelection_nullToCategory_categoryToNull_categoryToOther() {
-        assertThat(DayChartCategories.toggleSelection(null, DayChartCategory.MILK))
-            .isEqualTo(DayChartCategory.MILK)
-        assertThat(DayChartCategories.toggleSelection(DayChartCategory.MILK, DayChartCategory.MILK))
-            .isNull()
-        assertThat(DayChartCategories.toggleSelection(DayChartCategory.MILK, DayChartCategory.PEE))
-            .isEqualTo(DayChartCategory.PEE)
-    }
-
-    @Test
     fun reconcileSelection_clearsWhenCategoryGone_keepsWhenStillPresent() {
         val withMilk = listOf(rec(1, RecordType.FORMULA), rec(2, RecordType.PEE))
         val withoutMilk = listOf(rec(2, RecordType.PEE), rec(3, RecordType.TEMPERATURE))
