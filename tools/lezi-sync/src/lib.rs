@@ -767,9 +767,14 @@ async fn put_media(
     // Metadata may already have been pulled and skipped. Republish after every
     // durable PUT so retrying a request also heals a process failure between
     // the file replacement and this database transaction.
-    state
+    let republished = state
         .store
         .republish_media(&principal.family_id, &client_uuid.to_string())?;
+    if !republished {
+        return Err(ApiError::conflict(
+            "Atomic bundle media cannot be replaced via legacy upload",
+        ));
+    }
     Ok(Json(json!({"ok": true, "size": content.len()})))
 }
 

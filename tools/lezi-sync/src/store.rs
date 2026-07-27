@@ -1158,7 +1158,7 @@ impl Store {
                 SELECT 1 FROM media_publications
                 WHERE family_id = ?1
                   AND media_uuid = ?2
-                  AND source = 'bundle'
+                  AND source IN ('bundle_pending', 'bundle')
                 ",
                 params![family_id, client_uuid],
                 |_| Ok(()),
@@ -1364,16 +1364,20 @@ impl Store {
         if !live {
             return Ok(false);
         }
-        transaction.execute(
+        let claimed = transaction.execute(
             "
             INSERT INTO media_publications(family_id, media_uuid, source, bundle_id)
             VALUES (?1, ?2, 'legacy', NULL)
             ON CONFLICT(family_id, media_uuid) DO UPDATE SET
                 source = 'legacy',
                 bundle_id = NULL
+            WHERE media_publications.source = 'legacy'
             ",
             params![family_id, client_uuid],
         )?;
+        if claimed == 0 {
+            return Ok(false);
+        }
         let mut cursor: i64 = transaction.query_row(
             "SELECT rev FROM family_meta WHERE family_id = ?1",
             params![family_id],

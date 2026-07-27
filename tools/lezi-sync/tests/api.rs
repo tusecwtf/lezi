@@ -7229,7 +7229,7 @@ async fn atomic_bundle_rejects_stale_root_when_published_is_newer() {
 }
 
 #[tokio::test]
-async fn stale_bundle_bytes_are_not_claimed_by_legacy_metadata_after_restart() {
+async fn pending_bundle_bytes_are_not_claimed_by_legacy_metadata_or_put_across_restart() {
     let rig = Rig::new();
     let created = create_family(
         &rig.app,
@@ -7362,6 +7362,26 @@ async fn stale_bundle_bytes_are_not_claimed_by_legacy_metadata_after_restart() {
     )
     .await;
     assert_eq!(legacy_status, StatusCode::OK, "{legacy_body}");
+
+    let legacy_put = request(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/media/{media_id}"),
+        Some(token),
+        Body::from("new"),
+        Some("image/jpeg"),
+    )
+    .await;
+    assert_eq!(
+        legacy_put.status(),
+        StatusCode::CONFLICT,
+        "legacy PUT claimed media bytes reserved by an incomplete bundle"
+    );
+    assert_eq!(
+        fs::read(&final_path).unwrap(),
+        b"old",
+        "rejected legacy PUT replaced quarantined bundle bytes"
+    );
 
     for app in [&rig.app, &rig.restart("generation-b")] {
         let (_, pull) = get_json(app, "/v1/pull?cursor=0", Some(token)).await;
