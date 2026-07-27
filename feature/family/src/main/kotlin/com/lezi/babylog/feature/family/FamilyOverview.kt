@@ -28,6 +28,14 @@ import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.domain.babyAgeLabel
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
+import java.util.Locale
+
+internal fun formatBirthWeightKg(grams: Int): String =
+    if (grams % 1000 == 0) {
+        "${grams / 1000}kg"
+    } else {
+        String.format(Locale.ROOT, "%.2fkg", grams / 1000.0)
+    }
 
 /**
  * Independent baby zone on the account Tab. Device ID / storage / network
@@ -89,9 +97,9 @@ internal fun FamilyOverview(
                             val birth = current?.let {
                                 LocalDate.ofEpochDay(it.birthdayEpochDay).toString()
                             }.orEmpty()
-                            val weight = current?.birthWeightGrams?.let { grams ->
-                                if (grams % 1000 == 0) "${grams / 1000}kg" else String.format("%.2fkg", grams / 1000.0)
-                            }.orEmpty()
+                            val weight = current?.birthWeightGrams
+                                ?.let(::formatBirthWeightKg)
+                                .orEmpty()
                             Text(
                                 listOfNotNull(
                                     birth.takeIf { it.isNotBlank() }?.let { "${it}出生" },
