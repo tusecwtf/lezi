@@ -12,6 +12,7 @@ enum class PendingReminderCleanupOperation {
 data class PendingReminderCleanup(
     val operation: PendingReminderCleanupOperation,
     val calendarEventIds: Set<Long>,
+    val carePlanIds: Set<Long> = emptySet(),
     val familyServerRetained: Boolean,
 )
 
@@ -21,7 +22,7 @@ interface PendingReminderCleanupStore {
     /**
      * Merge a new hand-off into pending work.
      *
-     * Event ids are deduplicated and retention can only be promoted to true.
+     * Reminder ids are deduplicated and retention can only be promoted to true.
      */
     suspend fun upsert(pending: PendingReminderCleanup)
 
@@ -31,9 +32,10 @@ interface PendingReminderCleanupStore {
 class CorruptPendingReminderCleanupException internal constructor(
     val operation: PendingReminderCleanupOperation,
     val familyServerRetained: Boolean,
+    reminderKind: String,
     invalidToken: String,
 ) : IllegalStateException(
-    "Corrupt pending reminder cleanup ${operation.name}: invalid calendar event id " +
+    "Corrupt pending reminder cleanup ${operation.name}: invalid $reminderKind id " +
         "'${invalidToken.take(MAX_DIAGNOSTIC_TOKEN_LENGTH)}'",
 )
 
@@ -49,12 +51,19 @@ internal class RoomPendingReminderCleanupStore(
         require(pending.calendarEventIds.all { it > 0L }) {
             "Pending reminder cleanup calendar event ids must be positive"
         }
+        require(pending.carePlanIds.all { it > 0L }) {
+            "Pending reminder cleanup care-plan ids must be positive"
+        }
         val existing = load(pending.operation)
         dao.upsert(
             PendingReminderCleanupEntity(
                 operation = pending.operation.storageKey,
                 calendarEventIds =
                     (existing?.calendarEventIds.orEmpty() + pending.calendarEventIds)
+                        .sorted()
+                        .joinToString(","),
+                carePlanIds =
+                    (existing?.carePlanIds.orEmpty() + pending.carePlanIds)
                         .sorted()
                         .joinToString(","),
                 familyServerRetained =
@@ -72,10 +81,17 @@ internal class RoomPendingReminderCleanupStore(
     ): PendingReminderCleanup =
         PendingReminderCleanup(
             operation = typedOperation,
-            calendarEventIds = decodeCalendarEventIds(
+            calendarEventIds = decodeReminderIds(
                 encoded = calendarEventIds,
                 operation = typedOperation,
                 familyServerRetained = familyServerRetained,
+                reminderKind = "calendar event",
+            ),
+            carePlanIds = decodeReminderIds(
+                encoded = carePlanIds,
+                operation = typedOperation,
+                familyServerRetained = familyServerRetained,
+                reminderKind = "care-plan",
             ),
             familyServerRetained = familyServerRetained,
         )
@@ -86,10 +102,11 @@ private val PendingReminderCleanupOperation.storageKey: String
         PendingReminderCleanupOperation.RECORDS_CLEAR -> "records_clear"
     }
 
-private fun decodeCalendarEventIds(
+private fun decodeReminderIds(
     encoded: String,
     operation: PendingReminderCleanupOperation,
     familyServerRetained: Boolean,
+    reminderKind: String,
 ): Set<Long> {
     if (encoded.isEmpty()) return emptySet()
     return encoded.split(',').mapTo(linkedSetOf()) { token ->
@@ -99,6 +116,7 @@ private fun decodeCalendarEventIds(
             throw CorruptPendingReminderCleanupException(
                 operation = operation,
                 familyServerRetained = familyServerRetained,
+                reminderKind = reminderKind,
                 invalidToken = token,
             )
         }

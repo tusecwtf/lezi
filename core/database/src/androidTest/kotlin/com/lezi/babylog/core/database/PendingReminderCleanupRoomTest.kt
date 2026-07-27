@@ -38,6 +38,7 @@ class PendingReminderCleanupRoomTest {
             PendingReminderCleanupEntity(
                 operation = "records_clear",
                 calendarEventIds = "9,3,9",
+                carePlanIds = "8,4,8",
                 familyServerRetained = false,
             ),
         )
@@ -46,6 +47,7 @@ class PendingReminderCleanupRoomTest {
             PendingReminderCleanup(
                 operation = PendingReminderCleanupOperation.RECORDS_CLEAR,
                 calendarEventIds = setOf(2L, 3L),
+                carePlanIds = setOf(2L, 4L),
                 familyServerRetained = true,
             ),
         )
@@ -54,6 +56,7 @@ class PendingReminderCleanupRoomTest {
             PendingReminderCleanup(
                 operation = PendingReminderCleanupOperation.RECORDS_CLEAR,
                 calendarEventIds = setOf(2L, 3L, 9L),
+                carePlanIds = setOf(2L, 4L, 8L),
                 familyServerRetained = true,
             ),
             store.load(PendingReminderCleanupOperation.RECORDS_CLEAR),
@@ -62,6 +65,7 @@ class PendingReminderCleanupRoomTest {
             PendingReminderCleanupEntity(
                 operation = "records_clear",
                 calendarEventIds = "2,3,9",
+                carePlanIds = "2,4,8",
                 familyServerRetained = true,
             ),
             dao.get("records_clear"),

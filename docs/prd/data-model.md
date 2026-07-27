@@ -148,6 +148,11 @@ Record 会立即带当前 session membership；NAS 对 ordinary push 与 atomic 
 在 `/health` 宣告 `record_membership_author` 时才发送新 wire key；旧 NAS 继续收到
 不含该 key 的兼容 payload，并由 device 链路回退显示。
 
+Room 18→19 为既有 `pending_reminder_cleanup` 增加默认空集合的
+`carePlanIds`。清除记录或全部本地数据时，系统日历与护理计划的本机提醒 ID 在领域删除
+事务内一并持久化；只有两类提醒都取消成功后才删除 pending 行，进程重启恢复不得遗失
+已删除护理计划的闹钟身份。
+
 NAS 升级时只回填可证明的历史作者：同家庭内一个 `created_by_device_id` 恰好对应一个
 历史 membership 时，写入该 membership 并推进 Record/family revision，使已经越过旧
 cursor 的客户端仍能重新拉到；同一 device 曾对应多个 membership、字段为空或无法映射

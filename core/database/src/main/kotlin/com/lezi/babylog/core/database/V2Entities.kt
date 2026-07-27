@@ -140,6 +140,8 @@ interface CalendarEventDao {
 data class PendingReminderCleanupEntity(
     @PrimaryKey val operation: String,
     val calendarEventIds: String,
+    @androidx.room.ColumnInfo(defaultValue = "''")
+    val carePlanIds: String = "",
     val familyServerRetained: Boolean,
 )
 

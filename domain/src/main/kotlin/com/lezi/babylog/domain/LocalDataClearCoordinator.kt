@@ -44,16 +44,12 @@ class CalendarReminderMutationGuard @Inject constructor() {
     suspend fun <T> withLock(block: suspend () -> T): T = mutex.withLock { block() }
 }
 
-internal data class LocalDataClearCommit(
-    val carePlanIdsToCancel: List<Long>,
-)
-
 /** Internal persistence seam; the production adapter owns the single Room transaction. */
 internal interface LocalDataClearPersistence {
     suspend fun clear(
         scope: LocalDataClearScope,
         familyServerRetained: Boolean,
-    ): LocalDataClearCommit
+    )
 }
 
 @Singleton
@@ -73,9 +69,9 @@ internal class DaoLocalDataClearPersistence @Inject constructor(
     override suspend fun clear(
         scope: LocalDataClearScope,
         familyServerRetained: Boolean,
-    ): LocalDataClearCommit = transactionRunner.run {
+    ) = transactionRunner.run {
         val calendarEventIds = allCalendarEventIds()
-        val carePlanIds = carePlanDao.listAllIncludingDeleted().map { it.id }
+        val carePlanIds = carePlanDao.listAllIncludingDeleted().map { it.id }.toSet()
 
         recordDao.deleteAll()
         calendarEventDao.deleteAll()
@@ -92,10 +88,10 @@ internal class DaoLocalDataClearPersistence @Inject constructor(
             PendingReminderCleanup(
                 operation = PendingReminderCleanupOperation.RECORDS_CLEAR,
                 calendarEventIds = calendarEventIds.toSet(),
+                carePlanIds = carePlanIds,
                 familyServerRetained = familyServerRetained,
             ),
         )
-        LocalDataClearCommit(carePlanIdsToCancel = carePlanIds)
     }
 
     private suspend fun allCalendarEventIds(): List<Long> =
@@ -134,11 +130,10 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
 ) : LocalDataClearCoordinator {
     override suspend fun clear(scope: LocalDataClearScope) = mutationGuard.withLock {
         val familyServerRetained = syncPort.session().first().familyId.isNotBlank()
-        var committed = LocalDataClearCommit(carePlanIdsToCancel = emptyList())
         var failure: Throwable? = null
         try {
             executeThroughSyncBarrier(scope) { onCommitted ->
-                committed = persistence.clear(scope, familyServerRetained)
+                persistence.clear(scope, familyServerRetained)
                 onCommitted()
                 settings.clear(scope)
             }.getOrThrow()
@@ -147,8 +142,7 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
         }
 
         failure = withContext(NonCancellable) {
-            val afterCalendarReminders = finishPendingReminderCleanup(failure)
-            cancelCarePlanReminders(committed.carePlanIdsToCancel, afterCalendarReminders)
+            finishPendingReminderCleanup(failure)
         }
         throwClearFailure(failure)
     }
@@ -176,6 +170,7 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
             ?: return initialFailure
         return try {
             reminderCleanup.cancelForRecordsClear(pending.calendarEventIds)
+            pending.carePlanIds.forEach { reminderCleanup.cancelCarePlan(it) }
             pendingReminderCleanupStore.delete(operation)
             initialFailure
         } catch (cancellation: CancellationException) {
@@ -191,29 +186,6 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
                 ).also { classified ->
                     if (initialFailure != null) classified.addSuppressed(reminderError)
                 }
-            }
-        }
-    }
-
-    private suspend fun cancelCarePlanReminders(
-        carePlanIds: List<Long>,
-        initialFailure: Throwable?,
-    ): Throwable? {
-        if (carePlanIds.isEmpty()) return initialFailure
-        return try {
-            carePlanIds.forEach { reminderCleanup.cancelCarePlan(it) }
-            initialFailure
-        } catch (cancellation: CancellationException) {
-            throw cancellation
-        } catch (reminderError: Throwable) {
-            when (initialFailure) {
-                is LocalRecordsClearCommittedException -> initialFailure.apply {
-                    addSuppressed(reminderError)
-                }
-                else -> LocalRecordsClearCommittedException(
-                    familyServerRetained = syncPort.session().first().familyId.isNotBlank(),
-                    cause = reminderError,
-                )
             }
         }
     }

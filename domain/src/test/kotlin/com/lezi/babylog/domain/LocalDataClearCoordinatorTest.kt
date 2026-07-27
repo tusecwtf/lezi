@@ -81,6 +81,26 @@ class LocalDataClearCoordinatorTest {
     }
 
     @Test
+    fun carePlanReminderFailureSurvivesCoordinatorRecreationAndRecovery() = runTest {
+        val rig = ClearCoordinatorRig(familyServerRetained = true)
+        rig.reminders.carePlanFailuresRemaining = 1
+
+        val failure = runCatching {
+            rig.coordinator.clear(LocalDataClearScope.RecordsOnly)
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(LocalRecordsClearCommittedException::class.java)
+        assertThat(rig.reminders.cancelledCarePlanIds).containsExactly(21L)
+
+        rig.newCoordinator().recoverPendingReminderCleanup()
+
+        assertThat(rig.reminders.cancelledCarePlanIds)
+            .containsExactly(21L, 21L, 22L)
+            .inOrder()
+        assertThat(rig.pending.pending).isNull()
+    }
+
+    @Test
     fun nestedCancellationAfterCommitPropagatesTheOriginalCancellation() = runTest {
         val rig = ClearCoordinatorRig(familyServerRetained = true)
         val cancellation = CancellationException("caller stopped")
@@ -120,14 +140,17 @@ private class ClearCoordinatorRig(
     val settings = RecordingLocalDataClearSettings()
     val reminders = RecordingClearReminderPort()
     val sync = RecordingClearSyncPort(familyServerRetained)
-    val coordinator: LocalDataClearCoordinator = DefaultLocalDataClearCoordinator(
-        persistence = persistence,
-        settings = settings,
-        syncPort = sync,
-        reminderCleanup = reminders,
-        pendingReminderCleanupStore = pending,
-        mutationGuard = CalendarReminderMutationGuard(),
-    )
+    val coordinator: LocalDataClearCoordinator = newCoordinator()
+
+    fun newCoordinator(): LocalDataClearCoordinator =
+        DefaultLocalDataClearCoordinator(
+            persistence = persistence,
+            settings = settings,
+            syncPort = sync,
+            reminderCleanup = reminders,
+            pendingReminderCleanupStore = pending,
+            mutationGuard = CalendarReminderMutationGuard(),
+        )
 }
 
 private class RecordingLocalDataClearPersistence(
@@ -139,17 +162,17 @@ private class RecordingLocalDataClearPersistence(
     override suspend fun clear(
         scope: LocalDataClearScope,
         familyServerRetained: Boolean,
-    ): LocalDataClearCommit {
+    ) {
         failure?.let { throw it }
         scopes += scope
         pendingStore.upsert(
             PendingReminderCleanup(
                 operation = PendingReminderCleanupOperation.RECORDS_CLEAR,
                 calendarEventIds = setOf(11L, 12L),
+                carePlanIds = setOf(21L, 22L),
                 familyServerRetained = familyServerRetained,
             ),
         )
-        return LocalDataClearCommit(carePlanIdsToCancel = listOf(21L, 22L))
     }
 }
 
@@ -179,6 +202,7 @@ private class RecordingPendingReminderCleanupStore : PendingReminderCleanupStore
         val existing = this.pending?.takeIf { it.operation == pending.operation }
         this.pending = pending.copy(
             calendarEventIds = existing?.calendarEventIds.orEmpty() + pending.calendarEventIds,
+            carePlanIds = existing?.carePlanIds.orEmpty() + pending.carePlanIds,
             familyServerRetained =
                 existing?.familyServerRetained == true || pending.familyServerRetained,
         )
@@ -238,12 +262,17 @@ private class RecordingClearReminderPort : ReminderCleanupPort {
     val recordClearBatches = mutableListOf<Set<Long>>()
     val cancelledCarePlanIds = mutableListOf<Long>()
     var recordClearFailuresRemaining = 0
+    var carePlanFailuresRemaining = 0
 
     override suspend fun scheduleCalendar(event: CalendarEvent): Boolean = true
     override suspend fun cancelCalendar(eventId: Long) = Unit
     override suspend fun scheduleCarePlan(plan: CarePlan): Boolean = true
     override suspend fun cancelCarePlan(carePlanId: Long) {
         cancelledCarePlanIds += carePlanId
+        if (carePlanFailuresRemaining > 0) {
+            carePlanFailuresRemaining -= 1
+            throw IllegalStateException("care-plan reminder cleanup failed")
+        }
     }
     override suspend fun cancelCarePlanByClientUuid(clientUuid: String) = Unit
     override suspend fun cancelForRecordsClear(calendarEventIds: Collection<Long>) {

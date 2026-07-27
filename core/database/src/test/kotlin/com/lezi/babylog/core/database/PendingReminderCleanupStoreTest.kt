@@ -33,6 +33,7 @@ class PendingReminderCleanupStoreTest {
             PendingReminderCleanupEntity(
                 operation = "records_clear",
                 calendarEventIds = "7,2,7",
+                carePlanIds = "5,2,5",
                 familyServerRetained = false,
             ),
         )
@@ -42,6 +43,7 @@ class PendingReminderCleanupStoreTest {
             PendingReminderCleanup(
                 operation = PendingReminderCleanupOperation.RECORDS_CLEAR,
                 calendarEventIds = setOf(3L, 2L),
+                carePlanIds = setOf(3L, 2L),
                 familyServerRetained = false,
             ),
         )
@@ -49,6 +51,7 @@ class PendingReminderCleanupStoreTest {
             PendingReminderCleanup(
                 operation = PendingReminderCleanupOperation.RECORDS_CLEAR,
                 calendarEventIds = setOf(1L),
+                carePlanIds = setOf(1L),
                 familyServerRetained = true,
             ),
         )
@@ -56,6 +59,7 @@ class PendingReminderCleanupStoreTest {
             PendingReminderCleanup(
                 operation = PendingReminderCleanupOperation.RECORDS_CLEAR,
                 calendarEventIds = emptySet(),
+                carePlanIds = emptySet(),
                 familyServerRetained = false,
             ),
         )
@@ -64,6 +68,7 @@ class PendingReminderCleanupStoreTest {
             PendingReminderCleanupEntity(
                 operation = "records_clear",
                 calendarEventIds = "1,2,3,7",
+                carePlanIds = "1,2,3,5",
                 familyServerRetained = true,
             ),
         )
@@ -84,7 +89,9 @@ class PendingReminderCleanupStoreTest {
         )
 
         assertThat(store.load(operation)?.calendarEventIds).isEmpty()
+        assertThat(store.load(operation)?.carePlanIds).isEmpty()
         assertThat(dao.pending?.calendarEventIds).isEmpty()
+        assertThat(dao.pending?.carePlanIds).isEmpty()
 
         store.delete(operation)
 
@@ -107,6 +114,28 @@ class PendingReminderCleanupStoreTest {
 
         assertThat(failure).isInstanceOf(CorruptPendingReminderCleanupException::class.java)
         assertThat(failure).hasMessageThat().contains("not-an-id")
+        assertThat(dao.pending).isEqualTo(original)
+        assertThat(dao.deleteCount).isEqualTo(0)
+    }
+
+    @Test
+    fun corruptCarePlanIdsFailClosedAndKeepPendingRow() = runBlocking {
+        val original = PendingReminderCleanupEntity(
+            operation = "records_clear",
+            calendarEventIds = "3,9",
+            carePlanIds = "7,not-a-plan,11",
+            familyServerRetained = true,
+        )
+        val dao = FakePendingReminderCleanupDao(original)
+        val store = RoomPendingReminderCleanupStore(dao)
+
+        val failure = runCatching {
+            store.load(PendingReminderCleanupOperation.RECORDS_CLEAR)
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(CorruptPendingReminderCleanupException::class.java)
+        assertThat(failure).hasMessageThat().contains("care-plan")
+        assertThat(failure).hasMessageThat().contains("not-a-plan")
         assertThat(dao.pending).isEqualTo(original)
         assertThat(dao.deleteCount).isEqualTo(0)
     }

@@ -3862,6 +3862,7 @@ private class FakePendingReminderCleanupStore : PendingReminderCleanupStore {
         val existing = this.pending?.takeIf { it.operation == pending.operation }
         this.pending = pending.copy(
             calendarEventIds = existing?.calendarEventIds.orEmpty() + pending.calendarEventIds,
+            carePlanIds = existing?.carePlanIds.orEmpty() + pending.carePlanIds,
             familyServerRetained =
                 existing?.familyServerRetained == true || pending.familyServerRetained,
         )

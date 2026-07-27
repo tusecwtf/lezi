@@ -370,6 +370,16 @@ internal val MIGRATION_17_18 = object : Migration(17, 18) {
     }
 }
 
+/** Durable care-plan alarm identities for records/all-local clear recovery. */
+internal val MIGRATION_18_19 = object : Migration(18, 19) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "ALTER TABLE pending_reminder_cleanup ADD COLUMN " +
+                "`carePlanIds` TEXT NOT NULL DEFAULT ''",
+        )
+    }
+}
+
 @Module
 @InstallIn(SingletonComponent::class)
 object DatabaseModule {
@@ -395,6 +405,7 @@ object DatabaseModule {
                 MIGRATION_15_16,
                 MIGRATION_16_17,
                 MIGRATION_17_18,
+                MIGRATION_18_19,
             )
             .build()
 
