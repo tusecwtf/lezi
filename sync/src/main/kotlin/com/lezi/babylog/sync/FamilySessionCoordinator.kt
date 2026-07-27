@@ -45,7 +45,7 @@ internal interface FamilySessionReplica {
         entities: List<SyncEntity>,
     )
 
-    suspend fun persistAuthenticatedSelfMembershipIfMissing(
+    suspend fun convergeAuthenticatedSelfMembership(
         session: SyncSession,
         members: List<FamilyMember>,
     ): SyncSession
@@ -218,7 +218,7 @@ internal class FamilySessionCoordinator(
     private suspend fun listMembers(): FamilySessionOutcome =
         withAllowedSession { session ->
             val members = backend.members(session)
-            val refreshed = replica.persistAuthenticatedSelfMembershipIfMissing(session, members)
+            val refreshed = replica.convergeAuthenticatedSelfMembership(session, members)
             onSessionObserved(refreshed)
             FamilySessionOutcome.MembersListed(members)
         }

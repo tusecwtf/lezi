@@ -91,11 +91,8 @@ internal class ReplicaSyncEngine(
         requireRemoteAllowed(session)
         val plan = SyncPlan.forTrigger(trigger)
         var current = session
-        if (
-            current.membershipId.isBlank() &&
-            CAPABILITY_RECORD_MEMBERSHIP_AUTHOR in remoteCapabilities()
-        ) {
-            current = persistAuthenticatedSelfMembershipIfMissing(
+        if (CAPABILITY_RECORD_MEMBERSHIP_AUTHOR in remoteCapabilities()) {
+            current = convergeAuthenticatedSelfMembership(
                 current,
                 backend.members(current),
             )
@@ -1324,17 +1321,17 @@ internal class ReplicaSyncEngine(
         }
     }
 
-    override suspend fun persistAuthenticatedSelfMembershipIfMissing(
+    override suspend fun convergeAuthenticatedSelfMembership(
         session: SyncSession,
         members: List<FamilyMember>,
     ): SyncSession {
-        if (session.membershipId.isNotBlank()) return session
         val membershipId = members
             .singleOrNull { it.isSelf }
             ?.membershipId
             ?.trim()
             ?.takeIf { it.isNotEmpty() }
             ?: return session
+        if (session.membershipId == membershipId) return session
         val updated = session.copy(membershipId = membershipId)
         preferences.saveSession(updated)
         return updated

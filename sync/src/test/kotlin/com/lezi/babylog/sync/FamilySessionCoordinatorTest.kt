@@ -902,7 +902,7 @@ private class RecordingFamilySessionReplica(
         onApply(session, entities)
     }
 
-    override suspend fun persistAuthenticatedSelfMembershipIfMissing(
+    override suspend fun convergeAuthenticatedSelfMembership(
         session: SyncSession,
         members: List<FamilyMember>,
     ): SyncSession = onPersistMembership(session, members)

@@ -111,6 +111,42 @@ class ReplicaSyncEngineTest {
     }
 
     @Test
+    fun synchronizationConvergesLegacyMembershipAliasToCanonicalSelf() = runTest {
+        val session = joinedReplicaSession().copy(membershipId = "legacy-membership-alias")
+        val rig = ReplicaEngineRig(
+            session = session,
+            capabilities = setOf(
+                CAPABILITY_ATOMIC_BUNDLE,
+                CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+            ),
+        )
+        rig.backend.nextMembers = listOf(
+            FamilyMember(
+                displayName = "妈妈",
+                role = FamilyRole.Owner,
+                isSelf = true,
+                membershipId = "canonical-membership",
+            ),
+            FamilyMember(
+                displayName = "爸爸",
+                role = FamilyRole.Member,
+                isSelf = false,
+                membershipId = "peer-membership",
+            ),
+        )
+
+        val outcome = rig.engine.synchronize(
+            session = session,
+            trigger = SyncTrigger.PullToRefresh,
+        )
+
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
+        assertThat(rig.backend.memberCalls).isEqualTo(1)
+        assertThat(rig.preferences.current().membershipId)
+            .isEqualTo("canonical-membership")
+    }
+
+    @Test
     fun cursorAheadRequeuesTheCleanReplicaBeforeTheAuthoritativePull() = runTest {
         val session = joinedReplicaSession().copy(
             pullCursor = 9,
@@ -332,6 +368,7 @@ class ReplicaSyncEngineTest {
 
 private class ReplicaEngineRig(
     session: SyncSession,
+    capabilities: Set<String> = setOf(CAPABILITY_ATOMIC_BUNDLE),
 ) {
     val backend = RecordingSyncBackend()
     val preferences = MemorySyncPreferences(session)
@@ -365,7 +402,7 @@ private class ReplicaEngineRig(
         carePlanAppliedListener = NoOpCarePlanFamilyAppliedListener(),
         fulfillmentCandidateDao = fulfillmentCandidates,
         requireRemoteAllowed = {},
-        remoteCapabilities = { setOf(CAPABILITY_ATOMIC_BUNDLE) },
+        remoteCapabilities = { capabilities },
     )
 }
 
