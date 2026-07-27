@@ -129,6 +129,33 @@ class ReplicaSyncEngineTest {
     }
 
     @Test
+    fun pullResponseRequiresTheExactCurrentGenerationBeforeApplyOrCheckpoint() = runTest {
+        listOf("", "generation-b").forEach { returnedGeneration ->
+            val session = joinedReplicaSession().copy(pullCursor = 4)
+            val rig = ReplicaEngineRig(session)
+            rig.backend.nextPull = PullResult(
+                entities = listOf(remoteReplicaBaby()),
+                cursor = 5,
+                generation = returnedGeneration,
+                hasMore = false,
+            )
+
+            val failure = runCatching {
+                rig.engine.synchronize(
+                    session = session,
+                    trigger = SyncTrigger.PullToRefresh,
+                )
+            }.exceptionOrNull()
+
+            assertThat(failure).isInstanceOf(IllegalArgumentException::class.java)
+            assertThat(failure).hasMessageThat().contains("代际")
+            assertThat(rig.babies.getByClientUuid("baby-remote")).isNull()
+            assertThat(rig.preferences.current().pullCursor).isEqualTo(4)
+            assertThat(rig.preferences.current().pullGeneration).isEqualTo("generation-a")
+        }
+    }
+
+    @Test
     fun mismatchedAuthenticatedSelfMembershipFailsWithoutRepairingLocalState() = runTest {
         val session = joinedReplicaSession().copy(membershipId = "session-membership")
         val rig = ReplicaEngineRig(

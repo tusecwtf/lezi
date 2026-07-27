@@ -1488,10 +1488,8 @@ internal class ReplicaSyncEngine(
                     "家庭服务器分页 cursor 未推进"
                 }
             }
-            if (current.pullGeneration.isNotBlank() && pulled.generation.isNotBlank()) {
-                require(pulled.generation == current.pullGeneration) {
-                    "家庭服务器在分页期间切换了同步代际"
-                }
+            require(pulled.generation == current.pullGeneration) {
+                "家庭服务器在分页期间返回了非当前同步代际"
             }
             val pageFamilyName = normalizeFamilyNameForWire(pulled.familyName)
             require(!hasObservedFamilyName || observedFamilyName == pageFamilyName) {
@@ -1524,11 +1522,10 @@ internal class ReplicaSyncEngine(
                 preferences.updateCreatorAcknowledgements(remove = acknowledgedCreators)
             }
             downloadMissingMedia(current, mediaEditGuard)
-            val nextGeneration = pulled.generation.ifBlank { current.pullGeneration }
             if (!deferCursorUntilComplete) {
                 preferences.updatePullCheckpoint(
                     cursor = pulled.cursor,
-                    generation = nextGeneration,
+                    generation = pulled.generation,
                     familyName = pageFamilyName,
                 )
                 current = preferences.session.first()
@@ -1539,7 +1536,7 @@ internal class ReplicaSyncEngine(
                 // have been applied.
                 current = current.copy(
                     pullCursor = pulled.cursor,
-                    pullGeneration = nextGeneration,
+                    pullGeneration = pulled.generation,
                     familyName = pageFamilyName,
                 )
             }
