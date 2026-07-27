@@ -1,0 +1,107 @@
+package com.lezi.babylog.feature.settings
+
+import java.time.Instant
+import java.time.LocalDate
+import java.time.YearMonth
+import java.time.ZoneId
+
+internal data class CalendarMonthCell(
+    val date: LocalDate,
+    val isEnabled: Boolean,
+    val isToday: Boolean,
+)
+
+internal data class CalendarMonthWindow(
+    val startInclusive: Long,
+    val endExclusive: Long,
+)
+
+/** Epoch bounds for one local calendar month; never assumes every day is 24 hours. */
+internal fun calendarMonthWindow(
+    visibleMonth: YearMonth,
+    zone: ZoneId,
+): CalendarMonthWindow = CalendarMonthWindow(
+    startInclusive = visibleMonth.atDay(1).atStartOfDay(zone).toInstant().toEpochMilli(),
+    endExclusive = visibleMonth.plusMonths(1).atDay(1).atStartOfDay(zone).toInstant().toEpochMilli(),
+)
+
+/** A stable six-week, Monday-first grid; overflow days are visible but disabled. */
+internal fun calendarMonthCells(
+    visibleMonth: YearMonth,
+    today: LocalDate,
+): List<CalendarMonthCell> {
+    val firstOfMonth = visibleMonth.atDay(1)
+    val gridStart = firstOfMonth.minusDays((firstOfMonth.dayOfWeek.value - 1).toLong())
+    return List(CALENDAR_MONTH_CELL_COUNT) { index ->
+        val date = gridStart.plusDays(index.toLong())
+        CalendarMonthCell(
+            date = date,
+            isEnabled = YearMonth.from(date) == visibleMonth,
+            isToday = date == today,
+        )
+    }
+}
+
+/** Items belonging to one device-local calendar date, preserving chronological order. */
+internal fun calendarItemsForDate(
+    items: List<CalendarDayItem>,
+    date: LocalDate,
+    zone: ZoneId,
+): List<CalendarDayItem> = items
+    .asSequence()
+    .filter { item ->
+        Instant.ofEpochMilli(item.sortAt).atZone(zone).toLocalDate() == date
+    }
+    .sortedBy(CalendarDayItem::sortAt)
+    .toList()
+
+internal fun calendarItemCountsByDate(
+    items: List<CalendarDayItem>,
+    zone: ZoneId,
+): Map<LocalDate, Int> = items.groupingBy { item ->
+    Instant.ofEpochMilli(item.sortAt).atZone(zone).toLocalDate()
+}.eachCount()
+
+internal object CalendarUiTags {
+    const val MonthGrid = "calendar_month_grid"
+    const val PreviousMonth = "calendar_previous_month"
+    const val NextMonth = "calendar_next_month"
+    const val ScheduleCare = "calendar_schedule_care"
+    const val SelectedDayItems = "calendar_selected_day_items"
+
+    fun day(date: LocalDate): String = "calendar_day_$date"
+}
+
+/** Pure selection/navigation state for the Lezi month calendar. */
+internal data class CalendarMonthState(
+    val visibleMonth: YearMonth,
+    val selectedDate: LocalDate,
+    val today: LocalDate,
+) {
+    fun previousMonth(): CalendarMonthState = moveMonth(-1)
+
+    fun nextMonth(): CalendarMonthState = moveMonth(1)
+
+    fun selectDate(date: LocalDate): CalendarMonthState =
+        if (YearMonth.from(date) == visibleMonth) copy(selectedDate = date) else this
+
+    private fun moveMonth(delta: Long): CalendarMonthState {
+        val target = visibleMonth.plusMonths(delta)
+        val selectedDay = selectedDate.dayOfMonth.coerceAtMost(target.lengthOfMonth())
+        return copy(
+            visibleMonth = target,
+            selectedDate = target.atDay(selectedDay),
+        )
+    }
+
+    companion object {
+        fun initial(initialDate: LocalDate, today: LocalDate): CalendarMonthState =
+            CalendarMonthState(
+                visibleMonth = YearMonth.from(initialDate),
+                selectedDate = initialDate,
+                today = today,
+            )
+    }
+}
+
+private const val CALENDAR_MONTH_CELL_COUNT = 6 * 7

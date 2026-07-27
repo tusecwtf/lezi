@@ -1,0 +1,137 @@
+package com.lezi.babylog.feature.settings
+
+import com.lezi.babylog.core.model.CarePlan
+import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.domain.CalendarEvent
+import java.time.LocalDate
+import java.time.YearMonth
+import java.time.ZoneId
+import java.time.ZonedDateTime
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class CalendarMonthStateTest {
+    @Test
+    fun initialDateOwnsSelectionAndMonthNavigationClampsDayAtMonthBoundary() {
+        val initial = CalendarMonthState.initial(
+            initialDate = LocalDate.of(2024, 1, 31),
+            today = LocalDate.of(2024, 1, 15),
+        )
+
+        assertEquals(YearMonth.of(2024, 1), initial.visibleMonth)
+        assertEquals(LocalDate.of(2024, 1, 31), initial.selectedDate)
+
+        val february = initial.nextMonth()
+        assertEquals(YearMonth.of(2024, 2), february.visibleMonth)
+        assertEquals(LocalDate.of(2024, 2, 29), february.selectedDate)
+
+        val january = february.previousMonth()
+        assertEquals(YearMonth.of(2024, 1), january.visibleMonth)
+        assertEquals(LocalDate.of(2024, 1, 29), january.selectedDate)
+    }
+
+    @Test
+    fun monthGridStartsOnMondayAndKeepsCrossMonthFillDisabled() {
+        val cells = calendarMonthCells(
+            visibleMonth = YearMonth.of(2024, 3),
+            today = LocalDate.of(2024, 3, 10),
+        )
+
+        assertEquals(42, cells.size)
+        assertEquals(LocalDate.of(2024, 2, 26), cells.first().date)
+        assertEquals(LocalDate.of(2024, 4, 7), cells.last().date)
+        assertEquals(LocalDate.of(2024, 3, 1), cells[4].date)
+        assertEquals(1, cells.first().date.dayOfWeek.value)
+        assertEquals(7, cells[6].date.dayOfWeek.value)
+        assertFalse(cells.first().isEnabled)
+        assertTrue(cells[4].isEnabled)
+        assertTrue(cells.single { it.date == LocalDate.of(2024, 3, 10) }.isToday)
+    }
+
+    @Test
+    fun selectingEnabledDayUpdatesSelectionButOverflowFillCannotJumpMonth() {
+        val initial = CalendarMonthState.initial(
+            initialDate = LocalDate.of(2024, 3, 15),
+            today = LocalDate.of(2024, 3, 10),
+        )
+
+        val selected = initial.selectDate(LocalDate.of(2024, 3, 20))
+        assertEquals(LocalDate.of(2024, 3, 20), selected.selectedDate)
+
+        val overflowIgnored = selected.selectDate(LocalDate.of(2024, 4, 1))
+        assertEquals(selected, overflowIgnored)
+    }
+
+    @Test
+    fun selectedDayFiltersPlansAndLegacyEventsUsingDeviceZoneAcrossDst() {
+        val newYork = ZoneId.of("America/New_York")
+        val selected = LocalDate.of(2024, 3, 10)
+        val legacyAt = ZonedDateTime.of(2024, 3, 10, 1, 30, 0, 0, newYork)
+            .toInstant()
+            .toEpochMilli()
+        val planAt = ZonedDateTime.of(2024, 3, 10, 23, 30, 0, 0, newYork)
+            .toInstant()
+            .toEpochMilli()
+        val nextDayAt = ZonedDateTime.of(2024, 3, 11, 0, 15, 0, 0, newYork)
+            .toInstant()
+            .toEpochMilli()
+        val items = listOf(
+            CalendarDayItem.Plan(plan(id = 2L, scheduledAt = planAt)),
+            CalendarDayItem.LegacyEvent(event(id = 1L, eventAt = legacyAt)),
+            CalendarDayItem.Plan(plan(id = 3L, scheduledAt = nextDayAt)),
+        )
+
+        val newYorkItems = calendarItemsForDate(items, selected, newYork)
+        assertEquals(
+            listOf(
+                CalendarDayItem.LegacyEvent::class,
+                CalendarDayItem.Plan::class,
+            ),
+            newYorkItems.map { it::class },
+        )
+        assertEquals(listOf(legacyAt, planAt), newYorkItems.map { it.sortAt })
+
+        // 23:30 after the spring-forward transition is already March 11 in Shanghai.
+        val shanghaiItems = calendarItemsForDate(items, selected, ZoneId.of("Asia/Shanghai"))
+        assertEquals(listOf(legacyAt), shanghaiItems.map { it.sortAt })
+    }
+
+    @Test
+    fun visibleMonthQueryWindowUsesLocalMidnightsAcrossDst() {
+        val newYork = ZoneId.of("America/New_York")
+
+        val window = calendarMonthWindow(YearMonth.of(2024, 3), newYork)
+
+        assertEquals(
+            ZonedDateTime.of(2024, 3, 1, 0, 0, 0, 0, newYork).toInstant().toEpochMilli(),
+            window.startInclusive,
+        )
+        assertEquals(
+            ZonedDateTime.of(2024, 4, 1, 0, 0, 0, 0, newYork).toInstant().toEpochMilli(),
+            window.endExclusive,
+        )
+        assertEquals(31L * 24 * 60 * 60_000L - 60 * 60_000L, window.endExclusive - window.startInclusive)
+    }
+
+    private fun plan(id: Long, scheduledAt: Long) = CarePlan(
+        id = id,
+        clientUuid = "plan-$id",
+        babyId = 1L,
+        type = RecordType.BATH,
+        scheduledAt = scheduledAt,
+        scheduledZoneId = "America/New_York",
+        updatedAt = scheduledAt,
+    )
+
+    private fun event(id: Long, eventAt: Long) = CalendarEvent(
+        id = id,
+        clientUuid = "event-$id",
+        babyId = 1L,
+        title = "event-$id",
+        note = null,
+        eventAt = eventAt,
+        remindAt = null,
+    )
+}

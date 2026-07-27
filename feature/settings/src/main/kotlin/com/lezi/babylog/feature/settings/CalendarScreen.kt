@@ -23,8 +23,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
@@ -42,6 +40,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -53,6 +52,9 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -92,6 +94,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalTime
+import java.time.YearMonth
 import kotlinx.coroutines.flow.combine
 import java.time.ZoneId
 import java.time.ZoneOffset
@@ -202,13 +205,11 @@ class CalendarViewModel @Inject constructor(
     private val _status = MutableStateFlow<String?>(null)
     val status = _status
 
-    private val windowStart = RecordTime.today(zone)
-        .minusYears(1)
-        .atStartOfDay(zone)
-        .toInstant()
-        .toEpochMilli()
-    private val windowEnd =
-        LocalDate.of(2101, 1, 1).atStartOfDay(zone).toInstant().toEpochMilli()
+    private val visibleMonth = MutableStateFlow(YearMonth.from(RecordTime.today(zone)))
+
+    fun showMonth(month: YearMonth) {
+        visibleMonth.value = month
+    }
 
     /** Family owner/admin — gates conflict audit entry (domain still re-checks). */
     val isFamilyAdmin = flow { emit(careLog.isFamilyAdmin()) }
@@ -224,15 +225,19 @@ class CalendarViewModel @Inject constructor(
     val conflictBusy = _conflictBusy.asStateFlow()
 
     @OptIn(ExperimentalCoroutinesApi::class)
-    val events = careLog.observeCurrentBaby().flatMapLatest { baby ->
+    val events = combine(careLog.observeCurrentBaby(), visibleMonth) { baby, month ->
+        baby to calendarMonthWindow(month, zone)
+    }.flatMapLatest { (baby, window) ->
         if (baby == null) flowOf(emptyList())
-        else careLog.observeCalendarEvents(baby.id, windowStart, windowEnd)
+        else careLog.observeCalendarEvents(baby.id, window.startInclusive, window.endExclusive)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     @OptIn(ExperimentalCoroutinesApi::class)
-    val carePlans = careLog.observeCurrentBaby().flatMapLatest { baby ->
+    val carePlans = combine(careLog.observeCurrentBaby(), visibleMonth) { baby, month ->
+        baby to calendarMonthWindow(month, zone)
+    }.flatMapLatest { (baby, window) ->
         if (baby == null) flowOf(emptyList())
-        else careLog.observeCarePlansInRange(baby.id, windowStart, windowEnd)
+        else careLog.observeCarePlansInRange(baby.id, window.startInclusive, window.endExclusive)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /**
@@ -483,7 +488,6 @@ fun CalendarRoute(
     vm: CalendarViewModel = hiltViewModel(),
 ) {
     val dayItems by vm.dayItems.collectAsStateWithLifecycle()
-    val events by vm.events.collectAsStateWithLifecycle()
     val timeStepMin by vm.timeStepMin.collectAsStateWithLifecycle()
     val timePickerStyle by vm.timePickerStyle.collectAsStateWithLifecycle()
     val preferredHand by vm.preferredHand.collectAsStateWithLifecycle()
@@ -497,6 +501,19 @@ fun CalendarRoute(
     val conflictDetail by vm.conflictDetail.collectAsStateWithLifecycle()
     val conflictBusy by vm.conflictBusy.collectAsStateWithLifecycle()
     val zone = ZoneId.systemDefault()
+    val today = remember(zone) { RecordTime.today(zone) }
+    var monthState by remember(initialDate, today) {
+        mutableStateOf(CalendarMonthState.initial(initialDate, today))
+    }
+    LaunchedEffect(monthState.visibleMonth) {
+        vm.showMonth(monthState.visibleMonth)
+    }
+    val selectedDayItems = remember(dayItems, monthState.selectedDate, zone) {
+        calendarItemsForDate(dayItems, monthState.selectedDate, zone)
+    }
+    val itemCountsByDate = remember(dayItems, zone) {
+        calendarItemCountsByDate(dayItems, zone)
+    }
     val context = LocalContext.current
     var showAdd by remember { mutableStateOf(false) }
     var showPlanTypePicker by remember { mutableStateOf(false) }
@@ -561,44 +578,61 @@ fun CalendarRoute(
             Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .padding(LeziSpacing.Page),
+                .padding(LeziSpacing.Page)
+                .verticalScroll(rememberScrollState())
+                .testTag(CalendarUiTags.SelectedDayItems),
+            verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
         ) {
+            CalendarMonthPicker(
+                state = monthState,
+                itemCountsByDate = itemCountsByDate,
+                onPreviousMonth = { monthState = monthState.previousMonth() },
+                onNextMonth = { monthState = monthState.nextMonth() },
+                onSelectDate = { date -> monthState = monthState.selectDate(date) },
+            )
             LeziPrimaryButton(
                 "＋ 安排护理",
                 onClick = openPlanTypePicker,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(CalendarUiTags.ScheduleCare)
+                    .semantics {
+                        contentDescription =
+                            "在${monthState.selectedDate.monthValue}月" +
+                                "${monthState.selectedDate.dayOfMonth}日安排护理"
+                    },
             )
-            Spacer(Modifier.height(LeziSpacing.Sm))
             reminderStatus?.let {
                 Text(
                     it,
                     style = LeziTypography.Meta,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Spacer(Modifier.height(LeziSpacing.Xs))
             }
-            if (dayItems.isEmpty()) {
+            Text(
+                "${monthState.selectedDate.monthValue}月${monthState.selectedDate.dayOfMonth}日",
+                style = LeziTypography.TitleSm,
+                modifier = Modifier.semantics {
+                    contentDescription =
+                        "已选择${monthState.selectedDate.year}年" +
+                            "${monthState.selectedDate.monthValue}月" +
+                            "${monthState.selectedDate.dayOfMonth}日，" +
+                            "${selectedDayItems.size}条安排"
+                },
+            )
+            if (selectedDayItems.isEmpty()) {
                 StateContainer(
                     kind = StateKind.Empty,
-                    title = "还没有安排",
-                    message = "选择具体记录项目安排护理，或继续管理历史自由标题日程",
+                    title = "这一天还没有安排",
+                    message = "可选择具体记录项目安排护理",
                     actionLabel = "安排护理",
                     onAction = openPlanTypePicker,
                 )
             } else {
-                LazyColumn(
-                    modifier = Modifier.weight(1f),
+                Column(
                     verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs),
                 ) {
-                    items(
-                        dayItems,
-                        key = {
-                            when (it) {
-                                is CalendarDayItem.Plan -> "plan-${it.plan.id}"
-                                is CalendarDayItem.LegacyEvent -> "event-${it.event.id}"
-                            }
-                        },
-                    ) { item ->
+                    selectedDayItems.forEach { item ->
                         when (item) {
                             is CalendarDayItem.Plan -> {
                                 val plan = item.plan
@@ -714,7 +748,10 @@ fun CalendarRoute(
                         TextButton(
                             onClick = {
                                 showPlanTypePicker = false
-                                val at = RecordTime.defaultFutureEventTimestamp(initialDate, zone)
+                                val at = RecordTime.defaultFutureEventTimestamp(
+                                    monthState.selectedDate,
+                                    zone,
+                                )
                                 onScheduleCare(item.type, at, item.customItemId)
                             },
                             modifier = Modifier.fillMaxWidth(),
@@ -1333,6 +1370,125 @@ private fun ConflictPhotoPreviewDialog(
                         .padding(LeziSpacing.Page),
                 ) {
                     Text("关闭", color = Color.White)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CalendarMonthPicker(
+    state: CalendarMonthState,
+    itemCountsByDate: Map<LocalDate, Int>,
+    onPreviousMonth: () -> Unit,
+    onNextMonth: () -> Unit,
+    onSelectDate: (LocalDate) -> Unit,
+) {
+    val cells = remember(state.visibleMonth, state.today) {
+        calendarMonthCells(state.visibleMonth, state.today)
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag(CalendarUiTags.MonthGrid),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            TextButton(
+                onClick = onPreviousMonth,
+                modifier = Modifier
+                    .testTag(CalendarUiTags.PreviousMonth)
+                    .semantics { contentDescription = "上个月" },
+            ) { Text("‹") }
+            Text(
+                "${state.visibleMonth.year}年${state.visibleMonth.monthValue}月",
+                style = LeziTypography.BodyStrong,
+            )
+            TextButton(
+                onClick = onNextMonth,
+                modifier = Modifier
+                    .testTag(CalendarUiTags.NextMonth)
+                    .semantics { contentDescription = "下个月" },
+            ) { Text("›") }
+        }
+        Row(Modifier.fillMaxWidth()) {
+            listOf("一", "二", "三", "四", "五", "六", "日").forEach { label ->
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 24.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        label,
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+        cells.chunked(7).forEach { week ->
+            Row(Modifier.fillMaxWidth()) {
+                week.forEach { cell ->
+                    val selected = cell.date == state.selectedDate
+                    val itemCount = itemCountsByDate[cell.date] ?: 0
+                    val dateDescription =
+                        "${cell.date.year}年${cell.date.monthValue}月${cell.date.dayOfMonth}日"
+                    Surface(
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = LeziSpacing.Touch)
+                            .testTag(CalendarUiTags.day(cell.date))
+                            .clickable(enabled = cell.isEnabled) { onSelectDate(cell.date) }
+                            .semantics {
+                                contentDescription = buildString {
+                                    append(dateDescription)
+                                    if (cell.isToday) append("，今天")
+                                    append("，${itemCount}条安排")
+                                }
+                                stateDescription = when {
+                                    !cell.isEnabled -> "相邻月份，不可选择"
+                                    selected -> "已选择"
+                                    else -> "未选择"
+                                }
+                            },
+                        shape = MaterialTheme.shapes.small,
+                        color = if (selected) {
+                            MaterialTheme.colorScheme.primaryContainer
+                        } else {
+                            Color.Transparent
+                        },
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(vertical = 3.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Text(
+                                cell.date.dayOfMonth.toString(),
+                                style = if (selected) {
+                                    LeziTypography.BodyStrong
+                                } else {
+                                    LeziTypography.Body
+                                },
+                                color = when {
+                                    !cell.isEnabled ->
+                                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
+                                    cell.isToday -> MaterialTheme.colorScheme.primary
+                                    else -> MaterialTheme.colorScheme.onSurface
+                                },
+                            )
+                            Text(
+                                if (itemCount > 0) "•" else " ",
+                                style = LeziTypography.Meta,
+                                color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1,
+                            )
+                        }
+                    }
                 }
             }
         }
