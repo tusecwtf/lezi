@@ -3,13 +3,26 @@
 家庭育儿日志 · Android · Kotlin + Jetpack Compose
 包名：`com.lezi.babylog` · minSdk 26 · targetSdk 35 · 显示名「乐记」 · version `0.2.5`
 
-产品规格：[`docs/prd/`](docs/prd/)
+产品规格：[`docs/prd/`](docs/prd/) · 领域术语：[`CONTEXT.md`](CONTEXT.md) · 安全：[`SECURITY.md`](SECURITY.md)  
+许可：[MIT](LICENSE) · 贡献 / PR：[`CONTRIBUTING.md`](CONTRIBUTING.md)
 
 ## 环境
 
-- **JDK 21**（`gradle.properties` 已钉 `org.gradle.java.home`；JDK 25 会触发 AGP 失败）
-- Android SDK：`local.properties` → `sdk.dir`
+- **JDK 21**（不要用 JDK 25+：AGP 会失败）。可选在 `~/.gradle/gradle.properties` 设置
+  `org.gradle.java.home=/path/to/jdk-21`；仓库内 `gradle.properties` **不**钉死本机路径
+- Android SDK：本地创建 `local.properties`，写入 `sdk.dir=/path/to/Android/Sdk`（已 gitignore）
+- 签名：`keystore.properties` + `*.jks` 仅本机（已 gitignore，见 `SECURITY.md`）
 - 可选模拟器 AVD：`lezi_api35`（`lezi-emu start --window`）
+
+## Git remotes
+
+| Remote | 用途 |
+|--------|------|
+| `origin` | 局域网 Gitea（日常备份/内网） |
+| `github` | GitHub `tusecwtf/lezi`（private 镜像） |
+
+推送时显式指定 remote，例如 `git push github master` / `git push origin master`。
+`master` 的 upstream 以本机 `git branch -vv` 为准。
 
 ## 构建
 
@@ -31,6 +44,8 @@ adb shell am start -n com.lezi.babylog.debug/com.lezi.babylog.MainActivity
 ```bash
 ./gradlew test
 ```
+
+CI（GitHub Actions）：push/PR 上跑 unit test；`tools/lezi-sync` 变更另跑 cargo test + clippy。
 
 ## 同步服务（V2）
 
@@ -104,6 +119,22 @@ sync
 feature/{onboarding,log,timer,family,settings,summary,growth,export,search,widget}
 tools/lezi-sync
 ```
+
+## 票单与协作
+
+| 类型 | 真源 |
+|------|------|
+| 功能票 / spec | 本地 [`.scratch/`](.scratch/)（[`docs/agents/issue-tracker.md`](docs/agents/issue-tracker.md)） |
+| 代码评审与合入 | **GitHub Pull Request** → `master`（[`CONTRIBUTING.md`](CONTRIBUTING.md)、[`docs/agents/pull-requests.md`](docs/agents/pull-requests.md)） |
+| GitHub Issues | **不是**工作流入口 |
+
+开 PR：`git push -u github HEAD` 后 `gh pr create --base master`；模板见
+[`.github/pull_request_template.md`](.github/pull_request_template.md)。  
+同步契约变更对照 [`docs/prd/sync-home-lan.md`](docs/prd/sync-home-lan.md)。
+
+## 许可
+
+本仓库以 [MIT License](LICENSE) 发布（与 `tools/lezi-sync` 的 crate `license = "MIT"` 一致）。
 
 ## Agent / 模拟器
 

@@ -1,6 +1,9 @@
 # Issue tracker: Local Markdown
 
-Issues and specs for this repo live as markdown files in `.scratch/`.
+**Source of truth** for work items is local Markdown under `.scratch/`, not
+GitHub Issues. The GitHub remote is for code backup, Releases, and CI; do not
+create agent tickets as GitHub issues unless a human explicitly chooses that
+channel for a one-off.
 
 ## Conventions
 
@@ -16,4 +19,14 @@ Create or update files under `.scratch/<feature-slug>/`.
 
 ## Labels
 
-See `docs/agents/triage-labels.md`.
+See `docs/agents/triage-labels.md`. Those strings are for the `Status:` line in
+Markdown tickets. They are **not** automatically mirrored as GitHub labels.
+
+## Pull requests
+
+Code review and merge to `master` happen on **GitHub Pull Requests** (not by
+default as a silent push only to the LAN `origin`). See
+[`pull-requests.md`](./pull-requests.md) and root [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
+
+Use `.github/pull_request_template.md` and link the relevant
+`.scratch/.../issues/NN-....md` path in the PR summary.
