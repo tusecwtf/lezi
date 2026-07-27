@@ -3,6 +3,7 @@ package com.lezi.babylog.feature.settings
 import com.lezi.babylog.core.model.RecordTime
 import java.time.Instant
 import java.time.LocalDate
+import java.time.LocalTime
 import java.time.YearMonth
 import java.time.ZoneId
 import java.time.ZonedDateTime
@@ -85,7 +86,12 @@ internal fun calendarDefaultCarePlanTimestamp(
     val today = now.toLocalDate()
     if (selectedDate.isBefore(today)) return null
     val candidate = if (selectedDate == today) {
-        now.plusMinutes(1).withSecond(0).withNano(0)
+        val preferred = now
+            .plusMinutes(DEFAULT_CARE_PLAN_EDIT_MARGIN_MINUTES)
+            .withSecond(0)
+            .withNano(0)
+        preferred.takeIf { it.toLocalDate() == selectedDate }
+            ?: selectedDate.atTime(LocalTime.of(23, 59)).atZone(zone)
     } else {
         Instant.ofEpochMilli(
             RecordTime.defaultFutureEventTimestamp(selectedDate, zone, now),
@@ -96,6 +102,8 @@ internal fun calendarDefaultCarePlanTimestamp(
         ?.toInstant()
         ?.toEpochMilli()
 }
+
+private const val DEFAULT_CARE_PLAN_EDIT_MARGIN_MINUTES = 15L
 
 internal object CalendarUiTags {
     const val MonthGrid = "calendar_month_grid"

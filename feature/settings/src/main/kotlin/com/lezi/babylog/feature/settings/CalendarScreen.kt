@@ -44,6 +44,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -105,6 +106,7 @@ import java.time.format.DateTimeFormatter
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -502,8 +504,18 @@ fun CalendarRoute(
     val conflictAudits by vm.conflictAudits.collectAsStateWithLifecycle()
     val conflictDetail by vm.conflictDetail.collectAsStateWithLifecycle()
     val conflictBusy by vm.conflictBusy.collectAsStateWithLifecycle()
+    val wallClockMillis by produceState(initialValue = RecordTime.currentTimeMillis()) {
+        while (true) {
+            val current = RecordTime.currentTimeMillis()
+            value = current
+            delay((60_000L - current % 60_000L).coerceAtLeast(1L))
+        }
+    }
     val zone = ZoneId.systemDefault()
-    val today = remember(zone) { RecordTime.today(zone) }
+    val calendarNow = remember(zone, wallClockMillis) {
+        Instant.ofEpochMilli(wallClockMillis).atZone(zone)
+    }
+    val today = calendarNow.toLocalDate()
     var selectedDateEpochDay by rememberSaveable(initialDate) {
         mutableLongStateOf(initialDate.toEpochDay())
     }
@@ -530,6 +542,7 @@ fun CalendarRoute(
     var conflictError by remember { mutableStateOf<String?>(null) }
     var previewPhotos by remember { mutableStateOf<List<String>?>(null) }
     var previewStartIndex by remember { mutableStateOf(0) }
+    var scheduleError by remember { mutableStateOf<String?>(null) }
     var title by remember { mutableStateOf("") }
     var eventAt by remember(initialDate) {
         mutableStateOf(RecordTime.defaultFutureEventTimestamp(initialDate, zone))
@@ -552,10 +565,28 @@ fun CalendarRoute(
     val defaultCarePlanAt = calendarDefaultCarePlanTimestamp(
         selectedDate = monthState.selectedDate,
         zone = zone,
+        now = calendarNow,
     )
     val canScheduleSelectedDate = defaultCarePlanAt != null
     val openPlanTypePicker = {
-        if (canScheduleSelectedDate) showPlanTypePicker = true
+        if (
+            calendarDefaultCarePlanTimestamp(
+                selectedDate = monthState.selectedDate,
+                zone = zone,
+            ) != null
+        ) {
+            scheduleError = null
+            showPlanTypePicker = true
+        } else {
+            showPlanTypePicker = false
+            scheduleError = "所选日期已没有可安排的未来时刻，请选择其他日期。"
+        }
+    }
+    LaunchedEffect(canScheduleSelectedDate) {
+        if (!canScheduleSelectedDate) showPlanTypePicker = false
+    }
+    LaunchedEffect(monthState.selectedDate) {
+        scheduleError = null
     }
     val openCalendarDraft = {
         // Legacy free-title draft is only used when editing an existing CalendarEvent.
@@ -624,11 +655,18 @@ fun CalendarRoute(
                             }
                     },
             )
-            if (!canScheduleSelectedDate) {
+            if (!canScheduleSelectedDate && selectedDayItems.isNotEmpty()) {
                 Text(
                     "该日期仅供查看；护理计划只能安排在未来时刻。",
                     style = LeziTypography.Meta,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            scheduleError?.let {
+                Text(
+                    it,
+                    style = LeziTypography.Meta,
+                    color = MaterialTheme.colorScheme.error,
                 )
             }
             reminderStatus?.let {
@@ -650,12 +688,9 @@ fun CalendarRoute(
                 },
             )
             if (selectedDayItems.isEmpty()) {
-                StateContainer(
-                    kind = StateKind.Empty,
-                    title = "这一天还没有安排",
-                    message = "可选择具体记录项目安排护理",
-                    actionLabel = "安排护理",
-                    onAction = openPlanTypePicker,
+                CalendarEmptyDayState(
+                    canScheduleSelectedDate = canScheduleSelectedDate,
+                    onSchedule = openPlanTypePicker,
                 )
             } else {
                 Column(
@@ -779,7 +814,14 @@ fun CalendarRoute(
                                 val at = calendarDefaultCarePlanTimestamp(
                                     selectedDate = monthState.selectedDate,
                                     zone = zone,
-                                ) ?: return@TextButton
+                                )
+                                if (at == null) {
+                                    showPlanTypePicker = false
+                                    scheduleError =
+                                        "所选日期已没有可安排的未来时刻，请重新选择日期和时间。"
+                                    return@TextButton
+                                }
+                                scheduleError = null
                                 showPlanTypePicker = false
                                 onScheduleCare(item.type, at, item.customItemId)
                             },
@@ -1403,6 +1445,24 @@ private fun ConflictPhotoPreviewDialog(
             }
         }
     }
+}
+
+@Composable
+internal fun CalendarEmptyDayState(
+    canScheduleSelectedDate: Boolean,
+    onSchedule: () -> Unit,
+) {
+    StateContainer(
+        kind = StateKind.Empty,
+        title = "这一天还没有安排",
+        message = if (canScheduleSelectedDate) {
+            "可选择具体记录项目安排护理"
+        } else {
+            "该日期仅供查看；护理计划只能安排在未来时刻。"
+        },
+        actionLabel = "安排护理".takeIf { canScheduleSelectedDate },
+        onAction = onSchedule.takeIf { canScheduleSelectedDate },
+    )
 }
 
 @Composable

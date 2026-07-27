@@ -41,7 +41,7 @@ class CalendarMonthStateTest {
             ),
         )
         assertEquals(
-            ZonedDateTime.of(2026, 7, 27, 10, 31, 0, 0, zone).toInstant().toEpochMilli(),
+            ZonedDateTime.of(2026, 7, 27, 10, 45, 0, 0, zone).toInstant().toEpochMilli(),
             calendarDefaultCarePlanTimestamp(
                 selectedDate = LocalDate.of(2026, 7, 27),
                 zone = zone,
@@ -54,6 +54,14 @@ class CalendarMonthStateTest {
                 selectedDate = LocalDate.of(2026, 8, 2),
                 zone = zone,
                 now = now,
+            ),
+        )
+        assertEquals(
+            ZonedDateTime.of(2026, 7, 27, 23, 59, 0, 0, zone).toInstant().toEpochMilli(),
+            calendarDefaultCarePlanTimestamp(
+                selectedDate = LocalDate.of(2026, 7, 27),
+                zone = zone,
+                now = ZonedDateTime.of(2026, 7, 27, 23, 50, 30, 0, zone),
             ),
         )
         assertNull(
