@@ -680,6 +680,8 @@ class RecordComposerViewModel @Inject constructor(
     }
 }
 
+internal const val RECORD_COMPOSER_SKIP_PARTIALLY_EXPANDED = true
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RecordComposerHost(
@@ -745,7 +747,9 @@ fun RecordComposerHost(
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
+    val sheetState = rememberModalBottomSheetState(
+        skipPartiallyExpanded = RECORD_COMPOSER_SKIP_PARTIALLY_EXPANDED,
+    )
 
     LaunchedEffect(request) {
         if (request == null) {
