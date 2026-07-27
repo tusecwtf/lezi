@@ -3877,10 +3877,12 @@ internal class MemorySyncPreferences(initial: SyncSession) : SyncPreferences {
             allowedSsids = n.allowedSsids,
             serverScheme = n.scheme,
         )
-        if (prev.isJoined && prev.baseUrl != n.baseUrl && n.baseUrl.isNotBlank()) {
-            next = next.copy(pullCursor = 0, pullGeneration = "")
-        }
-        if (clearSessionIfServerChanged && !prev.isJoined && prev.baseUrl != n.baseUrl) {
+        if (
+            clearSessionIfServerChanged &&
+            prev.baseUrl.isNotBlank() &&
+            prev.baseUrl != n.baseUrl &&
+            n.baseUrl.isNotBlank()
+        ) {
             next = next.copy(
                 familyId = "",
                 familyToken = "",
@@ -3889,6 +3891,7 @@ internal class MemorySyncPreferences(initial: SyncSession) : SyncPreferences {
                 pullGeneration = "",
                 lastSuccessAt = null,
                 familyName = null,
+                membershipId = "",
             )
         }
         state.value = next

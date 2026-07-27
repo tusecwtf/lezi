@@ -14,7 +14,7 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class FamilySessionCoordinatorTest {
     @Test
-    fun serverChangeInvalidatesOldReceiptsBeforePublishingTheNewEndpoint() = runTest {
+    fun serverChangeInvalidatesOldReceiptsAndCredentialsBeforePublishingTheNewEndpoint() = runTest {
         val previous = joinedFamilySession().copy(
             pullCursor = 9,
             pullGeneration = "generation-a",
@@ -49,11 +49,11 @@ class FamilySessionCoordinatorTest {
         assertThat(result.getOrThrow()).isEqualTo(FamilySessionOutcome.Completed)
         assertThat(events).containsExactly("receipts-reset", "session-published").inOrder()
         assertThat(preferences.current()).isEqualTo(
-            previous.copy(
-                pullCursor = 0,
-                pullGeneration = "",
+            SyncSession(
+                deviceId = previous.deviceId,
                 serverHost = "192.168.1.99",
                 serverPort = 8765,
+                allowedSsids = previous.allowedSsids,
             ),
         )
     }
@@ -82,6 +82,7 @@ class FamilySessionCoordinatorTest {
                 ).isSuccess,
             ).isTrue()
             assertThat(preferences.current().allowedSsids).containsExactly("Home")
+            assertThat(preferences.current().isJoined).isFalse()
             assertThat(resetSessions).hasSize(1)
 
             assertThat(

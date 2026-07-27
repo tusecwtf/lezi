@@ -144,7 +144,9 @@ SSID 白名单 **仅存本机**，不随家庭同步到 NAS。两台手机可登
 
 - health 失败：指数退避（30s → 2min → 10min），禁止固定高频 ping。
 - 白名单已满 2 个时自动绑定新 SSID：**不覆盖**，提示用户手动改。
-- 已加入后改 host/port：**允许**；保留 token/family 与 SSID 名单；**cursor/generation 按 full_resync 语义重置**。
+- 已加入后改 host/port：**允许**；保留已确认的新端点与 SSID 配置，但必须原子清除旧
+  `token`、`family`、`membership`、`cursor/generation`，由用户在新 NAS 重新创建或加入家庭；
+  旧 NAS 凭据不得发送到新端点。
 - leave / owner 删除家庭成功：本机 **清空** host/port、SSID 白名单与会话。
 - 旧版仅 `sync_base_url` 迁移：解析 host/port；SSID 空 → 禁止同步直至用户绑定。
 - 不因同步失败回滚 Room 写入。

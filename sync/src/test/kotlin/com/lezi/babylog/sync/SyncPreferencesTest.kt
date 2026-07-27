@@ -285,7 +285,7 @@ class SyncPreferencesTest {
     }
 
     @Test
-    fun changingJoinedServerPreservesCredentialsAndResetsOnlyPullReceipt() = runTest {
+    fun changingJoinedServerClearsCredentialsAndFamilyReceipts() = runTest {
         val file = File.createTempFile("lezi-sync-", ".preferences_pb").also { it.delete() }
         val tokens = InMemorySecureFamilyTokenStore()
         val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
@@ -308,16 +308,10 @@ class SyncPreferencesTest {
         assertThat(preferences.session.first()).isEqualTo(
             SyncSession(
                 serverHost = "new-nas",
-                familyId = "old-family",
-                familyToken = "old-token",
                 deviceId = "stable-device",
-                role = FamilyRole.Owner,
-                pullCursor = 0,
-                pullGeneration = "",
-                lastSuccessAt = 123,
             ),
         )
-        assertThat(tokens.getToken()).isEqualTo("old-token")
+        assertThat(tokens.getToken()).isEmpty()
     }
 
     @Test

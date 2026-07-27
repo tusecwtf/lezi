@@ -146,7 +146,7 @@ class DataStoreSyncPreferences @Inject constructor(
             val serverChanged = previous.baseUrl.isNotBlank() &&
                 previous.baseUrl != newBase &&
                 newBase.isNotBlank()
-            if (clearSessionIfServerChanged && serverChanged && !previous.isJoined) {
+            if (clearSessionIfServerChanged && serverChanged) {
                 clearFamilyValues(prefs)
             }
             if (normalized.host.isBlank()) {
@@ -164,13 +164,6 @@ class DataStoreSyncPreferences @Inject constructor(
                 prefs.remove(Keys.ALLOWED_SSIDS)
             } else {
                 prefs[Keys.ALLOWED_SSIDS] = ssidEncoded
-            }
-        }
-        // A joined server change keeps the token but forces a full resync.
-        if (previous.isJoined && previous.baseUrl != newBase && newBase.isNotBlank()) {
-            dataStore.edit {
-                it[Keys.PULL_CURSOR] = 0
-                it.remove(Keys.PULL_GENERATION)
             }
         }
     }

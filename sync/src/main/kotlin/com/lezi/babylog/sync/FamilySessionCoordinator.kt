@@ -97,7 +97,7 @@ internal class FamilySessionCoordinator(
             }
             preferences.saveHomeLanConfig(
                 merged,
-                clearSessionIfServerChanged = !previous.isJoined,
+                clearSessionIfServerChanged = true,
             )
             onSessionChanged(preferences.session.first())
             FamilySessionOutcome.Completed
@@ -124,7 +124,7 @@ internal class FamilySessionCoordinator(
         }
         preferences.saveHomeLanConfig(
             merged,
-            clearSessionIfServerChanged = !previous.isJoined,
+            clearSessionIfServerChanged = true,
         )
         onSessionChanged(preferences.session.first())
         FamilySessionOutcome.Completed
