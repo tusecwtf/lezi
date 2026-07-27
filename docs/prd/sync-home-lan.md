@@ -200,12 +200,13 @@ SSID 白名单 **仅存本机**，不随家庭同步到 NAS。两台手机可登
 |--------------|--------|
 | Baby（含头像引用；头像写限 owner） | SettingsLocal 全部 |
 | Record（含软删） | 下次喂奶提醒、Widget |
-| 日志 MediaAsset 元数据 + 字节 | 本机-only 路径、主题排序等 |
-| | CustomItemDef / CarePlan（现行首版未实现，见下方已批准扩展）及通用 CalendarEvent |
+| CustomItemDef（不含布局、显隐与快捷槽位） | 本机-only 路径、主题与排序 |
+| CarePlan + FulfillmentCandidate | 通用 CalendarEvent、系统日历 ID/权限/披露与提醒偏好 |
+| Record/计划 MediaAsset 元数据 + 字节 | Widget 配置与下次喂奶时刻 |
 
-后续已批准但尚未实现的同步域为 `CustomItemDef`、`CarePlan` 与计划媒体；
-通用 `CalendarEvent` 仍不同步。带照片的 Record/CarePlan 必须在发送、服务端
-发布和接收应用阶段以完整照片包原子可见，不能先展示实体再补照片。
+`CustomItemDef`、`CarePlan`、`FulfillmentCandidate` 与计划媒体均为现行同步域；
+通用 `CalendarEvent` 仍不同步。带照片的 Record/CarePlan 必须在发送、服务端发布
+和接收应用阶段以完整照片包原子可见，不能先展示实体再补照片。
 
 ### 5.2 冲突
 
@@ -500,7 +501,8 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 }
 ```
 
-- `type`：`baby` | `record` | `media`
+- `type`：`baby` | `record` | `media` | `custom_item` | `fulfillment_candidate`；
+  `care_plan` 不经 ordinary push，必须使用 §9.8.1 原子同步包
 - `generation`：客户端已知服务代际；不匹配时服务端先返回结构化 `409`，
   不应用任何实体
 - LWW：请求 `updated_at` 小于库中则 skip

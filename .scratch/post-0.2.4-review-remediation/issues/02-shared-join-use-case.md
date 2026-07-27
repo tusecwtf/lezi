@@ -32,7 +32,9 @@
 - [x] scaffold、称呼缓存、join 与同步触发只有一份 implementation。
 - [x] 成功后本地称呼与 membership 一致；失败不得提前缓存称呼或退出 onboarding。
 - [x] 每次成功 join 至多触发一次立即同步；删除 Onboarding 现有重复 `requestSync` 路径。
-- [x] `CancellationException` 原样传播；产品错误继续统一经 `joinFamilyError`，不暴露堆栈/路径。
+- [x] server join 提交前的 `CancellationException` 原样传播；提交后称呼缓存/同步调度即使
+  取消或失败也保持终态 Joined，由后续前台补偿；产品错误继续统一经 `joinFamilyError`，
+  不暴露堆栈/路径。
 - [x] 邀请预填和 endpoint 真源仍由共享 draft/config 规则决定，不在 use case 引入第三套优先级。
 - [x] 用例 interface 测试覆盖：坏草稿、scaffold 失败、join 失败、成功、取消、一次同步。
 - [x] 原入口没有独立 ViewModel 工作流测试需要删除；行为测试集中在公共 use-case seam，现有 UI 配置测试只保留 draft/config 规则。
@@ -57,8 +59,9 @@
 - 来源：固定范围审查 Spec finding 2；原 Ticket 14 只共享 draft，未共享提交用例。
 - Implementation：domain `JoinFamilyUseCase` 是两个入口共用的小 interface；默认实现按
   draft 校验 → 本地 scaffold → server join → 缓存规范化家庭称呼 → 一次
-  `PullToRefresh` 请求排序。Onboarding 与 Family ViewModel 只收集表单、调用 use case
-  并经 `joinFamilyError` 渲染结果。
+  `PullToRefresh` 请求排序。join 提交前取消原样传播；提交后的本地缓存/调度为可补偿
+  副作用，不得把已持久加入变成可重试失败。Onboarding 与 Family ViewModel 只收集
+  表单、调用 use case 并经 `joinFamilyError` 渲染结果。
 - TDD：先记录 `JoinFamilyUseCase` 不存在的 RED；同时发现 `62a22c1` 基线
   `CareLogTest.FakeRecordDao` 缺少 `mergeCanonicalAuthor` 编译桩，按现有 DAO 语义补齐
   最窄测试适配器后，公共 seam 的 7 个测试全部 GREEN。
