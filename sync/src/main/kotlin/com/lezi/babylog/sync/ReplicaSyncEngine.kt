@@ -1516,13 +1516,42 @@ internal class ReplicaSyncEngine(
     override suspend fun resetLocalSyncReceipts(
         previous: SyncSession,
         invalidateCurrentReceipts: Boolean,
+        crossingFamilyBoundary: Boolean,
     ) {
         transactionRunner.run {
             babyDao.markAllPendingSync()
             recordDao.markAllPendingSync()
-            carePlanDao.markAllPendingSync()
-            customItemDao.markAllPendingSync()
-            fulfillmentCandidateDao.markAllPendingSync()
+            if (crossingFamilyBoundary) {
+                carePlanDao.listAllIncludingDeleted().forEach { plan ->
+                    carePlanDao.update(
+                        plan.copy(
+                            createdByMembershipId = "",
+                            syncDirty = true,
+                        ),
+                    )
+                }
+                customItemDao.listAllIncludingDeleted().forEach { item ->
+                    customItemDao.update(
+                        item.copy(
+                            createdByMembershipId = "",
+                            syncDirty = true,
+                        ),
+                    )
+                }
+                fulfillmentCandidateDao.listAllIncludingDeleted().forEach { candidate ->
+                    fulfillmentCandidateDao.update(
+                        candidate.copy(
+                            submitterMembershipId = "",
+                            submitterRole = "",
+                            syncDirty = true,
+                        ),
+                    )
+                }
+            } else {
+                carePlanDao.markAllPendingSync()
+                customItemDao.markAllPendingSync()
+                fulfillmentCandidateDao.markAllPendingSync()
+            }
             mediaDao.listAllIncludingDeleted().forEach { media ->
                 val hasCurrentReceipt = previous.isJoined && media.hasReceiptFor(previous)
                 val preserveCurrentReceipt = !invalidateCurrentReceipts ||

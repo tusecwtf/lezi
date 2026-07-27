@@ -891,6 +891,7 @@ private class RecordingFamilySessionReplica(
     override suspend fun resetLocalSyncReceipts(
         previous: SyncSession,
         invalidateCurrentReceipts: Boolean,
+        crossingFamilyBoundary: Boolean,
     ) {
         onReset(previous)
     }

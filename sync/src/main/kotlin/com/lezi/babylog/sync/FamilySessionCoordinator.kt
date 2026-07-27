@@ -35,9 +35,11 @@ internal sealed interface FamilySessionOutcome {
  * session transition.
  */
 internal interface FamilySessionReplica {
+    /** [crossingFamilyBoundary] invalidates server-owned evidence from the previous family. */
     suspend fun resetLocalSyncReceipts(
         previous: SyncSession,
         invalidateCurrentReceipts: Boolean = false,
+        crossingFamilyBoundary: Boolean = false,
     )
 
     suspend fun applyInitialEntities(
@@ -94,7 +96,10 @@ internal class FamilySessionCoordinator(
             require(parsed.isServerConfigured) { "请先填写家庭服务器地址" }
             val merged = parsed.copy(allowedSsids = previous.allowedSsids)
             if (previous.baseUrl.isNotBlank() && previous.baseUrl != merged.baseUrl) {
-                replica.resetLocalSyncReceipts(previous)
+                replica.resetLocalSyncReceipts(
+                    previous,
+                    crossingFamilyBoundary = true,
+                )
             }
             preferences.saveHomeLanConfig(
                 merged,
@@ -121,7 +126,10 @@ internal class FamilySessionCoordinator(
         }
         require(merged.isServerConfigured) { "请先填写家庭服务器地址" }
         if (previous.baseUrl.isNotBlank() && previous.baseUrl != merged.baseUrl) {
-            replica.resetLocalSyncReceipts(previous)
+            replica.resetLocalSyncReceipts(
+                previous,
+                crossingFamilyBoundary = true,
+            )
         }
         preferences.saveHomeLanConfig(
             merged,
@@ -276,7 +284,10 @@ internal class FamilySessionCoordinator(
 
     private suspend fun clearSession(session: SyncSession) {
         outboxDao.deleteFamily(session.familyId)
-        replica.resetLocalSyncReceipts(session)
+        replica.resetLocalSyncReceipts(
+            session,
+            crossingFamilyBoundary = true,
+        )
         preferences.clearAllLocalSyncConfig()
         onSessionChanged(preferences.session.first())
     }
@@ -305,7 +316,10 @@ internal class FamilySessionCoordinator(
             familyName = joined.familyName?.trim()?.takeIf { it.isNotEmpty() },
             membershipId = joined.membershipId?.trim().orEmpty(),
         )
-        replica.resetLocalSyncReceipts(previous)
+        replica.resetLocalSyncReceipts(
+            previous,
+            crossingFamilyBoundary = true,
+        )
         if (joined.entities.isNotEmpty()) {
             replica.applyInitialEntities(session, joined.entities)
         }

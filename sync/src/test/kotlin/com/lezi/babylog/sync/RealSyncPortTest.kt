@@ -452,6 +452,151 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun switchingFamilyReplacesFamilyScopedOwnershipStamps() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-old").copy(membershipId = "membership-old"),
+            healthCapabilities = setOf(
+                CAPABILITY_ATOMIC_BUNDLE,
+                CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+            ),
+        )
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val customItemId = rig.customItems.seed(
+            CustomItemEntity(
+                clientUuid = "custom-family-stamp",
+                familyId = 1,
+                name = "抚触",
+                iconSlot = 2,
+                updatedAt = 100,
+                createdByMembershipId = "membership-old",
+                syncDirty = false,
+            ),
+        )
+        val recordUuid = "record-family-stamp"
+        val planUuid = "plan-family-stamp"
+        rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = recordUuid,
+                createdByMembershipId = "membership-old",
+                syncDirty = false,
+            ),
+        )
+        rig.carePlans.seed(
+            localCarePlan(babyId).copy(
+                clientUuid = planUuid,
+                customItemId = customItemId,
+                status = "completed",
+                fulfilledRecordClientUuid = recordUuid,
+                fulfilledAt = 121,
+                createdByMembershipId = "membership-old",
+                updatedAt = 121,
+                syncDirty = false,
+            ),
+        )
+        rig.fulfillmentCandidates.seed(
+            FulfillmentCandidateEntity(
+                clientUuid = "candidate-family-stamp",
+                carePlanClientUuid = planUuid,
+                recordClientUuid = recordUuid,
+                confirmedAt = 121,
+                submitterMembershipId = "membership-old",
+                submitterRole = "member",
+                updatedAt = 121,
+                syncDirty = false,
+            ),
+        )
+
+        assertThat(rig.port.deleteFamily().isSuccess).isTrue()
+        rig.preferences.saveSession(
+            joinedSession("family-new").copy(membershipId = "membership-new"),
+        )
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "custom_item",
+                    clientUuid = "custom-family-stamp",
+                    payloadJson =
+                        """{"name":"抚触","icon_slot":2,"created_by_membership_id":"membership-new"}""",
+                    updatedAt = 100,
+                ),
+                SyncEntity(
+                    type = "care_plan",
+                    clientUuid = planUuid,
+                    payloadJson =
+                        """{"created_by_membership_id":"membership-new"}""",
+                    updatedAt = 121,
+                ),
+                SyncEntity(
+                    type = "fulfillment_candidate",
+                    clientUuid = "candidate-family-stamp",
+                    payloadJson =
+                        """{"care_plan_client_uuid":"$planUuid","record_client_uuid":"$recordUuid","confirmed_at":121,"submitter_membership_id":"membership-new","submitter_role":"owner"}""",
+                    updatedAt = 121,
+                ),
+            ),
+            cursor = 2,
+        )
+
+        val result = rig.port.sync(SyncTrigger.LocalWrite)
+
+        assertThat(result.exceptionOrNull()).isNull()
+        assertThat(rig.backend.pullCount).isEqualTo(1)
+        assertThat(rig.customItems.get("custom-family-stamp")?.createdByMembershipId)
+            .isEqualTo("membership-new")
+        assertThat(rig.carePlans.getByClientUuid(planUuid)?.createdByMembershipId)
+            .isEqualTo("membership-new")
+        val candidate = requireNotNull(
+            rig.fulfillmentCandidates.getByClientUuid("candidate-family-stamp"),
+        )
+        assertThat(candidate.submitterMembershipId).isEqualTo("membership-new")
+        assertThat(candidate.submitterRole).isEqualTo("owner")
+    }
+
+    @Test
+    fun switchingFamilyCarePlanCreatorSchedulesAuthoritativeAcknowledgementPull() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-old").copy(membershipId = "membership-old"),
+            healthCapabilities = setOf(
+                CAPABILITY_ATOMIC_BUNDLE,
+                CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+            ),
+        )
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        rig.carePlans.seed(
+            localCarePlan(babyId).copy(
+                clientUuid = "plan-family-stamp-only",
+                createdByMembershipId = "membership-old",
+                syncDirty = false,
+            ),
+        )
+
+        assertThat(rig.port.deleteFamily().isSuccess).isTrue()
+        rig.preferences.saveSession(
+            joinedSession("family-new").copy(membershipId = "membership-new"),
+        )
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "care_plan",
+                    clientUuid = "plan-family-stamp-only",
+                    payloadJson =
+                        """{"created_by_membership_id":"membership-new"}""",
+                    updatedAt = 100,
+                ),
+            ),
+            cursor = 1,
+        )
+
+        val result = rig.port.sync(SyncTrigger.LocalWrite)
+
+        assertThat(result.exceptionOrNull()).isNull()
+        assertThat(rig.backend.pullCount).isEqualTo(1)
+        assertThat(
+            rig.carePlans.getByClientUuid("plan-family-stamp-only")?.createdByMembershipId,
+        ).isEqualTo("membership-new")
+    }
+
+    @Test
     fun atomicRecordMembershipAuthorKeyFollowsHealthCapability() = runTest {
         val modernRig = SyncRig(
             session = joinedSession("family-a").copy(membershipId = "membership-a"),
