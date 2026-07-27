@@ -32,6 +32,7 @@ dependencies {
 
     implementation(project(":core:model"))
     implementation(project(":designsystem"))
+    implementation(libs.kotlinx.serialization.json)
     implementation(libs.androidx.core.ktx)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)

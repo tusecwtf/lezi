@@ -3,6 +3,11 @@ package com.lezi.babylog.core.ui
 import com.lezi.babylog.core.model.RecordItemIdentity
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.availableForNewEntry
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * Device-local catalog layout policy shared by “所有记录项目” and the more-sheet.
@@ -17,52 +22,18 @@ import com.lezi.babylog.core.model.availableForNewEntry
  */
 fun parseJsonStringArray(json: String): List<String> {
     val trimmed = json.trim()
-    if (trimmed.isEmpty() || trimmed == "[]") return emptyList()
-    if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return emptyList()
-    val body = trimmed.substring(1, trimmed.length - 1).trim()
-    if (body.isEmpty()) return emptyList()
-    val result = mutableListOf<String>()
-    var i = 0
-    while (i < body.length) {
-        while (i < body.length && (body[i].isWhitespace() || body[i] == ',')) i++
-        if (i >= body.length) break
-        if (body[i] != '"') {
-            // Unquoted token until comma (legacy / tolerant).
-            val start = i
-            while (i < body.length && body[i] != ',') i++
-            val token = body.substring(start, i).trim()
-            if (token.isNotEmpty()) result += token
-            continue
+    if (trimmed.isEmpty()) return emptyList()
+    return runCatching {
+        Json.parseToJsonElement(trimmed).jsonArray.mapNotNull { element ->
+            val primitive = element.jsonPrimitive
+            require(primitive.isString) { "Catalog order values must be JSON strings" }
+            primitive.content.trim().takeIf { it.isNotEmpty() }
         }
-        i++ // opening quote
-        val sb = StringBuilder()
-        while (i < body.length) {
-            val c = body[i]
-            when {
-                c == '\\' && i + 1 < body.length -> {
-                    sb.append(body[i + 1])
-                    i += 2
-                }
-                c == '"' -> {
-                    i++
-                    break
-                }
-                else -> {
-                    sb.append(c)
-                    i++
-                }
-            }
-        }
-        val value = sb.toString().trim()
-        if (value.isNotEmpty()) result += value
-    }
-    return result
+    }.getOrDefault(emptyList())
 }
 
 fun encodeJsonStringArray(items: List<String>): String =
-    items.joinToString(prefix = "[", postfix = "]") { item ->
-        "\"${item.replace("\\", "\\\\").replace("\"", "\\\"")}\""
-    }
+    buildJsonArray { items.forEach { add(JsonPrimitive(it)) } }.toString()
 
 val RecordSection.storageKey: String
     get() = when (this) {

@@ -10,6 +10,13 @@ import org.junit.Test
 
 class RecordCatalogOrderTest {
     @Test
+    fun parserRejectsNonCurrentArrayEncodings() {
+        assertEquals(emptyList<String>(), parseJsonStringArray("[feeding, health]"))
+        assertEquals(emptyList<String>(), parseJsonStringArray("[\"feeding\",]"))
+        assertEquals(emptyList<String>(), parseJsonStringArray("[1, \"health\"]"))
+    }
+
+    @Test
     fun emptyCategoryOrderUsesDefaultEnumOrderIncludingCustom() {
         val sections = orderedRecordSections("[]")
         assertEquals(RecordSection.entries.toList(), sections)
