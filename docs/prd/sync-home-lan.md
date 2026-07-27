@@ -439,6 +439,9 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
   控制符返回 `422`。客户端本地占位名“我（本机）”**不得**上传
 - 响应：`{ "family_id", "token", "role":"member", "membership_id", "entities":[], "cursor":0, "generation", "family_name"? }`
   （首包可空，随后 pull；或 join 时带全量，实现二选一，**须幂等**；幂等重试返回相同 `membership_id`）
+- 客户端共享 Join 用例以 server join 成功为提交点：提交前取消原样传播；服务端已成功
+  加入后，本地称呼缓存或一次 `PullToRefresh` 调度失败/取消不得把会话降回可重试失败，
+  保持 `Joined`，并由后续前台同步补偿。
 
 ### 9.5 `GET /v1/family/members`
 

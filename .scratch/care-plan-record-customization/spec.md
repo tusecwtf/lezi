@@ -322,7 +322,8 @@ Prior art：既有 Composer SavedState 与 SessionGate 测试已覆盖请求匹�
 
 - 本规格建立在“护理记录是事实、护理计划是意图”的术语边界上；实现与文案使用 `CONTEXT.md` 的统一词汇。
 - 已接受决策包括：未来计划与记录分离、停止新建泛化记录入口、照片作为通用附件、系统日历三级披露、记录/计划照片原子同步、共享自定义定义但不共享布局。
-- 当前代码已有 CareLog、RecordComposer、SyncPort、历史 CalendarEvent、媒体和本地提醒基础；本规格是已批准但尚未完成的扩展，不应把 PRD 设计文字当作已实现事实。
+- 当前实现已覆盖本规格的 28 张纵向票；Release 完成仍以最终候选的全量测试、迁移、设备、
+  服务端端到端与双轴审查证据为准，不以文档状态或历史 targeted test 替代。
 - 用户已确认测试边界：CareLog 与 RecordComposer 是两个主要产品 seam；SyncPort 做 NAS 集成/契约；SystemCalendarPort 仅作为 Android provider adapter，并通过领域行为验证。
 - 实现可拆成纵向票单，但所有票单必须维护同一领域模型和原子包契约；不能长期发布“计划无照片”或“记录无照片”的元数据阶段。
 - 发布位置：本地 issue tracker `.scratch/care-plan-record-customization/spec.md`。

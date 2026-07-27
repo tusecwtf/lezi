@@ -47,7 +47,8 @@
 
 ## Documentation Gate
 
-- 纯内部 use-case 收口，不改变 wire/产品行为时记录 N/A；若调整 join 错误或触发同步语义，同票更新 `docs/prd/sync-home-lan.md`。
+- [x] 已更新 `docs/prd/sync-home-lan.md` §9.4，明确 server join 提交点、提交前取消传播，
+  以及提交后的本地缓存/同步调度由后续前台同步补偿。
 
 ## Out of scope
 
@@ -72,5 +73,5 @@
 - 主代理复核发现 `RealSyncPort.joinFamily` 原本还会自行排队一次 Pull，与 use case 的唯一
   触发重复；已删除 Port 内部触发，使 join 只提交会话，成功后的唯一立即同步由 use case
   请求。代码搜索同时确认 join implementation 内不再出现 `requestSync`。
-- Documentation Gate：N/A。wire、产品步骤、错误文案和触发语义未改变，只把已经批准的
-  `docs/prd/sync-home-lan.md` join 流程收进单一领域 module。
+- Documentation Gate：已更新 `docs/prd/sync-home-lan.md` §9.4；wire 未改变，但把共享
+  Join 用例的提交点、取消边界和提交后补偿语义写回产品权威。
