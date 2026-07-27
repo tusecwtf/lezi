@@ -49,11 +49,15 @@ class EncryptedSecureFamilyTokenStore @Inject constructor(
             clearToken()
             return
         }
-        prefs.edit().putString(KEY_FAMILY_TOKEN, token).apply()
+        check(prefs.edit().putString(KEY_FAMILY_TOKEN, token).commit()) {
+            "Unable to persist encrypted family token"
+        }
     }
 
     override fun clearToken() {
-        prefs.edit().remove(KEY_FAMILY_TOKEN).apply()
+        check(prefs.edit().remove(KEY_FAMILY_TOKEN).commit()) {
+            "Unable to clear encrypted family token"
+        }
     }
 
     private companion object {

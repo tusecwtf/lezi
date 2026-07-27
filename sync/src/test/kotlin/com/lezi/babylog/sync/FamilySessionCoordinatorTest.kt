@@ -59,6 +59,31 @@ class FamilySessionCoordinatorTest {
     }
 
     @Test
+    fun failedReceiptResetKeepsThePreviousEndpointAndSession() = runTest {
+        val previous = joinedFamilySession().copy(
+            pullCursor = 9,
+            pullGeneration = "generation-a",
+        )
+        val preferences = MemorySyncPreferences(previous)
+        var published = false
+        val coordinator = coordinator(
+            preferences = preferences,
+            replica = RecordingFamilySessionReplica(
+                onReset = { throw IllegalStateException("receipt reset interrupted") },
+            ),
+            onSessionChanged = { published = true },
+        )
+
+        val failure = coordinator.execute(
+            FamilySessionCommand.SaveServer("http://192.168.1.99:8765"),
+        ).exceptionOrNull()
+
+        assertThat(failure).hasMessageThat().contains("receipt reset interrupted")
+        assertThat(preferences.current()).isEqualTo(previous)
+        assertThat(published).isFalse()
+    }
+
+    @Test
     fun structuredEndpointUpdatePreservesSsidsOnSameHostAndResetsReceiptsOnHostChange() =
         runTest {
             val preferences = MemorySyncPreferences(joinedFamilySession())

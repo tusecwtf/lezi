@@ -236,6 +236,7 @@ class RealSyncPort @Inject constructor(
 
     /** Caller owns [syncMutex]; lock order is sync mutex then domain mutation guard. */
     private suspend fun recoverPendingLocalClearLocked(): LocalClearRecoveryScope? {
+        preferences.migrateSecretsIfNeeded()
         val resumedDomain = localClearRecoveryGate.recoverPendingLocalClear()
         val resumedReplica = localReplicaClearCoordinator.recoverPendingLocked()
         return when {

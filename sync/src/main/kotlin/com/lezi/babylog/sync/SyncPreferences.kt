@@ -2,6 +2,7 @@ package com.lezi.babylog.sync
 
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
@@ -108,9 +109,10 @@ class DataStoreSyncPreferences @Inject constructor(
             ?: DEFAULT_SERVER_PORT
         val scheme = if (schemeIsValid) rawScheme.lowercase() else DEFAULT_SERVER_SCHEME
         val ssids = decodeSsids(prefs[Keys.ALLOWED_SSIDS])
+        val credentialClearPending = prefs[Keys.PENDING_FAMILY_CREDENTIAL_CLEAR] == true
         return SyncSession(
             familyId = prefs[Keys.FAMILY_ID].orEmpty(),
-            familyToken = resolveFamilyToken(prefs),
+            familyToken = if (credentialClearPending) "" else resolveFamilyToken(prefs),
             deviceId = prefs[Keys.DEVICE_ID].orEmpty(),
             role = prefs[Keys.ROLE]?.let { runCatching { FamilyRole.valueOf(it) }.getOrNull() }
                 ?: FamilyRole.None,
@@ -142,12 +144,13 @@ class DataStoreSyncPreferences @Inject constructor(
         val normalized = config.withNormalized()
         val previous = session.first()
         val newBase = normalized.baseUrl
+        val serverChanged = previous.baseUrl.isNotBlank() &&
+            previous.baseUrl != newBase &&
+            newBase.isNotBlank()
         dataStore.edit { prefs ->
-            val serverChanged = previous.baseUrl.isNotBlank() &&
-                previous.baseUrl != newBase &&
-                newBase.isNotBlank()
             if (clearSessionIfServerChanged && serverChanged) {
                 clearFamilyValues(prefs)
+                prefs[Keys.PENDING_FAMILY_CREDENTIAL_CLEAR] = true
             }
             if (normalized.host.isBlank()) {
                 prefs.remove(Keys.SERVER_HOST)
@@ -166,6 +169,7 @@ class DataStoreSyncPreferences @Inject constructor(
                 prefs[Keys.ALLOWED_SSIDS] = ssidEncoded
             }
         }
+        finishPendingFamilyCredentialClear()
     }
 
     override suspend fun saveSession(session: SyncSession) {
@@ -288,21 +292,43 @@ class DataStoreSyncPreferences @Inject constructor(
     }
 
     override suspend fun clearFamilySession() {
-        dataStore.edit(::clearFamilyValues)
+        dataStore.edit { prefs ->
+            clearFamilyValues(prefs)
+            prefs[Keys.PENDING_FAMILY_CREDENTIAL_CLEAR] = true
+        }
+        finishPendingFamilyCredentialClear()
     }
 
     override suspend fun clearAllLocalSyncConfig() {
         dataStore.edit { prefs ->
             clearFamilyValues(prefs)
+            prefs[Keys.PENDING_FAMILY_CREDENTIAL_CLEAR] = true
             prefs.remove(Keys.BASE_URL)
             prefs.remove(Keys.SERVER_HOST)
             prefs.remove(Keys.SERVER_PORT)
             prefs.remove(Keys.SERVER_SCHEME)
             prefs.remove(Keys.ALLOWED_SSIDS)
         }
+        finishPendingFamilyCredentialClear()
     }
 
-    override suspend fun migrateSecretsIfNeeded() = migratePlaintextTokenIfPresent()
+    override suspend fun migrateSecretsIfNeeded() {
+        finishPendingFamilyCredentialClear()
+        migratePlaintextTokenIfPresent()
+    }
+
+    private suspend fun finishPendingFamilyCredentialClear() {
+        if (dataStore.data.first()[Keys.PENDING_FAMILY_CREDENTIAL_CLEAR] != true) return
+        // EncryptedSharedPreferences is a separate durability domain. Keep the
+        // DataStore marker (and suppress token projection) until its synchronous
+        // clear succeeds, so process death can only expose the terminal unjoined
+        // state and a later foreground operation can finish idempotently.
+        secureTokenStore.clearToken()
+        dataStore.edit { prefs ->
+            prefs.remove(Keys.FAMILY_TOKEN)
+            prefs.remove(Keys.PENDING_FAMILY_CREDENTIAL_CLEAR)
+        }
+    }
 
     suspend fun migratePlaintextTokenIfPresent() {
         dataStore.edit { prefs ->
@@ -352,7 +378,6 @@ class DataStoreSyncPreferences @Inject constructor(
         prefs.remove(Keys.CREATE_REQUEST_ID)
         prefs.remove(Keys.FAMILY_NAME)
         prefs.remove(Keys.MEMBERSHIP_ID)
-        secureTokenStore.clearToken()
     }
 
     private fun encodeSsids(ssids: List<String>): String =
@@ -379,5 +404,7 @@ class DataStoreSyncPreferences @Inject constructor(
         val CREATE_REQUEST_ID = stringPreferencesKey("sync_create_request_id")
         val FAMILY_NAME = stringPreferencesKey("sync_family_name")
         val MEMBERSHIP_ID = stringPreferencesKey("sync_membership_id")
+        val PENDING_FAMILY_CREDENTIAL_CLEAR =
+            booleanPreferencesKey("sync_pending_family_credential_clear")
     }
 }

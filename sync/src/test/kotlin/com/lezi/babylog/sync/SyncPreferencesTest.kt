@@ -1,6 +1,7 @@
 package com.lezi.babylog.sync
 
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -315,6 +316,64 @@ class SyncPreferencesTest {
     }
 
     @Test
+    fun interruptedEndpointCredentialClearIsSuppressedAndRecoveredAfterRestart() = runTest {
+        val file = File.createTempFile("lezi-sync-endpoint-", ".preferences_pb")
+            .also { it.delete() }
+        val tokens = FailOnceClearTokenStore()
+        val firstScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val firstStore = PreferenceDataStoreFactory.create(scope = firstScope) { file }
+        val first = preferences(firstStore, tokens)
+        first.saveSession(
+            SyncSession(
+                serverHost = "old-nas",
+                familyId = "old-family",
+                familyToken = "old-token",
+                deviceId = "stable-device",
+                role = FamilyRole.Owner,
+                pullCursor = 99,
+                pullGeneration = "old-generation",
+            ),
+        )
+        tokens.failNextClear = true
+
+        val failure = runCatching {
+            first.saveServer("http://new-nas:8765")
+        }.exceptionOrNull()
+
+        assertThat(failure).hasMessageThat().contains("secure clear interrupted")
+        assertThat(tokens.getToken()).isEqualTo("old-token")
+        assertThat(first.session.first()).isEqualTo(
+            SyncSession(
+                serverHost = "new-nas",
+                deviceId = "stable-device",
+            ),
+        )
+        assertThat(
+            firstStore.data.first()[booleanPreferencesKey("sync_pending_family_credential_clear")],
+        ).isTrue()
+        firstScope.cancel()
+        advanceUntilIdle()
+
+        val secondScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val secondStore = PreferenceDataStoreFactory.create(scope = secondScope) { file }
+        val restored = preferences(secondStore, tokens)
+        restored.migrateSecretsIfNeeded()
+
+        assertThat(tokens.getToken()).isEmpty()
+        assertThat(
+            secondStore.data.first()[booleanPreferencesKey("sync_pending_family_credential_clear")],
+        ).isNull()
+        assertThat(restored.session.first()).isEqualTo(
+            SyncSession(
+                serverHost = "new-nas",
+                deviceId = "stable-device",
+            ),
+        )
+        secondScope.cancel()
+        file.delete()
+    }
+
+    @Test
     fun replacingSessionDoesNotLeakPreviousFamiliesSuccessTime() = runTest {
         val file = File.createTempFile("lezi-sync-", ".preferences_pb").also { it.delete() }
         val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
@@ -399,5 +458,22 @@ class SyncPreferencesTest {
         assertThat(restored.ensureCreateRequestId()).isNotEqualTo(requestId)
         secondScope.cancel()
         file.delete()
+    }
+}
+
+private class FailOnceClearTokenStore : SecureFamilyTokenStore {
+    private val delegate = InMemorySecureFamilyTokenStore()
+    var failNextClear = false
+
+    override fun getToken(): String = delegate.getToken()
+
+    override fun setToken(token: String) = delegate.setToken(token)
+
+    override fun clearToken() {
+        if (failNextClear) {
+            failNextClear = false
+            throw IllegalStateException("secure clear interrupted")
+        }
+        delegate.clearToken()
     }
 }

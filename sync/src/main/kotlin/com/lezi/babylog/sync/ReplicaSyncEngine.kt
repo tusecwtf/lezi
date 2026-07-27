@@ -1344,28 +1344,30 @@ internal class ReplicaSyncEngine(
         previous: SyncSession,
         invalidateCurrentReceipts: Boolean,
     ) {
-        babyDao.markAllPendingSync()
-        recordDao.markAllPendingSync()
-        carePlanDao.markAllPendingSync()
-        mediaDao.listAllIncludingDeleted().forEach { media ->
-            val hasCurrentReceipt = previous.isJoined && media.hasReceiptFor(previous)
-            val preserveCurrentReceipt = !invalidateCurrentReceipts ||
-                (previous.role == FamilyRole.Member && media.kind == "avatar")
-            val nextReceipt = when {
-                media.remoteUri.isNullOrBlank() -> null
-                media.remoteUri!!.startsWith(RECEIPT_PREFIX) -> {
-                    if (hasCurrentReceipt && !preserveCurrentReceipt) null else media.remoteUri
+        transactionRunner.run {
+            babyDao.markAllPendingSync()
+            recordDao.markAllPendingSync()
+            carePlanDao.markAllPendingSync()
+            mediaDao.listAllIncludingDeleted().forEach { media ->
+                val hasCurrentReceipt = previous.isJoined && media.hasReceiptFor(previous)
+                val preserveCurrentReceipt = !invalidateCurrentReceipts ||
+                    (previous.role == FamilyRole.Member && media.kind == "avatar")
+                val nextReceipt = when {
+                    media.remoteUri.isNullOrBlank() -> null
+                    media.remoteUri!!.startsWith(RECEIPT_PREFIX) -> {
+                        if (hasCurrentReceipt && !preserveCurrentReceipt) null else media.remoteUri
+                    }
+                    !previous.isJoined -> null
+                    !preserveCurrentReceipt -> null
+                    else -> previous.receiptFor(media.clientUuid)
                 }
-                !previous.isJoined -> null
-                !preserveCurrentReceipt -> null
-                else -> previous.receiptFor(media.clientUuid)
+                mediaDao.update(
+                    media.copy(
+                        remoteUri = nextReceipt,
+                        syncDirty = true,
+                    ),
+                )
             }
-            mediaDao.update(
-                media.copy(
-                    remoteUri = nextReceipt,
-                    syncDirty = true,
-                ),
-            )
         }
     }
 
