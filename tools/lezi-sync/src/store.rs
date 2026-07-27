@@ -33,7 +33,7 @@ const CURRENT_SCHEMA_SQL: &str = "
         family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE,
         role TEXT NOT NULL CHECK(role IN ('owner', 'member')),
         device_id TEXT NOT NULL,
-        display_name TEXT,
+        display_name TEXT NOT NULL,
         left_at INTEGER
     );
     CREATE INDEX memberships_family ON memberships(family_id);
@@ -128,7 +128,7 @@ pub struct Principal {
 #[derive(Debug, Clone)]
 pub struct ActiveMembership {
     pub role: String,
-    pub display_name: Option<String>,
+    pub display_name: String,
     /// Server-minted immutable membership identity (UUID).
     pub membership_id: String,
 }
@@ -466,7 +466,7 @@ impl Store {
                         row.get::<_, String>(0)?,
                         row.get::<_, Option<String>>(1)?,
                         row.get::<_, String>(2)?,
-                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
                     ))
                 },
@@ -476,7 +476,7 @@ impl Store {
             retry
         {
             if stored_device != device_id
-                || stored_name.as_deref() != Some(display_name)
+                || stored_name != display_name
                 || stored_family_name.as_deref() != family_name
             {
                 return Err(StoreError::FamilyAlreadyExists);
@@ -601,7 +601,7 @@ impl Store {
             .query_map(params![family_id], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                 ))
             })?
@@ -2261,16 +2261,34 @@ fn collect_pull_entity_with_dependencies(
     }
     if entity.deleted_at.is_none() {
         match entity.entity_type.as_str() {
-            "record" => append_pull_dependency(
-                connection,
-                family_id,
-                cursor,
-                "baby",
-                required_payload_reference(&entity.payload, "baby_client_uuid")?,
-                included_keys,
-                group_keys,
-                group,
-            )?,
+            "record" => {
+                append_pull_dependency(
+                    connection,
+                    family_id,
+                    cursor,
+                    "baby",
+                    required_payload_reference(&entity.payload, "baby_client_uuid")?,
+                    included_keys,
+                    group_keys,
+                    group,
+                )?;
+                if let Some(custom_item_id) = entity
+                    .payload
+                    .get("custom_item_client_uuid")
+                    .and_then(Value::as_str)
+                {
+                    append_pull_dependency(
+                        connection,
+                        family_id,
+                        cursor,
+                        "custom_item",
+                        custom_item_id,
+                        included_keys,
+                        group_keys,
+                        group,
+                    )?;
+                }
+            }
             "care_plan" => {
                 append_pull_dependency(
                     connection,
@@ -2282,6 +2300,22 @@ fn collect_pull_entity_with_dependencies(
                     group_keys,
                     group,
                 )?;
+                if let Some(custom_item_id) = entity
+                    .payload
+                    .get("custom_item_client_uuid")
+                    .and_then(Value::as_str)
+                {
+                    append_pull_dependency(
+                        connection,
+                        family_id,
+                        cursor,
+                        "custom_item",
+                        custom_item_id,
+                        included_keys,
+                        group_keys,
+                        group,
+                    )?;
+                }
                 // Completed plans co-gate on the fulfill record at the client.
                 // Pull the record (and its deps/media recursively) in the same
                 // group so pages do not stall with unresolved completed plans.
@@ -2581,17 +2615,23 @@ fn validate_push(
             .filter(|entity| entity.entity_type == "baby")
             .map(|entity| entity.client_uuid.clone()),
     );
-    let mut custom_item_ids = existing
-        .keys()
-        .filter(|(entity_type, _)| entity_type == "custom_item")
-        .map(|(_, id)| id.clone())
+    let mut live_custom_item_ids = existing
+        .iter()
+        .filter(|((entity_type, _), entity)| {
+            entity_type == "custom_item" && entity.deleted_at.is_none()
+        })
+        .map(|((_, id), _)| id.clone())
         .collect::<BTreeSet<_>>();
-    custom_item_ids.extend(
-        entities
-            .iter()
-            .filter(|entity| entity.entity_type == "custom_item")
-            .map(|entity| entity.client_uuid.clone()),
-    );
+    for entity in entities
+        .iter()
+        .filter(|entity| entity.entity_type == "custom_item")
+    {
+        if entity.deleted_at.is_none() {
+            live_custom_item_ids.insert(entity.client_uuid.clone());
+        } else {
+            live_custom_item_ids.remove(&entity.client_uuid);
+        }
+    }
 
     let mut effective_records = existing
         .iter()
@@ -2610,6 +2650,7 @@ fn validate_push(
                 "record baby_client_uuid does not exist".to_owned(),
             ));
         }
+        validate_custom_item_reference(entity, &live_custom_item_ids)?;
         effective_records.insert(entity.client_uuid.clone(), entity.payload.clone());
     }
     let record_ids = effective_records.keys().cloned().collect::<BTreeSet<_>>();
@@ -2631,35 +2672,7 @@ fn validate_push(
                 "care_plan baby_client_uuid does not exist".to_owned(),
             ));
         }
-        let plan_type = entity
-            .payload
-            .get("type")
-            .and_then(Value::as_str)
-            .ok_or(StoreError::InvalidStoredPayload)?;
-        let custom_item_id = entity
-            .payload
-            .get("custom_item_client_uuid")
-            .and_then(Value::as_str);
-        match (plan_type == "custom", custom_item_id) {
-            (true, None) => {
-                return Err(StoreError::UnresolvedReference(
-                    "care_plan type custom requires custom_item_client_uuid".to_owned(),
-                ));
-            }
-            (false, Some(_)) => {
-                return Err(StoreError::UnresolvedReference(
-                    "care_plan custom_item_client_uuid is only valid for type custom".to_owned(),
-                ));
-            }
-            _ => {}
-        }
-        if let Some(custom_item_id) = custom_item_id {
-            if !custom_item_ids.contains(custom_item_id) {
-                return Err(StoreError::UnresolvedReference(
-                    "care_plan custom_item_client_uuid does not exist".to_owned(),
-                ));
-            }
-        }
+        validate_custom_item_reference(entity, &live_custom_item_ids)?;
         effective_care_plans.insert(entity.client_uuid.clone(), entity.payload.clone());
     }
     let care_plan_ids = effective_care_plans
@@ -2839,6 +2852,43 @@ fn validate_push(
     Ok(())
 }
 
+fn validate_custom_item_reference(
+    entity: &Entity,
+    live_custom_item_ids: &BTreeSet<String>,
+) -> Result<(), StoreError> {
+    let item_type = entity
+        .payload
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or(StoreError::InvalidStoredPayload)?;
+    let custom_item_id = entity
+        .payload
+        .get("custom_item_client_uuid")
+        .and_then(Value::as_str);
+    match (item_type == "custom", custom_item_id) {
+        (true, None) => {
+            return Err(StoreError::UnresolvedReference(format!(
+                "{} type custom requires custom_item_client_uuid",
+                entity.entity_type
+            )));
+        }
+        (false, Some(_)) => {
+            return Err(StoreError::UnresolvedReference(format!(
+                "{} custom_item_client_uuid is only valid for type custom",
+                entity.entity_type
+            )));
+        }
+        _ => {}
+    }
+    if custom_item_id.is_some_and(|id| !live_custom_item_ids.contains(id)) {
+        return Err(StoreError::UnresolvedReference(format!(
+            "{} custom_item_client_uuid does not exist",
+            entity.entity_type
+        )));
+    }
+    Ok(())
+}
+
 fn media_association(payload: &Map<String, Value>) -> Result<MediaAssociation, StoreError> {
     let kind = payload["kind"]
         .as_str()
@@ -2904,6 +2954,16 @@ mod tests {
             connection
                 .query_row(
                     "SELECT \"notnull\" FROM pragma_table_info('sync_bundles') WHERE name = 'staged_membership_id'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT \"notnull\" FROM pragma_table_info('memberships') WHERE name = 'display_name'",
                     [],
                     |row| row.get::<_, i64>(0),
                 )
@@ -2999,6 +3059,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn current_version_with_nullable_membership_name_fails_without_mutation() {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("lezi.db");
+        let connection = Connection::open(&database_path).unwrap();
+        let nullable_membership_schema =
+            CURRENT_SCHEMA_SQL.replace("display_name TEXT NOT NULL", "display_name TEXT");
+        connection
+            .execute_batch(&nullable_membership_schema)
+            .unwrap();
+        connection
+            .pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)
+            .unwrap();
+        drop(connection);
+
+        let before = fs::read(&database_path).unwrap();
+        let before_entries = fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>();
+        assert!(matches!(
+            Store::open(&database_path).err(),
+            Some(StoreError::IncompatibleSchema { supported: 3 })
+        ));
+        assert_eq!(fs::read(&database_path).unwrap(), before);
+        assert_eq!(
+            fs::read_dir(directory.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<BTreeSet<_>>(),
+            before_entries
+        );
+    }
+
     fn entity(entity_type: &str, client_uuid: Uuid, updated_at: i64, payload: Value) -> Entity {
         Entity {
             entity_type: entity_type.to_owned(),
@@ -3046,7 +3140,7 @@ mod tests {
         let record = json!({
             "baby_client_uuid":baby_id,"type":"formula","timestamp":100,
             "end_timestamp":null,"note":null,"payload_json":{"amount_ml":120},
-            "schema_version":1
+            "schema_version":2
         });
         assert_eq!(
             store
@@ -3121,7 +3215,7 @@ mod tests {
                 "scheduled_zone_id": "Asia/Shanghai",
                 "status": "pending",
                 "payload_json": {},
-                "schema_version": 1,
+                "schema_version": 2,
                 "note": null,
             })
         };
@@ -3183,6 +3277,201 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_record_push_requires_a_live_type_consistent_custom_item_reference() {
+        let directory = TempDir::new().unwrap();
+        let store = Store::open(directory.path().join("lezi.db")).unwrap();
+        let family_id = family(&store);
+        let principal = owner_principal(&family_id);
+        let baby_id = Uuid::new_v4();
+        let live_custom_item_id = Uuid::new_v4();
+        let deleted_custom_item_id = Uuid::new_v4();
+        store
+            .push(
+                &principal,
+                vec![
+                    entity(
+                        "baby",
+                        baby_id,
+                        1,
+                        json!({
+                            "nickname":"年年","sex":"female","birthday":"2025-01-02",
+                            "avatar_media_uuid":null,"birth_weight_grams":3200
+                        }),
+                    ),
+                    entity(
+                        "custom_item",
+                        live_custom_item_id,
+                        1,
+                        json!({
+                            "name":"抚触","icon_slot":2,"created_by_membership_id":null
+                        }),
+                    ),
+                    entity(
+                        "custom_item",
+                        deleted_custom_item_id,
+                        1,
+                        json!({
+                            "name":"旧项目","icon_slot":3,"created_by_membership_id":null
+                        }),
+                    ),
+                ],
+                10,
+                1_700_000_000_000,
+            )
+            .unwrap();
+        let deleted_payload = json!({
+            "name":"旧项目","icon_slot":3,"created_by_membership_id":"m-owner"
+        });
+        let mut deleted_entity = entity("custom_item", deleted_custom_item_id, 2, deleted_payload);
+        deleted_entity.deleted_at = Some(2);
+        store
+            .push(&principal, vec![deleted_entity], 10, 1_700_000_000_000)
+            .unwrap();
+
+        let record_payload = |record_type: &str, custom_item_id: Option<Uuid>| {
+            json!({
+                "baby_client_uuid": baby_id,
+                "type": record_type,
+                "custom_item_client_uuid": custom_item_id,
+                "timestamp": 100,
+                "end_timestamp": null,
+                "note": null,
+                "payload_json": {},
+                "schema_version": 2,
+            })
+        };
+        for (payload, expected_message) in [
+            (
+                record_payload("custom", None),
+                "record type custom requires custom_item_client_uuid",
+            ),
+            (
+                record_payload("bath", Some(live_custom_item_id)),
+                "record custom_item_client_uuid is only valid for type custom",
+            ),
+            (
+                record_payload("custom", Some(Uuid::new_v4())),
+                "record custom_item_client_uuid does not exist",
+            ),
+            (
+                record_payload("custom", Some(deleted_custom_item_id)),
+                "record custom_item_client_uuid does not exist",
+            ),
+        ] {
+            let result = store.push(
+                &principal,
+                vec![entity("record", Uuid::new_v4(), 3, payload)],
+                10,
+                1_700_000_000_000,
+            );
+            assert!(matches!(
+                result,
+                Err(StoreError::UnresolvedReference(message)) if message == expected_message
+            ));
+        }
+
+        assert_eq!(
+            store
+                .push(
+                    &principal,
+                    vec![entity(
+                        "record",
+                        Uuid::new_v4(),
+                        3,
+                        record_payload("custom", Some(live_custom_item_id)),
+                    )],
+                    10,
+                    1_700_000_000_000,
+                )
+                .unwrap()
+                .applied,
+            1
+        );
+    }
+
+    #[test]
+    fn full_pull_emits_custom_item_dependency_before_custom_record() {
+        let directory = TempDir::new().unwrap();
+        let store = Store::open(directory.path().join("lezi.db")).unwrap();
+        let family_id = family(&store);
+        let principal = owner_principal(&family_id);
+        let baby_id = Uuid::new_v4();
+        let custom_item_id = Uuid::new_v4();
+        let record_id = Uuid::new_v4();
+        store
+            .push(
+                &principal,
+                vec![
+                    entity(
+                        "baby",
+                        baby_id,
+                        1,
+                        json!({
+                            "nickname":"年年","sex":"female","birthday":"2025-01-02",
+                            "avatar_media_uuid":null,"birth_weight_grams":3200
+                        }),
+                    ),
+                    entity(
+                        "custom_item",
+                        custom_item_id,
+                        1,
+                        json!({
+                            "name":"抚触","icon_slot":2,"created_by_membership_id":null
+                        }),
+                    ),
+                    entity(
+                        "record",
+                        record_id,
+                        1,
+                        json!({
+                            "baby_client_uuid":baby_id,
+                            "type":"custom",
+                            "custom_item_client_uuid":custom_item_id,
+                            "timestamp":100,
+                            "end_timestamp":null,
+                            "note":null,
+                            "payload_json":{"title":"抚触"},
+                            "schema_version":2
+                        }),
+                    ),
+                ],
+                10,
+                1_700_000_000_000,
+            )
+            .unwrap();
+        store
+            .push(
+                &principal,
+                vec![entity(
+                    "custom_item",
+                    custom_item_id,
+                    2,
+                    json!({
+                        "name":"睡前抚触","icon_slot":2,"created_by_membership_id":"m-owner"
+                    }),
+                )],
+                10,
+                1_700_000_000_000,
+            )
+            .unwrap();
+
+        let page = store.pull(&family_id, 0).unwrap();
+        let ordered_keys = page
+            .entities
+            .iter()
+            .map(|entity| (entity.entity_type.clone(), entity.client_uuid.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered_keys,
+            vec![
+                ("baby".to_owned(), baby_id.to_string()),
+                ("custom_item".to_owned(), custom_item_id.to_string()),
+                ("record".to_owned(), record_id.to_string()),
+            ]
+        );
+    }
+
+    #[test]
     fn push_rejects_entities_past_the_supplied_timestamp_limit_without_writing() {
         let directory = TempDir::new().unwrap();
         let store = Store::open(directory.path().join("lezi.db")).unwrap();
@@ -3221,9 +3510,13 @@ mod tests {
                 index + 2,
                 json!({
                     "baby_client_uuid":baby_id,
-                    "type":"custom",
+                    "type":"diary",
+                    "custom_item_client_uuid":null,
                     "timestamp":100,
-                    "payload_json":{"blob":"x".repeat(1024 * 1024)}
+                    "end_timestamp":null,
+                    "note":null,
+                    "payload_json":{"body":"x".repeat(1024 * 1024)},
+                    "schema_version":2
                 }),
             )
         }));
@@ -3279,9 +3572,13 @@ mod tests {
                 2,
                 json!({
                     "baby_client_uuid":baby_id,
-                    "type":"custom",
+                    "type":"diary",
+                    "custom_item_client_uuid":null,
                     "timestamp":100,
-                    "payload_json":{"blob":"x".repeat(PULL_PAGE_TARGET_BYTES)}
+                    "end_timestamp":null,
+                    "note":null,
+                    "payload_json":{"body":"x".repeat(PULL_PAGE_TARGET_BYTES)},
+                    "schema_version":2
                 }),
             )],
             100,

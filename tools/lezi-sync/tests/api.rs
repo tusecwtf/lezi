@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::body::{Body, Bytes};
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
@@ -21,6 +22,21 @@ struct Rig {
     directory: TempDir,
     app: Router,
     now: Arc<AtomicI64>,
+}
+
+#[derive(Clone)]
+struct TestClientSession {
+    device_id: String,
+    generation: String,
+}
+
+fn test_client_sessions() -> &'static Mutex<HashMap<String, TestClientSession>> {
+    static SESSIONS: OnceLock<Mutex<HashMap<String, TestClientSession>>> = OnceLock::new();
+    SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn test_client_session(token: &str) -> Option<TestClientSession> {
+    test_client_sessions().lock().unwrap().get(token).cloned()
 }
 
 impl Rig {
@@ -132,6 +148,69 @@ async fn json_request_with_headers(
     method: Method,
     uri: &str,
     token: Option<&str>,
+    mut body: Value,
+    extra_headers: &[(&str, &str)],
+) -> (StatusCode, Value) {
+    let request_device_id = body
+        .get("device_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    if method == Method::POST {
+        if let Some(session) = token.and_then(test_client_session) {
+            if uri == "/v1/push" {
+                if let Some(object) = body.as_object_mut() {
+                    object
+                        .entry("device_id")
+                        .or_insert_with(|| Value::String(session.device_id.clone()));
+                    object
+                        .entry("generation")
+                        .or_insert_with(|| Value::String(session.generation.clone()));
+                }
+            } else if uri == "/v1/bundles" || uri.ends_with("/commit") {
+                if let Some(object) = body.as_object_mut() {
+                    object
+                        .entry("generation")
+                        .or_insert_with(|| Value::String(session.generation));
+                }
+            }
+        }
+    }
+
+    let (status, value) =
+        raw_json_request_with_headers(app, method, uri, token, body, extra_headers).await;
+    if status.is_success() && (uri == "/v1/family/create" || uri == "/v1/join") {
+        if let (Some(token), Some(generation), Some(device_id)) = (
+            value.get("token").and_then(Value::as_str),
+            value.get("generation").and_then(Value::as_str),
+            request_device_id,
+        ) {
+            test_client_sessions().lock().unwrap().insert(
+                token.to_owned(),
+                TestClientSession {
+                    device_id,
+                    generation: generation.to_owned(),
+                },
+            );
+        }
+    }
+    (status, value)
+}
+
+async fn raw_json_request(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    token: Option<&str>,
+    body: Value,
+) -> (StatusCode, Value) {
+    raw_json_request_with_headers(app, method, uri, token, body, &[]).await
+}
+
+async fn raw_json_request_with_headers(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    token: Option<&str>,
     body: Value,
     extra_headers: &[(&str, &str)],
 ) -> (StatusCode, Value) {
@@ -157,7 +236,21 @@ async fn json_request_with_headers(
 }
 
 async fn get_json(app: &Router, uri: &str, token: Option<&str>) -> (StatusCode, Value) {
-    json_request(app, Method::GET, uri, token, json!({})).await
+    let mut current_uri = uri.to_owned();
+    let has_generation = uri
+        .split_once('?')
+        .is_some_and(|(_, query)| query.split('&').any(|part| part.starts_with("generation=")));
+    if uri.starts_with("/v1/pull?") && !has_generation {
+        if let Some(session) = token.and_then(test_client_session) {
+            current_uri.push_str("&generation=");
+            current_uri.push_str(&session.generation);
+        }
+    }
+    json_request(app, Method::GET, &current_uri, token, json!({})).await
+}
+
+async fn raw_get_json(app: &Router, uri: &str, token: Option<&str>) -> (StatusCode, Value) {
+    raw_json_request(app, Method::GET, uri, token, json!({})).await
 }
 
 async fn create_family(app: &Router, device_id: &str, request_id: &str) -> Value {
@@ -191,11 +284,12 @@ fn record_payload(baby_id: &str) -> Value {
     json!({
         "baby_client_uuid": baby_id,
         "type": "formula",
+        "custom_item_client_uuid": null,
         "timestamp": 100,
         "end_timestamp": null,
         "note": null,
         "payload_json": {"amount_ml": 120},
-        "schema_version": 1,
+        "schema_version": 2,
     })
 }
 
@@ -304,7 +398,12 @@ async fn current_schema_version_restarts_with_credentials_and_entities() {
     drop(connection);
 
     let restarted = rig.restart("generation-b");
-    let (pull_status, pull) = get_json(&restarted, "/v1/pull?cursor=0", Some(token)).await;
+    let (pull_status, pull) = get_json(
+        &restarted,
+        "/v1/pull?cursor=0&generation=generation-b",
+        Some(token),
+    )
+    .await;
     assert_eq!(pull_status, StatusCode::OK);
     assert!(
         pull["entities"]
@@ -719,6 +818,276 @@ async fn current_wire_rejects_removed_compatibility_fields() {
         StatusCode::UNPROCESSABLE_ENTITY,
         "{device_author_body}"
     );
+}
+
+#[tokio::test]
+async fn current_sync_requests_require_device_and_generation_envelopes() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "strict-envelope-owner",
+        "strict-envelope-owner-request-00001",
+    )
+    .await;
+    let token = owner["token"].as_str().unwrap();
+
+    for body in [
+        json!({"entities": []}),
+        json!({"device_id": "strict-envelope-owner", "entities": []}),
+        json!({"generation": "generation-a", "entities": []}),
+    ] {
+        let (status, response) =
+            raw_json_request(&rig.app, Method::POST, "/v1/push", Some(token), body).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
+    }
+
+    let (pull_status, pull_body) = raw_get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    assert_eq!(pull_status, StatusCode::UNPROCESSABLE_ENTITY, "{pull_body}");
+
+    let baby_id = Uuid::new_v4().to_string();
+    let (baby_status, baby_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({
+            "device_id": "strict-envelope-owner",
+            "generation": "generation-a",
+            "entities": [entity_wire(
+                "baby",
+                &baby_id,
+                1,
+                baby_payload("年年", None),
+                None,
+            )],
+        }),
+    )
+    .await;
+    assert_eq!(baby_status, StatusCode::OK, "{baby_body}");
+    let bundle_id = Uuid::new_v4().to_string();
+    let root_id = Uuid::new_v4().to_string();
+    let payload = json!({
+        "baby_client_uuid": baby_id,
+        "type": "formula",
+        "custom_item_client_uuid": null,
+        "timestamp": 1,
+        "end_timestamp": null,
+        "note": null,
+        "payload_json": {"amount_ml": 120},
+        "schema_version": 2,
+    });
+    let (stage_status, stage_body) = raw_json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire("record", &root_id, 2, payload.clone(), None),
+            "media": [],
+        }),
+    )
+    .await;
+    assert_eq!(
+        stage_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{stage_body}"
+    );
+
+    let (valid_stage_status, valid_stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire("record", &root_id, 2, payload, None),
+            "media": [],
+            "generation": "generation-a",
+        }),
+    )
+    .await;
+    assert_eq!(valid_stage_status, StatusCode::OK, "{valid_stage_body}");
+
+    let (commit_status, commit_body) = raw_json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        commit_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{commit_body}"
+    );
+}
+
+#[tokio::test]
+async fn current_record_and_care_plan_wire_rejects_obsolete_or_untyped_payloads() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "strict-payload-owner",
+        "strict-payload-owner-request-0001",
+    )
+    .await;
+    let token = owner["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, token).await;
+
+    for invalid_schema in [Value::Null, json!(1), json!(3), json!("2")] {
+        let mut record = record_payload(&baby_id);
+        record["schema_version"] = invalid_schema.clone();
+        let (record_status, record_body) = json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/push",
+            Some(token),
+            json!({"entities": [entity_wire(
+                "record",
+                &Uuid::new_v4().to_string(),
+                2,
+                record,
+                None,
+            )]}),
+        )
+        .await;
+        assert_eq!(
+            record_status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{record_body}"
+        );
+
+        let mut plan = care_plan_payload(&baby_id, "formula");
+        plan["schema_version"] = invalid_schema;
+        let (plan_status, plan_body) = json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/bundles",
+            Some(token),
+            json!({
+                "bundle_id": Uuid::new_v4(),
+                "root": entity_wire(
+                    "care_plan",
+                    &Uuid::new_v4().to_string(),
+                    2,
+                    plan,
+                    None,
+                ),
+                "media": [],
+            }),
+        )
+        .await;
+        assert_eq!(plan_status, StatusCode::UNPROCESSABLE_ENTITY, "{plan_body}");
+    }
+
+    for root_type in ["record", "care_plan"] {
+        let mut payload = if root_type == "record" {
+            record_payload(&baby_id)
+        } else {
+            care_plan_payload(&baby_id, "formula")
+        };
+        payload.as_object_mut().unwrap().remove("schema_version");
+        let (status, body) = if root_type == "record" {
+            json_request(
+                &rig.app,
+                Method::POST,
+                "/v1/push",
+                Some(token),
+                json!({"entities": [entity_wire(
+                    root_type,
+                    &Uuid::new_v4().to_string(),
+                    2,
+                    payload,
+                    None,
+                )]}),
+            )
+            .await
+        } else {
+            json_request(
+                &rig.app,
+                Method::POST,
+                "/v1/bundles",
+                Some(token),
+                json!({
+                    "bundle_id": Uuid::new_v4(),
+                    "root": entity_wire(
+                        root_type,
+                        &Uuid::new_v4().to_string(),
+                        2,
+                        payload,
+                        None,
+                    ),
+                    "media": [],
+                }),
+            )
+            .await
+        };
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    }
+
+    for (record_type, nested) in [
+        ("memo", json!({})),
+        ("other", json!({})),
+        ("unknown", json!({})),
+        ("formula", json!({})),
+        ("formula", json!({"amount_ml": "120"})),
+        ("formula", json!({"amount_ml": 120, "legacy_amount": 120})),
+        ("temperature", json!({"value": 36.7})),
+        ("diary", json!({"body": "日记", "photos": ["/data/a.jpg"]})),
+        ("custom", json!({"title": "抚触", "custom_item_id": 1})),
+    ] {
+        let mut record = record_payload(&baby_id);
+        record["type"] = json!(record_type);
+        record["payload_json"] = nested.clone();
+        let (record_status, record_body) = json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/push",
+            Some(token),
+            json!({"entities": [entity_wire(
+                "record",
+                &Uuid::new_v4().to_string(),
+                2,
+                record,
+                None,
+            )]}),
+        )
+        .await;
+        assert_eq!(
+            record_status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{record_body}"
+        );
+
+        let mut plan = care_plan_payload(&baby_id, "formula");
+        plan["type"] = json!(record_type);
+        plan["payload_json"] = nested;
+        let (plan_status, plan_body) = json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/bundles",
+            Some(token),
+            json!({
+                "bundle_id": Uuid::new_v4(),
+                "root": entity_wire(
+                    "care_plan",
+                    &Uuid::new_v4().to_string(),
+                    2,
+                    plan,
+                    None,
+                ),
+                "media": [],
+            }),
+        )
+        .await;
+        assert_eq!(plan_status, StatusCode::UNPROCESSABLE_ENTITY, "{plan_body}");
+    }
+
+    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    assert_eq!(pull["entities"].as_array().unwrap().len(), 1);
+    assert_eq!(pull["entities"][0]["type"], "baby");
 }
 
 #[tokio::test]
@@ -1511,8 +1880,12 @@ async fn zero_entity_pull_reports_family_name_value_and_null_across_restart() {
     assert_eq!(value_pull["family_name"], "小星星一家");
 
     let restarted = rig.restart("generation-b");
-    let (restart_value_status, restart_value_pull) =
-        get_json(&restarted, "/v1/pull?cursor=0", Some(member_token)).await;
+    let (restart_value_status, restart_value_pull) = get_json(
+        &restarted,
+        "/v1/pull?cursor=0&generation=generation-b",
+        Some(member_token),
+    )
+    .await;
     assert_eq!(restart_value_status, StatusCode::OK, "{restart_value_pull}");
     assert_eq!(restart_value_pull["entities"], json!([]));
     assert_eq!(restart_value_pull["family_name"], "小星星一家");
@@ -1526,8 +1899,12 @@ async fn zero_entity_pull_reports_family_name_value_and_null_across_restart() {
     )
     .await;
     assert_eq!(clear_status, StatusCode::OK, "{clear_body}");
-    let (null_status, null_pull) =
-        get_json(&restarted, "/v1/pull?cursor=0", Some(member_token)).await;
+    let (null_status, null_pull) = get_json(
+        &restarted,
+        "/v1/pull?cursor=0&generation=generation-b",
+        Some(member_token),
+    )
+    .await;
     assert_eq!(null_status, StatusCode::OK, "{null_pull}");
     assert_eq!(null_pull["entities"], json!([]));
     assert!(
@@ -1537,8 +1914,12 @@ async fn zero_entity_pull_reports_family_name_value_and_null_across_restart() {
     assert!(null_pull["family_name"].is_null(), "{null_pull}");
 
     let restarted_again = rig.restart("generation-c");
-    let (restart_null_status, restart_null_pull) =
-        get_json(&restarted_again, "/v1/pull?cursor=0", Some(member_token)).await;
+    let (restart_null_status, restart_null_pull) = get_json(
+        &restarted_again,
+        "/v1/pull?cursor=0&generation=generation-c",
+        Some(member_token),
+    )
+    .await;
     assert_eq!(restart_null_status, StatusCode::OK, "{restart_null_pull}");
     assert_eq!(restart_null_pull["entities"], json!([]));
     assert!(
@@ -3754,17 +4135,46 @@ async fn atomic_care_plan_requires_a_type_consistent_custom_item_reference() {
     .await;
     assert_eq!(custom_status, StatusCode::OK, "{custom_body}");
 
-    let missing_reference = care_plan_payload(&baby_id, "custom");
+    let mut missing_reference = care_plan_payload(&baby_id, "custom");
+    missing_reference
+        .as_object_mut()
+        .unwrap()
+        .remove("custom_item_client_uuid");
     let mut null_reference = care_plan_payload(&baby_id, "custom");
     null_reference["custom_item_client_uuid"] = Value::Null;
     let mut unexpected_reference = care_plan_payload(&baby_id, "bath");
     unexpected_reference["custom_item_client_uuid"] = json!(custom_item_id);
 
+    let missing_bundle_id = Uuid::new_v4().to_string();
+    let (missing_status, missing_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": missing_bundle_id,
+            "root": entity_wire(
+                "care_plan",
+                &Uuid::new_v4().to_string(),
+                2,
+                missing_reference,
+                None,
+            ),
+            "media": [],
+        }),
+    )
+    .await;
+    assert_eq!(
+        missing_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{missing_body}"
+    );
+    assert_eq!(
+        missing_body["detail"],
+        "custom_item_client_uuid is required"
+    );
+
     for (payload, expected_detail) in [
-        (
-            missing_reference,
-            "care_plan type custom requires custom_item_client_uuid",
-        ),
         (
             null_reference,
             "care_plan type custom requires custom_item_client_uuid",
@@ -4230,7 +4640,12 @@ async fn foreign_bundle_commit_cannot_leave_claimable_final_bytes() {
     assert_eq!(refine_status, StatusCode::OK, "{refine_body}");
 
     let restarted = rig.restart("generation-b");
-    let (_, pull) = get_json(&restarted, "/v1/pull?cursor=0", Some(owner_token)).await;
+    let (_, pull) = get_json(
+        &restarted,
+        "/v1/pull?cursor=0&generation=generation-b",
+        Some(owner_token),
+    )
+    .await;
     assert!(
         !pull["entities"]
             .as_array()
@@ -4776,7 +5191,7 @@ async fn atomic_bundle_prepares_durable_media_before_database_publication() {
         Method::POST,
         &format!("/v1/bundles/{bundle_id}/commit"),
         Some(token),
-        Body::from("{}"),
+        Body::from(r#"{"generation":"generation-a"}"#),
         Some("application/json"),
     )
     .await;
@@ -4824,7 +5239,7 @@ async fn atomic_bundle_prepares_durable_media_before_database_publication() {
         Method::POST,
         &format!("/v1/bundles/{bundle_id}/commit"),
         Some(token),
-        json!({}),
+        json!({"generation": "generation-b"}),
     )
     .await;
     assert_eq!(retry_status, StatusCode::OK, "{retry_body}");
@@ -5315,17 +5730,27 @@ async fn atomic_bundle_tombstone_publishes_without_media_bytes() {
 }
 
 fn care_plan_payload(baby_id: &str, plan_type: &str) -> Value {
+    let payload_json = match plan_type {
+        "formula" => json!({"amount_ml": 120}),
+        "pee" => json!({"pee_amount": 2}),
+        "custom" => json!({"title": "抚触"}),
+        "bath" => json!({}),
+        _ => panic!("missing API care-plan fixture for {plan_type}"),
+    };
     json!({
         "baby_client_uuid": baby_id,
         "type": plan_type,
+        "custom_item_client_uuid": null,
         "scheduled_at": 1_700_000_000_000i64,
         "scheduled_zone_id": "Asia/Shanghai",
         "status": "pending",
-        "payload_json": {},
-        "schema_version": 1,
+        "payload_json": payload_json,
+        "schema_version": 2,
         "note": null,
         // Forgery attempt — server must overwrite with authenticated membership.
         "created_by_membership_id": "spoofed-membership",
+        "fulfilled_record_client_uuid": null,
+        "fulfilled_at": null,
     })
 }
 
@@ -6375,8 +6800,14 @@ async fn pending_bundle_bytes_are_not_claimed_by_ordinary_metadata_or_put_across
         "rejected ordinary PUT replaced quarantined bundle bytes"
     );
 
-    for app in [&rig.app, &rig.restart("generation-b")] {
-        let (_, pull) = get_json(app, "/v1/pull?cursor=0", Some(token)).await;
+    let restarted = rig.restart("generation-b");
+    for (app, generation) in [(&rig.app, "generation-a"), (&restarted, "generation-b")] {
+        let (_, pull) = get_json(
+            app,
+            &format!("/v1/pull?cursor=0&generation={generation}"),
+            Some(token),
+        )
+        .await;
         assert!(
             !pull["entities"]
                 .as_array()

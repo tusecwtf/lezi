@@ -173,23 +173,21 @@ fn is_bidirectional_control(character: char) -> bool {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PushRequest {
-    #[serde(default)]
-    pub device_id: Option<String>,
-    #[serde(default)]
-    pub generation: Option<String>,
+    pub device_id: String,
+    pub generation: String,
     pub entities: Vec<RawEntity>,
 }
 
 pub struct ValidatedPush {
-    pub device_id: Option<String>,
-    pub generation: Option<String>,
+    pub device_id: String,
+    pub generation: String,
     pub entities: Vec<Entity>,
 }
 
 impl PushRequest {
     pub fn validate(self, max_media_bytes: usize) -> Result<ValidatedPush, ApiError> {
-        validate_optional_nonempty_string(&self.device_id, 128, "device_id")?;
-        validate_optional_nonempty_string(&self.generation, 128, "generation")?;
+        validate_required_string(&self.device_id, 128, "device_id")?;
+        validate_required_string(&self.generation, 128, "generation")?;
         if self.entities.len() > 1000 {
             return Err(ApiError::unprocessable(
                 "entities must contain at most 1000 items",
@@ -314,20 +312,19 @@ pub struct BundleStageRequest {
     pub root: RawEntity,
     #[serde(default)]
     pub media: Vec<RawEntity>,
-    #[serde(default)]
-    pub generation: Option<String>,
+    pub generation: String,
 }
 
 pub struct ValidatedBundleStage {
     pub bundle_id: String,
     pub root: Entity,
     pub media: Vec<Entity>,
-    pub generation: Option<String>,
+    pub generation: String,
 }
 
 impl BundleStageRequest {
     pub fn validate(self, max_media_bytes: usize) -> Result<ValidatedBundleStage, ApiError> {
-        validate_optional_nonempty_string(&self.generation, 128, "generation")?;
+        validate_required_string(&self.generation, 128, "generation")?;
         if self.media.len() > MAX_BUNDLE_MEDIA_ENTITIES {
             return Err(ApiError::unprocessable(format!(
                 "bundle media must contain at most {MAX_BUNDLE_MEDIA_ENTITIES} items"
@@ -385,13 +382,12 @@ impl BundleStageRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BundleCommitRequest {
-    #[serde(default)]
-    pub generation: Option<String>,
+    pub generation: String,
 }
 
 impl BundleCommitRequest {
     pub fn validate(&self) -> Result<(), ApiError> {
-        validate_optional_nonempty_string(&self.generation, 128, "generation")
+        validate_required_string(&self.generation, 128, "generation")
     }
 }
 
@@ -421,16 +417,67 @@ fn validate_baby(payload: &mut Map<String, Value>) -> Result<(), ApiError> {
     Ok(())
 }
 
+const CURRENT_RECORD_TYPES: &[&str] = &[
+    "nursing",
+    "formula",
+    "pumped_feed",
+    "pump_express",
+    "pee",
+    "poop",
+    "both_diaper",
+    "sleep",
+    "temperature",
+    "diary",
+    "bath",
+    "walk",
+    "cough",
+    "rash",
+    "vomit",
+    "injury",
+    "medicine",
+    "hospital",
+    "height",
+    "weight",
+    "baby_food",
+    "snack",
+    "drink",
+    "head",
+    "chest",
+    "foot_size",
+    "vaccine",
+    "custom",
+];
+
+fn current_record_type(payload: &Map<String, Value>) -> Result<&str, ApiError> {
+    let record_type = string_value(payload, "type")?;
+    if !CURRENT_RECORD_TYPES.contains(&record_type) {
+        return Err(ApiError::unprocessable(
+            "type must be a current record type",
+        ));
+    }
+    Ok(record_type)
+}
+
 fn validate_record(payload: &Map<String, Value>) -> Result<(), ApiError> {
     require_keys(
         payload,
-        &["baby_client_uuid", "type", "timestamp", "payload_json"],
+        &[
+            "baby_client_uuid",
+            "type",
+            "custom_item_client_uuid",
+            "timestamp",
+            "end_timestamp",
+            "note",
+            "payload_json",
+            "schema_version",
+        ],
     )?;
     allow_keys(
         payload,
         &[
             "baby_client_uuid",
             "type",
+            "custom_item_client_uuid",
             "timestamp",
             "end_timestamp",
             "note",
@@ -440,14 +487,13 @@ fn validate_record(payload: &Map<String, Value>) -> Result<(), ApiError> {
         ],
     )?;
     uuid(payload, "baby_client_uuid")?;
-    string(payload, "type", 1, 64)?;
+    let record_type = current_record_type(payload)?;
+    optional_nullable_uuid(payload, "custom_item_client_uuid")?;
     integer(payload, "timestamp", 0, i64::MAX)?;
     optional_integer(payload, "end_timestamp", 0, i64::MAX)?;
     optional_nullable_string(payload, "note", 0, 20_000)?;
-    if !payload.get("payload_json").is_some_and(Value::is_object) {
-        return Err(ApiError::unprocessable("payload_json must be an object"));
-    }
-    optional_integer(payload, "schema_version", 1, i64::MAX)?;
+    validate_current_payload_json(record_type, payload.get("payload_json"))?;
+    integer(payload, "schema_version", 2, 2)?;
     optional_nullable_string(payload, "created_by_membership_id", 1, 64)?;
     Ok(())
 }
@@ -528,10 +574,16 @@ fn validate_care_plan(payload: &mut Map<String, Value>) -> Result<(), ApiError> 
         &[
             "baby_client_uuid",
             "type",
+            "custom_item_client_uuid",
             "scheduled_at",
             "scheduled_zone_id",
+            "note",
             "status",
             "payload_json",
+            "schema_version",
+            "created_by_membership_id",
+            "fulfilled_record_client_uuid",
+            "fulfilled_at",
         ],
     )?;
     allow_keys(
@@ -552,15 +604,13 @@ fn validate_care_plan(payload: &mut Map<String, Value>) -> Result<(), ApiError> 
         ],
     )?;
     uuid(payload, "baby_client_uuid")?;
-    string(payload, "type", 1, 64)?;
+    let record_type = current_record_type(payload)?;
     optional_nullable_uuid(payload, "custom_item_client_uuid")?;
     integer(payload, "scheduled_at", 0, i64::MAX)?;
     string(payload, "scheduled_zone_id", 1, 64)?;
     optional_nullable_string(payload, "note", 0, 20_000)?;
-    if !payload.get("payload_json").is_some_and(Value::is_object) {
-        return Err(ApiError::unprocessable("payload_json must be an object"));
-    }
-    optional_integer(payload, "schema_version", 1, i64::MAX)?;
+    validate_current_payload_json(record_type, payload.get("payload_json"))?;
+    integer(payload, "schema_version", 2, 2)?;
     let status = string_value(payload, "status")?;
     if status != "pending" && status != "missed" && status != "completed" && status != "skipped" {
         return Err(ApiError::unprocessable(
@@ -571,6 +621,267 @@ fn validate_care_plan(payload: &mut Map<String, Value>) -> Result<(), ApiError> 
     optional_nullable_string(payload, "created_by_membership_id", 1, 64)?;
     optional_nullable_uuid(payload, "fulfilled_record_client_uuid")?;
     optional_integer(payload, "fulfilled_at", 0, i64::MAX)?;
+    Ok(())
+}
+
+fn validate_current_payload_json(
+    record_type: &str,
+    payload_json: Option<&Value>,
+) -> Result<(), ApiError> {
+    let payload = payload_json
+        .and_then(Value::as_object)
+        .ok_or_else(|| ApiError::unprocessable("payload_json must be an object"))?;
+    match record_type {
+        "nursing" => {
+            require_keys(payload, &["left_min", "right_min", "order", "record_mode"])?;
+            allow_keys(
+                payload,
+                &["left_min", "right_min", "order", "amount_ml", "record_mode"],
+            )?;
+            let left = nested_integer(payload, "left_min", 0, i64::from(i32::MAX))?;
+            let right = nested_integer(payload, "right_min", 0, i64::from(i32::MAX))?;
+            if left.saturating_add(right) <= 0 {
+                return Err(ApiError::unprocessable(
+                    "payload_json nursing duration must be positive",
+                ));
+            }
+            nested_string_in(payload, "order", &["L", "R", "LR", "RL"])?;
+            nested_optional_integer(
+                payload,
+                "amount_ml",
+                i64::from(i32::MIN),
+                i64::from(i32::MAX),
+            )?;
+            nested_string_in(payload, "record_mode", &["start", "end"])?;
+        }
+        "formula" => {
+            require_keys(payload, &["amount_ml"])?;
+            allow_keys(payload, &["amount_ml", "prepared_ml", "duration_min"])?;
+            nested_integer(payload, "amount_ml", 1, 999)?;
+            nested_optional_integer(payload, "prepared_ml", 0, 999)?;
+            nested_optional_integer(payload, "duration_min", 0, 1_440)?;
+        }
+        "pumped_feed" | "pump_express" => {
+            require_keys(payload, &["amount_ml"])?;
+            allow_keys(payload, &["amount_ml"])?;
+            nested_integer(payload, "amount_ml", 1, 999)?;
+        }
+        "pee" => {
+            allow_keys(payload, &["pee_amount"])?;
+            nested_optional_integer(payload, "pee_amount", 1, 3)?;
+        }
+        "poop" => {
+            allow_keys(
+                payload,
+                &["stool_amount", "stool_consistency", "stool_color"],
+            )?;
+            nested_optional_integer(payload, "stool_amount", 1, 4)?;
+            nested_optional_integer(payload, "stool_consistency", 1, 4)?;
+            nested_optional_integer(payload, "stool_color", 0, 7)?;
+        }
+        "both_diaper" => {
+            allow_keys(
+                payload,
+                &[
+                    "pee_amount",
+                    "stool_amount",
+                    "stool_consistency",
+                    "stool_color",
+                ],
+            )?;
+            nested_optional_integer(payload, "pee_amount", 1, 3)?;
+            nested_optional_integer(payload, "stool_amount", 1, 4)?;
+            nested_optional_integer(payload, "stool_consistency", 1, 4)?;
+            nested_optional_integer(payload, "stool_color", 0, 7)?;
+        }
+        "sleep" => {
+            require_keys(payload, &["anomaly_flag"])?;
+            allow_keys(payload, &["is_nap", "anomaly_flag"])?;
+            nested_optional_boolean(payload, "is_nap")?;
+            nested_boolean(payload, "anomaly_flag")?;
+        }
+        "temperature" => {
+            require_keys(payload, &["celsius"])?;
+            allow_keys(payload, &["celsius"])?;
+            nested_number(payload, "celsius", 34.0, 43.0)?;
+        }
+        "diary" => {
+            require_keys(payload, &["body"])?;
+            allow_keys(payload, &["body"])?;
+            nested_nonblank_string(payload, "body")?;
+        }
+        "bath" | "walk" => allow_keys(payload, &[])?,
+        "cough" | "rash" | "vomit" | "injury" => {
+            require_keys(payload, &["severity"])?;
+            allow_keys(payload, &["severity", "description"])?;
+            nested_integer(payload, "severity", 1, 3)?;
+            nested_optional_string(payload, "description")?;
+        }
+        "medicine" => {
+            require_keys(payload, &["name"])?;
+            allow_keys(payload, &["name", "dose"])?;
+            nested_nonblank_string(payload, "name")?;
+            nested_optional_string(payload, "dose")?;
+        }
+        "hospital" => {
+            require_keys(payload, &["reason"])?;
+            allow_keys(payload, &["reason", "advice"])?;
+            nested_nonblank_string(payload, "reason")?;
+            nested_optional_string(payload, "advice")?;
+        }
+        "height" | "weight" | "head" | "chest" | "foot_size" => {
+            require_keys(payload, &["value", "unit"])?;
+            allow_keys(payload, &["value", "unit"])?;
+            let value = nested_number(payload, "value", f64::MIN_POSITIVE, f64::MAX)?;
+            let unit = nested_string(payload, "unit")?;
+            let display_value = if record_type == "weight" && unit == "g" {
+                value / 1_000.0
+            } else {
+                value
+            };
+            let maximum = if record_type == "weight" {
+                100.0
+            } else {
+                250.0
+            };
+            if display_value > maximum {
+                return Err(ApiError::unprocessable(
+                    "payload_json measurement value is out of range",
+                ));
+            }
+        }
+        "baby_food" | "snack" | "drink" => {
+            require_keys(payload, &["content"])?;
+            allow_keys(payload, &["content", "amount"])?;
+            nested_nonblank_string(payload, "content")?;
+            nested_optional_string(payload, "amount")?;
+        }
+        "vaccine" => {
+            require_keys(payload, &["name"])?;
+            allow_keys(payload, &["name", "batch"])?;
+            nested_nonblank_string(payload, "name")?;
+            nested_optional_string(payload, "batch")?;
+        }
+        "custom" => {
+            require_keys(payload, &["title"])?;
+            allow_keys(payload, &["title", "detail", "icon_slot"])?;
+            nested_nonblank_string(payload, "title")?;
+            nested_optional_string(payload, "detail")?;
+            nested_optional_integer(
+                payload,
+                "icon_slot",
+                i64::from(i32::MIN),
+                i64::from(i32::MAX),
+            )?;
+        }
+        _ => {
+            return Err(ApiError::unprocessable(
+                "type must be a current record type",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn nested_integer(
+    payload: &Map<String, Value>,
+    key: &str,
+    min: i64,
+    max: i64,
+) -> Result<i64, ApiError> {
+    let value = payload
+        .get(key)
+        .and_then(Value::as_i64)
+        .ok_or_else(|| ApiError::unprocessable(format!("payload_json.{key} must be an integer")))?;
+    if !(min..=max).contains(&value) {
+        return Err(ApiError::unprocessable(format!(
+            "payload_json.{key} is out of range"
+        )));
+    }
+    Ok(value)
+}
+
+fn nested_optional_integer(
+    payload: &Map<String, Value>,
+    key: &str,
+    min: i64,
+    max: i64,
+) -> Result<(), ApiError> {
+    if payload.contains_key(key) {
+        nested_integer(payload, key, min, max)?;
+    }
+    Ok(())
+}
+
+fn nested_number(
+    payload: &Map<String, Value>,
+    key: &str,
+    min: f64,
+    max: f64,
+) -> Result<f64, ApiError> {
+    let value = payload
+        .get(key)
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| ApiError::unprocessable(format!("payload_json.{key} must be a number")))?;
+    if !(min..=max).contains(&value) {
+        return Err(ApiError::unprocessable(format!(
+            "payload_json.{key} is out of range"
+        )));
+    }
+    Ok(value)
+}
+
+fn nested_string<'a>(payload: &'a Map<String, Value>, key: &str) -> Result<&'a str, ApiError> {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::unprocessable(format!("payload_json.{key} must be a string")))
+}
+
+fn nested_nonblank_string(payload: &Map<String, Value>, key: &str) -> Result<(), ApiError> {
+    if nested_string(payload, key)?.trim().is_empty() {
+        return Err(ApiError::unprocessable(format!(
+            "payload_json.{key} must not be blank"
+        )));
+    }
+    Ok(())
+}
+
+fn nested_optional_string(payload: &Map<String, Value>, key: &str) -> Result<(), ApiError> {
+    if payload.contains_key(key) {
+        nested_string(payload, key)?;
+    }
+    Ok(())
+}
+
+fn nested_string_in(
+    payload: &Map<String, Value>,
+    key: &str,
+    allowed: &[&str],
+) -> Result<(), ApiError> {
+    let value = nested_string(payload, key)?;
+    if !allowed.contains(&value) {
+        return Err(ApiError::unprocessable(format!(
+            "payload_json.{key} has an unsupported value"
+        )));
+    }
+    Ok(())
+}
+
+fn nested_boolean(payload: &Map<String, Value>, key: &str) -> Result<(), ApiError> {
+    if !payload.get(key).is_some_and(Value::is_boolean) {
+        return Err(ApiError::unprocessable(format!(
+            "payload_json.{key} must be a boolean"
+        )));
+    }
+    Ok(())
+}
+
+fn nested_optional_boolean(payload: &Map<String, Value>, key: &str) -> Result<(), ApiError> {
+    if payload.contains_key(key) {
+        nested_boolean(payload, key)?;
+    }
     Ok(())
 }
 
@@ -750,17 +1061,6 @@ fn validate_required_string(value: &str, max: usize, field: &str) -> Result<(), 
     validate_length(value, 1, max, field)
 }
 
-fn validate_optional_nonempty_string(
-    value: &Option<String>,
-    max: usize,
-    field: &str,
-) -> Result<(), ApiError> {
-    if let Some(value) = value {
-        validate_length(value, 1, max, field)?;
-    }
-    Ok(())
-}
-
 fn validate_length(value: &str, min: usize, max: usize, field: &str) -> Result<(), ApiError> {
     let length = value.chars().count();
     if !(min..=max).contains(&length) {
@@ -769,4 +1069,337 @@ fn validate_length(value: &str, min: usize, max: usize, field: &str) -> Result<(
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{json, Value};
+    use uuid::Uuid;
+
+    use super::{EntityValidationContext, RawEntity};
+
+    fn record(payload: Value) -> RawEntity {
+        RawEntity {
+            entity_type: "record".to_owned(),
+            client_uuid: Uuid::new_v4(),
+            updated_at: 1,
+            deleted_at: None,
+            payload: payload.as_object().unwrap().clone(),
+        }
+    }
+
+    fn record_payload() -> Value {
+        json!({
+            "baby_client_uuid": Uuid::new_v4(),
+            "type": "formula",
+            "custom_item_client_uuid": null,
+            "timestamp": 1,
+            "end_timestamp": null,
+            "note": null,
+            "payload_json": {"amount_ml": 120},
+            "schema_version": 2,
+        })
+    }
+
+    fn care_plan(payload: Value) -> RawEntity {
+        RawEntity {
+            entity_type: "care_plan".to_owned(),
+            client_uuid: Uuid::new_v4(),
+            updated_at: 1,
+            deleted_at: None,
+            payload: payload.as_object().unwrap().clone(),
+        }
+    }
+
+    fn care_plan_payload() -> Value {
+        json!({
+            "baby_client_uuid": Uuid::new_v4(),
+            "type": "formula",
+            "custom_item_client_uuid": null,
+            "scheduled_at": 1,
+            "scheduled_zone_id": "Asia/Shanghai",
+            "note": null,
+            "payload_json": {"amount_ml": 120},
+            "schema_version": 2,
+            "status": "pending",
+            "created_by_membership_id": null,
+            "fulfilled_record_client_uuid": null,
+            "fulfilled_at": null,
+        })
+    }
+
+    fn valid_nested_payload(record_type: &str) -> Value {
+        match record_type {
+            "nursing" => json!({
+                "left_min": 10,
+                "right_min": 0,
+                "order": "L",
+                "record_mode": "end",
+            }),
+            "formula" => json!({"amount_ml": 120, "prepared_ml": 150, "duration_min": 15}),
+            "pumped_feed" | "pump_express" => json!({"amount_ml": 90}),
+            "pee" => json!({"pee_amount": 2}),
+            "poop" => json!({
+                "stool_amount": 3,
+                "stool_consistency": 3,
+                "stool_color": 0,
+            }),
+            "both_diaper" => json!({
+                "pee_amount": 2,
+                "stool_amount": 3,
+                "stool_consistency": 3,
+                "stool_color": 0,
+            }),
+            "sleep" => json!({"is_nap": true, "anomaly_flag": false}),
+            "temperature" => json!({"celsius": 36.7}),
+            "diary" => json!({"body": "今天很好"}),
+            "bath" | "walk" => json!({}),
+            "cough" | "rash" | "vomit" | "injury" => {
+                json!({"severity": 2, "description": "轻微"})
+            }
+            "medicine" => json!({"name": "维生素 D", "dose": "一滴"}),
+            "hospital" => json!({"reason": "复诊", "advice": "观察"}),
+            "height" | "head" | "chest" | "foot_size" => {
+                json!({"value": 65.5, "unit": "cm"})
+            }
+            "weight" => json!({"value": 6500, "unit": "g"}),
+            "baby_food" | "snack" | "drink" => {
+                json!({"content": "香蕉", "amount": "半根"})
+            }
+            "vaccine" => json!({"name": "乙肝", "batch": "A001"}),
+            "custom" => json!({"title": "抚触", "detail": "睡前", "icon_slot": 2}),
+            _ => panic!("missing test payload for {record_type}"),
+        }
+    }
+
+    #[test]
+    fn record_requires_schema_version_two() {
+        record(record_payload())
+            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .unwrap();
+
+        for invalid in [Value::Null, json!(1), json!(3), json!("2")] {
+            let mut payload = record_payload();
+            payload["schema_version"] = invalid;
+            assert!(record(payload)
+                .validate_as(1024, EntityValidationContext::OrdinaryPush)
+                .is_err());
+        }
+
+        let mut missing = record_payload();
+        missing.as_object_mut().unwrap().remove("schema_version");
+        assert!(record(missing)
+            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .is_err());
+    }
+
+    #[test]
+    fn care_plan_requires_schema_version_two() {
+        care_plan(care_plan_payload())
+            .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
+            .unwrap();
+
+        for invalid in [Value::Null, json!(1), json!(3), json!("2")] {
+            let mut payload = care_plan_payload();
+            payload["schema_version"] = invalid;
+            assert!(care_plan(payload)
+                .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
+                .is_err());
+        }
+
+        let mut missing = care_plan_payload();
+        missing.as_object_mut().unwrap().remove("schema_version");
+        assert!(care_plan(missing)
+            .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
+            .is_err());
+    }
+
+    #[test]
+    fn record_requires_current_nullable_keys() {
+        record(record_payload())
+            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .unwrap();
+
+        for key in ["custom_item_client_uuid", "end_timestamp", "note"] {
+            let mut payload = record_payload();
+            payload.as_object_mut().unwrap().remove(key);
+            assert!(record(payload)
+                .validate_as(1024, EntityValidationContext::OrdinaryPush)
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn care_plan_requires_current_nullable_keys() {
+        care_plan(care_plan_payload())
+            .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
+            .unwrap();
+
+        for key in [
+            "custom_item_client_uuid",
+            "note",
+            "created_by_membership_id",
+            "fulfilled_record_client_uuid",
+            "fulfilled_at",
+        ] {
+            let mut payload = care_plan_payload();
+            payload.as_object_mut().unwrap().remove(key);
+            assert!(care_plan(payload)
+                .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn record_and_care_plan_types_are_a_closed_current_set() {
+        let accepted = [
+            "nursing",
+            "formula",
+            "pumped_feed",
+            "pump_express",
+            "pee",
+            "poop",
+            "both_diaper",
+            "sleep",
+            "temperature",
+            "diary",
+            "bath",
+            "walk",
+            "cough",
+            "rash",
+            "vomit",
+            "injury",
+            "medicine",
+            "hospital",
+            "height",
+            "weight",
+            "baby_food",
+            "snack",
+            "drink",
+            "head",
+            "chest",
+            "foot_size",
+            "vaccine",
+            "custom",
+        ];
+        for record_type in accepted {
+            let mut record_payload = record_payload();
+            record_payload["type"] = json!(record_type);
+            record_payload["payload_json"] = valid_nested_payload(record_type);
+            record(record_payload)
+                .validate_as(1024, EntityValidationContext::OrdinaryPush)
+                .unwrap();
+
+            let mut plan_payload = care_plan_payload();
+            plan_payload["type"] = json!(record_type);
+            plan_payload["payload_json"] = valid_nested_payload(record_type);
+            care_plan(plan_payload)
+                .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
+                .unwrap();
+        }
+
+        for record_type in ["memo", "other", "unknown"] {
+            let mut record_payload = record_payload();
+            record_payload["type"] = json!(record_type);
+            assert!(record(record_payload)
+                .validate_as(1024, EntityValidationContext::OrdinaryPush)
+                .is_err());
+
+            let mut plan_payload = care_plan_payload();
+            plan_payload["type"] = json!(record_type);
+            assert!(care_plan(plan_payload)
+                .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn record_and_care_plan_require_strict_current_typed_payloads() {
+        for record_type in [
+            "nursing",
+            "formula",
+            "pumped_feed",
+            "pump_express",
+            "pee",
+            "poop",
+            "both_diaper",
+            "sleep",
+            "temperature",
+            "diary",
+            "bath",
+            "walk",
+            "cough",
+            "rash",
+            "vomit",
+            "injury",
+            "medicine",
+            "hospital",
+            "height",
+            "weight",
+            "baby_food",
+            "snack",
+            "drink",
+            "head",
+            "chest",
+            "foot_size",
+            "vaccine",
+            "custom",
+        ] {
+            let mut payload = record_payload();
+            payload["type"] = json!(record_type);
+            payload["payload_json"] = valid_nested_payload(record_type);
+            record(payload)
+                .validate_as(1024, EntityValidationContext::OrdinaryPush)
+                .unwrap();
+
+            let mut payload = care_plan_payload();
+            payload["type"] = json!(record_type);
+            payload["payload_json"] = valid_nested_payload(record_type);
+            care_plan(payload)
+                .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
+                .unwrap();
+        }
+
+        for (record_type, nested) in [
+            ("formula", json!({})),
+            ("formula", json!({"amount_ml": "120"})),
+            (
+                "formula",
+                json!({"amount_ml": 120, "prepared_milliliters": 150}),
+            ),
+            ("pumped_feed", json!({"amount_ml": 90, "duration_min": 10})),
+            ("pee", json!({"pee_amount": 4})),
+            ("sleep", json!({"is_nap": true})),
+            ("temperature", json!({"value": 36.7})),
+            (
+                "diary",
+                json!({"body": "今天很好", "photos": ["/data/a.jpg"]}),
+            ),
+            ("bath", json!({"detail": "晚间"})),
+            (
+                "nursing",
+                json!({
+                    "left_min": 10,
+                    "right_min": 0,
+                    "order": "left-first",
+                    "record_mode": "end",
+                }),
+            ),
+            ("custom", json!({"title": "抚触", "custom_item_id": 7})),
+        ] {
+            let mut payload = record_payload();
+            payload["type"] = json!(record_type);
+            payload["payload_json"] = nested.clone();
+            assert!(record(payload)
+                .validate_as(1024, EntityValidationContext::OrdinaryPush)
+                .is_err());
+
+            let mut payload = care_plan_payload();
+            payload["type"] = json!(record_type);
+            payload["payload_json"] = nested;
+            assert!(care_plan(payload)
+                .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
+                .is_err());
+        }
+    }
 }

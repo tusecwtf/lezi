@@ -12,7 +12,7 @@ use crate::{authenticate, json_body, ApiError, AppState};
 
 #[derive(Debug, Serialize)]
 struct MemberView {
-    display_name: Option<String>,
+    display_name: String,
     role: String,
     is_self: bool,
     /// Server-minted immutable membership identity. Safe public key for ACL.
@@ -44,11 +44,6 @@ pub(super) async fn list_family_members(
     members.sort_by(|left, right| {
         role_rank(&left.role)
             .cmp(&role_rank(&right.role))
-            .then_with(|| {
-                left.display_name
-                    .is_none()
-                    .cmp(&right.display_name.is_none())
-            })
             .then_with(|| left.display_name.cmp(&right.display_name))
             .then_with(|| left.membership_id.cmp(&right.membership_id))
     });

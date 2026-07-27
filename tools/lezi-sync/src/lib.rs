@@ -549,18 +549,10 @@ async fn push_entities(
 ) -> Result<Json<store::PushResult>, ApiError> {
     let principal = authenticate(&state, &headers)?;
     let request = json_body(body)?.validate(state.max_media_bytes)?;
-    if request
-        .device_id
-        .as_deref()
-        .is_some_and(|device_id| device_id != principal.device_id)
-    {
+    if request.device_id != principal.device_id {
         return Err(ApiError::forbidden("device_id does not match token"));
     }
-    if request
-        .generation
-        .as_deref()
-        .is_some_and(|generation| generation != state.generation)
-    {
+    if request.generation != state.generation {
         return Err(ApiError::conflict_value(
             state.recovery_detail(&principal.family_id, "generation_changed")?,
         ));
@@ -624,8 +616,7 @@ async fn push_entities(
 #[serde(deny_unknown_fields)]
 struct PullQuery {
     cursor: i64,
-    #[serde(default)]
-    generation: Option<String>,
+    generation: String,
 }
 
 async fn pull_entities(
@@ -640,11 +631,7 @@ async fn pull_entities(
     if query.cursor < 0 {
         return Err(ApiError::unprocessable("cursor must be non-negative"));
     }
-    if query
-        .generation
-        .as_deref()
-        .is_some_and(|generation| generation != state.generation)
-    {
+    if query.generation != state.generation {
         return Err(ApiError::conflict_value(
             state.recovery_detail(&principal.family_id, "generation_changed")?,
         ));
@@ -808,11 +795,7 @@ async fn stage_bundle(
 ) -> Result<impl IntoResponse, ApiError> {
     let principal = authenticate(&state, &headers)?;
     let request = json_body(body)?.validate(state.max_media_bytes)?;
-    if request
-        .generation
-        .as_deref()
-        .is_some_and(|generation| generation != state.generation)
-    {
+    if request.generation != state.generation {
         return Err(ApiError::conflict_value(
             state.recovery_detail(&principal.family_id, "generation_changed")?,
         ));
@@ -1020,11 +1003,7 @@ async fn commit_bundle(
     let principal = authenticate(&state, &headers)?;
     let request = json_body(body)?;
     request.validate()?;
-    if request
-        .generation
-        .as_deref()
-        .is_some_and(|generation| generation != state.generation)
-    {
+    if request.generation != state.generation {
         return Err(ApiError::conflict_value(
             state.recovery_detail(&principal.family_id, "generation_changed")?,
         ));
