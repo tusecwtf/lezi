@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -2527,7 +2527,7 @@ async fn baby_nickname_accepts_20_unicode_chars_and_rejects_21() {
 }
 
 #[tokio::test]
-async fn strict_entity_contract_orders_same_batch_references_and_strips_sort_order() {
+async fn strict_entity_contract_rejects_sort_order_and_orders_same_batch_references() {
     let rig = Rig::new();
     let owner = create_family(
         &rig.app,
@@ -2575,8 +2575,29 @@ async fn strict_entity_contract_orders_same_batch_references_and_strips_sort_ord
     )
     .await;
     assert_eq!(unresolved, StatusCode::CONFLICT);
-    let mut baby = baby_payload("年年", None);
-    baby["sort_order"] = json!(99);
+    let mut legacy_baby = baby_payload("年年", None);
+    legacy_baby["sort_order"] = json!(99);
+    let (legacy_status, legacy_result) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({"entities":[
+            {"type":"media","client_uuid":media_id,"updated_at":1,
+             "payload":log_media_payload(&record_id)},
+            {"type":"record","client_uuid":record_id,"updated_at":1,
+             "payload":record_payload(&baby_id)},
+            {"type":"baby","client_uuid":baby_id,"updated_at":1,"payload":legacy_baby}
+        ]}),
+    )
+    .await;
+    assert_eq!(
+        legacy_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{legacy_result}"
+    );
+
+    let baby = baby_payload("年年", None);
     let (same_batch, result) = json_request(
         &rig.app,
         Method::POST,
@@ -2627,6 +2648,27 @@ async fn strict_entity_contract_orders_same_batch_references_and_strips_sort_ord
         .collect::<Vec<_>>();
     assert_eq!(media_types, ["media"]);
     assert_eq!(after_bytes["entities"][0]["client_uuid"], media_id);
+    let canonical_media = after_bytes["entities"][0]["payload"].as_object().unwrap();
+    assert_eq!(
+        canonical_media
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "baby_client_uuid",
+            "byte_size",
+            "care_plan_client_uuid",
+            "height",
+            "kind",
+            "mime",
+            "record_client_uuid",
+            "width",
+        ]),
+    );
+    assert!(canonical_media["baby_client_uuid"].is_null());
+    assert!(canonical_media["care_plan_client_uuid"].is_null());
+    assert!(canonical_media["width"].is_null());
+    assert!(canonical_media["height"].is_null());
     assert_eq!(after_bytes["cursor"], 4);
 }
 
@@ -5687,6 +5729,7 @@ async fn atomic_bundle_tombstone_publishes_without_media_bytes() {
         StatusCode::OK
     );
 
+    media_payload["byte_size"] = json!(0);
     let tomb_bundle = Uuid::new_v4().to_string();
     let (status, staged) = json_request(
         &rig.app,

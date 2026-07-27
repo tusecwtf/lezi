@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use chrono::NaiveDate;
 use serde::Deserialize;
-use serde_json::{Map, Value};
+use serde_json::{Map, Number, Value};
 use uuid::Uuid;
 
 use crate::ApiError;
@@ -246,8 +246,12 @@ impl RawEntity {
         }
         match (context, self.entity_type.as_str()) {
             (_, "baby") => validate_baby(&mut self.payload)?,
-            (_, "record") => validate_record(&self.payload)?,
-            (_, "media") => validate_media(&self.payload, max_media_bytes)?,
+            (_, "record") => validate_record(&mut self.payload)?,
+            (_, "media") => validate_media(
+                &mut self.payload,
+                max_media_bytes,
+                self.deleted_at.is_some(),
+            )?,
             (EntityValidationContext::OrdinaryPush, "custom_item") => {
                 validate_custom_item(&mut self.payload)?
             }
@@ -392,9 +396,18 @@ impl BundleCommitRequest {
 }
 
 fn validate_baby(payload: &mut Map<String, Value>) -> Result<(), ApiError> {
+    payload
+        .entry("birth_weight_grams".to_owned())
+        .or_insert(Value::Null);
     require_keys(
         payload,
-        &["nickname", "sex", "birthday", "avatar_media_uuid"],
+        &[
+            "nickname",
+            "sex",
+            "birthday",
+            "avatar_media_uuid",
+            "birth_weight_grams",
+        ],
     )?;
     allow_keys(
         payload,
@@ -402,18 +415,20 @@ fn validate_baby(payload: &mut Map<String, Value>) -> Result<(), ApiError> {
             "nickname",
             "sex",
             "birthday",
-            "sort_order",
             "avatar_media_uuid",
             "birth_weight_grams",
         ],
     )?;
-    string(payload, "nickname", 1, 20)?;
+    trimmed_nonblank_string(payload, "nickname", 20)?;
     nullable_string(payload, "sex", 0, usize::MAX)?;
+    if let Some(sex) = payload.get("sex").and_then(Value::as_str) {
+        if sex != "female" && sex != "male" {
+            return Err(ApiError::unprocessable("sex must be female, male, or null"));
+        }
+    }
     date(payload, "birthday", false)?;
     nullable_uuid(payload, "avatar_media_uuid")?;
-    optional_integer(payload, "sort_order", i64::MIN, i64::MAX)?;
     optional_integer(payload, "birth_weight_grams", 0, 100_000)?;
-    payload.remove("sort_order");
     Ok(())
 }
 
@@ -458,7 +473,7 @@ fn current_record_type(payload: &Map<String, Value>) -> Result<&str, ApiError> {
     Ok(record_type)
 }
 
-fn validate_record(payload: &Map<String, Value>) -> Result<(), ApiError> {
+fn validate_record(payload: &mut Map<String, Value>) -> Result<(), ApiError> {
     require_keys(
         payload,
         &[
@@ -487,19 +502,60 @@ fn validate_record(payload: &Map<String, Value>) -> Result<(), ApiError> {
         ],
     )?;
     uuid(payload, "baby_client_uuid")?;
-    let record_type = current_record_type(payload)?;
+    let record_type = current_record_type(payload)?.to_owned();
     optional_nullable_uuid(payload, "custom_item_client_uuid")?;
     integer(payload, "timestamp", 0, i64::MAX)?;
     optional_integer(payload, "end_timestamp", 0, i64::MAX)?;
+    let timestamp = payload["timestamp"].as_i64().expect("validated timestamp");
+    if payload
+        .get("end_timestamp")
+        .and_then(Value::as_i64)
+        .is_some_and(|end| end < timestamp)
+    {
+        return Err(ApiError::unprocessable(
+            "end_timestamp must not be before timestamp",
+        ));
+    }
     optional_nullable_string(payload, "note", 0, 20_000)?;
-    validate_current_payload_json(record_type, payload.get("payload_json"))?;
+    validate_current_payload_json(&record_type, payload.get_mut("payload_json"))?;
     integer(payload, "schema_version", 2, 2)?;
     optional_nullable_string(payload, "created_by_membership_id", 1, 64)?;
     Ok(())
 }
 
-fn validate_media(payload: &Map<String, Value>, max_media_bytes: usize) -> Result<(), ApiError> {
-    require_keys(payload, &["kind"])?;
+fn validate_media(
+    payload: &mut Map<String, Value>,
+    max_media_bytes: usize,
+    is_tombstone: bool,
+) -> Result<(), ApiError> {
+    for key in [
+        "record_client_uuid",
+        "baby_client_uuid",
+        "care_plan_client_uuid",
+        "mime",
+        "width",
+        "height",
+    ] {
+        payload.entry(key.to_owned()).or_insert(Value::Null);
+    }
+    if is_tombstone {
+        payload
+            .entry("byte_size".to_owned())
+            .or_insert_with(|| Value::Number(0.into()));
+    }
+    require_keys(
+        payload,
+        &[
+            "kind",
+            "record_client_uuid",
+            "baby_client_uuid",
+            "care_plan_client_uuid",
+            "mime",
+            "width",
+            "height",
+            "byte_size",
+        ],
+    )?;
     allow_keys(
         payload,
         &[
@@ -525,7 +581,12 @@ fn validate_media(payload: &Map<String, Value>, max_media_bytes: usize) -> Resul
     let max_byte_size = i64::try_from(max_media_bytes).unwrap_or(i64::MAX);
     optional_integer(payload, "width", 1, max_dimension)?;
     optional_integer(payload, "height", 1, max_dimension)?;
-    optional_integer(payload, "byte_size", 1, max_byte_size)?;
+    integer(
+        payload,
+        "byte_size",
+        if is_tombstone { 0 } else { 1 },
+        max_byte_size,
+    )?;
 
     let record = optional_string_value(payload, "record_client_uuid")?;
     let baby = optional_string_value(payload, "baby_client_uuid")?;
@@ -558,7 +619,7 @@ fn validate_media(payload: &Map<String, Value>, max_media_bytes: usize) -> Resul
 fn validate_custom_item(payload: &mut Map<String, Value>) -> Result<(), ApiError> {
     require_keys(payload, &["name", "icon_slot"])?;
     allow_keys(payload, &["name", "icon_slot", "created_by_membership_id"])?;
-    string(payload, "name", 1, 40)?;
+    trimmed_nonblank_string(payload, "name", 40)?;
     integer(payload, "icon_slot", 0, 7)?;
     // Client may omit or send a guess; server overwrites on insert and freezes later.
     optional_nullable_string(payload, "created_by_membership_id", 1, 64)?;
@@ -604,12 +665,18 @@ fn validate_care_plan(payload: &mut Map<String, Value>) -> Result<(), ApiError> 
         ],
     )?;
     uuid(payload, "baby_client_uuid")?;
-    let record_type = current_record_type(payload)?;
+    let record_type = current_record_type(payload)?.to_owned();
     optional_nullable_uuid(payload, "custom_item_client_uuid")?;
     integer(payload, "scheduled_at", 0, i64::MAX)?;
     string(payload, "scheduled_zone_id", 1, 64)?;
+    let scheduled_zone_id = string_value(payload, "scheduled_zone_id")?;
+    if !is_android_zone_id(scheduled_zone_id) {
+        return Err(ApiError::unprocessable(
+            "scheduled_zone_id must be a current Android ZoneId",
+        ));
+    }
     optional_nullable_string(payload, "note", 0, 20_000)?;
-    validate_current_payload_json(record_type, payload.get("payload_json"))?;
+    validate_current_payload_json(&record_type, payload.get_mut("payload_json"))?;
     integer(payload, "schema_version", 2, 2)?;
     let status = string_value(payload, "status")?;
     if status != "pending" && status != "missed" && status != "completed" && status != "skipped" {
@@ -626,10 +693,10 @@ fn validate_care_plan(payload: &mut Map<String, Value>) -> Result<(), ApiError> 
 
 fn validate_current_payload_json(
     record_type: &str,
-    payload_json: Option<&Value>,
+    payload_json: Option<&mut Value>,
 ) -> Result<(), ApiError> {
     let payload = payload_json
-        .and_then(Value::as_object)
+        .and_then(Value::as_object_mut)
         .ok_or_else(|| ApiError::unprocessable("payload_json must be an object"))?;
     match record_type {
         "nursing" => {
@@ -669,6 +736,9 @@ fn validate_current_payload_json(
         "pee" => {
             allow_keys(payload, &["pee_amount"])?;
             nested_optional_integer(payload, "pee_amount", 1, 3)?;
+            payload
+                .entry("pee_amount".to_owned())
+                .or_insert_with(|| Value::Number(2.into()));
         }
         "poop" => {
             allow_keys(
@@ -678,6 +748,7 @@ fn validate_current_payload_json(
             nested_optional_integer(payload, "stool_amount", 1, 4)?;
             nested_optional_integer(payload, "stool_consistency", 1, 4)?;
             nested_optional_integer(payload, "stool_color", 0, 7)?;
+            canonicalize_stool_defaults(payload);
         }
         "both_diaper" => {
             allow_keys(
@@ -693,17 +764,28 @@ fn validate_current_payload_json(
             nested_optional_integer(payload, "stool_amount", 1, 4)?;
             nested_optional_integer(payload, "stool_consistency", 1, 4)?;
             nested_optional_integer(payload, "stool_color", 0, 7)?;
+            payload
+                .entry("pee_amount".to_owned())
+                .or_insert_with(|| Value::Number(2.into()));
+            canonicalize_stool_defaults(payload);
         }
         "sleep" => {
             require_keys(payload, &["anomaly_flag"])?;
             allow_keys(payload, &["is_nap", "anomaly_flag"])?;
             nested_optional_boolean(payload, "is_nap")?;
             nested_boolean(payload, "anomaly_flag")?;
+            payload
+                .entry("is_nap".to_owned())
+                .or_insert(Value::Bool(false));
         }
         "temperature" => {
             require_keys(payload, &["celsius"])?;
             allow_keys(payload, &["celsius"])?;
-            nested_number(payload, "celsius", 34.0, 43.0)?;
+            let celsius = nested_number(payload, "celsius", 34.0, 43.0)?;
+            payload.insert(
+                "celsius".to_owned(),
+                Value::Number(Number::from_f64(celsius).expect("finite temperature")),
+            );
         }
         "diary" => {
             require_keys(payload, &["body"])?;
@@ -749,6 +831,14 @@ fn validate_current_payload_json(
                     "payload_json measurement value is out of range",
                 ));
             }
+            payload.insert(
+                "value".to_owned(),
+                if value.fract() == 0.0 {
+                    Value::Number((value as i64).into())
+                } else {
+                    Value::Number(Number::from_f64(value).expect("finite measurement"))
+                },
+            );
         }
         "baby_food" | "snack" | "drink" => {
             require_keys(payload, &["content"])?;
@@ -885,11 +975,33 @@ fn nested_optional_boolean(payload: &Map<String, Value>, key: &str) -> Result<()
     Ok(())
 }
 
+fn canonicalize_stool_defaults(payload: &mut Map<String, Value>) {
+    for (key, value) in [
+        ("stool_amount", 3),
+        ("stool_consistency", 3),
+        ("stool_color", 0),
+    ] {
+        payload
+            .entry(key.to_owned())
+            .or_insert_with(|| Value::Number(value.into()));
+    }
+}
+
 /// Fulfillment candidate for multi-member offline fulfills (ticket 23 freeze).
 /// Submitter membership/role/confirmed_at are server-stamped; clients cannot
 /// forge evidence. Winner selection is a later ticket — this only stores candidates.
 fn validate_fulfillment_candidate(payload: &mut Map<String, Value>) -> Result<(), ApiError> {
-    require_keys(payload, &["care_plan_client_uuid", "record_client_uuid"])?;
+    payload
+        .entry("actual_timestamp".to_owned())
+        .or_insert(Value::Null);
+    require_keys(
+        payload,
+        &[
+            "care_plan_client_uuid",
+            "record_client_uuid",
+            "actual_timestamp",
+        ],
+    )?;
     allow_keys(
         payload,
         &[
@@ -930,6 +1042,63 @@ fn allow_keys(payload: &Map<String, Value>, allowed: &[&str]) -> Result<(), ApiE
 fn string(payload: &Map<String, Value>, key: &str, min: usize, max: usize) -> Result<(), ApiError> {
     let value = string_value(payload, key)?;
     validate_length(value, min, max, key)
+}
+
+fn trimmed_nonblank_string(
+    payload: &Map<String, Value>,
+    key: &str,
+    max: usize,
+) -> Result<(), ApiError> {
+    string(payload, key, 1, max)?;
+    let value = string_value(payload, key)?;
+    if value.trim().is_empty() {
+        return Err(ApiError::unprocessable(format!("{key} must not be blank")));
+    }
+    Ok(())
+}
+
+fn is_android_zone_id(value: &str) -> bool {
+    value.parse::<chrono_tz::Tz>().is_ok()
+        || value == "Z"
+        || ["UTC", "GMT", "UT"]
+            .iter()
+            .find_map(|prefix| value.strip_prefix(prefix))
+            .is_some_and(is_valid_zone_offset)
+        || is_valid_zone_offset(value)
+}
+
+fn is_valid_zone_offset(value: &str) -> bool {
+    let Some(signless) = value.strip_prefix('+').or_else(|| value.strip_prefix('-')) else {
+        return false;
+    };
+    let digits = signless.replace(':', "");
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    let (hours, minutes, seconds) = match digits.len() {
+        1 | 2 => (&digits[..], "0", "0"),
+        3 | 4 => (
+            &digits[..digits.len() - 2],
+            &digits[digits.len() - 2..],
+            "0",
+        ),
+        5 | 6 => (
+            &digits[..digits.len() - 4],
+            &digits[digits.len() - 4..digits.len() - 2],
+            &digits[digits.len() - 2..],
+        ),
+        _ => return false,
+    };
+    let Ok(hours) = hours.parse::<u8>() else {
+        return false;
+    };
+    let Ok(minutes) = minutes.parse::<u8>() else {
+        return false;
+    };
+    let Ok(seconds) = seconds.parse::<u8>() else {
+        return false;
+    };
+    hours <= 18 && minutes <= 59 && seconds <= 59 && (hours < 18 || (minutes == 0 && seconds == 0))
 }
 
 fn nullable_string(
@@ -1077,6 +1246,16 @@ mod tests {
     use uuid::Uuid;
 
     use super::{EntityValidationContext, RawEntity};
+
+    fn entity(entity_type: &str, payload: Value) -> RawEntity {
+        RawEntity {
+            entity_type: entity_type.to_owned(),
+            client_uuid: Uuid::new_v4(),
+            updated_at: 1,
+            deleted_at: None,
+            payload: payload.as_object().unwrap().clone(),
+        }
+    }
 
     fn record(payload: Value) -> RawEntity {
         RawEntity {
@@ -1248,6 +1427,216 @@ mod tests {
                 .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
                 .is_err());
         }
+    }
+
+    #[test]
+    fn optional_current_input_is_canonicalized_to_the_android_pull_shape() {
+        let baby_payload = json!({
+            "nickname": "年年",
+            "sex": null,
+            "birthday": "2025-01-02",
+            "avatar_media_uuid": null,
+            "birth_weight_grams": null,
+        });
+        entity("baby", baby_payload.clone())
+            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .unwrap();
+        let mut missing_birth_weight = baby_payload.clone();
+        missing_birth_weight
+            .as_object_mut()
+            .unwrap()
+            .remove("birth_weight_grams");
+        let canonical_baby = entity("baby", missing_birth_weight)
+            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .unwrap();
+        assert_eq!(canonical_baby.payload["birth_weight_grams"], Value::Null);
+        let mut old_sort_order = baby_payload;
+        old_sort_order["sort_order"] = json!(7);
+        assert!(entity("baby", old_sort_order)
+            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .is_err());
+
+        let media_payload = json!({
+            "kind": "log",
+            "record_client_uuid": Uuid::new_v4(),
+            "care_plan_client_uuid": null,
+            "baby_client_uuid": null,
+            "mime": "image/jpeg",
+            "width": null,
+            "height": null,
+            "byte_size": 3,
+        });
+        entity("media", media_payload.clone())
+            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .unwrap();
+        for key in [
+            "care_plan_client_uuid",
+            "baby_client_uuid",
+            "mime",
+            "width",
+            "height",
+        ] {
+            let mut missing = media_payload.clone();
+            missing.as_object_mut().unwrap().remove(key);
+            let canonical = entity("media", missing)
+                .validate_as(1024, EntityValidationContext::OrdinaryPush)
+                .unwrap();
+            assert_eq!(canonical.payload[key], Value::Null);
+        }
+        let mut care_plan_media = media_payload.clone();
+        care_plan_media["care_plan_client_uuid"] = json!(Uuid::new_v4());
+        care_plan_media
+            .as_object_mut()
+            .unwrap()
+            .remove("record_client_uuid");
+        let canonical_care_plan_media = entity("media", care_plan_media)
+            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .unwrap();
+        assert_eq!(
+            canonical_care_plan_media.payload["record_client_uuid"],
+            Value::Null
+        );
+        let mut live_without_byte_size = media_payload.clone();
+        live_without_byte_size
+            .as_object_mut()
+            .unwrap()
+            .remove("byte_size");
+        assert!(entity("media", live_without_byte_size)
+            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .is_err());
+        let mut tombstone_payload = media_payload;
+        tombstone_payload
+            .as_object_mut()
+            .unwrap()
+            .remove("byte_size");
+        let mut tombstone = entity("media", tombstone_payload);
+        tombstone.deleted_at = Some(2);
+        let canonical_tombstone = tombstone
+            .validate_as(1024, EntityValidationContext::AtomicBundleMedia)
+            .unwrap();
+        assert_eq!(canonical_tombstone.payload["byte_size"], json!(0));
+
+        let candidate_payload = json!({
+            "care_plan_client_uuid": Uuid::new_v4(),
+            "record_client_uuid": Uuid::new_v4(),
+            "actual_timestamp": null,
+        });
+        entity("fulfillment_candidate", candidate_payload.clone())
+            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .unwrap();
+        let mut missing_actual_timestamp = candidate_payload;
+        missing_actual_timestamp
+            .as_object_mut()
+            .unwrap()
+            .remove("actual_timestamp");
+        let canonical_candidate = entity("fulfillment_candidate", missing_actual_timestamp)
+            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .unwrap();
+        assert_eq!(canonical_candidate.payload["actual_timestamp"], Value::Null);
+    }
+
+    #[test]
+    fn current_wire_rejects_values_the_android_parser_cannot_apply() {
+        for invalid_sex in [json!("unknown"), json!("")] {
+            let payload = json!({
+                "nickname": "年年",
+                "sex": invalid_sex,
+                "birthday": "2025-01-02",
+                "avatar_media_uuid": null,
+                "birth_weight_grams": null,
+            });
+            assert!(entity("baby", payload)
+                .validate_as(1024, EntityValidationContext::OrdinaryPush)
+                .is_err());
+        }
+        let blank_nickname = json!({
+            "nickname": "   ",
+            "sex": null,
+            "birthday": "2025-01-02",
+            "avatar_media_uuid": null,
+            "birth_weight_grams": null,
+        });
+        assert!(entity("baby", blank_nickname)
+            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .is_err());
+
+        let blank_custom_item = json!({
+            "name": "   ",
+            "icon_slot": 1,
+        });
+        assert!(entity("custom_item", blank_custom_item)
+            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .is_err());
+
+        let mut invalid_interval = record_payload();
+        invalid_interval["timestamp"] = json!(100);
+        invalid_interval["end_timestamp"] = json!(99);
+        assert!(record(invalid_interval)
+            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .is_err());
+
+        let mut invalid_zone = care_plan_payload();
+        invalid_zone["scheduled_zone_id"] = json!("Mars/Olympus");
+        assert!(care_plan(invalid_zone)
+            .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
+            .is_err());
+    }
+
+    #[test]
+    fn optional_typed_fields_and_numbers_are_stored_in_android_canonical_shape() {
+        for (record_type, input, expected) in [
+            ("pee", json!({}), json!({"pee_amount": 2})),
+            (
+                "poop",
+                json!({}),
+                json!({"stool_amount": 3, "stool_consistency": 3, "stool_color": 0}),
+            ),
+            (
+                "both_diaper",
+                json!({}),
+                json!({
+                    "pee_amount": 2,
+                    "stool_amount": 3,
+                    "stool_consistency": 3,
+                    "stool_color": 0,
+                }),
+            ),
+            (
+                "sleep",
+                json!({"anomaly_flag": true}),
+                json!({"is_nap": false, "anomaly_flag": true}),
+            ),
+        ] {
+            let mut payload = record_payload();
+            payload["type"] = json!(record_type);
+            payload["payload_json"] = input;
+            let canonical = record(payload)
+                .validate_as(1024, EntityValidationContext::OrdinaryPush)
+                .unwrap();
+            assert_eq!(canonical.payload["payload_json"], expected);
+        }
+
+        let mut temperature = record_payload();
+        temperature["type"] = json!("temperature");
+        temperature["payload_json"] = json!({"celsius": 37});
+        let canonical_temperature = record(temperature)
+            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_string(&canonical_temperature.payload["payload_json"]).unwrap(),
+            r#"{"celsius":37.0}"#,
+        );
+
+        let mut measurement = care_plan_payload();
+        measurement["type"] = json!("height");
+        measurement["payload_json"] = json!({"value": 65.0, "unit": "cm"});
+        let canonical_measurement = care_plan(measurement)
+            .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
+            .unwrap();
+        assert_eq!(
+            canonical_measurement.payload["payload_json"],
+            json!({"value": 65, "unit": "cm"}),
+        );
     }
 
     #[test]

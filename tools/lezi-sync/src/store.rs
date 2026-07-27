@@ -2185,10 +2185,7 @@ fn stamp_fulfillment_candidates(
 
 fn pulled_entity_from_row(row: &rusqlite::Row<'_>) -> Result<PulledEntity, StoreError> {
     let entity_type = row.get::<_, String>(0)?;
-    let mut payload = parse_payload(&row.get::<_, String>(4)?)?;
-    if entity_type == "baby" {
-        payload.remove("sort_order");
-    }
+    let payload = parse_payload(&row.get::<_, String>(4)?)?;
     Ok(PulledEntity {
         entity_type,
         client_uuid: row.get(1)?,
@@ -2229,10 +2226,7 @@ fn load_pulled_entity(
         .optional()?
         .map(
             |(entity_type, client_uuid, updated_at, deleted_at, payload_raw, rev)| {
-                let mut payload = parse_payload(&payload_raw)?;
-                if entity_type == "baby" {
-                    payload.remove("sort_order");
-                }
+                let payload = parse_payload(&payload_raw)?;
                 Ok(PulledEntity {
                     entity_type,
                     client_uuid,

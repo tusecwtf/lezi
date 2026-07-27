@@ -212,6 +212,9 @@ CustomItemDef；接收端以该 UUID 解析自己的本机 id 后再写入 Room�
 | `sync_dirty` | 需快照入当前家庭 Outbox |
 
 当前仅支持图片；视频不做。
+NAS 持久化和 pull 的 current MediaAsset payload 固定包含三个归属 UUID、`mime`、
+`width`、`height` 与 `byte_size`；nullable 字段省略时规范为显式 `null`。live media 的
+`byte_size` 必须为正数，tombstone 规范为 `0` 且不要求字节。
 
 ### 3.8 SettingsLocal（**不同步**）
 
@@ -298,6 +301,8 @@ NAS 原子包根类型 `care_plan` 的 wire payload 为：
 1) 提交者是否管理员（`owner`/`admin`）；2) 较早的不可编辑 `confirmed_at`；
 3) 候选 `client_uuid` 升序。NAS 到达时间、可编辑实际发生时间、设备 `updated_at`
 与后续角色变化不参与比较。
+请求省略 `actual_timestamp` 时 NAS 规范为显式 `null`，保证 current pull 与 Android
+exact-key parser 使用同一 canonical shape。
 
 Android 本机表 `fulfillment_candidates` 在履行事务中写入稳定 `clientUuid` 与
 不可变本地 `confirmedAt`，并与 Record 原子包 + completed CarePlan 原子包一起出站

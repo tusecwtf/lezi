@@ -616,20 +616,30 @@ Record 与 CarePlan 共享以下 current-wire 约束：
   wire 内的 `payload_json` 不得携带设备自增 `custom_item_id`；接收端以 UUID 解析自己的
   本机 id 后再落库。其它类型必须省略或置空。该规则同时适用于 ordinary Record 和
   atomic CarePlan 根。
+- NAS 在校验后只持久化并 pull 一种 Android 可直接应用的 canonical JSON：PRD 标记为
+  optional/default 的字段可由请求省略，但 NAS 会补为显式 `null` 或当前默认值；这属于
+  current wire 规范化，不是旧协议兼容。非法枚举、关系、时间区间、时区或已移除字段
+  直接返回 `422`。
+- `pee`、`poop`、`both_diaper` 与 `sleep.is_nap` 的省略值分别规范为当前默认值；
+  temperature 与 measurement 数值规范为 Android codec 的唯一数值表示，避免服务端能写入、
+  客户端却无法推进 pull cursor 的形状。
 
 ### 10.1 `baby`
 
 ```json
 {
   "nickname": "...",
-  "sex": "...",
+  "sex": "female" | "male" | null,
   "birthday": "...",
+  "birth_weight_grams": null,
   "avatar_media_uuid": null
 }
 ```
 
 - 不含本机 `avatarPath`
-- `sort_order` 与 `theme_color` 为本机展示字段，不进入 wire payload
+- `birth_weight_grams` 请求可省略，NAS canonical payload 固定输出显式 `null` 或克数
+- `sort_order` 与 `theme_color` 为本机展示字段，不进入 wire payload；发送即 `422`，
+  不再接受后静默剥离
 - `avatar_media_uuid` 指向 `type=media` 且 `kind=avatar` 的实体
 
 ### 10.2 `record`
@@ -652,6 +662,8 @@ Record 与 CarePlan 共享以下 current-wire 约束：
   后续版本中冻结的作者；客户端字段只是可被忽略/改写的 claim
 - Android 与 NAS 均要求 current `record_membership_author` 能力；缺失时停止同步，
   不发送降级 payload
+- `end_timestamp` 只能为 `null` 或不早于 `timestamp`
+- CarePlan 的 `scheduled_zone_id` 必须是 Android `ZoneId` 可解析的 IANA/UTC/固定偏移 ID
 
 ### 10.3 `media`
 
@@ -670,6 +682,8 @@ Record 与 CarePlan 共享以下 current-wire 约束：
 
 - `kind=log` → `record_client_uuid` 与 `care_plan_client_uuid` 必须且只能提供一个
 - `kind=avatar` → 需 `baby_client_uuid`，且不得关联 Record/CarePlan；写限 owner
+- NAS canonical payload 固定输出上述 8 个字段；省略的 nullable 元数据补显式 `null`
+- live media 必须提供正 `byte_size`；tombstone 可省略并规范为 `0`，且不需要媒体字节
 
 ---
 
