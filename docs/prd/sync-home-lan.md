@@ -342,7 +342,7 @@ curl 或解释器。HTTPS 由 NAS 的 Caddy/Nginx/系统反向代理终止；容
 
 ```text
 $LEZI_DATA_DIR/                    # 例：/data 或 /volume1/docker/lezi
-├── lezi.db                        # SQLite（entities、invites、tokens、rev/cursor 元数据；user_version=1）
+├── lezi.db                        # SQLite（entities、invites、tokens、rev/cursor 元数据；user_version=2）
 ├── lezi.db-wal / lezi.db-shm      # 若启用 WAL
 ├── server.secret                  # token 幂等派生密钥；须保密并随整根备份
 └── media/
@@ -350,12 +350,14 @@ $LEZI_DATA_DIR/                    # 例：/data 或 /volume1/docker/lezi
         └── {media_client_uuid}     # 原始字节
 ```
 
-服务端必须显式管理 SQLite `PRAGMA user_version`：版本 0 原位幂等升级并保留家庭、
-凭证与实体；当前未发布的 version 1 内以幂等列迁移补入
-`sync_bundle_media.staged_sha256`，不额外提升版本。数据卷版本高于当前支持版本时，
-旧服务端必须在创建媒体目录、密钥、SQLite sidecar 或修改数据根权限前，以只读预检
-fail closed。启动清理只允许删除 `media/` 下名称为合法 UUID、且 SQLite 已无
-对应家庭的目录；非 UUID 运维项、符号链接和仍存家庭目录必须保留。
+服务端必须显式管理 SQLite `PRAGMA user_version`：版本 0/1 原位幂等升级并保留家庭、
+凭证与实体；v1 的 `sync_bundle_media.staged_sha256` 列迁移保持幂等。v2 新增
+`media_publications`：已 committed bundle 恢复为可发布归属，仍在 staging 的清单
+恢复为持久隔离态；仅经尺寸校验且没有 bundle 归属的旧 final-path 媒体可回填为
+legacy 归属。数据卷版本高于 2 时，旧服务端必须在创建媒体目录、密钥、SQLite
+sidecar 或修改数据根权限前，以只读预检 fail closed。启动清理只允许删除
+`media/` 下名称为合法 UUID、且 SQLite 已无对应家庭的目录；非 UUID 运维项、
+符号链接和仍存家庭目录必须保留。
 
 ### 8.1 Docker Compose 示例
 
@@ -664,6 +666,7 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 {
   "kind": "log" | "avatar",
   "record_client_uuid": null,
+  "care_plan_client_uuid": null,
   "baby_client_uuid": null,
   "mime": "image/jpeg",
   "width": 0,
@@ -672,8 +675,8 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 }
 ```
 
-- `kind=log` → 需 `record_client_uuid`
-- `kind=avatar` → 需 `baby_client_uuid`；写限 owner
+- `kind=log` → `record_client_uuid` 与 `care_plan_client_uuid` 必须且只能提供一个
+- `kind=avatar` → 需 `baby_client_uuid`，且不得关联 Record/CarePlan；写限 owner
 
 ---
 

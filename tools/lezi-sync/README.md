@@ -6,11 +6,12 @@ Docker 容器和一个持久化目录。
 
 ## 数据兼容性
 
-Rust 版本原位兼容既有数据根；当前 SQLite `PRAGMA user_version=1`。旧的
-`user_version=0` 数据根会幂等升级并保留既有家庭、实体、token hash 与
-`server.secret` 的 HMAC 派生规则。当前版本尚未正式发布，因此
-`sync_bundle_media.staged_sha256` 通过幂等列迁移补入，`user_version` 仍为 1。
-若数据卷版本高于服务端支持版本，启动会先对既有数据库执行只读预检并 fail
+Rust 版本原位兼容既有数据根；当前 SQLite `PRAGMA user_version=2`。旧的
+`user_version=0/1` 数据根会幂等升级并保留既有家庭、实体、token hash 与
+`server.secret` 的 HMAC 派生规则。v1 的 `sync_bundle_media.staged_sha256` 列迁移
+仍保持幂等；v2 新增 `media_publications`，恢复已提交 bundle 的媒体归属，并把
+仍在 staging 的媒体持久标记为不可见隔离态，避免失败发布的字节被兼容路径认领。
+若数据卷版本高于 2，启动会先对既有数据库执行只读预检并 fail
 closed；预检失败不会创建 `media/`、`server.secret`、SQLite sidecar，也不会
 修改数据根或数据库权限：
 
@@ -202,7 +203,7 @@ lezi-sync healthcheck
 
 | 方法 | 路径 | 摘要 |
 |---|---|---|
-| GET | `/health` | 廉价进程存活检查，正常 `{ok, version, capabilities:["atomic_bundle"]}`，不访问 DB/文件系统 |
+| GET | `/health` | 廉价进程存活检查，正常 `{ok, version, capabilities:["atomic_bundle","record_membership_author"]}`，不访问 DB/文件系统 |
 | GET | `/ready` | DB 与数据目录就绪检查；结果缓存 5 秒，异常返回 `503 {ok:false,status:"degraded",version}` |
 | POST | `/v1/family/create` | 幂等创建家庭并返回 owner token；可选 `family_name` |
 | GET | `/v1/family/members` | 当前家庭的 active 成员安全视图；owner/member 均可读 |
@@ -298,8 +299,11 @@ pull 响应新增兼容字段 `has_more`。每页最多扫描 200 个实体，�
 
 ### 原子同步包（`atomic_bundle`）
 
-`GET /health` 广告 `capabilities: ["atomic_bundle"]`。新客户端在发布带照片的
-记录/计划前必须确认该能力；**不得**对旧 NAS 静默回退到 metadata-first push。
+`GET /health` 广告
+`capabilities: ["atomic_bundle", "record_membership_author"]`。新客户端在发布
+带照片的记录/计划前必须确认 `atomic_bundle`；**不得**对旧 NAS 静默回退到
+metadata-first push。`record_membership_author` 表示服务端接受并回执 membership
+作者字段。
 
 典型发送流程：
 
