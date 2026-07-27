@@ -22,11 +22,45 @@ internal sealed class QuickDockCell {
         val customIconSlot: Int? = null,
     ) : QuickDockCell()
 
-    /** Empty or unresolved slot — shows "＋ 选择常用记录". */
+    /** Empty or unresolved slot — keeps its position and opens slot settings. */
     data object Empty : QuickDockCell()
 
     data object More : QuickDockCell()
 }
+
+/** Compact visual copy plus an unabridged TalkBack label for one dock cell. */
+internal data class QuickDockPresentation(
+    val visualLabel: String,
+    val contentDescription: String,
+)
+
+internal fun quickDockPresentation(
+    cell: QuickDockCell,
+    sleepRunning: Boolean,
+): QuickDockPresentation =
+    when (cell) {
+        is QuickDockCell.Bound -> {
+            if (cell.recordType == RecordType.SLEEP && sleepRunning) {
+                QuickDockPresentation(
+                    visualLabel = "醒来",
+                    contentDescription = "睡眠，记录醒来",
+                )
+            } else {
+                QuickDockPresentation(
+                    visualLabel = cell.label,
+                    contentDescription = "${cell.label}，打开记录面板",
+                )
+            }
+        }
+        QuickDockCell.Empty -> QuickDockPresentation(
+            visualLabel = "选择",
+            contentDescription = "＋ 选择常用记录",
+        )
+        QuickDockCell.More -> QuickDockPresentation(
+            visualLabel = "更多",
+            contentDescription = "更多记录",
+        )
+    }
 
 /** User intent emitted by a quick-dock cell; keeps empty slots actionable. */
 internal sealed interface QuickDockAction {

@@ -146,6 +146,32 @@ class QuickRecordSlotsTest {
     }
 
     @Test
+    fun dockPresentationShortensEmptyVisualCopyAndKeepsCompleteAccessibilityLabels() {
+        assertEquals(
+            QuickDockPresentation(
+                visualLabel = "选择",
+                contentDescription = "＋ 选择常用记录",
+            ),
+            quickDockPresentation(QuickDockCell.Empty, sleepRunning = false),
+        )
+
+        val longName = "一二三四五六七八九十一二三四五六七八九十"
+        val longCustom = QuickDockCell.Bound(
+            identity = RecordItemIdentity.custom(12L),
+            label = longName,
+            catalogKey = "custom:12",
+            recordType = RecordType.CUSTOM,
+        )
+        assertEquals(
+            QuickDockPresentation(
+                visualLabel = longName,
+                contentDescription = "$longName，打开记录面板",
+            ),
+            quickDockPresentation(longCustom, sleepRunning = false),
+        )
+    }
+
+    @Test
     fun swapReordersWithoutChangingLength() {
         val swapped = swapQuickRecordSlots(
             listOf("pee", "sleep", "nursing", "formula"),

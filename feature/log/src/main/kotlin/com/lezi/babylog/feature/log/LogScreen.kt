@@ -39,6 +39,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -1144,16 +1145,7 @@ private fun OneHandQuickDock(
             horizontalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             cells.forEachIndexed { index, cell ->
-                val label = when (cell) {
-                    is QuickDockCell.Bound ->
-                        if (cell.recordType == RecordType.SLEEP && sleepRunning) {
-                            "醒来"
-                        } else {
-                            cell.label
-                        }
-                    QuickDockCell.Empty -> "＋ 选择常用记录"
-                    QuickDockCell.More -> "更多"
-                }
+                val presentation = quickDockPresentation(cell, sleepRunning)
                 val tint = when (cell) {
                     is QuickDockCell.Bound ->
                         if (cell.recordType == RecordType.CUSTOM) {
@@ -1190,7 +1182,12 @@ private fun OneHandQuickDock(
                     contentColor = MaterialTheme.colorScheme.onSurface,
                 ) {
                     Column(
-                        Modifier.fillMaxWidth().padding(vertical = 5.dp),
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 5.dp)
+                            .clearAndSetSemantics {
+                                contentDescription = presentation.contentDescription
+                            },
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center,
                     ) {
@@ -1227,10 +1224,11 @@ private fun OneHandQuickDock(
                             }
                         }
                         Text(
-                            label,
+                            presentation.visualLabel,
                             style = LeziTypography.Meta,
                             color = MaterialTheme.colorScheme.onSurface,
                             maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
                     }
                 }
