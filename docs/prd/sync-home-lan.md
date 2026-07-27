@@ -402,7 +402,6 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 - 当前客户端要求能力集合包含 `atomic_bundle` 与 `record_membership_author`：前者标识
   原子同步包，后者标识 NAS 以认证 membership 权威化 Record 作者。缺少任一能力的
 
-> 实现注记（2026-07-27）：Android `OutboxPushPipeline` 已对全部 Record 走 atomic bundle；NAS 仍暂时接受 ordinary record 以便存量 fixture 迁移，后续应 fail-closed。
   服务端都不是受支持的 current endpoint，客户端停止同步并提示重新部署当前服务，
   不降级为其它 wire。
 - 客户端门闩探测用；响应体保持小体积（健康探测上限 64 KiB）

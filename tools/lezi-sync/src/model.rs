@@ -246,10 +246,6 @@ impl RawEntity {
         }
         match (context, self.entity_type.as_str()) {
             (_, "baby") => validate_baby(&mut self.payload)?,
-            // Current Android client always publishes records via atomic bundles
-            // (OutboxPushPipeline). Ordinary record remains wire-valid for NAS
-            // fixtures until those tests are fully migrated to seed_record_with_id.
-            (_, "record") => validate_record(&mut self.payload)?,
             (_, "media") => validate_media(
                 &mut self.payload,
                 max_media_bytes,
@@ -261,8 +257,18 @@ impl RawEntity {
             (EntityValidationContext::OrdinaryPush, "fulfillment_candidate") => {
                 validate_fulfillment_candidate(&mut self.payload)?
             }
+            (EntityValidationContext::AtomicBundleRoot, "record") => {
+                validate_record(&mut self.payload)?
+            }
             (EntityValidationContext::AtomicBundleRoot, "care_plan") => {
                 validate_care_plan(&mut self.payload)?
+            }
+            (EntityValidationContext::OrdinaryPush, "record") => {
+                // Align with Android OutboxPushPipeline: every Record is an
+                // atomic package root (0–3 photos), never ordinary /v1/push.
+                return Err(ApiError::unprocessable(
+                    "record must be published via atomic bundle",
+                ));
             }
             (EntityValidationContext::OrdinaryPush, "care_plan") => {
                 return Err(ApiError::unprocessable(
@@ -271,7 +277,7 @@ impl RawEntity {
             }
             (EntityValidationContext::OrdinaryPush, _) => {
                 return Err(ApiError::unprocessable(
-                    "entity type must be baby, record, media, custom_item, or fulfillment_candidate",
+                    "entity type must be baby, media, custom_item, or fulfillment_candidate",
                 ))
             }
             (EntityValidationContext::AtomicBundleRoot, _) => {
@@ -298,8 +304,7 @@ impl RawEntity {
 /// Where an entity is being accepted on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntityValidationContext {
-    /// Ordinary `/v1/push` (baby | record | media | custom_item | fulfillment_candidate).
-    /// Android never uses ordinary record; atomic is the product path.
+    /// Ordinary `/v1/push` (baby | media | custom_item | fulfillment_candidate).
     OrdinaryPush,
     /// Root of an atomic bundle (`record` | `care_plan`).
     AtomicBundleRoot,
@@ -1378,10 +1383,12 @@ mod tests {
 
 
     #[test]
-    fn record_validates_on_ordinary_and_atomic_contexts() {
-        record(record_payload())
-            .validate_as(1024, EntityValidationContext::OrdinaryPush)
-            .unwrap();
+    fn record_is_rejected_on_ordinary_push() {
+        assert!(
+            record(record_payload())
+                .validate_as(1024, EntityValidationContext::OrdinaryPush)
+                .is_err()
+        );
         record(record_payload())
             .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
             .unwrap();

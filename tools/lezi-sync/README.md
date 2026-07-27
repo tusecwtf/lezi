@@ -306,7 +306,7 @@ pull 响应包含当前字段 `has_more`。每页最多扫描 200 个实体，�
 - tombstone 包（root/media 带 `deleted_at`）不需上传字节即可 commit
 - 每包最多 8 个 media；每家庭最多 64 个 open staging bundle
 - `care_plan` 根类型与 `record` 共用原子发布契约，并执行当前字段、引用与成员 ACL 校验
-- ordinary `/v1/push` 与 `/v1/media` 仍用于 Baby、Record、Media、CustomItem 与头像流程
+- ordinary `/v1/push` 与 `/v1/media` 仍用于 Baby、Media（头像）、CustomItem 与 fulfillment；Record/CarePlan 走 atomic bundle
 
 家庭删除先提交 SQLite 外键级联删除，再清理该家庭媒体目录。数据库删除失败时
 媒体保持完整；数据库已删除但文件清理失败或进程中断时，该 UUID 目录作为孤儿
