@@ -33,6 +33,9 @@ import com.lezi.babylog.domain.CustomRecordItem
 
 private val CustomItemIcons = listOf("★", "♥", "☀", "☾", "♪", "●", "▲", "◆")
 
+internal fun customItemDialogScopeGuidance(): String =
+    "「本机显示」只影响本机目录与快捷坞；关闭不等于删除家庭共享定义。"
+
 /** Copy for shared definitions: local close is not family delete. */
 internal fun customItemLocalHideHint(manageable: Boolean, locallyHidden: Boolean): String =
     when {
@@ -96,7 +99,7 @@ internal fun CustomItemSettingsDialog(
                 verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
             ) {
                 Text(
-                    "「本机显示」只影响本机目录与快捷坞；关闭不等于删除家庭共享定义。",
+                    customItemDialogScopeGuidance(),
                     style = LeziTypography.Meta,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -213,11 +216,6 @@ internal fun CustomItemSettingsDialog(
                 if (editing != null) {
                     TextButton(onClick = { reset() }) { Text("取消修改") }
                 }
-                Text(
-                    "删除项目不会改写历史记录；历史标题与图标快照仍保留。本机关闭只改本机偏好，家庭定义仍在。",
-                    style = LeziTypography.Meta,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
             }
         },
         confirmButton = {
