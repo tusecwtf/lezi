@@ -88,15 +88,6 @@ data class SystemCalendarUpsertResult(
     val providerOwnsReminder: Boolean
         get() = outcome != SystemCalendarUpsertOutcome.ReleasedOrAbsent
 
-    /** Compatibility constructor for test adapters with no stale-owner state. */
-    constructor(eventId: String?, reminderReady: Boolean) : this(
-        eventId = eventId,
-        outcome = if (reminderReady) {
-            SystemCalendarUpsertOutcome.CurrentReady
-        } else {
-            SystemCalendarUpsertOutcome.ReleasedOrAbsent
-        },
-    )
 }
 
 /** Strict UID_2445 + app-package lookup for a Lezi-owned projection. */

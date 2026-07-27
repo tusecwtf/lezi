@@ -669,7 +669,10 @@ private class RecordingSystemCalendarPort : SystemCalendarPort {
     override suspend fun listWritableCalendars(): List<SystemCalendarTarget> = emptyList()
     override suspend fun upsertEvent(
         request: SystemCalendarUpsert,
-    ): SystemCalendarUpsertResult = SystemCalendarUpsertResult(null, false)
+    ): SystemCalendarUpsertResult = SystemCalendarUpsertResult(
+        eventId = null,
+        outcome = SystemCalendarUpsertOutcome.ReleasedOrAbsent,
+    )
     override suspend fun findOwnedEvent(
         carePlanClientUuid: String,
     ): SystemCalendarOwnedEventLookup {

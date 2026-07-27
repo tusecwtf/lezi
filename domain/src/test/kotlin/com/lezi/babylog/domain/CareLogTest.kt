@@ -4437,14 +4437,28 @@ private class FakeSystemCalendarPort : SystemCalendarPort {
                 existing in liveEventIds &&
                 eventOwners[existing] == request.carePlanClientUuid
             ) {
-                return SystemCalendarUpsertResult(existing, reminderReady = !failReminder)
+                return SystemCalendarUpsertResult(
+                    eventId = existing,
+                    outcome = if (failReminder) {
+                        SystemCalendarUpsertOutcome.ReleasedOrAbsent
+                    } else {
+                        SystemCalendarUpsertOutcome.CurrentReady
+                    },
+                )
             }
         }
         val id = "evt-${nextEventId++}"
         liveEventIds += id
         eventOwners[id] = request.carePlanClientUuid
         missingEventIds.remove(id)
-        return SystemCalendarUpsertResult(id, reminderReady = !failReminder)
+        return SystemCalendarUpsertResult(
+            eventId = id,
+            outcome = if (failReminder) {
+                SystemCalendarUpsertOutcome.ReleasedOrAbsent
+            } else {
+                SystemCalendarUpsertOutcome.CurrentReady
+            },
+        )
     }
 
     override suspend fun findOwnedEvent(
