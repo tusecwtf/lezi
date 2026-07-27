@@ -12,6 +12,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -160,7 +161,12 @@ class CarePlanReminderReceiver : BroadcastReceiver() {
         if (planId <= 0L || planUuid.isBlank()) return
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
-            try {
+            runBroadcastWork(
+                finish = pending::finish,
+                reportFailure = { failure ->
+                    Log.e(TAG, "Care-plan reminder delivery failed", failure)
+                },
+            ) {
                 if (
                     careLog.shouldDeliverCarePlanReminder(
                         carePlanId = planId,
@@ -170,8 +176,6 @@ class CarePlanReminderReceiver : BroadcastReceiver() {
                 ) {
                     notifyDuePlan(context, title, planId, planUuid)
                 }
-            } finally {
-                pending.finish()
             }
         }
     }
@@ -222,6 +226,7 @@ class CarePlanReminderReceiver : BroadcastReceiver() {
     }
 
     companion object {
+        private const val TAG = "CarePlanReminder"
         const val EXTRA_FULFILL_PLAN_ID = "lezi_fulfill_care_plan_id"
         const val EXTRA_FULFILL_PLAN_UUID = "lezi_fulfill_care_plan_uuid"
     }

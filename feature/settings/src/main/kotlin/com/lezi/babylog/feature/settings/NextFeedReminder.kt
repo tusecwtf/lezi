@@ -11,6 +11,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.content.pm.PackageManager
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -122,12 +123,15 @@ class NextFeedReceiver : BroadcastReceiver() {
         val expectedEpoch = intent?.getStringExtra(NextFeedScheduler.EXTRA_EPOCH)
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
-            try {
+            runBroadcastWork(
+                finish = pending::finish,
+                reportFailure = { failure ->
+                    Log.e(TAG, "Next-feed reminder delivery failed", failure)
+                },
+            ) {
                 if (scheduler.consumeDeliveredAlarm(expectedEpoch)) {
                     notifyDueFeed(context)
                 }
-            } finally {
-                pending.finish()
             }
         }
     }
@@ -166,6 +170,10 @@ class NextFeedReceiver : BroadcastReceiver() {
                 .notify(NextFeedScheduler.NOTIF_ID, notification)
         }
     }
+
+    private companion object {
+        const val TAG = "NextFeedReminder"
+    }
 }
 
 @AndroidEntryPoint
@@ -177,12 +185,19 @@ class BootReceiver : BroadcastReceiver() {
         if (intent?.action != Intent.ACTION_BOOT_COMPLETED) return
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
-            try {
+            runBroadcastWork(
+                finish = pending::finish,
+                reportFailure = { failure ->
+                    Log.e(TAG, "Reminder reschedule after boot failed", failure)
+                },
+            ) {
                 scheduler.rescheduleFromStore()
                 carePlanScheduler.rescheduleAll()
-            } finally {
-                pending.finish()
             }
         }
+    }
+
+    private companion object {
+        const val TAG = "ReminderBoot"
     }
 }
