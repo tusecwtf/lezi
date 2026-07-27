@@ -22,6 +22,7 @@ import com.lezi.babylog.core.model.SyncStatus
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
@@ -37,6 +38,33 @@ import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Test
 
 class RealSyncPortTest {
+    @Test
+    fun startupRecoveryContainsOperationalFailureAndReportsIt() = runTest {
+        val failure = IllegalStateException("marker unavailable")
+        var reported: Throwable? = null
+
+        runProcessStartupRecovery(
+            reportFailure = { reported = it },
+            recover = { throw failure },
+        )
+
+        assertThat(reported).isSameInstanceAs(failure)
+    }
+
+    @Test
+    fun startupRecoveryPropagatesCancellation() = runTest {
+        val cancellation = CancellationException("process stopping")
+
+        val thrown = runCatching {
+            runProcessStartupRecovery(
+                reportFailure = { error("must not report cancellation") },
+                recover = { throw cancellation },
+            )
+        }.exceptionOrNull()
+
+        assertThat(thrown).isSameInstanceAs(cancellation)
+    }
+
     @Test
     fun missingCurrentServerCapabilityFailsBeforeAnyRemoteSyncApiCall() = runTest {
         val rig = SyncRig(

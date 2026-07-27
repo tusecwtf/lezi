@@ -14,6 +14,7 @@ import com.lezi.babylog.core.model.SyncStatus
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -109,8 +110,10 @@ class RealSyncPort @Inject constructor(
 
     init {
         processScope.launch {
-            syncMutex.withLock {
-                recoverPendingLocalClearLocked()
+            runProcessStartupRecovery(::updateFailureStatus) {
+                syncMutex.withLock {
+                    recoverPendingLocalClearLocked()
+                }
             }
         }
         processScope.launch {
@@ -270,6 +273,30 @@ class RealSyncPort @Inject constructor(
             else -> SyncStatus.Error
         }
     }
+}
+
+/** Prevents recoverable startup I/O failures from reaching the process uncaught handler. */
+internal suspend fun runProcessStartupRecovery(
+    reportFailure: (Throwable) -> Unit,
+    recover: suspend () -> Unit,
+) {
+    try {
+        recover()
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (failure: Exception) {
+        failure.startupCancellationCauseOrNull()?.let { throw it }
+        reportFailure(failure)
+    }
+}
+
+private fun Throwable.startupCancellationCauseOrNull(): CancellationException? {
+    var current: Throwable? = this
+    while (current != null) {
+        if (current is CancellationException) return current
+        current = current.cause
+    }
+    return null
 }
 
 private fun HomeNetworkDecision.userMessage(): String = when (this) {
