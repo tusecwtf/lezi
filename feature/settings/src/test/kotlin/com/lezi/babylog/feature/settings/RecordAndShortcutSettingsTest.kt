@@ -22,6 +22,10 @@ class RecordAndShortcutSettingsTest {
             listOf("常用记录", "所有记录项目", "分项目设置", "护理计划与日历"),
             titles,
         )
+        assertEquals(
+            "本机提醒、系统日历与内容披露",
+            RecordShortcutHubDestination.PlanCalendar.subtitle,
+        )
     }
 
     @Test

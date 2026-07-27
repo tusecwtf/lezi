@@ -42,7 +42,55 @@ class PendingReplicaCleanupRoomTest {
         assertNull(reopened.load())
     }
 
+    @Test
+    fun nestedDomainDeleteAndMarkerRollBackTogether() = runBlocking {
+        val db = openDatabase()
+        db.recordDao().upsert(
+            RecordEntity(
+                clientUuid = "record-before-clear",
+                babyId = 1,
+                type = "formula",
+                timestamp = 100,
+                createdByUserId = 1,
+                payloadJson = "{}",
+                updatedAt = 100,
+            ),
+        )
+        val transactions = RoomDatabaseTransactionRunner(db)
+        val store = RoomPendingReplicaCleanupStore(db.pendingReplicaCleanupDao())
+
+        val failure = runCatching {
+            transactions.run {
+                store.stage(
+                    PendingReplicaCleanup(
+                        scope = PendingReplicaCleanupScope.RECORDS_ONLY,
+                        familyId = "family-a",
+                        pullGeneration = "generation-a",
+                        mediaClientUuids = emptySet(),
+                        localMediaPaths = emptySet(),
+                    ),
+                )
+                transactions.run {
+                    db.recordDao().deleteAll()
+                }
+                error("abort outer clear")
+            }
+        }.exceptionOrNull()
+
+        assertEquals("abort outer clear", failure?.message)
+        assertEquals(
+            "record-before-clear",
+            db.recordDao().getByClientUuid("record-before-clear")?.clientUuid,
+        )
+        assertNull(store.load())
+    }
+
     private fun openStore(): PendingReplicaCleanupStore {
+        val db = openDatabase()
+        return RoomPendingReplicaCleanupStore(db.pendingReplicaCleanupDao())
+    }
+
+    private fun openDatabase(): LeziDatabase {
         val db = Room.databaseBuilder(context, LeziDatabase::class.java, DATABASE_NAME)
             .addMigrations(
                 MIGRATION_7_8,
@@ -58,10 +106,11 @@ class PendingReplicaCleanupRoomTest {
                 MIGRATION_17_18,
                 MIGRATION_18_19,
                 MIGRATION_19_20,
+                MIGRATION_20_21,
             )
             .build()
         database = db
-        return RoomPendingReplicaCleanupStore(db.pendingReplicaCleanupDao())
+        return db
     }
 
     private companion object {

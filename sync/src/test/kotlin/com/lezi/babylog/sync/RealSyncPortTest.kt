@@ -73,6 +73,139 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun unjoinedSyncRecoversDurableReplicaCleanupBeforeDisabledNoOp() = runTest {
+        val rig = SyncRig(session = SyncSession())
+        rig.media.seed(
+            MediaAssetEntity(
+                clientUuid = "stale-media",
+                kind = "log",
+                recordId = 1,
+                localUri = "photos/stale.jpg",
+                createdAt = 1,
+            ),
+        )
+        rig.pendingReplicaCleanup.pending = pendingReplicaCleanup(
+            familyId = "family-old",
+            mediaClientUuids = setOf("stale-media"),
+            localMediaPaths = setOf("photos/stale.jpg"),
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+
+        assertThat(rig.pendingReplicaCleanup.pending).isNull()
+        assertThat(rig.media.getByClientUuid("stale-media")).isNull()
+        assertThat(rig.mediaFiles.deleted).containsExactly("photos/stale.jpg")
+        assertThat(rig.healthProbeCalls).isEqualTo(0)
+        assertThat(rig.backend.pushes).isEmpty()
+        assertThat(rig.backend.pullCount).isEqualTo(0)
+        assertThat(rig.pendingDomainRecovery.calls).isEqualTo(1)
+    }
+
+    @Test
+    fun failedDomainCleanupRecoveryBlocksReplicaAndBackendBeforeUnjoinedNoOp() = runTest {
+        val rig = SyncRig(session = SyncSession())
+        rig.pendingReplicaCleanup.pending = pendingReplicaCleanup()
+        rig.pendingDomainRecovery.failures += IllegalStateException("provider unavailable")
+
+        val failure = rig.port.sync(SyncTrigger.Foreground).exceptionOrNull()
+
+        assertThat(failure).hasMessageThat().isEqualTo("provider unavailable")
+        assertThat(rig.pendingReplicaCleanup.pending).isNotNull()
+        assertThat(rig.healthProbeCalls).isEqualTo(0)
+        assertThat(rig.backend.pushes).isEmpty()
+        assertThat(rig.backend.pullCount).isEqualTo(0)
+    }
+
+    @Test
+    fun failedDomainCleanupRecoveryBlocksEndpointMutation() = runTest {
+        val configured = SyncSession(
+            serverHost = "192.168.1.20",
+            serverPort = 8787,
+            allowedSsids = listOf("Home"),
+        )
+        val rig = SyncRig(session = configured)
+        rig.pendingDomainRecovery.failures += IllegalStateException("provider unavailable")
+
+        val failure = rig.port.saveServer("http://192.168.1.99:8787").exceptionOrNull()
+
+        assertThat(failure).hasMessageThat().isEqualTo("provider unavailable")
+        assertThat(rig.preferences.current()).isEqualTo(configured)
+        assertThat(rig.healthProbeCalls).isEqualTo(0)
+    }
+
+    @Test
+    fun failedReplicaRecoveryBlocksBackendAndIsRetriedOnNextSync() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        rig.media.seed(
+            MediaAssetEntity(
+                clientUuid = "stale-media",
+                kind = "log",
+                recordId = 1,
+                localUri = "photos/stale.jpg",
+                createdAt = 1,
+            ),
+        )
+        rig.pendingReplicaCleanup.pending = pendingReplicaCleanup(
+            mediaClientUuids = setOf("stale-media"),
+            localMediaPaths = setOf("photos/stale.jpg"),
+        )
+        rig.mediaFiles.deleteFailures += IllegalStateException("cleanup failed")
+
+        val first = rig.port.sync(SyncTrigger.Foreground)
+
+        assertThat(first.exceptionOrNull()).isInstanceOf(LocalClearCommittedException::class.java)
+        assertThat(rig.pendingReplicaCleanup.pending).isNotNull()
+        assertThat(rig.healthProbeCalls).isEqualTo(0)
+        assertThat(rig.backend.pushes).isEmpty()
+        assertThat(rig.backend.pullCount).isEqualTo(0)
+
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+        assertThat(rig.pendingReplicaCleanup.pending).isNull()
+        assertThat(rig.healthProbeCalls).isGreaterThan(0)
+        assertThat(rig.backend.pullCount).isEqualTo(1)
+    }
+
+    @Test
+    fun failedReplicaRecoveryBlocksFamilyCreationBeforePolicyAndBackendIo() = runTest {
+        val configured = SyncSession(
+            serverHost = "192.168.1.20",
+            serverPort = 8787,
+            allowedSsids = listOf("Home"),
+        )
+        val rig = SyncRig(session = configured)
+        rig.pendingReplicaCleanup.pending = pendingReplicaCleanup()
+        rig.pendingReplicaCleanup.loadFailures += IllegalStateException("marker unavailable")
+
+        val failure = rig.port.createFamily(
+            displayName = "妈妈",
+            bootstrapSecret = "bootstrap",
+            familyName = "乐乐家",
+        ).exceptionOrNull()
+
+        assertThat(failure).hasMessageThat().isEqualTo("marker unavailable")
+        assertThat(rig.healthProbeCalls).isEqualTo(0)
+        assertThat(rig.backend.createRequestIds).isEmpty()
+        assertThat(rig.preferences.current()).isEqualTo(configured)
+    }
+
+    @Test
+    fun failedReplicaRecoveryBlocksEndpointMutationInsideSharedBarrier() = runTest {
+        val configured = SyncSession(
+            serverHost = "192.168.1.20",
+            serverPort = 8787,
+            allowedSsids = listOf("Home"),
+        )
+        val rig = SyncRig(session = configured)
+        rig.pendingReplicaCleanup.pending = pendingReplicaCleanup()
+        rig.pendingReplicaCleanup.loadFailures += IllegalStateException("marker unavailable")
+
+        val failure = rig.port.saveServer("http://192.168.1.99:8787").exceptionOrNull()
+
+        assertThat(failure).hasMessageThat().isEqualTo("marker unavailable")
+        assertThat(rig.preferences.current()).isEqualTo(configured)
+    }
+
+    @Test
     fun nonWifiStillSnapshotsBabyAndRecordIntoFamilyOutbox() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"), wifi = false)
         val babyId = rig.babies.seed(localBaby())
@@ -704,12 +837,11 @@ class RealSyncPortTest {
                 updatedAt = 1,
             ),
         )
-        rig.outbox.failDeleteTypeAttempts = 2
+        rig.outbox.failDeleteTypeAttempts = 1
 
-        val failure = rig.port.clearLocalRecords { committed ->
-            rig.records.deleteAll()
-            committed()
-        }.exceptionOrNull()
+        val failure = rig.port.clearLocalRecords(
+            realPortClearWorkflow { rig.records.deleteAll() },
+        ).exceptionOrNull()
 
         assertThat(failure).isInstanceOf(LocalClearCommittedException::class.java)
         assertThat(rig.records.listAllIncludingDeleted()).isEmpty()
@@ -717,6 +849,27 @@ class RealSyncPortTest {
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).exceptionOrNull()).isNull()
         assertThat(rig.backend.pushes.flatMap(PushedBatch::entities).map(SyncEntity::type))
             .doesNotContain("record")
+    }
+
+    @Test
+    fun resumedCommittedClearStillHonorsTheNewExplicitClearRequest() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        rig.records.seed(localRecord(babyId).copy(syncDirty = false))
+        rig.pendingDomainRecovery.resumed = LocalClearRecoveryScope.RecordsOnly
+        var roomClearCalls = 0
+
+        val result = rig.port.clearLocalRecords(
+            realPortClearWorkflow {
+                roomClearCalls += 1
+                rig.records.deleteAll()
+            },
+        )
+
+        assertThat(result.isSuccess).isTrue()
+        assertThat(roomClearCalls).isEqualTo(1)
+        assertThat(rig.records.listAllIncludingDeleted()).isEmpty()
+        assertThat(rig.pendingReplicaCleanup.pending).isNull()
     }
 
     @Test
@@ -732,10 +885,9 @@ class RealSyncPortTest {
         val pulling = async { rig.port.sync(SyncTrigger.PullToRefresh) }
         rig.backend.pullStarted!!.await()
         val clearing = async {
-            rig.port.clearLocalRecords { committed ->
-                rig.records.deleteAll()
-                committed()
-            }
+            rig.port.clearLocalRecords(
+                realPortClearWorkflow { rig.records.deleteAll() },
+            )
         }
         runCurrent()
         assertThat(clearing.isCompleted).isFalse()
@@ -778,7 +930,7 @@ class RealSyncPortTest {
             ),
         )
 
-        assertThat(rig.port.clearLocalRecords { it() }.isSuccess).isTrue()
+        assertThat(rig.port.clearLocalRecords(realPortClearWorkflow()).isSuccess).isTrue()
         assertThat(rig.preferences.current().pullCursor).isEqualTo(0)
         assertThat(rig.preferences.current().pullGeneration).isEqualTo("old-generation")
 
@@ -2706,6 +2858,149 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun remoteCarePlanProjectionRevisionInvalidatesCalendarReadiness() = runTest {
+        val applied = mutableListOf<String>()
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            carePlanApplied = { uuids -> applied += uuids },
+        )
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val babyUuid = rig.babies.getIncludingDeleted(babyId)!!.clientUuid
+        rig.carePlans.seed(
+            localCarePlan(babyId).copy(
+                clientUuid = "remote-plan-revision",
+                type = "formula",
+                scheduledAt = 1_000,
+                scheduledZoneId = "UTC",
+                note = "旧备注",
+                updatedAt = 100,
+                syncDirty = false,
+                systemCalendarEventId = "provider-event-1",
+                systemCalendarReminderReady = true,
+                systemCalendarProjectionPending = false,
+            ),
+        )
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "care_plan",
+                    clientUuid = "remote-plan-revision",
+                    payloadJson =
+                        """{"baby_client_uuid":"$babyUuid","type":"sleep","scheduled_at":2000,"scheduled_zone_id":"Asia/Shanghai","note":"新备注","status":"pending","payload_json":{},"schema_version":1,"created_by_membership_id":"member-a"}""",
+                    updatedAt = 200,
+                    deletedAt = null,
+                ),
+            ),
+            cursor = 20,
+            generation = "g1",
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+
+        val plan = rig.carePlans.getByClientUuid("remote-plan-revision")!!
+        assertThat(plan.type).isEqualTo("sleep")
+        assertThat(plan.scheduledAt).isEqualTo(2_000)
+        assertThat(plan.scheduledZoneId).isEqualTo("Asia/Shanghai")
+        assertThat(plan.note).isEqualTo("新备注")
+        assertThat(plan.systemCalendarEventId).isEqualTo("provider-event-1")
+        assertThat(plan.systemCalendarReminderReady).isFalse()
+        assertThat(plan.systemCalendarProjectionPending).isTrue()
+        assertThat(applied).containsExactly("remote-plan-revision")
+    }
+
+    @Test
+    fun remoteCarePlanRevisionWithoutProjectionEvidenceDoesNotClaimCleanupPending() = runTest {
+        val applied = mutableListOf<String>()
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            carePlanApplied = { uuids -> applied += uuids },
+        )
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val babyUuid = rig.babies.getIncludingDeleted(babyId)!!.clientUuid
+        rig.carePlans.seed(
+            localCarePlan(babyId).copy(
+                clientUuid = "remote-plan-never-projected",
+                scheduledAt = 1_000,
+                updatedAt = 100,
+                syncDirty = false,
+                systemCalendarEventId = null,
+                systemCalendarReminderReady = false,
+                systemCalendarProjectionPending = false,
+                legacyCarePlanReminderPending = false,
+            ),
+        )
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "care_plan",
+                    clientUuid = "remote-plan-never-projected",
+                    payloadJson =
+                        """{"baby_client_uuid":"$babyUuid","type":"formula","scheduled_at":2000,"scheduled_zone_id":"Asia/Shanghai","status":"pending","payload_json":{},"schema_version":1,"created_by_membership_id":"member-a"}""",
+                    updatedAt = 200,
+                    deletedAt = null,
+                ),
+            ),
+            cursor = 20,
+            generation = "g1",
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+
+        val plan = rig.carePlans.getByClientUuid("remote-plan-never-projected")!!
+        assertThat(plan.scheduledAt).isEqualTo(2_000)
+        assertThat(plan.systemCalendarReminderReady).isFalse()
+        assertThat(plan.systemCalendarProjectionPending).isFalse()
+        assertThat(applied).containsExactly("remote-plan-never-projected")
+    }
+
+    @Test
+    fun remoteCarePlanTerminalRevisionMarksCalendarCleanupPending() = runTest {
+        val applied = mutableListOf<String>()
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            carePlanApplied = { uuids -> applied += uuids },
+        )
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val babyUuid = rig.babies.getIncludingDeleted(babyId)!!.clientUuid
+        rig.carePlans.seed(
+            localCarePlan(babyId).copy(
+                clientUuid = "remote-plan-terminal",
+                updatedAt = 100,
+                syncDirty = false,
+                systemCalendarEventId = "provider-event-terminal",
+                systemCalendarReminderReady = true,
+                systemCalendarProjectionPending = false,
+            ),
+        )
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "care_plan",
+                    clientUuid = "remote-plan-terminal",
+                    payloadJson =
+                        """{"baby_client_uuid":"$babyUuid","type":"formula","scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","status":"skipped","payload_json":{},"schema_version":1,"created_by_membership_id":"member-a"}""",
+                    updatedAt = 200,
+                    deletedAt = null,
+                ),
+            ),
+            cursor = 20,
+            generation = "g1",
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+
+        val plan = rig.carePlans.getByClientUuid("remote-plan-terminal")!!
+        assertThat(plan.status).isEqualTo("skipped")
+        assertThat(plan.systemCalendarEventId).isEqualTo("provider-event-terminal")
+        assertThat(plan.systemCalendarReminderReady).isFalse()
+        assertThat(plan.systemCalendarProjectionPending).isTrue()
+        assertThat(applied).containsExactly("remote-plan-terminal")
+    }
+
+    @Test
     fun atomicCarePlanDownloadFailureKeepsPlanInvisibleAndCursorUnmoved() = runTest {
         val applied = mutableListOf<String>()
         val rig = SyncRig(
@@ -3983,7 +4278,7 @@ private class TestForegroundState(
     }
 }
 
-internal class TestMediaFileStore : SyncMediaFileStore {
+internal open class TestMediaFileStore : SyncMediaFileStore {
     val deleted = mutableListOf<String>()
     val deleteFailures = ArrayDeque<Throwable>()
     var afterInspect: (suspend () -> Unit)? = null
@@ -4008,10 +4303,19 @@ internal class TestMediaFileStore : SyncMediaFileStore {
         return "downloaded/$clientUuid"
     }
 
-    override suspend fun delete(localUri: String) {
+    override open suspend fun delete(localUri: String) {
         deleted += localUri
         deleteFailures.removeFirstOrNull()?.let { throw it }
     }
+}
+
+private fun realPortClearWorkflow(
+    clearRoom: suspend () -> Unit = {},
+    finishCommitted: suspend () -> Unit = {},
+): LocalClearWorkflow = object : LocalClearWorkflow {
+    override suspend fun <T> withLocalExclusion(block: suspend () -> T): T = block()
+    override suspend fun clearRoom() = clearRoom.invoke()
+    override suspend fun finishCommitted() = finishCommitted.invoke()
 }
 
 private class SyncRig(
@@ -4034,6 +4338,8 @@ private class SyncRig(
     val customItems = MemoryCustomItemDao()
     val mediaFiles = TestMediaFileStore()
     val transactions = RecordingTransactionRunner()
+    val pendingReplicaCleanup = TestPendingReplicaCleanupStore()
+    val pendingDomainRecovery = TestLocalClearRecoveryGate()
     val families = MemoryFamilyDao().apply {
         seed(FamilyEntity(id = 1, ownerUserId = 1, createdAt = 0))
     }
@@ -4072,9 +4378,45 @@ private class SyncRig(
         foregroundState = foreground,
         mediaFiles = mediaFiles,
         transactionRunner = transactions,
+        pendingReplicaCleanupStore = pendingReplicaCleanup,
+        localClearRecoveryGate = pendingDomainRecovery,
         carePlanAppliedListener = CarePlanFamilyAppliedListener { carePlanApplied(it) },
         fulfillmentCandidateDao = fulfillmentCandidates,
     )
+}
+
+internal class TestLocalClearRecoveryGate : LocalClearRecoveryGate {
+    var calls = 0
+    var resumed: LocalClearRecoveryScope? = null
+    val failures = ArrayDeque<Throwable>()
+
+    override suspend fun recoverPendingLocalClear(): LocalClearRecoveryScope? {
+        calls += 1
+        failures.removeFirstOrNull()?.let { throw it }
+        return resumed
+    }
+}
+
+internal class TestPendingReplicaCleanupStore :
+    com.lezi.babylog.core.database.PendingReplicaCleanupStore {
+    var pending: com.lezi.babylog.core.database.PendingReplicaCleanup? = null
+    val loadFailures = ArrayDeque<Throwable>()
+
+    override suspend fun load(): com.lezi.babylog.core.database.PendingReplicaCleanup? {
+        loadFailures.removeFirstOrNull()?.let { throw it }
+        return pending
+    }
+
+    override suspend fun stage(
+        pending: com.lezi.babylog.core.database.PendingReplicaCleanup,
+    ) {
+        check(this.pending == null)
+        this.pending = pending
+    }
+
+    override suspend fun delete() {
+        pending = null
+    }
 }
 
 internal class MemoryFulfillmentCandidateDao : FulfillmentCandidateDao {
@@ -4260,6 +4602,59 @@ internal class MemoryCarePlanDao : CarePlanDao {
         rows.value = rows.value.map { if (it.id == plan.id) plan else it }
     }
 
+    override suspend fun updateSystemCalendarProjection(
+        clientUuid: String,
+        eventId: String?,
+        reminderReady: Boolean,
+        pending: Boolean,
+    ) {
+        rows.value = rows.value.map {
+            if (it.clientUuid == clientUuid) {
+                it.copy(
+                    systemCalendarEventId = eventId,
+                    systemCalendarReminderReady = reminderReady,
+                    systemCalendarProjectionPending = pending,
+                )
+            } else {
+                it
+            }
+        }
+    }
+
+    override suspend fun updateSystemCalendarProjectionEnabled(
+        clientUuid: String,
+        enabled: Boolean,
+    ) {
+        rows.value = rows.value.map {
+            if (it.clientUuid == clientUuid) {
+                it.copy(
+                    systemCalendarProjectionEnabled = enabled,
+                )
+            } else {
+                it
+            }
+        }
+    }
+
+    override suspend fun markLegacyCarePlanReminderReplaced(clientUuid: String) {
+        rows.value = rows.value.map {
+            if (it.clientUuid == clientUuid) it.copy(legacyCarePlanReminderPending = false) else it
+        }
+    }
+
+    override suspend fun consumeLegacyCarePlanReminder(id: Long, clientUuid: String): Int {
+        var changed = 0
+        rows.value = rows.value.map {
+            if (it.id == id && it.clientUuid == clientUuid && it.legacyCarePlanReminderPending) {
+                changed = 1
+                it.copy(legacyCarePlanReminderPending = false)
+            } else {
+                it
+            }
+        }
+        return changed
+    }
+
     override suspend fun updatePayloadReplica(
         id: Long,
         expectedPayloadJson: String,
@@ -4377,6 +4772,18 @@ private fun joinedSession(familyId: String) = SyncSession(
     allowedSsids = listOf("Home"),
 )
 
+private fun pendingReplicaCleanup(
+    familyId: String = "family-a",
+    mediaClientUuids: Set<String> = emptySet(),
+    localMediaPaths: Set<String> = emptySet(),
+) = com.lezi.babylog.core.database.PendingReplicaCleanup(
+    scope = com.lezi.babylog.core.database.PendingReplicaCleanupScope.RECORDS_ONLY,
+    familyId = familyId,
+    pullGeneration = "known-generation",
+    mediaClientUuids = mediaClientUuids,
+    localMediaPaths = localMediaPaths,
+)
+
 internal class MemoryOutboxDao : OutboxDao {
     private val rows = mutableListOf<OutboxEntity>()
     private val ids = AtomicLong(1)
@@ -4427,6 +4834,14 @@ internal class MemoryOutboxDao : OutboxDao {
         rows.removeAll { it.familyId == familyId && it.entityType == entityType }
     }
 
+    override suspend fun deleteTypeAcrossFamilies(entityType: String) {
+        if (failDeleteTypeAttempts > 0) {
+            failDeleteTypeAttempts--
+            error("outbox delete failed")
+        }
+        rows.removeAll { it.entityType == entityType }
+    }
+
     override suspend fun deleteEntities(
         familyId: String,
         entityType: String,
@@ -4438,6 +4853,17 @@ internal class MemoryOutboxDao : OutboxDao {
             it.familyId == familyId &&
                 it.entityType == entityType &&
                 it.clientUuid in clientUuids
+        }
+    }
+
+    override suspend fun deleteEntitiesAcrossFamilies(
+        entityType: String,
+        clientUuids: List<String>,
+    ) {
+        deleteEntityBatchSizes += clientUuids.size
+        require(clientUuids.size <= 400)
+        rows.removeAll {
+            it.entityType == entityType && it.clientUuid in clientUuids
         }
     }
 
@@ -4810,6 +5236,10 @@ internal class MemoryMediaDao : MediaAssetDao {
 
     override suspend fun deleteLogMedia() {
         rows.removeAll { it.kind == "log" }
+    }
+
+    override suspend fun deleteByClientUuids(clientUuids: List<String>) {
+        rows.removeAll { it.clientUuid in clientUuids }
     }
 
     override suspend fun deleteForRecord(recordId: Long) {

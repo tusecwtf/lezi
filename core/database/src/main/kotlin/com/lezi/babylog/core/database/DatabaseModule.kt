@@ -399,6 +399,51 @@ internal val MIGRATION_19_20 = object : Migration(19, 20) {
     }
 }
 
+/** Durable Android Calendar provider identities for local-clear recovery. */
+internal val MIGRATION_20_21 = object : Migration(20, 21) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "ALTER TABLE pending_reminder_cleanup ADD COLUMN " +
+                "`systemCalendarProjectionsJson` TEXT NOT NULL DEFAULT '{}'",
+        )
+        db.execSQL(
+            "ALTER TABLE pending_reminder_cleanup ADD COLUMN " +
+                "`settingsSnapshotCaptured` INTEGER NOT NULL DEFAULT 0",
+        )
+        db.execSQL(
+            "ALTER TABLE pending_reminder_cleanup ADD COLUMN " +
+                "`currentBabyId` INTEGER DEFAULT NULL",
+        )
+        db.execSQL(
+            "ALTER TABLE pending_reminder_cleanup ADD COLUMN " +
+                "`nextFeedAt` INTEGER DEFAULT NULL",
+        )
+        db.execSQL(
+            "ALTER TABLE pending_reminder_cleanup ADD COLUMN " +
+                "`nextFeedEpoch` TEXT DEFAULT NULL",
+        )
+        db.execSQL(
+            "ALTER TABLE care_plans ADD COLUMN " +
+                "`systemCalendarProjectionEnabled` INTEGER NOT NULL DEFAULT 1",
+        )
+        db.execSQL(
+            "ALTER TABLE care_plans ADD COLUMN `systemCalendarEventId` TEXT DEFAULT NULL",
+        )
+        db.execSQL(
+            "ALTER TABLE care_plans ADD COLUMN " +
+                "`systemCalendarReminderReady` INTEGER NOT NULL DEFAULT 0",
+        )
+        db.execSQL(
+            "ALTER TABLE care_plans ADD COLUMN " +
+                "`systemCalendarProjectionPending` INTEGER NOT NULL DEFAULT 0",
+        )
+        db.execSQL(
+            "ALTER TABLE care_plans ADD COLUMN " +
+                "`legacyCarePlanReminderPending` INTEGER NOT NULL DEFAULT 1",
+        )
+    }
+}
+
 @Module
 @InstallIn(SingletonComponent::class)
 object DatabaseModule {
@@ -426,6 +471,7 @@ object DatabaseModule {
                 MIGRATION_17_18,
                 MIGRATION_18_19,
                 MIGRATION_19_20,
+                MIGRATION_20_21,
             )
             .build()
 

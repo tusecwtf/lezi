@@ -799,6 +799,7 @@ internal data class QuickRecordDraft(
                     base.rightMin
                 },
                 customItemId = plan.customItemId ?: base.customItemId,
+                projectToSystemCalendar = plan.systemCalendarProjectionEnabled,
             )
         }
 

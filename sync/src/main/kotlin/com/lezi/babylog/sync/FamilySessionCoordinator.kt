@@ -68,6 +68,7 @@ internal class FamilySessionCoordinator(
     private val onSessionChanged: (SyncSession) -> Unit,
     private val onSessionObserved: (SyncSession) -> Unit,
     private val requestSync: (SyncTrigger) -> Unit,
+    private val beforeOperation: suspend () -> Unit = {},
 ) {
     suspend fun execute(command: FamilySessionCommand): Result<FamilySessionOutcome> =
         resultOf {
@@ -87,7 +88,7 @@ internal class FamilySessionCoordinator(
         }
 
     private suspend fun saveServer(baseUrl: String): FamilySessionOutcome =
-        barrier.withLock {
+        withBarrier {
             val previous = preferences.session.first()
             val parsed = HomeLanServerConfig.fromBaseUrl(baseUrl).withNormalized()
             require(parsed.isServerConfigured) { "请先填写家庭服务器地址" }
@@ -105,7 +106,7 @@ internal class FamilySessionCoordinator(
 
     private suspend fun saveHomeLanConfig(
         config: HomeLanServerConfig,
-    ): FamilySessionOutcome = barrier.withLock {
+    ): FamilySessionOutcome = withBarrier {
         val previous = preferences.session.first()
         val merged = config.withNormalized().let { normalized ->
             if (
@@ -136,7 +137,7 @@ internal class FamilySessionCoordinator(
         require(command.bootstrapSecret.isNotBlank()) {
             "请填写服务器初始化口令"
         }
-        return barrier.withLock {
+        return withBarrier {
             val current = preferences.session.first()
             require(!current.isJoined) {
                 "请先退出当前家庭，再创建新的家庭"
@@ -178,7 +179,7 @@ internal class FamilySessionCoordinator(
 
     private suspend fun joinFamily(
         command: JoinFamilyCommand,
-    ): FamilySessionOutcome = barrier.withLock {
+    ): FamilySessionOutcome = withBarrier {
         require(!preferences.session.first().isJoined) {
             "请先退出当前家庭，再加入新的家庭"
         }
@@ -315,13 +316,19 @@ internal class FamilySessionCoordinator(
 
     private suspend fun <T> withAllowedSession(
         block: suspend (SyncSession) -> T,
-    ): T = barrier.withLock {
+    ): T = withBarrier {
         val session = preferences.session.first()
         onSessionObserved(session)
         if (!session.isJoined) throw SyncNotEnabledException()
         requireRemoteAllowed(session.homeLanConfig)
         block(session)
     }
+
+    private suspend fun <T> withBarrier(block: suspend () -> T): T =
+        barrier.withLock {
+            beforeOperation()
+            block()
+        }
 }
 
 private fun SyncHttpException.meansFamilySessionIsGone(): Boolean =

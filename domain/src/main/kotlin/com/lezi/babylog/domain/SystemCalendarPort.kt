@@ -18,24 +18,102 @@ interface SystemCalendarPort {
 
     /**
      * Insert or update a begin-time alert event for [request].
-     * @return platform event id on success; null on deny/fail/missing target.
+     *
+     * [SystemCalendarUpsertResult.eventId] is nullable when provider identity
+     * cannot be recovered. Callers must use [SystemCalendarUpsertResult.outcome]
+     * as the single-reminder-source authority; event identity alone does not
+     * prove that the requested generation owns a provider reminder.
      */
-    suspend fun upsertEvent(request: SystemCalendarUpsert): String?
-
-    /** Best-effort delete of a previously projected event. */
-    suspend fun deleteEvent(eventId: String): Boolean
+    suspend fun upsertEvent(request: SystemCalendarUpsert): SystemCalendarUpsertResult
 
     /**
-     * Whether [eventId] still exists in the provider.
-     * Used to detect vanished events after permission/target loss.
+     * Finds this app's event by its stable care-plan UID. Provider failure and
+     * permission loss are [SystemCalendarOwnedEventLookup.Unavailable], never absence.
      */
-    suspend fun eventExists(eventId: String): Boolean
+    suspend fun findOwnedEvent(carePlanClientUuid: String): SystemCalendarOwnedEventLookup
+
+    /**
+     * Best-effort delete of a previously projected event. The adapter always
+     * verifies app ownership; [carePlanClientUuid] additionally locks the
+     * stable UID when available.
+     */
+    suspend fun deleteEvent(eventId: String, carePlanClientUuid: String? = null): Boolean
+
+    /** Strict owned lookup; unavailable must never be treated as confirmed absence. */
+    suspend fun eventState(
+        eventId: String,
+        carePlanClientUuid: String? = null,
+    ): SystemCalendarEventState
+
+    /** Convenience projection for UI status; cleanup code must use [eventState]. */
+    suspend fun eventExists(eventId: String, carePlanClientUuid: String? = null): Boolean =
+        eventState(eventId, carePlanClientUuid) == SystemCalendarEventState.PRESENT
 
     /**
      * Whether [calendarId] is still among writable calendars.
      * False when permission denied, target deleted, or provider unavailable.
      */
     suspend fun isWritableCalendar(calendarId: String): Boolean
+}
+
+enum class SystemCalendarEventState {
+    PRESENT,
+    ABSENT,
+    UNAVAILABLE,
+}
+
+/** Provider reminder ownership relative to the exact requested generation. */
+enum class SystemCalendarUpsertOutcome {
+    CurrentReady,
+    ProviderStillOwnsStale,
+    ReleasedOrAbsent,
+}
+
+/** Provider identity plus an explicit single-reminder-source outcome. */
+data class SystemCalendarUpsertResult(
+    val eventId: String?,
+    val outcome: SystemCalendarUpsertOutcome,
+) {
+    init {
+        require(outcome != SystemCalendarUpsertOutcome.CurrentReady || !eventId.isNullOrBlank()) {
+            "CurrentReady requires a provider event id"
+        }
+    }
+
+    /** True only when provider identity, target calendar, DTSTART, and begin reminder match. */
+    val reminderReady: Boolean
+        get() = outcome == SystemCalendarUpsertOutcome.CurrentReady
+
+    /** CareLog must not enable its fallback while a stale/indeterminate provider still owns it. */
+    val providerOwnsReminder: Boolean
+        get() = outcome != SystemCalendarUpsertOutcome.ReleasedOrAbsent
+
+    /** Compatibility constructor for test adapters with no stale-owner state. */
+    constructor(eventId: String?, reminderReady: Boolean) : this(
+        eventId = eventId,
+        outcome = if (reminderReady) {
+            SystemCalendarUpsertOutcome.CurrentReady
+        } else {
+            SystemCalendarUpsertOutcome.ReleasedOrAbsent
+        },
+    )
+}
+
+/** Strict UID_2445 + app-package lookup for a Lezi-owned projection. */
+sealed interface SystemCalendarOwnedEventLookup {
+    data class Found(val eventIds: Set<String>) : SystemCalendarOwnedEventLookup {
+        init {
+            require(eventIds.isNotEmpty()) { "Found requires at least one event id" }
+            require(eventIds.none(String::isBlank)) { "Event ids must not be blank" }
+        }
+
+        /** Oldest numeric id wins so every retry selects the same survivor. */
+        val canonicalEventId: String = eventIds.minWith(
+            compareBy<String> { it.toLongOrNull() ?: Long.MAX_VALUE }.thenBy { it },
+        )
+    }
+    data object Absent : SystemCalendarOwnedEventLookup
+    data object Unavailable : SystemCalendarOwnedEventLookup
 }
 
 data class SystemCalendarTarget(
@@ -162,6 +240,8 @@ data class SystemCalendarUpsert(
     val description: String? = null,
     /** Existing platform event id to update; null inserts. */
     val existingEventId: String? = null,
+    /** True when an earlier crash/retry may have handed reminder ownership to the provider. */
+    val providerHandoffMayExist: Boolean = existingEventId != null,
     /**
      * Optional [CalendarContract.Events.CUSTOM_APP_URI] for L3 deep link.
      * Always also mirrored in [description] for OEM compatibility.
@@ -173,9 +253,20 @@ data class SystemCalendarUpsert(
 class NoOpSystemCalendarPort : SystemCalendarPort {
     override fun hasCalendarPermission(): Boolean = false
     override suspend fun listWritableCalendars(): List<SystemCalendarTarget> = emptyList()
-    override suspend fun upsertEvent(request: SystemCalendarUpsert): String? = null
-    override suspend fun deleteEvent(eventId: String): Boolean = false
-    override suspend fun eventExists(eventId: String): Boolean = false
+    override suspend fun upsertEvent(request: SystemCalendarUpsert): SystemCalendarUpsertResult =
+        SystemCalendarUpsertResult(
+            eventId = null,
+            outcome = SystemCalendarUpsertOutcome.ReleasedOrAbsent,
+        )
+    override suspend fun findOwnedEvent(
+        carePlanClientUuid: String,
+    ): SystemCalendarOwnedEventLookup = SystemCalendarOwnedEventLookup.Unavailable
+    override suspend fun deleteEvent(eventId: String, carePlanClientUuid: String?): Boolean = false
+    override suspend fun eventState(
+        eventId: String,
+        carePlanClientUuid: String?,
+    ): SystemCalendarEventState =
+        SystemCalendarEventState.UNAVAILABLE
     override suspend fun isWritableCalendar(calendarId: String): Boolean = false
 }
 
@@ -193,12 +284,14 @@ fun evaluateCarePlanSystemCalendarUnsynced(
     targetWritable: Boolean,
     mappedEventId: String?,
     eventExists: Boolean,
+    reminderReady: Boolean = true,
+    projectionPending: Boolean = false,
 ): Boolean {
     if (!systemCalendarEnabled || systemCalendarId.isNullOrBlank()) return false
     if (!hasPermission) return true
     if (!targetWritable) return true
     if (mappedEventId.isNullOrBlank()) return true
-    return !eventExists
+    return !eventExists || !reminderReady || projectionPending
 }
 
 /**

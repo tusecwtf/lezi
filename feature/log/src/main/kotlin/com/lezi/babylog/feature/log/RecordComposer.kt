@@ -470,6 +470,7 @@ class RecordComposerViewModel @Inject constructor(
                         payloadJson = command.payloadJson,
                         schemaVersion = command.schemaVersion,
                         photoLocalPaths = draft.photos,
+                        projectToSystemCalendar = draft.projectToSystemCalendar,
                     )
                     draft.carePlanId != null -> careLog.fulfillCarePlan(
                         carePlanId = draft.carePlanId,

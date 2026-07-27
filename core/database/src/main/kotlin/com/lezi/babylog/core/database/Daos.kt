@@ -541,6 +541,52 @@ interface CarePlanDao {
     @Update
     suspend fun update(plan: CarePlanEntity)
 
+    /** Update device-local projection ownership without making the family entity dirty. */
+    @Query(
+        """
+        UPDATE care_plans
+        SET systemCalendarEventId = :eventId,
+            systemCalendarReminderReady = :reminderReady,
+            systemCalendarProjectionPending = :pending
+        WHERE clientUuid = :clientUuid
+        """,
+    )
+    suspend fun updateSystemCalendarProjection(
+        clientUuid: String,
+        eventId: String?,
+        reminderReady: Boolean,
+        pending: Boolean = false,
+    )
+
+    /** Persist only the device-local desired route; never changes family LWW metadata. */
+    @Query(
+        """
+        UPDATE care_plans
+        SET systemCalendarProjectionEnabled = :enabled
+        WHERE clientUuid = :clientUuid
+        """,
+    )
+    suspend fun updateSystemCalendarProjectionEnabled(clientUuid: String, enabled: Boolean)
+
+    @Query(
+        """
+        UPDATE care_plans
+        SET legacyCarePlanReminderPending = 0
+        WHERE clientUuid = :clientUuid
+        """,
+    )
+    suspend fun markLegacyCarePlanReminderReplaced(clientUuid: String)
+
+    @Query(
+        """
+        UPDATE care_plans
+        SET legacyCarePlanReminderPending = 0
+        WHERE id = :id AND clientUuid = :clientUuid
+          AND legacyCarePlanReminderPending = 1
+        """,
+    )
+    suspend fun consumeLegacyCarePlanReminder(id: Long, clientUuid: String): Int
+
     /**
      * Device-local payload replica (e.g. photos[] paths) without advancing
      * [CarePlanEntity.updatedAt] or [CarePlanEntity.syncDirty].
@@ -742,6 +788,9 @@ interface MediaAssetDao {
 
     @Query("DELETE FROM media_assets WHERE kind = 'log'")
     suspend fun deleteLogMedia()
+
+    @Query("DELETE FROM media_assets WHERE clientUuid IN (:clientUuids)")
+    suspend fun deleteByClientUuids(clientUuids: List<String>)
 
     @Query("DELETE FROM media_assets WHERE recordId = :recordId")
     suspend fun deleteForRecord(recordId: Long)

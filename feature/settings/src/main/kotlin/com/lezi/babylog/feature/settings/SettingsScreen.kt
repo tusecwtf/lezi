@@ -201,7 +201,7 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch { settingsStore.setTimelineOrder(order) }
     fun setWeekStart(day: Int) = viewModelScope.launch { settingsStore.setWeekStart(day) }
     fun setCarePlanLocalReminders(enabled: Boolean) =
-        viewModelScope.launch { settingsStore.setCarePlanLocalRemindersEnabled(enabled) }
+        viewModelScope.launch { careLog.setCarePlanLocalRemindersEnabled(enabled) }
 
     fun confirmSystemCalendar(calendarId: String, disclosureLevel: Int) =
         viewModelScope.launch {

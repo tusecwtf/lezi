@@ -89,6 +89,7 @@ class CarePlanReminderAlarm @Inject constructor(
         const val EXTRA_PLAN_ID = "care_plan_id"
         const val EXTRA_PLAN_UUID = "care_plan_client_uuid"
         const val EXTRA_TITLE = "care_plan_title"
+        const val EXTRA_SCHEDULED_AT = "care_plan_scheduled_at"
         /** Namespace request codes away from calendar event hashCodes and feed REQ=77. */
         private const val REQUEST_CODE_BASE = 0x4C5A_0000 // 'LZ' nibble prefix
 
@@ -96,20 +97,28 @@ class CarePlanReminderAlarm @Inject constructor(
             REQUEST_CODE_BASE + (carePlanId % 0x0000_FFFF).toInt()
 
         fun pendingIntent(context: Context, plan: CarePlan): PendingIntent =
-            pendingIntent(context, plan.id, plan.clientUuid, plan.displayLabel())
+            pendingIntent(
+                context,
+                plan.id,
+                plan.clientUuid,
+                plan.displayLabel(),
+                plan.scheduledAt,
+            )
 
         fun pendingIntent(
             context: Context,
             carePlanId: Long,
             clientUuid: String,
             title: String,
+            scheduledAt: Long = 0L,
         ): PendingIntent = PendingIntent.getBroadcast(
             context,
             requestCode(carePlanId),
             Intent(context, CarePlanReminderReceiver::class.java)
                 .putExtra(EXTRA_PLAN_ID, carePlanId)
                 .putExtra(EXTRA_PLAN_UUID, clientUuid)
-                .putExtra(EXTRA_TITLE, title),
+                .putExtra(EXTRA_TITLE, title)
+                .putExtra(EXTRA_SCHEDULED_AT, scheduledAt),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
     }
@@ -141,13 +150,44 @@ class CarePlanReminderScheduler @Inject constructor(
 
 @AndroidEntryPoint
 class CarePlanReminderReceiver : BroadcastReceiver() {
+    @Inject lateinit var careLog: CareLog
+
     override fun onReceive(context: Context, intent: Intent?) {
-        CarePlanReminderScheduler.ensureChannel(context)
         val title = intent?.getStringExtra(CarePlanReminderAlarm.EXTRA_TITLE)
             .orEmpty()
             .ifBlank { "护理计划" }
         val planId = intent?.getLongExtra(CarePlanReminderAlarm.EXTRA_PLAN_ID, 0L) ?: 0L
         val planUuid = intent?.getStringExtra(CarePlanReminderAlarm.EXTRA_PLAN_UUID).orEmpty()
+        val expectedScheduledAt = intent?.getLongExtra(
+            CarePlanReminderAlarm.EXTRA_SCHEDULED_AT,
+            Long.MIN_VALUE,
+        ) ?: Long.MIN_VALUE
+        if (planId <= 0L || planUuid.isBlank()) return
+        val pending = goAsync()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                if (
+                    careLog.shouldDeliverCarePlanReminder(
+                        carePlanId = planId,
+                        clientUuid = planUuid,
+                        expectedScheduledAt = expectedScheduledAt,
+                    )
+                ) {
+                    notifyDuePlan(context, title, planId, planUuid)
+                }
+            } finally {
+                pending.finish()
+            }
+        }
+    }
+
+    private fun notifyDuePlan(
+        context: Context,
+        title: String,
+        planId: Long,
+        planUuid: String,
+    ) {
+        CarePlanReminderScheduler.ensureChannel(context)
         val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
             ?.apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP

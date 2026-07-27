@@ -10,10 +10,16 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import com.lezi.babylog.core.model.DEFAULT_QUICK_RECORD_SLOTS
 import com.lezi.babylog.core.model.QUICK_RECORD_SLOT_COUNT
 import com.lezi.babylog.core.model.SettingsLocal
+import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 
 @Singleton
 class SettingsDataSource @Inject constructor(
@@ -33,6 +39,7 @@ class SettingsDataSource @Inject constructor(
             recordAtStartOrEnd = prefs[Keys.RECORD_AT] ?: "end",
             nursingIntervalMin = prefs[Keys.NURSING_INTERVAL] ?: 180,
             nextFeedAt = prefs[Keys.NEXT_FEED_AT],
+            nextFeedEpoch = prefs[Keys.NEXT_FEED_EPOCH].orEmpty(),
             darkMode = prefs[Keys.DARK_MODE] ?: "system",
             visualStyle = prefs[Keys.VISUAL_STYLE] ?: "warm",
             preferredHand = prefs[Keys.PREFERRED_HAND] ?: "right",
@@ -117,14 +124,47 @@ class SettingsDataSource @Inject constructor(
         dataStore.edit { it[Keys.RECORD_AT] = startOrEnd }
     }
 
-    override suspend fun setNextFeedAt(epochMs: Long?) {
+    override suspend fun setNextFeedAt(epochMs: Long?): String {
+        val epoch = UUID.randomUUID().toString()
         dataStore.edit { prefs ->
             if (epochMs == null) prefs.remove(Keys.NEXT_FEED_AT)
             else prefs[Keys.NEXT_FEED_AT] = epochMs
+            prefs[Keys.NEXT_FEED_EPOCH] = epoch
         }
+        return epoch
     }
 
-    override suspend fun clearNextFeedAt() = setNextFeedAt(null)
+    override suspend fun clearNextFeedAt() {
+        setNextFeedAt(null)
+    }
+
+    override suspend fun clearNextFeedAtIfEpoch(expectedEpoch: String): Boolean {
+        if (expectedEpoch.isBlank()) return false
+        var cleared = false
+        dataStore.edit { prefs ->
+            if (
+                prefs[Keys.NEXT_FEED_AT] != null &&
+                prefs[Keys.NEXT_FEED_EPOCH].orEmpty() == expectedEpoch
+            ) {
+                prefs.remove(Keys.NEXT_FEED_AT)
+                prefs[Keys.NEXT_FEED_EPOCH] = UUID.randomUUID().toString()
+                cleared = true
+            }
+        }
+        return cleared
+    }
+
+    override suspend fun clearLegacyNextFeedAtIfEpochMissing(): Boolean {
+        var cleared = false
+        dataStore.edit { prefs ->
+            if (prefs[Keys.NEXT_FEED_AT] != null && Keys.NEXT_FEED_EPOCH !in prefs) {
+                prefs.remove(Keys.NEXT_FEED_AT)
+                prefs[Keys.NEXT_FEED_EPOCH] = UUID.randomUUID().toString()
+                cleared = true
+            }
+        }
+        return cleared
+    }
 
     override suspend fun setItemOrderJson(json: String) {
         dataStore.edit { it[Keys.ITEM_ORDER] = json }
@@ -217,6 +257,49 @@ class SettingsDataSource @Inject constructor(
         dataStore.edit { it[Keys.SYSTEM_CALENDAR_EVENT_MAP] = json.ifBlank { "{}" } }
     }
 
+    override suspend fun captureLocalClearSettings(): LocalClearSettingsSnapshot {
+        val prefs = dataStore.data.first()
+        val systemCalendarProjections = decodeSystemCalendarEventMap(
+            prefs[Keys.SYSTEM_CALENDAR_EVENT_MAP] ?: "{}",
+        )
+        return LocalClearSettingsSnapshot(
+            currentBabyId = prefs[Keys.CURRENT_BABY_ID],
+            nextFeedAt = prefs[Keys.NEXT_FEED_AT],
+            systemCalendarProjections = systemCalendarProjections,
+            nextFeedEpoch = prefs[Keys.NEXT_FEED_EPOCH].orEmpty(),
+        )
+    }
+
+    override suspend fun finishLocalClearSettings(
+        snapshot: LocalClearSettingsSnapshot,
+        clearCurrentBabyId: Boolean,
+    ): LocalClearSettingsFinish {
+        var cancelNextFeedAlarm = false
+        dataStore.edit { prefs ->
+            if (
+                clearCurrentBabyId &&
+                prefs[Keys.CURRENT_BABY_ID] == snapshot.currentBabyId
+            ) {
+                prefs.remove(Keys.CURRENT_BABY_ID)
+            }
+            val sameNextFeedEpoch =
+                snapshot.nextFeedEpoch != null &&
+                    prefs[Keys.NEXT_FEED_EPOCH].orEmpty() == snapshot.nextFeedEpoch
+            cancelNextFeedAlarm = sameNextFeedEpoch
+            if (sameNextFeedEpoch) {
+                prefs.remove(Keys.NEXT_FEED_AT)
+            }
+            val currentMap = decodeSystemCalendarEventMap(
+                prefs[Keys.SYSTEM_CALENDAR_EVENT_MAP] ?: "{}",
+            )
+            val retainedMap = currentMap.filter { (clientUuid, eventId) ->
+                snapshot.systemCalendarProjections[clientUuid] != eventId
+            }
+            prefs[Keys.SYSTEM_CALENDAR_EVENT_MAP] = encodeSystemCalendarEventMap(retainedMap)
+        }
+        return LocalClearSettingsFinish(cancelNextFeedAlarm = cancelNextFeedAlarm)
+    }
+
     private object Keys {
         val ITEM_ORDER = stringPreferencesKey("item_order_json")
         val CATEGORY_ORDER = stringPreferencesKey("category_order_json")
@@ -227,6 +310,7 @@ class SettingsDataSource @Inject constructor(
         val RECORD_AT = stringPreferencesKey("record_at")
         val NURSING_INTERVAL = intPreferencesKey("nursing_interval_min")
         val NEXT_FEED_AT = longPreferencesKey("next_feed_at")
+        val NEXT_FEED_EPOCH = stringPreferencesKey("next_feed_epoch")
         val DARK_MODE = stringPreferencesKey("dark_mode")
         val VISUAL_STYLE = stringPreferencesKey("visual_style")
         val PREFERRED_HAND = stringPreferencesKey("preferred_hand")
@@ -250,6 +334,25 @@ class SettingsDataSource @Inject constructor(
         val SYSTEM_CALENDAR_EVENT_MAP = stringPreferencesKey("system_calendar_event_map")
     }
 }
+
+internal fun decodeSystemCalendarEventMap(raw: String): Map<String, String> {
+    val parsed = Json.parseToJsonElement(raw) as? JsonObject
+        ?: throw IllegalArgumentException("System calendar event map must be a JSON object")
+    return parsed.mapValues { (key, value) ->
+        val primitive = value as? JsonPrimitive
+        require(primitive != null && primitive.isString && primitive.content.isNotBlank()) {
+            "Invalid system calendar event id for $key"
+        }
+        primitive.content
+    }.filterKeys(String::isNotBlank)
+}
+
+internal fun encodeSystemCalendarEventMap(map: Map<String, String>): String =
+    buildJsonObject {
+        map.toSortedMap().forEach { (key, eventId) ->
+            put(key, JsonPrimitive(eventId))
+        }
+    }.toString()
 
 /**
  * Missing preference → first-run defaults (pee/sleep/nursing/formula).

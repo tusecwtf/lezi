@@ -132,9 +132,10 @@ interface CalendarEventDao {
 /**
  * Durable hand-off from the Room clear transaction to Android alarm cleanup.
  *
- * A single records-clear row survives process death until every captured
- * PendingIntent has been cancelled. This storage entity is private to
- * [RoomPendingReminderCleanupStore]; callers use typed snapshots.
+ * One row per local-clear scope survives process death until settings, app
+ * alarms, and captured Android system-calendar events have all been cleaned.
+ * This storage entity is private to [RoomPendingReminderCleanupStore]; callers
+ * use typed snapshots.
  */
 @Entity(tableName = "pending_reminder_cleanup")
 data class PendingReminderCleanupEntity(
@@ -142,6 +143,16 @@ data class PendingReminderCleanupEntity(
     val calendarEventIds: String,
     @androidx.room.ColumnInfo(defaultValue = "''")
     val carePlanIds: String = "",
+    @androidx.room.ColumnInfo(defaultValue = "'{}'")
+    val systemCalendarProjectionsJson: String = "{}",
+    @androidx.room.ColumnInfo(defaultValue = "0")
+    val settingsSnapshotCaptured: Boolean = false,
+    @androidx.room.ColumnInfo(defaultValue = "NULL")
+    val currentBabyId: Long? = null,
+    @androidx.room.ColumnInfo(defaultValue = "NULL")
+    val nextFeedAt: Long? = null,
+    @androidx.room.ColumnInfo(defaultValue = "NULL")
+    val nextFeedEpoch: String? = null,
     val familyServerRetained: Boolean,
 )
 

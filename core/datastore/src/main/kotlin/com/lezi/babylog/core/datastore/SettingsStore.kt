@@ -3,6 +3,22 @@ package com.lezi.babylog.core.datastore
 import com.lezi.babylog.core.model.SettingsLocal
 import kotlinx.coroutines.flow.Flow
 
+/** Exact device-local settings epoch captured before a durable Room clear commits. */
+data class LocalClearSettingsSnapshot(
+    val currentBabyId: Long?,
+    val nextFeedAt: Long?,
+    /** Exact provider identity captured for each plan UUID; IDs alone are ABA-prone. */
+    val systemCalendarProjections: Map<String, String> = emptyMap(),
+    /** Stable identity of the next-feed write, so equal timestamps cannot form an ABA. */
+    /** Null only for a migrated v20 clear marker that must not consume current feed state. */
+    val nextFeedEpoch: String? = null,
+)
+
+data class LocalClearSettingsFinish(
+    /** Safe to cancel the shared PendingIntent because no newer feed epoch exists. */
+    val cancelNextFeedAlarm: Boolean,
+)
+
 /**
  * Preference surface used by domain. [SettingsDataSource] is the production impl;
  * tests can fake this without Android DataStore.
@@ -23,8 +39,13 @@ interface SettingsStore {
     suspend fun setInfantFeverAdviceEnabled(enabled: Boolean)
     suspend fun setNursingIntervalMin(min: Int)
     suspend fun setRecordAt(startOrEnd: String)
-    suspend fun setNextFeedAt(epochMs: Long?)
+    /** Stores the time as a new alarm epoch and returns that stable epoch identity. */
+    suspend fun setNextFeedAt(epochMs: Long?): String
     suspend fun clearNextFeedAt()
+    /** Atomically consumes only the alarm epoch carried by a delivered PendingIntent. */
+    suspend fun clearNextFeedAtIfEpoch(expectedEpoch: String): Boolean
+    /** Upgrade bridge for a pre-epoch PendingIntent; rejects every epoch-aware write. */
+    suspend fun clearLegacyNextFeedAtIfEpochMissing(): Boolean
     suspend fun setItemOrderJson(json: String)
     suspend fun setCategoryOrderJson(json: String)
     suspend fun setHiddenItems(items: Set<String>)
@@ -57,4 +78,16 @@ interface SettingsStore {
         setSystemCalendarEnabled(!calendarId.isNullOrBlank())
     }
     suspend fun setSystemCalendarEventMapJson(json: String)
+
+    /** Capture all settings that a local clear may later finalize. */
+    suspend fun captureLocalClearSettings(): LocalClearSettingsSnapshot
+
+    /**
+     * Remove only values captured by [snapshot]. Values written after the Room
+     * commit are a newer epoch and must survive crash-recovery finalization.
+     */
+    suspend fun finishLocalClearSettings(
+        snapshot: LocalClearSettingsSnapshot,
+        clearCurrentBabyId: Boolean,
+    ): LocalClearSettingsFinish
 }

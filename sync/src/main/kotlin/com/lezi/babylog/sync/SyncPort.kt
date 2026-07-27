@@ -36,6 +36,35 @@ data class SyncPlan(val push: Boolean, val pull: Boolean) {
     }
 }
 
+/**
+ * Domain-owned two-phase local clear run under the sync barrier.
+ *
+ * [withLocalExclusion] supplies the shared calendar/reminder guard. The sync
+ * implementation keeps that exclusion around its Room marker transaction,
+ * replica finalization, and [finishCommitted], enforcing syncMutex → local
+ * guard ordering for clear, pull projections, and crash recovery.
+ */
+interface LocalClearWorkflow {
+    suspend fun <T> withLocalExclusion(block: suspend () -> T): T
+    suspend fun clearRoom()
+    suspend fun finishCommitted()
+}
+
+/** Domain recovery gate invoked before any sync or family/session operation. */
+enum class LocalClearRecoveryScope {
+    RecordsOnly,
+    AllLocal,
+}
+
+fun interface LocalClearRecoveryGate {
+    /** @return the widest previously committed clear resumed to completion. */
+    suspend fun recoverPendingLocalClear(): LocalClearRecoveryScope?
+}
+
+class NoOpLocalClearRecoveryGate : LocalClearRecoveryGate {
+    override suspend fun recoverPendingLocalClear(): LocalClearRecoveryScope? = null
+}
+
 class SyncNotEnabledException : Exception("请先配置家庭服务器并加入家庭")
 class BootstrapSecretRejectedException : Exception("初始化口令不正确，请核对 NAS 配置")
 
@@ -69,18 +98,18 @@ interface SyncPort {
     suspend fun updateMyDisplayName(displayName: String): Result<Unit>
     suspend fun leave(familyId: String): Result<Unit>
     suspend fun deleteFamily(): Result<Unit>
-    /** [clearLocal] must call its marker immediately after the domain transaction commits. */
+    /** [workflow] joins domain Room work and committed cleanup to the replica barrier. */
     suspend fun clearLocalRecords(
-        clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
+        workflow: LocalClearWorkflow,
     ): Result<Unit>
     /**
      * Full local replica wipe (records, media, outbox, files) under the same
      * sync barrier as pull/apply. Domain tables beyond records are cleared via
-     * [clearLocal]. Unlike [clearLocalRecords], avatar media and all outbox
+     * [workflow]. Unlike [clearLocalRecords], avatar media and all outbox
      * rows are removed so a subsequent join cannot push stale residue.
      */
     suspend fun clearAllLocalData(
-        clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
+        workflow: LocalClearWorkflow,
     ): Result<Unit>
 }
 
@@ -114,32 +143,15 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
     override suspend fun leave(familyId: String) = Result.failure<Unit>(SyncNotEnabledException())
     override suspend fun deleteFamily() = Result.failure<Unit>(SyncNotEnabledException())
     override suspend fun clearLocalRecords(
-        clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
+        workflow: LocalClearWorkflow,
     ) = runCatching {
-        var committed = false
-        try {
-            clearLocal { committed = true }
-            check(committed) { "本机记录清除未确认领域事务已提交" }
-        } catch (error: Throwable) {
-            if (committed) {
-                throw LocalClearCommittedException(familyServerRetained = false, cause = error)
-            }
-            throw error
+        workflow.withLocalExclusion {
+            workflow.clearRoom()
+            workflow.finishCommitted()
         }
     }
 
     override suspend fun clearAllLocalData(
-        clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
-    ) = runCatching {
-        var committed = false
-        try {
-            clearLocal { committed = true }
-            check(committed) { "本机数据清除未确认领域事务已提交" }
-        } catch (error: Throwable) {
-            if (committed) {
-                throw LocalClearCommittedException(familyServerRetained = false, cause = error)
-            }
-            throw error
-        }
-    }
+        workflow: LocalClearWorkflow,
+    ) = clearLocalRecords(workflow)
 }

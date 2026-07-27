@@ -25,7 +25,10 @@ interface ReminderCleanupPort {
 
     suspend fun cancelCarePlanByClientUuid(clientUuid: String)
 
-    suspend fun cancelForRecordsClear(calendarEventIds: Collection<Long>)
+    suspend fun cancelForRecordsClear(
+        calendarEventIds: Collection<Long>,
+        cancelNextFeed: Boolean = true,
+    )
 
     suspend fun cancelForBabyDelete(calendarEventIds: Collection<Long>)
 }

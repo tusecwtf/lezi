@@ -87,6 +87,34 @@ class SystemCalendarProjectionPolicyTest {
     }
 
     @Test
+    fun presentEventIsStillUnsyncedUntilItsReminderGenerationIsReady() {
+        assertThat(
+            evaluateCarePlanSystemCalendarUnsynced(
+                systemCalendarEnabled = true,
+                systemCalendarId = "cal-1",
+                hasPermission = true,
+                targetWritable = true,
+                mappedEventId = "evt-1",
+                eventExists = true,
+                reminderReady = false,
+                projectionPending = false,
+            ),
+        ).isTrue()
+        assertThat(
+            evaluateCarePlanSystemCalendarUnsynced(
+                systemCalendarEnabled = true,
+                systemCalendarId = "cal-1",
+                hasPermission = true,
+                targetWritable = true,
+                mappedEventId = "evt-1",
+                eventExists = true,
+                reminderReady = true,
+                projectionPending = true,
+            ),
+        ).isTrue()
+    }
+
+    @Test
     fun providerContractLocksWritableAccessBeginReminderAndStableUid() {
         // Contributor threshold mirrors CalendarContract.Calendars.CAL_ACCESS_CONTRIBUTOR (= 500).
         val contributor = 500

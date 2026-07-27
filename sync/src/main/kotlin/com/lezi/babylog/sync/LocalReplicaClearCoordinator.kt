@@ -1,13 +1,23 @@
 package com.lezi.babylog.sync
 
 import com.lezi.babylog.core.database.BabyDao
+import com.lezi.babylog.core.database.CarePlanDao
+import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.OutboxDao
+import com.lezi.babylog.core.database.PendingReplicaCleanup
+import com.lezi.babylog.core.database.PendingReplicaCleanupScope
+import com.lezi.babylog.core.database.PendingReplicaCleanupStore
 import com.lezi.babylog.core.database.RecordDao
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 internal enum class LocalReplicaClearScope {
     RecordsOnly,
@@ -15,143 +25,212 @@ internal enum class LocalReplicaClearScope {
 }
 
 /**
- * Owns the post-domain-commit cleanup of the local sync replica.
+ * Owns the crash-recoverable hand-off from a domain Room clear to replica cleanup.
  *
- * [barrier] is the same mutex used by pull/apply, so the domain callback and
- * every replica cleanup step are observed as one indivisible local operation.
+ * The marker and domain deletion commit in one Room transaction. External file
+ * and DataStore work then runs non-cancellably, and a final Room transaction
+ * atomically retires captured outbox/media rows with the marker.
  */
 internal class LocalReplicaClearCoordinator(
     private val barrier: Mutex,
     private val preferences: SyncPreferences,
     private val outboxDao: OutboxDao,
     private val recordDao: RecordDao,
+    private val carePlanDao: CarePlanDao,
     private val babyDao: BabyDao,
     private val mediaDao: MediaAssetDao,
     private val mediaFiles: SyncMediaFileStore,
+    private val transactionRunner: DatabaseTransactionRunner,
+    private val pendingStore: PendingReplicaCleanupStore,
 ) {
-    private var pendingCommittedSnapshot: ClearSnapshot? = null
-
     suspend fun clear(
         scope: LocalReplicaClearScope,
-        clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
+        workflow: LocalClearWorkflow,
+        recoverDomain: suspend () -> LocalClearRecoveryScope?,
     ): Result<Unit> = runCatching {
         barrier.withLock {
-            pendingCommittedSnapshot?.let { finishCommitted(it) }
-            val snapshot = snapshot(scope)
-            var domainCommitted = false
-            try {
-                clearLocal { domainCommitted = true }
-                check(domainCommitted) { scope.missingCommitMessage }
-            } catch (error: Throwable) {
-                if (!domainCommitted) throw error
-                pendingCommittedSnapshot = snapshot
-                try {
-                    finish(snapshot)
-                    pendingCommittedSnapshot = null
-                } catch (cleanupError: Throwable) {
-                    error.addSuppressed(cleanupError)
+            // Recovery completes an older committed request. It never satisfies
+            // this new explicit clear: the user may have created local data after
+            // the older request failed its side-effect finalization.
+            recoverDomain()
+            recoverPendingLocked()
+            workflow.withLocalExclusion {
+                val session = preferences.session.first()
+                val pending = transactionRunner.run {
+                    snapshot(scope, session).also { staged ->
+                        pendingStore.stage(staged)
+                        workflow.clearRoom()
+                    }
                 }
-                throw LocalClearCommittedException(
-                    familyServerRetained = snapshot.familyServerRetained,
-                    cause = error,
-                )
+                finishCommitted(pending, workflow::finishCommitted)
             }
-            finishCommitted(snapshot)
         }
     }
 
-    private suspend fun snapshot(scope: LocalReplicaClearScope): ClearSnapshot {
-        val session = preferences.session.first()
+    suspend fun recoverPending(): Result<Unit> = runCatching {
+        barrier.withLock {
+            recoverPendingLocked()
+            Unit
+        }
+    }
+
+    /** Caller already owns [barrier]; used before any remote or session mutation. */
+    internal suspend fun recoverPendingLocked(): LocalClearRecoveryScope? {
+        val pending = pendingStore.load() ?: return null
+        finishCommitted(pending)
+        return pending.scope.toRecoveryScope()
+    }
+
+    private suspend fun snapshot(
+        scope: LocalReplicaClearScope,
+        session: SyncSession,
+    ): PendingReplicaCleanup {
         val media = when (scope) {
             LocalReplicaClearScope.RecordsOnly ->
                 mediaDao.listAllIncludingDeleted().filter { it.kind == "log" }
             LocalReplicaClearScope.AllLocal -> mediaDao.listAllIncludingDeleted()
         }
-        val paths = buildList {
+        check(media.all { it.clientUuid.isNotBlank() }) {
+            "本机媒体清理快照包含无效同步标识"
+        }
+        val retainedPaths = if (scope == LocalReplicaClearScope.RecordsOnly) {
+            buildSet {
+                mediaDao.listAllIncludingDeleted()
+                    .filter { it.kind != "log" }
+                    .mapTo(this, MediaAssetEntity::localUri)
+                babyDao.listAllIncludingDeleted().forEach { baby ->
+                    baby.avatarPath?.takeIf(String::isNotBlank)?.let(::add)
+                }
+            }
+        } else {
+            emptySet()
+        }
+        val paths = buildSet {
             addAll(media.map(MediaAssetEntity::localUri))
             recordDao.listAllIncludingDeleted().forEach { record ->
                 addAll(localPhotoPaths(record.payloadJson))
+            }
+            carePlanDao.listAllIncludingDeleted().forEach { plan ->
+                addAll(localPhotoPaths(plan.payloadJson))
             }
             if (scope == LocalReplicaClearScope.AllLocal) {
                 babyDao.listAllIncludingDeleted().forEach { baby ->
                     baby.avatarPath?.takeIf(String::isNotBlank)?.let(::add)
                 }
             }
-        }.filter(String::isNotBlank).distinct()
-        return ClearSnapshot(
-            scope = scope,
-            session = session,
-            media = media,
+        }.filterTo(linkedSetOf()) { it.isNotBlank() && it !in retainedPaths }
+        return PendingReplicaCleanup(
+            scope = scope.toPendingScope(),
+            familyId = session.familyId,
+            pullGeneration = session.pullGeneration,
+            mediaClientUuids = media.mapTo(linkedSetOf(), MediaAssetEntity::clientUuid),
             localMediaPaths = paths,
         )
     }
 
-    private suspend fun finish(snapshot: ClearSnapshot) {
-        when (snapshot.scope) {
-            LocalReplicaClearScope.RecordsOnly -> finishRecordsOnly(snapshot)
-            LocalReplicaClearScope.AllLocal -> finishAllLocal(snapshot)
-        }
-    }
-
-    private suspend fun finishCommitted(snapshot: ClearSnapshot) {
-        pendingCommittedSnapshot = snapshot
-        try {
-            finish(snapshot)
-            pendingCommittedSnapshot = null
-        } catch (error: Throwable) {
-            try {
-                finish(snapshot)
-                pendingCommittedSnapshot = null
-            } catch (retryError: Throwable) {
-                error.addSuppressed(retryError)
-            }
-            throw LocalClearCommittedException(
-                familyServerRetained = snapshot.familyServerRetained,
-                cause = error,
-            )
-        }
-    }
-
-    private suspend fun finishRecordsOnly(snapshot: ClearSnapshot) {
-        val familyId = snapshot.session.familyId
-        if (familyId.isNotBlank()) {
-            outboxDao.deleteType(familyId, "record")
-            outboxDao.deleteType(familyId, "care_plan")
-            outboxDao.deleteType(familyId, "fulfillment_candidate")
-            snapshot.media.map(MediaAssetEntity::clientUuid)
-                .chunked(OUTBOX_DELETE_CHUNK_SIZE)
-                .forEach { chunk ->
-                    outboxDao.deleteEntities(familyId, "media", chunk)
-                }
-        }
-        snapshot.localMediaPaths.forEach { mediaFiles.delete(it) }
-        mediaDao.deleteLogMedia()
-        // Keep the server incarnation as the next mutation's recovery precondition.
-        preferences.updateCursor(0, generation = snapshot.session.pullGeneration)
-    }
-
-    private suspend fun finishAllLocal(snapshot: ClearSnapshot) {
-        outboxDao.deleteAll()
-        snapshot.localMediaPaths.forEach { mediaFiles.delete(it) }
-        mediaDao.deleteAll()
-        // The next join/create starts with no local replica or server incarnation.
-        preferences.updateCursor(0, generation = "")
-    }
-
-    private data class ClearSnapshot(
-        val scope: LocalReplicaClearScope,
-        val session: SyncSession,
-        val media: List<MediaAssetEntity>,
-        val localMediaPaths: List<String>,
+    private suspend fun finishCommitted(
+        pending: PendingReplicaCleanup,
+        finishDomain: suspend () -> Unit = {},
     ) {
-        val familyServerRetained: Boolean = session.familyId.isNotBlank()
+        var failure: Throwable? = null
+        withContext(NonCancellable) {
+            try {
+                finish(pending)
+            } catch (error: Throwable) {
+                failure = LocalClearCommittedException(
+                    familyServerRetained = pending.familyId.isNotBlank(),
+                    cause = error,
+                )
+            }
+            try {
+                finishDomain()
+            } catch (error: Throwable) {
+                val cancellation = error.cancellationCauseOrNull()
+                if (cancellation != null) {
+                    failure?.takeUnless { it === cancellation }?.let(cancellation::addSuppressed)
+                    failure = cancellation
+                } else if (failure == null) {
+                    failure = error
+                } else {
+                    failure!!.addSuppressed(error)
+                }
+            }
+        }
+        failure?.cancellationCauseOrNull()?.let { cancellation ->
+            failure?.takeUnless { it === cancellation }?.let(cancellation::addSuppressed)
+            throw cancellation
+        }
+        try {
+            currentCoroutineContext().ensureActive()
+        } catch (cancellation: CancellationException) {
+            failure?.takeUnless { it === cancellation }?.let(cancellation::addSuppressed)
+            throw cancellation
+        }
+        failure?.let { throw it }
+    }
+
+    private suspend fun finish(pending: PendingReplicaCleanup) {
+        preferences.updateCursor(
+            cursor = 0,
+            generation = when (pending.scope) {
+                PendingReplicaCleanupScope.RECORDS_ONLY -> pending.pullGeneration
+                PendingReplicaCleanupScope.ALL_LOCAL -> ""
+            },
+        )
+        transactionRunner.run {
+            // Every committed media ownership change uses this Room write lease
+            // (remote materialization is additionally behind [barrier]). Keep the
+            // final ownership read and irreversible file deletion in that same
+            // lease so no new row can appear between check and delete.
+            val protectedPaths = buildSet {
+                mediaDao.listAllIncludingDeleted()
+                    .filter { it.clientUuid !in pending.mediaClientUuids }
+                    .mapTo(this, MediaAssetEntity::localUri)
+                babyDao.listAllIncludingDeleted().forEach { baby ->
+                    baby.avatarPath?.takeIf(String::isNotBlank)?.let(::add)
+                }
+            }
+            pending.localMediaPaths
+                .filterNot(protectedPaths::contains)
+                .forEach { mediaFiles.delete(it) }
+            when (pending.scope) {
+                PendingReplicaCleanupScope.RECORDS_ONLY -> finishRecordsOnly(pending)
+                PendingReplicaCleanupScope.ALL_LOCAL -> outboxDao.deleteAll()
+            }
+            pending.mediaClientUuids.chunked(OUTBOX_DELETE_CHUNK_SIZE).forEach { chunk ->
+                mediaDao.deleteByClientUuids(chunk)
+            }
+            pendingStore.delete()
+        }
+    }
+
+    private suspend fun finishRecordsOnly(pending: PendingReplicaCleanup) {
+        outboxDao.deleteTypeAcrossFamilies("record")
+        outboxDao.deleteTypeAcrossFamilies("care_plan")
+        outboxDao.deleteTypeAcrossFamilies("fulfillment_candidate")
+        pending.mediaClientUuids.chunked(OUTBOX_DELETE_CHUNK_SIZE).forEach { chunk ->
+            outboxDao.deleteEntitiesAcrossFamilies("media", chunk)
+        }
     }
 }
 
-private val LocalReplicaClearScope.missingCommitMessage: String
-    get() = when (this) {
-        LocalReplicaClearScope.RecordsOnly -> "本机记录清除未确认领域事务已提交"
-        LocalReplicaClearScope.AllLocal -> "本机数据清除未确认领域事务已提交"
-    }
+private fun LocalReplicaClearScope.toPendingScope(): PendingReplicaCleanupScope = when (this) {
+    LocalReplicaClearScope.RecordsOnly -> PendingReplicaCleanupScope.RECORDS_ONLY
+    LocalReplicaClearScope.AllLocal -> PendingReplicaCleanupScope.ALL_LOCAL
+}
+
+private fun PendingReplicaCleanupScope.toRecoveryScope(): LocalClearRecoveryScope = when (this) {
+    PendingReplicaCleanupScope.RECORDS_ONLY -> LocalClearRecoveryScope.RecordsOnly
+    PendingReplicaCleanupScope.ALL_LOCAL -> LocalClearRecoveryScope.AllLocal
+}
 
 private const val OUTBOX_DELETE_CHUNK_SIZE = 400
+
+private fun Throwable.cancellationCauseOrNull(): CancellationException? {
+    var current: Throwable? = this
+    while (current != null) {
+        if (current is CancellationException) return current
+        current = current.cause
+    }
+    return null
+}

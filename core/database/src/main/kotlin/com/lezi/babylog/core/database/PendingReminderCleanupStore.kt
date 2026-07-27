@@ -1,5 +1,11 @@
 package com.lezi.babylog.core.database
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+
 /**
  * Durable reminder-cleanup kinds understood by callers.
  *
@@ -7,12 +13,21 @@ package com.lezi.babylog.core.database
  */
 enum class PendingReminderCleanupOperation {
     RECORDS_CLEAR,
+    ALL_LOCAL_DATA_CLEAR,
 }
 
 data class PendingReminderCleanup(
     val operation: PendingReminderCleanupOperation,
     val calendarEventIds: Set<Long>,
     val carePlanIds: Set<Long> = emptySet(),
+    /** Exact stable plan UUID -> provider event ID; null means recover through UID lookup only. */
+    val systemCalendarProjections: Map<String, String?> = emptyMap(),
+    /** False only for a row migrated from Room v20 before these settings fields existed. */
+    val settingsSnapshotCaptured: Boolean = true,
+    val currentBabyId: Long? = null,
+    val nextFeedAt: Long? = null,
+    /** Null only for v20 rows; legacy recovery must not consume current feed state. */
+    val nextFeedEpoch: String? = null,
     val familyServerRetained: Boolean,
 )
 
@@ -54,7 +69,19 @@ internal class RoomPendingReminderCleanupStore(
         require(pending.carePlanIds.all { it > 0L }) {
             "Pending reminder cleanup care-plan ids must be positive"
         }
+        require(
+            pending.systemCalendarProjections.none { (clientUuid, eventId) ->
+                clientUuid.isBlank() || eventId?.isBlank() == true
+            },
+        ) {
+            "Pending reminder cleanup projection identities must not be blank"
+        }
         val existing = load(pending.operation)
+        val latestSettingsSnapshot = when {
+            pending.settingsSnapshotCaptured -> pending
+            existing?.settingsSnapshotCaptured == true -> existing
+            else -> pending
+        }
         dao.upsert(
             PendingReminderCleanupEntity(
                 operation = pending.operation.storageKey,
@@ -66,6 +93,16 @@ internal class RoomPendingReminderCleanupStore(
                     (existing?.carePlanIds.orEmpty() + pending.carePlanIds)
                         .sorted()
                         .joinToString(","),
+                systemCalendarProjectionsJson = encodeSystemCalendarProjections(
+                    existing?.systemCalendarProjections.orEmpty() +
+                        pending.systemCalendarProjections,
+                ),
+                settingsSnapshotCaptured =
+                    existing?.settingsSnapshotCaptured == true ||
+                        pending.settingsSnapshotCaptured,
+                currentBabyId = latestSettingsSnapshot.currentBabyId,
+                nextFeedAt = latestSettingsSnapshot.nextFeedAt,
+                nextFeedEpoch = latestSettingsSnapshot.nextFeedEpoch,
                 familyServerRetained =
                     existing?.familyServerRetained == true || pending.familyServerRetained,
             ),
@@ -93,6 +130,15 @@ internal class RoomPendingReminderCleanupStore(
                 familyServerRetained = familyServerRetained,
                 reminderKind = "care-plan",
             ),
+            systemCalendarProjections = decodeSystemCalendarProjections(
+                encoded = systemCalendarProjectionsJson,
+                operation = typedOperation,
+                familyServerRetained = familyServerRetained,
+            ),
+            settingsSnapshotCaptured = settingsSnapshotCaptured,
+            currentBabyId = currentBabyId,
+            nextFeedAt = nextFeedAt,
+            nextFeedEpoch = nextFeedEpoch,
             familyServerRetained = familyServerRetained,
         )
 }
@@ -100,6 +146,7 @@ internal class RoomPendingReminderCleanupStore(
 private val PendingReminderCleanupOperation.storageKey: String
     get() = when (this) {
         PendingReminderCleanupOperation.RECORDS_CLEAR -> "records_clear"
+        PendingReminderCleanupOperation.ALL_LOCAL_DATA_CLEAR -> "all_local_data_clear"
     }
 
 private fun decodeReminderIds(
@@ -121,6 +168,48 @@ private fun decodeReminderIds(
             )
         }
         id
+    }
+}
+
+private fun encodeSystemCalendarProjections(values: Map<String, String?>): String =
+    buildJsonObject {
+        values.toSortedMap().forEach { (clientUuid, eventId) ->
+            if (eventId == null) put(clientUuid, JsonNull)
+            else put(clientUuid, JsonPrimitive(eventId))
+        }
+    }.toString()
+
+private fun decodeSystemCalendarProjections(
+    encoded: String,
+    operation: PendingReminderCleanupOperation,
+    familyServerRetained: Boolean,
+): Map<String, String?> {
+    val objectValue = try {
+        Json.parseToJsonElement(encoded) as? JsonObject
+            ?: throw IllegalArgumentException("not an object")
+    } catch (_: Exception) {
+        throw CorruptPendingReminderCleanupException(
+            operation = operation,
+            familyServerRetained = familyServerRetained,
+            reminderKind = "system calendar projection",
+            invalidToken = encoded,
+        )
+    }
+    return objectValue.entries.associate { (clientUuid, element) ->
+        val eventId = when (element) {
+            JsonNull -> null
+            is JsonPrimitive -> element.takeIf { it.isString }?.content
+            else -> null
+        }
+        if (clientUuid.isBlank() || (element !== JsonNull && eventId.isNullOrBlank())) {
+            throw CorruptPendingReminderCleanupException(
+                operation = operation,
+                familyServerRetained = familyServerRetained,
+                reminderKind = "system calendar projection",
+                invalidToken = "$clientUuid=$element",
+            )
+        }
+        clientUuid to eventId
     }
 }
 

@@ -58,6 +58,7 @@ import java.time.temporal.ChronoUnit
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
@@ -864,6 +865,7 @@ class CareLog @Inject constructor(
                     sourceRecordClientUuid = existing.clientUuid,
                     updatedAt = at,
                     syncDirty = true,
+                    systemCalendarProjectionEnabled = projectToSystemCalendar,
                 ),
             )
             reconcileCarePlanPhotos(planId, photos, at)
@@ -1036,7 +1038,7 @@ class CareLog @Inject constructor(
             inserted
         }
         if (carePlanId != null) {
-            reminderCleanup.cancelCarePlan(carePlanId)
+            cancelCarePlanReminderBestEffort(carePlanId)
             removeSystemCalendarProjection(carePlanId)
         }
         requestLocalSync()
@@ -1316,6 +1318,7 @@ class CareLog @Inject constructor(
                     createdByMembershipId = currentMembershipActorId(),
                     updatedAt = now,
                     syncDirty = true,
+                    systemCalendarProjectionEnabled = projectToSystemCalendar,
                 ),
             )
             reconcileCarePlanPhotos(planId, photos, now)
@@ -1437,7 +1440,7 @@ class CareLog @Inject constructor(
         } else {
             writeFulfill()
         }
-        reminderCleanup.cancelCarePlan(carePlanId)
+        cancelCarePlanReminderBestEffort(carePlanId)
         removeSystemCalendarProjection(carePlanId)
         requestLocalSync()
         return recordId
@@ -1924,6 +1927,7 @@ class CareLog @Inject constructor(
         photoLocalPaths: List<String>? = null,
         zone: ZoneId? = null,
         nowMillis: Long = System.currentTimeMillis(),
+        projectToSystemCalendar: Boolean? = null,
     ) {
         val photos = photoLocalPaths?.let { normalizePhotoPaths(it) }
         transactionRunner.run {
@@ -1941,25 +1945,53 @@ class CareLog @Inject constructor(
             } else {
                 payloadJson ?: plan.payloadJson
             }
-            // Persist stored status as pending; missed is always derived from clock.
-            carePlanDao.update(
-                plan.copy(
+            val nextZoneId = zone?.id ?: plan.scheduledZoneId
+            val nextSchemaVersion = schemaVersion ?: plan.schemaVersion
+            val desiredProjection =
+                projectToSystemCalendar ?: plan.systemCalendarProjectionEnabled
+            val sharedChanged =
+                plan.scheduledAt != scheduledAt ||
+                    plan.scheduledZoneId != nextZoneId ||
+                    plan.note != note ||
+                    plan.payloadJson != nextPayload ||
+                    plan.schemaVersion != nextSchemaVersion ||
+                    plan.status != CarePlanStatus.PENDING.storageKey
+            if (sharedChanged) {
+                // Persist stored status as pending; missed is always derived from clock.
+                carePlanDao.update(plan.copy(
                     scheduledAt = scheduledAt,
-                    scheduledZoneId = zone?.id ?: plan.scheduledZoneId,
+                    scheduledZoneId = nextZoneId,
                     note = note,
                     payloadJson = nextPayload,
-                    schemaVersion = schemaVersion ?: plan.schemaVersion,
+                    schemaVersion = nextSchemaVersion,
                     status = CarePlanStatus.PENDING.storageKey,
                     updatedAt = at,
                     syncDirty = true,
-                ),
-            )
-            if (photos != null) {
-                reconcileCarePlanPhotos(carePlanId, photos, at)
+                    systemCalendarProjectionEnabled = desiredProjection,
+                    systemCalendarReminderReady = false,
+                ))
+                if (photos != null) {
+                    reconcileCarePlanPhotos(carePlanId, photos, at)
+                }
+            } else if (desiredProjection != plan.systemCalendarProjectionEnabled) {
+                carePlanDao.updateSystemCalendarProjectionEnabled(
+                    clientUuid = plan.clientUuid,
+                    enabled = desiredProjection,
+                )
             }
         }
-        carePlanDao.get(carePlanId)?.toModel()?.let { plan ->
-            projectOrScheduleCarePlanReminder(plan, projectToSystemCalendar = true)
+        calendarReminderMutationGuard.withLock {
+            carePlanDao.get(carePlanId)?.toModel()?.let { plan ->
+                if (plan.scheduledAt <= nowMillis) {
+                    cancelCarePlanReminderBestEffort(plan.id)
+                    removeSystemCalendarProjectionLocked(plan.id)
+                } else {
+                    projectOrScheduleCarePlanReminderLocked(
+                        plan,
+                        projectToSystemCalendar = plan.systemCalendarProjectionEnabled,
+                    )
+                }
+            }
         }
         requestLocalSync()
     }
@@ -1987,7 +2019,7 @@ class CareLog @Inject constructor(
                 ),
             )
         }
-        reminderCleanup.cancelCarePlan(carePlanId)
+        cancelCarePlanReminderBestEffort(carePlanId)
         removeSystemCalendarProjection(carePlanId)
         requestLocalSync()
     }
@@ -2007,7 +2039,7 @@ class CareLog @Inject constructor(
             carePlanDao.softDelete(carePlanId, deletedAt)
             tombstoneCarePlanPhotos(carePlanId, deletedAt)
         }
-        reminderCleanup.cancelCarePlan(carePlanId)
+        cancelCarePlanReminderBestEffort(carePlanId)
         removeSystemCalendarProjection(carePlanId)
         requestLocalSync()
     }
@@ -2017,28 +2049,68 @@ class CareLog @Inject constructor(
      * device's own reminders / system calendar copies. Never requests calendar
      * permission (passive receive). Local prefs never enter the family package.
      */
-    suspend fun onFamilyCarePlansApplied(planClientUuids: List<String>) {
+    suspend fun onFamilyCarePlansApplied(
+        planClientUuids: List<String>,
+        nowMillis: Long = System.currentTimeMillis(),
+    ) {
         if (planClientUuids.isEmpty()) return
-        for (uuid in planClientUuids) {
-            val plan = carePlanDao.getByClientUuid(uuid) ?: continue
-            val model = plan.toModel()
-            val terminal = plan.deletedAt != null ||
-                model.status == CarePlanStatus.COMPLETED ||
-                model.status == CarePlanStatus.SKIPPED
-            if (terminal) {
-                reminderCleanup.cancelCarePlan(plan.id)
-                removeSystemCalendarProjection(plan.id)
-            } else {
-                // Device-local prefs only; hasCalendarPermission is never requested here.
-                projectOrScheduleCarePlanReminder(model, projectToSystemCalendar = true)
+        calendarReminderMutationGuard.withLock {
+            for (uuid in planClientUuids) {
+                val plan = carePlanDao.getByClientUuid(uuid) ?: continue
+                val model = plan.toModel()
+                val terminal = plan.deletedAt != null ||
+                    model.status == CarePlanStatus.COMPLETED ||
+                    model.status == CarePlanStatus.SKIPPED
+                val expired = model.scheduledAt <= nowMillis
+                if (terminal || expired) {
+                    cancelCarePlanReminderBestEffort(plan.id)
+                    removeSystemCalendarProjectionLocked(plan.id)
+                } else {
+                    // Passive receive never requests permission; syncMutex → this guard.
+                    projectOrScheduleCarePlanReminderLocked(
+                        model,
+                        projectToSystemCalendar = model.systemCalendarProjectionEnabled,
+                    )
+                }
             }
         }
     }
 
     private suspend fun scheduleCarePlanReminder(plan: CarePlan) {
-        val scheduled = reminderCleanup.scheduleCarePlan(plan)
+        runCatching { carePlanDao.markLegacyCarePlanReminderReplaced(plan.clientUuid) }
+        val scheduled = runCatching { reminderCleanup.scheduleCarePlan(plan) }.getOrDefault(false)
         if (!scheduled) {
-            reminderCleanup.cancelCarePlan(plan.id)
+            cancelCarePlanReminderBestEffort(plan.id)
+        }
+    }
+
+    /** AlarmManager cleanup must not roll back or mask an already-committed plan change. */
+    private suspend fun cancelCarePlanReminderBestEffort(carePlanId: Long) {
+        try {
+            reminderCleanup.cancelCarePlan(carePlanId)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            // Delivery is still fail-closed by shouldDeliverCarePlanReminder;
+            // startup/foreground reconciliation retries the physical cancel.
+        }
+    }
+
+    /** Persist and immediately reconcile the device-local Lezi reminder source. */
+    suspend fun setCarePlanLocalRemindersEnabled(
+        enabled: Boolean,
+        nowMillis: Long = System.currentTimeMillis(),
+    ) = calendarReminderMutationGuard.withLock {
+        settings.setCarePlanLocalRemindersEnabled(enabled)
+        carePlanDao.listAllOpenFuture(nowMillis).forEach { entity ->
+            if (!enabled) {
+                cancelCarePlanReminderBestEffort(entity.id)
+            } else {
+                projectOrScheduleCarePlanReminderLocked(
+                    entity.toModel(),
+                    projectToSystemCalendar = entity.systemCalendarProjectionEnabled,
+                )
+            }
         }
     }
 
@@ -2055,16 +2127,50 @@ class CareLog @Inject constructor(
      */
     suspend fun projectOrScheduleCarePlanReminder(
         plan: CarePlan,
-        projectToSystemCalendar: Boolean = true,
+        projectToSystemCalendar: Boolean = plan.systemCalendarProjectionEnabled,
+    ): Boolean = calendarReminderMutationGuard.withLock {
+        projectOrScheduleCarePlanReminderLocked(plan, projectToSystemCalendar)
+    }
+
+    private suspend fun projectOrScheduleCarePlanReminderLocked(
+        requestedPlan: CarePlan,
+        projectToSystemCalendar: Boolean,
     ): Boolean {
+        val entity = carePlanDao.get(requestedPlan.id)
+            ?.takeIf { it.clientUuid == requestedPlan.clientUuid }
+            ?: return false
+        val plan = entity.toModel()
+        if (
+            plan.deletedAt != null ||
+            plan.status == CarePlanStatus.COMPLETED ||
+            plan.status == CarePlanStatus.SKIPPED
+        ) {
+            cancelCarePlanReminderBestEffort(plan.id)
+            removeSystemCalendarProjectionLocked(plan.id)
+            return false
+        }
         if (!projectToSystemCalendar) {
-            scheduleCarePlanReminder(plan)
+            val removed = removeSystemCalendarProjectionByClientUuidLocked(plan.clientUuid)
+            if (removed) scheduleCarePlanReminder(plan) else {
+                cancelCarePlanReminderBestEffort(plan.id)
+            }
             return false
         }
         val prefs = settings.settings.first()
         val calendarId = prefs.systemCalendarId?.takeIf { it.isNotBlank() }
         val configured = prefs.systemCalendarEnabled && calendarId != null
-        if (!configured || !systemCalendar.hasCalendarPermission()) {
+        if (!configured) {
+            val removed = removeSystemCalendarProjectionByClientUuidLocked(plan.clientUuid)
+            if (removed) scheduleCarePlanReminder(plan) else {
+                cancelCarePlanReminderBestEffort(plan.id)
+            }
+            return false
+        }
+        if (!systemCalendar.hasCalendarPermission()) {
+            if (entity.systemCalendarReminderReady || entity.systemCalendarProjectionPending) {
+                cancelCarePlanReminderBestEffort(plan.id)
+                return entity.systemCalendarReminderReady
+            }
             scheduleCarePlanReminder(plan)
             return false
         }
@@ -2081,8 +2187,29 @@ class CareLog @Inject constructor(
             carePlanClientUuid = plan.clientUuid,
         )
         val map = parseSystemCalendarEventMap(prefs.systemCalendarEventMapJson)
-        val existingEventId = map[plan.clientUuid]
-        suspend fun upsert(existing: String?): String? = runCatching {
+        val existingEventId = entity.systemCalendarEventId ?: map[plan.clientUuid]
+        val wasPending = entity.systemCalendarProjectionPending
+        val providerHandoffMayExist = wasPending ||
+            entity.systemCalendarReminderReady ||
+            existingEventId != null ||
+            entity.legacyCarePlanReminderPending
+        val handoffStored = runCatching {
+            carePlanDao.updateSystemCalendarProjection(
+                clientUuid = plan.clientUuid,
+                eventId = existingEventId,
+                reminderReady = entity.systemCalendarReminderReady,
+                pending = true,
+            )
+        }.isSuccess
+        if (!handoffStored) {
+            if (entity.systemCalendarReminderReady) {
+                cancelCarePlanReminderBestEffort(plan.id)
+                return true
+            }
+            scheduleCarePlanReminder(plan)
+            return false
+        }
+        val result = runCatching {
             systemCalendar.upsertEvent(
                 SystemCalendarUpsert(
                     calendarId = calendarId!!,
@@ -2090,24 +2217,52 @@ class CareLog @Inject constructor(
                     beginAtMillis = plan.scheduledAt,
                     title = content.title,
                     description = content.description,
-                    existingEventId = existing,
+                    existingEventId = existingEventId,
+                    providerHandoffMayExist = providerHandoffMayExist,
                     customAppUri = content.deepLinkUri,
                 ),
             )
         }.getOrNull()
-        var eventId = upsert(existingEventId)
-        // External delete: provider update fails → rebuild via insert and refresh map.
-        if (eventId == null && !existingEventId.isNullOrBlank()) {
-            eventId = upsert(existing = null)
+        if (result == null) {
+            // The hand-off was durably staged before the adapter call. An
+            // unexpected adapter exception leaves ownership indeterminate, so
+            // retain pending and never create a definite second reminder source.
+            cancelCarePlanReminderBestEffort(plan.id)
+            return false
         }
-        return if (eventId != null) {
-            putSystemCalendarEventMapping(plan.clientUuid, eventId)
-            reminderCleanup.cancelCarePlan(plan.id)
-            true
-        } else {
-            // Failure / missing calendar: keep Lezi reminder, leave map stale if any.
-            scheduleCarePlanReminder(plan)
-            false
+        val projectionPending =
+            result.outcome == SystemCalendarUpsertOutcome.ProviderStillOwnsStale
+        runCatching {
+            carePlanDao.updateSystemCalendarProjection(
+                clientUuid = plan.clientUuid,
+                eventId = result.eventId,
+                reminderReady = result.reminderReady,
+                pending = projectionPending,
+            )
+        }
+        if (result.eventId != null) {
+            runCatching { putSystemCalendarEventMapping(plan.clientUuid, result.eventId) }
+        } else if (result.outcome == SystemCalendarUpsertOutcome.ReleasedOrAbsent) {
+            runCatching {
+                removeSystemCalendarEventMapping(plan.clientUuid, existingEventId)
+            }
+        }
+        if (result.outcome != SystemCalendarUpsertOutcome.ProviderStillOwnsStale) {
+            runCatching { carePlanDao.markLegacyCarePlanReminderReplaced(plan.clientUuid) }
+        }
+        return when (result.outcome) {
+            SystemCalendarUpsertOutcome.CurrentReady -> {
+                cancelCarePlanReminderBestEffort(plan.id)
+                true
+            }
+            SystemCalendarUpsertOutcome.ProviderStillOwnsStale -> {
+                cancelCarePlanReminderBestEffort(plan.id)
+                false
+            }
+            SystemCalendarUpsertOutcome.ReleasedOrAbsent -> {
+                scheduleCarePlanReminder(plan)
+                false
+            }
         }
     }
 
@@ -2118,12 +2273,13 @@ class CareLog @Inject constructor(
      */
     suspend fun reprojectOpenFutureSystemCalendarCopies(
         nowMillis: Long = System.currentTimeMillis(),
-    ) {
+    ) = calendarReminderMutationGuard.withLock {
+        reconcileTerminalSystemCalendarProjectionsLocked()
         carePlanDao.listAllOpenFuture(nowMillis).forEach { entity ->
             runCatching {
-                projectOrScheduleCarePlanReminder(
+                projectOrScheduleCarePlanReminderLocked(
                     entity.toModel(),
-                    projectToSystemCalendar = true,
+                    projectToSystemCalendar = entity.systemCalendarProjectionEnabled,
                 )
             }
         }
@@ -2136,7 +2292,9 @@ class CareLog @Inject constructor(
      * and mapped events that no longer exist in the provider.
      */
     suspend fun isCarePlanSystemCalendarUnsynced(carePlanId: Long): Boolean {
-        val plan = carePlanDao.get(carePlanId)?.toModel() ?: return false
+        val entity = carePlanDao.get(carePlanId) ?: return false
+        val plan = entity.toModel()
+        if (!plan.systemCalendarProjectionEnabled) return false
         val prefs = settings.settings.first()
         val calendarId = prefs.systemCalendarId
         if (!prefs.systemCalendarEnabled || calendarId.isNullOrBlank()) {
@@ -2145,9 +2303,9 @@ class CareLog @Inject constructor(
         val hasPermission = systemCalendar.hasCalendarPermission()
         val targetWritable = hasPermission && systemCalendar.isWritableCalendar(calendarId)
         val map = parseSystemCalendarEventMap(prefs.systemCalendarEventMapJson)
-        val mappedEventId = map[plan.clientUuid]
+        val mappedEventId = entity.systemCalendarEventId ?: map[plan.clientUuid]
         val eventExists = if (!mappedEventId.isNullOrBlank() && hasPermission) {
-            systemCalendar.eventExists(mappedEventId)
+            systemCalendar.eventExists(mappedEventId, plan.clientUuid)
         } else {
             false
         }
@@ -2158,17 +2316,126 @@ class CareLog @Inject constructor(
             targetWritable = targetWritable,
             mappedEventId = mappedEventId,
             eventExists = eventExists,
+            reminderReady = entity.systemCalendarReminderReady,
+            projectionPending = entity.systemCalendarProjectionPending,
         )
     }
 
-    private suspend fun removeSystemCalendarProjection(carePlanId: Long) {
-        val plan = carePlanDao.get(carePlanId) ?: carePlanDao.get(carePlanId)
-        val clientUuid = plan?.clientUuid ?: return
+    private suspend fun removeSystemCalendarProjection(carePlanId: Long) =
+        calendarReminderMutationGuard.withLock {
+            removeSystemCalendarProjectionLocked(carePlanId)
+        }
+
+    private suspend fun removeSystemCalendarProjectionLocked(carePlanId: Long): Boolean {
+        val plan = carePlanDao.get(carePlanId)
+        val clientUuid = plan?.clientUuid ?: return true
+        return removeSystemCalendarProjectionByClientUuidLocked(clientUuid)
+    }
+
+    /** Keep the durable map identity until provider deletion is confirmed. */
+    private suspend fun removeSystemCalendarProjectionByClientUuidLocked(
+        clientUuid: String,
+    ): Boolean {
         val prefs = settings.settings.first()
         val map = parseSystemCalendarEventMap(prefs.systemCalendarEventMapJson).toMutableMap()
-        val eventId = map.remove(clientUuid) ?: return
-        runCatching { systemCalendar.deleteEvent(eventId) }
-        settings.setSystemCalendarEventMapJson(encodeSystemCalendarEventMap(map))
+        val plan = carePlanDao.getByClientUuid(clientUuid)
+        val knownIds = linkedSetOf<String>().apply {
+            plan?.systemCalendarEventId?.let(::add)
+            map[clientUuid]?.let(::add)
+        }
+        // A new v21 row with no identity, ready generation, or hand-off has
+        // provably never touched the provider. Migrated rows retain the legacy
+        // side-effect marker until one strict lookup/reconciliation completes.
+        val requiresProviderLookup = knownIds.isNotEmpty() ||
+            plan?.systemCalendarReminderReady == true ||
+            plan?.systemCalendarProjectionPending == true ||
+            plan?.legacyCarePlanReminderPending == true
+        suspend fun deleteKnown(eventId: String): Boolean {
+            val deleted = runCatching {
+                systemCalendar.deleteEvent(eventId, clientUuid)
+            }.getOrDefault(false)
+            return deleted || runCatching {
+                systemCalendar.eventState(eventId, clientUuid) == SystemCalendarEventState.ABSENT
+            }.getOrDefault(false)
+        }
+        knownIds.forEach { deleteKnown(it) }
+        var lookup = if (requiresProviderLookup) {
+            runCatching { systemCalendar.findOwnedEvent(clientUuid) }
+                .getOrDefault(SystemCalendarOwnedEventLookup.Unavailable)
+        } else {
+            SystemCalendarOwnedEventLookup.Absent
+        }
+        if (lookup is SystemCalendarOwnedEventLookup.Found) {
+            lookup.eventIds.forEach { deleteKnown(it) }
+            lookup = runCatching { systemCalendar.findOwnedEvent(clientUuid) }
+                .getOrDefault(SystemCalendarOwnedEventLookup.Unavailable)
+        }
+        val confirmedAbsent = lookup == SystemCalendarOwnedEventLookup.Absent
+        if (!confirmedAbsent) {
+            val found = lookup as? SystemCalendarOwnedEventLookup.Found
+            if (found != null && plan != null) {
+                runCatching {
+                    carePlanDao.updateSystemCalendarProjection(
+                        clientUuid = clientUuid,
+                        eventId = found.canonicalEventId,
+                        reminderReady = plan.systemCalendarReminderReady,
+                        pending = true,
+                    )
+                }
+            }
+            return false
+        }
+        if (plan != null) {
+            runCatching {
+                carePlanDao.updateSystemCalendarProjection(
+                    clientUuid = clientUuid,
+                    eventId = null,
+                    reminderReady = false,
+                    pending = false,
+                )
+            }
+        }
+        map.remove(clientUuid)
+        runCatching {
+            settings.setSystemCalendarEventMapJson(encodeSystemCalendarEventMap(map))
+        }
+        return true
+    }
+
+    private suspend fun reconcileTerminalSystemCalendarProjectionsLocked() {
+        val mappings = parseSystemCalendarEventMap(
+            settings.settings.first().systemCalendarEventMapJson,
+        )
+        val plans = carePlanDao.listAllIncludingDeleted()
+        val candidates = mappings.keys + plans.filter {
+            it.systemCalendarEventId != null || it.systemCalendarProjectionPending
+        }.map { it.clientUuid }
+        candidates.forEach { clientUuid ->
+            val plan = carePlanDao.getByClientUuid(clientUuid)
+            val terminal = plan == null ||
+                plan.deletedAt != null ||
+                CarePlanStatus.fromStorage(plan.status) == CarePlanStatus.COMPLETED ||
+                CarePlanStatus.fromStorage(plan.status) == CarePlanStatus.SKIPPED
+            if (terminal) removeSystemCalendarProjectionByClientUuidLocked(clientUuid)
+        }
+    }
+
+    /** Disable globally, delete every owned copy, then restore Lezi only after confirmed deletion. */
+    suspend fun disableSystemCalendarProjection() = calendarReminderMutationGuard.withLock {
+        val plans = carePlanDao.listAllIncludingDeleted()
+        val mappedUuids = parseSystemCalendarEventMap(
+            settings.settings.first().systemCalendarEventMapJson,
+        ).keys
+        (plans.map { it.clientUuid } + mappedUuids).distinct().forEach { clientUuid ->
+            val removed = removeSystemCalendarProjectionByClientUuidLocked(clientUuid)
+            val plan = carePlanDao.getByClientUuid(clientUuid) ?: return@forEach
+            val open = plan.deletedAt == null && plan.status in setOf("pending", "missed")
+            if (open && removed) {
+                scheduleCarePlanReminder(plan.toModel())
+            } else if (open) {
+                cancelCarePlanReminderBestEffort(plan.id)
+            }
+        }
     }
 
     private suspend fun putSystemCalendarEventMapping(clientUuid: String, eventId: String) {
@@ -2178,19 +2445,68 @@ class CareLog @Inject constructor(
         settings.setSystemCalendarEventMapJson(encodeSystemCalendarEventMap(map))
     }
 
-    /**
-     * Rebuild care-plan alarms for still-open future plans only (boot / process restart).
-     */
+    private suspend fun removeSystemCalendarEventMapping(
+        clientUuid: String,
+        expectedEventId: String?,
+    ) {
+        val prefs = settings.settings.first()
+        val map = parseSystemCalendarEventMap(prefs.systemCalendarEventMapJson).toMutableMap()
+        val current = map[clientUuid]
+        if (expectedEventId == null || current == expectedEventId) {
+            map.remove(clientUuid)
+            settings.setSystemCalendarEventMapJson(encodeSystemCalendarEventMap(map))
+        }
+    }
+
+    /** Reconcile every durable care-plan side effect after boot/process restart. */
     suspend fun rescheduleCarePlanReminders(
         nowMillis: Long = System.currentTimeMillis(),
-    ) {
-        carePlanDao.listAllOpenFuture(nowMillis).forEach { entity ->
-            projectOrScheduleCarePlanReminder(entity.toModel(), projectToSystemCalendar = true)
+    ) = calendarReminderMutationGuard.withLock {
+        reconcileTerminalSystemCalendarProjectionsLocked()
+        carePlanDao.listAllIncludingDeleted().forEach { entity ->
+            val open = entity.deletedAt == null && entity.status in setOf("pending", "missed")
+            if (!open) return@forEach
+            if (entity.scheduledAt > nowMillis) {
+                projectOrScheduleCarePlanReminderLocked(
+                    entity.toModel(),
+                    projectToSystemCalendar = entity.systemCalendarProjectionEnabled,
+                )
+            } else {
+                // Missed plans remain visible in Lezi but no longer own a future
+                // notification. This also closes a crash after future -> past edit.
+                cancelCarePlanReminderBestEffort(entity.id)
+                removeSystemCalendarProjectionByClientUuidLocked(entity.clientUuid)
+            }
         }
     }
 
     suspend fun getCarePlanByClientUuid(clientUuid: String): CarePlan? =
         carePlanDao.getByClientUuid(clientUuid)?.toModel()
+
+    /** Fail-closed gate for an already-delivered AlarmManager intent. */
+    suspend fun shouldDeliverCarePlanReminder(
+        carePlanId: Long,
+        clientUuid: String,
+        expectedScheduledAt: Long,
+    ): Boolean = calendarReminderMutationGuard.withLock {
+        val plan = carePlanDao.get(carePlanId) ?: return@withLock false
+        if (plan.clientUuid != clientUuid) {
+            return@withLock false
+        }
+        val legacyDelivery = expectedScheduledAt == Long.MIN_VALUE
+        if (!legacyDelivery && plan.scheduledAt != expectedScheduledAt) return@withLock false
+        if (plan.deletedAt != null || plan.status !in setOf("pending", "missed")) {
+            return@withLock false
+        }
+        if (!settings.settings.first().carePlanLocalRemindersEnabled) {
+            return@withLock false
+        }
+        if (plan.systemCalendarReminderReady || plan.systemCalendarProjectionPending) {
+            return@withLock false
+        }
+        if (!legacyDelivery) return@withLock true
+        carePlanDao.consumeLegacyCarePlanReminder(carePlanId, clientUuid) == 1
+    }
 
     /**
      * Active plan photo local paths for [carePlanId].
@@ -2782,6 +3098,7 @@ private fun CarePlanEntity.toModel(): CarePlan =
         updatedAt = updatedAt,
         deletedAt = deletedAt,
         syncDirty = syncDirty,
+        systemCalendarProjectionEnabled = systemCalendarProjectionEnabled,
     )
 
 private fun FulfillmentCandidateEntity.toModel(): FulfillmentCandidate =

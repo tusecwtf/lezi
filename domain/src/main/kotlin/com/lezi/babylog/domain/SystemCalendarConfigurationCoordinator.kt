@@ -12,6 +12,7 @@ interface SystemCalendarConfigurationCoordinator {
 internal class DefaultSystemCalendarConfigurationCoordinator private constructor(
     private val configure: suspend (calendarId: String?, disclosureLevel: Int?) -> Unit,
     private val reprojectOpenFuture: suspend () -> Unit,
+    private val disableProjection: suspend () -> Unit,
 ) : SystemCalendarConfigurationCoordinator {
     @Inject
     constructor(
@@ -20,15 +21,18 @@ internal class DefaultSystemCalendarConfigurationCoordinator private constructor
     ) : this(
         configure = settings::setSystemCalendarConfiguration,
         reprojectOpenFuture = { careLog.reprojectOpenFutureSystemCalendarCopies() },
+        disableProjection = { careLog.disableSystemCalendarProjection() },
     )
 
     internal constructor(
         configure: suspend (calendarId: String?, disclosureLevel: Int?) -> Unit,
         reprojectOpenFuture: suspend () -> Unit,
+        disableProjection: suspend () -> Unit,
         @Suppress("UNUSED_PARAMETER") testOnly: Unit = Unit,
     ) : this(
         configure = configure,
         reprojectOpenFuture = reprojectOpenFuture,
+        disableProjection = disableProjection,
     )
 
     override suspend fun confirm(calendarId: String, disclosureLevel: Int) {
@@ -40,5 +44,6 @@ internal class DefaultSystemCalendarConfigurationCoordinator private constructor
 
     override suspend fun disable() {
         configure(null, null)
+        disableProjection()
     }
 }

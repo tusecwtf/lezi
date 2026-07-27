@@ -240,7 +240,7 @@ formula/pee UI 交叉可见均已验证；双模拟器还在严格使用
 | 阶段 | 行为 |
 |------|------|
 | **历史 V1 Stub** | 曾用空 `SyncPort` +「同步即将支持」文案；**不再是默认交付** |
-| **现行 V2（默认 DI）** | **家庭局域网中心化**：自建 NAS Docker `lezi-sync`；**仅家 Wi‑Fi + NAS 可达**；**仅前台**同步（回前台 / 下拉 / 写成功 push）；邀请码 + family token；同步 **Baby + Record + 日志媒体**（头像仅管理员可改）；`RealSyncPort` 为默认绑定 |
+| **现行 V2（默认 DI）** | **家庭局域网中心化**：自建 NAS Docker `lezi-sync`；**仅家 Wi‑Fi + NAS 可达**；**仅前台**同步（回前台 / 下拉 / 写成功 push）；邀请码 + family token；同步 Baby、Record、CustomItemDef、CarePlan、履行候选与记录/计划原子照片包（头像仅管理员可改）；`RealSyncPort` 为默认绑定 |
 | 本机独立 | 主题、图标排序、暗色、下次喂奶提醒、时间制等 **不同步** |
 | 不做 | 部分字段共享、伴侣推送/即时通知同步、后台轮询同步、P2P 主路径、奶库、公网强制云 |
 
@@ -317,7 +317,7 @@ Widget 每个实例独立保存 `widgetId`、绑定 `babyId` 和快捷记录类�
 - [x] 双模拟器前台 formula/pee UI 交叉可见；严格 live 服务端建家/加入与双向协议通过
 - [ ] **物理 NAS / 双真机 / 相机扫码** 目标环境验收（见 [sync-home-lan.md](./sync-home-lan.md) §5.4）
 - [x] **本机** PDF、自定义项目、辅食类、扩展测量、疫苗手记、日程
-- [ ] `CustomItemDef`、`CarePlan`、计划照片与原子照片包 **出站家庭同步**（设计已批准、实现待完成）；通用 `CalendarEvent` 与设备系统日历配置不同步
+- [x] `CustomItemDef`、`CarePlan`、履行候选、计划照片与 Record/计划原子照片包家庭同步；通用 `CalendarEvent` 与设备系统日历配置仍不同步
 
 ### 6.4 APK 交付
 

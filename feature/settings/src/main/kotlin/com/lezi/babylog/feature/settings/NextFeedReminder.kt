@@ -15,6 +15,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.lezi.babylog.core.datastore.SettingsStore
+import com.lezi.babylog.domain.CalendarReminderMutationGuard
 import com.lezi.babylog.domain.FeedReminderPort
 import dagger.Binds
 import dagger.Module
@@ -32,34 +33,61 @@ import kotlinx.coroutines.launch
 @Singleton
 class NextFeedScheduler @Inject constructor(
     private val settings: SettingsStore,
+    private val mutationGuard: CalendarReminderMutationGuard,
     @ApplicationContext private val context: Context,
 ) : FeedReminderPort {
-    override suspend fun scheduleAfterFeed(atMillis: Long?) {
+    override suspend fun scheduleAfterFeed(atMillis: Long?) = mutationGuard.withLock {
         val intervalMin = settings.settings.first().nursingIntervalMin
         val whenMs = atMillis ?: (System.currentTimeMillis() + intervalMin * 60_000L)
-        settings.setNextFeedAt(whenMs)
+        val epoch = settings.setNextFeedAt(whenMs)
         ensureChannel(context)
         val am = context.getSystemService(AlarmManager::class.java)
-        val pi = pending(context)
+        val pi = pending(context, epoch)
         am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, whenMs, pi)
     }
 
-    suspend fun cancel() {
+    suspend fun cancel() = mutationGuard.withLock {
         settings.clearNextFeedAt()
+        cancelAlarmLocked()
+    }
+
+    /**
+     * Cancels the captured local-clear alarm without touching a newer settings epoch.
+     * The local-clear coordinator already owns [mutationGuard]; reacquiring it after
+     * switching to NonCancellable would deadlock on the same lease.
+     */
+    internal fun cancelCapturedAlarmUnderGuard() = cancelAlarmLocked()
+
+    private fun cancelAlarmLocked() {
         val am = context.getSystemService(AlarmManager::class.java)
         am.cancel(pending(context))
     }
 
-    suspend fun rescheduleFromStore() {
-        val at = settings.settings.first().nextFeedAt ?: return
-        if (at <= System.currentTimeMillis()) return
+    suspend fun rescheduleFromStore() = mutationGuard.withLock {
+        val stored = settings.settings.first()
+        val at = stored.nextFeedAt ?: return@withLock
+        if (at <= System.currentTimeMillis()) return@withLock
+        val epoch = stored.nextFeedEpoch.ifBlank { settings.setNextFeedAt(at) }
         ensureChannel(context)
         val am = context.getSystemService(AlarmManager::class.java)
-        am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pending(context))
+        am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pending(context, epoch))
     }
 
-    private fun pending(context: Context): PendingIntent {
-        val intent = Intent(context, NextFeedReceiver::class.java)
+    /** Atomically rejects a stale delivery before it can notify or clear a newer epoch. */
+    internal suspend fun consumeDeliveredAlarm(expectedEpoch: String?): Boolean {
+        return mutationGuard.withLock {
+            if (expectedEpoch.isNullOrBlank()) {
+                settings.clearLegacyNextFeedAtIfEpochMissing()
+            } else {
+                settings.clearNextFeedAtIfEpoch(expectedEpoch)
+            }
+        }
+    }
+
+    private fun pending(context: Context, epoch: String? = null): PendingIntent {
+        val intent = Intent(context, NextFeedReceiver::class.java).apply {
+            epoch?.let { putExtra(EXTRA_EPOCH, it) }
+        }
         return PendingIntent.getBroadcast(
             context,
             REQ,
@@ -72,6 +100,7 @@ class NextFeedScheduler @Inject constructor(
         const val CHANNEL = "next_feed"
         const val NOTIF_ID = 77
         const val REQ = 77
+        internal const val EXTRA_EPOCH = "com.lezi.babylog.extra.NEXT_FEED_EPOCH"
 
         fun ensureChannel(context: Context) {
             val nm = context.getSystemService(NotificationManager::class.java)
@@ -92,9 +121,23 @@ abstract class FeedReminderModule {
 
 @AndroidEntryPoint
 class NextFeedReceiver : BroadcastReceiver() {
-    @Inject lateinit var settings: SettingsStore
+    @Inject lateinit var scheduler: NextFeedScheduler
 
     override fun onReceive(context: Context, intent: Intent?) {
+        val expectedEpoch = intent?.getStringExtra(NextFeedScheduler.EXTRA_EPOCH)
+        val pending = goAsync()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                if (scheduler.consumeDeliveredAlarm(expectedEpoch)) {
+                    notifyDueFeed(context)
+                }
+            } finally {
+                pending.finish()
+            }
+        }
+    }
+
+    private fun notifyDueFeed(context: Context) {
         NextFeedScheduler.ensureChannel(context)
         val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
         val pi = PendingIntent.getActivity(
@@ -118,14 +161,6 @@ class NextFeedReceiver : BroadcastReceiver() {
             ) == PackageManager.PERMISSION_GRANTED
         ) {
             notifyWithGrantedPermission(context, notif)
-        }
-        val pending = goAsync()
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                settings.clearNextFeedAt()
-            } finally {
-                pending.finish()
-            }
         }
     }
 

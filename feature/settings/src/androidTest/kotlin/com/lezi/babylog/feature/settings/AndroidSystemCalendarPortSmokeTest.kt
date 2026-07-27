@@ -9,7 +9,10 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.domain.SystemCalendarDisclosureLevel
 import com.lezi.babylog.domain.SystemCalendarDisclosurePolicy
+import com.lezi.babylog.domain.SystemCalendarEventState
+import com.lezi.babylog.domain.SystemCalendarOwnedEventLookup
 import com.lezi.babylog.domain.SystemCalendarUpsert
+import com.lezi.babylog.domain.SystemCalendarUpsertOutcome
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assume.assumeTrue
@@ -110,7 +113,7 @@ class AndroidSystemCalendarPortSmokeTest {
             photoCount = 3,
             carePlanClientUuid = planUuid,
         )
-        val eventId = port.upsertEvent(
+        val inserted = port.upsertEvent(
             SystemCalendarUpsert(
                 calendarId = calId,
                 carePlanClientUuid = planUuid,
@@ -120,8 +123,12 @@ class AndroidSystemCalendarPortSmokeTest {
                 customAppUri = l1.deepLinkUri,
             ),
         )
-        assertThat(eventId).isNotNull()
-        createdEventIds += eventId!!.toLong()
+        assertThat(inserted.outcome).isEqualTo(SystemCalendarUpsertOutcome.CurrentReady)
+        val eventId = checkNotNull(inserted.eventId)
+        createdEventIds += eventId.toLong()
+        assertThat(readBeginReminder(eventId.toLong())).isTrue()
+        assertThat(port.findOwnedEvent(planUuid))
+            .isEqualTo(SystemCalendarOwnedEventLookup.Found(setOf(eventId)))
         val l1Row = readEvent(eventId.toLong())
         assertThat(l1Row.title).isEqualTo(SystemCalendarDisclosurePolicy.L1_TITLE)
         assertThat(l1Row.description.orEmpty()).doesNotContain("不应出现")
@@ -150,7 +157,8 @@ class AndroidSystemCalendarPortSmokeTest {
                 customAppUri = l2.deepLinkUri,
             ),
         )
-        assertThat(sameId).isEqualTo(eventId)
+        assertThat(sameId.eventId).isEqualTo(eventId)
+        assertThat(sameId.outcome).isEqualTo(SystemCalendarUpsertOutcome.CurrentReady)
         val l2Row = readEvent(eventId.toLong())
         assertThat(l2Row.title).isEqualTo("乐乐 · 配方奶")
 
@@ -167,18 +175,19 @@ class AndroidSystemCalendarPortSmokeTest {
         assertThat(l3.description).contains("照片 2 张，打开乐记查看")
         assertThat(l3.description).doesNotContain("content://")
         assertThat(l3.description).doesNotContain("file://")
-        val l3Id = port.upsertEvent(
+        val l3Result = port.upsertEvent(
             SystemCalendarUpsert(
                 calendarId = calId,
                 carePlanClientUuid = planUuid,
                 beginAtMillis = begin + 120_000L,
                 title = l3.title,
                 description = l3.description,
-                existingEventId = eventId,
+                existingEventId = null,
                 customAppUri = l3.deepLinkUri,
             ),
         )
-        assertThat(l3Id).isEqualTo(eventId)
+        assertThat(l3Result.eventId).isEqualTo(eventId)
+        assertThat(l3Result.outcome).isEqualTo(SystemCalendarUpsertOutcome.CurrentReady)
         val l3Row = readEvent(eventId.toLong())
         assertThat(l3Row.title).isEqualTo("乐乐 · 配方奶")
         assertThat(l3Row.description).contains("照片 2 张，打开乐记查看")
@@ -192,6 +201,7 @@ class AndroidSystemCalendarPortSmokeTest {
         assertThat(port.eventExists(eventId)).isTrue()
         assertThat(port.deleteEvent(eventId)).isTrue()
         assertThat(port.eventExists(eventId)).isFalse()
+        assertThat(port.findOwnedEvent(planUuid)).isEqualTo(SystemCalendarOwnedEventLookup.Absent)
         createdEventIds.remove(eventId.toLong())
     }
 
@@ -209,13 +219,14 @@ class AndroidSystemCalendarPortSmokeTest {
                 description = null,
             ),
         )
-        assertThat(result).isNull()
+        assertThat(result.eventId).isNull()
+        assertThat(result.outcome).isEqualTo(SystemCalendarUpsertOutcome.ReleasedOrAbsent)
         assertThat(port.deleteEvent("not-a-number")).isFalse()
         assertThat(port.eventExists("not-a-number")).isFalse()
-        // Existing-id update on garbage id also fails closed.
+        // Confirmed missing id/UID still cannot insert into an invalid target.
         val updateMissing = port.upsertEvent(
             SystemCalendarUpsert(
-                calendarId = "1",
+                calendarId = "not-a-calendar-id",
                 carePlanClientUuid = "fail-plan-2",
                 beginAtMillis = System.currentTimeMillis() + 60_000L,
                 title = "乐记 · 护理计划",
@@ -223,13 +234,260 @@ class AndroidSystemCalendarPortSmokeTest {
                 existingEventId = "999999999999",
             ),
         )
-        assertThat(updateMissing).isNull()
+        assertThat(updateMissing.eventId).isNull()
+        assertThat(updateMissing.outcome)
+            .isEqualTo(SystemCalendarUpsertOutcome.ReleasedOrAbsent)
+    }
+
+    @Test
+    fun duplicateOwnedEventsConvergeToOneCanonicalProjection() = runBlocking<Unit> {
+        assumeTrue("Calendar permission not granted", port.hasCalendarPermission())
+        val calendarId = createWritableLocalCalendar()
+        assumeTrue("Cannot create writable local calendar", calendarId != null)
+        val calId = calendarId!!
+        val planUuid = "duplicate-plan-${System.nanoTime()}"
+        val begin = System.currentTimeMillis() + 7_200_000L
+
+        val first = port.upsertEvent(
+            SystemCalendarUpsert(
+                calendarId = calId,
+                carePlanClientUuid = planUuid,
+                beginAtMillis = begin,
+                title = "first",
+            ),
+        )
+        val firstEventId = checkNotNull(first.eventId)
+        createdEventIds += firstEventId.toLong()
+        val duplicate2 = rawInsertOwnedEvent(calId, planUuid, begin + 60_000L)
+        val duplicate3 = rawInsertOwnedEvent(calId, planUuid, begin + 120_000L)
+        createdEventIds += duplicate2
+        createdEventIds += duplicate3
+        rawInsertReminder(duplicate2, minutes = 15)
+        rawInsertReminder(duplicate3, minutes = 30)
+        assertThat(readAnyReminder(duplicate2)).isTrue()
+        assertThat(readAnyReminder(duplicate3)).isTrue()
+
+        assertThat(port.findOwnedEvent(planUuid)).isEqualTo(
+            SystemCalendarOwnedEventLookup.Found(
+                setOf(firstEventId, duplicate2.toString(), duplicate3.toString()),
+            ),
+        )
+
+        val converged = port.upsertEvent(
+            SystemCalendarUpsert(
+                calendarId = calId,
+                carePlanClientUuid = planUuid,
+                beginAtMillis = begin + 180_000L,
+                title = "canonical",
+            ),
+        )
+        assertThat(converged.eventId).isEqualTo(firstEventId)
+        assertThat(converged.outcome).isEqualTo(SystemCalendarUpsertOutcome.CurrentReady)
+        assertThat(port.findOwnedEvent(planUuid))
+            .isEqualTo(SystemCalendarOwnedEventLookup.Found(setOf(firstEventId)))
+        assertThat(port.eventState(duplicate2.toString())).isEqualTo(SystemCalendarEventState.ABSENT)
+        assertThat(port.eventState(duplicate3.toString())).isEqualTo(SystemCalendarEventState.ABSENT)
+        assertThat(readAnyReminder(duplicate2)).isFalse()
+        assertThat(readAnyReminder(duplicate3)).isFalse()
+        createdEventIds.remove(duplicate2)
+        createdEventIds.remove(duplicate3)
+    }
+
+    @Test
+    fun deletedProviderTombstoneIsStrictlyAbsent() = runBlocking<Unit> {
+        assumeTrue("Calendar permission not granted", port.hasCalendarPermission())
+        val calendarId = createWritableLocalCalendar()
+        assumeTrue("Cannot create writable local calendar", calendarId != null)
+        val calId = calendarId!!
+        val planUuid = "tombstone-plan-${System.nanoTime()}"
+        val inserted = port.upsertEvent(
+            SystemCalendarUpsert(
+                calendarId = calId,
+                carePlanClientUuid = planUuid,
+                beginAtMillis = System.currentTimeMillis() + 3_600_000L,
+                title = "tombstone",
+            ),
+        )
+        val eventId = checkNotNull(inserted.eventId).toLong()
+        createdEventIds += eventId
+        val syncAdapterUri = ContentUris.withAppendedId(
+            CalendarContract.Events.CONTENT_URI,
+            eventId,
+        ).buildUpon()
+            .appendQueryParameter(CalendarContract.CALLER_IS_SYNCADAPTER, "true")
+            .appendQueryParameter(CalendarContract.Calendars.ACCOUNT_NAME, ACCOUNT_NAME)
+            .appendQueryParameter(
+                CalendarContract.Calendars.ACCOUNT_TYPE,
+                CalendarContract.ACCOUNT_TYPE_LOCAL,
+            )
+            .build()
+        val updated = context.contentResolver.update(
+            syncAdapterUri,
+            ContentValues().apply { put(CalendarContract.Events.DELETED, 1) },
+            null,
+            null,
+        )
+        assumeTrue("Calendar provider cannot create a tombstone", updated > 0)
+
+        assertThat(port.eventState(eventId.toString())).isEqualTo(SystemCalendarEventState.ABSENT)
+        assertThat(port.findOwnedEvent(planUuid)).isEqualTo(SystemCalendarOwnedEventLookup.Absent)
+    }
+
+    @Test
+    fun staleIdsNeverMutateEventsWithTheWrongUidOrPackage() = runBlocking<Unit> {
+        assumeTrue("Calendar permission not granted", port.hasCalendarPermission())
+        val calendarId = createWritableLocalCalendar()
+        assumeTrue("Cannot create writable local calendar", calendarId != null)
+        val calId = calendarId!!
+        val begin = System.currentTimeMillis() + 10_800_000L
+
+        val packagePlan = "package-owner-${System.nanoTime()}"
+        val wrongPackageId = rawInsertOwnedEvent(
+            calendarId = calId,
+            carePlanClientUuid = packagePlan,
+            beginAtMillis = begin,
+            appPackage = "com.example.not.lezi",
+        )
+        createdEventIds += wrongPackageId
+        assertThat(port.eventState(wrongPackageId.toString()))
+            .isEqualTo(SystemCalendarEventState.ABSENT)
+        assertThat(port.eventState(wrongPackageId.toString(), packagePlan))
+            .isEqualTo(SystemCalendarEventState.ABSENT)
+        val packageResult = port.upsertEvent(
+            SystemCalendarUpsert(
+                calendarId = calId,
+                carePlanClientUuid = packagePlan,
+                beginAtMillis = begin + 60_000L,
+                title = "owned package",
+                existingEventId = wrongPackageId.toString(),
+            ),
+        )
+        createdEventIds += checkNotNull(packageResult.eventId).toLong()
+        assertThat(packageResult.eventId).isNotEqualTo(wrongPackageId.toString())
+        assertThat(readEvent(wrongPackageId).title).isEqualTo("duplicate")
+        assertThat(port.deleteEvent(wrongPackageId.toString())).isFalse()
+        assertThat(port.deleteEvent(wrongPackageId.toString(), packagePlan)).isFalse()
+
+        val uidPlan = "uid-owner-${System.nanoTime()}"
+        val wrongUidId = rawInsertOwnedEvent(
+            calendarId = calId,
+            carePlanClientUuid = "$uidPlan-other",
+            beginAtMillis = begin,
+        )
+        createdEventIds += wrongUidId
+        assertThat(port.eventState(wrongUidId.toString(), uidPlan))
+            .isEqualTo(SystemCalendarEventState.ABSENT)
+        val uidResult = port.upsertEvent(
+            SystemCalendarUpsert(
+                calendarId = calId,
+                carePlanClientUuid = uidPlan,
+                beginAtMillis = begin + 120_000L,
+                title = "owned uid",
+                existingEventId = wrongUidId.toString(),
+            ),
+        )
+        createdEventIds += checkNotNull(uidResult.eventId).toLong()
+        assertThat(uidResult.eventId).isNotEqualTo(wrongUidId.toString())
+        assertThat(readEvent(wrongUidId).title).isEqualTo("duplicate")
+        assertThat(port.deleteEvent(wrongUidId.toString(), uidPlan)).isFalse()
+    }
+
+    @Test
+    fun unwritableTargetReleasesTheOldProviderReminderBeforeFallback() = runBlocking<Unit> {
+        assumeTrue("Calendar permission not granted", port.hasCalendarPermission())
+        val calendarId = createWritableLocalCalendar()
+        assumeTrue("Cannot create writable local calendar", calendarId != null)
+        val calId = calendarId!!
+        val planUuid = "unwritable-target-${System.nanoTime()}"
+        val begin = System.currentTimeMillis() + 14_400_000L
+        val inserted = port.upsertEvent(
+            SystemCalendarUpsert(
+                calendarId = calId,
+                carePlanClientUuid = planUuid,
+                beginAtMillis = begin,
+                title = "before target loss",
+            ),
+        )
+        val eventId = checkNotNull(inserted.eventId).toLong()
+        createdEventIds += eventId
+        assertThat(readBeginReminder(eventId)).isTrue()
+
+        val calendarUri = ContentUris.withAppendedId(
+            CalendarContract.Calendars.CONTENT_URI,
+            calId.toLong(),
+        ).buildUpon()
+            .appendQueryParameter(CalendarContract.CALLER_IS_SYNCADAPTER, "true")
+            .appendQueryParameter(CalendarContract.Calendars.ACCOUNT_NAME, ACCOUNT_NAME)
+            .appendQueryParameter(
+                CalendarContract.Calendars.ACCOUNT_TYPE,
+                CalendarContract.ACCOUNT_TYPE_LOCAL,
+            )
+            .build()
+        val downgraded = context.contentResolver.update(
+            calendarUri,
+            ContentValues().apply {
+                put(
+                    CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL,
+                    CalendarContract.Calendars.CAL_ACCESS_READ,
+                )
+            },
+            null,
+            null,
+        )
+        assumeTrue("Calendar provider cannot downgrade target", downgraded > 0)
+        assertThat(port.isWritableCalendar(calId)).isFalse()
+
+        val result = port.upsertEvent(
+            SystemCalendarUpsert(
+                calendarId = calId,
+                carePlanClientUuid = planUuid,
+                beginAtMillis = begin + 60_000L,
+                title = "after target loss",
+                existingEventId = eventId.toString(),
+                providerHandoffMayExist = true,
+            ),
+        )
+        assertThat(result.outcome).isEqualTo(SystemCalendarUpsertOutcome.ReleasedOrAbsent)
+        assertThat(result.eventId).isEqualTo(eventId.toString())
+        assertThat(readAnyReminder(eventId)).isFalse()
+    }
+
+    private fun readBeginReminder(eventId: Long): Boolean {
+        context.contentResolver.query(
+            CalendarContract.Reminders.CONTENT_URI,
+            arrayOf(CalendarContract.Reminders._ID),
+            "${CalendarContract.Reminders.EVENT_ID}=? AND " +
+                "${CalendarContract.Reminders.MINUTES}=? AND " +
+                "${CalendarContract.Reminders.METHOD}=?",
+            arrayOf(
+                eventId.toString(),
+                "0",
+                CalendarContract.Reminders.METHOD_ALERT.toString(),
+            ),
+            null,
+        )?.use { cursor -> return cursor.moveToFirst() }
+        return false
+    }
+
+    private fun readAnyReminder(eventId: Long): Boolean {
+        context.contentResolver.query(
+            CalendarContract.Reminders.CONTENT_URI,
+            arrayOf(CalendarContract.Reminders._ID),
+            "${CalendarContract.Reminders.EVENT_ID}=?",
+            arrayOf(eventId.toString()),
+            null,
+        )?.use { cursor -> return cursor.moveToFirst() }
+        return false
     }
 
     private fun ensureWritableLocalCalendar(): String? {
         val existing = runBlocking { port.listWritableCalendars() }.firstOrNull()
         if (existing != null) return existing.calendarId
 
+        return createWritableLocalCalendar()
+    }
+
+    private fun createWritableLocalCalendar(): String? {
         val values = ContentValues().apply {
             put(CalendarContract.Calendars.ACCOUNT_NAME, ACCOUNT_NAME)
             put(CalendarContract.Calendars.ACCOUNT_TYPE, CalendarContract.ACCOUNT_TYPE_LOCAL)
@@ -255,6 +513,37 @@ class AndroidSystemCalendarPortSmokeTest {
         val id = ContentUris.parseId(inserted)
         createdCalendarIds += id
         return id.toString()
+    }
+
+    private fun rawInsertOwnedEvent(
+        calendarId: String,
+        carePlanClientUuid: String,
+        beginAtMillis: Long,
+        appPackage: String = context.packageName,
+    ): Long {
+        val values = ContentValues().apply {
+            put(CalendarContract.Events.CALENDAR_ID, calendarId.toLong())
+            put(CalendarContract.Events.TITLE, "duplicate")
+            put(CalendarContract.Events.DTSTART, beginAtMillis)
+            put(CalendarContract.Events.DTEND, beginAtMillis + 30L * 60_000L)
+            put(CalendarContract.Events.EVENT_TIMEZONE, "UTC")
+            put(CalendarContract.Events.HAS_ALARM, 1)
+            put(CalendarContract.Events.CUSTOM_APP_PACKAGE, appPackage)
+            put(CalendarContract.Events.UID_2445, "lezi-care-plan-$carePlanClientUuid")
+        }
+        val uri = checkNotNull(
+            context.contentResolver.insert(CalendarContract.Events.CONTENT_URI, values),
+        )
+        return ContentUris.parseId(uri)
+    }
+
+    private fun rawInsertReminder(eventId: Long, minutes: Int) {
+        val values = ContentValues().apply {
+            put(CalendarContract.Reminders.EVENT_ID, eventId)
+            put(CalendarContract.Reminders.MINUTES, minutes)
+            put(CalendarContract.Reminders.METHOD, CalendarContract.Reminders.METHOD_ALERT)
+        }
+        checkNotNull(context.contentResolver.insert(CalendarContract.Reminders.CONTENT_URI, values))
     }
 
     private data class EventRow(

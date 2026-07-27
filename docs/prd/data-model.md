@@ -149,9 +149,19 @@ Record 会立即带当前 session membership；NAS 对 ordinary push 与 atomic 
 不含该 key 的兼容 payload，并由 device 链路回退显示。
 
 Room 18→19 为既有 `pending_reminder_cleanup` 增加默认空集合的
-`carePlanIds`。清除记录或全部本地数据时，系统日历与护理计划的本机提醒 ID 在领域删除
-事务内一并持久化；只有两类提醒都取消成功后才删除 pending 行，进程重启恢复不得遗失
-已删除护理计划的闹钟身份。
+`carePlanIds`；Room 20→21 再加入默认 `{}` 的 `systemCalendarProjectionsJson`、默认 `0` 的
+`settingsSnapshotCaptured`，以及可空的 `currentBabyId` / `nextFeedAt` / `nextFeedEpoch`。
+`systemCalendarProjectionsJson` 是稳定护理计划 UUID 到 provider event ID（可空，表示只可按
+UID 查找）的精确映射。清除记录或全部本地数据时，领域事务按 scope 分别写入 pending 行，
+持久保存普通日程提醒 ID、护理计划提醒 ID、系统日历投影身份、设置 epoch 与家庭服务器保留
+标记。提交后必须依次确认系统日历副本已删除、scope 对应设置已清理、应用内提醒已取消，
+才可删除 pending 行并向界面返回成功；权限撤销或 provider 失败时保留该行，进程重启或用户
+重试后继续，不得遗失已删除护理计划的任一提醒身份。
+
+v20 遗留 pending 行没有可信设置 epoch：升级恢复只认领当前已无对应 CarePlan 的孤儿 UUID
+映射，并把 `nextFeedEpoch` 保持为空，因此不得消费恢复期间的当前喂养提醒。v21 新清除则只
+删除仍与捕获 UUID + event ID 精确相等的系统日历映射，以及 epoch 仍相等的喂养提醒；清除
+提交后新写入的设置、映射及其 alarm 属于新 epoch，必须保留。
 
 NAS 升级时只回填可证明的历史作者：同家庭内一个 `created_by_device_id` 恰好对应一个
 历史 membership 时，写入该 membership 并推进 Record/family revision，使已经越过旧
@@ -204,7 +214,7 @@ server-owned metadata；不修改护理内容、照片、删除状态或业务�
 |------|------|
 | `id` | |
 | `client_uuid` | 跨设备同步键，UNIQUE |
-| `kind` | `log` \| `plan`（已批准扩展、待实现）\| `avatar` |
+| `kind` | `log`（Record/CarePlan 由归属列区分）\| `avatar` |
 | `record_id` / `plan_id` / `baby_id` | 记录图关联 Record；计划图关联 CarePlan；头像关联 Baby，三选一 |
 | `local_uri` | 本机私有文件路径，不进入 wire payload |
 | `remote_uri` | 当前家庭服务器已上传标记；更换服务器时清除 |
@@ -228,6 +238,7 @@ server-owned metadata；不修改护理内容、照片、删除状态或业务�
 | `record_at_start_or_end` | 母乳记录时刻 |
 | `nursing_interval_min` | 提醒间隔 |
 | `next_feed_at` | 本机下次提醒 |
+| `next_feed_epoch` | 本机下次提醒写入身份；接收器与本地清除只消费匹配 epoch，防止同时间 ABA |
 | `dark_mode` | |
 | `day_count_mode` | 满日龄 / 计数日龄 |
 | `week_start` | |
@@ -263,13 +274,18 @@ server-owned metadata；不修改护理内容、照片、删除状态或业务�
 写入时从认证 membership 盖章创建者，普通成员仅可改自己的定义，管理员可改全部，
 tombstone 不可复活。删除目录项不级联删除或改写历史 `custom` 记录。
 
-### 3.11 CarePlan（本机 tracer 已落地；NAS wire/ACL 已落地；客户端家庭 apply 待后续票）
+### 3.11 CarePlan（本机、NAS wire/ACL 与客户端家庭 apply 已落地）
 
 护理计划与已发生 Record 分离。Room 表 `care_plans` 字段包括：`client_uuid`,
 `baby_id`, `type`, `custom_item_id?`, `scheduled_at`, `scheduled_zone_id`,
 `note`, `payload_json`, `schema_version`, `status`,
 `created_by_membership_id`, `fulfilled_record_client_uuid?`, `fulfilled_at?`,
-`updated_at`, `deleted_at`。
+`source_record_client_uuid?`, `updated_at`, `deleted_at`, `sync_dirty`。此外保留
+`system_calendar_projection_enabled`, `system_calendar_event_id?`,
+`system_calendar_reminder_ready`, `system_calendar_projection_pending` 与
+`legacy_care_plan_reminder_pending` 等设备本机副作用状态；这些字段不进入家庭 wire。
+远端 apply 保留本机投影选择与 event ID，但共享的时间、时区、标题内容或生命周期
+变化时会使旧 reminder generation 失效，并在已有 provider 身份时留下待收敛标记。
 
 NAS 原子包根类型 `care_plan` 的 wire payload 为：
 `baby_client_uuid`, `type`, `custom_item_client_uuid?`, `scheduled_at`,
@@ -409,10 +425,10 @@ interface SyncPort {
   suspend fun leave(familyId: String): Result<Unit>
   suspend fun deleteFamily(): Result<Unit>
 
-  /** 清本机记录副本 + 日志媒体/文件；保留会话 generation */
-  suspend fun clearLocalRecords(clearLocal: suspend () -> Unit): Result<Unit>
-  /** 全量 wipe（含 outbox/头像媒体），join 前用 */
-  suspend fun clearAllLocalData(clearLocal: suspend () -> Unit): Result<Unit>
+  /** 清本机 Record/CarePlan/履行候选/历史日程及日志媒体；保留宝宝、自定义项目和家庭会话 */
+  suspend fun clearLocalRecords(workflow: LocalClearWorkflow): Result<Unit>
+  /** 全量 wipe（含 outbox/头像媒体），join 前用；使用同一耐久 workflow */
+  suspend fun clearAllLocalData(workflow: LocalClearWorkflow): Result<Unit>
 }
 ```
 
@@ -431,9 +447,9 @@ interface SyncPort {
 | 部署 | 家庭 NAS 中心化（Docker `lezi-sync`）；**非** P2P 主路径 |
 | 门闩 | **硬家庭局域网**：Wi‑Fi + NAS health；蜂窝不同步 |
 | 触发 | **仅前台**：回前台、下拉、前台写成功后 push；**无**后台轮询、**无**推送拉同步 |
-| 同步域（首版） | **Baby + Record + 日志 MediaAsset（含字节）** |
+| 同步域（现行） | **Baby + Record + CustomItemDef + CarePlan + FulfillmentCandidate + Record/计划 MediaAsset（含原子照片包）** |
 | 写权限 | 宝宝**头像**仅 owner；日志媒体家庭内可同步 |
-| 已批准扩展（待实现） | CustomItemDef、CarePlan、计划 MediaAsset、Record/CarePlan 原子照片包 |
+| 已落地扩展 | CustomItemDef、CarePlan、计划 MediaAsset、Record/CarePlan 原子照片包与履行候选 |
 | 继续不同步 | 通用 CalendarEvent、系统日历 ID/权限/披露级别、提醒偏好、快捷槽位与布局顺序 |
 | 不同步 | SettingsLocal、Baby `theme_color`/`sort_order`、下次喂奶时刻、Widget 配置、本机路径 |
 | 共享粒度 | **全量**（同步域内）；不做字段白名单 |
@@ -470,5 +486,4 @@ V1 可提供「导出数据库/JSON 到文件」便于换机；与家庭实时�
 |------|--------|
 | V1 | LocalUser, Family, Membership, Baby, Record, Media, SettingsLocal；SyncPort 空实现 |
 | V1.5 | 曲线包资源只读；导出读 Record |
-| V2（现行） | ShareInvite, Outbox, CustomItem, CalendarEvent；SyncPort 真实现 |
-| V2 护理计划扩展（待实现） | 家庭共享 CustomItemDef、CarePlan、计划媒体与原子照片同步包；CalendarEvent 保持历史本机兼容 |
+| V2（现行） | ShareInvite、Outbox、CustomItemDef、CarePlan、FulfillmentCandidate、Record/计划媒体原子包；SyncPort 真实现；CalendarEvent 保持历史本机兼容 |

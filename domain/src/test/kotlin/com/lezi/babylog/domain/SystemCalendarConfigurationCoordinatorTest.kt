@@ -13,6 +13,7 @@ class SystemCalendarConfigurationCoordinatorTest {
                 events += "configure:$calendarId:$disclosureLevel"
             },
             reprojectOpenFuture = { events += "reproject" },
+            disableProjection = { events += "disable-projection" },
         )
 
         coordinator.confirm(calendarId = " calendar-7 ", disclosureLevel = 3)
@@ -29,6 +30,7 @@ class SystemCalendarConfigurationCoordinatorTest {
         val coordinator = DefaultSystemCalendarConfigurationCoordinator(
             configure = { _, _ -> events += "configure" },
             reprojectOpenFuture = { events += "reproject" },
+            disableProjection = { events += "disable-projection" },
         )
 
         val error = runCatching {
@@ -40,17 +42,21 @@ class SystemCalendarConfigurationCoordinatorTest {
     }
 
     @Test
-    fun disableDoesNotReprojectOrChangeTheLastDisclosureChoice() = runTest {
+    fun disablePersistsFirstThenReconcilesEveryOwnedProjection() = runTest {
         val events = mutableListOf<String>()
         val coordinator = DefaultSystemCalendarConfigurationCoordinator(
             configure = { calendarId, disclosureLevel ->
                 events += "configure:$calendarId:$disclosureLevel"
             },
             reprojectOpenFuture = { events += "reproject" },
+            disableProjection = { events += "disable-projection" },
         )
 
         coordinator.disable()
 
-        assertThat(events).containsExactly("configure:null:null")
+        assertThat(events).containsExactly(
+            "configure:null:null",
+            "disable-projection",
+        ).inOrder()
     }
 }

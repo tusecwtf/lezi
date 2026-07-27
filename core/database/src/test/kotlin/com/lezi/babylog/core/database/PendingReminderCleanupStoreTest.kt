@@ -22,6 +22,7 @@ class PendingReminderCleanupStoreTest {
             PendingReminderCleanup(
                 operation = PendingReminderCleanupOperation.RECORDS_CLEAR,
                 calendarEventIds = setOf(3L, 9L),
+                settingsSnapshotCaptured = false,
                 familyServerRetained = false,
             ),
         )
@@ -44,6 +45,10 @@ class PendingReminderCleanupStoreTest {
                 operation = PendingReminderCleanupOperation.RECORDS_CLEAR,
                 calendarEventIds = setOf(3L, 2L),
                 carePlanIds = setOf(3L, 2L),
+                systemCalendarProjections = linkedMapOf(
+                    "plan-3" to "evt,3",
+                    "plan-2" to "evt-2",
+                ),
                 familyServerRetained = false,
             ),
         )
@@ -52,6 +57,7 @@ class PendingReminderCleanupStoreTest {
                 operation = PendingReminderCleanupOperation.RECORDS_CLEAR,
                 calendarEventIds = setOf(1L),
                 carePlanIds = setOf(1L),
+                systemCalendarProjections = mapOf("plan-1" to "evt-1"),
                 familyServerRetained = true,
             ),
         )
@@ -60,6 +66,7 @@ class PendingReminderCleanupStoreTest {
                 operation = PendingReminderCleanupOperation.RECORDS_CLEAR,
                 calendarEventIds = emptySet(),
                 carePlanIds = emptySet(),
+                systemCalendarProjections = emptyMap(),
                 familyServerRetained = false,
             ),
         )
@@ -69,6 +76,9 @@ class PendingReminderCleanupStoreTest {
                 operation = "records_clear",
                 calendarEventIds = "1,2,3,7",
                 carePlanIds = "1,2,3,5",
+                systemCalendarProjectionsJson =
+                    "{\"plan-1\":\"evt-1\",\"plan-2\":\"evt-2\",\"plan-3\":\"evt,3\"}",
+                settingsSnapshotCaptured = true,
                 familyServerRetained = true,
             ),
         )
@@ -90,12 +100,74 @@ class PendingReminderCleanupStoreTest {
 
         assertThat(store.load(operation)?.calendarEventIds).isEmpty()
         assertThat(store.load(operation)?.carePlanIds).isEmpty()
+        assertThat(store.load(operation)?.systemCalendarProjections).isEmpty()
+        assertThat(store.load(operation)?.settingsSnapshotCaptured).isTrue()
         assertThat(dao.pending?.calendarEventIds).isEmpty()
         assertThat(dao.pending?.carePlanIds).isEmpty()
+        assertThat(dao.pending?.systemCalendarProjectionsJson).isEqualTo("{}")
 
         store.delete(operation)
 
         assertThat(store.load(operation)).isNull()
+    }
+
+    @Test
+    fun nextFeedEpochRoundTripsThroughTheDurableMarker() = runBlocking {
+        val dao = FakePendingReminderCleanupDao()
+        val store = RoomPendingReminderCleanupStore(dao)
+        val pending = PendingReminderCleanup(
+            operation = PendingReminderCleanupOperation.RECORDS_CLEAR,
+            calendarEventIds = emptySet(),
+            nextFeedAt = 8L,
+            nextFeedEpoch = "feed-epoch-1",
+            familyServerRetained = false,
+        )
+
+        store.upsert(pending)
+
+        assertThat(store.load(PendingReminderCleanupOperation.RECORDS_CLEAR)).isEqualTo(pending)
+        assertThat(dao.pending?.nextFeedEpoch).isEqualTo("feed-epoch-1")
+    }
+
+    @Test
+    fun systemCalendarProjectionPairsAndUidOnlyHandoffsRoundTrip() = runBlocking {
+        val dao = FakePendingReminderCleanupDao()
+        val store = RoomPendingReminderCleanupStore(dao)
+        val pending = PendingReminderCleanup(
+            operation = PendingReminderCleanupOperation.RECORDS_CLEAR,
+            calendarEventIds = emptySet(),
+            systemCalendarProjections = linkedMapOf(
+                "plan-with-id" to "evt-41",
+                "plan-needs-uid-lookup" to null,
+            ),
+            familyServerRetained = false,
+        )
+
+        store.upsert(pending)
+
+        assertThat(store.load(PendingReminderCleanupOperation.RECORDS_CLEAR))
+            .isEqualTo(pending)
+        assertThat(dao.pending?.systemCalendarProjectionsJson)
+            .isEqualTo("{\"plan-needs-uid-lookup\":null,\"plan-with-id\":\"evt-41\"}")
+    }
+
+    @Test
+    fun allLocalCleanupUsesAnIndependentDurableOperationKey() = runBlocking {
+        val dao = FakePendingReminderCleanupDao()
+        val store = RoomPendingReminderCleanupStore(dao)
+        val operation = PendingReminderCleanupOperation.ALL_LOCAL_DATA_CLEAR
+
+        store.upsert(
+            PendingReminderCleanup(
+                operation = operation,
+                calendarEventIds = setOf(7L),
+                carePlanIds = setOf(8L),
+                familyServerRetained = false,
+            ),
+        )
+
+        assertThat(dao.pending?.operation).isEqualTo("all_local_data_clear")
+        assertThat(store.load(operation)?.operation).isEqualTo(operation)
     }
 
     @Test

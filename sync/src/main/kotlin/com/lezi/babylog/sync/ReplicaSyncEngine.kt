@@ -731,24 +731,56 @@ internal class ReplicaSyncEngine(
         ) {
             if (recordDao.getByClientUuid(fulfilledRecordUuid) == null) return false
         }
+        val remoteType = payload.string("type") ?: existing?.type ?: "other"
+        val remoteScheduledAt = payload.long("scheduled_at") ?: existing?.scheduledAt
+            ?: entity.updatedAt
+        val remoteScheduledZoneId = payload.string("scheduled_zone_id")
+            ?: existing?.scheduledZoneId
+            ?: "UTC"
+        val remoteNote = if ("note" in payload) payload.string("note") else existing?.note
+        val remotePayloadJson = preserveDeviceLocalPhotos(
+            remotePayloadJson = SyncWireMapper.carePlanPayloadJson(payload),
+            existingPayloadJson = existing?.payloadJson,
+        )
+        val remoteSchemaVersion = SyncWireMapper.carePlanSchemaVersion(payload)
+        val terminal = entity.deletedAt != null || status == "completed" || status == "skipped"
+        val existingTerminal = existing?.let {
+            it.deletedAt != null || it.status == "completed" || it.status == "skipped"
+        }
+        val projectionVisibleRevision = existing != null && (
+            existing.babyId != baby.id ||
+                existing.type != remoteType ||
+                existing.customItemId != (customItemId ?: existing.customItemId) ||
+                existing.scheduledAt != remoteScheduledAt ||
+                existing.scheduledZoneId != remoteScheduledZoneId ||
+                existing.note != remoteNote ||
+                existing.payloadJson != remotePayloadJson ||
+                existing.schemaVersion != remoteSchemaVersion ||
+                existingTerminal != terminal
+            )
+        // Provider I/O runs only after this transaction. Persist the hand-off here so
+        // a crash between replica apply and the listener cannot leave a stale event
+        // claiming that its reminder is ready. Terminal rows use the same marker for
+        // durable cleanup only when this device has evidence of a prior side effect.
+        val calendarProjectionNeedsReconciliation = terminal || projectionVisibleRevision
+        val hasLocalReminderSideEffectEvidence = existing?.let {
+            it.systemCalendarEventId != null ||
+                it.systemCalendarReminderReady ||
+                it.systemCalendarProjectionPending ||
+                it.legacyCarePlanReminderPending
+        } == true
         carePlanDao.upsert(
             CarePlanEntity(
                 id = existing?.id ?: 0,
                 clientUuid = entity.clientUuid,
                 babyId = baby.id,
-                type = payload.string("type") ?: existing?.type ?: "other",
+                type = remoteType,
                 customItemId = customItemId ?: existing?.customItemId,
-                scheduledAt = payload.long("scheduled_at") ?: existing?.scheduledAt
-                    ?: entity.updatedAt,
-                scheduledZoneId = payload.string("scheduled_zone_id")
-                    ?: existing?.scheduledZoneId
-                    ?: "UTC",
-                note = if ("note" in payload) payload.string("note") else existing?.note,
-                payloadJson = preserveDeviceLocalPhotos(
-                    remotePayloadJson = SyncWireMapper.carePlanPayloadJson(payload),
-                    existingPayloadJson = existing?.payloadJson,
-                ),
-                schemaVersion = SyncWireMapper.carePlanSchemaVersion(payload),
+                scheduledAt = remoteScheduledAt,
+                scheduledZoneId = remoteScheduledZoneId,
+                note = remoteNote,
+                payloadJson = remotePayloadJson,
+                schemaVersion = remoteSchemaVersion,
                 status = status,
                 createdByMembershipId = payload.string("created_by_membership_id")
                     ?: existing?.createdByMembershipId
@@ -763,6 +795,21 @@ internal class ReplicaSyncEngine(
                 updatedAt = entity.updatedAt,
                 deletedAt = entity.deletedAt,
                 syncDirty = false,
+                systemCalendarProjectionEnabled =
+                    existing?.systemCalendarProjectionEnabled ?: true,
+                systemCalendarEventId = existing?.systemCalendarEventId,
+                systemCalendarReminderReady = if (calendarProjectionNeedsReconciliation) {
+                    false
+                } else {
+                    existing?.systemCalendarReminderReady ?: false
+                },
+                systemCalendarProjectionPending = if (calendarProjectionNeedsReconciliation) {
+                    hasLocalReminderSideEffectEvidence
+                } else {
+                    existing?.systemCalendarProjectionPending ?: false
+                },
+                legacyCarePlanReminderPending =
+                    existing?.legacyCarePlanReminderPending ?: false,
             ),
         )
         return true

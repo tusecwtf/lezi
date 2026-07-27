@@ -5,6 +5,7 @@ import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -593,7 +594,79 @@ class DatabaseMigrationTest {
     }
 
     @Test
-    fun migrate8To20_preservesLegacyPendingReminderCleanupRow() {
+    fun migrate20To21_addsSystemCalendarIdsWithoutLosingPendingCleanup() {
+        helper.createDatabase(PENDING_CALENDAR_V21_DATABASE, 20).apply {
+            execSQL(
+                """
+                INSERT INTO pending_reminder_cleanup (
+                    operation, calendarEventIds, carePlanIds, familyServerRetained
+                ) VALUES ('records_clear', '9,3', '8,4', 1)
+                """.trimIndent(),
+            )
+            execSQL(
+                """
+                INSERT INTO care_plans (
+                    id, clientUuid, babyId, type, customItemId, scheduledAt,
+                    scheduledZoneId, note, payloadJson, schemaVersion, status,
+                    createdByMembershipId, fulfilledRecordClientUuid, fulfilledAt,
+                    sourceRecordClientUuid, updatedAt, deletedAt, syncDirty
+                ) VALUES (
+                    23, 'plan-v20', 1, 'bath', NULL, 2000,
+                    'Asia/Shanghai', NULL, '{}', 1, 'pending',
+                    'member-1', NULL, NULL,
+                    NULL, 1500, NULL, 0
+                )
+                """.trimIndent(),
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            PENDING_CALENDAR_V21_DATABASE,
+            21,
+            true,
+            MIGRATION_20_21,
+        ).apply {
+            query(
+                """
+                SELECT calendarEventIds, carePlanIds, systemCalendarProjectionsJson,
+                       settingsSnapshotCaptured, currentBabyId, nextFeedAt, nextFeedEpoch,
+                       familyServerRetained
+                FROM pending_reminder_cleanup
+                WHERE operation = 'records_clear'
+                """.trimIndent(),
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("9,3", cursor.getString(0))
+                assertEquals("8,4", cursor.getString(1))
+                assertEquals("{}", cursor.getString(2))
+                assertEquals(0, cursor.getInt(3))
+                assertTrue(cursor.isNull(4))
+                assertTrue(cursor.isNull(5))
+                assertTrue(cursor.isNull(6))
+                assertEquals(1, cursor.getInt(7))
+            }
+            query(
+                """
+                SELECT systemCalendarProjectionEnabled, systemCalendarEventId,
+                       systemCalendarReminderReady, systemCalendarProjectionPending,
+                       legacyCarePlanReminderPending
+                FROM care_plans WHERE id = 23
+                """.trimIndent(),
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(1, cursor.getInt(0))
+                assertTrue(cursor.isNull(1))
+                assertEquals(0, cursor.getInt(2))
+                assertEquals(0, cursor.getInt(3))
+                assertEquals(1, cursor.getInt(4))
+            }
+            close()
+        }
+    }
+
+    @Test
+    fun migrate8To21_preservesLegacyPendingReminderCleanupRow() {
         helper.createDatabase(PENDING_REMINDER_DATABASE, 8).apply {
             execSQL(
                 """
@@ -607,7 +680,7 @@ class DatabaseMigrationTest {
 
         helper.runMigrationsAndValidate(
             PENDING_REMINDER_DATABASE,
-            20,
+            21,
             true,
             MIGRATION_8_9,
             MIGRATION_9_10,
@@ -621,6 +694,7 @@ class DatabaseMigrationTest {
             MIGRATION_17_18,
             MIGRATION_18_19,
             MIGRATION_19_20,
+            MIGRATION_20_21,
         ).apply {
             query(
                 """
@@ -640,14 +714,14 @@ class DatabaseMigrationTest {
 
     /**
      * Full upgrade chain from the shipped 0.2.4 Room schema (v7) through every
-     * published migration to the current feature head (v20).
+     * published migration to the current feature head (v21).
      *
      * Seeds a realistic pre-feature DB: facts with 1–3 log photos, free-title
      * calendar events, and a custom item. Asserts row preservation and that
      * feature tables/columns exist — does not invent missing migrations.
      */
     @Test
-    fun migrate7To20_preservesShipped024BaselineThroughCurrentHead() {
+    fun migrate7To21_preservesShipped024BaselineThroughCurrentHead() {
         helper.createDatabase(SHIPPED_024_DATABASE, 7).apply {
             execSQL(
                 """
@@ -761,7 +835,7 @@ class DatabaseMigrationTest {
 
         helper.runMigrationsAndValidate(
             SHIPPED_024_DATABASE,
-            20,
+            21,
             true,
             MIGRATION_7_8,
             MIGRATION_8_9,
@@ -776,6 +850,7 @@ class DatabaseMigrationTest {
             MIGRATION_17_18,
             MIGRATION_18_19,
             MIGRATION_19_20,
+            MIGRATION_20_21,
         ).apply {
             // Local identity preserved.
             query(
@@ -945,6 +1020,8 @@ class DatabaseMigrationTest {
         const val PENDING_REMINDER_DATABASE = "lezi-pending-reminder-migration-test"
         const val PENDING_REMINDER_V19_DATABASE = "lezi-pending-reminder-v19-migration-test"
         const val PENDING_REPLICA_V20_DATABASE = "lezi-pending-replica-v20-migration-test"
+        const val PENDING_CALENDAR_V21_DATABASE =
+            "lezi-pending-calendar-v21-migration-test"
         /** Shipped product 0.2.4 Room head (see dist/lezi-0.2.4-release.apk + schema 7.json). */
         const val SHIPPED_024_DATABASE = "lezi-shipped-0.2.4-full-chain-migration-test"
     }

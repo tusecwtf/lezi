@@ -24,6 +24,8 @@ import com.lezi.babylog.core.database.PendingReminderCleanupOperation
 import com.lezi.babylog.core.database.PendingReminderCleanupStore
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
+import com.lezi.babylog.core.datastore.LocalClearSettingsFinish
+import com.lezi.babylog.core.datastore.LocalClearSettingsSnapshot
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.core.model.CarePlanStatus
@@ -2209,6 +2211,53 @@ class CareLogTest {
     }
 
     @Test
+    fun recordsClearMarkerCapturesOnlyMappedOrProviderTouchedPlanUuids() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        suspend fun newPlan(): CarePlanEntity {
+            val id = care.createCarePlan(
+                babyId = babyId,
+                type = RecordType.BATH,
+                scheduledAt = now + 60_000L + fakes.carePlans.listAllIncludingDeleted().size,
+                nowMillis = now,
+            )
+            return checkNotNull(fakes.carePlans.get(id))
+        }
+        val mapped = newPlan()
+        val withEventId = newPlan().let { plan ->
+            plan.copy(systemCalendarEventId = "evt-known").also {
+                fakes.carePlans.update(it)
+            }
+        }
+        val uidLookupOnly = newPlan().let { plan ->
+            plan.copy(systemCalendarProjectionPending = true).also {
+                fakes.carePlans.update(it)
+            }
+        }
+        val untouched = newPlan()
+        fakes.settings.setSystemCalendarEventMapJson(
+            "{\"${mapped.clientUuid}\":\"evt-mapped\"}",
+        )
+
+        val failure = runCatching { care.clearRecordsOnly() }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(LocalRecordsClearCommittedException::class.java)
+        assertThat(fakes.pendingReminderCleanup.pending?.systemCalendarProjections)
+            .containsExactly(
+                mapped.clientUuid,
+                "evt-mapped",
+                withEventId.clientUuid,
+                "evt-known",
+                uidLookupOnly.clientUuid,
+                null,
+            )
+        assertThat(fakes.pendingReminderCleanup.pending?.systemCalendarProjections)
+            .doesNotContainKey(untouched.clientUuid)
+    }
+
+    @Test
     fun clearRecordsOnlyCancelsNextFeedAndEveryCalendarReminder() = runTest {
         val fakes = Fakes()
         val care = fakes.careLog()
@@ -2624,6 +2673,67 @@ class CareLogTest {
             care.onFamilyCarePlansApplied(listOf(skipUuid))
             assertThat(fakes.reminders.cancelledCarePlanIds).contains(skipId)
         }
+
+    @Test
+    fun onFamilyCarePlansAppliedCancelsAPastPlanInsteadOfSchedulingAnImmediateReminder() =
+        runTest {
+            val fakes = Fakes()
+            fakes.systemCalendar.permission = false
+            val care = fakes.careLog()
+            val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+            val planId = care.createCarePlan(
+                babyId = babyId,
+                type = RecordType.PEE,
+                scheduledAt = 10_000L,
+                nowMillis = 1_000L,
+            )
+            val planUuid = care.getCarePlan(planId)!!.clientUuid
+            fakes.carePlans.update(fakes.carePlans.get(planId)!!.copy(syncDirty = false))
+            fakes.reminders.scheduledCarePlanIds.clear()
+            fakes.reminders.cancelledCarePlanIds.clear()
+
+            care.onFamilyCarePlansApplied(
+                planClientUuids = listOf(planUuid),
+                nowMillis = 20_000L,
+            )
+
+            assertThat(fakes.reminders.scheduledCarePlanIds).doesNotContain(planId)
+            assertThat(fakes.reminders.cancelledCarePlanIds).contains(planId)
+        }
+
+    @Test
+    fun committedCarePlanSkipContinuesWhenAlarmCancellationFails() = runTest {
+        val sync = RecordingSyncPort()
+        val fakes = Fakes(sync)
+        fakes.systemCalendar.permission = true
+        fakes.settings.setSystemCalendarEnabled(true)
+        fakes.settings.setSystemCalendarId("cal-1")
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.BATH,
+            scheduledAt = now + 60_000L,
+            nowMillis = now,
+        )
+        val planUuid = care.getCarePlan(planId)!!.clientUuid
+        val eventId = parseSystemCalendarEventMap(
+            fakes.settings.settings.first().systemCalendarEventMapJson,
+        )[planUuid]
+        assertThat(eventId).isNotNull()
+        fakes.reminders.carePlanCancelFailure = IllegalStateException("alarm service unavailable")
+        val syncRequestsBeforeSkip = sync.requests
+
+        val failure = runCatching {
+            care.skipCarePlan(planId, nowMillis = now + 1)
+        }.exceptionOrNull()
+
+        assertThat(failure).isNull()
+        assertThat(fakes.carePlans.get(planId)!!.status).isEqualTo("skipped")
+        assertThat(fakes.systemCalendar.deleted).contains(eventId)
+        assertThat(sync.requests).isGreaterThan(syncRequestsBeforeSkip)
+    }
 
     @Test
     fun onFamilyCarePlansAppliedCancelsReminderAndSystemCalendarOnPeerCompleteAndDelete() =
@@ -3118,6 +3228,206 @@ class CareLogTest {
     }
 
     @Test
+    fun alarmManagerFailureNeverRollsBackCommittedCarePlan() = runTest {
+        val fakes = Fakes()
+        fakes.reminders.carePlanScheduleFailure = IllegalStateException("alarm unavailable")
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+
+        val result = runCatching {
+            care.createCarePlan(
+                babyId = babyId,
+                type = RecordType.BATH,
+                scheduledAt = now + 60_000L,
+                nowMillis = now,
+            )
+        }
+
+        assertThat(result.isSuccess).isTrue()
+        assertThat(care.getCarePlan(result.getOrThrow())).isNotNull()
+        assertThat(fakes.reminders.cancelledCarePlanIds).contains(result.getOrThrow())
+    }
+
+    @Test
+    fun providerEventWithoutReadyReminderKeepsLeziFallbackAndUnsyncedStatus() = runTest {
+        val fakes = Fakes()
+        fakes.systemCalendar.permission = true
+        fakes.systemCalendar.failReminder = true
+        fakes.settings.setSystemCalendarEnabled(true)
+        fakes.settings.setSystemCalendarId("cal-1")
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.BATH,
+            scheduledAt = now + 60_000L,
+            nowMillis = now,
+        )
+
+        val entity = fakes.carePlans.get(planId)!!
+        assertThat(entity.systemCalendarEventId).isNotNull()
+        assertThat(entity.systemCalendarReminderReady).isFalse()
+        assertThat(entity.systemCalendarProjectionPending).isFalse()
+        assertThat(fakes.reminders.scheduledCarePlanIds).contains(planId)
+        assertThat(care.isCarePlanSystemCalendarUnsynced(planId)).isTrue()
+    }
+
+    @Test
+    fun failedProviderUpdateCannotReusePriorReminderGeneration() = runTest {
+        val fakes = Fakes()
+        fakes.systemCalendar.permission = true
+        fakes.settings.setSystemCalendarEnabled(true)
+        fakes.settings.setSystemCalendarId("cal-1")
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.BATH,
+            scheduledAt = now + 60_000L,
+            nowMillis = now,
+        )
+        assertThat(fakes.carePlans.get(planId)!!.systemCalendarReminderReady).isTrue()
+
+        fakes.systemCalendar.failUpsert = true
+        fakes.reminders.scheduledCarePlanIds.clear()
+        care.updateCarePlan(
+            carePlanId = planId,
+            scheduledAt = now + 180_000L,
+            nowMillis = now + 1L,
+        )
+
+        assertThat(fakes.carePlans.get(planId)!!.systemCalendarReminderReady).isFalse()
+        assertThat(fakes.reminders.scheduledCarePlanIds).contains(planId)
+        assertThat(care.isCarePlanSystemCalendarUnsynced(planId)).isTrue()
+    }
+
+    @Test
+    fun indeterminateStaleProviderOwnerNeverEnablesSecondLeziReminder() = runTest {
+        val fakes = Fakes()
+        fakes.systemCalendar.permission = true
+        fakes.settings.setSystemCalendarEnabled(true)
+        fakes.settings.setSystemCalendarId("cal-1")
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.BATH,
+            scheduledAt = now + 60_000L,
+            nowMillis = now,
+        )
+
+        fakes.systemCalendar.providerStillOwnsStaleReminder = true
+        fakes.reminders.scheduledCarePlanIds.clear()
+        fakes.reminders.cancelledCarePlanIds.clear()
+        care.updateCarePlan(
+            carePlanId = planId,
+            scheduledAt = now + 180_000L,
+            nowMillis = now + 1L,
+        )
+
+        val entity = fakes.carePlans.get(planId)!!
+        assertThat(entity.systemCalendarReminderReady).isFalse()
+        assertThat(entity.systemCalendarProjectionPending).isTrue()
+        assertThat(fakes.reminders.scheduledCarePlanIds).doesNotContain(planId)
+        assertThat(fakes.reminders.cancelledCarePlanIds).contains(planId)
+        assertThat(care.isCarePlanSystemCalendarUnsynced(planId)).isTrue()
+    }
+
+    @Test
+    fun configuredCalendarWithoutPermissionSchedulesLeziForPendingHandoff() = runTest {
+        val fakes = Fakes()
+        fakes.systemCalendar.permission = false
+        fakes.settings.setSystemCalendarEnabled(true)
+        fakes.settings.setSystemCalendarId("cal-1")
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.BATH,
+            scheduledAt = now + 60_000L,
+            nowMillis = now,
+        )
+
+        assertThat(fakes.carePlans.get(planId)!!.systemCalendarProjectionPending).isFalse()
+        assertThat(fakes.reminders.scheduledCarePlanIds).contains(planId)
+        assertThat(fakes.reminders.cancelledCarePlanIds).doesNotContain(planId)
+    }
+
+    @Test
+    fun perPlanCalendarOptOutSurvivesReloadEditAndBootReconciliation() = runTest {
+        val fakes = Fakes()
+        fakes.systemCalendar.permission = true
+        fakes.settings.setSystemCalendarEnabled(true)
+        fakes.settings.setSystemCalendarId("cal-1")
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.BATH,
+            scheduledAt = now + 120_000L,
+            nowMillis = now,
+            projectToSystemCalendar = false,
+        )
+
+        assertThat(care.getCarePlan(planId)!!.systemCalendarProjectionEnabled).isFalse()
+        assertThat(care.isCarePlanSystemCalendarUnsynced(planId)).isFalse()
+        assertThat(fakes.systemCalendar.upserts).isEmpty()
+
+        fakes.reminders.scheduledCarePlanIds.clear()
+        care.rescheduleCarePlanReminders(nowMillis = now + 1)
+        assertThat(fakes.systemCalendar.upserts).isEmpty()
+        assertThat(fakes.reminders.scheduledCarePlanIds).contains(planId)
+
+        care.updateCarePlan(
+            carePlanId = planId,
+            scheduledAt = now + 180_000L,
+            projectToSystemCalendar = true,
+            nowMillis = now + 2,
+        )
+        assertThat(care.getCarePlan(planId)!!.systemCalendarProjectionEnabled).isTrue()
+        assertThat(fakes.systemCalendar.upserts).isNotEmpty()
+    }
+
+    @Test
+    fun perPlanCalendarRouteOnlyEditDoesNotAdvanceFamilyRevision() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.BATH,
+            scheduledAt = now + 120_000L,
+            nowMillis = now,
+        )
+        val before = fakes.carePlans.get(planId)!!
+        fakes.carePlans.markSynced(before.clientUuid, before.updatedAt)
+
+        care.updateCarePlan(
+            carePlanId = planId,
+            scheduledAt = before.scheduledAt,
+            note = before.note,
+            payloadJson = before.payloadJson,
+            schemaVersion = before.schemaVersion,
+            projectToSystemCalendar = false,
+            nowMillis = now + 1,
+        )
+
+        val after = fakes.carePlans.get(planId)!!
+        assertThat(after.updatedAt).isEqualTo(before.updatedAt)
+        assertThat(after.syncDirty).isFalse()
+        assertThat(after.systemCalendarProjectionEnabled).isFalse()
+    }
+
+    @Test
     fun systemCalendarUnconfiguredUsesLeziReminderOnly() = runTest {
         val fakes = Fakes()
         // Enabled false / no calendar id — never project, never request permission.
@@ -3134,6 +3444,84 @@ class CareLogTest {
         assertThat(fakes.systemCalendar.upserts).isEmpty()
         assertThat(fakes.reminders.scheduledCarePlanIds).contains(planId)
         assertThat(care.isCarePlanSystemCalendarUnsynced(planId)).isFalse()
+    }
+
+    @Test
+    fun localCarePlanReminderToggleImmediatelyCancelsAndRebuildsOpenPlans() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.BATH,
+            scheduledAt = now + 120_000L,
+            nowMillis = now,
+        )
+        assertThat(fakes.reminders.scheduledCarePlanIds).contains(planId)
+
+        care.setCarePlanLocalRemindersEnabled(false, nowMillis = now + 1)
+        assertThat(fakes.reminders.scheduledCarePlanIds).doesNotContain(planId)
+        assertThat(fakes.settings.settings.first().carePlanLocalRemindersEnabled).isFalse()
+
+        care.setCarePlanLocalRemindersEnabled(true, nowMillis = now + 2)
+        assertThat(fakes.settings.settings.first().carePlanLocalRemindersEnabled).isTrue()
+        assertThat(fakes.reminders.scheduledCarePlanIds).contains(planId)
+    }
+
+    @Test
+    fun migratedLegacyCarePlanAlarmIsConsumedAtMostOnce() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.BATH,
+            scheduledAt = now + 120_000L,
+            nowMillis = now,
+        )
+        val plan = fakes.carePlans.get(planId)!!
+        fakes.carePlans.update(plan.copy(legacyCarePlanReminderPending = true))
+
+        assertThat(
+            care.shouldDeliverCarePlanReminder(planId, plan.clientUuid, Long.MIN_VALUE),
+        ).isTrue()
+        assertThat(
+            care.shouldDeliverCarePlanReminder(planId, plan.clientUuid, Long.MIN_VALUE),
+        ).isFalse()
+    }
+
+    @Test
+    fun deliveredCarePlanAlarmRejectsStaleGenerationAndProviderOwnership() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.BATH,
+            scheduledAt = now + 120_000L,
+            nowMillis = now,
+        )
+        val plan = fakes.carePlans.get(planId)!!
+
+        assertThat(
+            care.shouldDeliverCarePlanReminder(planId, plan.clientUuid, plan.scheduledAt + 1L),
+        ).isFalse()
+        fakes.carePlans.update(plan.copy(systemCalendarProjectionPending = true))
+        assertThat(
+            care.shouldDeliverCarePlanReminder(planId, plan.clientUuid, plan.scheduledAt),
+        ).isFalse()
+        fakes.carePlans.update(
+            plan.copy(
+                systemCalendarProjectionPending = false,
+                systemCalendarReminderReady = true,
+            ),
+        )
+        assertThat(
+            care.shouldDeliverCarePlanReminder(planId, plan.clientUuid, plan.scheduledAt),
+        ).isFalse()
     }
 
     @Test
@@ -3314,10 +3702,9 @@ class CareLogTest {
 
         val ok = care.projectOrScheduleCarePlanReminder(plan)
         assertThat(ok).isTrue()
-        // Update fails, then insert rebuilds a new event id.
-        assertThat(fakes.systemCalendar.upserts.size).isAtLeast(2)
-        assertThat(fakes.systemCalendar.upserts.first().existingEventId).isEqualTo(oldEventId)
-        assertThat(fakes.systemCalendar.upserts.last().existingEventId).isNull()
+        // The adapter strictly detects absence and rebuilds within one upsert command.
+        assertThat(fakes.systemCalendar.upserts).hasSize(1)
+        assertThat(fakes.systemCalendar.upserts.single().existingEventId).isEqualTo(oldEventId)
         val newMap = parseSystemCalendarEventMap(
             fakes.settings.settings.first().systemCalendarEventMapJson,
         )
@@ -3400,6 +3787,119 @@ class CareLogTest {
                 fakes.settings.settings.first().systemCalendarEventMapJson,
             ),
         ).doesNotContainKey(fulfillPlan.clientUuid)
+    }
+
+    @Test
+    fun terminalPlanRetainsProjectionIdentityUntilProviderDeletionIsConfirmed() = runTest {
+        val fakes = Fakes()
+        fakes.systemCalendar.permission = true
+        fakes.settings.setSystemCalendarEnabled(true)
+        fakes.settings.setSystemCalendarId("cal-1")
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.BATH,
+            scheduledAt = now + 60_000L,
+            nowMillis = now,
+        )
+        val plan = care.getCarePlan(planId)!!
+        val eventId = parseSystemCalendarEventMap(
+            fakes.settings.settings.first().systemCalendarEventMapJson,
+        ).getValue(plan.clientUuid)
+
+        fakes.systemCalendar.permission = false
+        care.skipCarePlan(planId, nowMillis = now + 1)
+
+        assertThat(
+            parseSystemCalendarEventMap(
+                fakes.settings.settings.first().systemCalendarEventMapJson,
+            ),
+        ).containsEntry(plan.clientUuid, eventId)
+
+        fakes.systemCalendar.permission = true
+        care.rescheduleCarePlanReminders(nowMillis = now + 2)
+
+        assertThat(fakes.systemCalendar.deleted).contains(eventId)
+        assertThat(
+            parseSystemCalendarEventMap(
+                fakes.settings.settings.first().systemCalendarEventMapJson,
+            ),
+        ).doesNotContainKey(plan.clientUuid)
+    }
+
+    @Test
+    fun processRestartRemovesOldFutureProjectionAfterPlanMovesToMissed() = runTest {
+        val fakes = Fakes()
+        fakes.systemCalendar.permission = true
+        fakes.settings.setSystemCalendarEnabled(true)
+        fakes.settings.setSystemCalendarId("cal-1")
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.BATH,
+            scheduledAt = now + 120_000L,
+            nowMillis = now,
+        )
+        val beforeCrash = fakes.carePlans.get(planId)!!
+        val eventId = beforeCrash.systemCalendarEventId!!
+
+        // Simulate process death after the Room edit committed but before provider I/O.
+        fakes.carePlans.update(
+            beforeCrash.copy(
+                scheduledAt = now - 1L,
+                systemCalendarReminderReady = false,
+            ),
+        )
+        fakes.systemCalendar.deleted.clear()
+        fakes.reminders.scheduledCarePlanIds.clear()
+
+        care.rescheduleCarePlanReminders(nowMillis = now)
+
+        assertThat(fakes.systemCalendar.deleted).contains(eventId)
+        assertThat(fakes.reminders.scheduledCarePlanIds).doesNotContain(planId)
+        assertThat(fakes.reminders.cancelledCarePlanIds).contains(planId)
+    }
+
+    @Test
+    fun movingAPlanToMissedRemovesItsFutureProjectionImmediately() = runTest {
+        val fakes = Fakes()
+        fakes.systemCalendar.permission = true
+        fakes.settings.setSystemCalendarEnabled(true)
+        fakes.settings.setSystemCalendarId("cal-1")
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.BATH,
+            scheduledAt = now + 120_000L,
+            nowMillis = now,
+        )
+        val planUuid = care.getCarePlan(planId)!!.clientUuid
+        val eventId = parseSystemCalendarEventMap(
+            fakes.settings.settings.first().systemCalendarEventMapJson,
+        ).getValue(planUuid)
+        fakes.systemCalendar.deleted.clear()
+        fakes.reminders.scheduledCarePlanIds.clear()
+
+        care.updateCarePlan(
+            carePlanId = planId,
+            scheduledAt = now - 1L,
+            nowMillis = now,
+        )
+
+        assertThat(fakes.systemCalendar.deleted).contains(eventId)
+        assertThat(fakes.reminders.scheduledCarePlanIds).doesNotContain(planId)
+        assertThat(fakes.reminders.cancelledCarePlanIds).contains(planId)
+        assertThat(
+            parseSystemCalendarEventMap(
+                fakes.settings.settings.first().systemCalendarEventMapJson,
+            ),
+        ).doesNotContainKey(planUuid)
     }
 
     @Test
@@ -3693,6 +4193,7 @@ private class Fakes(
         settings = StoreLocalDataClearSettings(settings),
         syncPort = sync,
         reminderCleanup = reminders,
+        systemCalendar = systemCalendar,
         pendingReminderCleanupStore = pendingReminderCleanup,
         mutationGuard = calendarReminderMutationGuard,
     )
@@ -3721,6 +4222,8 @@ private class Fakes(
 private class FakeSystemCalendarPort : SystemCalendarPort {
     var permission = false
     var failUpsert = false
+    var failReminder = false
+    var providerStillOwnsStaleReminder = false
     /** When non-null, only these calendar ids are writable (simulates vanished target). */
     var writableCalendarIds: Set<String>? = null
     /** Event ids that no longer exist in the provider (external delete). */
@@ -3729,6 +4232,7 @@ private class FakeSystemCalendarPort : SystemCalendarPort {
     val deleted = mutableListOf<String>()
     private var nextEventId = 1L
     private val liveEventIds = mutableSetOf<String>()
+    private val eventOwners = mutableMapOf<String, String>()
 
     override fun hasCalendarPermission(): Boolean = permission
 
@@ -3746,34 +4250,75 @@ private class FakeSystemCalendarPort : SystemCalendarPort {
             }
         }
 
-    override suspend fun upsertEvent(request: SystemCalendarUpsert): String? {
+    override suspend fun upsertEvent(
+        request: SystemCalendarUpsert,
+    ): SystemCalendarUpsertResult {
         upserts += request
-        if (!permission || failUpsert) return null
-        if (!isWritableCalendar(request.calendarId)) return null
+        if (providerStillOwnsStaleReminder) {
+            return SystemCalendarUpsertResult(
+                eventId = request.existingEventId,
+                outcome = SystemCalendarUpsertOutcome.ProviderStillOwnsStale,
+            )
+        }
+        if (!permission || failUpsert || !isWritableCalendar(request.calendarId)) {
+            return SystemCalendarUpsertResult(
+                eventId = request.existingEventId,
+                outcome = SystemCalendarUpsertOutcome.ReleasedOrAbsent,
+            )
+        }
         val existing = request.existingEventId
         if (!existing.isNullOrBlank()) {
-            // Simulate external delete: update of a vanished event fails.
-            if (existing in missingEventIds || existing !in liveEventIds) {
-                return null
+            if (
+                existing !in missingEventIds &&
+                existing in liveEventIds &&
+                eventOwners[existing] == request.carePlanClientUuid
+            ) {
+                return SystemCalendarUpsertResult(existing, reminderReady = !failReminder)
             }
-            return existing
         }
         val id = "evt-${nextEventId++}"
         liveEventIds += id
+        eventOwners[id] = request.carePlanClientUuid
         missingEventIds.remove(id)
-        return id
+        return SystemCalendarUpsertResult(id, reminderReady = !failReminder)
     }
 
-    override suspend fun deleteEvent(eventId: String): Boolean {
+    override suspend fun findOwnedEvent(
+        carePlanClientUuid: String,
+    ): SystemCalendarOwnedEventLookup {
+        if (!permission) return SystemCalendarOwnedEventLookup.Unavailable
+        val ids = liveEventIds.filterTo(linkedSetOf()) {
+            it !in missingEventIds && eventOwners[it] == carePlanClientUuid
+        }
+        return if (ids.isEmpty()) {
+            SystemCalendarOwnedEventLookup.Absent
+        } else {
+            SystemCalendarOwnedEventLookup.Found(ids)
+        }
+    }
+
+    override suspend fun deleteEvent(
+        eventId: String,
+        carePlanClientUuid: String?,
+    ): Boolean {
         deleted += eventId
+        if (!permission) return false
+        if (carePlanClientUuid != null && eventOwners[eventId] != carePlanClientUuid) return false
         liveEventIds.remove(eventId)
+        eventOwners.remove(eventId)
         return true
     }
 
-    override suspend fun eventExists(eventId: String): Boolean {
-        if (!permission) return false
-        if (eventId in missingEventIds) return false
-        return eventId in liveEventIds
+    override suspend fun eventState(
+        eventId: String,
+        carePlanClientUuid: String?,
+    ): SystemCalendarEventState = when {
+        !permission -> SystemCalendarEventState.UNAVAILABLE
+        eventId in missingEventIds -> SystemCalendarEventState.ABSENT
+        eventId in liveEventIds &&
+            (carePlanClientUuid == null || eventOwners[eventId] == carePlanClientUuid) ->
+            SystemCalendarEventState.PRESENT
+        else -> SystemCalendarEventState.ABSENT
     }
 
     override suspend fun isWritableCalendar(calendarId: String): Boolean =
@@ -3813,8 +4358,11 @@ private class FakeReminderCleanupPort : ReminderCleanupPort {
     val cancelledCarePlanIds = mutableListOf<Long>()
     var carePlanScheduleEnabled: Boolean = true
     var carePlanPermissionGranted: Boolean = true
+    var carePlanScheduleFailure: Throwable? = null
+    var carePlanCancelFailure: Throwable? = null
 
     override suspend fun scheduleCarePlan(plan: CarePlan): Boolean {
+        carePlanScheduleFailure?.let { throw it }
         if (!carePlanScheduleEnabled || !carePlanPermissionGranted) return false
         if (plan.deletedAt != null) return false
         // Domain already gates future scheduledAt via nowMillis. Tests inject
@@ -3827,6 +4375,7 @@ private class FakeReminderCleanupPort : ReminderCleanupPort {
     }
 
     override suspend fun cancelCarePlan(carePlanId: Long) {
+        carePlanCancelFailure?.let { throw it }
         scheduledCarePlanIds -= carePlanId
         cancelledCarePlanIds += carePlanId
     }
@@ -3835,9 +4384,12 @@ private class FakeReminderCleanupPort : ReminderCleanupPort {
         // Test adapter keys by local id only.
     }
 
-    override suspend fun cancelForRecordsClear(calendarEventIds: Collection<Long>) {
+    override suspend fun cancelForRecordsClear(
+        calendarEventIds: Collection<Long>,
+        cancelNextFeed: Boolean,
+    ) {
         recordClearBatches += calendarEventIds.toList()
-        nextFeedScheduled = false
+        if (cancelNextFeed) nextFeedScheduled = false
         scheduledCalendarIds.removeAll(calendarEventIds.toSet())
     }
 
@@ -3863,6 +4415,9 @@ private class FakePendingReminderCleanupStore : PendingReminderCleanupStore {
         this.pending = pending.copy(
             calendarEventIds = existing?.calendarEventIds.orEmpty() + pending.calendarEventIds,
             carePlanIds = existing?.carePlanIds.orEmpty() + pending.carePlanIds,
+            systemCalendarProjections =
+                existing?.systemCalendarProjections.orEmpty() +
+                    pending.systemCalendarProjections,
             familyServerRetained =
                 existing?.familyServerRetained == true || pending.familyServerRetained,
         )
@@ -3920,22 +4475,24 @@ private class RecordingSyncPort(
     }
 
     override suspend fun clearLocalRecords(
-        clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
+        workflow: com.lezi.babylog.sync.LocalClearWorkflow,
     ): Result<Unit> {
         localRecordReconciliations++
-        var committed = false
-        clearLocal { committed = true }
-        check(committed)
+        workflow.withLocalExclusion {
+            workflow.clearRoom()
+            workflow.finishCommitted()
+        }
         return Result.success(Unit)
     }
 
     override suspend fun clearAllLocalData(
-        clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
+        workflow: com.lezi.babylog.sync.LocalClearWorkflow,
     ): Result<Unit> {
         fullLocalWipes++
-        var committed = false
-        clearLocal { committed = true }
-        check(committed)
+        workflow.withLocalExclusion {
+            workflow.clearRoom()
+            workflow.finishCommitted()
+        }
         return Result.success(Unit)
     }
 }
@@ -4031,6 +4588,10 @@ private class FakeMediaAssetDao : MediaAssetDao {
 
     override suspend fun deleteLogMedia() {
         items.removeAll { it.kind == "log" }
+    }
+
+    override suspend fun deleteByClientUuids(clientUuids: List<String>) {
+        items.removeAll { it.clientUuid in clientUuids }
     }
 
     override suspend fun deleteForRecord(recordId: Long) {
@@ -4248,6 +4809,59 @@ private class FakeCarePlanDao : CarePlanDao {
         items.value = items.value.map { if (it.id == plan.id) plan else it }
     }
 
+    override suspend fun updateSystemCalendarProjection(
+        clientUuid: String,
+        eventId: String?,
+        reminderReady: Boolean,
+        pending: Boolean,
+    ) {
+        items.value = items.value.map {
+            if (it.clientUuid == clientUuid) {
+                it.copy(
+                    systemCalendarEventId = eventId,
+                    systemCalendarReminderReady = reminderReady,
+                    systemCalendarProjectionPending = pending,
+                )
+            } else {
+                it
+            }
+        }
+    }
+
+    override suspend fun updateSystemCalendarProjectionEnabled(
+        clientUuid: String,
+        enabled: Boolean,
+    ) {
+        items.value = items.value.map {
+            if (it.clientUuid == clientUuid) {
+                it.copy(
+                    systemCalendarProjectionEnabled = enabled,
+                )
+            } else {
+                it
+            }
+        }
+    }
+
+    override suspend fun markLegacyCarePlanReminderReplaced(clientUuid: String) {
+        items.value = items.value.map {
+            if (it.clientUuid == clientUuid) it.copy(legacyCarePlanReminderPending = false) else it
+        }
+    }
+
+    override suspend fun consumeLegacyCarePlanReminder(id: Long, clientUuid: String): Int {
+        var changed = 0
+        items.value = items.value.map {
+            if (it.id == id && it.clientUuid == clientUuid && it.legacyCarePlanReminderPending) {
+                changed = 1
+                it.copy(legacyCarePlanReminderPending = false)
+            } else {
+                it
+            }
+        }
+        return changed
+    }
+
     override suspend fun updatePayloadReplica(
         id: Long,
         expectedPayloadJson: String,
@@ -4394,6 +5008,7 @@ private class FakeSettingsStore : SettingsStore {
     private val babyId = MutableStateFlow<Long?>(null)
     private val timer = MutableStateFlow<String?>(null)
     private val nextFeed = MutableStateFlow<Long?>(null)
+    private var nextFeedEpoch = 0L
     private val dark = MutableStateFlow("system")
     private val step = MutableStateFlow(5)
     private val timerEnabled = MutableStateFlow(true)
@@ -4403,6 +5018,7 @@ private class FakeSettingsStore : SettingsStore {
     private val hidden = MutableStateFlow(emptySet<String>())
     private val weekStart = MutableStateFlow(1)
     private val systemCalEnabled = MutableStateFlow(false)
+    private val carePlanLocalReminders = MutableStateFlow(true)
     private val systemCalId = MutableStateFlow<String?>(null)
     private val systemCalDisclosure = MutableStateFlow(2)
     private val systemCalMap = MutableStateFlow("{}")
@@ -4416,10 +5032,12 @@ private class FakeSettingsStore : SettingsStore {
         nursingIntervalMin = interval.value,
         recordAtStartOrEnd = recordAt.value,
         nextFeedAt = nextFeed.value,
+        nextFeedEpoch = nextFeedEpoch.toString(),
         itemOrderJson = order.value,
         hiddenItems = hidden.value,
         weekStart = weekStart.value,
         systemCalendarEnabled = systemCalEnabled.value,
+        carePlanLocalRemindersEnabled = carePlanLocalReminders.value,
         systemCalendarId = systemCalId.value,
         systemCalendarDisclosureLevel = systemCalDisclosure.value,
         systemCalendarEventMapJson = systemCalMap.value,
@@ -4473,15 +5091,24 @@ private class FakeSettingsStore : SettingsStore {
         publish()
     }
 
-    override suspend fun setNextFeedAt(epochMs: Long?) {
+    override suspend fun setNextFeedAt(epochMs: Long?): String {
         nextFeed.value = epochMs
+        nextFeedEpoch += 1L
         publish()
+        return nextFeedEpoch.toString()
     }
 
     override suspend fun clearNextFeedAt() {
-        nextFeed.value = null
-        publish()
+        setNextFeedAt(null)
     }
+
+    override suspend fun clearNextFeedAtIfEpoch(expectedEpoch: String): Boolean {
+        if (nextFeed.value == null || expectedEpoch != nextFeedEpoch.toString()) return false
+        clearNextFeedAt()
+        return true
+    }
+
+    override suspend fun clearLegacyNextFeedAtIfEpochMissing(): Boolean = false
 
     override suspend fun setItemOrderJson(json: String) {
         order.value = json
@@ -4513,7 +5140,10 @@ private class FakeSettingsStore : SettingsStore {
     override suspend fun setShowAvgSleep(enabled: Boolean) {
         showAvg.value = enabled
     }
-    override suspend fun setCarePlanLocalRemindersEnabled(enabled: Boolean) = Unit
+    override suspend fun setCarePlanLocalRemindersEnabled(enabled: Boolean) {
+        carePlanLocalReminders.value = enabled
+        publish()
+    }
 
     override suspend fun setSystemCalendarEnabled(enabled: Boolean) {
         systemCalEnabled.value = enabled
@@ -4533,6 +5163,34 @@ private class FakeSettingsStore : SettingsStore {
     override suspend fun setSystemCalendarEventMapJson(json: String) {
         systemCalMap.value = json
         publish()
+    }
+
+    override suspend fun captureLocalClearSettings(): LocalClearSettingsSnapshot =
+        LocalClearSettingsSnapshot(
+            currentBabyId = babyId.value,
+            nextFeedAt = nextFeed.value,
+            systemCalendarProjections = parseSystemCalendarEventMap(systemCalMap.value),
+            nextFeedEpoch = nextFeedEpoch.toString(),
+        )
+
+    override suspend fun finishLocalClearSettings(
+        snapshot: LocalClearSettingsSnapshot,
+        clearCurrentBabyId: Boolean,
+    ): LocalClearSettingsFinish {
+        if (clearCurrentBabyId && babyId.value == snapshot.currentBabyId) {
+            babyId.value = null
+        }
+        val cancelNextFeedAlarm = snapshot.nextFeedEpoch == nextFeedEpoch.toString()
+        if (cancelNextFeedAlarm) {
+            nextFeed.value = null
+        }
+        val retained = parseSystemCalendarEventMap(systemCalMap.value)
+            .filter { (clientUuid, eventId) ->
+                snapshot.systemCalendarProjections[clientUuid] != eventId
+            }
+        systemCalMap.value = encodeSystemCalendarEventMap(retained)
+        publish()
+        return LocalClearSettingsFinish(cancelNextFeedAlarm)
     }
 
     override suspend fun setComparePrevWeek(enabled: Boolean) {

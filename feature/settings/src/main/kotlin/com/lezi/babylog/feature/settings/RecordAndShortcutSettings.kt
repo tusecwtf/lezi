@@ -51,7 +51,7 @@ internal enum class RecordShortcutHubDestination(val title: String, val subtitle
     QuickSlots("常用记录", "四个快捷槽位：选择、拖动排序、清空"),
     AllItems("所有记录项目", "拖动类别与项目，开启或关闭"),
     PerItem("分项目设置", "仅展示确有专属设置的项目"),
-    PlanCalendar("护理计划与日历", "本机提醒与系统日历（后续开放）"),
+    PlanCalendar("护理计划与日历", "本机提醒、系统日历与内容披露"),
 }
 
 /**

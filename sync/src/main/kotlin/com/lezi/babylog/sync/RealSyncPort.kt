@@ -8,6 +8,7 @@ import com.lezi.babylog.core.database.FamilyDao
 import com.lezi.babylog.core.database.FulfillmentCandidateDao
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.OutboxDao
+import com.lezi.babylog.core.database.PendingReplicaCleanupStore
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.model.SyncStatus
 import java.util.concurrent.atomic.AtomicBoolean
@@ -41,6 +42,9 @@ class RealSyncPort @Inject constructor(
     private val foregroundState: ForegroundState,
     private val mediaFiles: SyncMediaFileStore,
     private val transactionRunner: DatabaseTransactionRunner,
+    private val pendingReplicaCleanupStore: PendingReplicaCleanupStore,
+    private val localClearRecoveryGate: LocalClearRecoveryGate =
+        NoOpLocalClearRecoveryGate(),
     private val carePlanAppliedListener: CarePlanFamilyAppliedListener =
         NoOpCarePlanFamilyAppliedListener(),
     private val fulfillmentCandidateDao: FulfillmentCandidateDao,
@@ -75,6 +79,18 @@ class RealSyncPort @Inject constructor(
             policy.lastHealthStatus.capabilities.toSet()
         },
     )
+    private val localReplicaClearCoordinator = LocalReplicaClearCoordinator(
+        barrier = syncMutex,
+        preferences = preferences,
+        outboxDao = outboxDao,
+        recordDao = recordDao,
+        carePlanDao = carePlanDao,
+        babyDao = babyDao,
+        mediaDao = mediaDao,
+        mediaFiles = mediaFiles,
+        transactionRunner = transactionRunner,
+        pendingStore = pendingReplicaCleanupStore,
+    )
     private val familySessionCoordinator = FamilySessionCoordinator(
         backend = backend,
         preferences = preferences,
@@ -88,15 +104,7 @@ class RealSyncPort @Inject constructor(
         onSessionChanged = ::publishSession,
         onSessionObserved = { session -> cachedSession = session },
         requestSync = ::requestSync,
-    )
-    private val localReplicaClearCoordinator = LocalReplicaClearCoordinator(
-        barrier = syncMutex,
-        preferences = preferences,
-        outboxDao = outboxDao,
-        recordDao = recordDao,
-        babyDao = babyDao,
-        mediaDao = mediaDao,
-        mediaFiles = mediaFiles,
+        beforeOperation = ::recoverPendingLocalClearLocked,
     )
     private val syncSignal = Channel<Unit>(Channel.CONFLATED)
     private val pullRequested = AtomicBoolean(false)
@@ -123,9 +131,7 @@ class RealSyncPort @Inject constructor(
                 } else {
                     SyncTrigger.LocalWrite
                 }
-                if (preferences.session.first().isJoined) {
-                    sync(trigger)
-                }
+                sync(trigger)
             }
         }
     }
@@ -183,6 +189,7 @@ class RealSyncPort @Inject constructor(
 
     override suspend fun sync(trigger: SyncTrigger): Result<Unit> = runCatching {
         syncMutex.withLock {
+            recoverPendingLocalClearLocked()
             val session = preferences.session.first()
             cachedSession = session
             if (!session.isJoined) {
@@ -208,16 +215,37 @@ class RealSyncPort @Inject constructor(
         executeFamily(FamilySessionCommand.DeleteFamily).map { Unit }
 
     override suspend fun clearLocalRecords(
-        clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
+        workflow: LocalClearWorkflow,
     ): Result<Unit> = localReplicaClearCoordinator
-        .clear(LocalReplicaClearScope.RecordsOnly, clearLocal)
+        .clear(
+            scope = LocalReplicaClearScope.RecordsOnly,
+            workflow = workflow,
+            recoverDomain = localClearRecoveryGate::recoverPendingLocalClear,
+        )
         .onFailure(::updateFailureStatus)
 
     override suspend fun clearAllLocalData(
-        clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
+        workflow: LocalClearWorkflow,
     ): Result<Unit> = localReplicaClearCoordinator
-        .clear(LocalReplicaClearScope.AllLocal, clearLocal)
+        .clear(
+            scope = LocalReplicaClearScope.AllLocal,
+            workflow = workflow,
+            recoverDomain = localClearRecoveryGate::recoverPendingLocalClear,
+        )
         .onFailure(::updateFailureStatus)
+
+    /** Caller owns [syncMutex]; lock order is sync mutex then domain mutation guard. */
+    private suspend fun recoverPendingLocalClearLocked(): LocalClearRecoveryScope? {
+        val resumedDomain = localClearRecoveryGate.recoverPendingLocalClear()
+        val resumedReplica = localReplicaClearCoordinator.recoverPendingLocked()
+        return when {
+            resumedDomain == LocalClearRecoveryScope.AllLocal ||
+                resumedReplica == LocalClearRecoveryScope.AllLocal ->
+                LocalClearRecoveryScope.AllLocal
+            resumedDomain != null || resumedReplica != null -> LocalClearRecoveryScope.RecordsOnly
+            else -> null
+        }
+    }
 
     private suspend fun executeFamily(
         command: FamilySessionCommand,

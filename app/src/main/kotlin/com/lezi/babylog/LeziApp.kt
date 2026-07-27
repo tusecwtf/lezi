@@ -40,12 +40,32 @@ class LeziApp : Application(), DefaultLifecycleObserver {
             } catch (_: Throwable) {
                 // The durable row remains and the next process start retries it.
             }
+            try {
+                // Boot broadcasts are not guaranteed after a process crash. Ordinary
+                // startup also closes durable calendar/reminder hand-offs.
+                careLog.rescheduleCarePlanReminders()
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Throwable) {
+                // Per-plan hand-off state remains durable for the next startup.
+            }
         }
         widgetAutoRefresh.start(applicationScope)
     }
 
     override fun onStart(owner: LifecycleOwner) {
         foregroundState.setForeground(true)
+        applicationScope.launch(Dispatchers.IO) {
+            try {
+                // Re-entering after Android settings changes must retry retained
+                // calendar ownership and local alarm hand-offs.
+                careLog.rescheduleCarePlanReminders()
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Throwable) {
+                // Durable per-plan state is retried on the next foreground/startup.
+            }
+        }
         syncPort.requestSync(SyncTrigger.Foreground)
     }
 

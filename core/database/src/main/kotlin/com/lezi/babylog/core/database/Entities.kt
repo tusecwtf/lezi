@@ -137,6 +137,21 @@ data class CarePlanEntity(
      */
     @ColumnInfo(defaultValue = "1")
     val syncDirty: Boolean = true,
+    /** Device-local desired reminder route; deliberately excluded from family wire payloads. */
+    @ColumnInfo(defaultValue = "1")
+    val systemCalendarProjectionEnabled: Boolean = true,
+    /** Device-local provider identity; stable UID lookup repairs a missing value after crashes. */
+    @ColumnInfo(defaultValue = "NULL")
+    val systemCalendarEventId: String? = null,
+    /** Last confirmed ownership state for the provider begin-time reminder. */
+    @ColumnInfo(defaultValue = "0")
+    val systemCalendarReminderReady: Boolean = false,
+    /** Durable hand-off set before external provider I/O; closes insert-before-id crashes. */
+    @ColumnInfo(defaultValue = "0")
+    val systemCalendarProjectionPending: Boolean = false,
+    /** True only for a pre-v21 AlarmManager intent that has no scheduled-time lease. */
+    @ColumnInfo(defaultValue = "1")
+    val legacyCarePlanReminderPending: Boolean = false,
 )
 
 /**

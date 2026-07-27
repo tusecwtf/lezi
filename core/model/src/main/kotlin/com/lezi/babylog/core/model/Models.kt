@@ -136,6 +136,8 @@ data class CarePlan(
      * receivers never see incomplete packages.
      */
     val syncDirty: Boolean = false,
+    /** Device-local, per-plan desired calendar route; never family-synced. */
+    val systemCalendarProjectionEnabled: Boolean = true,
 ) {
     /** Effective status for UI: pending past scheduledAt becomes missed. */
     fun effectiveStatus(nowMillis: Long = System.currentTimeMillis()): CarePlanStatus {
@@ -235,6 +237,8 @@ data class SettingsLocal(
     val recordAtStartOrEnd: String = "end",
     val nursingIntervalMin: Int = 180,
     val nextFeedAt: Long? = null,
+    /** Device-local identity of the write that owns [nextFeedAt]. */
+    val nextFeedEpoch: String = "",
     val darkMode: String = "system",
     /** "warm" = card template; "journal" = compact logbook template. */
     val visualStyle: String = "warm",

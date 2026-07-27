@@ -35,8 +35,11 @@ class AlarmReminderCleanup @Inject constructor(
         carePlanAlarm.cancelByClientUuid(clientUuid)
     }
 
-    override suspend fun cancelForRecordsClear(calendarEventIds: Collection<Long>) {
-        nextFeedScheduler.cancel()
+    override suspend fun cancelForRecordsClear(
+        calendarEventIds: Collection<Long>,
+        cancelNextFeed: Boolean,
+    ) {
+        if (cancelNextFeed) nextFeedScheduler.cancelCapturedAlarmUnderGuard()
         cancelCalendar(calendarEventIds)
     }
 

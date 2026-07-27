@@ -72,6 +72,9 @@ interface OutboxDao {
     )
     suspend fun deleteType(familyId: String, entityType: String)
 
+    @Query("DELETE FROM outbox WHERE entityType = :entityType")
+    suspend fun deleteTypeAcrossFamilies(entityType: String)
+
     @Query(
         """
         DELETE FROM outbox
@@ -82,6 +85,18 @@ interface OutboxDao {
     )
     suspend fun deleteEntities(
         familyId: String,
+        entityType: String,
+        clientUuids: List<String>,
+    )
+
+    @Query(
+        """
+        DELETE FROM outbox
+        WHERE entityType = :entityType
+          AND clientUuid IN (:clientUuids)
+        """,
+    )
+    suspend fun deleteEntitiesAcrossFamilies(
         entityType: String,
         clientUuids: List<String>,
     )
