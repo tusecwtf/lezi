@@ -28,6 +28,33 @@ class NursingTimerScheduleGateTest {
     }
 
     @Test
+    fun expiredExplicitScheduleStillDoesNotExposeStartTimerOrBecomeFactMode() {
+        val request = RecordComposerRequest.New(
+            babyId = 1L,
+            type = RecordType.NURSING,
+            timestamp = now - 1L,
+            historical = false,
+            createIntent = ComposerCreateIntent.ScheduleCare,
+        )
+        val draft = QuickRecordDraft.create(
+            type = RecordType.NURSING,
+            timestamp = now - 1L,
+            createIntent = ComposerCreateIntent.ScheduleCare,
+        )
+
+        assertTrue(draft.workMode(now) == ComposerWorkMode.ScheduleCare)
+        assertFalse(draft.canConfirm(now))
+        assertFalse(
+            computeCanStartNursingTimer(
+                request = request,
+                draft = draft,
+                timerEnabled = true,
+                nowMillis = now,
+            ),
+        )
+    }
+
+    @Test
     fun liveNewNursingExposesStartTimerWhenEnabled() {
         val draft = QuickRecordDraft.create(RecordType.NURSING, now - 1_000L)
         assertTrue(draft.workMode(now) != ComposerWorkMode.ScheduleCare)

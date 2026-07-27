@@ -31,6 +31,33 @@ class RecordComposerSavedStateTest {
     }
 
     @Test
+    fun explicitScheduleIntentSurvivesRecreationAndDoesNotRestoreAsTimestampDerived() {
+        val handle = SavedStateHandle()
+        val request = RecordComposerRequest.New(
+            babyId = 7L,
+            type = RecordType.BATH,
+            timestamp = 2_000L,
+            historical = false,
+            createIntent = ComposerCreateIntent.ScheduleCare,
+        )
+        val draft = QuickRecordDraft.create(
+            type = RecordType.BATH,
+            timestamp = 2_000L,
+            createIntent = ComposerCreateIntent.ScheduleCare,
+        )
+        RecordComposerSavedState(handle).save(request, draft)
+
+        val recreated = RecordComposerSavedState(handle)
+
+        assertEquals(ComposerCreateIntent.ScheduleCare, recreated.restore(request)?.createIntent)
+        assertNull(
+            recreated.restore(
+                request.copy(createIntent = ComposerCreateIntent.DeriveFromTimestamp),
+            ),
+        )
+    }
+
+    @Test
     fun explicitClearRemovesRestorableDraft() {
         val handle = SavedStateHandle()
         val request = RecordComposerRequest.Edit(recordId = 9L)

@@ -63,12 +63,14 @@ import kotlinx.coroutines.launch
 
 sealed interface RecordComposerRequest : java.io.Serializable {
     /**
-     * Create a new fact for a concrete record item.
+     * Create a new fact or plan for a concrete record item.
      *
      * [type] remains the storage [RecordType]. When [type] is [RecordType.CUSTOM],
      * [customItemId] identifies the specific custom definition (required for new
-     * catalog picks). Bare CUSTOM without an id is no longer offered as a create
-     * path; historical edit still uses [Edit].
+     * catalog picks). [createIntent] freezes an explicit Calendar scheduling path;
+     * otherwise the shared Composer derives fact versus plan from [timestamp].
+     * Bare CUSTOM without an id is no longer offered as a create path; historical
+     * edit still uses [Edit].
      */
     data class New(
         val babyId: Long,
@@ -79,6 +81,8 @@ sealed interface RecordComposerRequest : java.io.Serializable {
         val lastAmountMl: Int? = null,
         /** Concrete custom definition when [type] is CUSTOM; null for built-ins. */
         val customItemId: Long? = null,
+        /** Explicit Calendar scheduling remains a plan even if its initial time expires. */
+        val createIntent: ComposerCreateIntent = ComposerCreateIntent.DeriveFromTimestamp,
     ) : RecordComposerRequest {
         fun itemIdentity(): RecordItemIdentity? =
             when {
@@ -148,6 +152,30 @@ internal data class RecordComposerUiState(
     val deleting: Boolean = false,
     val error: String? = null,
 )
+
+/** One immutable write decision for a confirm attempt; never resample wall-clock mode mid-save. */
+internal enum class ComposerWriteDecision {
+    UpdateCarePlan,
+    FulfillCarePlan,
+    ConvertRecordToCarePlan,
+    ConfirmSleep,
+    UpdateRecord,
+    CreateCarePlan,
+    AddRecord,
+}
+
+internal fun QuickRecordDraft.writeDecision(nowMillis: Long): ComposerWriteDecision = when {
+    isEditingCarePlan -> ComposerWriteDecision.UpdateCarePlan
+    carePlanId != null -> ComposerWriteDecision.FulfillCarePlan
+    needsConvertToCarePlan(nowMillis) -> ComposerWriteDecision.ConvertRecordToCarePlan
+    type == RecordType.SLEEP && sleepAction in setOf(
+        SleepDraftAction.SleepDown,
+        SleepDraftAction.WakeUp,
+    ) -> ComposerWriteDecision.ConfirmSleep
+    existingRecordId != null -> ComposerWriteDecision.UpdateRecord
+    workMode(nowMillis) == ComposerWorkMode.ScheduleCare -> ComposerWriteDecision.CreateCarePlan
+    else -> ComposerWriteDecision.AddRecord
+}
 
 @HiltViewModel
 class RecordComposerViewModel @Inject constructor(
@@ -240,6 +268,7 @@ class RecordComposerViewModel @Inject constructor(
                                 ),
                                 historical = request.historical,
                                 customItemId = request.customItemId,
+                                createIntent = request.createIntent,
                             ).let { created ->
                                 // Bind the concrete custom definition from the request;
                                 // never fall back to "first custom item" for bare CUSTOM.
@@ -446,24 +475,20 @@ class RecordComposerViewModel @Inject constructor(
         val draft = snapshot.draft ?: return
         val babyId = snapshot.babyId ?: return
         if (snapshot.saving || snapshot.deleting) return
-        val validation = draft.validationError()
+        val nowMillis = RecordTime.currentTimeMillis()
+        val validation = draft.validationError(nowMillis)
         if (validation != null) {
             _state.update { it.copy(error = validation) }
             return
         }
+        val writeDecision = draft.writeDecision(nowMillis)
         val session = sessionGate.current() ?: return
         _state.update { it.copy(saving = true, error = null) }
         actionJob = viewModelScope.launch {
             val message = try {
                 val command = draft.toSaveCommand()
-                val statefulSleep = command.type == RecordType.SLEEP &&
-                    draft.sleepAction in setOf(
-                        SleepDraftAction.SleepDown,
-                        SleepDraftAction.WakeUp,
-                    )
-                val converting = draft.needsConvertToCarePlan()
-                when {
-                    draft.isEditingCarePlan -> careLog.updateCarePlan(
+                when (writeDecision) {
+                    ComposerWriteDecision.UpdateCarePlan -> careLog.updateCarePlan(
                         carePlanId = requireNotNull(draft.carePlanId),
                         scheduledAt = command.timestamp,
                         note = command.note,
@@ -472,8 +497,8 @@ class RecordComposerViewModel @Inject constructor(
                         photoLocalPaths = draft.photos,
                         projectToSystemCalendar = draft.projectToSystemCalendar,
                     )
-                    draft.carePlanId != null -> careLog.fulfillCarePlan(
-                        carePlanId = draft.carePlanId,
+                    ComposerWriteDecision.FulfillCarePlan -> careLog.fulfillCarePlan(
+                        carePlanId = requireNotNull(draft.carePlanId),
                         actualTimestamp = command.timestamp,
                         endTimestamp = command.endTimestamp.takeIf {
                             command.type == RecordType.SLEEP
@@ -483,9 +508,9 @@ class RecordComposerViewModel @Inject constructor(
                         schemaVersion = command.schemaVersion,
                         photoLocalPaths = draft.photos,
                     )
-                    converting && command.existingRecordId != null ->
+                    ComposerWriteDecision.ConvertRecordToCarePlan ->
                         careLog.convertRecordToCarePlan(
-                            recordId = command.existingRecordId,
+                            recordId = requireNotNull(command.existingRecordId),
                             scheduledAt = command.timestamp,
                             note = command.note,
                             payloadJson = command.payloadJson,
@@ -493,7 +518,7 @@ class RecordComposerViewModel @Inject constructor(
                             photoLocalPaths = draft.photos,
                             projectToSystemCalendar = draft.projectToSystemCalendar,
                         )
-                    statefulSleep -> careLog.confirmSleep(
+                    ComposerWriteDecision.ConfirmSleep -> careLog.confirmSleep(
                         babyId = babyId,
                         expectedOpenSleepId = command.existingRecordId,
                         timestamp = command.timestamp,
@@ -503,8 +528,8 @@ class RecordComposerViewModel @Inject constructor(
                         schemaVersion = command.schemaVersion,
                         photoLocalPaths = draft.photos,
                     )
-                    command.existingRecordId != null -> careLog.updateRecord(
-                        id = command.existingRecordId,
+                    ComposerWriteDecision.UpdateRecord -> careLog.updateRecord(
+                        id = requireNotNull(command.existingRecordId),
                         timestamp = command.timestamp,
                         endTimestamp = command.endTimestamp,
                         note = command.note,
@@ -512,7 +537,7 @@ class RecordComposerViewModel @Inject constructor(
                         schemaVersion = command.schemaVersion,
                         photoLocalPaths = draft.photos,
                     )
-                    draft.workMode() == ComposerWorkMode.ScheduleCare -> careLog.createCarePlan(
+                    ComposerWriteDecision.CreateCarePlan -> careLog.createCarePlan(
                         babyId = babyId,
                         type = command.type,
                         scheduledAt = command.timestamp,
@@ -523,7 +548,7 @@ class RecordComposerViewModel @Inject constructor(
                         photoLocalPaths = draft.photos,
                         projectToSystemCalendar = draft.projectToSystemCalendar,
                     )
-                    else -> careLog.addRecord(
+                    ComposerWriteDecision.AddRecord -> careLog.addRecord(
                         babyId = babyId,
                         type = command.type,
                         timestamp = command.timestamp,
@@ -538,10 +563,10 @@ class RecordComposerViewModel @Inject constructor(
                 // Never delete plan-owned paths on fulfill (sourcePhotos empty);
                 // edit-plan, convert, and edit-record only drop discarded paths.
                 photoStore.delete(draft.sourcePhotos - draft.photos.toSet())
-                val message = when {
-                    draft.isEditingCarePlan -> "已保存护理计划"
-                    draft.carePlanId != null -> "已完成护理计划"
-                    converting -> {
+                val message = when (writeDecision) {
+                    ComposerWriteDecision.UpdateCarePlan -> "已保存护理计划"
+                    ComposerWriteDecision.FulfillCarePlan -> "已完成护理计划"
+                    ComposerWriteDecision.ConvertRecordToCarePlan -> {
                         val label = if (command.type == RecordType.CUSTOM) {
                             draft.customTitle.trim().ifBlank {
                                 command.type.presentation.label
@@ -551,7 +576,7 @@ class RecordComposerViewModel @Inject constructor(
                         }
                         "已转为护理计划 · $label"
                     }
-                    draft.workMode() == ComposerWorkMode.ScheduleCare -> {
+                    ComposerWriteDecision.CreateCarePlan -> {
                         val label = if (command.type == RecordType.CUSTOM) {
                             draft.customTitle.trim().ifBlank {
                                 command.type.presentation.label
@@ -561,12 +586,14 @@ class RecordComposerViewModel @Inject constructor(
                         }
                         "已安排$label"
                     }
-                    draft.sleepAction == SleepDraftAction.SleepDown &&
-                        draft.endTimestamp == null -> "已开始睡眠"
-                    draft.sleepAction == SleepDraftAction.SleepDown -> "已记录睡眠"
-                    draft.sleepAction == SleepDraftAction.WakeUp -> "已记录醒来"
-                    draft.isEditing -> "已保存修改"
-                    else -> {
+                    ComposerWriteDecision.ConfirmSleep -> when {
+                        draft.sleepAction == SleepDraftAction.SleepDown &&
+                            draft.endTimestamp == null -> "已开始睡眠"
+                        draft.sleepAction == SleepDraftAction.SleepDown -> "已记录睡眠"
+                        else -> "已记录醒来"
+                    }
+                    ComposerWriteDecision.UpdateRecord -> "已保存修改"
+                    ComposerWriteDecision.AddRecord -> {
                         val label = if (command.type == RecordType.CUSTOM) {
                             draft.customTitle.trim().ifBlank {
                                 command.type.presentation.label

@@ -77,6 +77,7 @@ import com.lezi.babylog.domain.babyAgeLabel
 import com.lezi.babylog.feature.export.ExportRoute
 import com.lezi.babylog.feature.family.FamilyRoute
 import com.lezi.babylog.feature.growth.GrowthRoute
+import com.lezi.babylog.feature.log.ComposerCreateIntent
 import com.lezi.babylog.feature.log.LogRoute
 import com.lezi.babylog.feature.log.RecordComposerHost
 import com.lezi.babylog.feature.log.RecordComposerRequest
@@ -717,6 +718,7 @@ fun LeziRoot(
                                 timestamp = scheduledAt,
                                 historical = false,
                                 customItemId = customItemId,
+                                createIntent = ComposerCreateIntent.ScheduleCare,
                             ),
                         )
                     },

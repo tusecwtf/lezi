@@ -32,6 +32,7 @@ import com.lezi.babylog.core.model.localPhotoPaths
 import com.lezi.babylog.core.ui.formatRecordDuration
 
 internal const val FUTURE_TIME_WARNING = "不能选未来时刻"
+internal const val CARE_PLAN_TIME_NOT_FUTURE_WARNING = "护理计划时间必须晚于当前时间"
 private const val SLEEP_END_MISSING_WARNING = "请选择醒来时刻"
 private const val SLEEP_END_ORDER_WARNING = "醒来须晚于睡下"
 
@@ -132,6 +133,15 @@ internal enum class ComposerWorkMode {
     FulfillPlan,
 }
 
+/** Stable creation intent carried from the entry point into the restorable draft. */
+enum class ComposerCreateIntent {
+    /** Preserve the shared Composer rule: future creates a plan, current/past creates a fact. */
+    DeriveFromTimestamp,
+
+    /** The caller explicitly opened “安排护理”; this intent must never degrade into a fact. */
+    ScheduleCare,
+}
+
 internal data class QuickRecordDraft(
     val type: RecordType,
     val timestamp: Long,
@@ -143,6 +153,7 @@ internal data class QuickRecordDraft(
      */
     val carePlanId: Long? = null,
     val editCarePlan: Boolean = false,
+    val createIntent: ComposerCreateIntent = ComposerCreateIntent.DeriveFromTimestamp,
     val sourcePayloadJson: String = "{}",
     val sourceSchemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
     val note: String = "",
@@ -200,6 +211,7 @@ internal data class QuickRecordDraft(
         isEditingCarePlan -> ComposerWorkMode.EditPlan
         carePlanId != null -> ComposerWorkMode.FulfillPlan
         existingRecordId != null -> ComposerWorkMode.RecordFact
+        createIntent == ComposerCreateIntent.ScheduleCare -> ComposerWorkMode.ScheduleCare
         timestamp > nowMillis -> ComposerWorkMode.ScheduleCare
         else -> ComposerWorkMode.RecordFact
     }
@@ -339,6 +351,12 @@ internal data class QuickRecordDraft(
     ): ComposerValidationResult? {
         val work = workMode(nowMillis)
         val converting = needsConvertToCarePlan(nowMillis)
+        if (work == ComposerWorkMode.ScheduleCare && timestamp <= nowMillis) {
+            return ComposerValidationResult(
+                CARE_PLAN_TIME_NOT_FUTURE_WARNING,
+                ComposerInvalidField.StartTime,
+            )
+        }
         // Schedule/edit plan (and explicit record→plan convert) allow future plan time.
         // Fact + fulfill still reject future actual times — unless convert is the path.
         if (
@@ -622,9 +640,11 @@ internal data class QuickRecordDraft(
             customItemId: Long? = null,
             customTitle: String = "",
             customIconSlot: Int? = null,
+            createIntent: ComposerCreateIntent = ComposerCreateIntent.DeriveFromTimestamp,
         ): QuickRecordDraft = QuickRecordDraft(
             type = type,
             timestamp = timestamp,
+            createIntent = createIntent,
             amountMl = lastAmountMl?.takeIf { it in 1..999 }
                 ?: recentAmountMl.firstOrNull { it in 1..999 }
                 ?: if (type == RecordType.PUMP_EXPRESS) 60 else 120,

@@ -675,6 +675,45 @@ class QuickRecordDraftTest {
     }
 
     @Test
+    fun explicitScheduleIntentNeverDegradesToAFactAfterItsTimePasses() {
+        val scheduledAt = tappedAt + 60_000L
+        val afterScheduledAt = scheduledAt + 1L
+        val draft = QuickRecordDraft.create(
+            type = RecordType.BATH,
+            timestamp = scheduledAt,
+            createIntent = ComposerCreateIntent.ScheduleCare,
+        )
+
+        assertEquals(
+            ComposerWorkMode.ScheduleCare,
+            draft.workMode(nowMillis = afterScheduledAt),
+        )
+        assertEquals(
+            ComposerWriteDecision.CreateCarePlan,
+            draft.writeDecision(nowMillis = afterScheduledAt),
+        )
+        assertEquals(
+            CARE_PLAN_TIME_NOT_FUTURE_WARNING,
+            draft.validationError(nowMillis = afterScheduledAt),
+        )
+        assertFalse(draft.canConfirm(nowMillis = afterScheduledAt))
+        assertEquals("确认安排", draft.confirmLabel(nowMillis = afterScheduledAt))
+
+        val adjusted = draft.copy(timestamp = afterScheduledAt + 60_000L)
+        assertNull(adjusted.validationError(nowMillis = afterScheduledAt))
+        assertTrue(adjusted.canConfirm(nowMillis = afterScheduledAt))
+
+        val ordinaryFact = QuickRecordDraft.create(
+            type = RecordType.BATH,
+            timestamp = scheduledAt,
+        )
+        assertEquals(
+            ComposerWriteDecision.AddRecord,
+            ordinaryFact.writeDecision(nowMillis = afterScheduledAt),
+        )
+    }
+
+    @Test
     fun fromCarePlanHydratesPlanFieldSnapshotIntoFulfillDraft() {
         val plan = com.lezi.babylog.core.model.CarePlan(
             id = 9L,
