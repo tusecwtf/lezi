@@ -602,7 +602,7 @@ internal class ReplicaSyncEngine(
                 if (!applyBaby(session, entity)) unresolved += entity
             }
             for (entity in entities.filter { it.type == "custom_item" }) {
-                if (!applyCustomItem(entity)) unresolved += entity
+                if (!applyCustomItem(session, entity)) unresolved += entity
             }
             // Fulfillment full-set: record(+photos) before completed care_plan before
             // fulfillment_candidate. Incomplete sets leave cursor unmoved (unresolved).
@@ -610,7 +610,7 @@ internal class ReplicaSyncEngine(
                 if (!applyRecord(entity)) unresolved += entity
             }
             for (entity in entities.filter { it.type == "care_plan" }) {
-                val applied = applyCarePlan(entity)
+                val applied = applyCarePlan(session, entity)
                 if (!applied) {
                     unresolved += entity
                 } else {
@@ -700,7 +700,10 @@ internal class ReplicaSyncEngine(
      * be local (same-page records are applied first) so receivers never see
      * completed-without-Record partial state.
      */
-    private suspend fun applyCarePlan(entity: SyncEntity): Boolean {
+    private suspend fun applyCarePlan(
+        session: SyncSession,
+        entity: SyncEntity,
+    ): Boolean {
         val existing = carePlanDao.getByClientUuid(entity.clientUuid)
         // Match server LWW: existing wins on equal updatedAt (>= skip).
         if (existing != null && existing.updatedAt >= entity.updatedAt) return true
@@ -781,9 +784,11 @@ internal class ReplicaSyncEngine(
                 payloadJson = remotePayloadJson,
                 schemaVersion = remoteSchemaVersion,
                 status = status,
-                createdByMembershipId = payload.string("created_by_membership_id")
-                    ?: existing?.createdByMembershipId
-                    ?: "",
+                createdByMembershipId = resolvedImmutableCreator(
+                    session = session,
+                    existingCreator = existing?.createdByMembershipId,
+                    remoteCreator = payload.string("created_by_membership_id"),
+                ),
                 fulfilledRecordClientUuid = fulfilledRecordUuid,
                 fulfilledAt = if ("fulfilled_at" in payload) {
                     payload.long("fulfilled_at")
@@ -951,7 +956,10 @@ internal class ReplicaSyncEngine(
      * Apply a remote custom item definition with pure updated_at LWW.
      * Preserves local sortOrder (layout). Does not resurrect local layout prefs.
      */
-    private suspend fun applyCustomItem(entity: SyncEntity): Boolean {
+    private suspend fun applyCustomItem(
+        session: SyncSession,
+        entity: SyncEntity,
+    ): Boolean {
         val existing = customItemDao.getByClientUuid(entity.clientUuid)
         // Match server LWW: existing wins on equal updatedAt (>= skip).
         if (existing != null && existing.updatedAt >= entity.updatedAt) return true
@@ -963,9 +971,11 @@ internal class ReplicaSyncEngine(
         val iconSlot = payload["icon_slot"]?.jsonPrimitive?.longOrNull?.toInt()
             ?: existing?.iconSlot
             ?: 0
-        val creator = payload.string("created_by_membership_id")
-            ?: existing?.createdByMembershipId
-            ?: ""
+        val creator = resolvedImmutableCreator(
+            session = session,
+            existingCreator = existing?.createdByMembershipId,
+            remoteCreator = payload.string("created_by_membership_id"),
+        )
         val familyId = existing?.familyId
             ?: familyDao.listAll().firstOrNull()?.id
             ?: return false
@@ -986,6 +996,19 @@ internal class ReplicaSyncEngine(
             ),
         )
         return true
+    }
+
+    private fun resolvedImmutableCreator(
+        session: SyncSession,
+        existingCreator: String?,
+        remoteCreator: String?,
+    ): String {
+        val canonicalSelf = session.membershipId.trim()
+        return existingCreator
+            ?.takeIf { canonicalSelf.isNotEmpty() && it == canonicalSelf }
+            ?: remoteCreator
+            ?: existingCreator
+            ?: ""
     }
 
     private suspend fun applyBaby(session: SyncSession, entity: SyncEntity): Boolean {
@@ -1332,9 +1355,67 @@ internal class ReplicaSyncEngine(
             ?.takeIf { it.isNotEmpty() }
             ?: return session
         if (session.membershipId == membershipId) return session
+        val legacyMembershipId = session.membershipId.trim()
+        val legacyNowIdentifiesPeer = legacyMembershipId.isNotEmpty() && members.any { member ->
+            !member.isSelf && member.membershipId?.trim() == legacyMembershipId
+        }
+        if (legacyMembershipId.isNotEmpty() && !legacyNowIdentifiesPeer) {
+            transactionRunner.run {
+                carePlanDao.listAllIncludingDeleted()
+                    .filter { it.createdByMembershipId == legacyMembershipId }
+                    .forEach { plan ->
+                        rewritePendingCreatorAlias(
+                            familyId = session.familyId,
+                            entityType = "care_plan",
+                            clientUuid = plan.clientUuid,
+                            legacyMembershipId = legacyMembershipId,
+                            canonicalMembershipId = membershipId,
+                        )
+                        carePlanDao.update(
+                            plan.copy(createdByMembershipId = membershipId),
+                        )
+                    }
+                customItemDao.listAllIncludingDeleted()
+                    .filter { it.createdByMembershipId == legacyMembershipId }
+                    .forEach { item ->
+                        rewritePendingCreatorAlias(
+                            familyId = session.familyId,
+                            entityType = "custom_item",
+                            clientUuid = item.clientUuid,
+                            legacyMembershipId = legacyMembershipId,
+                            canonicalMembershipId = membershipId,
+                        )
+                        customItemDao.update(
+                            item.copy(createdByMembershipId = membershipId),
+                        )
+                    }
+            }
+        }
         val updated = session.copy(membershipId = membershipId)
         preferences.saveSession(updated)
         return updated
+    }
+
+    private suspend fun rewritePendingCreatorAlias(
+        familyId: String,
+        entityType: String,
+        clientUuid: String,
+        legacyMembershipId: String,
+        canonicalMembershipId: String,
+    ) {
+        val pending = outboxDao.find(familyId, entityType, clientUuid) ?: return
+        val payload = runCatching {
+            Json.parseToJsonElement(pending.payloadJson).jsonObject
+        }.getOrNull() ?: return
+        if (payload.string("created_by_membership_id") != legacyMembershipId) return
+        outboxDao.enqueue(
+            pending.copy(
+                payloadJson = JsonObject(
+                    payload +
+                        ("created_by_membership_id" to JsonPrimitive(canonicalMembershipId)),
+                ).toString(),
+            ),
+        )
     }
 
     override suspend fun resetLocalSyncReceipts(
