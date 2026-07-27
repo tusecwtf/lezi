@@ -19,6 +19,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -41,7 +43,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -50,6 +54,40 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.lezi.babylog.designsystem.LeziDetailTopBar
 import kotlinx.coroutines.delay
+
+internal enum class TimerViewportMode {
+    Spacious,
+    Scrollable,
+}
+
+/** Keep every timer action reachable on short viewports and with enlarged system text. */
+internal fun timerViewportMode(
+    screenHeightDp: Int,
+    fontScale: Float,
+): TimerViewportMode {
+    val scaledMinimumHeight = 520f * fontScale.coerceAtLeast(1f)
+    return if (screenHeightDp < scaledMinimumHeight) {
+        TimerViewportMode.Scrollable
+    } else {
+        TimerViewportMode.Spacious
+    }
+}
+
+internal sealed interface TimerReminderPermissionDecision {
+    data object ScheduleReminder : TimerReminderPermissionDecision
+
+    data class KeepPromptOpen(val message: String) : TimerReminderPermissionDecision
+}
+
+/** The record is already persisted before this decision; denial must not save or exit again. */
+internal fun timerReminderPermissionDecision(
+    granted: Boolean,
+): TimerReminderPermissionDecision =
+    if (granted) {
+        TimerReminderPermissionDecision.ScheduleReminder
+    } else {
+        TimerReminderPermissionDecision.KeepPromptOpen("记录已保存、提醒未设置")
+    }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -102,12 +140,14 @@ fun TimerRoute(
     val notificationPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
-        if (!granted) {
-            reminderScheduling = false
-            savedAwaitingReminder = false
-            onDone()
-        } else {
-            vm.scheduleReminder(pendingReminderAt, ::finishReminderSchedule)
+        when (val decision = timerReminderPermissionDecision(granted)) {
+            TimerReminderPermissionDecision.ScheduleReminder ->
+                vm.scheduleReminder(pendingReminderAt, ::finishReminderSchedule)
+
+            is TimerReminderPermissionDecision.KeepPromptOpen -> {
+                reminderScheduling = false
+                reminderScheduleError = decision.message
+            }
         }
     }
     fun requestOrSchedule(atMillis: Long?) {
@@ -127,6 +167,12 @@ fun TimerRoute(
         }
     }
     val completionSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val configuration = LocalConfiguration.current
+    val viewportMode = timerViewportMode(
+        screenHeightDp = configuration.screenHeightDp,
+        fontScale = LocalDensity.current.fontScale,
+    )
+    val timerScrollState = rememberScrollState()
 
     Scaffold(
         topBar = {
@@ -137,9 +183,20 @@ fun TimerRoute(
             Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .then(
+                    if (viewportMode == TimerViewportMode.Scrollable) {
+                        Modifier.verticalScroll(timerScrollState)
+                    } else {
+                        Modifier
+                    },
+                )
                 .padding(20.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.SpaceBetween,
+            verticalArrangement = if (viewportMode == TimerViewportMode.Scrollable) {
+                Arrangement.spacedBy(20.dp)
+            } else {
+                Arrangement.SpaceBetween
+            },
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
