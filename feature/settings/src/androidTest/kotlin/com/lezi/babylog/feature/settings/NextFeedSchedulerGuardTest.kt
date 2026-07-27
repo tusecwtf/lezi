@@ -71,7 +71,6 @@ class NextFeedSchedulerGuardTest {
     ) { _, method, args ->
         when (method.name) {
             "clearNextFeedAtIfEpoch" -> clearIfEpoch(args!![0] as String)
-            "clearLegacyNextFeedAtIfEpochMissing" -> false
             else -> error("Unexpected SettingsStore call: ${method.name}")
         }
     } as SettingsStore

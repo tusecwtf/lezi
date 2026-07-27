@@ -154,18 +154,6 @@ class SettingsDataSource @Inject constructor(
         return cleared
     }
 
-    override suspend fun clearLegacyNextFeedAtIfEpochMissing(): Boolean {
-        var cleared = false
-        dataStore.edit { prefs ->
-            if (prefs[Keys.NEXT_FEED_AT] != null && Keys.NEXT_FEED_EPOCH !in prefs) {
-                prefs.remove(Keys.NEXT_FEED_AT)
-                prefs[Keys.NEXT_FEED_EPOCH] = UUID.randomUUID().toString()
-                cleared = true
-            }
-        }
-        return cleared
-    }
-
     override suspend fun setItemOrderJson(json: String) {
         dataStore.edit { it[Keys.ITEM_ORDER] = json }
     }

@@ -1,8 +1,6 @@
 package com.lezi.babylog.core.datastore
 
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
-import androidx.datastore.preferences.core.edit
-import androidx.datastore.preferences.core.longPreferencesKey
 import java.io.File
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -101,22 +99,6 @@ class SettingsDataSourceLocalClearTest {
 
         assertTrue(settings.clearNextFeedAtIfEpoch(currentEpoch))
         assertNull(settings.settings.first().nextFeedAt)
-    }
-
-    @Test
-    fun legacyAlarmConsumesOnlyAFeedWithoutAnEpochKey() = runBlocking {
-        val file = File(temporaryFolder.root, "legacy-alarm-epoch.preferences_pb")
-        val store = PreferenceDataStoreFactory.create(produceFile = { file })
-        val settings = SettingsDataSource(store)
-        store.edit { it[longPreferencesKey("next_feed_at")] = 8L }
-
-        assertTrue(settings.clearLegacyNextFeedAtIfEpochMissing())
-        assertNull(settings.settings.first().nextFeedAt)
-
-        store.edit { it[longPreferencesKey("next_feed_at")] = 8L }
-        settings.setNextFeedAt(8L)
-        assertFalse(settings.clearLegacyNextFeedAtIfEpochMissing())
-        assertEquals(8L, settings.settings.first().nextFeedAt)
     }
 
     private fun newSettings(fileName: String): SettingsDataSource {

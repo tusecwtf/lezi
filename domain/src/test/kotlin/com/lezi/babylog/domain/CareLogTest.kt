@@ -5291,8 +5291,6 @@ private class FakeSettingsStore : SettingsStore {
         return true
     }
 
-    override suspend fun clearLegacyNextFeedAtIfEpochMissing(): Boolean = false
-
     override suspend fun setItemOrderJson(json: String) {
         order.value = json
         publish()

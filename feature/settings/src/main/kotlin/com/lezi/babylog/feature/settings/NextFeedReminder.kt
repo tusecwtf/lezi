@@ -75,13 +75,8 @@ class NextFeedScheduler @Inject constructor(
 
     /** Atomically rejects a stale delivery before it can notify or clear a newer epoch. */
     internal suspend fun consumeDeliveredAlarm(expectedEpoch: String?): Boolean {
-        return mutationGuard.withLock {
-            if (expectedEpoch.isNullOrBlank()) {
-                settings.clearLegacyNextFeedAtIfEpochMissing()
-            } else {
-                settings.clearNextFeedAtIfEpoch(expectedEpoch)
-            }
-        }
+        if (expectedEpoch.isNullOrBlank()) return false
+        return mutationGuard.withLock { settings.clearNextFeedAtIfEpoch(expectedEpoch) }
     }
 
     private fun pending(context: Context, epoch: String? = null): PendingIntent {

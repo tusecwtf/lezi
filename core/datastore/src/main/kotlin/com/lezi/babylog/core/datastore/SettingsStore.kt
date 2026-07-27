@@ -44,8 +44,6 @@ interface SettingsStore {
     suspend fun clearNextFeedAt()
     /** Atomically consumes only the alarm epoch carried by a delivered PendingIntent. */
     suspend fun clearNextFeedAtIfEpoch(expectedEpoch: String): Boolean
-    /** Upgrade bridge for a pre-epoch PendingIntent; rejects every epoch-aware write. */
-    suspend fun clearLegacyNextFeedAtIfEpochMissing(): Boolean
     suspend fun setItemOrderJson(json: String)
     suspend fun setCategoryOrderJson(json: String)
     suspend fun setHiddenItems(items: Set<String>)
