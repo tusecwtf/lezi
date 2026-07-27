@@ -1143,6 +1143,170 @@ class CareLogTest {
     }
 
     @Test
+    fun pendingCreatorAcknowledgementAllowsOnlyTheExactLocalBlankEntities() = runTest {
+        val pending = setOf(
+            com.lezi.babylog.sync.CreatorAcknowledgementRef(
+                entityType = "custom_item",
+                clientUuid = "item-local-pending",
+            ),
+            com.lezi.babylog.sync.CreatorAcknowledgementRef(
+                entityType = "care_plan",
+                clientUuid = "plan-local-pending",
+            ),
+        )
+        val sync = RecordingSyncPort(
+            membershipId = "m-canonical",
+            role = com.lezi.babylog.sync.FamilyRole.Member,
+            familyId = "fam-1",
+            deviceId = "dev-1",
+            pendingCreatorAcknowledgements = pending,
+        )
+        val care = Fakes(sync).careLog()
+        val localItem = CustomRecordItem(
+            id = 1,
+            clientUuid = "item-local-pending",
+            name = "本机项目",
+            iconSlot = 0,
+            sortOrder = 0,
+            createdByMembershipId = "",
+        )
+        val unknownItem = localItem.copy(
+            id = 2,
+            clientUuid = "item-legacy-unknown",
+            name = "未知项目",
+        )
+        val localPlan = CarePlan(
+            id = 1,
+            clientUuid = "plan-local-pending",
+            babyId = 1,
+            type = RecordType.PEE,
+            scheduledAt = 10_000,
+            scheduledZoneId = "Asia/Shanghai",
+            createdByMembershipId = "",
+            updatedAt = 1,
+        )
+        val unknownPlan = localPlan.copy(
+            id = 2,
+            clientUuid = "plan-legacy-unknown",
+        )
+
+        assertThat(care.canManageCustomItem(localItem)).isTrue()
+        assertThat(care.canManageCarePlan(localPlan)).isTrue()
+        assertThat(care.canManageCustomItem(unknownItem)).isFalse()
+        assertThat(care.canManageCarePlan(unknownPlan)).isFalse()
+
+        sync.replaceSession(
+            sync.currentSession().copy(pendingCreatorAcknowledgements = emptySet()),
+        )
+
+        assertThat(care.canManageCustomItem(localItem)).isFalse()
+        assertThat(care.canManageCarePlan(localPlan)).isFalse()
+    }
+
+    @Test
+    fun pendingCreatorAcknowledgementEnforcesExactEditAndDeletePermissions() = runTest {
+        val sync = RecordingSyncPort(
+            membershipId = "m-canonical",
+            role = com.lezi.babylog.sync.FamilyRole.Member,
+            familyId = "fam-1",
+            deviceId = "dev-1",
+            pendingCreatorAcknowledgements = setOf(
+                com.lezi.babylog.sync.CreatorAcknowledgementRef(
+                    "custom_item",
+                    "item-local-pending",
+                ),
+                com.lezi.babylog.sync.CreatorAcknowledgementRef(
+                    "care_plan",
+                    "plan-local-pending",
+                ),
+            ),
+        )
+        val fakes = Fakes(sync)
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        fakes.babies.upsert(
+            BabyEntity(
+                id = 1,
+                familyId = 1,
+                clientUuid = "baby-local",
+                nickname = "年年",
+                birthdayEpochDay = 1,
+                themeColorArgb = 0,
+                updatedAt = 1,
+            ),
+        )
+        fakes.customItems.upsert(
+            CustomItemEntity(
+                id = 1,
+                clientUuid = "item-local-pending",
+                familyId = 1,
+                name = "本机项目",
+                iconSlot = 0,
+                sortOrder = 0,
+                updatedAt = 1,
+                createdByMembershipId = "",
+                syncDirty = false,
+            ),
+        )
+        fakes.customItems.upsert(
+            CustomItemEntity(
+                id = 2,
+                clientUuid = "item-legacy-unknown",
+                familyId = 1,
+                name = "未知项目",
+                iconSlot = 0,
+                sortOrder = 1,
+                updatedAt = 1,
+                createdByMembershipId = "",
+                syncDirty = false,
+            ),
+        )
+        fakes.carePlans.upsert(
+            CarePlanEntity(
+                id = 1,
+                clientUuid = "plan-local-pending",
+                babyId = 1,
+                type = "pee",
+                scheduledAt = 10_000,
+                scheduledZoneId = "Asia/Shanghai",
+                updatedAt = 1,
+                createdByMembershipId = "",
+                syncDirty = false,
+            ),
+        )
+        fakes.carePlans.upsert(
+            CarePlanEntity(
+                id = 2,
+                clientUuid = "plan-legacy-unknown",
+                babyId = 1,
+                type = "pee",
+                scheduledAt = 10_000,
+                scheduledZoneId = "Asia/Shanghai",
+                updatedAt = 1,
+                createdByMembershipId = "",
+                syncDirty = false,
+            ),
+        )
+
+        val localItem = care.observeCustomItems().first().first { it.id == 1L }
+        care.updateCustomItem(localItem.copy(name = "本机项目已编辑"))
+        care.deleteCarePlan(carePlanId = 1, nowMillis = 2)
+
+        assertThat(fakes.customItems.getById(1)?.name).isEqualTo("本机项目已编辑")
+        assertThat(fakes.carePlans.get(1)?.deletedAt).isEqualTo(2)
+        val unknownItem = care.observeCustomItems().first().first { it.id == 2L }
+        assertThat(
+            runCatching {
+                care.updateCustomItem(unknownItem.copy(name = "不应成功"))
+            }.exceptionOrNull(),
+        ).isInstanceOf(CustomItemPermissionException::class.java)
+        assertThat(
+            runCatching { care.deleteCarePlan(carePlanId = 2, nowMillis = 2) }
+                .exceptionOrNull(),
+        ).isInstanceOf(CarePlanPermissionException::class.java)
+    }
+
+    @Test
     fun customItemStampsCreatorMembershipAndRejectsNonOwnerEdit() = runTest {
         val memberSync = RecordingSyncPort(
             membershipId = "m-member",
@@ -4456,19 +4620,30 @@ private class RecordingSyncPort(
     private val familyId: String = "",
     private val membershipId: String = "",
     private val role: com.lezi.babylog.sync.FamilyRole = com.lezi.babylog.sync.FamilyRole.None,
+    pendingCreatorAcknowledgements: Set<com.lezi.babylog.sync.CreatorAcknowledgementRef> =
+        emptySet(),
 ) : com.lezi.babylog.sync.SyncPort by delegate {
     var requests = 0
     var localRecordReconciliations = 0
     var fullLocalWipes = 0
 
-    override fun session(): Flow<com.lezi.babylog.sync.SyncSession> = MutableStateFlow(
+    private val sessionState = MutableStateFlow(
         com.lezi.babylog.sync.SyncSession(
             familyId = familyId,
             deviceId = deviceId,
             membershipId = membershipId,
             role = role,
+            pendingCreatorAcknowledgements = pendingCreatorAcknowledgements,
         ),
     )
+
+    override fun session(): Flow<com.lezi.babylog.sync.SyncSession> = sessionState
+
+    fun currentSession(): com.lezi.babylog.sync.SyncSession = sessionState.value
+
+    fun replaceSession(session: com.lezi.babylog.sync.SyncSession) {
+        sessionState.value = session
+    }
 
     override fun requestSync(trigger: com.lezi.babylog.sync.SyncTrigger) {
         requests++

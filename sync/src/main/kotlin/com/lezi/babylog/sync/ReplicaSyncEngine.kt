@@ -87,13 +87,21 @@ internal class ReplicaSyncEngine(
     ): ReplicaSyncOutcome {
         cleanupPendingTombstonedMedia()
         val mediaEditGuard = captureLocalMediaEditGuard()
-        val capturedPendingBlankCreator = captureLocalChanges(session)
-        requireRemoteAllowed(session)
+        val capturedPendingCreatorAcknowledgements = captureLocalChanges(session)
         val plan = SyncPlan.forTrigger(trigger)
-        var current = session
-        var membershipConvergedFromBlank = false
+        var current = preferences.session.first()
+        // The home-network gate refreshes health capabilities. Reading them
+        // before this call would lose first-cycle creator acknowledgement intent.
+        requireRemoteAllowed(current)
         val supportsMembershipAuthor =
             CAPABILITY_RECORD_MEMBERSHIP_AUTHOR in remoteCapabilities()
+        if (supportsMembershipAuthor && capturedPendingCreatorAcknowledgements.isNotEmpty()) {
+            preferences.updateCreatorAcknowledgements(
+                add = capturedPendingCreatorAcknowledgements,
+            )
+            current = preferences.session.first()
+        }
+        var membershipConvergedFromBlank = false
         if (supportsMembershipAuthor) {
             val previousMembershipWasBlank = current.membershipId.isBlank()
             current = convergeAuthenticatedSelfMembership(
@@ -117,11 +125,14 @@ internal class ReplicaSyncEngine(
                 recovered = true
             }
         }
-        // A failed prior cycle can leave the session canonical while its captured
-        // rows still have no creator. This flag only schedules an authoritative
-        // acknowledgement pull; it never treats dirty/outbox state as ownership.
+        // Exact local provenance is durable across process death. It only
+        // schedules an authoritative acknowledgement pull and never supplies a
+        // creator membership value of its own.
         val requiresCreatorAcknowledgementPull = supportsMembershipAuthor &&
-            (membershipConvergedFromBlank || capturedPendingBlankCreator)
+            (
+                membershipConvergedFromBlank ||
+                    current.pendingCreatorAcknowledgements.isNotEmpty()
+                )
         if ((plan.pull || requiresCreatorAcknowledgementPull) && !recovered) {
             try {
                 current = pullAllPages(
@@ -1596,6 +1607,13 @@ internal class ReplicaSyncEngine(
                 pulled.entities,
                 mediaEditGuard = mediaEditGuard,
             )
+            val acknowledgedCreators = authoritativeCreatorAcknowledgements(
+                pending = preferences.session.first().pendingCreatorAcknowledgements,
+                entities = pulled.entities,
+            )
+            if (acknowledgedCreators.isNotEmpty()) {
+                preferences.updateCreatorAcknowledgements(remove = acknowledgedCreators)
+            }
             downloadMissingMedia(current, mediaEditGuard)
             val nextGeneration = pulled.generation.ifBlank { current.pullGeneration }
             if (!deferCursorUntilComplete) {
@@ -1653,13 +1671,15 @@ internal class ReplicaSyncEngine(
         }
     }
 
-    private suspend fun captureLocalChanges(session: SyncSession): Boolean {
+    private suspend fun captureLocalChanges(
+        session: SyncSession,
+    ): Set<CreatorAcknowledgementRef> {
         val babies = babyDao.listPendingSync()
         val records = recordDao.listPendingSync()
         val carePlans = carePlanDao.listPendingSync()
         val customItems = customItemDao.listPendingSync()
         val fulfillmentCandidates = fulfillmentCandidateDao.listPendingSync()
-        var capturedPendingBlankCreator = false
+        val capturedPendingCreatorAcknowledgements = mutableSetOf<CreatorAcknowledgementRef>()
         materializeLocalMedia(
             includeAvatars = session.role != FamilyRole.Member,
             babies = babies,
@@ -1711,7 +1731,10 @@ internal class ReplicaSyncEngine(
         customItems.forEach { item ->
             enqueue(session, SyncWireMapper.customItem(item))
             if (item.createdByMembershipId.isBlank()) {
-                capturedPendingBlankCreator = true
+                capturedPendingCreatorAcknowledgements += CreatorAcknowledgementRef(
+                    entityType = "custom_item",
+                    clientUuid = item.clientUuid,
+                )
             }
         }
         // Outbox materialization only; atomic commit order is record packages →
@@ -1746,7 +1769,10 @@ internal class ReplicaSyncEngine(
                 ),
             )
             if (plan.createdByMembershipId.isBlank()) {
-                capturedPendingBlankCreator = true
+                capturedPendingCreatorAcknowledgements += CreatorAcknowledgementRef(
+                    entityType = "care_plan",
+                    clientUuid = plan.clientUuid,
+                )
             }
         }
         fulfillmentCandidates.forEach { candidate ->
@@ -1780,8 +1806,35 @@ internal class ReplicaSyncEngine(
                 ),
             )
         }
-        return capturedPendingBlankCreator
+        return capturedPendingCreatorAcknowledgements
     }
+
+    private suspend fun authoritativeCreatorAcknowledgements(
+        pending: Set<CreatorAcknowledgementRef>,
+        entities: List<SyncEntity>,
+    ): Set<CreatorAcknowledgementRef> = entities.mapNotNull { entity ->
+        val ref = CreatorAcknowledgementRef(entity.type, entity.clientUuid)
+        if (ref !in pending) return@mapNotNull null
+        val remoteCreator = runCatching {
+            Json.parseToJsonElement(entity.payloadJson).jsonObject
+        }.getOrNull()
+            ?.string("created_by_membership_id")
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
+            ?: return@mapNotNull null
+        val applied = when (entity.type) {
+            "care_plan" -> carePlanDao.getByClientUuid(entity.clientUuid)?.let { local ->
+                local.updatedAt == entity.updatedAt &&
+                    local.createdByMembershipId.trim() == remoteCreator
+            } == true
+            "custom_item" -> customItemDao.getByClientUuid(entity.clientUuid)?.let { local ->
+                local.updatedAt == entity.updatedAt &&
+                    local.createdByMembershipId.trim() == remoteCreator
+            } == true
+            else -> false
+        }
+        ref.takeIf { applied }
+    }.toSet()
 
     private suspend fun enqueue(session: SyncSession, entity: SyncEntity) {
         outboxDao.enqueue(

@@ -20,6 +20,18 @@ enum class FamilyRole {
     None,
 }
 
+/**
+ * Exact local entity whose server-owned creator stamp has not been observed yet.
+ *
+ * This is provenance only: it never contains or implies a membership id. The
+ * reference survives process death so a failed acknowledgement pull can retry
+ * without treating every legacy blank creator as local ownership.
+ */
+data class CreatorAcknowledgementRef(
+    val entityType: String,
+    val clientUuid: String,
+)
+
 data class SyncSession(
     val familyId: String = "",
     val familyToken: String = "",
@@ -44,6 +56,7 @@ data class SyncSession(
      * Prefer members list projection to refresh after upgrade.
      */
     val membershipId: String = "",
+    val pendingCreatorAcknowledgements: Set<CreatorAcknowledgementRef> = emptySet(),
 ) {
     val baseUrl: String
         get() = homeLanConfig.baseUrl
@@ -58,6 +71,10 @@ data class SyncSession(
             allowedSsids = allowedSsids,
             scheme = serverScheme,
         ).withNormalized()
+
+    fun isCreatorAcknowledgementPending(entityType: String, clientUuid: String): Boolean =
+        CreatorAcknowledgementRef(entityType.trim(), clientUuid.trim()) in
+            pendingCreatorAcknowledgements
 }
 
 interface SyncPreferences {
@@ -70,6 +87,10 @@ interface SyncPreferences {
         cursor: Long,
         generation: String,
         familyName: PullFamilyName,
+    )
+    suspend fun updateCreatorAcknowledgements(
+        add: Set<CreatorAcknowledgementRef> = emptySet(),
+        remove: Set<CreatorAcknowledgementRef> = emptySet(),
     )
     suspend fun markSuccess(atMillis: Long)
     suspend fun ensureDeviceId(): String
@@ -125,6 +146,8 @@ class DataStoreSyncPreferences @Inject constructor(
             serverScheme = scheme,
             familyName = prefs[Keys.FAMILY_NAME]?.trim()?.takeIf { it.isNotEmpty() },
             membershipId = prefs[Keys.MEMBERSHIP_ID].orEmpty(),
+            pendingCreatorAcknowledgements =
+                decodeCreatorAcknowledgements(prefs[Keys.PENDING_CREATOR_ACKNOWLEDGEMENTS]),
         )
     }
 
@@ -176,6 +199,7 @@ class DataStoreSyncPreferences @Inject constructor(
         secureTokenStore.setToken(session.familyToken)
         val config = session.homeLanConfig.withNormalized()
         dataStore.edit { prefs ->
+            val previousFamilyId = prefs[Keys.FAMILY_ID].orEmpty()
             if (config.host.isNotBlank()) {
                 prefs[Keys.SERVER_HOST] = config.host
                 prefs[Keys.SERVER_PORT] = config.port
@@ -188,6 +212,9 @@ class DataStoreSyncPreferences @Inject constructor(
             if (ssidEncoded.isBlank()) prefs.remove(Keys.ALLOWED_SSIDS)
             else prefs[Keys.ALLOWED_SSIDS] = ssidEncoded
             prefs[Keys.FAMILY_ID] = session.familyId
+            if (previousFamilyId != session.familyId) {
+                prefs.remove(Keys.PENDING_CREATOR_ACKNOWLEDGEMENTS)
+            }
             prefs.remove(Keys.FAMILY_TOKEN)
             // The owner session and retirement of its idempotency key are one
             // durable commit. A separate post-commit edit can fail after the UI
@@ -254,6 +281,27 @@ class DataStoreSyncPreferences @Inject constructor(
                 } else {
                     it[Keys.FAMILY_NAME] = normalizedFamilyName
                 }
+            }
+        }
+    }
+
+    override suspend fun updateCreatorAcknowledgements(
+        add: Set<CreatorAcknowledgementRef>,
+        remove: Set<CreatorAcknowledgementRef>,
+    ) {
+        val normalizedAdd = normalizeCreatorAcknowledgements(add)
+        val normalizedRemove = normalizeCreatorAcknowledgements(remove)
+        if (normalizedAdd.isEmpty() && normalizedRemove.isEmpty()) return
+        dataStore.edit { prefs ->
+            val next = (
+                decodeCreatorAcknowledgements(prefs[Keys.PENDING_CREATOR_ACKNOWLEDGEMENTS]) +
+                    normalizedAdd
+                ) - normalizedRemove
+            val encoded = encodeCreatorAcknowledgements(next)
+            if (encoded.isEmpty()) {
+                prefs.remove(Keys.PENDING_CREATOR_ACKNOWLEDGEMENTS)
+            } else {
+                prefs[Keys.PENDING_CREATOR_ACKNOWLEDGEMENTS] = encoded
             }
         }
     }
@@ -378,6 +426,7 @@ class DataStoreSyncPreferences @Inject constructor(
         prefs.remove(Keys.CREATE_REQUEST_ID)
         prefs.remove(Keys.FAMILY_NAME)
         prefs.remove(Keys.MEMBERSHIP_ID)
+        prefs.remove(Keys.PENDING_CREATOR_ACKNOWLEDGEMENTS)
     }
 
     private fun encodeSsids(ssids: List<String>): String =
@@ -386,6 +435,50 @@ class DataStoreSyncPreferences @Inject constructor(
     private fun decodeSsids(raw: String?): List<String> {
         if (raw.isNullOrBlank()) return emptyList()
         return HomeLanServerConfig.normalizeSsids(raw.split('\u001e', '\n', ','))
+    }
+
+    private fun encodeCreatorAcknowledgements(
+        refs: Set<CreatorAcknowledgementRef>,
+    ): String = normalizeCreatorAcknowledgements(refs)
+        .sortedWith(
+            compareBy(
+                CreatorAcknowledgementRef::entityType,
+                CreatorAcknowledgementRef::clientUuid,
+            ),
+        )
+        .joinToString(CREATOR_ACK_ENTRY_SEPARATOR.toString()) { ref ->
+            "${ref.entityType}$CREATOR_ACK_FIELD_SEPARATOR${ref.clientUuid}"
+        }
+
+    private fun decodeCreatorAcknowledgements(raw: String?): Set<CreatorAcknowledgementRef> =
+        raw.orEmpty()
+            .split(CREATOR_ACK_ENTRY_SEPARATOR)
+            .mapNotNull { encoded ->
+                val parts = encoded.split(CREATOR_ACK_FIELD_SEPARATOR, limit = 2)
+                if (parts.size != 2) return@mapNotNull null
+                normalizeCreatorAcknowledgement(
+                    CreatorAcknowledgementRef(parts[0], parts[1]),
+                )
+            }
+            .toSet()
+
+    private fun normalizeCreatorAcknowledgements(
+        refs: Set<CreatorAcknowledgementRef>,
+    ): Set<CreatorAcknowledgementRef> = refs.mapNotNull(::normalizeCreatorAcknowledgement).toSet()
+
+    private fun normalizeCreatorAcknowledgement(
+        ref: CreatorAcknowledgementRef,
+    ): CreatorAcknowledgementRef? {
+        val entityType = ref.entityType.trim()
+        val clientUuid = ref.clientUuid.trim()
+        if (entityType !in CREATOR_ACK_ENTITY_TYPES || clientUuid.isEmpty()) return null
+        if (
+            CREATOR_ACK_ENTRY_SEPARATOR in clientUuid ||
+            CREATOR_ACK_FIELD_SEPARATOR in clientUuid
+        ) {
+            return null
+        }
+        return CreatorAcknowledgementRef(entityType, clientUuid)
     }
 
     private object Keys {
@@ -404,7 +497,15 @@ class DataStoreSyncPreferences @Inject constructor(
         val CREATE_REQUEST_ID = stringPreferencesKey("sync_create_request_id")
         val FAMILY_NAME = stringPreferencesKey("sync_family_name")
         val MEMBERSHIP_ID = stringPreferencesKey("sync_membership_id")
+        val PENDING_CREATOR_ACKNOWLEDGEMENTS =
+            stringPreferencesKey("sync_pending_creator_acknowledgements")
         val PENDING_FAMILY_CREDENTIAL_CLEAR =
             booleanPreferencesKey("sync_pending_family_credential_clear")
+    }
+
+    private companion object {
+        const val CREATOR_ACK_ENTRY_SEPARATOR = '\u001e'
+        const val CREATOR_ACK_FIELD_SEPARATOR = '\u001f'
+        val CREATOR_ACK_ENTITY_TYPES = setOf("care_plan", "custom_item")
     }
 }

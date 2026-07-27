@@ -54,6 +54,14 @@ class SyncPreferencesTest {
                 familyName = "乐乐一家",
             ),
         )
+        val pendingCreatorAcknowledgements = setOf(
+            CreatorAcknowledgementRef("care_plan", "plan-awaiting-author"),
+            CreatorAcknowledgementRef("custom_item", "item-awaiting-author"),
+        )
+        first.updateCreatorAcknowledgements(add = pendingCreatorAcknowledgements)
+        first.saveSession(
+            first.session.first().copy(membershipId = "membership-after-members-call"),
+        )
         firstScope.cancel()
         advanceUntilIdle()
 
@@ -67,7 +75,18 @@ class SyncPreferencesTest {
         assertThat(restored.session.first().pullGeneration).isEqualTo("server-generation")
         assertThat(restored.session.first().familyToken).isEqualTo("secret-token")
         assertThat(restored.session.first().familyName).isEqualTo("乐乐一家")
+        assertThat(restored.session.first().membershipId)
+            .isEqualTo("membership-after-members-call")
+        assertThat(restored.session.first().pendingCreatorAcknowledgements)
+            .containsExactlyElementsIn(pendingCreatorAcknowledgements)
         assertThat(tokens.getToken()).isEqualTo("secret-token")
+
+        restored.updateCreatorAcknowledgements(
+            remove = setOf(CreatorAcknowledgementRef("care_plan", "plan-awaiting-author")),
+        )
+        assertThat(restored.session.first().pendingCreatorAcknowledgements).containsExactly(
+            CreatorAcknowledgementRef("custom_item", "item-awaiting-author"),
+        )
         secondScope.cancel()
         file.delete()
     }
@@ -103,9 +122,13 @@ class SyncPreferencesTest {
                 familyName = "恢复",
             ),
         )
+        preferences.updateCreatorAcknowledgements(
+            add = setOf(CreatorAcknowledgementRef("care_plan", "plan-before-clear")),
+        )
         preferences.clearFamilySession()
         assertThat(preferences.session.first().familyName).isNull()
         assertThat(preferences.session.first().familyId).isEmpty()
+        assertThat(preferences.session.first().pendingCreatorAcknowledgements).isEmpty()
         file.delete()
     }
 
@@ -136,6 +159,9 @@ class SyncPreferencesTest {
                     allowedSsids = listOf("Home", "Backup"),
                 ),
             )
+            preferences.updateCreatorAcknowledgements(
+                add = setOf(CreatorAcknowledgementRef("custom_item", "item-concurrent")),
+            )
 
             preferences.updatePullCheckpoint(
                 cursor = 5,
@@ -151,6 +177,9 @@ class SyncPreferencesTest {
             assertThat(preferences.session.first().allowedSsids)
                 .containsExactly("Home", "Backup")
                 .inOrder()
+            assertThat(preferences.session.first().pendingCreatorAcknowledgements).containsExactly(
+                CreatorAcknowledgementRef("custom_item", "item-concurrent"),
+            )
 
             preferences.saveSession(
                 preferences.session.first().copy(familyName = "旧 NAS 本地缓存"),
@@ -178,6 +207,42 @@ class SyncPreferencesTest {
                 .inOrder()
             file.delete()
         }
+
+    @Test
+    fun staleSameFamilySaveCannotEraseCreatorAcknowledgementsButFamilyChangeDoes() = runTest {
+        val file = File.createTempFile("lezi-sync-creator-ack-", ".preferences_pb")
+            .also { it.delete() }
+        val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
+        val preferences = preferences(store)
+        preferences.saveSession(
+            SyncSession(
+                serverHost = "nas",
+                familyId = "family-a",
+                familyToken = "token-a",
+                deviceId = "device",
+                role = FamilyRole.Member,
+            ),
+        )
+        val stale = preferences.session.first()
+        val pending = CreatorAcknowledgementRef("care_plan", "plan-stale-save")
+        preferences.updateCreatorAcknowledgements(add = setOf(pending))
+
+        preferences.saveSession(stale.copy(familyName = "同一家庭的新名字"))
+
+        assertThat(preferences.session.first().pendingCreatorAcknowledgements)
+            .containsExactly(pending)
+
+        preferences.saveSession(
+            stale.copy(
+                familyId = "family-b",
+                familyToken = "token-b",
+                familyName = "另一个家庭",
+            ),
+        )
+
+        assertThat(preferences.session.first().pendingCreatorAcknowledgements).isEmpty()
+        file.delete()
+    }
 
     @Test
     fun familyTokenIsNotWrittenToPlaintextDataStore() = runTest {

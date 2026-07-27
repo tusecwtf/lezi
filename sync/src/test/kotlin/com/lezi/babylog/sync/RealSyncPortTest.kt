@@ -345,6 +345,65 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun firstHealthProbePersistsBlankCreatorIntentBeforeCanonicalPush() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(
+                role = FamilyRole.Member,
+                membershipId = "",
+            ),
+            healthCapabilities = setOf(
+                CAPABILITY_ATOMIC_BUNDLE,
+                CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+            ),
+        )
+        rig.backend.nextMembers = listOf(
+            FamilyMember(
+                displayName = "爸爸",
+                role = FamilyRole.Member,
+                isSelf = true,
+                membershipId = "membership-canonical",
+            ),
+        )
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        rig.carePlans.seed(
+            CarePlanEntity(
+                clientUuid = "plan-first-health",
+                babyId = babyId,
+                type = "pee",
+                scheduledAt = 10_000,
+                scheduledZoneId = "Asia/Shanghai",
+                updatedAt = 100,
+                createdByMembershipId = "",
+                syncDirty = true,
+            ),
+        )
+        rig.customItems.seed(
+            CustomItemEntity(
+                clientUuid = "item-first-health",
+                familyId = 1,
+                name = "抚触",
+                iconSlot = 0,
+                sortOrder = 0,
+                updatedAt = 100,
+                createdByMembershipId = "",
+                syncDirty = true,
+            ),
+        )
+        rig.backend.pullFailures += SyncHttpException(statusCode = 503)
+
+        val failure = rig.port.sync(SyncTrigger.LocalWrite).exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(SyncHttpException::class.java)
+        assertThat(rig.healthProbeCalls).isGreaterThan(0)
+        assertThat(rig.backend.pullCount).isEqualTo(1)
+        assertThat(rig.preferences.current().membershipId).isEqualTo("membership-canonical")
+        assertThat(rig.preferences.current().pendingCreatorAcknowledgements).containsExactly(
+            CreatorAcknowledgementRef("care_plan", "plan-first-health"),
+            CreatorAcknowledgementRef("custom_item", "item-first-health"),
+        )
+    }
+
+    @Test
     fun atomicRecordUsesLastPreStageCapabilitySnapshotForMembershipAuthorKey() = runTest {
         val modernCapabilities = setOf(
             CAPABILITY_ATOMIC_BUNDLE,
@@ -4246,6 +4305,7 @@ internal class MemorySyncPreferences(
                 lastSuccessAt = null,
                 familyName = null,
                 membershipId = "",
+                pendingCreatorAcknowledgements = emptySet(),
             )
         }
         state.value = next
@@ -4254,7 +4314,14 @@ internal class MemorySyncPreferences(
     override suspend fun saveSession(session: SyncSession) {
         saveSessionCalls += 1
         createRequestId = null
-        state.value = session
+        val previous = state.value
+        state.value = session.copy(
+            pendingCreatorAcknowledgements = if (previous.familyId == session.familyId) {
+                previous.pendingCreatorAcknowledgements
+            } else {
+                emptySet()
+            },
+        )
     }
 
     override suspend fun migrateSecretsIfNeeded() {
@@ -4291,6 +4358,16 @@ internal class MemorySyncPreferences(
         )
     }
 
+    override suspend fun updateCreatorAcknowledgements(
+        add: Set<CreatorAcknowledgementRef>,
+        remove: Set<CreatorAcknowledgementRef>,
+    ) {
+        state.value = state.value.copy(
+            pendingCreatorAcknowledgements =
+                (state.value.pendingCreatorAcknowledgements + add) - remove,
+        )
+    }
+
     override suspend fun markSuccess(atMillis: Long) {
         state.value = state.value.copy(lastSuccessAt = atMillis)
     }
@@ -4322,6 +4399,7 @@ internal class MemorySyncPreferences(
             pullGeneration = "",
             lastSuccessAt = null,
             familyName = null,
+            pendingCreatorAcknowledgements = emptySet(),
         )
     }
 

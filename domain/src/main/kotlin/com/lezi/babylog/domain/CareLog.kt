@@ -617,10 +617,14 @@ class CareLog @Inject constructor(
 
     suspend fun canManageCustomItem(item: CustomRecordItem): Boolean {
         val session = syncPort.session().first()
-        return canManageCustomItem(
-            item = item,
+        return canManageCreatorOwnedFamilyEntity(
+            creatorMembershipId = item.createdByMembershipId,
             actorMembershipId = session.membershipId.trim(),
             actorIsAdmin = session.role == com.lezi.babylog.sync.FamilyRole.Owner,
+            creatorAcknowledgementPending = session.isCreatorAcknowledgementPending(
+                entityType = "custom_item",
+                clientUuid = item.clientUuid,
+            ),
         )
     }
 
@@ -630,6 +634,10 @@ class CareLog @Inject constructor(
             creatorMembershipId = existing.createdByMembershipId,
             actorMembershipId = session.membershipId.trim(),
             actorIsAdmin = session.role == com.lezi.babylog.sync.FamilyRole.Owner,
+            creatorAcknowledgementPending = session.isCreatorAcknowledgementPending(
+                entityType = "custom_item",
+                clientUuid = existing.clientUuid,
+            ),
         )
         if (!allowed) throw CustomItemPermissionException()
     }
@@ -1893,10 +1901,14 @@ class CareLog @Inject constructor(
 
     suspend fun canManageCarePlan(plan: CarePlan): Boolean {
         val session = syncPort.session().first()
-        return canManageCarePlan(
-            plan = plan,
+        return canManageCreatorOwnedFamilyEntity(
+            creatorMembershipId = plan.createdByMembershipId,
             actorMembershipId = session.membershipId.trim(),
             actorIsAdmin = session.role == com.lezi.babylog.sync.FamilyRole.Owner,
+            creatorAcknowledgementPending = session.isCreatorAcknowledgementPending(
+                entityType = "care_plan",
+                clientUuid = plan.clientUuid,
+            ),
         )
     }
 
@@ -1906,6 +1918,10 @@ class CareLog @Inject constructor(
             creatorMembershipId = plan.createdByMembershipId,
             actorMembershipId = session.membershipId.trim(),
             actorIsAdmin = session.role == com.lezi.babylog.sync.FamilyRole.Owner,
+            creatorAcknowledgementPending = session.isCreatorAcknowledgementPending(
+                entityType = "care_plan",
+                clientUuid = plan.clientUuid,
+            ),
         )
     }
 
@@ -3123,7 +3139,8 @@ private fun FulfillmentCandidateEntity.toModel(): FulfillmentCandidate =
  * and care plans share the same membership ACL — ADR 0001 / 0006).
  *
  * Empty creator + empty actor → offline single-device local owner.
- * Empty creator + joined non-admin → deny (await admin takeover after upgrade).
+ * Empty creator + exact local pending acknowledgement → temporarily allow.
+ * Any other empty creator + joined non-admin → deny (await authoritative data).
  * Non-empty creator match → member may manage own entity.
  * Admin always may manage (including after creator leave).
  */
@@ -3131,11 +3148,13 @@ fun canManageCreatorOwnedFamilyEntity(
     creatorMembershipId: String,
     actorMembershipId: String,
     actorIsAdmin: Boolean,
+    creatorAcknowledgementPending: Boolean = false,
 ): Boolean {
     if (actorIsAdmin) return true
     val creator = creatorMembershipId.trim()
     val actor = actorMembershipId.trim()
     if (creator.isEmpty() && actor.isEmpty()) return true
+    if (creator.isEmpty() && creatorAcknowledgementPending) return true
     if (creator.isEmpty()) return false
     return creator == actor
 }

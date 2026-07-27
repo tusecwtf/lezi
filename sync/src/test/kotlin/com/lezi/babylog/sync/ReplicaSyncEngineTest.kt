@@ -414,6 +414,214 @@ class ReplicaSyncEngineTest {
     }
 
     @Test
+    fun failedCreatorAcknowledgementPullRetriesOnTheNextLocalWrite() = runTest {
+        val session = joinedReplicaSession().copy(membershipId = "canonical-membership")
+        val rig = ReplicaEngineRig(
+            session = session,
+            capabilities = setOf(
+                CAPABILITY_ATOMIC_BUNDLE,
+                CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+            ),
+        )
+        rig.backend.nextMembers = listOf(
+            FamilyMember(
+                displayName = "妈妈",
+                role = FamilyRole.Owner,
+                isSelf = true,
+                membershipId = "canonical-membership",
+            ),
+        )
+        rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
+        rig.carePlans.seed(
+            localReplicaCarePlan("plan-retry-ack", "", updatedAt = 810)
+                .copy(syncDirty = true),
+        )
+        rig.customItems.seed(
+            localReplicaCustomItem("item-retry-ack", "", updatedAt = 820)
+                .copy(syncDirty = true),
+        )
+        rig.backend.pullFailures += SyncHttpException(statusCode = 503)
+
+        val firstFailure = runCatching {
+            rig.engine.synchronize(
+                session = rig.preferences.current(),
+                trigger = SyncTrigger.LocalWrite,
+            )
+        }.exceptionOrNull()
+
+        assertThat(firstFailure).isInstanceOf(SyncHttpException::class.java)
+        assertThat(rig.backend.pullCount).isEqualTo(1)
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "custom_item",
+                    clientUuid = "item-retry-ack",
+                    payloadJson =
+                        """{"name":"item-retry-ack","icon_slot":0,"created_by_membership_id":"canonical-membership"}""",
+                    updatedAt = 820,
+                ),
+                SyncEntity(
+                    type = "care_plan",
+                    clientUuid = "plan-retry-ack",
+                    payloadJson =
+                        """{"baby_client_uuid":"baby-local","type":"formula","scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","status":"pending","payload_json":{},"schema_version":1,"created_by_membership_id":"canonical-membership"}""",
+                    updatedAt = 810,
+                ),
+            ),
+            cursor = 2,
+            generation = "generation-a",
+        )
+
+        val outcome = rig.engine.synchronize(
+            session = rig.preferences.current(),
+            trigger = SyncTrigger.LocalWrite,
+        )
+
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
+        assertThat(rig.backend.pullCount).isEqualTo(2)
+        assertThat(rig.carePlans.getByClientUuid("plan-retry-ack")?.createdByMembershipId)
+            .isEqualTo("canonical-membership")
+        assertThat(rig.customItems.get("item-retry-ack")?.createdByMembershipId)
+            .isEqualTo("canonical-membership")
+    }
+
+    @Test
+    fun commitFailureKeepsExactLocalCreatorProvenanceUntilAuthoritativePull() = runTest {
+        val session = joinedReplicaSession().copy(
+            role = FamilyRole.Member,
+            membershipId = "",
+        )
+        val rig = ReplicaEngineRig(
+            session = session,
+            capabilities = setOf(
+                CAPABILITY_ATOMIC_BUNDLE,
+                CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+            ),
+        )
+        rig.backend.nextMembers = listOf(
+            FamilyMember(
+                displayName = "爸爸",
+                role = FamilyRole.Member,
+                isSelf = true,
+                membershipId = "canonical-membership",
+            ),
+        )
+        rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
+        rig.carePlans.seed(
+            localReplicaCarePlan("plan-commit-retry", "", updatedAt = 830)
+                .copy(syncDirty = true),
+        )
+        rig.customItems.seed(
+            localReplicaCustomItem("item-commit-retry", "", updatedAt = 840)
+                .copy(syncDirty = true),
+        )
+        rig.backend.commitBundleFailure = IllegalStateException("commit interrupted")
+
+        val firstFailure = runCatching {
+            rig.engine.synchronize(
+                session = rig.preferences.current(),
+                trigger = SyncTrigger.LocalWrite,
+            )
+        }.exceptionOrNull()
+
+        assertThat(firstFailure).hasMessageThat().contains("commit interrupted")
+        assertThat(rig.preferences.current().membershipId).isEqualTo("canonical-membership")
+        assertThat(rig.preferences.current().pendingCreatorAcknowledgements).containsExactly(
+            CreatorAcknowledgementRef("care_plan", "plan-commit-retry"),
+            CreatorAcknowledgementRef("custom_item", "item-commit-retry"),
+        )
+
+        rig.backend.commitBundleFailure = null
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "custom_item",
+                    clientUuid = "item-commit-retry",
+                    payloadJson =
+                        """{"name":"item-commit-retry","icon_slot":0,"created_by_membership_id":"canonical-membership"}""",
+                    updatedAt = 840,
+                ),
+                SyncEntity(
+                    type = "care_plan",
+                    clientUuid = "plan-commit-retry",
+                    payloadJson =
+                        """{"baby_client_uuid":"baby-local","type":"formula","scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","status":"pending","payload_json":{},"schema_version":1,"created_by_membership_id":"canonical-membership"}""",
+                    updatedAt = 830,
+                ),
+            ),
+            cursor = 2,
+            generation = "generation-a",
+        )
+
+        val outcome = rig.engine.synchronize(
+            session = rig.preferences.current(),
+            trigger = SyncTrigger.LocalWrite,
+        )
+
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
+        assertThat(rig.preferences.current().pendingCreatorAcknowledgements).isEmpty()
+        assertThat(rig.carePlans.getByClientUuid("plan-commit-retry")?.createdByMembershipId)
+            .isEqualTo("canonical-membership")
+        assertThat(rig.customItems.get("item-commit-retry")?.createdByMembershipId)
+            .isEqualTo("canonical-membership")
+    }
+
+    @Test
+    fun unappliedRemoteCreatorDoesNotClearThePendingAcknowledgement() = runTest {
+        val pending = CreatorAcknowledgementRef("care_plan", "plan-unapplied-ack")
+        val session = joinedReplicaSession().copy(
+            membershipId = "canonical-membership",
+            pendingCreatorAcknowledgements = setOf(pending),
+        )
+        val rig = ReplicaEngineRig(
+            session = session,
+            capabilities = setOf(
+                CAPABILITY_ATOMIC_BUNDLE,
+                CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+            ),
+        )
+        rig.backend.nextMembers = listOf(
+            FamilyMember(
+                displayName = "妈妈",
+                role = FamilyRole.Owner,
+                isSelf = true,
+                membershipId = "canonical-membership",
+            ),
+        )
+        rig.carePlans.seed(
+            localReplicaCarePlan("plan-unapplied-ack", "", updatedAt = 850)
+                .copy(syncDirty = false),
+        )
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "care_plan",
+                    clientUuid = "plan-unapplied-ack",
+                    payloadJson =
+                        """{"baby_client_uuid":"missing-baby","type":"formula","scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","status":"pending","payload_json":{},"schema_version":1,"created_by_membership_id":"canonical-membership"}""",
+                    updatedAt = 851,
+                ),
+            ),
+            cursor = 1,
+            generation = "generation-a",
+        )
+
+        val failure = runCatching {
+            rig.engine.synchronize(
+                session = rig.preferences.current(),
+                trigger = SyncTrigger.LocalWrite,
+            )
+        }.exceptionOrNull()
+
+        assertThat(failure).hasMessageThat().contains("同步数据引用尚未就绪")
+        assertThat(rig.carePlans.getByClientUuid("plan-unapplied-ack")?.let {
+            it.updatedAt to it.createdByMembershipId
+        }).isEqualTo(850L to "")
+        assertThat(rig.preferences.current().pendingCreatorAcknowledgements)
+            .containsExactly(pending)
+    }
+
+    @Test
     fun pendingBlankCreatorDoesNotForcePullWithoutMembershipAuthorCapability() = runTest {
         val session = joinedReplicaSession().copy(membershipId = "canonical-membership")
         val rig = ReplicaEngineRig(
