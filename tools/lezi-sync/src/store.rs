@@ -1146,6 +1146,27 @@ impl Store {
             .is_some())
     }
 
+    pub fn is_media_bundle_owned(
+        &self,
+        family_id: &str,
+        client_uuid: &str,
+    ) -> Result<bool, StoreError> {
+        let connection = self.connect()?;
+        Ok(connection
+            .query_row(
+                "
+                SELECT 1 FROM media_publications
+                WHERE family_id = ?1
+                  AND media_uuid = ?2
+                  AND source = 'bundle'
+                ",
+                params![family_id, client_uuid],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
     pub fn published_media(
         &self,
         family_id: &str,
@@ -1884,20 +1905,14 @@ impl Store {
             "UPDATE family_meta SET rev = ?1 WHERE family_id = ?2",
             params![cursor, family_id],
         )?;
-        for entity in &media {
-            let published_deleted_at = transaction
-                .query_row(
-                    "
-                    SELECT deleted_at FROM entities
-                    WHERE family_id = ?1
-                      AND entity_type = 'media'
-                      AND client_uuid = ?2
-                    ",
-                    params![family_id, entity.client_uuid],
-                    |row| row.get::<_, Option<i64>>(0),
-                )
-                .optional()?;
-            if published_deleted_at != Some(None) {
+        // Ownership follows only media that actually won this transaction's
+        // LWW decision. A losing manifest entry must not publish quarantined
+        // bytes merely because an unrelated live metadata row already exists.
+        for entity in effective
+            .iter()
+            .filter(|entity| entity.entity_type == "media")
+        {
+            if entity.deleted_at.is_some() {
                 transaction.execute(
                     "
                     DELETE FROM media_publications
@@ -1906,6 +1921,13 @@ impl Store {
                     params![family_id, entity.client_uuid],
                 )?;
                 continue;
+            }
+            if !media_ready
+                .get(&entity.client_uuid)
+                .copied()
+                .unwrap_or(false)
+            {
+                return Err(StoreError::BundleMediaIncomplete);
             }
             transaction.execute(
                 "

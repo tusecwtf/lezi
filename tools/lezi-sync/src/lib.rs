@@ -716,6 +716,14 @@ async fn put_media(
         .store
         .media_metadata(&principal.family_id, &client_uuid.to_string())?
         .ok_or_else(|| ApiError::not_found("Media metadata not found"))?;
+    if state
+        .store
+        .is_media_bundle_owned(&principal.family_id, &client_uuid.to_string())?
+    {
+        return Err(ApiError::conflict(
+            "Atomic bundle media cannot be replaced via legacy upload",
+        ));
+    }
     if metadata.kind == "avatar" && principal.role != "owner" {
         return Err(ApiError::forbidden("Only owner may change avatar"));
     }

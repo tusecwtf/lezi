@@ -7241,6 +7241,166 @@ async fn stale_bundle_bytes_are_not_claimed_by_legacy_metadata_after_restart() {
 }
 
 #[tokio::test]
+async fn losing_bundle_media_tombstone_does_not_publish_quarantined_bytes() {
+    let rig = Rig::new();
+    let created = create_family(
+        &rig.app,
+        "bundle-losing-media-owner",
+        "bundle-losing-media-request-000001",
+    )
+    .await;
+    let token = created["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let media_id = Uuid::new_v4().to_string();
+    let stale_bundle_id = Uuid::new_v4().to_string();
+
+    let (published_status, published_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({
+            "entities": [entity_wire(
+                "record",
+                &record_id,
+                100,
+                record_payload(&baby_id),
+                None,
+            )],
+        }),
+    )
+    .await;
+    assert_eq!(published_status, StatusCode::OK, "{published_body}");
+
+    let (stage_status, stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": stale_bundle_id,
+            "root": entity_wire(
+                "record",
+                &record_id,
+                50,
+                record_payload(&baby_id),
+                None,
+            ),
+            "media": [entity_wire(
+                "media",
+                &media_id,
+                50,
+                log_media_payload(&record_id),
+                None,
+            )],
+        }),
+    )
+    .await;
+    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
+    assert_eq!(
+        request(
+            &rig.app,
+            Method::PUT,
+            &format!("/v1/bundles/{stale_bundle_id}/media/{media_id}"),
+            Some(token),
+            Body::from("old"),
+            Some("image/jpeg"),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let (stale_status, stale_body) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{stale_bundle_id}/commit"),
+        Some(token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(stale_status, StatusCode::CONFLICT, "{stale_body}");
+
+    let (metadata_status, metadata_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({
+            "entities": [entity_wire(
+                "media",
+                &media_id,
+                100,
+                log_media_payload(&record_id),
+                None,
+            )],
+        }),
+    )
+    .await;
+    assert_eq!(metadata_status, StatusCode::OK, "{metadata_body}");
+
+    let winner_bundle_id = Uuid::new_v4().to_string();
+    let (winner_stage_status, winner_stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": winner_bundle_id,
+            "root": entity_wire(
+                "record",
+                &record_id,
+                101,
+                record_payload(&baby_id),
+                None,
+            ),
+            "media": [entity_wire(
+                "media",
+                &media_id,
+                99,
+                log_media_payload(&record_id),
+                Some(99),
+            )],
+        }),
+    )
+    .await;
+    assert_eq!(winner_stage_status, StatusCode::OK, "{winner_stage_body}");
+    let (commit_status, commit_body) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{winner_bundle_id}/commit"),
+        Some(token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(commit_status, StatusCode::OK, "{commit_body}");
+    assert_eq!(commit_body["applied"], 1);
+
+    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    assert!(
+        !pull["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entity| entity["client_uuid"] == media_id),
+        "losing tombstone published another bundle's quarantined bytes: {pull}"
+    );
+    assert_eq!(
+        request(
+            &rig.app,
+            Method::GET,
+            &format!("/v1/media/{media_id}"),
+            Some(token),
+            Body::empty(),
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
 async fn v1_staging_bytes_stay_quarantined_after_upgrade_and_manifest_refine() {
     let rig = Rig::new();
     let created = create_family(
@@ -7489,6 +7649,95 @@ async fn legacy_push_pull_media_remain_available_alongside_bundles() {
             .unwrap()
             .to_bytes(),
         "log"
+    );
+}
+
+#[tokio::test]
+async fn legacy_put_cannot_overwrite_committed_bundle_media() {
+    let rig = Rig::new();
+    let created = create_family(
+        &rig.app,
+        "bundle-owned-media-owner",
+        "bundle-owned-media-request-0000001",
+    )
+    .await;
+    let token = created["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let media_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
+    let (stage_status, stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire(
+                "record",
+                &record_id,
+                2,
+                record_payload(&baby_id),
+                None,
+            ),
+            "media": [entity_wire(
+                "media",
+                &media_id,
+                2,
+                log_media_payload(&record_id),
+                None,
+            )],
+        }),
+    )
+    .await;
+    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
+    assert_eq!(
+        request(
+            &rig.app,
+            Method::PUT,
+            &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
+            Some(token),
+            Body::from("img"),
+            Some("image/jpeg"),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let (commit_status, commit_body) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(commit_status, StatusCode::OK, "{commit_body}");
+
+    let overwrite = request(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/media/{media_id}"),
+        Some(token),
+        Body::from("bad"),
+        Some("image/jpeg"),
+    )
+    .await;
+    assert_eq!(overwrite.status(), StatusCode::CONFLICT);
+
+    let preserved = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(preserved.status(), StatusCode::OK);
+    assert_eq!(
+        preserved.into_body().collect().await.unwrap().to_bytes(),
+        "img"
     );
 }
 
