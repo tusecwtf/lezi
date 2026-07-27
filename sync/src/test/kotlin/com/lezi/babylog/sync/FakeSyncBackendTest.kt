@@ -380,6 +380,25 @@ class FakeSyncBackendTest {
     }
 
     @Test
+    fun membersRejectsSessionWithoutCurrentMembershipIdentity() = runBlocking {
+        val backend = FakeSyncBackend()
+        val session = SyncSession(
+            familyId = "family-current",
+            familyToken = "token-current",
+            deviceId = "device-current",
+            role = FamilyRole.Owner,
+            membershipId = "",
+            serverHost = "127.0.0.1",
+            serverPort = 8765,
+        )
+
+        val failure = runCatching { backend.members(session) }.exceptionOrNull()
+
+        assertThat(failure).hasMessageThat()
+            .isEqualTo("current session membershipId is required")
+    }
+
+    @Test
     fun fulfillmentCandidateFreezeIsIdempotentAndIgnoresClientForgedStamps() = runBlocking {
         // Ticket 26: Fake mirrors lezi-sync — first accept freezes membership/role/
         // confirmed_at; later pushes cannot rewrite those fields.

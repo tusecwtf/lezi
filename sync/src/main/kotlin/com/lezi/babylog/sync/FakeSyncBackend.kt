@@ -126,17 +126,20 @@ class FakeSyncBackend : SyncBackend {
         return joined
     }
 
-    override suspend fun members(session: SyncSession) = listOf(
-        FamilyMember(
-            displayName = membershipNames["${session.familyId}:${session.deviceId}"]
-                ?: if (session.role == FamilyRole.Owner) "管理员" else "家庭成员",
-            role = session.role,
-            isSelf = true,
-            membershipId = session.membershipId.ifBlank {
-                membershipIdFor(session.familyId, session.deviceId)
-            },
-        ),
-    )
+    override suspend fun members(session: SyncSession): List<FamilyMember> {
+        require(session.membershipId.isNotBlank()) {
+            "current session membershipId is required"
+        }
+        return listOf(
+            FamilyMember(
+                displayName = membershipNames["${session.familyId}:${session.deviceId}"]
+                    ?: if (session.role == FamilyRole.Owner) "管理员" else "家庭成员",
+                role = session.role,
+                isSelf = true,
+                membershipId = session.membershipId,
+            ),
+        )
+    }
 
     override suspend fun updateMyDisplayName(session: SyncSession, displayName: String) {
         membershipNames["${session.familyId}:${session.deviceId}"] =
