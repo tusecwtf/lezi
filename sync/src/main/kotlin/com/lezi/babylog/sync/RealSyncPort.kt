@@ -75,6 +75,20 @@ class RealSyncPort @Inject constructor(
             policy.lastHealthStatus.capabilities.toSet()
         },
     )
+    private val familySessionCoordinator = FamilySessionCoordinator(
+        backend = backend,
+        preferences = preferences,
+        outboxDao = outboxDao,
+        replica = replicaSyncEngine,
+        barrier = syncMutex,
+        requireRemoteAllowed = { config ->
+            val decision = policy.evaluate(config, foregroundState.isForeground())
+            requireAllowed(decision)
+        },
+        onSessionChanged = ::publishSession,
+        onSessionObserved = { session -> cachedSession = session },
+        requestSync = ::requestSync,
+    )
     private val localReplicaClearCoordinator = LocalReplicaClearCoordinator(
         barrier = syncMutex,
         preferences = preferences,
@@ -126,128 +140,46 @@ class RealSyncPort @Inject constructor(
         syncSignal.trySend(Unit)
     }
 
-    override suspend fun saveServer(baseUrl: String) = runCatching {
-        syncMutex.withLock {
-            val previous = preferences.session.first()
-            val parsed = HomeLanServerConfig.fromBaseUrl(baseUrl).withNormalized()
-            require(parsed.isServerConfigured) { "请先填写家庭服务器地址" }
-            val merged = parsed.copy(allowedSsids = previous.allowedSsids)
-            // Changing hosts invalidates upload receipts from the previous server.
-            if (previous.baseUrl.isNotBlank() && previous.baseUrl != merged.baseUrl) {
-                replicaSyncEngine.resetLocalSyncReceipts(previous)
-            }
-            preferences.saveHomeLanConfig(merged, clearSessionIfServerChanged = !previous.isJoined)
-            cachedSession = preferences.session.first()
-            currentStatus.value = if (cachedSession.isJoined) SyncStatus.Idle else SyncStatus.Disabled
-        }
-    }.onFailure(::updateFailureStatus)
+    override suspend fun saveServer(baseUrl: String): Result<Unit> =
+        executeFamily(FamilySessionCommand.SaveServer(baseUrl)).map { Unit }
 
-    override suspend fun saveHomeLanConfig(config: HomeLanServerConfig) = runCatching {
-        syncMutex.withLock {
-            val previous = preferences.session.first()
-            val merged = config.withNormalized().let { c ->
-                // An empty SSID list must not erase an existing allowlist on a host-only update.
-                if (c.allowedSsids.isEmpty() && previous.allowedSsids.isNotEmpty() && c.host == previous.serverHost) {
-                    c.copy(allowedSsids = previous.allowedSsids)
-                } else {
-                    c
-                }
-            }
-            require(merged.isServerConfigured) { "请先填写家庭服务器地址" }
-            if (previous.baseUrl.isNotBlank() && previous.baseUrl != merged.baseUrl) {
-                replicaSyncEngine.resetLocalSyncReceipts(previous)
-            }
-            preferences.saveHomeLanConfig(merged, clearSessionIfServerChanged = !previous.isJoined)
-            cachedSession = preferences.session.first()
-            currentStatus.value = if (cachedSession.isJoined) SyncStatus.Idle else SyncStatus.Disabled
-        }
-    }.onFailure(::updateFailureStatus)
+    override suspend fun saveHomeLanConfig(
+        config: HomeLanServerConfig,
+    ): Result<Unit> =
+        executeFamily(FamilySessionCommand.SaveHomeLanConfig(config)).map { Unit }
 
     override suspend fun createFamily(
         displayName: String?,
         bootstrapSecret: String,
         familyName: String?,
-    ): Result<SyncSession> {
-        if (bootstrapSecret.isBlank()) {
-            return Result.failure<SyncSession>(
-                IllegalArgumentException("请填写服务器初始化口令"),
-            ).onFailure(::updateFailureStatus)
-        }
-        return gatedWithoutSession { baseUrl ->
-            val deviceId = preferences.ensureDeviceId()
-            val createRequestId = preferences.ensureCreateRequestId()
-            val joined = try {
-                backend.create(
-                    baseUrl = baseUrl,
-                    deviceId = deviceId,
-                    displayName = memberDisplayNameForWire(displayName),
-                    createRequestId = createRequestId,
-                    bootstrapSecret = bootstrapSecret,
-                    familyName = normalizeFamilyNameForWire(familyName),
-                )
-            } catch (error: SyncHttpException) {
-                if (error.statusCode == 401 || error.statusCode == 403) {
-                    throw BootstrapSecretRejectedException()
-                }
-                throw error
-            }
-            persistJoin(baseUrl, deviceId, joined).also {
-                preferences.clearCreateRequestId()
-                requestSync(SyncTrigger.LocalWrite)
-            }
-        }
-    }
+    ): Result<SyncSession> =
+        executeFamily(
+            FamilySessionCommand.CreateFamily(
+                displayName = displayName,
+                bootstrapSecret = bootstrapSecret,
+                familyName = familyName,
+            ),
+        ).map { (it as FamilySessionOutcome.Joined).session }
 
     override suspend fun renameFamily(familyName: String?): Result<Unit> =
-        withAllowedSession { session ->
-            require(session.role == FamilyRole.Owner) { "仅家庭管理员可修改家庭名" }
-            val normalized = normalizeFamilyNameForWire(familyName)
-            backend.renameFamily(session, normalized)
-            preferences.saveSession(session.copy(familyName = normalized))
-            cachedSession = preferences.session.first()
-        }
+        executeFamily(FamilySessionCommand.RenameFamily(familyName)).map { Unit }
 
     override suspend fun joinFamily(
         command: JoinFamilyCommand,
-    ) = runCatching {
-        syncMutex.withLock {
-            require(!preferences.session.first().isJoined) {
-                "请先退出当前家庭，再加入新的家庭"
-            }
-            val decoded = InvitePayloadCodec.decode(command.invitation.trim())
-            val config = command.homeLanConfig.withNormalized()
-            require(config.isServerConfigured) { "请先填写家庭服务器地址" }
-            require(config.allowedSsids.isNotEmpty()) { "请至少填写一个家庭 Wi‑Fi 名称" }
-            val decision = policy.evaluate(config, foregroundState.isForeground())
-            requireAllowed(decision)
-            val baseUrl = config.baseUrl
-            val deviceId = preferences.ensureDeviceId()
-            val joined = backend.join(
-                baseUrl,
-                decoded.code,
-                deviceId,
-                memberDisplayNameForWire(command.displayName),
-            )
-            persistJoin(baseUrl, deviceId, joined, config)
-        }
-    }.onFailure(::updateFailureStatus)
+    ): Result<SyncSession> =
+        executeFamily(FamilySessionCommand.JoinFamily(command))
+            .map { (it as FamilySessionOutcome.Joined).session }
 
-    override suspend fun createInvite(familyId: String): Result<Invite> = withAllowedSession {
-        require(it.role == FamilyRole.Owner) { "仅家庭管理员可生成邀请" }
-        backend.invite(it)
-    }
+    override suspend fun createInvite(familyId: String): Result<Invite> =
+        executeFamily(FamilySessionCommand.CreateInvite)
+            .map { (it as FamilySessionOutcome.InviteCreated).invite }
 
-    override suspend fun listFamilyMembers(): Result<List<FamilyMember>> = withAllowedSession {
-        val members = backend.members(it)
-        replicaSyncEngine.persistAuthenticatedSelfMembershipIfMissing(it, members)
-        cachedSession = preferences.session.first()
-        members
-    }
+    override suspend fun listFamilyMembers(): Result<List<FamilyMember>> =
+        executeFamily(FamilySessionCommand.ListMembers)
+            .map { (it as FamilySessionOutcome.MembersListed).members }
 
     override suspend fun updateMyDisplayName(displayName: String): Result<Unit> =
-        withAllowedSession { session ->
-            backend.updateMyDisplayName(session, memberDisplayNameForWire(displayName))
-        }
+        executeFamily(FamilySessionCommand.UpdateMyDisplayName(displayName)).map { Unit }
 
     override suspend fun sync(trigger: SyncTrigger): Result<Unit> = runCatching {
         syncMutex.withLock {
@@ -269,35 +201,11 @@ class RealSyncPort @Inject constructor(
     override suspend fun push(familyId: String) = sync(SyncTrigger.LocalWrite)
     override suspend fun pull(familyId: String) = sync(SyncTrigger.PullToRefresh)
 
-    override suspend fun leave(familyId: String) = withAllowedSession {
-        require(it.role == FamilyRole.Member) {
-            "家庭管理员请使用“删除家庭数据”完成退出"
-        }
-        try {
-            backend.leave(it)
-        } catch (error: SyncHttpException) {
-            if (!error.meansSessionIsGone()) throw error
-        }
-        outboxDao.deleteFamily(it.familyId)
-        replicaSyncEngine.resetLocalSyncReceipts(it)
-        preferences.clearAllLocalSyncConfig()
-        cachedSession = preferences.session.first()
-        currentStatus.value = SyncStatus.Disabled
-    }
+    override suspend fun leave(familyId: String): Result<Unit> =
+        executeFamily(FamilySessionCommand.Leave).map { Unit }
 
-    override suspend fun deleteFamily() = withAllowedSession {
-        require(it.role == FamilyRole.Owner) { "仅家庭管理员可删除家庭" }
-        try {
-            backend.deleteFamily(it)
-        } catch (error: SyncHttpException) {
-            if (!error.meansSessionIsGone()) throw error
-        }
-        outboxDao.deleteFamily(it.familyId)
-        replicaSyncEngine.resetLocalSyncReceipts(it)
-        preferences.clearAllLocalSyncConfig()
-        cachedSession = preferences.session.first()
-        currentStatus.value = SyncStatus.Disabled
-    }
+    override suspend fun deleteFamily(): Result<Unit> =
+        executeFamily(FamilySessionCommand.DeleteFamily).map { Unit }
 
     override suspend fun clearLocalRecords(
         clearLocal: suspend (onCommitted: () -> Unit) -> Unit,
@@ -311,66 +219,15 @@ class RealSyncPort @Inject constructor(
         .clear(LocalReplicaClearScope.AllLocal, clearLocal)
         .onFailure(::updateFailureStatus)
 
-    private suspend fun persistJoin(
-        baseUrl: String,
-        deviceId: String,
-        joined: JoinResult,
-        joinedConfig: HomeLanServerConfig? = null,
-    ): SyncSession {
-        val previous = preferences.session.first()
-        val parsed = HomeLanServerConfig.fromBaseUrl(baseUrl).withNormalized()
-        val config = joinedConfig?.withNormalized()
-            ?: parsed.copy(allowedSsids = previous.allowedSsids)
-        val session = SyncSession(
-            familyId = joined.familyId,
-            familyToken = joined.token,
-            deviceId = deviceId,
-            role = joined.role,
-            pullCursor = joined.cursor,
-            pullGeneration = joined.generation,
-            serverHost = config.host.ifBlank { previous.serverHost },
-            serverPort = if (config.host.isNotBlank()) config.port else previous.serverPort,
-            allowedSsids = config.allowedSsids,
-            serverScheme = if (config.host.isNotBlank()) config.scheme else previous.serverScheme,
-            // Cached from create/join/rename; cold start has no GET family-name path.
-            familyName = joined.familyName?.trim()?.takeIf { it.isNotEmpty() },
-            // Server-minted identity; empty when legacy NAS omitted membership_id.
-            membershipId = joined.membershipId?.trim().orEmpty(),
-        )
-        // Upload receipts only prove that bytes exist in the previous
-        // server/family namespace. A new family must reconcile them again.
-        replicaSyncEngine.resetLocalSyncReceipts(preferences.session.first())
-        if (joined.entities.isNotEmpty()) {
-            replicaSyncEngine.applyInitialEntities(session, joined.entities)
-        }
-        preferences.saveSession(session)
+    private suspend fun executeFamily(
+        command: FamilySessionCommand,
+    ): Result<FamilySessionOutcome> =
+        familySessionCoordinator.execute(command).onFailure(::updateFailureStatus)
+
+    private fun publishSession(session: SyncSession) {
         cachedSession = session
-        currentStatus.value = SyncStatus.Idle
-        return session
+        currentStatus.value = if (session.isJoined) SyncStatus.Idle else SyncStatus.Disabled
     }
-
-    private suspend fun <T> gatedWithoutSession(block: suspend (String) -> T): Result<T> = runCatching {
-        syncMutex.withLock {
-            val current = preferences.session.first()
-            require(!current.isJoined) {
-                "请先退出当前家庭，再创建新的家庭"
-            }
-            val decision = policy.evaluate(current.homeLanConfig, foregroundState.isForeground())
-            requireAllowed(decision)
-            block(current.homeLanConfig.baseUrl)
-        }
-    }.onFailure(::updateFailureStatus)
-
-    private suspend fun <T> withAllowedSession(block: suspend (SyncSession) -> T): Result<T> = runCatching {
-        syncMutex.withLock {
-            val session = preferences.session.first()
-            cachedSession = session
-            if (!session.isJoined) throw SyncNotEnabledException()
-            val decision = policy.evaluate(session.homeLanConfig, foregroundState.isForeground())
-            requireAllowed(decision)
-            block(session)
-        }
-    }.onFailure(::updateFailureStatus)
 
     private fun requireAllowed(decision: HomeNetworkDecision) {
         if (decision == HomeNetworkDecision.Allowed) return
@@ -414,10 +271,6 @@ private fun HomeNetworkDecision.toSyncStatus(): SyncStatus = when (this) {
 }
 
 private class HomeNetworkBlockedException(message: String) : IllegalStateException(message)
-
-private fun SyncHttpException.meansSessionIsGone(): Boolean =
-    statusCode == 401
-
 
 /**
  * Creator-local publish chrome for a care record that is still waiting on an

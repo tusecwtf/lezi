@@ -80,7 +80,7 @@ internal class ReplicaSyncEngine(
     private val fulfillmentCandidateDao: FulfillmentCandidateDao,
     private val requireRemoteAllowed: suspend (SyncSession) -> Unit,
     private val remoteCapabilities: () -> Set<String>,
-) {
+) : FamilySessionReplica {
     suspend fun synchronize(
         session: SyncSession,
         trigger: SyncTrigger,
@@ -127,7 +127,7 @@ internal class ReplicaSyncEngine(
         return ReplicaSyncOutcome.Synchronized
     }
 
-    suspend fun applyInitialEntities(
+    override suspend fun applyInitialEntities(
         session: SyncSession,
         entities: List<SyncEntity>,
     ) {
@@ -1231,7 +1231,7 @@ internal class ReplicaSyncEngine(
         return true
     }
 
-    suspend fun persistAuthenticatedSelfMembershipIfMissing(
+    override suspend fun persistAuthenticatedSelfMembershipIfMissing(
         session: SyncSession,
         members: List<FamilyMember>,
     ): SyncSession {
@@ -1247,9 +1247,9 @@ internal class ReplicaSyncEngine(
         return updated
     }
 
-    suspend fun resetLocalSyncReceipts(
+    override suspend fun resetLocalSyncReceipts(
         previous: SyncSession,
-        invalidateCurrentReceipts: Boolean = false,
+        invalidateCurrentReceipts: Boolean,
     ) {
         babyDao.markAllPendingSync()
         recordDao.markAllPendingSync()

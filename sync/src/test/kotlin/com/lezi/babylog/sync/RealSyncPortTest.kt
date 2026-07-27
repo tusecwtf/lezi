@@ -473,282 +473,6 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun savingServerBeforeJoinClearsMediaUploadMarkers() = runTest {
-        val rig = SyncRig(
-            session = SyncSession(
-                serverHost = "192.168.1.20",
-                serverPort = 8787,
-                allowedSsids = listOf("Home"),
-            ),
-        )
-        val mediaUuid = "44444444-4444-4444-4444-444444444444"
-        rig.media.seed(
-            MediaAssetEntity(
-                clientUuid = mediaUuid,
-                kind = "log",
-                recordId = 7,
-                localUri = "photos/already-uploaded.jpg",
-                remoteUri = mediaUuid,
-                createdAt = 100,
-                updatedAt = 100,
-            ),
-        )
-
-        assertThat(rig.port.saveServer("http://192.168.1.99:8765").isSuccess).isTrue()
-
-        assertThat(rig.media.getByClientUuid(mediaUuid)?.remoteUri).isNull()
-    }
-
-    @Test
-    fun joinedSessionCanRepointHostAndKeepsTokenWithCursorReset() = runTest {
-        val initial = joinedSession("family-a").copy(pullCursor = 9, pullGeneration = "gen-a")
-        val rig = SyncRig(session = initial)
-
-        val result = rig.port.saveServer("http://192.168.1.99:8765")
-
-        assertThat(result.isSuccess).isTrue()
-        val after = rig.preferences.current()
-        assertThat(after.familyToken).isEqualTo("token")
-        assertThat(after.familyId).isEqualTo("family-a")
-        assertThat(after.baseUrl).isEqualTo("http://192.168.1.99:8765")
-        assertThat(after.pullCursor).isEqualTo(0)
-        assertThat(after.pullGeneration).isEmpty()
-        assertThat(after.allowedSsids).containsExactly("Home")
-    }
-
-    @Test
-    fun joinedSessionCannotCreateOrJoinOverItsOwnerCredential() = runTest {
-        val initial = joinedSession("family-a")
-        val rig = SyncRig(session = initial)
-
-        assertThat(rig.port.createFamily("妈妈", "bootstrap-secret").isFailure).isTrue()
-        assertThat(
-            rig.port.joinFamily(
-                JoinFamilyCommand(
-                    invitation = "ANY-CODE",
-                    homeLanConfig = initial.homeLanConfig,
-                    displayName = "爸爸",
-                ),
-            ).isFailure,
-        ).isTrue()
-
-        assertThat(rig.preferences.current()).isEqualTo(initial)
-    }
-
-    @Test
-    fun defaultLocalPlaceholderAndBlankNamesAreRejectedOnCreateAndJoin() = runTest {
-        val ownerRig = SyncRig(
-            session = SyncSession(
-                serverHost = "192.168.1.20",
-                serverPort = 8787,
-                allowedSsids = listOf("Home"),
-            ),
-        )
-        assertThat(ownerRig.port.createFamily("我（本机）", "bootstrap-secret").isFailure).isTrue()
-        assertThat(ownerRig.port.createFamily("  ", "bootstrap-secret").isFailure).isTrue()
-        assertThat(ownerRig.port.createFamily(null, "bootstrap-secret").isFailure).isTrue()
-        assertThat(ownerRig.backend.createDisplayNames).isEmpty()
-
-        val memberRig = SyncRig(session = SyncSession(), ssid = "Home")
-        val config = HomeLanServerConfig(
-            host = "192.168.1.20",
-            port = 8787,
-            allowedSsids = listOf("Home"),
-        )
-        assertThat(
-            memberRig.port.joinFamily(
-                JoinFamilyCommand(
-                    invitation = "ABCD1234",
-                    homeLanConfig = config,
-                    displayName = "我（本机）",
-                ),
-            ).isFailure,
-        ).isTrue()
-        assertThat(
-            memberRig.port.joinFamily(
-                JoinFamilyCommand(
-                    invitation = "ABCD1234",
-                    homeLanConfig = config,
-                    displayName = "  ",
-                ),
-            ).isFailure,
-        ).isTrue()
-        assertThat(memberRig.backend.joinDisplayNames).isEmpty()
-    }
-
-    @Test
-    fun updateMyDisplayNameSendsNormalizedNameToBackend() = runTest {
-        val rig = SyncRig(session = joinedSession("family-a"))
-        assertThat(rig.port.updateMyDisplayName("  干爹  ").isSuccess).isTrue()
-        assertThat(rig.backend.updatedDisplayNames).containsExactly("干爹")
-        assertThat(rig.port.updateMyDisplayName("我（本机）").isFailure).isTrue()
-        assertThat(rig.port.updateMyDisplayName("  ").isFailure).isTrue()
-    }
-
-    @Test
-    fun explicitSavedAddressCommandWinsOverStaleQrPayloadWhenJoining() = runTest {
-        val rig = SyncRig(session = SyncSession(), ssid = "EditedHome")
-        val edited = HomeLanServerConfig(
-            host = "192.168.1.99",
-            port = 9443,
-            scheme = "https",
-            allowedSsids = listOf("EditedHome"),
-        )
-        assertThat(rig.port.saveHomeLanConfig(edited).isSuccess).isTrue()
-        val staleQr = InvitePayloadCodec.encode(
-            InvitePayload(
-                baseUrl = "http://192.168.1.20:8787",
-                code = "ABCD1234",
-                ssids = listOf("OldHome"),
-            ),
-        )
-
-        assertThat(
-            rig.port.joinFamily(
-                JoinFamilyCommand(
-                    invitation = staleQr,
-                    homeLanConfig = edited,
-                    displayName = "爸爸",
-                ),
-            ).isSuccess,
-        ).isTrue()
-
-        assertThat(rig.backend.joinBaseUrls).containsExactly("https://192.168.1.99:9443")
-        assertThat(rig.preferences.current().allowedSsids).containsExactly("EditedHome")
-    }
-
-    @Test
-    fun scannedUnsavedAddressWinsOverPreviouslySavedServerAndPersistsAfterSuccess() = runTest {
-        val rig = SyncRig(
-            session = SyncSession(
-                serverHost = "old.home",
-                serverPort = 8765,
-                allowedSsids = listOf("OldHome"),
-            ),
-            ssid = "EditedHome",
-        )
-        val edited = HomeLanServerConfig(
-            host = "lezi.home",
-            port = 443,
-            scheme = "https",
-            allowedSsids = listOf("EditedHome"),
-        )
-        val scannedQr = InvitePayloadCodec.encode(
-            InvitePayload(
-                baseUrl = "https://lezi.home:443",
-                code = "ABCD1234",
-                ssids = listOf("EditedHome"),
-            ),
-        )
-
-        assertThat(
-            rig.port.joinFamily(
-                JoinFamilyCommand(
-                    invitation = scannedQr,
-                    homeLanConfig = edited,
-                    displayName = "爸爸",
-                ),
-            ).isSuccess,
-        ).isTrue()
-
-        assertThat(rig.backend.joinBaseUrls).containsExactly("https://lezi.home:443")
-        assertThat(rig.backend.joinDisplayNames).containsExactly("爸爸")
-        assertThat(rig.preferences.current().baseUrl).isEqualTo("https://lezi.home:443")
-        assertThat(rig.preferences.current().allowedSsids).containsExactly("EditedHome")
-    }
-
-    @Test
-    fun joinCommandUsesItsRequiredEndpointWithoutSavedOrQrPriority() = runTest {
-        val rig = SyncRig(
-            session = SyncSession(
-                serverHost = "saved.home",
-                serverPort = 8765,
-                allowedSsids = listOf("SavedHome"),
-            ),
-            ssid = "EditedHome",
-        )
-        val qr = InvitePayloadCodec.encode(
-            InvitePayload(
-                baseUrl = "http://stale-qr.home:8787",
-                code = "ABCD1234",
-                ssids = listOf("StaleHome"),
-            ),
-        )
-        val command = JoinFamilyCommand(
-            invitation = qr,
-            homeLanConfig = HomeLanServerConfig(
-                host = "edited.home",
-                port = 9443,
-                scheme = "https",
-                allowedSsids = listOf("EditedHome"),
-            ),
-            displayName = "爸爸",
-        )
-
-        assertThat(rig.port.joinFamily(command).isSuccess).isTrue()
-
-        assertThat(rig.backend.joinBaseUrls).containsExactly("https://edited.home:9443")
-        assertThat(rig.backend.joinDisplayNames).containsExactly("爸爸")
-        assertThat(rig.preferences.current().homeLanConfig).isEqualTo(command.homeLanConfig)
-    }
-
-    @Test
-    fun familyMemberListUsesTheJoinedHomeLanSession() = runTest {
-        val rig = SyncRig(session = joinedSession("family-a"))
-        rig.backend.nextMembers = listOf(
-            FamilyMember(
-                "妈妈",
-                FamilyRole.Owner,
-                isSelf = true,
-                deviceId = "device-a",
-                membershipId = "membership-self",
-            ),
-            FamilyMember(
-                "爸爸",
-                FamilyRole.Member,
-                isSelf = false,
-                deviceId = "device-b",
-                membershipId = "membership-peer",
-            ),
-        )
-
-        val result = rig.port.listFamilyMembers()
-
-        assertThat(result.getOrThrow()).containsExactlyElementsIn(rig.backend.nextMembers).inOrder()
-        assertThat(rig.backend.memberCalls).isEqualTo(1)
-    }
-
-    @Test
-    fun familyMemberListPersistsAuthenticatedSelfMembershipForLegacySession() = runTest {
-        val rig = SyncRig(
-            session = joinedSession("family-a").copy(membershipId = ""),
-        )
-        rig.backend.nextMembers = listOf(
-            FamilyMember(
-                "妈妈",
-                FamilyRole.Owner,
-                isSelf = true,
-                deviceId = "device-a",
-                membershipId = " membership-self ",
-            ),
-            FamilyMember(
-                "爸爸",
-                FamilyRole.Member,
-                isSelf = false,
-                deviceId = "device-b",
-                membershipId = "membership-peer",
-            ),
-        )
-
-        val result = rig.port.listFamilyMembers()
-
-        assertThat(result.isSuccess).isTrue()
-        assertThat(rig.preferences.current().membershipId).isEqualTo("membership-self")
-        assertThat(rig.preferences.current().familyToken).isEqualTo("token")
-        assertThat(rig.backend.memberCalls).isEqualTo(1)
-    }
-
-    @Test
     fun normalSyncPersistsAuthenticatedSelfMembershipAfterNasUpgrade() = runTest {
         val rig = SyncRig(
             session = joinedSession("family-a").copy(membershipId = ""),
@@ -775,167 +499,11 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun createFamilyPersistsServerMembershipIdOnSession() = runTest {
-        val rig = SyncRig(
-            session = SyncSession(
-                serverHost = "192.168.1.20",
-                serverPort = 8787,
-                allowedSsids = listOf("Home"),
-            ),
-        )
-
-        val created = rig.port.createFamily("妈妈", "bootstrap-secret").getOrThrow()
-
-        assertThat(created.membershipId).isEqualTo("membership-created")
-        assertThat(rig.preferences.current().membershipId).isEqualTo("membership-created")
-        assertThat(created.role).isEqualTo(FamilyRole.Owner)
-    }
-
-    @Test
-    fun joinFamilyPersistsServerMembershipIdOnSession() = runTest {
-        val rig = SyncRig(session = SyncSession(), ssid = "Home")
-        val command = JoinFamilyCommand(
-            invitation = "ABCD1234",
-            homeLanConfig = HomeLanServerConfig(
-                host = "192.168.1.20",
-                port = 8787,
-                scheme = "http",
-                allowedSsids = listOf("Home"),
-            ),
-            displayName = "爸爸",
-        )
-
-        val joined = rig.port.joinFamily(command).getOrThrow()
-
-        assertThat(joined.membershipId).isEqualTo("membership-joined")
-        assertThat(rig.preferences.current().membershipId).isEqualTo("membership-joined")
-        assertThat(joined.role).isEqualTo(FamilyRole.Member)
-    }
-
-    @Test
     fun familyMemberListDoesNotReachBackendAwayFromHomeWifi() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"), wifi = false, ssid = null)
 
         assertThat(rig.port.listFamilyMembers().isFailure).isTrue()
         assertThat(rig.backend.memberCalls).isEqualTo(0)
-    }
-
-    @Test
-    fun failedJoinDoesNotPersistEditedServerOrWifi() = runTest {
-        val rig = SyncRig(session = SyncSession(), ssid = "EditedHome")
-        rig.backend.joinFailure = IllegalStateException("join rejected")
-        val edited = HomeLanServerConfig(
-            host = "lezi.home",
-            port = 443,
-            scheme = "https",
-            allowedSsids = listOf("EditedHome"),
-        )
-
-        assertThat(
-            rig.port.joinFamily(
-                JoinFamilyCommand(
-                    invitation = "ABCD1234",
-                    homeLanConfig = edited,
-                    displayName = "爸爸",
-                ),
-            ).isFailure,
-        ).isTrue()
-
-        assertThat(rig.backend.joinBaseUrls).containsExactly("https://lezi.home:443")
-        val after = rig.preferences.current()
-        assertThat(after.baseUrl).isEmpty()
-        assertThat(after.serverHost).isEmpty()
-        assertThat(after.allowedSsids).isEmpty()
-        assertThat(after.isJoined).isFalse()
-    }
-
-    @Test
-    fun createRetriesReuseThePersistedRecoveryIdUntilSessionSave() = runTest {
-        val rig = SyncRig(
-            session = SyncSession(
-                serverHost = "192.168.1.20",
-                serverPort = 8787,
-                allowedSsids = listOf("Home"),
-            ),
-        )
-        rig.backend.createFailure = IllegalStateException("response lost")
-
-        assertThat(rig.port.createFamily("妈妈", "bootstrap-secret").isFailure).isTrue()
-        rig.backend.createFailure = null
-        assertThat(rig.port.createFamily("妈妈", "bootstrap-secret").isSuccess).isTrue()
-
-        assertThat(rig.backend.createRequestIds).hasSize(2)
-        assertThat(rig.backend.createRequestIds.distinct()).hasSize(1)
-        assertThat(rig.preferences.current().isJoined).isTrue()
-    }
-
-    @Test
-    fun createForwardsBootstrapSecretWithoutPersistingItInSession() = runTest {
-        val rig = SyncRig(
-            session = SyncSession(
-                serverHost = "192.168.1.20",
-                serverPort = 8787,
-                allowedSsids = listOf("Home"),
-            ),
-        )
-
-        assertThat(
-            rig.port.createFamily(
-                displayName = "妈妈",
-                bootstrapSecret = "one-time-bootstrap-secret",
-            ).isSuccess,
-        ).isTrue()
-
-        assertThat(rig.backend.createBootstrapSecrets)
-            .containsExactly("one-time-bootstrap-secret")
-        assertThat(rig.preferences.current().toString())
-            .doesNotContain("one-time-bootstrap-secret")
-    }
-
-    @Test
-    fun createCachesSharedFamilyNameAndOwnerCanRename() = runTest {
-        val rig = SyncRig(
-            session = SyncSession(
-                serverHost = "192.168.1.20",
-                serverPort = 8787,
-                allowedSsids = listOf("Home"),
-            ),
-        )
-        rig.backend.nextCreateFamilyName = "乐乐一家"
-
-        val created = rig.port.createFamily(
-            displayName = "妈妈",
-            bootstrapSecret = "bootstrap-secret",
-            familyName = "  乐乐一家  ",
-        )
-        assertThat(created.isSuccess).isTrue()
-        assertThat(rig.backend.createFamilyNames).containsExactly("乐乐一家")
-        assertThat(rig.preferences.current().familyName).isEqualTo("乐乐一家")
-
-        assertThat(rig.port.renameFamily("  年年的家庭  ").isSuccess).isTrue()
-        assertThat(rig.backend.renamedFamilyNames).containsExactly("年年的家庭")
-        assertThat(rig.preferences.current().familyName).isEqualTo("年年的家庭")
-    }
-
-    @Test
-    fun memberCannotRenameSharedFamilyName() = runTest {
-        val rig = SyncRig(
-            session = SyncSession(
-                serverHost = "192.168.1.20",
-                serverPort = 8787,
-                allowedSsids = listOf("Home"),
-                familyId = "family",
-                familyToken = "member-token",
-                deviceId = "device",
-                role = FamilyRole.Member,
-                familyName = "原名",
-            ),
-        )
-
-        val failure = rig.port.renameFamily("偷改").exceptionOrNull()
-        assertThat(failure).hasMessageThat().contains("管理员")
-        assertThat(rig.backend.renamedFamilyNames).isEmpty()
-        assertThat(rig.preferences.current().familyName).isEqualTo("原名")
     }
 
     @Test
@@ -1120,118 +688,6 @@ class RealSyncPortTest {
         assertThat(result.exceptionOrNull()?.message).contains("分页期间变更了家庭名")
         assertThat(rig.preferences.current().familyName).isEqualTo("第一页名字")
         assertThat(rig.preferences.current().pullCursor).isEqualTo(1)
-    }
-
-    @Test
-    fun blankBootstrapSecretFailsBeforePolicyOrBackendIo() = runTest {
-        val rig = SyncRig(
-            session = SyncSession(
-                serverHost = "192.168.1.20",
-                serverPort = 8787,
-                allowedSsids = listOf("Home"),
-            ),
-        )
-
-        val failure = rig.port.createFamily("妈妈", "  ").exceptionOrNull()
-
-        assertThat(failure).hasMessageThat().contains("初始化口令")
-        assertThat(rig.backend.createRequestIds).isEmpty()
-        assertThat(rig.healthProbeCalls).isEqualTo(0)
-    }
-
-    @Test
-    fun createMapsRejectedBootstrapSecretToActionableProductError() = runTest {
-        val rig = SyncRig(
-            session = SyncSession(
-                serverHost = "192.168.1.20",
-                serverPort = 8787,
-                allowedSsids = listOf("Home"),
-            ),
-        )
-        listOf(401, 403).forEach { statusCode ->
-            rig.backend.createFailure = SyncHttpException(
-                statusCode,
-                "Bootstrap secret required or invalid",
-            )
-
-            val error = rig.port.createFamily(
-                displayName = "妈妈",
-                bootstrapSecret = "wrong-secret",
-            ).exceptionOrNull()
-
-            assertThat(error).isInstanceOf(BootstrapSecretRejectedException::class.java)
-            assertThat(error).hasMessageThat()
-                .isEqualTo("初始化口令不正确，请核对 NAS 配置")
-            assertThat(error.toString()).doesNotContain("HTTP")
-        }
-    }
-
-    @Test
-    fun concurrentCreateAndJoinCannotOverwriteTheFirstCredential() = runTest {
-        val rig = SyncRig(
-            session = SyncSession(
-                serverHost = "192.168.1.20",
-                serverPort = 8787,
-                allowedSsids = listOf("Home"),
-            ),
-        )
-        rig.backend.createStarted = CompletableDeferred()
-        rig.backend.releaseCreate = CompletableDeferred()
-
-        val creating = async { rig.port.createFamily("妈妈", "bootstrap-secret") }
-        rig.backend.createStarted!!.await()
-        val joining = async {
-            rig.port.joinFamily(
-                JoinFamilyCommand(
-                    invitation = "JOIN-CODE",
-                    homeLanConfig = rig.preferences.current().homeLanConfig,
-                    displayName = "爸爸",
-                ),
-            )
-        }
-        runCurrent()
-
-        rig.backend.releaseCreate!!.complete(Unit)
-
-        assertThat(creating.await().isSuccess).isTrue()
-        assertThat(joining.await().isFailure).isTrue()
-        assertThat(rig.backend.joinCalls).isEqualTo(0)
-        assertThat(rig.preferences.current().familyId).isEqualTo("family-created")
-    }
-
-    @Test
-    fun revokedMemberCanForgetLocallyAndJoinAnotherFamily() = runTest {
-        val initial = joinedSession("family-a").copy(role = FamilyRole.Member)
-        val rig = SyncRig(session = initial)
-        rig.backend.leaveFailure = SyncHttpException(401)
-
-        assertThat(rig.port.leave("family-a").isSuccess).isTrue()
-
-        assertThat(rig.preferences.current().isJoined).isFalse()
-        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Disabled)
-    }
-
-    @Test
-    fun lostDeleteResponseCanFinishCleanupAfterServerRevokesCredential() = runTest {
-        val rig = SyncRig(session = joinedSession("family-a"))
-        rig.backend.deleteFailure = SyncHttpException(401)
-
-        assertThat(rig.port.deleteFamily().isSuccess).isTrue()
-
-        assertThat(rig.preferences.current().isJoined).isFalse()
-        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Disabled)
-    }
-
-    @Test
-    fun routeNotFoundNeverErasesTheOnlyOwnerCredential() = runTest {
-        val initial = joinedSession("family-a")
-        val rig = SyncRig(session = initial)
-        rig.backend.deleteFailure = SyncHttpException(404)
-
-        assertThat(rig.port.deleteFamily().isFailure).isTrue()
-
-        assertThat(rig.preferences.current()).isEqualTo(initial)
-        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Error)
     }
 
     @Test
@@ -4165,6 +3621,9 @@ internal class RecordingSyncBackend : SyncBackend {
     var releaseCreate: CompletableDeferred<Unit>? = null
     var leaveFailure: Throwable? = null
     var deleteFailure: Throwable? = null
+    var onLeave: suspend () -> Unit = {}
+    var onDeleteFamily: suspend () -> Unit = {}
+    var deleteFamilyCalls = 0
     var createFailure: Throwable? = null
     var joinFailure: Throwable? = null
     var membersFailure: Throwable? = null
@@ -4182,12 +3641,18 @@ internal class RecordingSyncBackend : SyncBackend {
     val createBootstrapSecrets = mutableListOf<String?>()
     var joinCalls = 0
     val joinBaseUrls = mutableListOf<String>()
+    val joinCodes = mutableListOf<String>()
     val joinDisplayNames = mutableListOf<String?>()
     val updatedDisplayNames = mutableListOf<String>()
     val renamedFamilyNames = mutableListOf<String?>()
+    var renameFamilyFailure: Throwable? = null
     var nextCreateFamilyName: String? = null
+    var nextCreateEntities: List<SyncEntity> = emptyList()
     var nextJoinFamilyName: String? = null
+    var nextJoinEntities: List<SyncEntity> = emptyList()
     var memberCalls = 0
+    var nextInvite = Invite(code = "INVITE", expiresAt = 1_000)
+    val inviteSessions = mutableListOf<SyncSession>()
     private val knownEntities = mutableSetOf<Pair<String, String>>()
 
     fun remember(type: String, clientUuid: String) {
@@ -4213,6 +3678,7 @@ internal class RecordingSyncBackend : SyncBackend {
             familyId = "family-created",
             token = "owner-token",
             role = FamilyRole.Owner,
+            entities = nextCreateEntities,
             familyName = nextCreateFamilyName ?: familyName,
             membershipId = "membership-created",
         )
@@ -4267,7 +3733,10 @@ internal class RecordingSyncBackend : SyncBackend {
         return pullResults.removeFirstOrNull() ?: nextPull
     }
 
-    override suspend fun invite(session: SyncSession): Invite = error("not used")
+    override suspend fun invite(session: SyncSession): Invite {
+        inviteSessions += session
+        return nextInvite
+    }
     override suspend fun join(
         baseUrl: String,
         code: String,
@@ -4276,12 +3745,14 @@ internal class RecordingSyncBackend : SyncBackend {
     ): JoinResult {
         joinCalls++
         joinBaseUrls += baseUrl
+        joinCodes += code
         joinDisplayNames += displayName
         joinFailure?.let { throw it }
         return JoinResult(
             familyId = "family-joined",
             token = "member-token",
             role = FamilyRole.Member,
+            entities = nextJoinEntities,
             familyName = nextJoinFamilyName,
             membershipId = "membership-joined",
         )
@@ -4298,15 +3769,19 @@ internal class RecordingSyncBackend : SyncBackend {
     }
 
     override suspend fun renameFamily(session: SyncSession, familyName: String?) {
+        renameFamilyFailure?.let { throw it }
         renamedFamilyNames += familyName
     }
 
     override suspend fun leave(session: SyncSession) {
         leaveFailure?.let { throw it }
+        onLeave()
     }
 
     override suspend fun deleteFamily(session: SyncSession) {
+        deleteFamilyCalls += 1
         deleteFailure?.let { throw it }
+        onDeleteFamily()
     }
 
     override suspend fun putMedia(
@@ -4899,6 +4374,7 @@ internal class MemoryOutboxDao : OutboxDao {
     private val ids = AtomicLong(1)
     val deleteEntityBatchSizes = mutableListOf<Int>()
     var failDeleteTypeAttempts = 0
+    var afterDeleteFamily: suspend (String) -> Unit = {}
 
     fun all(): List<OutboxEntity> = rows.toList()
 
@@ -4932,6 +4408,7 @@ internal class MemoryOutboxDao : OutboxDao {
 
     override suspend fun deleteFamily(familyId: String) {
         rows.removeAll { it.familyId == familyId }
+        afterDeleteFamily(familyId)
     }
 
     override suspend fun deleteType(familyId: String, entityType: String) {
