@@ -388,7 +388,7 @@ internal class ReplicaSyncEngine(
             deletedAt = recordRow.deletedAt,
         )
         val bundleId = AtomicBundleId.forRecord(record.clientUuid, recordRow.updatedAt)
-        backend.stageBundle(
+        val stage = backend.stageBundle(
             session,
             AtomicBundleDraft(
                 bundleId = bundleId,
@@ -396,15 +396,20 @@ internal class ReplicaSyncEngine(
                 media = mediaEntities,
             ),
         )
+        val mediaToUpload = stage.mediaUuidsToUpload(
+            mediaBytes.map { it.first.clientUuid }.toSet(),
+        )
         for ((media, prepared) in mediaBytes) {
-            requireRemoteAllowed(session)
-            backend.putBundleMedia(
-                session,
-                bundleId,
-                media.clientUuid,
-                prepared.bytes,
-                prepared.mime,
-            )
+            if (media.clientUuid in mediaToUpload) {
+                requireRemoteAllowed(session)
+                backend.putBundleMedia(
+                    session,
+                    bundleId,
+                    media.clientUuid,
+                    prepared.bytes,
+                    prepared.mime,
+                )
+            }
             mediaDao.update(media.copy(remoteUri = session.receiptFor(media.clientUuid)))
         }
         requireRemoteAllowed(session)
@@ -490,7 +495,7 @@ internal class ReplicaSyncEngine(
         )
         val bundleId = AtomicBundleId.forCarePlan(plan.clientUuid, planRow.updatedAt)
         requireRemoteAllowed(session)
-        backend.stageBundle(
+        val stage = backend.stageBundle(
             session,
             AtomicBundleDraft(
                 bundleId = bundleId,
@@ -498,15 +503,20 @@ internal class ReplicaSyncEngine(
                 media = mediaEntities,
             ),
         )
+        val mediaToUpload = stage.mediaUuidsToUpload(
+            mediaBytes.map { it.first.clientUuid }.toSet(),
+        )
         for ((media, prepared) in mediaBytes) {
-            requireRemoteAllowed(session)
-            backend.putBundleMedia(
-                session,
-                bundleId,
-                media.clientUuid,
-                prepared.bytes,
-                prepared.mime,
-            )
+            if (media.clientUuid in mediaToUpload) {
+                requireRemoteAllowed(session)
+                backend.putBundleMedia(
+                    session,
+                    bundleId,
+                    media.clientUuid,
+                    prepared.bytes,
+                    prepared.mime,
+                )
+            }
             mediaDao.update(media.copy(remoteUri = session.receiptFor(media.clientUuid)))
         }
         requireRemoteAllowed(session)
@@ -2232,6 +2242,14 @@ private fun SyncSession.receiptFor(clientUuid: String): String {
     )
     return "$RECEIPT_PREFIX$namespace:$clientUuid"
 }
+
+private fun BundleStageStatus.mediaUuidsToUpload(liveMediaUuids: Set<String>): Set<String> =
+    when {
+        isCommitted -> emptySet()
+        missingMedia.isNotEmpty() -> missingMedia.toSet()
+        stagedMedia.isNotEmpty() -> liveMediaUuids - stagedMedia.toSet()
+        else -> liveMediaUuids
+    }
 
 private fun MediaAssetEntity.hasReceiptFor(session: SyncSession): Boolean =
     remoteUri == clientUuid || remoteUri == session.receiptFor(clientUuid)

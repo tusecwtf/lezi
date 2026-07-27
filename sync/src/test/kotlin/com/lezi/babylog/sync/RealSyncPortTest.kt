@@ -2831,6 +2831,147 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun committedRecordBundleRetrySkipsMediaUploadAndStillAcknowledgesCommit() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(membershipId = "membership-a"),
+            healthCapabilities = setOf(
+                CAPABILITY_ATOMIC_BUNDLE,
+                CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+            ),
+        )
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val mediaUuid = "10000000-0000-4000-8000-000000000001"
+        val recordId = rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "record-committed-retry",
+                createdByMembershipId = "",
+                payloadJson =
+                    """{"amount_ml":50,"photos":["photos/committed-record.jpg"]}""",
+                syncDirty = true,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = mediaUuid,
+                kind = "log",
+                localUri = "photos/committed-record.jpg",
+                mime = "image/jpeg",
+                byteSize = 4,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+        rig.backend.stageBundleStatus = "committed"
+        rig.backend.stageBundleMissingMedia = listOf(mediaUuid)
+        rig.backend.putBundleMediaFailure = IllegalStateException("BundleMediaUploadClosed")
+        rig.backend.nextCommitRecordAuthors = listOf(
+            CanonicalRecordAuthor(
+                clientUuid = "record-committed-retry",
+                createdByMembershipId = "membership-a",
+            ),
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        assertThat(rig.backend.bundleMediaUploads).isEmpty()
+        assertThat(rig.backend.committedBundles)
+            .containsExactly(rig.backend.stagedBundles.single().bundleId)
+        val record = requireNotNull(
+            rig.records.getByClientUuid("record-committed-retry"),
+        )
+        assertThat(record.createdByMembershipId).isEqualTo("membership-a")
+        assertThat(record.syncDirty).isFalse()
+        val media = rig.media.listForRecord(recordId).single()
+        assertThat(media.syncDirty).isFalse()
+        assertThat(media.remoteUri)
+            .isEqualTo(rig.preferences.current().expectedMediaReceipt(mediaUuid))
+        assertThat(rig.outbox.all()).isEmpty()
+    }
+
+    @Test
+    fun stagingRecordBundleRetryUsesProgressAndFallsBackForLegacyEmptyStatus() = runTest {
+        suspend fun runCase(
+            suffix: String,
+            missingIndexes: List<Int>,
+            stagedIndexes: List<Int>,
+            expectedUploadIndexes: List<Int>,
+        ) {
+            val rig = SyncRig(session = joinedSession("family-a"))
+            assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+            val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+            val paths = (0 until 3).map { "photos/$suffix-$it.jpg" }
+            val mediaUuids = (0 until 3).map { index ->
+                "20000000-0000-4000-8000-${index.toString().padStart(12, '0')}"
+            }
+            val recordId = rig.records.seed(
+                localRecord(babyId).copy(
+                    clientUuid = "record-$suffix-retry",
+                    payloadJson =
+                        """{"amount_ml":50,"photos":[${
+                            paths.joinToString(",") { "\"$it\"" }
+                        }]}""",
+                    syncDirty = true,
+                ),
+            )
+            paths.forEachIndexed { index, path ->
+                rig.media.seed(
+                    MediaAssetEntity(
+                        recordId = recordId,
+                        clientUuid = mediaUuids[index],
+                        kind = "log",
+                        localUri = path,
+                        mime = "image/jpeg",
+                        byteSize = 4,
+                        createdAt = 100,
+                        updatedAt = 100L + index,
+                        syncDirty = true,
+                    ),
+                )
+            }
+            rig.backend.stageBundleStatus = "staging"
+            rig.backend.stageBundleMissingMedia = missingIndexes.map(mediaUuids::get)
+            rig.backend.stageBundleStagedMedia = stagedIndexes.map(mediaUuids::get)
+
+            assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+            assertThat(rig.backend.bundleMediaUploads.map { it.second })
+                .containsExactlyElementsIn(expectedUploadIndexes.map(mediaUuids::get))
+            assertThat(rig.backend.committedBundles).hasSize(1)
+            assertThat(rig.records.getByClientUuid("record-$suffix-retry")?.syncDirty)
+                .isFalse()
+            val media = rig.media.listForRecord(recordId)
+            assertThat(media.map { it.syncDirty })
+                .containsExactly(false, false, false)
+            val session = rig.preferences.current()
+            assertThat(media.map { it.remoteUri })
+                .containsExactlyElementsIn(mediaUuids.map(session::expectedMediaReceipt))
+            assertThat(rig.outbox.all()).isEmpty()
+        }
+
+        runCase(
+            suffix = "missing",
+            missingIndexes = listOf(1),
+            stagedIndexes = listOf(0, 2),
+            expectedUploadIndexes = listOf(1),
+        )
+        runCase(
+            suffix = "staged",
+            missingIndexes = emptyList(),
+            stagedIndexes = listOf(0, 2),
+            expectedUploadIndexes = listOf(1),
+        )
+        runCase(
+            suffix = "legacy",
+            missingIndexes = emptyList(),
+            stagedIndexes = emptyList(),
+            expectedUploadIndexes = listOf(0, 1, 2),
+        )
+    }
+
+    @Test
     fun atomicCarePlanCreateStagesZeroOneAndThreePhotosThenCommits() = runTest {
         suspend fun runCase(photoCount: Int) {
             val rig = SyncRig(session = joinedSession("family-a"))
@@ -2885,6 +3026,52 @@ class RealSyncPortTest {
         runCase(0)
         runCase(1)
         runCase(3)
+    }
+
+    @Test
+    fun committedCarePlanBundleRetrySkipsMediaUploadAndStillAcknowledgesCommit() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val mediaUuid = "30000000-0000-4000-8000-000000000001"
+        val planId = rig.carePlans.seed(
+            localCarePlan(babyId).copy(
+                clientUuid = "plan-committed-retry",
+                payloadJson =
+                    """{"photos":["photos/committed-plan.jpg"]}""",
+                syncDirty = true,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                carePlanId = planId,
+                recordId = null,
+                clientUuid = mediaUuid,
+                kind = "log",
+                localUri = "photos/committed-plan.jpg",
+                mime = "image/jpeg",
+                byteSize = 4,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+        rig.backend.stageBundleStatus = "committed"
+        rig.backend.stageBundleMissingMedia = listOf(mediaUuid)
+        rig.backend.putBundleMediaFailure = IllegalStateException("BundleMediaUploadClosed")
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        assertThat(rig.backend.bundleMediaUploads).isEmpty()
+        assertThat(rig.backend.committedBundles)
+            .containsExactly(rig.backend.stagedBundles.single().bundleId)
+        assertThat(rig.carePlans.getByClientUuid("plan-committed-retry")?.syncDirty)
+            .isFalse()
+        val media = rig.media.listForCarePlan(planId).single()
+        assertThat(media.syncDirty).isFalse()
+        assertThat(media.remoteUri)
+            .isEqualTo(rig.preferences.current().expectedMediaReceipt(mediaUuid))
+        assertThat(rig.outbox.all()).isEmpty()
     }
 
     @Test
@@ -4210,6 +4397,9 @@ internal class RecordingSyncBackend : SyncBackend {
     var putBundleMediaFailure: Throwable? = null
     var commitBundleFailure: Throwable? = null
     var nextCommitRecordAuthors: List<CanonicalRecordAuthor> = emptyList()
+    var stageBundleStatus = "staging"
+    var stageBundleMissingMedia: List<String>? = null
+    var stageBundleStagedMedia: List<String> = emptyList()
 
     override suspend fun stageBundle(
         session: SyncSession,
@@ -4219,8 +4409,10 @@ internal class RecordingSyncBackend : SyncBackend {
         stagedBundles += draft
         return BundleStageStatus(
             bundleId = draft.bundleId,
-            status = "staging",
-            missingMedia = draft.media.filter { it.deletedAt == null }.map { it.clientUuid },
+            status = stageBundleStatus,
+            missingMedia = stageBundleMissingMedia
+                ?: draft.media.filter { it.deletedAt == null }.map { it.clientUuid },
+            stagedMedia = stageBundleStagedMedia,
         )
     }
 
@@ -4923,6 +5115,13 @@ private fun joinedSession(familyId: String) = SyncSession(
     serverPort = 8787,
     allowedSsids = listOf("Home"),
 )
+
+private fun SyncSession.expectedMediaReceipt(clientUuid: String): String {
+    val namespace = UUID.nameUUIDFromBytes(
+        "${baseUrl.trimEnd('/')}\n$familyId".toByteArray(Charsets.UTF_8),
+    )
+    return "lezi-sync:$namespace:$clientUuid"
+}
 
 private fun pendingReplicaCleanup(
     familyId: String = "family-a",
