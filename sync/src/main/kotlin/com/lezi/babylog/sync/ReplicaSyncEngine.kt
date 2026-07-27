@@ -1121,12 +1121,31 @@ internal class ReplicaSyncEngine(
         authors: List<CanonicalRecordAuthor>,
         expectedUpdatedAt: Map<String, Long>,
     ) {
-        authors.distinctBy(CanonicalRecordAuthor::clientUuid).forEach { author ->
-            val updatedAt = expectedUpdatedAt[author.clientUuid] ?: return@forEach
+        val authorsByClientUuid = authors.groupBy(CanonicalRecordAuthor::clientUuid)
+        val expectedClientUuids = expectedUpdatedAt.keys
+        val actualClientUuids = authorsByClientUuid.keys
+        val missing = expectedClientUuids - actualClientUuids
+        val unexpected = actualClientUuids - expectedClientUuids
+        val duplicates = authorsByClientUuid
+            .filterValues { acknowledgements -> acknowledgements.size != 1 }
+            .keys
+        require(missing.isEmpty() && unexpected.isEmpty() && duplicates.isEmpty()) {
+            "record_authors 回执必须与请求中的 Record 一一对应；" +
+                "缺失=${missing.sorted()}，重复=${duplicates.sorted()}，多余=${unexpected.sorted()}"
+        }
+        val canonicalMemberships = authors.associate { author ->
             val membershipId = author.createdByMembershipId.trim()
-            if (membershipId.isNotEmpty()) {
-                recordDao.mergeCanonicalAuthor(author.clientUuid, updatedAt, membershipId)
+            require(membershipId.isNotEmpty()) {
+                "record_authors[${author.clientUuid}] 的 canonical membership 为空"
             }
+            author.clientUuid to membershipId
+        }
+        expectedUpdatedAt.forEach { (clientUuid, updatedAt) ->
+            recordDao.mergeCanonicalAuthor(
+                clientUuid = clientUuid,
+                expectedUpdatedAt = updatedAt,
+                membershipId = checkNotNull(canonicalMemberships[clientUuid]),
+            )
         }
     }
 

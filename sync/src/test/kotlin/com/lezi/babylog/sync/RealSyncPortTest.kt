@@ -687,6 +687,52 @@ class RealSyncPortTest {
         assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
     }
 
+    @Test
+    fun ordinaryRecordPushRejectsMalformedCanonicalAuthorAcknowledgements() = runTest {
+        val malformedAcknowledgements = listOf(
+            emptyList(),
+            listOf(
+                CanonicalRecordAuthor("pre-join-record", "membership-a"),
+                CanonicalRecordAuthor("pre-join-record", "membership-a"),
+            ),
+            listOf(
+                CanonicalRecordAuthor("pre-join-record", "membership-a"),
+                CanonicalRecordAuthor("unexpected-record", "membership-a"),
+            ),
+        )
+
+        malformedAcknowledgements.forEach { acknowledgements ->
+            val rig = SyncRig(
+                session = joinedSession("family-a").copy(membershipId = "membership-a"),
+                healthCapabilities = setOf(
+                    CAPABILITY_ATOMIC_BUNDLE,
+                    CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+                ),
+            )
+            val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+            rig.backend.remember("baby", "baby-local")
+            rig.records.seed(
+                localRecord(babyId).copy(
+                    clientUuid = "pre-join-record",
+                    createdByMembershipId = "",
+                    updatedAt = 120,
+                    syncDirty = true,
+                ),
+            )
+            rig.backend.nextPushRecordAuthors = acknowledgements
+
+            val result = rig.port.sync(SyncTrigger.LocalWrite)
+
+            assertThat(result.isFailure).isTrue()
+            assertThat(result.exceptionOrNull()).hasMessageThat().contains("record_authors")
+            val retained = requireNotNull(rig.records.getByClientUuid("pre-join-record"))
+            assertThat(retained.createdByMembershipId).isEmpty()
+            assertThat(retained.syncDirty).isTrue()
+            assertThat(rig.outbox.peek("family-a", 10).map(OutboxEntity::clientUuid))
+                .containsExactly("pre-join-record")
+        }
+    }
+
 
     @Test
     fun customItemDirtySnapshotPushesAndPullPreservesLocalSortOrder() = runTest {
@@ -3084,6 +3130,55 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun atomicRecordCommitMissingCanonicalAuthorAckRemainsRetryable() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a").copy(membershipId = "membership-a"),
+            healthCapabilities = setOf(
+                CAPABILITY_ATOMIC_BUNDLE,
+                CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+            ),
+        )
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        rig.backend.remember("baby", "baby-local")
+        val recordId = rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "pre-join-photo-record",
+                createdByMembershipId = "",
+                updatedAt = 120,
+                syncDirty = true,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = "10000000-0000-4000-8000-000000000099",
+                kind = "log",
+                localUri = "photos/pre-join.jpg",
+                mime = "image/jpeg",
+                byteSize = 4,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+        rig.backend.nextCommitRecordAuthors = emptyList()
+
+        val result = rig.port.sync(SyncTrigger.LocalWrite)
+
+        assertThat(result.isFailure).isTrue()
+        assertThat(result.exceptionOrNull()).hasMessageThat().contains("record_authors")
+        val retained = requireNotNull(rig.records.getByClientUuid("pre-join-photo-record"))
+        assertThat(retained.createdByMembershipId).isEmpty()
+        assertThat(retained.syncDirty).isTrue()
+        assertThat(rig.media.listForRecord(recordId).single().syncDirty).isTrue()
+        assertThat(rig.outbox.peek("family-a", 10).map(OutboxEntity::clientUuid))
+            .containsExactly(
+                "pre-join-photo-record",
+                "10000000-0000-4000-8000-000000000099",
+            )
+    }
+
+    @Test
     fun stagingRecordBundleRetryUsesCurrentMissingAndStagedProgress() = runTest {
         suspend fun runCase(
             suffix: String,
@@ -4489,7 +4584,7 @@ internal class RecordingSyncBackend : SyncBackend {
     val updatedDisplayNames = mutableListOf<String>()
     val renamedFamilyNames = mutableListOf<String?>()
     var renameFamilyFailure: Throwable? = null
-    var nextPushRecordAuthors: List<CanonicalRecordAuthor> = emptyList()
+    var nextPushRecordAuthors: List<CanonicalRecordAuthor>? = null
     var nextCreateFamilyName: String? = null
     var nextCreateEntities: List<SyncEntity> = emptyList()
     var nextJoinFamilyName: String? = null
@@ -4568,7 +4663,19 @@ internal class RecordingSyncBackend : SyncBackend {
         afterPush?.invoke()
         return PushResult(
             applied = entities.size,
-            recordAuthors = nextPushRecordAuthors,
+            recordAuthors = nextPushRecordAuthors ?: entities
+                .filter { it.type == "record" }
+                .map { entity ->
+                    val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
+                    CanonicalRecordAuthor(
+                        clientUuid = entity.clientUuid,
+                        createdByMembershipId = payload["created_by_membership_id"]
+                            ?.jsonPrimitive
+                            ?.contentOrNull
+                            ?.takeIf(String::isNotBlank)
+                            ?: session.membershipId,
+                    )
+                },
         )
     }
 
@@ -4668,7 +4775,7 @@ internal class RecordingSyncBackend : SyncBackend {
     var stageBundleFailure: Throwable? = null
     var putBundleMediaFailure: Throwable? = null
     var commitBundleFailure: Throwable? = null
-    var nextCommitRecordAuthors: List<CanonicalRecordAuthor> = emptyList()
+    var nextCommitRecordAuthors: List<CanonicalRecordAuthor>? = null
     var stageBundleStatus = "staging"
     var stageBundleMissingMedia: List<String>? = null
     var stageBundleStagedMedia: List<String> = emptyList()
@@ -4732,12 +4839,30 @@ internal class RecordingSyncBackend : SyncBackend {
     ): BundleCommitResult {
         commitBundleFailure?.let { throw it }
         committedBundles += bundleId
+        val recordAuthors = nextCommitRecordAuthors ?: stagedBundles
+            .lastOrNull { it.bundleId == bundleId }
+            ?.root
+            ?.takeIf { it.type == "record" }
+            ?.let { root ->
+                val payload = Json.parseToJsonElement(root.payloadJson).jsonObject
+                listOf(
+                    CanonicalRecordAuthor(
+                        clientUuid = root.clientUuid,
+                        createdByMembershipId = payload["created_by_membership_id"]
+                            ?.jsonPrimitive
+                            ?.contentOrNull
+                            ?.takeIf(String::isNotBlank)
+                            ?: session.membershipId,
+                    ),
+                )
+            }
+            .orEmpty()
         return BundleCommitResult(
             bundleId = bundleId,
             status = "committed",
             applied = 1,
             cursor = session.pullCursor,
-            recordAuthors = nextCommitRecordAuthors,
+            recordAuthors = recordAuthors,
         )
     }
 }
