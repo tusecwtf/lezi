@@ -4434,6 +4434,111 @@ async fn atomic_care_plan_waits_for_its_custom_item_definition() {
 }
 
 #[tokio::test]
+async fn atomic_care_plan_requires_a_type_consistent_custom_item_reference() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "bundle-custom-shape-owner",
+        "bundle-custom-shape-request-0001",
+    )
+    .await;
+    let token = owner["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let custom_item_id = Uuid::new_v4().to_string();
+    let (custom_status, custom_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(token),
+        json!({
+            "entities": [entity_wire(
+                "custom_item",
+                &custom_item_id,
+                1,
+                json!({
+                    "name": "抚触",
+                    "icon_slot": 2,
+                    "created_by_membership_id": null,
+                }),
+                None,
+            )],
+        }),
+    )
+    .await;
+    assert_eq!(custom_status, StatusCode::OK, "{custom_body}");
+
+    let missing_reference = care_plan_payload(&baby_id, "custom");
+    let mut null_reference = care_plan_payload(&baby_id, "custom");
+    null_reference["custom_item_client_uuid"] = Value::Null;
+    let mut unexpected_reference = care_plan_payload(&baby_id, "bath");
+    unexpected_reference["custom_item_client_uuid"] = json!(custom_item_id);
+
+    for (payload, expected_detail) in [
+        (
+            missing_reference,
+            "care_plan type custom requires custom_item_client_uuid",
+        ),
+        (
+            null_reference,
+            "care_plan type custom requires custom_item_client_uuid",
+        ),
+        (
+            unexpected_reference,
+            "care_plan custom_item_client_uuid is only valid for type custom",
+        ),
+    ] {
+        let bundle_id = Uuid::new_v4().to_string();
+        let (status, body) = json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/bundles",
+            Some(token),
+            json!({
+                "bundle_id": bundle_id,
+                "root": entity_wire(
+                    "care_plan",
+                    &Uuid::new_v4().to_string(),
+                    2,
+                    payload,
+                    None,
+                ),
+                "media": [],
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["detail"], expected_detail);
+
+        let (lookup_status, lookup_body) =
+            get_json(&rig.app, &format!("/v1/bundles/{bundle_id}"), Some(token)).await;
+        assert_eq!(lookup_status, StatusCode::NOT_FOUND, "{lookup_body}");
+    }
+
+    let valid_bundle_id = Uuid::new_v4().to_string();
+    let mut valid_payload = care_plan_payload(&baby_id, "custom");
+    valid_payload["custom_item_client_uuid"] = json!(custom_item_id);
+    let (valid_status, valid_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": valid_bundle_id,
+            "root": entity_wire(
+                "care_plan",
+                &Uuid::new_v4().to_string(),
+                2,
+                valid_payload,
+                None,
+            ),
+            "media": [],
+        }),
+    )
+    .await;
+    assert_eq!(valid_status, StatusCode::OK, "{valid_body}");
+}
+
+#[tokio::test]
 async fn atomic_bundle_commit_rejects_malformed_or_wrong_shape_json() {
     let rig = Rig::new();
     let owner = create_family(

@@ -3350,11 +3350,29 @@ fn validate_push(
                 "care_plan baby_client_uuid does not exist".to_owned(),
             ));
         }
-        if let Some(custom_item_id) = entity
+        let plan_type = entity
+            .payload
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or(StoreError::InvalidStoredPayload)?;
+        let custom_item_id = entity
             .payload
             .get("custom_item_client_uuid")
-            .and_then(Value::as_str)
-        {
+            .and_then(Value::as_str);
+        match (plan_type == "custom", custom_item_id) {
+            (true, None) => {
+                return Err(StoreError::UnresolvedReference(
+                    "care_plan type custom requires custom_item_client_uuid".to_owned(),
+                ));
+            }
+            (false, Some(_)) => {
+                return Err(StoreError::UnresolvedReference(
+                    "care_plan custom_item_client_uuid is only valid for type custom".to_owned(),
+                ));
+            }
+            _ => {}
+        }
+        if let Some(custom_item_id) = custom_item_id {
             if !custom_item_ids.contains(custom_item_id) {
                 return Err(StoreError::UnresolvedReference(
                     "care_plan custom_item_client_uuid does not exist".to_owned(),
@@ -3863,6 +3881,110 @@ mod tests {
             1
         );
         assert_eq!(store.pull(&family_id, 0).unwrap().entities.len(), 2);
+    }
+
+    #[test]
+    fn care_plan_stage_requires_a_type_consistent_custom_item_reference() {
+        let directory = TempDir::new().unwrap();
+        let store = Store::open(directory.path().join("lezi.db")).unwrap();
+        let family_id = family(&store);
+        let principal = owner_principal(&family_id);
+        let baby_id = Uuid::new_v4();
+        let custom_item_id = Uuid::new_v4();
+        store
+            .push(
+                &principal,
+                vec![
+                    entity(
+                        "baby",
+                        baby_id,
+                        1,
+                        json!({
+                            "nickname":"年年","sex":"female","birthday":"2025-01-02",
+                            "due_date":null,"avatar_media_uuid":null,"birth_weight_grams":3200
+                        }),
+                    ),
+                    entity(
+                        "custom_item",
+                        custom_item_id,
+                        1,
+                        json!({
+                            "name":"抚触","icon_slot":2,"created_by_membership_id":null
+                        }),
+                    ),
+                ],
+                10,
+                1_700_000_000_000,
+            )
+            .unwrap();
+
+        let base_payload = || {
+            json!({
+                "baby_client_uuid": baby_id,
+                "type": "custom",
+                "scheduled_at": 1_700_000_000_000i64,
+                "scheduled_zone_id": "Asia/Shanghai",
+                "status": "pending",
+                "payload_json": {},
+                "schema_version": 1,
+                "note": null,
+            })
+        };
+        let missing_reference = base_payload();
+        let mut null_reference = base_payload();
+        null_reference["custom_item_client_uuid"] = Value::Null;
+        let mut unexpected_reference = base_payload();
+        unexpected_reference["type"] = json!("bath");
+        unexpected_reference["custom_item_client_uuid"] = json!(custom_item_id);
+
+        for (payload, expected_message) in [
+            (
+                missing_reference,
+                "care_plan type custom requires custom_item_client_uuid",
+            ),
+            (
+                null_reference,
+                "care_plan type custom requires custom_item_client_uuid",
+            ),
+            (
+                unexpected_reference,
+                "care_plan custom_item_client_uuid is only valid for type custom",
+            ),
+        ] {
+            let bundle_id = Uuid::new_v4().to_string();
+            let result = store.stage_bundle(
+                &principal,
+                &bundle_id,
+                entity("care_plan", Uuid::new_v4(), 2, payload),
+                vec![],
+                2,
+            );
+            assert!(matches!(
+                result,
+                Err(StoreError::UnresolvedReference(message)) if message == expected_message
+            ));
+            assert!(store
+                .bundle_status(&family_id, &bundle_id)
+                .unwrap()
+                .is_none());
+        }
+
+        let valid_bundle_id = Uuid::new_v4().to_string();
+        let mut valid_payload = base_payload();
+        valid_payload["custom_item_client_uuid"] = json!(custom_item_id);
+        assert_eq!(
+            store
+                .stage_bundle(
+                    &principal,
+                    &valid_bundle_id,
+                    entity("care_plan", Uuid::new_v4(), 2, valid_payload),
+                    vec![],
+                    2,
+                )
+                .unwrap()
+                .status,
+            "staging"
+        );
     }
 
     #[test]
