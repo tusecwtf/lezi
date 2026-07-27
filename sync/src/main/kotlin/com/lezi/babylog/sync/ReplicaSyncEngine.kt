@@ -87,15 +87,21 @@ internal class ReplicaSyncEngine(
     ): ReplicaSyncOutcome {
         cleanupPendingTombstonedMedia()
         val mediaEditGuard = captureLocalMediaEditGuard()
-        captureLocalChanges(session)
+        val capturedPendingBlankCreator = captureLocalChanges(session)
         requireRemoteAllowed(session)
         val plan = SyncPlan.forTrigger(trigger)
         var current = session
-        if (CAPABILITY_RECORD_MEMBERSHIP_AUTHOR in remoteCapabilities()) {
+        var membershipConvergedFromBlank = false
+        val supportsMembershipAuthor =
+            CAPABILITY_RECORD_MEMBERSHIP_AUTHOR in remoteCapabilities()
+        if (supportsMembershipAuthor) {
+            val previousMembershipWasBlank = current.membershipId.isBlank()
             current = convergeAuthenticatedSelfMembership(
                 current,
                 backend.members(current),
             )
+            membershipConvergedFromBlank =
+                previousMembershipWasBlank && current.membershipId.isNotBlank()
         }
         var recovered = false
         if (current.pullCursor > 0 && current.pullGeneration.isBlank()) {
@@ -111,7 +117,12 @@ internal class ReplicaSyncEngine(
                 recovered = true
             }
         }
-        if (plan.pull && !recovered) {
+        // A failed prior cycle can leave the session canonical while its captured
+        // rows still have no creator. This flag only schedules an authoritative
+        // acknowledgement pull; it never treats dirty/outbox state as ownership.
+        val requiresCreatorAcknowledgementPull = supportsMembershipAuthor &&
+            (membershipConvergedFromBlank || capturedPendingBlankCreator)
+        if ((plan.pull || requiresCreatorAcknowledgementPull) && !recovered) {
             try {
                 current = pullAllPages(
                     initial = current,
@@ -705,8 +716,19 @@ internal class ReplicaSyncEngine(
         entity: SyncEntity,
     ): Boolean {
         val existing = carePlanDao.getByClientUuid(entity.clientUuid)
-        // Match server LWW: existing wins on equal updatedAt (>= skip).
-        if (existing != null && existing.updatedAt >= entity.updatedAt) return true
+        // Match server LWW for business fields. Equal revisions may still carry
+        // the NAS-owned immutable creator acknowledgement after a legacy push.
+        if (existing != null && existing.updatedAt > entity.updatedAt) return true
+        if (existing != null && existing.updatedAt == entity.updatedAt) {
+            acknowledgedEqualRevisionCreator(
+                session = session,
+                existingCreator = existing.createdByMembershipId,
+                payloadJson = entity.payloadJson,
+            )?.let { creator ->
+                carePlanDao.update(existing.copy(createdByMembershipId = creator))
+            }
+            return true
+        }
         // Keep in-flight local create/edit until push commits.
         if (existing != null && existing.syncDirty) return true
         val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
@@ -961,8 +983,19 @@ internal class ReplicaSyncEngine(
         entity: SyncEntity,
     ): Boolean {
         val existing = customItemDao.getByClientUuid(entity.clientUuid)
-        // Match server LWW: existing wins on equal updatedAt (>= skip).
-        if (existing != null && existing.updatedAt >= entity.updatedAt) return true
+        // Match server LWW for business fields. Equal revisions may still carry
+        // the NAS-owned immutable creator acknowledgement after a legacy push.
+        if (existing != null && existing.updatedAt > entity.updatedAt) return true
+        if (existing != null && existing.updatedAt == entity.updatedAt) {
+            acknowledgedEqualRevisionCreator(
+                session = session,
+                existingCreator = existing.createdByMembershipId,
+                payloadJson = entity.payloadJson,
+            )?.let { creator ->
+                customItemDao.update(existing.copy(createdByMembershipId = creator))
+            }
+            return true
+        }
         // Keep in-flight local rename/delete until push commits.
         if (existing != null && existing.syncDirty) return true
         val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
@@ -996,6 +1029,24 @@ internal class ReplicaSyncEngine(
             ),
         )
         return true
+    }
+
+    private fun acknowledgedEqualRevisionCreator(
+        session: SyncSession,
+        existingCreator: String?,
+        payloadJson: String,
+    ): String? {
+        val remoteCreator = runCatching { Json.parseToJsonElement(payloadJson).jsonObject }
+            .getOrNull()
+            ?.string("created_by_membership_id")
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
+            ?: return null
+        return resolvedImmutableCreator(
+            session = session,
+            existingCreator = existingCreator,
+            remoteCreator = remoteCreator,
+        ).takeIf { it != existingCreator }
     }
 
     private fun resolvedImmutableCreator(
@@ -1602,12 +1653,13 @@ internal class ReplicaSyncEngine(
         }
     }
 
-    private suspend fun captureLocalChanges(session: SyncSession) {
+    private suspend fun captureLocalChanges(session: SyncSession): Boolean {
         val babies = babyDao.listPendingSync()
         val records = recordDao.listPendingSync()
         val carePlans = carePlanDao.listPendingSync()
         val customItems = customItemDao.listPendingSync()
         val fulfillmentCandidates = fulfillmentCandidateDao.listPendingSync()
+        var capturedPendingBlankCreator = false
         materializeLocalMedia(
             includeAvatars = session.role != FamilyRole.Member,
             babies = babies,
@@ -1658,6 +1710,9 @@ internal class ReplicaSyncEngine(
         }
         customItems.forEach { item ->
             enqueue(session, SyncWireMapper.customItem(item))
+            if (item.createdByMembershipId.isBlank()) {
+                capturedPendingBlankCreator = true
+            }
         }
         // Outbox materialization only; atomic commit order is record packages →
         // care_plan packages → fulfillment_candidate residual (see pushOutboxBatch).
@@ -1690,6 +1745,9 @@ internal class ReplicaSyncEngine(
                     customItemUuid,
                 ),
             )
+            if (plan.createdByMembershipId.isBlank()) {
+                capturedPendingBlankCreator = true
+            }
         }
         fulfillmentCandidates.forEach { candidate ->
             enqueue(session, SyncWireMapper.fulfillmentCandidate(candidate))
@@ -1722,6 +1780,7 @@ internal class ReplicaSyncEngine(
                 ),
             )
         }
+        return capturedPendingBlankCreator
     }
 
     private suspend fun enqueue(session: SyncSession, entity: SyncEntity) {

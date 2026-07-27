@@ -267,6 +267,250 @@ class ReplicaSyncEngineTest {
     }
 
     @Test
+    fun blankLegacyMembershipUsesServerAcknowledgementForPendingCreatorOwnedRows() = runTest {
+        val session = joinedReplicaSession().copy(membershipId = "")
+        val rig = ReplicaEngineRig(
+            session = session,
+            capabilities = setOf(
+                CAPABILITY_ATOMIC_BUNDLE,
+                CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+            ),
+        )
+        rig.backend.nextMembers = listOf(
+            FamilyMember(
+                displayName = "妈妈",
+                role = FamilyRole.Owner,
+                isSelf = true,
+                membershipId = "canonical-membership",
+            ),
+        )
+        rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
+        rig.carePlans.seed(
+            localReplicaCarePlan("plan-pending-blank", "", updatedAt = 510)
+                .copy(syncDirty = true),
+        )
+        rig.customItems.seed(
+            localReplicaCustomItem("item-pending-blank", "", updatedAt = 520)
+                .copy(syncDirty = true),
+        )
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "custom_item",
+                    clientUuid = "item-pending-blank",
+                    payloadJson =
+                        """{"name":"item-pending-blank","icon_slot":0,"created_by_membership_id":"canonical-membership"}""",
+                    updatedAt = 520,
+                ),
+                SyncEntity(
+                    type = "care_plan",
+                    clientUuid = "plan-pending-blank",
+                    payloadJson =
+                        """{"baby_client_uuid":"baby-local","type":"formula","scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","status":"pending","payload_json":{},"schema_version":1,"created_by_membership_id":"canonical-membership"}""",
+                    updatedAt = 510,
+                ),
+            ),
+            cursor = 2,
+            generation = "generation-a",
+        )
+
+        val outcome = rig.engine.synchronize(
+            session = session,
+            trigger = SyncTrigger.LocalWrite,
+        )
+
+        val planPayload = Json.parseToJsonElement(
+            rig.backend.stagedBundles.single().root.payloadJson,
+        ).jsonObject
+        val itemPayload = Json.parseToJsonElement(
+            rig.backend.pushes.single().entities.single { it.type == "custom_item" }.payloadJson,
+        ).jsonObject
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
+        assertThat(planPayload["created_by_membership_id"].toString()).isEqualTo("null")
+        assertThat(itemPayload["created_by_membership_id"].toString()).isEqualTo("null")
+        assertThat(rig.backend.pullCount).isEqualTo(1)
+        assertThat(rig.backend.stagedBundles).hasSize(1)
+        assertThat(rig.backend.pushes).hasSize(1)
+        assertThat(rig.preferences.current().membershipId).isEqualTo("canonical-membership")
+        assertThat(rig.carePlans.getByClientUuid("plan-pending-blank")?.let {
+            Triple(it.createdByMembershipId, it.updatedAt, it.syncDirty)
+        }).isEqualTo(Triple("canonical-membership", 510L, false))
+        assertThat(rig.customItems.get("item-pending-blank")?.let {
+            Triple(it.createdByMembershipId, it.updatedAt, it.syncDirty)
+        }).isEqualTo(Triple("canonical-membership", 520L, false))
+        assertThat(rig.outbox.all()).isEmpty()
+    }
+
+    @Test
+    fun canonicalSessionPullsAcknowledgementsForPendingBlankCreators() = runTest {
+        val session = joinedReplicaSession().copy(membershipId = "canonical-membership")
+        val rig = ReplicaEngineRig(
+            session = session,
+            capabilities = setOf(
+                CAPABILITY_ATOMIC_BUNDLE,
+                CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+            ),
+        )
+        rig.backend.nextMembers = listOf(
+            FamilyMember(
+                displayName = "妈妈",
+                role = FamilyRole.Owner,
+                isSelf = true,
+                membershipId = "canonical-membership",
+            ),
+        )
+        rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
+        rig.carePlans.seed(
+            localReplicaCarePlan("plan-recovered-blank", "", updatedAt = 710)
+                .copy(syncDirty = true),
+        )
+        rig.customItems.seed(
+            localReplicaCustomItem("item-recovered-blank", "", updatedAt = 720)
+                .copy(syncDirty = true),
+        )
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "custom_item",
+                    clientUuid = "item-recovered-blank",
+                    payloadJson =
+                        """{"name":"item-recovered-blank","icon_slot":0,"created_by_membership_id":"canonical-membership"}""",
+                    updatedAt = 720,
+                ),
+                SyncEntity(
+                    type = "care_plan",
+                    clientUuid = "plan-recovered-blank",
+                    payloadJson =
+                        """{"baby_client_uuid":"baby-local","type":"formula","scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","status":"pending","payload_json":{},"schema_version":1,"created_by_membership_id":"canonical-membership"}""",
+                    updatedAt = 710,
+                ),
+            ),
+            cursor = 2,
+            generation = "generation-a",
+        )
+
+        val outcome = rig.engine.synchronize(
+            session = session,
+            trigger = SyncTrigger.LocalWrite,
+        )
+
+        val planPayload = Json.parseToJsonElement(
+            rig.backend.stagedBundles.single().root.payloadJson,
+        ).jsonObject
+        val itemPayload = Json.parseToJsonElement(
+            rig.backend.pushes.single().entities.single { it.type == "custom_item" }.payloadJson,
+        ).jsonObject
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
+        assertThat(planPayload["created_by_membership_id"].toString()).isEqualTo("null")
+        assertThat(itemPayload["created_by_membership_id"].toString()).isEqualTo("null")
+        assertThat(rig.backend.pullCount).isEqualTo(1)
+        assertThat(rig.carePlans.getByClientUuid("plan-recovered-blank")?.let {
+            Triple(it.createdByMembershipId, it.updatedAt, it.syncDirty)
+        }).isEqualTo(Triple("canonical-membership", 710L, false))
+        assertThat(rig.customItems.get("item-recovered-blank")?.let {
+            Triple(it.createdByMembershipId, it.updatedAt, it.syncDirty)
+        }).isEqualTo(Triple("canonical-membership", 720L, false))
+        assertThat(rig.outbox.all()).isEmpty()
+    }
+
+    @Test
+    fun pendingBlankCreatorDoesNotForcePullWithoutMembershipAuthorCapability() = runTest {
+        val session = joinedReplicaSession().copy(membershipId = "canonical-membership")
+        val rig = ReplicaEngineRig(
+            session = session,
+            capabilities = emptySet(),
+        )
+        rig.customItems.seed(
+            localReplicaCustomItem("item-legacy-server", "", updatedAt = 730)
+                .copy(syncDirty = true),
+        )
+
+        val outcome = rig.engine.synchronize(
+            session = session,
+            trigger = SyncTrigger.LocalWrite,
+        )
+
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
+        assertThat(rig.backend.pushes).hasSize(1)
+        assertThat(rig.backend.pullCount).isEqualTo(0)
+        assertThat(rig.customItems.get("item-legacy-server")?.let {
+            Triple(it.createdByMembershipId, it.updatedAt, it.syncDirty)
+        }).isEqualTo(Triple("", 730L, false))
+        assertThat(rig.outbox.all()).isEmpty()
+    }
+
+    @Test
+    fun blankLegacyMembershipDoesNotClaimUnacknowledgedRowsAsSelf() = runTest {
+        val session = joinedReplicaSession().copy(membershipId = "")
+        val rig = ReplicaEngineRig(
+            session = session,
+            capabilities = setOf(
+                CAPABILITY_ATOMIC_BUNDLE,
+                CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+            ),
+        )
+        rig.backend.nextMembers = listOf(
+            FamilyMember(
+                displayName = "妈妈",
+                role = FamilyRole.Owner,
+                isSelf = true,
+                membershipId = "canonical-membership",
+            ),
+            FamilyMember(
+                displayName = "爸爸",
+                role = FamilyRole.Member,
+                isSelf = false,
+                membershipId = "peer-membership",
+            ),
+        )
+        rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
+        rig.carePlans.seed(
+            localReplicaCarePlan("plan-unknown", "", updatedAt = 610),
+        )
+        rig.customItems.seed(
+            localReplicaCustomItem("item-peer-ack", "", updatedAt = 620),
+        )
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                SyncEntity(
+                    type = "custom_item",
+                    clientUuid = "item-peer-ack",
+                    payloadJson =
+                        """{"name":"item-peer-ack","icon_slot":0,"created_by_membership_id":"peer-membership"}""",
+                    updatedAt = 620,
+                ),
+                SyncEntity(
+                    type = "care_plan",
+                    clientUuid = "plan-unknown",
+                    payloadJson =
+                        """{"baby_client_uuid":"baby-local","type":"formula","scheduled_at":9000000000000,"scheduled_zone_id":"Asia/Shanghai","status":"pending","payload_json":{},"schema_version":1}""",
+                    updatedAt = 610,
+                ),
+            ),
+            cursor = 2,
+            generation = "generation-a",
+        )
+
+        val outcome = rig.engine.synchronize(
+            session = session,
+            trigger = SyncTrigger.LocalWrite,
+        )
+
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
+        assertThat(rig.backend.pullCount).isEqualTo(1)
+        assertThat(rig.backend.stagedBundles).isEmpty()
+        assertThat(rig.backend.pushes).isEmpty()
+        assertThat(rig.preferences.current().membershipId).isEqualTo("canonical-membership")
+        assertThat(rig.carePlans.getByClientUuid("plan-unknown")?.let {
+            Triple(it.createdByMembershipId, it.updatedAt, it.syncDirty)
+        }).isEqualTo(Triple("", 610L, false))
+        assertThat(rig.customItems.get("item-peer-ack")?.let {
+            Triple(it.createdByMembershipId, it.updatedAt, it.syncDirty)
+        }).isEqualTo(Triple("peer-membership", 620L, false))
+        assertThat(rig.outbox.all()).isEmpty()
+    }
+
+    @Test
     fun canonicalSelfConvergenceDoesNotClaimAStampThatNowIdentifiesAPeer() = runTest {
         val session = joinedReplicaSession().copy(membershipId = "peer-membership")
         val rig = ReplicaEngineRig(
