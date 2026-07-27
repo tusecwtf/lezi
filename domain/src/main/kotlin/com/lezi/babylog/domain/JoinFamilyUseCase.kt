@@ -77,11 +77,17 @@ internal class DefaultJoinFamilyUseCase private constructor(
 
         try {
             localStore.cacheDisplayName(command.displayName)
+        } catch (_: Exception) {
+            // The server join and local session are already committed. A local
+            // display-name cache failure or cancellation must not turn that
+            // success into a retryable join failure.
+        }
+        try {
             sync.requestSync(SyncTrigger.PullToRefresh)
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (error: Throwable) {
-            return failure(error)
+        } catch (_: Exception) {
+            // Pull scheduling is best-effort after the joined session has been
+            // committed. Cancellation before/during join still escapes above;
+            // the next foreground trigger can retry this post-commit step.
         }
         return JoinFamilyResult.Joined(session)
     }

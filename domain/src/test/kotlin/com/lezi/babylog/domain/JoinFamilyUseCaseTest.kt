@@ -80,13 +80,7 @@ class JoinFamilyUseCaseTest {
     fun successCachesNormalizedMembershipNameThenRequestsExactlyOnePull() = runTest {
         val events = mutableListOf<String>()
         val local = RecordingJoinFamilyLocalStore(events)
-        val session = SyncSession(
-            familyId = "family-1",
-            familyToken = "token-1",
-            membershipId = "membership-1",
-            serverHost = "nas.home",
-            allowedSsids = listOf("Home"),
-        )
+        val session = joinedSession()
         val sync = RecordingJoinSyncPort(events).apply {
             joinResult = Result.success(session)
         }
@@ -101,6 +95,84 @@ class JoinFamilyUseCaseTest {
             .containsExactly("scaffold", "join", "cache:妈妈", "sync:PullToRefresh")
             .inOrder()
         assertThat(sync.syncRequests).isEqualTo(1)
+    }
+
+    @Test
+    fun successfulJoinRemainsJoinedWhenLocalNameCacheFails() = runTest {
+        val events = mutableListOf<String>()
+        val local = RecordingJoinFamilyLocalStore(events).apply {
+            cacheFailure = IllegalStateException("local name cache failed")
+        }
+        val session = joinedSession()
+        val sync = RecordingJoinSyncPort(events).apply {
+            joinResult = Result.success(session)
+        }
+
+        val result = DefaultJoinFamilyUseCase(local, sync).execute(validRequest())
+
+        assertThat(result).isEqualTo(JoinFamilyResult.Joined(session))
+        assertThat(events)
+            .containsExactly("scaffold", "join", "cache:妈妈", "sync:PullToRefresh")
+            .inOrder()
+    }
+
+    @Test
+    fun successfulJoinRemainsJoinedWhenImmediatePullRequestFails() = runTest {
+        val events = mutableListOf<String>()
+        val session = joinedSession()
+        val sync = RecordingJoinSyncPort(events).apply {
+            joinResult = Result.success(session)
+            requestSyncFailure = IllegalStateException("sync scheduling failed")
+        }
+
+        val result = DefaultJoinFamilyUseCase(
+            RecordingJoinFamilyLocalStore(events),
+            sync,
+        ).execute(validRequest())
+
+        assertThat(result).isEqualTo(JoinFamilyResult.Joined(session))
+        assertThat(events)
+            .containsExactly("scaffold", "join", "cache:妈妈", "sync:PullToRefresh")
+            .inOrder()
+    }
+
+    @Test
+    fun successfulJoinRemainsJoinedWhenLocalNameCacheIsCancelled() = runTest {
+        val events = mutableListOf<String>()
+        val local = RecordingJoinFamilyLocalStore(events).apply {
+            cacheFailure = CancellationException("cancel-name-cache")
+        }
+        val session = joinedSession()
+        val sync = RecordingJoinSyncPort(events).apply {
+            joinResult = Result.success(session)
+        }
+
+        val result = DefaultJoinFamilyUseCase(local, sync).execute(validRequest())
+
+        assertThat(result).isEqualTo(JoinFamilyResult.Joined(session))
+        assertThat(events)
+            .containsExactly("scaffold", "join", "cache:妈妈", "sync:PullToRefresh")
+            .inOrder()
+    }
+
+    @Test
+    fun successfulJoinRemainsJoinedWhenImmediatePullRequestIsCancelled() = runTest {
+        val events = mutableListOf<String>()
+        val session = joinedSession()
+        val sync = RecordingJoinSyncPort(events).apply {
+            joinResult = Result.success(session)
+            requestSyncFailure = CancellationException("cancel-sync-request")
+        }
+
+        val result = DefaultJoinFamilyUseCase(
+            RecordingJoinFamilyLocalStore(events),
+            sync,
+        ).execute(validRequest())
+
+        assertThat(result).isEqualTo(JoinFamilyResult.Joined(session))
+        assertThat(events)
+            .containsExactly("scaffold", "join", "cache:妈妈", "sync:PullToRefresh")
+            .inOrder()
     }
 
     @Test
@@ -141,12 +213,21 @@ class JoinFamilyUseCaseTest {
         ),
         displayName = displayName,
     )
+
+    private fun joinedSession() = SyncSession(
+        familyId = "family-1",
+        familyToken = "token-1",
+        membershipId = "membership-1",
+        serverHost = "nas.home",
+        allowedSsids = listOf("Home"),
+    )
 }
 
 private class RecordingJoinFamilyLocalStore(
     val events: MutableList<String> = mutableListOf(),
 ) : JoinFamilyLocalStore {
     var scaffoldFailure: Throwable? = null
+    var cacheFailure: Throwable? = null
 
     override suspend fun ensureScaffold() {
         events += "scaffold"
@@ -155,6 +236,7 @@ private class RecordingJoinFamilyLocalStore(
 
     override suspend fun cacheDisplayName(displayName: String) {
         events += "cache:$displayName"
+        cacheFailure?.let { throw it }
     }
 }
 
@@ -164,6 +246,7 @@ private class RecordingJoinSyncPort(
     var joinResult: Result<SyncSession> = Result.success(SyncSession())
     var joinedCommand: JoinFamilyCommand? = null
     var syncRequests = 0
+    var requestSyncFailure: Throwable? = null
 
     override suspend fun joinFamily(command: JoinFamilyCommand): Result<SyncSession> {
         events += "join"
@@ -174,5 +257,6 @@ private class RecordingJoinSyncPort(
     override fun requestSync(trigger: SyncTrigger) {
         events += "sync:$trigger"
         syncRequests += 1
+        requestSyncFailure?.let { throw it }
     }
 }
