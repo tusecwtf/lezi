@@ -22,3 +22,8 @@ Notes (care-w12):
 - CarePlanFamilyAppliedListener (domain Lazy binding) projects/cancels after full apply only.
 - Log pending plan rows show amber 仅本机 chrome via localCarePlanPublishLabel/Detail.
 - Tests: RealSyncPortTest care_plan atomic create/pull/fail/custom wait/tombstone; CareLog dirty+requestSync + passive projection; schema migration 13→14.
+
+Notes (Release revalidation 2026-07-27):
+- Fresh-family push now publishes Baby, CustomItem, and Baby/avatar metadata plus bytes before staging dependent Record/CarePlan bundles; unsupported NAS capability still fails before any prerequisite write.
+- Family/endpoint transitions requeue CustomItem and FulfillmentCandidate alongside Baby, Record, CarePlan, and media so a previously synced local graph can converge into the replacement family.
+- `RealSyncPortTest` covers Record, CarePlan, avatar upload order, atomic-capability fail-closed behavior, and the old-family → fresh-family full shared-entity requeue.

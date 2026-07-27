@@ -66,6 +66,9 @@ interface CustomItemDao {
     )
     suspend fun markSynced(clientUuid: String, updatedAt: Long)
 
+    @Query("UPDATE custom_items SET syncDirty = 1")
+    suspend fun markAllPendingSync()
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(item: CustomItemEntity): Long
 

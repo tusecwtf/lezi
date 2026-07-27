@@ -308,6 +308,150 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun freshFamilyPushesBabyBeforeStagingRecordBundle() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        rig.backend.enforceBundleReferences = true
+        val babyId = rig.babies.seed(localBaby())
+        rig.records.seed(localRecord(babyId))
+
+        val result = rig.port.sync(SyncTrigger.LocalWrite)
+
+        assertThat(result.exceptionOrNull()).isNull()
+        assertThat(rig.backend.operationOrder)
+            .containsExactly("push:baby", "stage:record")
+            .inOrder()
+        assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
+    }
+
+    @Test
+    fun freshFamilyUploadsBabyAvatarBeforeStagingRecordBundle() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        rig.backend.enforceBundleReferences = true
+        val avatarUuid = "11111111-1111-4111-8111-111111111111"
+        val babyId = rig.babies.seed(
+            localBaby().copy(
+                clientUuid = "22222222-2222-4222-8222-222222222222",
+                avatarMediaUuid = avatarUuid,
+                avatarPath = "avatars/baby.jpg",
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                babyId = babyId,
+                clientUuid = avatarUuid,
+                kind = "avatar",
+                localUri = "avatars/baby.jpg",
+                mime = "image/jpeg",
+                byteSize = 1,
+                createdAt = 100,
+                updatedAt = 100,
+            ),
+        )
+        rig.records.seed(localRecord(babyId))
+
+        val result = rig.port.sync(SyncTrigger.LocalWrite)
+
+        assertThat(result.exceptionOrNull()).isNull()
+        assertThat(rig.backend.operationOrder)
+            .containsExactly(
+                "push:baby,media",
+                "put_media:$avatarUuid",
+                "stage:record",
+            )
+            .inOrder()
+        assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
+    }
+
+    @Test
+    fun freshFamilyPushesCarePlanReferencesBeforeStagingBundle() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        rig.backend.enforceBundleReferences = true
+        val babyId = rig.babies.seed(localBaby())
+        val customItemId = rig.customItems.seed(
+            CustomItemEntity(
+                clientUuid = "custom-local",
+                familyId = 1,
+                name = "抚触",
+                iconSlot = 2,
+                updatedAt = 100,
+            ),
+        )
+        rig.carePlans.seed(localCarePlan(babyId).copy(customItemId = customItemId))
+
+        val result = rig.port.sync(SyncTrigger.LocalWrite)
+
+        assertThat(result.exceptionOrNull()).isNull()
+        assertThat(rig.backend.operationOrder)
+            .containsExactly("push:baby,custom_item", "stage:care_plan")
+            .inOrder()
+        assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
+    }
+
+    @Test
+    fun switchingFamilyRequeuesEverySharedEntityBeforePublishingDependencies() = runTest {
+        val rig = SyncRig(session = joinedSession("family-old"))
+        rig.backend.enforceBundleReferences = true
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val customItemId = rig.customItems.seed(
+            CustomItemEntity(
+                clientUuid = "custom-local",
+                familyId = 1,
+                name = "抚触",
+                iconSlot = 2,
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+        val recordUuid = "record-local"
+        val planUuid = "plan-local"
+        rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = recordUuid,
+                syncDirty = false,
+            ),
+        )
+        rig.carePlans.seed(
+            localCarePlan(babyId).copy(
+                clientUuid = planUuid,
+                type = "custom",
+                customItemId = customItemId,
+                fulfilledRecordClientUuid = recordUuid,
+                fulfilledAt = 120,
+                status = "completed",
+                syncDirty = false,
+            ),
+        )
+        rig.fulfillmentCandidates.seed(
+            FulfillmentCandidateEntity(
+                clientUuid = "candidate-local",
+                carePlanClientUuid = planUuid,
+                recordClientUuid = recordUuid,
+                confirmedAt = 120,
+                updatedAt = 121,
+                syncDirty = false,
+            ),
+        )
+
+        assertThat(rig.port.deleteFamily().isSuccess).isTrue()
+        rig.preferences.saveSession(joinedSession("family-new"))
+        val result = rig.port.sync(SyncTrigger.LocalWrite)
+
+        assertThat(result.exceptionOrNull()).isNull()
+        assertThat(rig.backend.operationOrder)
+            .containsExactly(
+                "push:baby,custom_item",
+                "stage:record",
+                "stage:care_plan",
+                "push:fulfillment_candidate",
+            )
+            .inOrder()
+        assertThat(rig.outbox.peek("family-new", 100)).isEmpty()
+        assertThat(rig.customItems.get("custom-local")?.syncDirty).isFalse()
+        assertThat(rig.fulfillmentCandidates.getByClientUuid("candidate-local")?.syncDirty)
+            .isFalse()
+    }
+
+    @Test
     fun atomicRecordMembershipAuthorKeyFollowsHealthCapability() = runTest {
         val modernRig = SyncRig(
             session = joinedSession("family-a").copy(membershipId = "membership-a"),
@@ -2786,6 +2930,25 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun atomicUnsupportedNasDoesNotPublishFreshBundlePrerequisites() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            healthCapabilities = emptySet(),
+        )
+        val babyId = rig.babies.seed(localBaby())
+        rig.records.seed(localRecord(babyId))
+
+        val result = rig.port.sync(SyncTrigger.LocalWrite)
+
+        assertThat(result.exceptionOrNull())
+            .isInstanceOf(AtomicBundleUnsupportedException::class.java)
+        assertThat(rig.backend.pushes).isEmpty()
+        assertThat(rig.backend.stagedBundles).isEmpty()
+        assertThat(rig.outbox.peek("family-a", 100).map(OutboxEntity::entityType))
+            .containsExactly("baby", "record")
+    }
+
+    @Test
     fun atomicRetryUsesSameBundleIdAndDoesNotDuplicateCommit() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
@@ -4198,6 +4361,7 @@ internal data class PushedBatch(
 internal class RecordingSyncBackend : SyncBackend {
     val pushes = mutableListOf<PushedBatch>()
     val pushAttempts = mutableListOf<SyncSession>()
+    val operationOrder = mutableListOf<String>()
     val mediaUploads = mutableListOf<String>()
     var pullCount = 0
     var nextPull = PullResult(emptyList(), 0)
@@ -4222,6 +4386,7 @@ internal class RecordingSyncBackend : SyncBackend {
         FamilyMember("我（本机）", FamilyRole.Owner, isSelf = true),
     )
     var rejectMemberAvatarPointers = false
+    var enforceBundleReferences = false
     var beforeGetMediaReturn: (suspend () -> Unit)? = null
     var beforePullReturn: (suspend () -> Unit)? = null
     var getMediaFailure: Throwable? = null
@@ -4308,6 +4473,7 @@ internal class RecordingSyncBackend : SyncBackend {
                 }
             }
         }
+        operationOrder += "push:${entities.joinToString(",") { it.type }}"
         pushes += PushedBatch(session, entities)
         knownEntities += entities.map { it.type to it.clientUuid }
         afterPush?.invoke()
@@ -4381,6 +4547,7 @@ internal class RecordingSyncBackend : SyncBackend {
         bytes: ByteArray,
         mime: String?,
     ) {
+        operationOrder += "put_media:$clientUuid"
         mediaUploads += clientUuid
     }
 
@@ -4406,6 +4573,28 @@ internal class RecordingSyncBackend : SyncBackend {
         draft: AtomicBundleDraft,
     ): BundleStageStatus {
         stageBundleFailure?.let { throw it }
+        if (enforceBundleReferences) {
+            val payload = Json.parseToJsonElement(draft.root.payloadJson).jsonObject
+            listOf(
+                "baby_client_uuid" to "baby",
+                "custom_item_client_uuid" to "custom_item",
+            ).forEach { (payloadKey, entityType) ->
+                payload[payloadKey]
+                    ?.jsonPrimitive
+                    ?.contentOrNull
+                    ?.takeIf(String::isNotBlank)
+                    ?.let { clientUuid ->
+                        if (entityType to clientUuid !in knownEntities) {
+                            throw SyncHttpException(
+                                statusCode = 409,
+                                responseBody =
+                                    """{"detail":"${draft.root.type} $payloadKey does not exist"}""",
+                            )
+                        }
+                    }
+            }
+        }
+        operationOrder += "stage:${draft.root.type}"
         stagedBundles += draft
         return BundleStageStatus(
             bundleId = draft.bundleId,
@@ -4834,6 +5023,10 @@ internal class MemoryFulfillmentCandidateDao : FulfillmentCandidateDao {
         }
     }
 
+    override suspend fun markAllPendingSync() {
+        rows.value = rows.value.map { it.copy(syncDirty = true) }
+    }
+
     override suspend fun upsert(candidate: FulfillmentCandidateEntity): Long = seed(candidate)
 
     override suspend fun update(candidate: FulfillmentCandidateEntity) {
@@ -5069,6 +5262,10 @@ internal class MemoryCustomItemDao : CustomItemDao {
                 it
             }
         }
+    }
+
+    override suspend fun markAllPendingSync() {
+        rows.replaceAll { it.copy(syncDirty = true) }
     }
 
     override suspend fun upsert(item: CustomItemEntity): Long {

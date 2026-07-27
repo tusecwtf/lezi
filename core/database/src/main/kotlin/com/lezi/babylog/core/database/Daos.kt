@@ -703,6 +703,9 @@ interface FulfillmentCandidateDao {
     )
     suspend fun markSynced(clientUuid: String, updatedAt: Long)
 
+    @Query("UPDATE fulfillment_candidates SET syncDirty = 1")
+    suspend fun markAllPendingSync()
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(candidate: FulfillmentCandidateEntity): Long
 

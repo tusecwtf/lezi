@@ -216,13 +216,20 @@ internal class ReplicaSyncEngine(
         }
         val atomicPackageRows =
             (recordRows + carePlanRows + logMediaForRecords + logMediaForPlans).toSet()
-        val residual = pending - atomicPackageRows
+        var residual = pending - atomicPackageRows
 
         if (recordRows.isNotEmpty() || carePlanRows.isNotEmpty()) {
             requireRemoteAllowed(session)
             if (CAPABILITY_ATOMIC_BUNDLE !in remoteCapabilities()) {
                 throw AtomicBundleUnsupportedException()
             }
+
+            // A fresh family has no referenced Baby/CustomItem rows yet. Publish
+            // those roots (and cyclic Baby/avatar metadata) before asking the NAS
+            // to validate an atomic Record/CarePlan bundle against them.
+            val prerequisites = residual.filter { it.isAtomicBundlePrerequisite() }
+            pushResidualBatch(session, prerequisites)
+            residual = residual - prerequisites.toSet()
             // Prefer fulfill Record before completed care_plan so pull pages that
             // end mid-set still apply the fact first. Receivers apply records then
             // co-gate completed plans until the linked record is present (same-txn).
@@ -235,6 +242,15 @@ internal class ReplicaSyncEngine(
         }
 
         if (residual.isEmpty()) return true
+        pushResidualBatch(session, residual)
+        return true
+    }
+
+    private suspend fun pushResidualBatch(
+        session: SyncSession,
+        residual: List<OutboxEntity>,
+    ) {
+        if (residual.isEmpty()) return
         val uploads = mutableListOf<MediaAssetEntity>()
         val entities = residual
             .map { row ->
@@ -302,7 +318,14 @@ internal class ReplicaSyncEngine(
             }
         }
         outboxDao.deleteIds(residual.map { it.id })
-        return true
+    }
+
+    private fun OutboxEntity.isAtomicBundlePrerequisite(): Boolean = when (entityType) {
+        "baby", "custom_item" -> true
+        "media" -> runCatching {
+            Json.parseToJsonElement(payloadJson).jsonObject.string("kind") == "avatar"
+        }.getOrDefault(false)
+        else -> false
     }
 
     /**
@@ -1498,6 +1521,8 @@ internal class ReplicaSyncEngine(
             babyDao.markAllPendingSync()
             recordDao.markAllPendingSync()
             carePlanDao.markAllPendingSync()
+            customItemDao.markAllPendingSync()
+            fulfillmentCandidateDao.markAllPendingSync()
             mediaDao.listAllIncludingDeleted().forEach { media ->
                 val hasCurrentReceipt = previous.isJoined && media.hasReceiptFor(previous)
                 val preserveCurrentReceipt = !invalidateCurrentReceipts ||

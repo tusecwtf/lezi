@@ -4857,6 +4857,10 @@ private class FakeFulfillmentCandidateDao : FulfillmentCandidateDao {
         }
     }
 
+    override suspend fun markAllPendingSync() {
+        items.value = items.value.map { it.copy(syncDirty = true) }
+    }
+
     override suspend fun upsert(candidate: FulfillmentCandidateEntity): Long {
         val id = candidate.id.takeIf { it > 0 } ?: seq.getAndIncrement()
         items.value = items.value.filterNot { it.id == id || it.clientUuid == candidate.clientUuid } +
@@ -5098,6 +5102,10 @@ private class FakeCustomItemDao : CustomItemDao {
                 it
             }
         }
+    }
+
+    override suspend fun markAllPendingSync() {
+        items.value = items.value.map { it.copy(syncDirty = true) }
     }
 
     override suspend fun upsert(item: CustomItemEntity): Long {
