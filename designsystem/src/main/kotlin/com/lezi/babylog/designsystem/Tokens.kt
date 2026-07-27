@@ -184,17 +184,3 @@ object LeziTypography {
         labelSmall = Meta,
     )
 }
-
-// Back-compat aliases used by existing screens
-val LeziBg = LeziColors.Bg
-val LeziSurface = LeziColors.Surface
-val LeziOnBg = LeziColors.Fg
-val LeziMuted = LeziColors.Muted
-val LeziBorder = LeziColors.Border
-val LeziAccent = LeziColors.Accent
-val LeziFab = LeziColors.Fab
-val LeziDarkBg = LeziColors.DarkBg
-val LeziDarkSurface = LeziColors.DarkSurface
-val LeziDarkOn = LeziColors.DarkFg
-val LeziDarkAccent = LeziColors.DarkAccent
-val LeziDarkFab = LeziColors.DarkFab
