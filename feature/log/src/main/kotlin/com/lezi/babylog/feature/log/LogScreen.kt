@@ -29,6 +29,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -87,6 +88,7 @@ import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
 import com.lezi.babylog.designsystem.SummaryMetric
+import com.lezi.babylog.designsystem.TimelineAxis
 import com.lezi.babylog.designsystem.TimelineLaneSegment
 import com.lezi.babylog.designsystem.TimelineLegendEntry
 import com.lezi.babylog.designsystem.TimelineRailCard
@@ -164,6 +166,11 @@ data class LogUiState(
     val planPriorFamilyRevision: Map<Long, Boolean> = emptyMap(),
     val familyJoined: Boolean = false,
     val lastSyncFailed: Boolean = false,
+    /**
+     * Whether to render the 72h time bar: true when **any** of D−1 / D / D+1
+     * has a day-chart type. Summary / list / legend stay on [records] (day D only).
+     */
+    val showDayChart: Boolean = false,
 )
 
 @HiltViewModel
@@ -235,18 +242,34 @@ class LogViewModel @Inject constructor(
             } else {
                 careLog.observeDayPendingPlans(baby.id, day, zone)
             }
+            // List / summary / legend / filter stay on selected day D only.
+            val dayRecordsFlow = careLog.observeDayRecords(baby.id, day, zone)
+            // Rail marks load D−1..D+1 on the continuous 72h content axis.
+            val railRecordsFlow = careLog.observeRecords(
+                babyId = baby.id,
+                startDayInclusive = day.minusDays(1),
+                endDayExclusive = day.plusDays(2),
+                zone = zone,
+            )
             combine(
-                careLog.observeDayRecords(baby.id, day, zone),
+                combine(dayRecordsFlow, railRecordsFlow, ::Pair),
                 careLog.observeOpenSleep(baby.id),
                 plansFlow,
                 uploaderMembers,
                 selfUploaderIdentity,
-            ) { records, openSleep, plans, members, selfIdentity ->
+            ) { dayAndRail, openSleep, plans, members, selfIdentity ->
+                val (records, railRecords) = dayAndRail
                 val joined = familyJoined.value
-                val start = day.atStartOfDay(zone).toInstant().toEpochMilli()
-                val end = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
+                val window = threeDayContentWindow(day, zone)
                 val summary = CareAggregation.day(records, day, zone).toDailySummary()
-                val lanes = buildLanes(records, start, end)
+                val lanes = buildTimelineLanes(
+                    records = railRecords,
+                    windowStartMs = window.startMs,
+                    windowEndMs = window.endMs,
+                    zone = zone,
+                )
+                // Rail visibility uses the three-day union; list/summary stay on D.
+                val showDayChart = DayChartCategories.shouldShowDayChart(railRecords)
                 val labels = buildUploaderLabels(
                     records = records,
                     isFamilyJoined = joined,
@@ -301,6 +324,7 @@ class LogViewModel @Inject constructor(
                     recordPriorFamilyRevision = priorRevisions,
                     planPriorFamilyRevision = planPriorRevisions,
                     familyJoined = joined,
+                    showDayChart = showDayChart,
                 )
             }
         }
@@ -412,35 +436,148 @@ private data class LogCombine(
     val customItems: List<CustomRecordItem>,
 )
 
-private data class Lanes(
+internal data class TimelineLanes(
     val sleep: List<TimelineLaneSegment>,
     val feed: List<TimelineLaneSegment>,
     val care: List<TimelineLaneSegment>,
 )
 
-private fun buildLanes(records: List<Record>, dayStart: Long, dayEnd: Long): Lanes {
+/** Half-open content window [startMs, endMs) for selected day D: D−1 00:00 .. D+2 00:00. */
+internal data class ThreeDayContentWindow(
+    val selectedDay: LocalDate,
+    val startMs: Long,
+    val endMs: Long,
+) {
+    val contentDurationMinutes: Int
+        get() = ((endMs - startMs) / 60_000L).toInt()
+}
+
+/** Re-anchors the 72h content axis whenever the date-bar selected day D changes. */
+internal fun threeDayContentWindow(
+    selectedDay: LocalDate,
+    zone: ZoneId,
+): ThreeDayContentWindow {
+    val start = selectedDay.minusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
+    val end = selectedDay.plusDays(2).atStartOfDay(zone).toInstant().toEpochMilli()
+    return ThreeDayContentWindow(selectedDay = selectedDay, startMs = start, endMs = end)
+}
+
+/**
+ * Default non-gesture viewport for **non-today** days: primary day D fills most
+ * of the canvas with [TimelineAxis.NEIGHBOR_PEEK_MINUTES] of each neighbor on
+ * the sides. Today uses [todayThreeDayViewportStartMinutes] instead.
+ */
+internal fun defaultThreeDayViewportStartMinutes(): Int =
+    TimelineAxis.defaultViewportStartMinutes()
+
+internal fun defaultThreeDayViewportDurationMinutes(): Int =
+    TimelineAxis.defaultViewportDurationMinutes()
+
+/**
+ * Content-axis minute for wall-clock [nowMs] inside [window], or null when
+ * now falls outside the 72h window (caller hides the now line).
+ */
+internal fun nowContentMinuteInWindow(
+    nowMs: Long,
+    window: ThreeDayContentWindow,
+): Int? = TimelineAxis.contentMinuteIfInWindow(
+    nowMs = nowMs,
+    windowStartMs = window.startMs,
+    windowEndMs = window.endMs,
+)
+
+/**
+ * Initial viewport for **today**: center on [nowContentMinute], clamped so the
+ * full span stays inside the 72h content (no blank outside).
+ */
+internal fun todayThreeDayViewportStartMinutes(
+    nowContentMinute: Int,
+    viewportDurationMinutes: Int = defaultThreeDayViewportDurationMinutes(),
+): Int = TimelineAxis.todayCenteredViewportStartMinutes(
+    nowContentMinute = nowContentMinute,
+    viewportDurationMinutes = viewportDurationMinutes,
+)
+
+/**
+ * Day-keyed **initial** viewport for the rail. Today centers on wall-clock now;
+ * non-today uses D-primary peeks. Pan mutates a separate UI state that is only
+ * reset when [selectedDay] changes (including 「返回今天」) — never every recompose.
+ */
+internal fun initialThreeDayViewportStartMinutes(
+    selectedDay: LocalDate,
+    today: LocalDate,
+    nowMs: Long,
+    zone: ZoneId,
+    viewportDurationMinutes: Int = defaultThreeDayViewportDurationMinutes(),
+): Int {
+    if (selectedDay == today) {
+        val window = threeDayContentWindow(selectedDay, zone)
+        val nowMin = nowContentMinuteInWindow(nowMs, window)
+        if (nowMin != null) {
+            return todayThreeDayViewportStartMinutes(nowMin, viewportDurationMinutes)
+        }
+    }
+    return defaultThreeDayViewportStartMinutes()
+}
+
+/**
+ * Pure pan step for tests/UI: apply finger [deltaPx] to [currentStartMinutes]
+ * and clamp inside the 72h content (never mutates selected day D).
+ */
+internal fun threeDayViewportStartAfterPan(
+    currentStartMinutes: Int,
+    deltaPx: Float,
+    axisLengthPx: Float,
+    viewportDurationMinutes: Int = defaultThreeDayViewportDurationMinutes(),
+): Int = TimelineAxis.panViewportStart(
+    currentStartMinutes = currentStartMinutes,
+    deltaPx = deltaPx,
+    axisLengthPx = axisLengthPx,
+    viewportDurationMinutes = viewportDurationMinutes,
+)
+
+/**
+ * Build rail segments on the continuous content axis (minutes from [windowStartMs]).
+ *
+ * Overnight sleep is one unclipped-at-midnight interval clipped only to the
+ * 72h window ends. List/summary ownership still uses natural-day aggregation
+ * elsewhere — this function only produces geometry.
+ */
+internal fun buildTimelineLanes(
+    records: List<Record>,
+    windowStartMs: Long,
+    windowEndMs: Long,
+    zone: ZoneId = ZoneId.systemDefault(),
+    nowMs: Long = System.currentTimeMillis(),
+): TimelineLanes {
     val sleep = mutableListOf<TimelineLaneSegment>()
     val feed = mutableListOf<TimelineLaneSegment>()
     val care = mutableListOf<TimelineLaneSegment>()
-    val zone = ZoneId.systemDefault()
+    val contentMax = ((windowEndMs - windowStartMs) / 60_000L).toInt().coerceAtLeast(1)
+
+    fun contentMinutes(ms: Long): Int =
+        ((ms - windowStartMs) / 60_000L).toInt().coerceIn(0, contentMax)
+
+    fun clock(ms: Long): String = formatClock(ms, zone)
+
     for (r in records) {
-        val startMs = r.timestamp.coerceIn(dayStart, dayEnd - 1)
-        fun mins(ms: Long) = ((ms - dayStart) / 60_000L).toInt().coerceIn(0, 24 * 60)
-        fun clock(ms: Long): String = formatClock(ms, zone)
         when (r.type) {
             RecordType.SLEEP -> {
                 val open = r.endTimestamp == null
-                val endMs = (r.endTimestamp ?: System.currentTimeMillis()).coerceIn(dayStart + 1, dayEnd)
-                if (endMs > startMs) {
-                    val startMin = mins(startMs)
-                    val endMin = mins(endMs).coerceAtLeast(startMin + 1)
-                    val durationMin = ((endMs - startMs) / 60_000L).coerceAtLeast(1)
+                val rawEnd = r.endTimestamp ?: nowMs
+                // Clip only to the 72h window — do not split at midnight.
+                val clippedStart = maxOf(r.timestamp, windowStartMs)
+                val clippedEnd = minOf(rawEnd, windowEndMs)
+                if (clippedEnd > clippedStart) {
+                    val startMin = contentMinutes(clippedStart)
+                    val endMin = contentMinutes(clippedEnd).coerceAtLeast(startMin + 1)
+                    val durationMin = ((rawEnd - r.timestamp) / 60_000L).coerceAtLeast(1)
                     val nap = (r.payload.payload as? SleepPayload)?.isNap == true
                     val title = if (nap) "午睡" else "睡眠"
                     val detail = buildString {
-                        append(clock(startMs))
+                        append(clock(r.timestamp))
                         append("–")
-                        append(if (open) "进行中" else clock(endMs))
+                        append(if (open) "进行中" else clock(rawEnd))
                         append(" · ")
                         append(formatDurationMinutes(durationMin))
                         if (open) append("（未结束）")
@@ -459,10 +596,11 @@ private fun buildLanes(records: List<Record>, dayStart: Long, dayEnd: Long): Lan
             RecordType.FORMULA, RecordType.NURSING, RecordType.PUMPED_FEED,
             RecordType.PUMP_EXPRESS,
             -> {
-                val startMin = mins(startMs)
+                if (r.timestamp < windowStartMs || r.timestamp >= windowEndMs) continue
+                val startMin = contentMinutes(r.timestamp)
                 val title = r.type.presentation.label
                 val detail = buildString {
-                    append(clock(startMs))
+                    append(clock(r.timestamp))
                     when (r.type) {
                         RecordType.FORMULA, RecordType.PUMPED_FEED, RecordType.PUMP_EXPRESS -> {
                             val ml = (r.payload.payload as? MilkPayload)?.amountMl ?: 0
@@ -492,7 +630,8 @@ private fun buildLanes(records: List<Record>, dayStart: Long, dayEnd: Long): Lan
             RecordType.PEE, RecordType.POOP, RecordType.BOTH_DIAPER, RecordType.BATH,
             RecordType.TEMPERATURE, RecordType.MEDICINE,
             -> {
-                val startMin = mins(startMs)
+                if (r.timestamp < windowStartMs || r.timestamp >= windowEndMs) continue
+                val startMin = contentMinutes(r.timestamp)
                 val notePart = r.note?.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
                 when (r.type) {
                     RecordType.PEE -> care += TimelineLaneSegment(
@@ -500,7 +639,7 @@ private fun buildLanes(records: List<Record>, dayStart: Long, dayEnd: Long): Lan
                         endMinOfDay = startMin,
                         color = Color(CARE_PEE),
                         title = "尿尿",
-                        detail = "${clock(startMs)}$notePart · 护理",
+                        detail = "${clock(r.timestamp)}$notePart · 护理",
                         isEvent = true,
                         dayChartCategoryKey = DayChartCategory.PEE.name,
                     )
@@ -509,7 +648,7 @@ private fun buildLanes(records: List<Record>, dayStart: Long, dayEnd: Long): Lan
                         endMinOfDay = startMin,
                         color = Color(CARE_POOP),
                         title = "便便",
-                        detail = "${clock(startMs)}$notePart · 护理",
+                        detail = "${clock(r.timestamp)}$notePart · 护理",
                         isEvent = true,
                         dayChartCategoryKey = DayChartCategory.POOP.name,
                     )
@@ -520,7 +659,7 @@ private fun buildLanes(records: List<Record>, dayStart: Long, dayEnd: Long): Lan
                             endMinOfDay = startMin,
                             color = Color(CARE_PEE),
                             title = "尿尿",
-                            detail = "${clock(startMs)}$notePart · 尿+便（尿）",
+                            detail = "${clock(r.timestamp)}$notePart · 尿+便（尿）",
                             isEvent = true,
                             dayChartCategoryKey = DayChartCategory.PEE.name,
                         )
@@ -529,7 +668,7 @@ private fun buildLanes(records: List<Record>, dayStart: Long, dayEnd: Long): Lan
                             endMinOfDay = startMin,
                             color = Color(CARE_POOP),
                             title = "便便",
-                            detail = "${clock(startMs)}$notePart · 尿+便（便）",
+                            detail = "${clock(r.timestamp)}$notePart · 尿+便（便）",
                             isEvent = true,
                             dayChartCategoryKey = DayChartCategory.POOP.name,
                         )
@@ -539,7 +678,7 @@ private fun buildLanes(records: List<Record>, dayStart: Long, dayEnd: Long): Lan
                         endMinOfDay = startMin,
                         color = Color(CARE_OTHER),
                         title = r.type.presentation.label,
-                        detail = "${clock(startMs)}$notePart · 护理",
+                        detail = "${clock(r.timestamp)}$notePart · 护理",
                         isEvent = true,
                         dayChartCategoryKey = null,
                     )
@@ -548,13 +687,13 @@ private fun buildLanes(records: List<Record>, dayStart: Long, dayEnd: Long): Lan
             else -> Unit
         }
     }
-    return Lanes(sleep, feed, care)
+    return TimelineLanes(sleep, feed, care)
 }
 
 /**
  * Opaque key for [TimelineLaneSegment.dayChartCategoryKey], aligned with
  * [DayChartCategory.name]. Non day-chart types (e.g. 吸奶) return null.
- * BOTH_DIAPER is handled as two segments in [buildLanes], not here.
+ * BOTH_DIAPER is handled as two segments in [buildTimelineLanes], not here.
  */
 internal fun dayChartCategoryKeyForRecordType(type: RecordType): String? =
     DayChartCategories.categoriesOf(type).singleOrNull()?.name
@@ -594,9 +733,12 @@ internal fun reduceSummaryDayChartSelection(
     records: List<Record>,
 ): DayChartFilterState {
     val category = summaryDayChartCategory(type) ?: return state
-    if (category !in DayChartCategories.legendCategories(records)) return state
+    // Toggle off same category; A2 gate lives in Select via day-D records.
     val nextKey = category.name.takeUnless { state.selection == category }
-    return reduceDayChartFilter(state, DayChartFilterAction.Select(nextKey))
+    return reduceDayChartFilter(
+        state,
+        DayChartFilterAction.Select(nextKey, dayRecords = records),
+    )
 }
 
 internal data class DayChartFilterContext(
@@ -612,7 +754,14 @@ internal data class DayChartFilterState(
 internal sealed interface DayChartFilterAction {
     data class ChangeContext(val context: DayChartFilterContext) : DayChartFilterAction
 
-    data class Select(val categoryKey: String?) : DayChartFilterAction
+    /**
+     * Proposed filter key after designsystem toggle/clear.
+     * [dayRecords] must be selected-day **D** only (A2 gate); never the 72h rail union.
+     */
+    data class Select(
+        val categoryKey: String?,
+        val dayRecords: List<Record>,
+    ) : DayChartFilterAction
 
     data class RefreshRecords(val records: List<Record>) : DayChartFilterAction
 }
@@ -627,7 +776,14 @@ internal fun reduceDayChartFilter(
     }
 
     is DayChartFilterAction.Select -> {
-        state.copy(selection = resolveDayChartSelection(action.categoryKey))
+        val proposed = resolveDayChartSelection(action.categoryKey)
+        state.copy(
+            selection = DayChartCategories.commitSelection(
+                current = state.selection,
+                proposed = proposed,
+                dayRecords = action.dayRecords,
+            ),
+        )
     }
 
     is DayChartFilterAction.RefreshRecords -> {
@@ -794,11 +950,25 @@ fun LogRoute(
         }
     }
 
-    val nowMin = if (state.day == today) {
-        val t = LocalTime.now()
-        t.hour * 60 + t.minute
-    } else {
-        null
+    // Now line: wall-clock absolute time on the 72h content axis; only when
+    // now falls inside [D−1 00:00, D+1 24:00). Viewport start is day-keyed UI
+    // state: init from today/now-centered or non-today D+peek defaults; pan
+    // clamps inside 72h and never mutates D / summary / list. Reset only on
+    // selected-day change (including 「返回今天」).
+    val threeDayWindow = remember(state.day, zone) { threeDayContentWindow(state.day, zone) }
+    val nowMs = System.currentTimeMillis()
+    val nowContentMinute = nowContentMinuteInWindow(nowMs, threeDayWindow)
+    val timelineViewportDuration = defaultThreeDayViewportDurationMinutes()
+    var timelineViewportStart by remember(state.day) {
+        mutableIntStateOf(
+            initialThreeDayViewportStartMinutes(
+                selectedDay = state.day,
+                today = today,
+                nowMs = System.currentTimeMillis(),
+                zone = zone,
+                viewportDurationMinutes = timelineViewportDuration,
+            ),
+        )
     }
 
     PageScaffoldBackground {
@@ -912,10 +1082,10 @@ fun LogRoute(
                         }
                     }
 
-                    // Hide the time bar when the day has no day-chart types (empty day or
-                    // only non-rhythm types such as pump_express / temp / medicine).
+                    // Show when any of D−1 / D / D+1 has a day-chart type (ViewModel
+                    // already gated on the railRecords union). List/summary stay on D.
                     // Visibility uses DayChartCategories, not buildLanes emptiness.
-                    if (DayChartCategories.shouldShowDayChart(state.records)) {
+                    if (state.showDayChart) {
                         item {
                             TimelineRailCard(
                                 sleep = state.sleepLanes.map { it.copy(color = ext.laneSleep) },
@@ -935,15 +1105,26 @@ fun LogRoute(
                                     )
                                 },
                                 recordCount = state.records.size,
-                                nowMinOfDay = nowMin,
+                                nowContentMinute = nowContentMinute,
                                 selectedCategoryKey = dayChartFilter?.name,
                                 onCategorySelect = { key ->
+                                    // A2: gate on day-D records only; rail marks stay 72h union.
+                                    // Once committed, selectedCategoryKey highlights matching
+                                    // marks across D−1|D|D+1 without re-drawing the rail.
                                     dayChartFilterState = reduceDayChartFilter(
                                         reconciledDayChartFilterState,
-                                        DayChartFilterAction.Select(key),
+                                        DayChartFilterAction.Select(
+                                            categoryKey = key,
+                                            dayRecords = state.records,
+                                        ),
                                     )
                                 },
                                 legend = dayChartLegend,
+                                viewportStartMinutes = timelineViewportStart,
+                                viewportDurationMinutes = timelineViewportDuration,
+                                onViewportStartChange = { timelineViewportStart = it },
+                                titlePrimary = if (journal) "三天记录轨道" else "三天节奏",
+                                titleSecondary = "72h 时间轴",
                                 modifier = Modifier.padding(horizontal = LeziSpacing.Page),
                             )
                         }

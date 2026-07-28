@@ -1,10 +1,12 @@
 package com.lezi.babylog.feature.log
 
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.domain.DayChartCategories
 import com.lezi.babylog.domain.DayChartCategory
 import java.time.LocalDate
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -13,6 +15,12 @@ import org.junit.Test
  */
 class DayChartFilterWiringTest {
 
+    private val dayRecordsWithPee = listOf(stubRecord(1, RecordType.PEE))
+    private val dayRecordsWithMilkAndPee = listOf(
+        stubRecord(1, RecordType.FORMULA),
+        stubRecord(2, RecordType.PEE),
+    )
+
     @Test
     fun filterContext_changeClearsSelection_withoutRestoringPerBabyState() {
         val day = LocalDate.of(2026, 7, 27)
@@ -20,24 +28,36 @@ class DayChartFilterWiringTest {
         val babyB = DayChartFilterContext(babyId = 202, day = day)
         var state = DayChartFilterState(context = babyA)
 
-        state = reduceDayChartFilter(state, DayChartFilterAction.Select("PEE"))
+        state = reduceDayChartFilter(
+            state,
+            DayChartFilterAction.Select("PEE", dayRecordsWithPee),
+        )
         assertEquals(DayChartCategory.PEE, state.selection)
 
         state = reduceDayChartFilter(state, DayChartFilterAction.ChangeContext(babyB))
         assertNull(state.selection)
 
-        state = reduceDayChartFilter(state, DayChartFilterAction.Select("PEE"))
+        state = reduceDayChartFilter(
+            state,
+            DayChartFilterAction.Select("PEE", dayRecordsWithPee),
+        )
         state = reduceDayChartFilter(state, DayChartFilterAction.ChangeContext(babyA))
         assertNull(state.selection)
 
-        state = reduceDayChartFilter(state, DayChartFilterAction.Select("POOP"))
+        state = reduceDayChartFilter(
+            state,
+            DayChartFilterAction.Select("POOP", listOf(stubRecord(3, RecordType.POOP))),
+        )
         state = reduceDayChartFilter(
             state,
             DayChartFilterAction.ChangeContext(babyA.copy(day = day.plusDays(1))),
         )
         assertNull(state.selection)
 
-        state = reduceDayChartFilter(state, DayChartFilterAction.Select("MILK"))
+        state = reduceDayChartFilter(
+            state,
+            DayChartFilterAction.Select("MILK", listOf(stubRecord(4, RecordType.FORMULA))),
+        )
         state = reduceDayChartFilter(
             state,
             DayChartFilterAction.ChangeContext(DayChartFilterContext(babyId = null, day = day)),
@@ -52,7 +72,10 @@ class DayChartFilterWiringTest {
             day = LocalDate.of(2026, 7, 27),
         )
         var state = DayChartFilterState(context = context)
-        state = reduceDayChartFilter(state, DayChartFilterAction.Select("PEE"))
+        state = reduceDayChartFilter(
+            state,
+            DayChartFilterAction.Select("PEE", dayRecordsWithPee),
+        )
 
         state = reduceDayChartFilter(
             state,
@@ -101,6 +124,111 @@ class DayChartFilterWiringTest {
         assertNull(state.selection)
         state = reduceSummaryDayChartSelection(state, RecordType.PEE, records)
         assertEquals(DayChartCategory.PEE, state.selection)
+    }
+
+    @Test
+    fun select_a2BlocksCategoryAbsentOnDayD_evenIfNeighborRailHasIt() {
+        // Day D has milk only; tapping PEE (e.g. a D−1 mark) must not enter filter.
+        val dayD = listOf(stubRecord(1, RecordType.FORMULA))
+        var state = DayChartFilterState(
+            DayChartFilterContext(babyId = 1, day = LocalDate.of(2026, 7, 27)),
+        )
+
+        state = reduceDayChartFilter(
+            state,
+            DayChartFilterAction.Select("PEE", dayRecords = dayD),
+        )
+        assertNull(state.selection)
+
+        // Existing filter is preserved when switching to an absent category.
+        state = reduceDayChartFilter(
+            state,
+            DayChartFilterAction.Select("MILK", dayRecords = dayD),
+        )
+        assertEquals(DayChartCategory.MILK, state.selection)
+        state = reduceDayChartFilter(
+            state,
+            DayChartFilterAction.Select("POOP", dayRecords = dayD),
+        )
+        assertEquals(DayChartCategory.MILK, state.selection)
+    }
+
+    @Test
+    fun select_categoryPresentOnDayD_commits_andClearPathsWork() {
+        val dayD = dayRecordsWithMilkAndPee
+        var state = DayChartFilterState(
+            DayChartFilterContext(babyId = 1, day = LocalDate.of(2026, 7, 27)),
+        )
+
+        state = reduceDayChartFilter(
+            state,
+            DayChartFilterAction.Select("PEE", dayRecords = dayD),
+        )
+        assertEquals(DayChartCategory.PEE, state.selection)
+
+        // List stays on D only.
+        val filtered = DayChartCategories.filterRecords(dayD, state.selection)
+        assertEquals(listOf(2L), filtered.map { it.id })
+
+        // Blank / re-tap clear (null) is never blocked by A2.
+        state = reduceDayChartFilter(
+            state,
+            DayChartFilterAction.Select(null, dayRecords = dayD),
+        )
+        assertNull(state.selection)
+
+        state = reduceDayChartFilter(
+            state,
+            DayChartFilterAction.Select("MILK", dayRecords = dayD),
+        )
+        assertEquals(DayChartCategory.MILK, state.selection)
+        state = reduceDayChartFilter(
+            state,
+            DayChartFilterAction.Select(null, dayRecords = emptyList()),
+        )
+        assertNull(state.selection)
+    }
+
+    @Test
+    fun select_onceCommitted_selectedKeyMatchesMarksAcrossThreeDaysForHighlight() {
+        // Rail marks from D−1|D|D+1 share the same dayChartCategoryKey string;
+        // page selection is one key — designsystem lights every matching mark.
+        val dayD = listOf(stubRecord(1, RecordType.PEE))
+        var state = DayChartFilterState(
+            DayChartFilterContext(babyId = 1, day = LocalDate.of(2026, 7, 27)),
+        )
+        state = reduceDayChartFilter(
+            state,
+            DayChartFilterAction.Select("PEE", dayRecords = dayD),
+        )
+        val selectedKey = state.selection?.name
+        assertEquals("PEE", selectedKey)
+
+        val railKeysAcross72h = listOf("PEE", "PEE", "MILK", "PEE")
+        val highlighted = railKeysAcross72h.map { key ->
+            selectedKey != null && key == selectedKey
+        }
+        assertEquals(listOf(true, true, false, true), highlighted)
+        // Neighbor-only keys never commit when absent on D.
+        assertTrue(DayChartCategories.isPresentOnDay(DayChartCategory.PEE, dayD))
+        assertTrue(!DayChartCategories.isPresentOnDay(DayChartCategory.MILK, dayD))
+    }
+
+    @Test
+    fun legendAndReconcileStayOnDayD_notRailUnion() {
+        val dayD = listOf(stubRecord(1, RecordType.FORMULA))
+        // Neighbor-only sleep must not appear in D legend / keep sticky filter.
+        assertEquals(
+            listOf(DayChartCategory.MILK),
+            DayChartCategories.legendCategories(dayD),
+        )
+        assertNull(
+            DayChartCategories.reconcileSelection(DayChartCategory.SLEEP, dayD),
+        )
+        assertEquals(
+            DayChartCategory.MILK,
+            DayChartCategories.reconcileSelection(DayChartCategory.MILK, dayD),
+        )
     }
 
     private fun stubRecord(id: Long, type: RecordType) = com.lezi.babylog.core.model.Record(

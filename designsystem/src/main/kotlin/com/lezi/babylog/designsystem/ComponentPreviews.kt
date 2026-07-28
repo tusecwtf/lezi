@@ -70,7 +70,7 @@ fun PreviewJournalOverview() {
                 ),
             ),
             recordCount = 8,
-            nowMinOfDay = 600,
+            nowContentMinute = 600,
             legend = listOf(
                 TimelineLegendEntry("SLEEP", "睡眠", LeziColors.JournalSleep, isBar = true),
                 TimelineLegendEntry("MILK", "奶", LeziColors.JournalFeed),
@@ -160,7 +160,7 @@ fun PreviewTimelineNormal() {
                 ),
             ),
             recordCount = 6,
-            nowMinOfDay = 560,
+            nowContentMinute = 560,
             selectedCategoryKey = "MILK",
             legend = listOf(
                 TimelineLegendEntry("SLEEP", "睡眠", LeziColors.LaneSleep, isBar = true),
@@ -172,11 +172,65 @@ fun PreviewTimelineNormal() {
     }
 }
 
+@Preview(name = "Timeline · three-day viewport", widthDp = 390, heightDp = 280, showBackground = true)
+@Composable
+fun PreviewTimelineThreeDay() {
+    val d0 = TimelineAxis.PRIMARY_DAY_START_MINUTES
+    val nowMin = d0 + 14 * 60 + 30
+    PreviewFrame {
+        TimelineRailCard(
+            sleep = listOf(
+                // Overnight sleep spanning D−1 → D as one continuous bar
+                // (neighbor peek dims; D portion full-strength).
+                TimelineLaneSegment(
+                    d0 - 120, d0 + 360, LeziColors.LaneSleep,
+                    title = "睡眠",
+                    dayChartCategoryKey = "SLEEP",
+                ),
+            ),
+            feed = listOf(
+                // Neighbor D−1 feed (dimmed).
+                TimelineLaneSegment(
+                    d0 - 60, d0 - 60, LeziColors.LaneFeed,
+                    title = "配方奶",
+                    isEvent = true,
+                    dayChartCategoryKey = "MILK",
+                ),
+                TimelineLaneSegment(
+                    d0 + 480, d0 + 480, LeziColors.LaneFeed,
+                    title = "配方奶",
+                    isEvent = true,
+                    dayChartCategoryKey = "MILK",
+                ),
+            ),
+            care = listOf(
+                TimelineLaneSegment(
+                    d0 + 600, d0 + 600, LeziColors.LaneCare,
+                    title = "尿尿",
+                    isEvent = true,
+                    dayChartCategoryKey = "PEE",
+                ),
+            ),
+            recordCount = 4,
+            nowContentMinute = nowMin,
+            viewportStartMinutes = TimelineAxis.todayCenteredViewportStartMinutes(nowMin),
+            viewportDurationMinutes = TimelineAxis.defaultViewportDurationMinutes(),
+            titlePrimary = "三天节奏",
+            titleSecondary = "72h 时间轴",
+            legend = listOf(
+                TimelineLegendEntry("SLEEP", "睡眠", LeziColors.LaneSleep, isBar = true),
+                TimelineLegendEntry("MILK", "奶", LeziColors.LaneFeed),
+                TimelineLegendEntry("PEE", "尿", LeziColors.LaneCare),
+            ),
+        )
+    }
+}
+
 @Preview(name = "Timeline · empty", widthDp = 390, heightDp = 240, showBackground = true)
 @Composable
 fun PreviewTimelineEmpty() {
     PreviewFrame {
-        TimelineRailCard(emptyList(), emptyList(), emptyList(), 0, nowMinOfDay = 600)
+        TimelineRailCard(emptyList(), emptyList(), emptyList(), 0, nowContentMinute = 600)
     }
 }
 

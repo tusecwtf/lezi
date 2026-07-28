@@ -28,7 +28,11 @@ class TimelineMarkerLayout(
 }
 
 /**
- * Places event segments into stable time clusters.
+ * Places event segments into stable time clusters on a viewport-mapped axis.
+ *
+ * [viewportStartMinutes] / [viewportDurationMinutes] describe which slice of the
+ * content axis (segment start/end minutes) maps onto [axisLengthPx]. Defaults
+ * preserve the historical single-day fill (0…24h maps to the full axis).
  *
  * The whole cluster is shifted at an edge so its centers keep their spacing. If the
  * available axis is too short, spacing compresses instead of collapsing or drawing out
@@ -41,14 +45,25 @@ fun layoutTimelineEventMarkers(
     slotSpacingPx: Float,
     edgeInsetPx: Float,
     hitRadiusPx: Float,
+    viewportStartMinutes: Int = 0,
+    viewportDurationMinutes: Int = TimelineAxis.MINUTES_PER_DAY,
 ): TimelineMarkerLayout {
     val safeAxisLengthPx = axisLengthPx.coerceAtLeast(0f)
     val safeClusterWindowMinutes = clusterWindowMinutes.coerceAtLeast(0)
     val safeEdgeInsetPx = edgeInsetPx.coerceIn(0f, safeAxisLengthPx / 2f)
     val safeHitRadiusPx = hitRadiusPx.coerceAtLeast(0f)
+    val safeViewportDuration = viewportDurationMinutes.coerceAtLeast(1)
+    val viewportEnd = viewportStartMinutes + safeViewportDuration
     val sortedEvents = segments
         .mapIndexed(::IndexedSegment)
         .filter { it.segment.isEvent }
+        // Only lay out events that can fall on the visible slice (with a small margin
+        // for edge clusters that still need room to expand).
+        .filter {
+            val m = it.segment.startMinOfDay
+            m in (viewportStartMinutes - safeClusterWindowMinutes)..
+                (viewportEnd + safeClusterWindowMinutes)
+        }
         .sortedWith(
             compareBy<IndexedSegment>(
                 { it.segment.startMinOfDay },
@@ -76,8 +91,12 @@ fun layoutTimelineEventMarkers(
     val targets = clusters.flatMap { cluster ->
         val naturalAnchorPx = cluster
             .map {
-                it.segment.startMinOfDay.coerceIn(0, MINUTES_PER_DAY) /
-                    MINUTES_PER_DAY.toFloat() * safeAxisLengthPx
+                TimelineAxis.contentMinuteToAxisPx(
+                    contentMinute = it.segment.startMinOfDay,
+                    axisLengthPx = safeAxisLengthPx,
+                    viewportStartMinutes = viewportStartMinutes,
+                    viewportDurationMinutes = safeViewportDuration,
+                )
             }
             .average()
             .toFloat()
@@ -112,5 +131,3 @@ private data class IndexedSegment(
     val sourceIndex: Int,
     val segment: TimelineLaneSegment,
 )
-
-private const val MINUTES_PER_DAY = 24 * 60

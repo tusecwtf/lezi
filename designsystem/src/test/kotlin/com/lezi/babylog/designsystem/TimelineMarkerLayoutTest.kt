@@ -159,6 +159,86 @@ class TimelineMarkerLayoutTest {
         assertNull(nextCategorySelection("PEE", layout.hitTest(130f)))
     }
 
+    @Test
+    fun `nextCategorySelection toggles and switches shared day-chart keys`() {
+        val pee = eventSegment(minute = 400, category = "PEE")
+        val milk = eventSegment(minute = 500, category = "MILK")
+        val nonselectable = eventSegment(minute = 600, category = null)
+
+        assertEquals("PEE", nextCategorySelection(null, pee))
+        assertNull(nextCategorySelection("PEE", pee))
+        assertEquals("MILK", nextCategorySelection("PEE", milk))
+        assertNull(nextCategorySelection("PEE", null))
+        assertNull(nextCategorySelection("PEE", nonselectable))
+        assertNull(nextCategorySelection(null, nonselectable))
+    }
+
+    @Test
+    fun `nextCategorySelection on neighbor-day mark still emits category key for A2 gate`() {
+        // Hit testing is content-axis agnostic: a D−1 mark yields the same key as D.
+        // Feature-layer A2 decides whether to commit (must be present on day D).
+        val d0 = TimelineAxis.PRIMARY_DAY_START_MINUTES
+        val neighborPee = eventSegment(minute = d0 - 6 * 60, category = "PEE")
+        val primaryPee = eventSegment(minute = d0 + 12 * 60, category = "PEE")
+        val neighborPlusMilk = eventSegment(
+            minute = d0 + TimelineAxis.MINUTES_PER_DAY + 3 * 60,
+            category = "MILK",
+        )
+
+        assertEquals("PEE", nextCategorySelection(null, neighborPee))
+        assertEquals("PEE", nextCategorySelection(null, primaryPee))
+        assertEquals("MILK", nextCategorySelection("PEE", neighborPlusMilk))
+        // Re-tap same type from a neighbor mark still clears at designsystem layer.
+        assertNull(nextCategorySelection("PEE", neighborPee))
+    }
+
+    @Test
+    fun `viewport mapping places primary-day markers with neighbor peeks`() {
+        val d0 = TimelineAxis.PRIMARY_DAY_START_MINUTES
+        val viewportStart = TimelineAxis.defaultViewportStartMinutes()
+        val viewportDuration = TimelineAxis.defaultViewportDurationMinutes()
+        val noon = eventSegment(minute = d0 + 12 * 60, category = "MILK")
+        val axisPx = viewportDuration.toFloat()
+
+        val layout = layoutTimelineEventMarkers(
+            segments = listOf(noon),
+            axisLengthPx = axisPx,
+            clusterWindowMinutes = 12,
+            slotSpacingPx = 10f,
+            edgeInsetPx = 20f,
+            hitRadiusPx = 8f,
+            viewportStartMinutes = viewportStart,
+            viewportDurationMinutes = viewportDuration,
+        )
+
+        // Noon of D is 12h after primary start → offset from viewport left =
+        // peek + 12h minutes, 1px per content minute.
+        val expected =
+            (TimelineAxis.NEIGHBOR_PEEK_MINUTES + 12 * 60).toFloat()
+        assertEquals(expected, layout.targets.single().centerPx, 0.001f)
+        assertEquals("MILK", layout.hitTest(expected)?.dayChartCategoryKey)
+    }
+
+    @Test
+    fun `events far outside the viewport are not laid out`() {
+        val viewportStart = TimelineAxis.defaultViewportStartMinutes()
+        val viewportDuration = TimelineAxis.defaultViewportDurationMinutes()
+        val far = eventSegment(minute = 30, category = "PEE") // deep in D−1
+
+        val layout = layoutTimelineEventMarkers(
+            segments = listOf(far),
+            axisLengthPx = 1000f,
+            clusterWindowMinutes = 12,
+            slotSpacingPx = 10f,
+            edgeInsetPx = 20f,
+            hitRadiusPx = 8f,
+            viewportStartMinutes = viewportStart,
+            viewportDurationMinutes = viewportDuration,
+        )
+
+        assertTrue(layout.targets.isEmpty())
+    }
+
     private fun layout(
         segments: List<TimelineLaneSegment>,
         slotSpacingPx: Float = 10f,

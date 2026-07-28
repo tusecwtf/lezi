@@ -70,6 +70,34 @@ object DayChartCategories {
     ): DayChartCategory? = if (selected == tapped) null else tapped
 
     /**
+     * True when [category] appears among day-chart types in [dayRecords]
+     * (selected day **D** only — not the 72h rail union).
+     */
+    fun isPresentOnDay(
+        category: DayChartCategory,
+        dayRecords: Iterable<Record>,
+    ): Boolean = category in legendCategories(dayRecords)
+
+    /**
+     * A2 selection gate for day-chart filter commits.
+     *
+     * - [proposed] null always clears (blank tap / re-tap same type / legend deselect).
+     * - Non-null [proposed] commits only when that category appears in [dayRecords] (day D).
+     * - Otherwise keep [current] unchanged (neighbor-only marks do not enter an empty filter).
+     *
+     * List / legend / reconcile stay on D; once committed, the rail highlights the same key
+     * across the 72h window via `selectedCategoryKey`.
+     */
+    fun commitSelection(
+        current: DayChartCategory?,
+        proposed: DayChartCategory?,
+        dayRecords: Iterable<Record>,
+    ): DayChartCategory? {
+        if (proposed == null) return null
+        return if (isPresentOnDay(proposed, dayRecords)) proposed else current
+    }
+
+    /**
      * Keep [selected] only while that category still appears in [records];
      * otherwise clear (avoids a zero-row sticky filter).
      */

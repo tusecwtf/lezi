@@ -106,6 +106,51 @@ class DayChartCategoriesTest {
         assertThat(DayChartCategories.shouldShowDayChart(records)).isFalse()
     }
 
+    /**
+     * Three-day rail visibility: callers feed the D−1|D|D+1 union.
+     * D alone empty must not hide the rail when a neighbor has a day-chart type.
+     */
+    @Test
+    fun shouldShowDayChart_threeDayUnion_neighborOnlyShowsRail() {
+        val dayDRecords = emptyList<Record>()
+        val railRecords = listOf(rec(1, RecordType.PEE)) // neighbor-only day-chart type
+        assertThat(DayChartCategories.shouldShowDayChart(dayDRecords)).isFalse()
+        assertThat(DayChartCategories.shouldShowDayChart(railRecords)).isTrue()
+    }
+
+    @Test
+    fun shouldShowDayChart_threeDayUnion_allEmptyHidesRail() {
+        assertThat(DayChartCategories.shouldShowDayChart(emptyList())).isFalse()
+    }
+
+    @Test
+    fun shouldShowDayChart_threeDayUnion_onlyNonDayChartAcrossDaysHidesRail() {
+        val railRecords = listOf(
+            rec(1, RecordType.PUMP_EXPRESS),
+            rec(2, RecordType.TEMPERATURE),
+            rec(3, RecordType.MEDICINE),
+        )
+        assertThat(DayChartCategories.shouldShowDayChart(railRecords)).isFalse()
+    }
+
+    @Test
+    fun shouldShowDayChart_threeDayUnion_dHasTypeShowsRail() {
+        val railRecords = listOf(
+            rec(1, RecordType.FORMULA),
+            rec(2, RecordType.TEMPERATURE),
+        )
+        assertThat(DayChartCategories.shouldShowDayChart(railRecords)).isTrue()
+    }
+
+    @Test
+    fun shouldShowDayChart_threeDayUnion_softDeletedNeighborDoesNotShow() {
+        val railRecords = listOf(
+            rec(1, RecordType.PEE, deleted = baseTs),
+            rec(2, RecordType.BATH),
+        )
+        assertThat(DayChartCategories.shouldShowDayChart(railRecords)).isFalse()
+    }
+
     @Test
     fun legendCategories_onlyPresentInEnumOrder() {
         val records = listOf(
@@ -197,6 +242,83 @@ class DayChartCategoriesTest {
         assertThat(DayChartCategories.filterRecords(records, DayChartCategory.POOP).map { it.id })
             .containsExactly(2L, 3L)
             .inOrder()
+    }
+
+    @Test
+    fun isPresentOnDay_trueOnlyForCategoriesInDayRecords() {
+        val dayD = listOf(rec(1, RecordType.FORMULA), rec(2, RecordType.PEE))
+        assertThat(DayChartCategories.isPresentOnDay(DayChartCategory.MILK, dayD)).isTrue()
+        assertThat(DayChartCategories.isPresentOnDay(DayChartCategory.PEE, dayD)).isTrue()
+        assertThat(DayChartCategories.isPresentOnDay(DayChartCategory.POOP, dayD)).isFalse()
+        assertThat(DayChartCategories.isPresentOnDay(DayChartCategory.SLEEP, emptyList())).isFalse()
+    }
+
+    @Test
+    fun commitSelection_a2BlocksCategoryAbsentOnDay_allowsClear() {
+        // D has milk only; PEE exists only on a neighbor day in the 72h rail.
+        val dayD = listOf(rec(1, RecordType.FORMULA))
+        assertThat(
+            DayChartCategories.commitSelection(
+                current = null,
+                proposed = DayChartCategory.PEE,
+                dayRecords = dayD,
+            ),
+        ).isNull()
+        assertThat(
+            DayChartCategories.commitSelection(
+                current = DayChartCategory.MILK,
+                proposed = DayChartCategory.PEE,
+                dayRecords = dayD,
+            ),
+        ).isEqualTo(DayChartCategory.MILK)
+        // Clear always succeeds (blank / re-tap / legend deselect).
+        assertThat(
+            DayChartCategories.commitSelection(
+                current = DayChartCategory.MILK,
+                proposed = null,
+                dayRecords = dayD,
+            ),
+        ).isNull()
+        assertThat(
+            DayChartCategories.commitSelection(
+                current = DayChartCategory.MILK,
+                proposed = null,
+                dayRecords = emptyList(),
+            ),
+        ).isNull()
+    }
+
+    @Test
+    fun commitSelection_categoryPresentOnDayCommits() {
+        val dayD = listOf(rec(1, RecordType.FORMULA), rec(2, RecordType.PEE))
+        assertThat(
+            DayChartCategories.commitSelection(
+                current = null,
+                proposed = DayChartCategory.PEE,
+                dayRecords = dayD,
+            ),
+        ).isEqualTo(DayChartCategory.PEE)
+        assertThat(
+            DayChartCategories.commitSelection(
+                current = DayChartCategory.PEE,
+                proposed = DayChartCategory.MILK,
+                dayRecords = dayD,
+            ),
+        ).isEqualTo(DayChartCategory.MILK)
+    }
+
+    @Test
+    fun commitSelection_bothDiaperMakesPeeAndPoopSelectableOnDay() {
+        val dayD = listOf(rec(1, RecordType.BOTH_DIAPER))
+        assertThat(
+            DayChartCategories.commitSelection(null, DayChartCategory.PEE, dayD),
+        ).isEqualTo(DayChartCategory.PEE)
+        assertThat(
+            DayChartCategories.commitSelection(null, DayChartCategory.POOP, dayD),
+        ).isEqualTo(DayChartCategory.POOP)
+        assertThat(
+            DayChartCategories.commitSelection(null, DayChartCategory.MILK, dayD),
+        ).isNull()
     }
 
     @Test
