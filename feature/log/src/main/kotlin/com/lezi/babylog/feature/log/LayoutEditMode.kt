@@ -86,26 +86,21 @@ internal fun LayoutEditModeDialog(
     var dragKey by remember { mutableStateOf<String?>(null) }
     var dragPointer by remember { mutableStateOf<Offset?>(null) }
 
-    fun dropAt(windowPos: Offset, sourceKey: String, sourceIsDeleted: Boolean) {
-        val inTrash = trashBounds?.contains(windowPos) == true
-        if (inTrash && !sourceIsDeleted) {
-            onIntent(LayoutEditIntent.MoveToLocalDeleted(sourceKey))
-            return
-        }
-        if (!inTrash && sourceIsDeleted) {
-            // Dropping deleted item anywhere above trash restores.
-            if (trashBounds?.contains(windowPos) != true) {
-                onIntent(LayoutEditIntent.RestoreFromLocalDeleted(sourceKey))
-            }
-            return
-        }
-        val hitSlot = slotBounds.entries
-            .filter { it.value.contains(windowPos) }
-            .minByOrNull { abs(it.value.center.x - windowPos.x) }
-            ?.key
-        if (hitSlot != null && !sourceIsDeleted) {
-            onIntent(LayoutEditIntent.AssignToSlot(hitSlot, sourceKey))
-        }
+    fun dropAt(
+        windowPos: Offset,
+        sourceKey: String,
+        sourceIsDeleted: Boolean,
+        sourceSlotIndex: Int? = null,
+    ) {
+        val intent = resolveLayoutDrop(
+            pointerWindow = windowPos,
+            slotBounds = slotBounds.toMap(),
+            trashBounds = trashBounds,
+            sourceKey = sourceKey,
+            sourceIsDeleted = sourceIsDeleted,
+            sourceSlotIndex = sourceSlotIndex,
+        )
+        if (intent != null) onIntent(intent)
     }
 
     AlertDialog(
@@ -125,7 +120,7 @@ internal fun LayoutEditModeDialog(
                 verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
             ) {
                 Text(
-                    "长按拖到常用槽可替换；拖到底部本机已删除可隐藏；完成退出。",
+                    "长按拖到常用槽可替换；拖出坞外清空快捷方式；拖到底部本机已删除可隐藏；完成退出。",
                     style = LeziTypography.Meta,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -168,19 +163,13 @@ internal fun LayoutEditModeDialog(
                                                 },
                                                 onDrag = { dragPointer = it },
                                                 onDragEnd = { pos ->
-                                                    // Slot-to-slot: hit another slot → swap/assign
-                                                    val other = slotBounds.entries
-                                                        .firstOrNull { (i, rect) ->
-                                                            i != index && rect.contains(pos)
-                                                        }
-                                                        ?.key
-                                                    if (other != null) {
-                                                        onIntent(
-                                                            LayoutEditIntent.SwapSlots(index, other),
-                                                        )
-                                                    } else {
-                                                        dropAt(pos, key, sourceIsDeleted = false)
-                                                    }
+                                                    // From bound slot: swap / trash / drag-off clear.
+                                                    dropAt(
+                                                        windowPos = pos,
+                                                        sourceKey = key,
+                                                        sourceIsDeleted = false,
+                                                        sourceSlotIndex = index,
+                                                    )
                                                     dragKey = null
                                                     dragPointer = null
                                                 },
@@ -397,8 +386,13 @@ private fun Modifier.draggableCatalogKey(
 }
 
 /**
- * Resolve drop using window coordinates. Call sites pass window offsets when available.
- * For local-only last pointer, [resolveLayoutDrop] maps slot index by horizontal fraction.
+ * Resolve drop using window coordinates.
+ *
+ * - Catalog → slot: [AssignToSlot]
+ * - Bound slot → other slot: [SwapSlots] when [sourceSlotIndex] set
+ * - Any non-deleted → trash: [MoveToLocalDeleted]
+ * - Deleted → outside trash: [RestoreFromLocalDeleted]
+ * - Bound slot drag-off (miss dock + trash): [ClearSlot] (removes shortcut only)
  */
 internal fun resolveLayoutDrop(
     pointerWindow: Offset?,
@@ -406,6 +400,7 @@ internal fun resolveLayoutDrop(
     trashBounds: Rect?,
     sourceKey: String,
     sourceIsDeleted: Boolean,
+    sourceSlotIndex: Int? = null,
 ): LayoutEditIntent? {
     val pos = pointerWindow ?: return null
     if (trashBounds?.contains(pos) == true && !sourceIsDeleted) {
@@ -419,7 +414,15 @@ internal fun resolveLayoutDrop(
         .minByOrNull { abs(it.value.center.x - pos.x) }
         ?.key
     if (hit != null && !sourceIsDeleted) {
+        if (sourceSlotIndex != null) {
+            if (hit == sourceSlotIndex) return null
+            return LayoutEditIntent.SwapSlots(sourceSlotIndex, hit)
+        }
         return LayoutEditIntent.AssignToSlot(hit, sourceKey)
+    }
+    // Drag-off dock (and not onto trash): clear shortcut pointer only.
+    if (sourceSlotIndex != null && !sourceIsDeleted) {
+        return LayoutEditIntent.ClearSlot(sourceSlotIndex)
     }
     return null
 }
