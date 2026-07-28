@@ -218,6 +218,54 @@ class SyncWireMapperTest {
     }
 
     @Test
+    fun babySexNormalizesLegacyEnumNamesToWireContract() {
+        fun sexOf(stored: String?): String? {
+            val entity = BabyEntity(
+                familyId = 1,
+                nickname = "年年",
+                sex = stored,
+                birthdayEpochDay = 20_000,
+                themeColorArgb = 0,
+                clientUuid = "baby-uuid",
+                updatedAt = 1,
+            )
+            val payload = Json.parseToJsonElement(
+                SyncWireMapper.baby(entity, avatarMediaUuid = null).payloadJson,
+            ).jsonObject
+            return payload["sex"]?.let { element ->
+                if (element.toString() == "null") null else element.jsonPrimitive.contentOrNull
+            }
+        }
+
+        assertThat(sexOf("female")).isEqualTo("female")
+        assertThat(sexOf("male")).isEqualTo("male")
+        assertThat(sexOf("FEMALE")).isEqualTo("female")
+        assertThat(sexOf("MALE")).isEqualTo("male")
+        assertThat(sexOf("UNKNOWN")).isNull()
+        assertThat(sexOf("女")).isEqualTo("female")
+        assertThat(sexOf(null)).isNull()
+        assertThat(SyncWireMapper.normalizeBabySexForWire("男宝")).isEqualTo("male")
+    }
+
+    @Test
+    fun carePlanStatusAndMediaKindNormalizeLegacyCase() {
+        assertThat(SyncWireMapper.normalizeCarePlanStatusForWire("PENDING"))
+            .isEqualTo("pending")
+        assertThat(SyncWireMapper.normalizeCarePlanStatusForWire("completed"))
+            .isEqualTo("completed")
+        assertThat(SyncWireMapper.normalizeMediaKindForWire("LOG")).isEqualTo("log")
+        assertThat(SyncWireMapper.normalizeMediaKindForWire("avatar")).isEqualTo("avatar")
+        assertThat(
+            runCatching { SyncWireMapper.normalizeCarePlanStatusForWire("done") }
+                .exceptionOrNull(),
+        ).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(
+            runCatching { SyncWireMapper.normalizeMediaKindForWire("photo") }
+                .exceptionOrNull(),
+        ).isInstanceOf(IllegalArgumentException::class.java)
+    }
+
+    @Test
     fun fulfillmentCandidateWireCarriesPlanRecordLinksAndConfirmTime() {
         val entity = FulfillmentCandidateEntity(
             clientUuid = "cand-uuid",

@@ -37,7 +37,10 @@ object SyncWireMapper {
         payloadJson = buildJsonObject {
             val birthWeightGrams = entity.birthWeightGrams
             put("nickname", entity.nickname)
-            if (entity.sex == null) put("sex", JsonNull) else put("sex", entity.sex)
+            // Room may hold legacy enum names (FEMALE/MALE/UNKNOWN) from older edit UI;
+            // Home-LAN wire requires lowercase female|male|null only.
+            val wireSex = normalizeBabySexForWire(entity.sex)
+            if (wireSex == null) put("sex", JsonNull) else put("sex", wireSex)
             put("birthday", LocalDate.ofEpochDay(entity.birthdayEpochDay).toString())
             if (birthWeightGrams == null) {
                 put("birth_weight_grams", JsonNull)
@@ -53,6 +56,43 @@ object SyncWireMapper {
         updatedAt = entity.updatedAt,
         deletedAt = entity.deletedAt,
     )
+
+    /**
+     * Map local baby sex storage onto the Home-LAN contract.
+     * Accepts wire values, Kotlin enum names, and common Chinese UI labels.
+     */
+    internal fun normalizeBabySexForWire(raw: String?): String? {
+        if (raw.isNullOrBlank()) return null
+        return when (raw.trim().lowercase()) {
+            "female", "f", "女", "女宝" -> "female"
+            "male", "m", "男", "男宝" -> "male"
+            "unknown", "未设置" -> null
+            else -> null
+        }
+    }
+
+    /**
+     * Care-plan status wire values: pending|missed|completed|skipped.
+     * Tolerates legacy Kotlin enum names (PENDING, …) if any row still has them.
+     */
+    internal fun normalizeCarePlanStatusForWire(raw: String): String {
+        val normalized = raw.trim().lowercase()
+        require(normalized in setOf("pending", "missed", "completed", "skipped")) {
+            "care plan status 无效: $raw"
+        }
+        return normalized
+    }
+
+    /**
+     * Media kind wire values: log|avatar. Rejects unknown kinds before they hit NAS.
+     */
+    internal fun normalizeMediaKindForWire(raw: String): String {
+        val normalized = raw.trim().lowercase()
+        require(normalized == "log" || normalized == "avatar") {
+            "media kind 无效: $raw"
+        }
+        return normalized
+    }
 
     fun record(
         entity: RecordEntity,
@@ -154,7 +194,8 @@ object SyncWireMapper {
             if (entity.note == null) put("note", JsonNull) else put("note", entity.note)
             put("payload_json", localPayload)
             put("schema_version", entity.schemaVersion)
-            put("status", entity.status)
+            // Room should store storageKey (pending/…); accept legacy enum names.
+            put("status", normalizeCarePlanStatusForWire(entity.status))
             if (entity.createdByMembershipId.isBlank()) {
                 put("created_by_membership_id", JsonNull)
             } else {
@@ -222,7 +263,8 @@ object SyncWireMapper {
         type = "media",
         clientUuid = entity.clientUuid,
         payloadJson = buildJsonObject {
-            put("kind", entity.kind)
+            val kind = normalizeMediaKindForWire(entity.kind)
+            put("kind", kind)
             if (recordClientUuid == null) {
                 put("record_client_uuid", JsonNull)
             } else {
@@ -235,7 +277,7 @@ object SyncWireMapper {
             }
             // Log media associates through portable record or care_plan id.
             // Avatar only carries baby_client_uuid.
-            if (entity.kind != "avatar" || babyClientUuid == null) {
+            if (kind != "avatar" || babyClientUuid == null) {
                 put("baby_client_uuid", JsonNull)
             } else {
                 put("baby_client_uuid", babyClientUuid)

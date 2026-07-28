@@ -69,7 +69,16 @@ internal fun BabyEditDialog(
     ) -> Unit,
 ) {
     var nickname by remember(baby.id) { mutableStateOf(baby.nickname) }
-    var sex by remember(baby.id) { mutableStateOf(baby.sex?.name) }
+    // Persist Home-LAN wire values (female/male/null), not Kotlin enum names.
+    var sex by remember(baby.id) {
+        mutableStateOf(
+            when (baby.sex?.name) {
+                "FEMALE" -> "female"
+                "MALE" -> "male"
+                else -> null
+            },
+        )
+    }
     var birthday by remember(baby.id) { mutableLongStateOf(baby.birthdayEpochDay) }
     var weightText by remember(baby.id) {
         mutableStateOf(baby.birthWeightGrams?.let { (it / 1000.0).toString() }.orEmpty())
@@ -243,7 +252,11 @@ internal fun BabyEditDialog(
                 )
                 Text("性别", style = LeziTypography.Label)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("FEMALE" to "女宝", "MALE" to "男宝", "UNKNOWN" to "未设置").forEach { (key, label) ->
+                    listOf(
+                        "female" to "女宝",
+                        "male" to "男宝",
+                        null to "未设置",
+                    ).forEach { (key, label) ->
                         FilterChip(
                             selected = sex == key,
                             enabled = !saving,

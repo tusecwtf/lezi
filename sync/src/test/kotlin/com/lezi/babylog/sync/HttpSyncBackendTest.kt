@@ -877,4 +877,17 @@ class HttpSyncBackendTest {
         }
         return headers.joinToString("\n") + "\n\n" + String(body, 0, read)
     }
+
+    @Test
+    fun formatSyncHttpFailureIncludesJsonDetail() {
+        assertThat(
+            formatSyncHttpFailure(
+                422,
+                """{"detail":"sex must be female, male, or null"}""",
+            ),
+        ).isEqualTo("家庭服务器请求失败（HTTP 422）：sex must be female, male, or null")
+
+        assertThat(formatSyncHttpFailure(503, "")).isEqualTo("家庭服务器请求失败（HTTP 503）")
+        assertThat(formatSyncHttpFailure(500, "not-json")).isEqualTo("家庭服务器请求失败（HTTP 500）")
+    }
 }

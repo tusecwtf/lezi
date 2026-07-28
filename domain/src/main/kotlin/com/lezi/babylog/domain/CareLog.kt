@@ -231,7 +231,7 @@ class CareLog @Inject constructor(
                 BabyEntity(
                     familyId = familyId,
                     nickname = nickname,
-                    sex = input.sex,
+                    sex = normalizeBabySexForStorage(input.sex),
                     birthdayEpochDay = input.birthdayEpochDay,
                     birthWeightGrams = weight,
                     avatarPath = input.avatarPath,
@@ -258,7 +258,7 @@ class CareLog @Inject constructor(
             babyDao.update(
                 existing.copy(
                     nickname = nickname,
-                    sex = input.sex,
+                    sex = normalizeBabySexForStorage(input.sex),
                     birthdayEpochDay = input.birthdayEpochDay,
                     birthWeightGrams = normalizeBirthWeightGrams(input.birthWeightGrams),
                     avatarPath = input.avatarPath,
@@ -2511,10 +2511,23 @@ fun CustomRecordItem.toFieldSnapshot(): CustomItemFieldSnapshot =
 private fun parseSex(raw: String): Sex =
     runCatching { Sex.valueOf(raw) }.getOrNull()
         ?: when (raw.lowercase()) {
-            "male", "m", "男" -> Sex.MALE
-            "female", "f", "女" -> Sex.FEMALE
+            "male", "m", "男", "男宝" -> Sex.MALE
+            "female", "f", "女", "女宝" -> Sex.FEMALE
             else -> Sex.UNKNOWN
         }
+
+/**
+ * Canonical Room storage for baby sex: Home-LAN wire values only
+ * (`female` / `male` / null). Rejects enum names and UI labels at the write edge.
+ */
+internal fun normalizeBabySexForStorage(raw: String?): String? {
+    if (raw.isNullOrBlank()) return null
+    return when (parseSex(raw.trim())) {
+        Sex.FEMALE -> "female"
+        Sex.MALE -> "male"
+        Sex.UNKNOWN -> null
+    }
+}
 
 private fun withAnomaly(payloadJson: String, schemaVersion: Int): Pair<String, Int> {
     val document = RecordPayloadCodec.decode(RecordType.SLEEP, payloadJson, schemaVersion)

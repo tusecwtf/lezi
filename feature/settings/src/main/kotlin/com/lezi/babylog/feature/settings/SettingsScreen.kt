@@ -688,10 +688,11 @@ fun SettingsRoute(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
+                        // Home-LAN wire values only (female/male/null), not Kotlin enum names.
                         listOf(
-                            "FEMALE" to "女宝",
-                            "MALE" to "男宝",
-                            "UNKNOWN" to "未设置",
+                            "female" to "女宝",
+                            "male" to "男宝",
+                            null to "未设置",
                         ).forEach { (key, label) ->
                             FilterChip(
                                 selected = newSex == key,

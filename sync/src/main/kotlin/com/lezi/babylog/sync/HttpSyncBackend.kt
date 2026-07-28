@@ -609,7 +609,30 @@ private fun JsonObject.requiredStringArray(key: String, context: String): List<S
 internal class SyncHttpException(
     val statusCode: Int,
     val responseBody: String = "",
-) : IllegalStateException("家庭服务器请求失败（HTTP $statusCode）")
+) : IllegalStateException(formatSyncHttpFailure(statusCode, responseBody))
+
+/**
+ * Product-facing message for non-2xx family-server responses.
+ * Prefer JSON `detail` when present so operators can act without logcat.
+ */
+internal fun formatSyncHttpFailure(statusCode: Int, responseBody: String): String {
+    val detail = syncHttpDetailOrNull(responseBody)
+    return if (detail.isNullOrBlank()) {
+        "家庭服务器请求失败（HTTP $statusCode）"
+    } else {
+        "家庭服务器请求失败（HTTP $statusCode）：$detail"
+    }
+}
+
+internal fun syncHttpDetailOrNull(responseBody: String): String? {
+    val trimmed = responseBody.trim()
+    if (trimmed.isEmpty()) return null
+    return runCatching {
+        val root = Json.parseToJsonElement(trimmed).jsonObject
+        val detail = root["detail"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        detail.takeIf { it.isNotEmpty() }?.take(240)
+    }.getOrNull()
+}
 
 internal class SyncResponseTooLargeException(
     val responseKind: String,
