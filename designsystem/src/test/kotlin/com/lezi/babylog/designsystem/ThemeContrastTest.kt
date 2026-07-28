@@ -5,35 +5,59 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.abs
 
 class ThemeContrastTest {
     @Test
     fun warmBabyAccentsAlwaysResolveReadablePrimaryContent() {
-        val palette = listOf(
-            0xFF007BAE,
-            0xFFAA442B,
-            0xFF2F8F6B,
-            0xFF7A5CFF,
-            0xFFE09F3E,
-            0xFFD4578C,
-            0xFF4C6A92,
-            0xFF5B8C5A,
-        )
-
-        palette.forEach { argb ->
+        LeziBabyTheme.PaletteArgb.forEach { argb ->
             listOf(false, true).forEach { dark ->
                 val scheme = resolveLeziColorScheme(
                     darkTheme = dark,
                     style = LeziVisualStyle.Warm,
-                    babyThemeArgb = argb.toInt(),
+                    babyThemeArgb = argb,
                 )
 
                 assertReadable(
                     foreground = scheme.onPrimary,
                     background = scheme.primary,
-                    context = "baby accent ${argb.toString(16)} dark=$dark",
+                    context = "baby accent ${Integer.toHexString(argb)} dark=$dark",
                 )
             }
+        }
+    }
+
+    @Test
+    fun babyThemeColorsShareConsistentLightness() {
+        val lightnesses = LeziBabyTheme.PaletteArgb.map { argb ->
+            val c = normalizeBabyThemeColor(Color(argb))
+            rgbToHsl(c.red, c.green, c.blue).third
+        }
+        lightnesses.forEach { l ->
+            assertTrue("lightness $l off band", abs(l - BabyThemeLightness) < 0.02f)
+        }
+        val span = lightnesses.max() - lightnesses.min()
+        assertTrue("lightness span $span too wide", span < 0.02f)
+    }
+
+    @Test
+    fun babyAccentDrivesHeaderColorForBothTemplates() {
+        val raw = 0xFFE09F3E.toInt()
+        LeziVisualStyle.entries.forEach { style ->
+            val scheme = resolveLeziColorScheme(false, style, raw)
+            val ext = resolveLeziExtendedColors(false, style, raw, scheme.primary)
+            val expected = normalizeBabyThemeColor(Color(raw))
+            assertTrue(
+                "babyAccent for $style drifted",
+                abs(expected.red - ext.babyAccent.red) < 0.02f &&
+                    abs(expected.green - ext.babyAccent.green) < 0.02f &&
+                    abs(expected.blue - ext.babyAccent.blue) < 0.02f,
+            )
+            assertReadable(
+                readableContentColor(ext.babyAccent),
+                ext.babyAccent,
+                "header on babyAccent $style",
+            )
         }
     }
 

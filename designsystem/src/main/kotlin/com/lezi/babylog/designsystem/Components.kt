@@ -79,13 +79,13 @@ fun LeziCard(
                     Modifier
                 },
             ),
-        shape = if (journal) LeziShapes.JournalCard else LeziShapes.Md,
+        shape = LeziThemeExt.cardShape,
         color = MaterialTheme.colorScheme.surface,
         border = androidx.compose.foundation.BorderStroke(
             1.dp,
             MaterialTheme.colorScheme.outline.copy(alpha = if (journal) 0.95f else 0.65f),
         ),
-        shadowElevation = 0.dp,
+        shadowElevation = LeziThemeExt.cardElevation,
         tonalElevation = 0.dp,
     ) {
         Column(Modifier.padding(contentPadding), content = content)
@@ -179,7 +179,7 @@ fun SummaryMetric(
                     Modifier
                 },
             ),
-        shape = LeziShapes.Md,
+        shape = LeziThemeExt.cardShape,
         color = if (selected) {
             MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.78f)
         } else {
@@ -193,7 +193,7 @@ fun SummaryMetric(
                 MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
             },
         ),
-        shadowElevation = 0.dp,
+        shadowElevation = if (selected) LeziThemeExt.cardElevation else LeziElevation.None,
         tonalElevation = 0.dp,
     ) {
         Column(

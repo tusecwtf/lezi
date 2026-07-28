@@ -69,7 +69,6 @@ import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.ui.UiTags
 import com.lezi.babylog.designsystem.AppBrandBar
-import com.lezi.babylog.designsystem.LeziColors
 import com.lezi.babylog.designsystem.LeziTheme
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.SystemCalendarConfigurationCoordinator
@@ -550,7 +549,7 @@ fun LeziRoot(
                                 if (dark) {
                                     MaterialTheme.colorScheme.surface
                                 } else {
-                                    LeziColors.JournalAccent
+                                    com.lezi.babylog.designsystem.LeziThemeExt.colors.babyAccent
                                 },
                             )
                             .statusBarsPadding(),
@@ -585,7 +584,7 @@ fun LeziRoot(
                                 if (dark) {
                                     MaterialTheme.colorScheme.surface
                                 } else {
-                                    LeziColors.JournalAccent
+                                    com.lezi.babylog.designsystem.LeziThemeExt.colors.babyAccent
                                 },
                             )
                             .statusBarsPadding(),

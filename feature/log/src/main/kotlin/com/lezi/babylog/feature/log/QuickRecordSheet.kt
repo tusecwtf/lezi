@@ -67,6 +67,7 @@ import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziPrimaryButtonMode
 import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziShapes
+import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
@@ -454,7 +455,7 @@ internal fun QuickRecordSheet(
                             contentDescription = reason
                             liveRegion = LiveRegionMode.Polite
                         },
-                    shape = LeziShapes.Sm,
+                    shape = LeziThemeExt.controlShape,
                     color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.92f),
                     contentColor = MaterialTheme.colorScheme.onErrorContainer,
                 ) {

@@ -1192,10 +1192,10 @@ private fun OneHandQuickDock(
             .fillMaxWidth()
             .padding(horizontal = if (journal) 0.dp else 8.dp, vertical = 4.dp)
             .testTag("one_hand_quick_dock_$preferredHand"),
-        shape = if (journal) LeziShapes.JournalCard else LeziShapes.Lg,
+        shape = LeziThemeExt.dockShape,
         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.7f)),
-        shadowElevation = if (journal) 2.dp else 8.dp,
+        shadowElevation = LeziThemeExt.dockElevation,
     ) {
         Row(
             Modifier
@@ -1232,7 +1232,7 @@ private fun OneHandQuickDock(
                                 QuickDockAction.OpenMore -> onMore()
                             }
                         },
-                    shape = if (journal) LeziShapes.JournalButton else LeziShapes.Sm,
+                    shape = LeziThemeExt.controlShape,
                     color = if (quickDockIdleContainerIsEmphasized(cell)) {
                         MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f)
                     } else {

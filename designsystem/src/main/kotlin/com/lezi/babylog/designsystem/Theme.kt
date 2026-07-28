@@ -1,15 +1,23 @@
 package com.lezi.babylog.designsystem
 
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 
 data class LeziExtendedColors(
     val fab: Color,
@@ -66,6 +74,74 @@ private fun contrastRatio(first: Color, second: Color): Float {
     val lighter = maxOf(first.luminance(), second.luminance())
     val darker = minOf(first.luminance(), second.luminance())
     return (lighter + 0.05f) / (darker + 0.05f)
+}
+
+/**
+ * Shared HSL lightness for baby theme accents so the header does not jump when
+ * switching babies. Saturation is gently clamped so pastels stay soft.
+ *
+ * Pure Kotlin HSL (no android.graphics) so JVM unit tests can resolve colors.
+ */
+internal const val BabyThemeLightness = 0.48f
+
+/** Normalize any stored baby theme ARGB to the shared lightness band. */
+fun normalizeBabyThemeColor(color: Color): Color {
+    val (h, s, _) = rgbToHsl(color.red, color.green, color.blue)
+    val sat = s.coerceIn(0.32f, 0.72f)
+    val (r, g, b) = hslToRgb(h, sat, BabyThemeLightness)
+    return Color(red = r, green = g, blue = b, alpha = color.alpha)
+}
+
+fun normalizeBabyThemeArgb(argb: Int): Int {
+    val c = normalizeBabyThemeColor(Color(argb))
+    val a = (c.alpha * 255f + 0.5f).toInt().coerceIn(0, 255)
+    val r = (c.red * 255f + 0.5f).toInt().coerceIn(0, 255)
+    val g = (c.green * 255f + 0.5f).toInt().coerceIn(0, 255)
+    val b = (c.blue * 255f + 0.5f).toInt().coerceIn(0, 255)
+    return (a shl 24) or (r shl 16) or (g shl 8) or b
+}
+
+/** Returns H in [0,360), S/L in [0,1]. */
+internal fun rgbToHsl(r: Float, g: Float, b: Float): Triple<Float, Float, Float> {
+    val maxC = max(r, max(g, b))
+    val minC = min(r, min(g, b))
+    val l = (maxC + minC) / 2f
+    if (abs(maxC - minC) < 1e-6f) {
+        return Triple(0f, 0f, l)
+    }
+    val d = maxC - minC
+    val s = if (l > 0.5f) d / (2f - maxC - minC) else d / (maxC + minC)
+    val h = when (maxC) {
+        r -> ((g - b) / d + if (g < b) 6f else 0f)
+        g -> ((b - r) / d + 2f)
+        else -> ((r - g) / d + 4f)
+    } / 6f
+    return Triple(h * 360f, s, l)
+}
+
+/** H in [0,360), S/L in [0,1] → RGB channels in [0,1]. */
+internal fun hslToRgb(h: Float, s: Float, l: Float): Triple<Float, Float, Float> {
+    if (s <= 1e-6f) {
+        return Triple(l, l, l)
+    }
+    val hue = ((h % 360f) + 360f) % 360f / 360f
+    fun hue2rgb(p: Float, q: Float, tIn: Float): Float {
+        var t = tIn
+        if (t < 0f) t += 1f
+        if (t > 1f) t -= 1f
+        return when {
+            t < 1f / 6f -> p + (q - p) * 6f * t
+            t < 1f / 2f -> q
+            t < 2f / 3f -> p + (q - p) * (2f / 3f - t) * 6f
+            else -> p
+        }
+    }
+    val q = if (l < 0.5f) l * (1f + s) else l + s - l * s
+    val p = 2f * l - q
+    val r = hue2rgb(p, q, hue + 1f / 3f)
+    val g = hue2rgb(p, q, hue)
+    val b = hue2rgb(p, q, hue - 1f / 3f)
+    return Triple(r.coerceIn(0f, 1f), g.coerceIn(0f, 1f), b.coerceIn(0f, 1f))
 }
 
 private val LightScheme = lightColorScheme(
@@ -185,12 +261,31 @@ internal fun resolveLeziColorScheme(
         LeziVisualStyle.Warm -> if (darkTheme) DarkScheme else LightScheme
         LeziVisualStyle.Journal -> if (darkTheme) JournalDarkScheme else JournalLightScheme
     }
+    // Warm primary follows the baby theme; journal keeps coral chrome for CTAs.
     if (style != LeziVisualStyle.Warm || babyThemeArgb == null) return base
 
-    val primary = Color(babyThemeArgb)
+    val primary = normalizeBabyThemeColor(Color(babyThemeArgb))
     return base.copy(
         primary = primary,
         onPrimary = readableContentColor(primary),
+    )
+}
+
+/** Exposed for unit tests that assert Material shape mapping per template. */
+internal fun leziShapes(style: LeziVisualStyle): Shapes = when (style) {
+    LeziVisualStyle.Warm -> Shapes(
+        extraSmall = RoundedCornerShape(8.dp),
+        small = LeziShapes.Sm,
+        medium = LeziShapes.Md,
+        large = LeziShapes.Lg,
+        extraLarge = LeziShapes.Lg,
+    )
+    LeziVisualStyle.Journal -> Shapes(
+        extraSmall = LeziShapes.JournalSm,
+        small = LeziShapes.JournalButton,
+        medium = LeziShapes.JournalCard,
+        large = LeziShapes.JournalLg,
+        extraLarge = LeziShapes.JournalDialog,
     )
 }
 
@@ -275,6 +370,7 @@ fun LeziTheme(
         MaterialTheme(
             colorScheme = scheme,
             typography = LeziTypography.material(journal = style == LeziVisualStyle.Journal),
+            shapes = leziShapes(style),
             content = content,
         )
     }
@@ -290,7 +386,8 @@ internal fun resolveLeziExtendedColors(
         LeziVisualStyle.Warm -> if (darkTheme) DarkExt else LightExt
         LeziVisualStyle.Journal -> if (darkTheme) JournalDarkExt else JournalLightExt
     }
-    return base.copy(babyAccent = babyThemeArgb?.let(::Color) ?: fallbackAccent)
+    val baby = babyThemeArgb?.let { normalizeBabyThemeColor(Color(it)) } ?: fallbackAccent
+    return base.copy(babyAccent = baby)
 }
 
 object LeziThemeExt {
@@ -302,4 +399,28 @@ object LeziThemeExt {
 
     val isJournal: Boolean
         @Composable get() = LocalLeziVisualStyle.current == LeziVisualStyle.Journal
+
+    val cardShape: Shape
+        @Composable get() = if (isJournal) LeziShapes.JournalCard else LeziShapes.Md
+
+    val controlShape: Shape
+        @Composable get() = if (isJournal) LeziShapes.JournalButton else LeziShapes.Sm
+
+    val buttonShape: Shape
+        @Composable get() = if (isJournal) LeziShapes.JournalButton else LeziShapes.Button
+
+    val dialogShape: Shape
+        @Composable get() = if (isJournal) LeziShapes.JournalDialog else LeziShapes.Md
+
+    val dockShape: Shape
+        @Composable get() = if (isJournal) LeziShapes.JournalCard else LeziShapes.Lg
+
+    val dockElevation: Dp
+        @Composable get() = if (isJournal) LeziElevation.DockJournal else LeziElevation.DockWarm
+
+    val cardElevation: Dp
+        @Composable get() = if (isJournal) LeziElevation.None else LeziElevation.CardWarm
+
+    val modalElevation: Dp
+        @Composable get() = if (isJournal) LeziElevation.ModalJournal else LeziElevation.ModalWarm
 }

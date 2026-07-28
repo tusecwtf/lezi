@@ -101,9 +101,17 @@ fun AppBrandBar(
     dark: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    // Keep account and menu chrome consistent with the main app header.
-    val background = if (dark) MaterialTheme.colorScheme.surface else LeziColors.JournalAccent
-    val content = if (dark) MaterialTheme.colorScheme.onSurface else Color(0xFF271015)
+    // Shared with AppHeaderBar: baby theme accent in light mode, surface in dark.
+    val background = if (dark) {
+        MaterialTheme.colorScheme.surface
+    } else {
+        LeziThemeExt.colors.babyAccent
+    }
+    val content = if (dark) {
+        MaterialTheme.colorScheme.onSurface
+    } else {
+        readableContentColor(background)
+    }
     Row(
         modifier
             .fillMaxWidth()

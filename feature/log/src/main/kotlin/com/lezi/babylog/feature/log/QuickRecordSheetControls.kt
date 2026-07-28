@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.dp
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.designsystem.LeziShapes
+import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTypography
 import java.time.Instant
 import java.time.ZoneId
@@ -277,7 +278,7 @@ private fun EmptyTimeButton(
     Surface(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
-        shape = LeziShapes.Sm,
+        shape = LeziThemeExt.controlShape,
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
         border = if (highlighted) {
             BorderStroke(2.dp, MaterialTheme.colorScheme.error)
@@ -313,7 +314,7 @@ private fun TimeButton(
         modifier = Modifier
             .fillMaxWidth()
             .semantics { contentDescription = "$label，${formatRecordTime(millis, zone)}，选择时间" },
-        shape = LeziShapes.Sm,
+        shape = LeziThemeExt.controlShape,
         color = containerColor,
         border = if (highlighted) {
             BorderStroke(2.dp, MaterialTheme.colorScheme.error)
@@ -339,7 +340,7 @@ private fun TimeButton(
 private fun TimeReadOnly(label: String, millis: Long, zone: ZoneId) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = LeziShapes.Sm,
+        shape = LeziThemeExt.controlShape,
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
     ) {
         Column(Modifier.padding(horizontal = 14.dp, vertical = 11.dp)) {

@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -31,6 +32,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 
 @Composable
@@ -55,12 +57,13 @@ fun QuickRecordButton(
                 indication = ripple(bounded = true),
                 onClick = onClick,
             ),
-        shape = if (journal) LeziShapes.JournalCard else LeziShapes.Md,
+        shape = LeziThemeExt.cardShape,
         color = MaterialTheme.colorScheme.surface,
         border = androidx.compose.foundation.BorderStroke(
             1.dp,
             MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
         ),
+        shadowElevation = LeziThemeExt.cardElevation,
     ) {
         if (journal) Column(
             Modifier.fillMaxSize().padding(6.dp),
@@ -176,7 +179,7 @@ fun LeziPrimaryButton(
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val clickable = mode != LeziPrimaryButtonMode.Disabled
-    val shape = if (journal) LeziShapes.JournalButton else LeziShapes.Button
+    val shape = LeziThemeExt.buttonShape
     val fillColor = when (mode) {
         LeziPrimaryButtonMode.Enabled -> MaterialTheme.colorScheme.primary
         LeziPrimaryButtonMode.ExplainedDisabled ->
@@ -191,14 +194,26 @@ fun LeziPrimaryButton(
         LeziPrimaryButtonMode.Disabled ->
             MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
     }
+    val hardEdge = journal && mode == LeziPrimaryButtonMode.Enabled
     val elevation = when {
-        mode != LeziPrimaryButtonMode.Enabled -> 0.dp
-        pressed -> 0.dp
-        else -> 4.dp
+        mode != LeziPrimaryButtonMode.Enabled -> LeziElevation.None
+        hardEdge -> LeziElevation.None
+        pressed -> LeziElevation.None
+        else -> LeziElevation.ButtonWarm
     }
-    Surface(
+    val hardShadow = MaterialTheme.colorScheme.primary.copy(alpha = 0.55f).let { base ->
+        // Darken primary for the journal hard edge (template-v2 accent-strong).
+        Color(
+            red = (base.red * 0.72f).coerceIn(0f, 1f),
+            green = (base.green * 0.72f).coerceIn(0f, 1f),
+            blue = (base.blue * 0.72f).coerceIn(0f, 1f),
+            alpha = 1f,
+        )
+    }
+    val edge = LeziElevation.JournalHardEdge
+    Box(
         modifier = modifier
-            .heightIn(min = LeziSpacing.Touch)
+            .heightIn(min = LeziSpacing.Touch + if (hardEdge && !pressed) edge else 0.dp)
             .then(
                 if (mode == LeziPrimaryButtonMode.ExplainedDisabled) {
                     Modifier.border(
@@ -209,23 +224,39 @@ fun LeziPrimaryButton(
                 } else {
                     Modifier
                 },
-            )
-            .clickable(
-                enabled = clickable,
-                interactionSource = interaction,
-                indication = if (clickable) ripple() else null,
-                onClick = onClick,
             ),
-        shape = shape,
-        color = fillColor,
-        contentColor = labelColor,
-        shadowElevation = elevation,
     ) {
-        Box(
-            Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
-            contentAlignment = Alignment.Center,
+        if (hardEdge && !pressed) {
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .offset(y = edge)
+                    .clip(shape)
+                    .background(hardShadow),
+            )
+        }
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = LeziSpacing.Touch)
+                .offset(y = if (hardEdge && pressed) edge else 0.dp)
+                .clickable(
+                    enabled = clickable,
+                    interactionSource = interaction,
+                    indication = if (clickable) ripple() else null,
+                    onClick = onClick,
+                ),
+            shape = shape,
+            color = fillColor,
+            contentColor = labelColor,
+            shadowElevation = elevation,
         ) {
-            Text(label, style = LeziTypography.Label, maxLines = 1)
+            Box(
+                Modifier.padding(horizontal = 18.dp, vertical = 12.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(label, style = LeziTypography.Label, maxLines = 1)
+            }
         }
     }
 }
@@ -237,8 +268,7 @@ fun LeziSecondaryButton(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
 ) {
-    val journal = LeziThemeExt.isJournal
-    val shape = if (journal) LeziShapes.JournalButton else LeziShapes.Button
+    val shape = LeziThemeExt.buttonShape
     Surface(
         modifier = modifier
             .heightIn(min = LeziSpacing.Touch)

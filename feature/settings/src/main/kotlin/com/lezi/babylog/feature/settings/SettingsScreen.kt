@@ -91,26 +91,10 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
-private val BabyThemePalette = listOf(
-    0xFF007BAE.toInt(),
-    0xFFAA442B.toInt(),
-    0xFF2F8F6B.toInt(),
-    0xFF7A5CFF.toInt(),
-    0xFFE09F3E.toInt(),
-    0xFFD4578C.toInt(),
-    0xFF4C6A92.toInt(),
-    0xFF5B8C5A.toInt(),
-)
-private val BabyThemePaletteLabels = listOf(
-    "湖蓝",
-    "砖红",
-    "青绿",
-    "紫罗兰",
-    "琥珀",
-    "玫红",
-    "灰蓝",
-    "草绿",
-)
+private val BabyThemePalette = com.lezi.babylog.designsystem.LeziBabyTheme.PaletteArgb.map {
+    com.lezi.babylog.designsystem.normalizeBabyThemeArgb(it)
+}
+private val BabyThemePaletteLabels = com.lezi.babylog.designsystem.LeziBabyTheme.Labels
 
 internal fun clearRecordsFailureCopy(error: Throwable): String = when {
     error is LocalRecordsClearCommittedException && error.familyServerRetained ->
@@ -715,7 +699,9 @@ fun SettingsRoute(
                         ) {
                             BabyThemePalette.forEachIndexed { index, argb ->
                                 FilterChip(
-                                    selected = baby.themeColorArgb == argb,
+                                    selected = com.lezi.babylog.designsystem.normalizeBabyThemeArgb(
+                                        baby.themeColorArgb,
+                                    ) == argb,
                                     onClick = {
                                         vm.setBabyLocalTheme(baby.id, argb) {
                                             localPreferenceError = it

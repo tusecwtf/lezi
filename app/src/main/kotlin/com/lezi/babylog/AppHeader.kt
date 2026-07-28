@@ -35,7 +35,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
@@ -69,8 +68,6 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import com.lezi.babylog.designsystem.LeziColors
-import com.lezi.babylog.designsystem.LeziShapes
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTheme
 import com.lezi.babylog.designsystem.LeziThemeExt
@@ -103,9 +100,18 @@ internal fun AppHeaderBar(
     onSearch: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val background = if (dark) MaterialTheme.colorScheme.surface else LeziColors.JournalAccent
-    val content = if (dark) MaterialTheme.colorScheme.onSurface else Color(0xFF271015)
+    val background = if (dark) {
+        MaterialTheme.colorScheme.surface
+    } else {
+        LeziThemeExt.colors.babyAccent
+    }
+    val content = if (dark) {
+        MaterialTheme.colorScheme.onSurface
+    } else {
+        com.lezi.babylog.designsystem.readableContentColor(background)
+    }
     val babyAccent = LeziThemeExt.colors.babyAccent
+    val controlShape = LeziThemeExt.controlShape
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -118,7 +124,7 @@ internal fun AppHeaderBar(
             modifier = Modifier
                 .weight(1f)
                 .height(54.dp)
-                .clip(RoundedCornerShape(12.dp))
+                .clip(controlShape)
                 .clickable(enabled = canCycleBaby, onClick = onCycleBaby)
                 .padding(horizontal = 4.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -204,7 +210,7 @@ internal fun AppHeaderBar(
                 modifier = Modifier
                     .weight(1f)
                     .height(48.dp)
-                    .clip(RoundedCornerShape(12.dp))
+                    .clip(controlShape)
                     .semantics(mergeDescendants = true) {
                         contentDescription =
                             "选择日期，${headerPrimaryDateLabel(selectedDate, today)}，" +
@@ -410,11 +416,11 @@ internal fun HeaderCalendarDialog(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = LeziSpacing.Md),
-            shape = LeziShapes.Md,
+            shape = LeziThemeExt.dialogShape,
             color = MaterialTheme.colorScheme.surface,
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
             tonalElevation = 2.dp,
-            shadowElevation = 12.dp,
+            shadowElevation = LeziThemeExt.modalElevation,
         ) {
             Column(
                 Modifier.padding(

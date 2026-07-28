@@ -35,6 +35,7 @@ import com.lezi.babylog.designsystem.LeziClockDialDialog
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziShapes
+import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
@@ -152,7 +153,7 @@ internal fun NursingCompletionSheet(
                         contentDescription =
                             "结束时刻，${formatTime(draft.endedAt, zone)}，选择时间"
                     },
-                shape = LeziShapes.Sm,
+                shape = LeziThemeExt.controlShape,
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
             ) {
                 Row(
@@ -271,7 +272,7 @@ private fun NursingStatusBadge(label: String) {
 private fun ReadOnlyTimeField(label: String, value: Long, zone: ZoneId) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = LeziShapes.Sm,
+        shape = LeziThemeExt.controlShape,
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
     ) {
         Column(Modifier.padding(horizontal = 14.dp, vertical = 11.dp)) {

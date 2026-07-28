@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.dp
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.designsystem.LeziShapes
+import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTypography
 
 @Composable
@@ -143,7 +144,7 @@ private fun BabyFoodGuidancePanel(
 
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = LeziShapes.Sm,
+        shape = LeziThemeExt.controlShape,
         color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f),
     ) {
         Column(

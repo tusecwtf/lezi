@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -37,6 +36,7 @@ import com.lezi.babylog.designsystem.LeziCard
 import com.lezi.babylog.designsystem.LeziRecordColorRole
 import com.lezi.babylog.designsystem.LeziRecordGlyph
 import com.lezi.babylog.designsystem.LeziRecordGlyphIcon
+import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTone
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.leziRecordColor
@@ -236,17 +236,18 @@ fun RecordSummaryStrip(
                 val color = leziRecordColor(item.type.presentation.colorRole)
                 val selected = item.type == selectedType
                 val selectable = onSelect != null && item.type in selectableTypes
+                val cellShape = LeziThemeExt.controlShape
                 Column(
                     Modifier
                         .weight(1f)
                         .heightIn(min = 62.dp)
-                        .clip(RoundedCornerShape(10.dp))
+                        .clip(cellShape)
                         .background(
                             if (selected) color.copy(alpha = 0.18f) else Color.Transparent,
                         )
                         .then(
                             if (selected) {
-                                Modifier.border(1.dp, color.copy(alpha = 0.8f), RoundedCornerShape(10.dp))
+                                Modifier.border(1.dp, color.copy(alpha = 0.8f), cellShape)
                             } else {
                                 Modifier
                             },

@@ -91,26 +91,10 @@ import java.time.format.DateTimeFormatter
 import javax.inject.Inject
 import kotlinx.coroutines.launch
 
-private val ThemePalette = listOf(
-    0xFF007BAE.toInt(),
-    0xFFAA442B.toInt(),
-    0xFF2F8F6B.toInt(),
-    0xFF7A5CFF.toInt(),
-    0xFFE09F3E.toInt(),
-    0xFFD4578C.toInt(),
-    0xFF4C6A92.toInt(),
-    0xFF5B8C5A.toInt(),
-)
-private val ThemePaletteLabels = listOf(
-    "湖蓝",
-    "砖红",
-    "青绿",
-    "紫罗兰",
-    "琥珀",
-    "玫红",
-    "灰蓝",
-    "草绿",
-)
+private val ThemePalette = com.lezi.babylog.designsystem.LeziBabyTheme.PaletteArgb.map {
+    com.lezi.babylog.designsystem.normalizeBabyThemeArgb(it)
+}
+private val ThemePaletteLabels = com.lezi.babylog.designsystem.LeziBabyTheme.Labels
 
 @HiltViewModel
 class OnboardingViewModel @Inject constructor(

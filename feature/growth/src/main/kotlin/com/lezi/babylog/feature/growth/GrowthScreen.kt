@@ -374,7 +374,7 @@ fun GrowthRoute(
                             modifier = Modifier.fillMaxWidth(),
                             color = MaterialTheme.colorScheme.errorContainer,
                             contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                            shape = com.lezi.babylog.designsystem.LeziShapes.Sm,
+                            shape = com.lezi.babylog.designsystem.LeziThemeExt.controlShape,
                         ) {
                             Text(
                                 warning,

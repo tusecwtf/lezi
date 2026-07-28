@@ -95,15 +95,73 @@ object LeziSpacing {
     val TopBarAction: Dp = 48.dp
 }
 
+/**
+ * Corner radii for the two visual templates.
+ *
+ * Warm: soft large cards — 12 / 20 / 28 / pill.
+ * Journal: compact logbook — 4 / 8 / 12 / dialog 18 / pill; circles only for
+ * record icons, timer mains, and avatars.
+ */
 @Immutable
 object LeziShapes {
+    // Warm scale (also default Material small/medium/large mapping).
     val Sm = RoundedCornerShape(12.dp)
     val Md = RoundedCornerShape(20.dp)
     val Lg = RoundedCornerShape(28.dp)
     val Pill = RoundedCornerShape(999.dp)
-    val Button = RoundedCornerShape(14.dp)
+    /** Warm primary/secondary buttons — aligned with [Sm], not a free 14dp. */
+    val Button = Sm
+
+    // Journal scale.
+    val JournalSm = RoundedCornerShape(4.dp)
     val JournalCard = RoundedCornerShape(8.dp)
     val JournalButton = RoundedCornerShape(8.dp)
+    val JournalLg = RoundedCornerShape(12.dp)
+    val JournalDialog = RoundedCornerShape(18.dp)
+    /** Chart marks / hairline chips shared by both templates. */
+    val Micro = RoundedCornerShape(2.dp)
+}
+
+/** Soft float (warm) vs thin/hard (journal) elevation steps. */
+@Immutable
+object LeziElevation {
+    val None = 0.dp
+    val CardWarm = 1.dp
+    val ButtonWarm = 4.dp
+    val DockWarm = 8.dp
+    val ModalWarm = 12.dp
+    val DockJournal = 2.dp
+    val ModalJournal = 8.dp
+    /** Journal primary hard-edge shadow height (CSS `0 3px 0`). */
+    val JournalHardEdge = 3.dp
+}
+
+/**
+ * Shared baby theme swatches. Display and theme resolution always normalize
+ * these to a common HSL lightness so header chrome does not jump when switching babies.
+ */
+object LeziBabyTheme {
+    val PaletteArgb: List<Int> = listOf(
+        0xFF007BAE.toInt(),
+        0xFFAA442B.toInt(),
+        0xFF2F8F6B.toInt(),
+        0xFF7A5CFF.toInt(),
+        0xFFE09F3E.toInt(),
+        0xFFD4578C.toInt(),
+        0xFF4C6A92.toInt(),
+        0xFF5B8C5A.toInt(),
+    )
+
+    val Labels: List<String> = listOf(
+        "湖蓝",
+        "砖红",
+        "青绿",
+        "紫罗兰",
+        "琥珀",
+        "玫红",
+        "灰蓝",
+        "草绿",
+    )
 }
 
 object LeziTypography {

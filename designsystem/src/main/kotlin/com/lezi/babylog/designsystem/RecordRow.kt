@@ -62,7 +62,7 @@ fun RecordRow(
                 Box(
                     Modifier
                         .size(30.dp)
-                        .clip(LeziShapes.JournalCard)
+                        .clip(CircleShape)
                         .background(toneBg(tone)),
                     contentAlignment = Alignment.Center,
                 ) { leading() }

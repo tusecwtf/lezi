@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentSize
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CalendarMonth
 import androidx.compose.material3.AlertDialog
@@ -158,7 +157,7 @@ fun LeziClockDialDialog(
                             contentDescription =
                                 "选择日期，${formatClockDate(selectedDate)}"
                         },
-                    shape = LeziShapes.Sm,
+                    shape = LeziThemeExt.controlShape,
                     color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f),
                 ) {
                     Row(
@@ -479,7 +478,7 @@ private fun TimeSelectorBox(
     onClick: () -> Unit,
     contentDescription: String,
 ) {
-    val shape = RoundedCornerShape(8.dp)
+    val shape = LeziThemeExt.controlShape
     val container = if (selected) {
         MaterialTheme.colorScheme.primaryContainer
     } else {
@@ -515,7 +514,7 @@ private fun PeriodToggle(
     onSelectPm: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val shape = RoundedCornerShape(8.dp)
+    val shape = LeziThemeExt.controlShape
     val outline = MaterialTheme.colorScheme.outline
     val selectedContainer = MaterialTheme.colorScheme.tertiaryContainer
     val selectedContent = MaterialTheme.colorScheme.onTertiaryContainer

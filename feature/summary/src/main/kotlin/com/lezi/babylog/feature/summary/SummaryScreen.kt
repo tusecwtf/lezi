@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -48,6 +47,7 @@ import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.designsystem.LeziCard
+import com.lezi.babylog.designsystem.LeziShapes
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTypography
@@ -459,10 +459,12 @@ private fun RangeTabs(
     selected: SummaryRange,
     onSelect: (SummaryRange) -> Unit,
 ) {
+    val trackShape = LeziThemeExt.controlShape
+    val tabShape = if (LeziThemeExt.isJournal) LeziShapes.JournalSm else LeziShapes.Sm
     Row(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
+            .clip(trackShape)
             .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f))
             .padding(4.dp),
         horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -472,7 +474,7 @@ private fun RangeTabs(
             Box(
                 Modifier
                     .weight(1f)
-                    .clip(RoundedCornerShape(11.dp))
+                    .clip(tabShape)
                     .background(
                         if (on) MaterialTheme.colorScheme.surface else Color.Transparent,
                     )
@@ -481,7 +483,7 @@ private fun RangeTabs(
                             Modifier.border(
                                 1.dp,
                                 MaterialTheme.colorScheme.outline.copy(alpha = 0.35f),
-                                RoundedCornerShape(11.dp),
+                                tabShape,
                             )
                         } else {
                             Modifier
@@ -643,7 +645,7 @@ private fun DiaperLegendDot(color: Color, label: String) {
             Modifier
                 .height(10.dp)
                 .width(10.dp)
-                .clip(RoundedCornerShape(3.dp))
+                .clip(LeziShapes.Micro)
                 .background(color),
         )
         Text(label, style = LeziTypography.Meta, color = MaterialTheme.colorScheme.onSurfaceVariant)

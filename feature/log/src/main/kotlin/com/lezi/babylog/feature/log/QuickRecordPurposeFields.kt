@@ -50,6 +50,7 @@ import com.lezi.babylog.core.ui.stoolColorLabel
 import com.lezi.babylog.core.ui.stoolConsistencyLabel
 import com.lezi.babylog.designsystem.LeziPeeAmountMark
 import com.lezi.babylog.designsystem.LeziShapes
+import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziStoolAmountMark
 import com.lezi.babylog.designsystem.LeziStoolColorMark
 import com.lezi.babylog.designsystem.LeziStoolConsistencyMark
@@ -212,7 +213,7 @@ private fun NursingFields(
                 .fillMaxWidth()
                 .alpha(if (actionsEnabled) 1f else 0.45f),
             enabled = actionsEnabled,
-            shape = LeziShapes.Sm,
+            shape = LeziThemeExt.controlShape,
             color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
         ) {
             Row(
@@ -450,7 +451,7 @@ private fun ExcretionChoice(
                 contentDescription = semanticLabel
                 stateDescription = if (selected) "已选择" else "未选择"
             },
-        shape = LeziShapes.Sm,
+        shape = LeziThemeExt.controlShape,
         color = if (selected) {
             MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
         } else {
@@ -637,7 +638,7 @@ private fun TemperatureFields(
         )
     ) {
         Surface(
-            shape = LeziShapes.Sm,
+            shape = LeziThemeExt.controlShape,
             color = MaterialTheme.colorScheme.errorContainer,
         ) {
             Text(
