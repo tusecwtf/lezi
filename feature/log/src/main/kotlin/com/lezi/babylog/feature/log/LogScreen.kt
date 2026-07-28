@@ -710,11 +710,6 @@ fun LogRoute(
             )
         }
     }
-    val dayChartTipCount = remember(state.records, dayChartFilter) {
-        if (dayChartFilter == null) 0
-        else DayChartCategories.filterRecords(state.records, dayChartFilter).size
-    }
-
     fun openComposer(identity: RecordItemIdentity) {
         val babyId = state.baby?.id ?: return
         val type = identity.recordType
@@ -901,8 +896,6 @@ fun LogRoute(
                                     )
                                 },
                                 legend = dayChartLegend,
-                                tipLabel = dayChartFilter?.label,
-                                tipCount = dayChartTipCount,
                                 modifier = Modifier.padding(horizontal = LeziSpacing.Page),
                             )
                         }

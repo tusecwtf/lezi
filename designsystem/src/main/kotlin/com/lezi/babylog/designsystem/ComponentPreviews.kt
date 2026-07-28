@@ -168,8 +168,6 @@ fun PreviewTimelineNormal() {
                 TimelineLegendEntry("NURSING", "母乳", LeziColors.LaneFeed),
                 TimelineLegendEntry("PEE", "尿", LeziColors.LaneCare),
             ),
-            tipLabel = "奶",
-            tipCount = 1,
         )
     }
 }

@@ -3,7 +3,6 @@ package com.lezi.babylog.designsystem
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -56,7 +55,7 @@ data class TimelineLaneSegment(
     val startMinOfDay: Int,
     val endMinOfDay: Int,
     val color: Color,
-    /** Short name shown in the tip, e.g. 睡眠 / 配方奶. */
+    /** Short record-type name, e.g. 睡眠 / 配方奶. */
     val title: String = "",
     /** Human-readable explanation, e.g. 22:00–06:00 · 8小时. */
     val detail: String = "",
@@ -297,7 +296,7 @@ fun TimelineLane(
 
 /**
  * Day time-bar card. Selection is owned by the caller (page state): all marks that share
- * [selectedCategoryKey] highlight together; legend and tip use the same key.
+ * [selectedCategoryKey] highlight together; the legend uses the same key.
  */
 @Composable
 fun TimelineRailCard(
@@ -310,8 +309,6 @@ fun TimelineRailCard(
     selectedCategoryKey: String? = null,
     onCategorySelect: (String?) -> Unit = {},
     legend: List<TimelineLegendEntry> = emptyList(),
-    tipLabel: String? = null,
-    tipCount: Int = 0,
 ) {
     if (LeziThemeExt.isJournal) {
         JournalTimelineRail(
@@ -323,8 +320,6 @@ fun TimelineRailCard(
             selectedCategoryKey = selectedCategoryKey,
             onCategorySelect = onCategorySelect,
             legend = legend,
-            tipLabel = tipLabel,
-            tipCount = tipCount,
             modifier = modifier,
         )
         return
@@ -381,11 +376,6 @@ fun TimelineRailCard(
             markerStyle = true,
             selectedCategoryKey = selectedCategoryKey,
             onCategorySelect = onCategorySelect,
-        )
-        TimelineCategoryTip(
-            label = tipLabel,
-            count = tipCount,
-            onDismiss = { onCategorySelect(null) },
         )
         if (legend.isNotEmpty()) {
             Spacer(Modifier.height(10.dp))
@@ -480,53 +470,6 @@ private fun TimelineLegendRow(
     }
 }
 
-/** Type-level filter tip: category name · record count · tap to clear. */
-@Composable
-private fun TimelineCategoryTip(
-    label: String?,
-    count: Int,
-    onDismiss: () -> Unit,
-) {
-    if (label.isNullOrBlank()) return
-    Spacer(Modifier.height(10.dp))
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onDismiss)
-            .semantics {
-                contentDescription = "已筛选$label，$count 条，再点取消筛选"
-            },
-        shape = LeziShapes.Sm,
-        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
-    ) {
-        Column(
-            Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    "$label · $count 条",
-                    style = LeziTypography.BodyStrong,
-                )
-                Text(
-                    "取消",
-                    style = LeziTypography.Meta,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
-            Text(
-                "再点取消筛选",
-                style = LeziTypography.Meta,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
 @Composable
 private fun JournalTimelineRail(
     sleep: List<TimelineLaneSegment>,
@@ -537,8 +480,6 @@ private fun JournalTimelineRail(
     selectedCategoryKey: String?,
     onCategorySelect: (String?) -> Unit,
     legend: List<TimelineLegendEntry>,
-    tipLabel: String?,
-    tipCount: Int,
     modifier: Modifier,
 ) {
     val grid = LeziThemeExt.colors.chartGrid
@@ -760,11 +701,6 @@ private fun JournalTimelineRail(
                 modifier = Modifier.padding(start = 32.dp),
             )
         }
-        TimelineCategoryTip(
-            label = tipLabel,
-            count = tipCount,
-            onDismiss = { onCategorySelect(null) },
-        )
     }
 }
 
