@@ -189,6 +189,7 @@ lezi-sync healthcheck
 | GET | `/ready` | DB 与数据目录就绪检查；结果缓存 5 秒，异常返回 `503 {ok:false,status:"degraded",version}` |
 | POST | `/v1/family/create` | 幂等创建家庭并返回 owner token；可选 `family_name` |
 | GET | `/v1/family/members` | 当前家庭的 active 成员安全视图；owner/member 均可读 |
+| POST | `/v1/family/members/remove` | owner 移除另一 active member（不能移自己/owner）；吊销其凭证 |
 | POST | `/v1/family/display-name` | 成员更新自己的家庭称呼 |
 | POST | `/v1/family/name` | owner 改共享家庭名 |
 | POST | `/v1/invite` | owner 创建一次性邀请码 |

@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -62,6 +63,7 @@ internal fun FamilyMembersListSheet(
     ui: FamilyUi,
     onRefreshMembers: () -> Unit,
     onEditMyDisplayName: () -> Unit,
+    onRemoveMember: ((membershipId: String, displayName: String) -> Unit)? = null,
     onDismiss: () -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -72,6 +74,7 @@ internal fun FamilyMembersListSheet(
         ui.membershipId,
         ui.membersLoaded,
     )
+    val viewerIsOwner = ui.role == FamilyRole.Owner
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(
             Modifier
@@ -101,6 +104,16 @@ internal fun FamilyMembersListSheet(
                 FamilyMemberRow(
                     member = member,
                     onEditSelf = onEditMyDisplayName.takeIf { member.isSelf },
+                    onRemove = onRemoveMember
+                        ?.takeIf { canRemoveFamilyMember(viewerIsOwner, member) }
+                        ?.let { remove ->
+                            {
+                                remove(
+                                    member.membershipId,
+                                    familyMemberDisplayName(member),
+                                )
+                            }
+                        },
                 )
             }
             ui.membersError?.let { error ->
@@ -126,6 +139,7 @@ internal fun FamilyMembersListSheet(
 internal fun FamilyMemberRow(
     member: FamilyMember,
     onEditSelf: (() -> Unit)? = null,
+    onRemove: (() -> Unit)? = null,
 ) {
     Row(
         modifier = Modifier
@@ -180,8 +194,45 @@ internal fun FamilyMemberRow(
             androidx.compose.material3.TextButton(onClick = onEditSelf) {
                 Text("改称呼")
             }
+        } else if (onRemove != null) {
+            androidx.compose.material3.TextButton(onClick = onRemove) {
+                Text(
+                    "移除",
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
         }
     }
+}
+
+@Composable
+internal fun RemoveMemberConfirmDialog(
+    displayName: String,
+    removing: Boolean,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val label = displayName.trim().ifBlank { "家人" }
+    AlertDialog(
+        onDismissRequest = { if (!removing) onDismiss() },
+        title = { Text("移出家庭？") },
+        text = {
+            Text(
+                "确认将「$label」移出家庭？对方设备将无法继续同步；已同步的育儿记录会保留在家庭服务器上。",
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm, enabled = !removing) {
+                Text(
+                    if (removing) "移除中…" else "确认移除",
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !removing) { Text("取消") }
+        },
+    )
 }
 
 @Composable

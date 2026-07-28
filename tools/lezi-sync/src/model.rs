@@ -98,6 +98,29 @@ impl RenameFamilyRequest {
     }
 }
 
+/// Owner-only removal of another active membership (not self, not owner).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoveMemberRequest {
+    pub membership_id: String,
+}
+
+impl RemoveMemberRequest {
+    pub fn validate(&self) -> Result<String, ApiError> {
+        let id = self.membership_id.trim();
+        if id.is_empty() || id.len() > 64 {
+            return Err(ApiError::unprocessable(
+                "membership_id must be a non-empty membership identifier",
+            ));
+        }
+        // Server mints UUID strings; reject control characters / whitespace-only noise.
+        if id.chars().any(|c| c.is_control() || c.is_whitespace()) {
+            return Err(ApiError::unprocessable("membership_id is invalid"));
+        }
+        Ok(id.to_owned())
+    }
+}
+
 /// Product-required family 称呼 for create / join / self-rename.
 ///
 /// Blank, whitespace-only, and the device-local placeholder 「我（本机）」 all

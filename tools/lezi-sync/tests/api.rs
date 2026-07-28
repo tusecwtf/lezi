@@ -1303,6 +1303,115 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
 }
 
 #[tokio::test]
+async fn owner_can_remove_member_and_revokes_access() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "remove-owner-device",
+        "remove-member-owner-request-001-xxxxxxxx",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let owner_membership_id = owner["membership_id"].as_str().unwrap().to_owned();
+
+    let (_, invitation) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/invite",
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    let code = invitation["code"].as_str().unwrap();
+    let (_, joined) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/join",
+        None,
+        json!({
+            "code": code,
+            "device_id": "remove-member-device",
+            "display_name": "爸爸",
+        }),
+    )
+    .await;
+    let member_token = joined["token"].as_str().unwrap();
+    let member_membership_id = joined["membership_id"].as_str().unwrap().to_owned();
+    assert_eq!(joined["role"], "member");
+
+    // Member cannot remove anyone.
+    let (member_remove, member_remove_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/members/remove",
+        Some(member_token),
+        json!({ "membership_id": owner_membership_id }),
+    )
+    .await;
+    assert_eq!(member_remove, StatusCode::FORBIDDEN);
+    assert!(
+        member_remove_body["detail"]
+            .as_str()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("owner")
+    );
+
+    // Owner cannot remove self.
+    let (self_remove, self_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/members/remove",
+        Some(owner_token),
+        json!({ "membership_id": owner_membership_id }),
+    )
+    .await;
+    assert_eq!(self_remove, StatusCode::FORBIDDEN);
+    assert!(self_body["detail"]
+        .as_str()
+        .unwrap_or("")
+        .to_lowercase()
+        .contains("yourself"));
+
+    // Owner removes member.
+    let (ok_status, ok_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/members/remove",
+        Some(owner_token),
+        json!({ "membership_id": member_membership_id }),
+    )
+    .await;
+    assert_eq!(ok_status, StatusCode::OK);
+    assert_eq!(ok_body["ok"], true);
+    assert_eq!(ok_body["membership_id"], member_membership_id);
+
+    let (_, after) = get_json(&rig.app, "/v1/family/members", Some(owner_token)).await;
+    assert_eq!(after["members"].as_array().unwrap().len(), 1);
+    assert_eq!(after["members"][0]["membership_id"], owner_membership_id);
+
+    // Removed member token is revoked.
+    let (pull_status, _) = get_json(&rig.app, "/v1/pull?cursor=0", Some(member_token)).await;
+    assert_eq!(pull_status, StatusCode::UNAUTHORIZED);
+
+    // Idempotent-ish: removing again is not found.
+    let (again, again_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/members/remove",
+        Some(owner_token),
+        json!({ "membership_id": member_membership_id }),
+    )
+    .await;
+    assert_eq!(again, StatusCode::NOT_FOUND);
+    assert!(again_body["detail"]
+        .as_str()
+        .unwrap_or("")
+        .to_lowercase()
+        .contains("not found"));
+}
+
+#[tokio::test]
 async fn membership_id_is_stable_across_restart_and_rejects_role_forgery() {
     let rig = Rig::new();
     let owner = create_family(

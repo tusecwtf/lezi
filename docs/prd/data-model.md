@@ -412,6 +412,8 @@ interface SyncPort {
   /** invitation + 家网配置 + 必填家庭称呼组成唯一 Join command */
   suspend fun joinFamily(command: JoinFamilyCommand): Result<SyncSession>
   suspend fun leave(familyId: String): Result<Unit>
+  /** 仅 owner：按 membership_id 移除另一 active member */
+  suspend fun removeMember(membershipId: String): Result<Unit>
   suspend fun deleteFamily(): Result<Unit>
 
   /** 清本机 Record/CarePlan/履行候选及日志媒体；保留宝宝、自定义项目和家庭会话 */

@@ -96,6 +96,11 @@ interface SyncBackend {
     /** Owner-only; null/blank clears the shared family name. */
     suspend fun renameFamily(session: SyncSession, familyName: String?)
     suspend fun leave(session: SyncSession)
+    /**
+     * Owner removes another active member by [membershipId].
+     * Does not clear local replica; only ends the target membership's access.
+     */
+    suspend fun removeMember(session: SyncSession, membershipId: String)
     suspend fun deleteFamily(session: SyncSession)
     suspend fun putMedia(
         session: SyncSession,

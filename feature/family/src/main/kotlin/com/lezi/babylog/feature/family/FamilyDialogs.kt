@@ -58,8 +58,8 @@ private fun FamilyWizardStepHeader(
 }
 
 /**
- * Wizard network step: host / port / ≤2 SSIDs. Saving advances to identity;
- * interrupt keeps any already-persisted server/SSID (caller persists on confirm).
+ * Wizard network step: host / port / ≤2 SSIDs.
+ * Join mode may expose scan + invite chip; Create keeps save-then-advance.
  */
 @Composable
 internal fun FamilyWizardNetworkDialog(
@@ -72,10 +72,13 @@ internal fun FamilyWizardNetworkDialog(
     onSsid1Change: (String) -> Unit,
     ssid2: String,
     onSsid2Change: (String) -> Unit,
-    networkConfigured: Boolean,
+    networkReady: Boolean,
     feedback: String?,
+    networkInfoHint: String? = null,
+    inviteCodeSummary: String? = null,
     saving: Boolean,
     onUseCurrentWifi: () -> Unit,
+    onScan: (() -> Unit)? = null,
     onContinue: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -92,8 +95,21 @@ internal fun FamilyWizardNetworkDialog(
                     .dismissKeyboardOnTap(),
                 verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
             ) {
-                FamilyWizardStepHeader(mode, FamilyWizardStep.Network, networkConfigured)
+                FamilyWizardStepHeader(mode, FamilyWizardStep.Network, networkReady)
                 FamilyScopeRow("本机", "家庭网络", "服务器与 Wi‑Fi 仅存本机，可中断后继续")
+                if (inviteCodeSummary != null) {
+                    Text(
+                        "邀请码已填 · $inviteCodeSummary",
+                        style = LeziTypography.BodyStrong,
+                    )
+                }
+                if (networkInfoHint != null) {
+                    Text(
+                        networkInfoHint,
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 OutlinedTextField(
                     value = host,
                     onValueChange = onHostChange,
@@ -137,6 +153,21 @@ internal fun FamilyWizardNetworkDialog(
                 ) {
                     Text("填入当前 Wi‑Fi 名称")
                 }
+                if (onScan != null) {
+                    OutlinedButton(
+                        onClick = onScan,
+                        enabled = !saving,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(
+                            Icons.Outlined.QrCodeScanner,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Spacer(Modifier.size(8.dp))
+                        Text("扫码填入邀请与家庭网络")
+                    }
+                }
                 if (feedback != null) {
                     Text(feedback, color = MaterialTheme.colorScheme.error, style = LeziTypography.Meta)
                 }
@@ -144,7 +175,13 @@ internal fun FamilyWizardNetworkDialog(
         },
         confirmButton = {
             TextButton(onClick = onContinue, enabled = !saving) {
-                Text(if (saving) "保存中…" else "下一步")
+                Text(
+                    when {
+                        saving -> "保存中…"
+                        mode == FamilyWizardMode.Join -> "下一步"
+                        else -> "下一步"
+                    },
+                )
             }
         },
         dismissButton = {
@@ -161,7 +198,11 @@ internal fun JoinFamilyDialog(
     onDisplayNameChange: (String) -> Unit,
     displayNameError: String?,
     joining: Boolean,
-    networkConfigured: Boolean = true,
+    networkReady: Boolean = true,
+    networkSummary: String? = null,
+    networkMissingHint: String? = null,
+    inviteFieldError: String? = null,
+    confirmEnabled: Boolean = true,
     showWizardChrome: Boolean = true,
     onScan: () -> Unit,
     onBackToNetwork: (() -> Unit)? = null,
@@ -185,11 +226,20 @@ internal fun JoinFamilyDialog(
                     FamilyWizardStepHeader(
                         FamilyWizardMode.Join,
                         FamilyWizardStep.Identity,
-                        networkConfigured,
+                        networkReady,
                     )
                 }
                 FamilyScopeRow("共享", "家庭数据", "宝宝档案、照护记录、日志图片")
                 FamilyScopeRow("本机", "个人偏好", "主题、提醒、桌面小组件")
+                if (networkSummary != null) {
+                    Text(networkSummary, style = LeziTypography.Meta)
+                } else if (networkMissingHint != null) {
+                    Text(
+                        networkMissingHint,
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
                 OutlinedTextField(
                     value = displayName,
                     onValueChange = onDisplayNameChange,
@@ -208,6 +258,8 @@ internal fun JoinFamilyDialog(
                     onValueChange = onJoinCodeChange,
                     label = { Text("邀请码") },
                     placeholder = { Text("输入共享码，或使用下方扫码") },
+                    supportingText = inviteFieldError?.let { { Text(it) } },
+                    isError = inviteFieldError != null,
                     singleLine = true,
                     enabled = !joining,
                     modifier = Modifier.fillMaxWidth(),
@@ -215,12 +267,12 @@ internal fun JoinFamilyDialog(
                 OutlinedButton(onClick = onScan, enabled = !joining, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Outlined.QrCodeScanner, contentDescription = null, modifier = Modifier.size(20.dp))
                     Spacer(Modifier.size(8.dp))
-                    Text("扫码填入邀请码")
+                    Text("扫码填入邀请与家庭网络")
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = onConfirm, enabled = !joining) {
+            TextButton(onClick = onConfirm, enabled = confirmEnabled && !joining) {
                 Text(if (joining) "正在加入…" else "加入")
             }
         },

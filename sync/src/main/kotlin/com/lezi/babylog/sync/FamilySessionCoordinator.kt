@@ -20,6 +20,8 @@ internal sealed interface FamilySessionCommand {
     data class RenameFamily(val familyName: String?) : FamilySessionCommand
     data class UpdateMyDisplayName(val displayName: String) : FamilySessionCommand
     data object Leave : FamilySessionCommand
+    /** Owner removes another active membership (not self). */
+    data class RemoveMember(val membershipId: String) : FamilySessionCommand
     data object DeleteFamily : FamilySessionCommand
 }
 
@@ -85,6 +87,7 @@ internal class FamilySessionCoordinator(
                 is FamilySessionCommand.UpdateMyDisplayName ->
                     updateMyDisplayName(command.displayName)
                 FamilySessionCommand.Leave -> leave()
+                is FamilySessionCommand.RemoveMember -> removeMember(command.membershipId)
                 FamilySessionCommand.DeleteFamily -> deleteFamily()
             }
         }
@@ -265,6 +268,20 @@ internal class FamilySessionCoordinator(
                 if (!error.meansFamilySessionIsGone()) throw error
             }
             clearSession(session)
+            FamilySessionOutcome.Completed
+        }
+
+    private suspend fun removeMember(membershipId: String): FamilySessionOutcome =
+        withAllowedSession { session ->
+            require(session.role == FamilyRole.Owner) {
+                "仅家庭管理员可移除家人"
+            }
+            val target = membershipId.trim()
+            require(target.isNotEmpty()) { "请选择要移除的家人" }
+            require(target != session.membershipId.trim()) {
+                "不能移除自己；管理员请使用“删除家庭数据”"
+            }
+            backend.removeMember(session, target)
             FamilySessionOutcome.Completed
         }
 

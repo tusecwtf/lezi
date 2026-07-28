@@ -213,6 +213,9 @@ class RealSyncPort @Inject constructor(
     override suspend fun leave(familyId: String): Result<Unit> =
         executeFamily(FamilySessionCommand.Leave).map { Unit }
 
+    override suspend fun removeMember(membershipId: String): Result<Unit> =
+        executeFamily(FamilySessionCommand.RemoveMember(membershipId)).map { Unit }
+
     override suspend fun deleteFamily(): Result<Unit> =
         executeFamily(FamilySessionCommand.DeleteFamily).map { Unit }
 

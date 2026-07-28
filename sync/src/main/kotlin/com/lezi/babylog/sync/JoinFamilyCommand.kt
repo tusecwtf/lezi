@@ -18,6 +18,31 @@ fun memberDisplayNameValidationError(displayName: String?): String? =
         null
     }.exceptionOrNull()?.message
 
+/**
+ * Where home-LAN values on the join draft came from (wizard session).
+ * Copy and routing use this enum; do not infer “from invite” from host alone.
+ */
+enum class JoinNetworkProvenance {
+    None,
+    NoviceHint,
+    PrefsSaved,
+    ScannedFull,
+    ScannedHost,
+    UserEdited,
+}
+
+/**
+ * Result of safe invite field / scan ingestion. [error] is product copy for the invite field.
+ * Never throws from [JoinFamilyDraft.applyInvitationInput].
+ */
+data class InvitationInputResult(
+    val draft: JoinFamilyDraft,
+    val error: String? = null,
+    val decodedHost: Boolean = false,
+    val decodedSsidsFromPayload: Boolean = false,
+    val fromFullPayload: Boolean = false,
+)
+
 /** Shared mutable-UI value object for onboarding and the family account flow. */
 data class JoinFamilyDraft(
     val invitation: String = "",
@@ -30,18 +55,84 @@ data class JoinFamilyDraft(
     val ssids: List<String>
         get() = HomeLanServerConfig.normalizeSsids(listOf(ssid1, ssid2))
 
+    /** Join readiness: non-blank host and ≥1 SSID (includes novice prefill when SSID present). */
+    fun hasJoinNetwork(): Boolean =
+        host.isNotBlank() && ssids.isNotEmpty()
+
+    /**
+     * Decode invite and merge network fields. Stores **short code** only.
+     * Throws on invalid payload (callers that must not crash use [applyInvitationInput]).
+     */
     fun prefillInvitation(raw: String): JoinFamilyDraft {
         val invitation = raw.trim()
         if (invitation.isEmpty()) return this
         val decoded = InvitePayloadCodec.decode(invitation)
         val invitedConfig = decoded.homeLanConfig.withNormalized()
         return copy(
-            invitation = invitation,
+            invitation = decoded.code,
             host = invitedConfig.host.takeIf(String::isNotBlank) ?: host,
             portText = if (invitedConfig.host.isNotBlank()) invitedConfig.port.toString() else portText,
             scheme = if (invitedConfig.host.isNotBlank()) invitedConfig.scheme else scheme,
             ssid1 = decoded.ssids.getOrNull(0) ?: ssid1,
             ssid2 = decoded.ssids.getOrNull(1) ?: ssid2,
+        )
+    }
+
+    /**
+     * Safe invite field / scan ingestion. Never throws.
+     * - blank: unchanged
+     * - successful JSON or plain code: short code + optional network merge
+     * - broken `{...`: keep draft; surface error; never store partial JSON as invitation
+     * - intermediate plain typing: store trimmed raw for later validation
+     */
+    fun applyInvitationInput(raw: String): InvitationInputResult {
+        val value = raw.trim()
+        if (value.isEmpty()) return InvitationInputResult(this)
+
+        if (value.startsWith("{")) {
+            return runCatching {
+                val decoded = InvitePayloadCodec.decode(value)
+                val next = prefillInvitation(value)
+                InvitationInputResult(
+                    draft = next,
+                    decodedHost = decoded.host.isNotBlank() || decoded.baseUrl.isNotBlank(),
+                    decodedSsidsFromPayload = decoded.ssids.isNotEmpty(),
+                    fromFullPayload = true,
+                )
+            }.getOrElse {
+                InvitationInputResult(
+                    draft = this,
+                    error = it.message?.takeIf(String::isNotBlank)
+                        ?: "邀请内容无效，请重新扫码或输入邀请码",
+                )
+            }
+        }
+
+        return runCatching {
+            val code = InvitePayloadCodec.decode(value).code
+            InvitationInputResult(
+                draft = copy(invitation = code),
+                decodedHost = false,
+                fromFullPayload = false,
+            )
+        }.getOrElse {
+            InvitationInputResult(copy(invitation = value), error = null)
+        }
+    }
+
+    /**
+     * Merge saved prefs network into this draft without wiping [invitation].
+     * Used when prefs change mid-wizard while the user still holds an invite code.
+     */
+    fun mergeFromSaved(config: HomeLanServerConfig): JoinFamilyDraft {
+        val normalized = config.withNormalized()
+        return copy(
+            host = normalized.host,
+            portText = normalized.port.toString(),
+            scheme = normalized.scheme,
+            ssid1 = normalized.allowedSsids.getOrNull(0).orEmpty(),
+            ssid2 = normalized.allowedSsids.getOrNull(1).orEmpty(),
+            // invitation preserved
         )
     }
 
@@ -82,3 +173,112 @@ data class JoinFamilyDraft(
         }
     }
 }
+
+/** Pure: after invite applied, land on Identity only when host+≥1 SSID ready. */
+fun joinDraftReadyForIdentity(draft: JoinFamilyDraft): Boolean = draft.hasJoinNetwork()
+
+/** Pure: Network-step neutral hint after partial prefill; null = no info line. */
+fun joinNetworkPartialPrefillHint(draft: JoinFamilyDraft): String? = when {
+    draft.host.isNotBlank() && draft.ssids.isEmpty() ->
+        "已带入服务器 ${draft.host.trim()}，请绑定家庭 Wi‑Fi"
+    draft.invitation.isNotBlank() && !draft.hasJoinNetwork() && draft.host.isBlank() ->
+        "邀请码已填入，请填写服务器与家庭 Wi‑Fi"
+    else -> null
+}
+
+/**
+ * Durable Identity network summary. Honest about SSID source (ScannedHost never
+ * claims Wi‑Fi came from the invite).
+ */
+fun identityNetworkSummary(
+    draft: JoinFamilyDraft,
+    provenance: JoinNetworkProvenance,
+): String? {
+    if (!draft.hasJoinNetwork()) return null
+    val endpoint = "${draft.host.trim()}:${draft.portText.trim()}"
+    val wifi = draft.ssids.joinToString(" / ")
+    return when (provenance) {
+        JoinNetworkProvenance.ScannedFull ->
+            "网络已从邀请带入 · $endpoint · Wi‑Fi $wifi"
+        JoinNetworkProvenance.ScannedHost ->
+            "服务器已从邀请带入；Wi‑Fi 使用本机预填 · $endpoint · Wi‑Fi $wifi"
+        JoinNetworkProvenance.PrefsSaved,
+        JoinNetworkProvenance.UserEdited,
+        ->
+            "家庭网络已就绪 · $endpoint · Wi‑Fi $wifi"
+        JoinNetworkProvenance.NoviceHint ->
+            "已预填默认服务器与当前 Wi‑Fi（可改） · $endpoint · Wi‑Fi $wifi"
+        JoinNetworkProvenance.None -> null
+    }
+}
+
+/** Hint when Identity is open without a ready network. */
+fun identityNetworkMissingHint(draft: JoinFamilyDraft): String? =
+    if (draft.hasJoinNetwork()) {
+        null
+    } else {
+        "尚未配置家庭网络：请扫码带入，或点「上一步」填写"
+    }
+
+/**
+ * Provenance after wizard finally dismisses (not Message/Guide mid-stack).
+ * Prefers PrefsSaved when prefs already hold a configured endpoint.
+ */
+fun initialProvenanceAfterDismiss(
+    prefsConfigured: Boolean,
+    draft: JoinFamilyDraft,
+): JoinNetworkProvenance = when {
+    prefsConfigured -> JoinNetworkProvenance.PrefsSaved
+    !draft.hasJoinNetwork() -> JoinNetworkProvenance.None
+    !prefsConfigured &&
+        draft.host.trim() == DEFAULT_SERVER_HOST &&
+        draft.portText.toIntOrNull() == DEFAULT_SERVER_PORT ->
+        JoinNetworkProvenance.NoviceHint
+    else -> JoinNetworkProvenance.UserEdited
+}
+
+/**
+ * Update provenance after a successful [InvitationInputResult] with no error.
+ * Plain code does not set Scanned*.
+ */
+fun provenanceAfterInviteInput(
+    previous: JoinNetworkProvenance,
+    result: InvitationInputResult,
+): JoinNetworkProvenance {
+    if (result.error != null) return previous
+    return when {
+        result.fromFullPayload && result.decodedHost && result.decodedSsidsFromPayload ->
+            JoinNetworkProvenance.ScannedFull
+        result.fromFullPayload && result.decodedHost ->
+            JoinNetworkProvenance.ScannedHost
+        else -> previous
+    }
+}
+
+/**
+ * After the user edits host/port/SSID fields, demote scanned provenance so
+ * summary no longer claims values still come from the invite.
+ */
+fun provenanceAfterManualNetworkEdit(previous: JoinNetworkProvenance): JoinNetworkProvenance =
+    when (previous) {
+        JoinNetworkProvenance.ScannedFull,
+        JoinNetworkProvenance.ScannedHost,
+        JoinNetworkProvenance.NoviceHint,
+        JoinNetworkProvenance.None,
+        -> JoinNetworkProvenance.UserEdited
+        else -> previous
+    }
+
+/**
+ * Join confirm enablement (K11): network ready, invite non-blank, 称呼 non-empty.
+ * Does not run full display-name validation (that still happens at submit).
+ */
+fun joinConfirmEnabled(
+    draft: JoinFamilyDraft,
+    displayName: String,
+    joining: Boolean = false,
+): Boolean =
+    !joining &&
+        draft.hasJoinNetwork() &&
+        draft.invitation.isNotBlank() &&
+        displayName.trim().isNotEmpty()

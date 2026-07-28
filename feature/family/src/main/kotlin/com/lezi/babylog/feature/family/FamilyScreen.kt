@@ -26,8 +26,15 @@ import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.sync.HomeLanServerConfig
 import com.lezi.babylog.sync.HomeWifiPermission
-import com.lezi.babylog.sync.InvitePayloadCodec
 import com.lezi.babylog.sync.JoinFamilyDraft
+import com.lezi.babylog.sync.JoinNetworkProvenance
+import com.lezi.babylog.sync.identityNetworkMissingHint
+import com.lezi.babylog.sync.identityNetworkSummary
+import com.lezi.babylog.sync.initialProvenanceAfterDismiss
+import com.lezi.babylog.sync.joinConfirmEnabled
+import com.lezi.babylog.sync.joinNetworkPartialPrefillHint
+import com.lezi.babylog.sync.provenanceAfterInviteInput
+import com.lezi.babylog.sync.provenanceAfterManualNetworkEdit
 
 @Composable
 fun FamilyRoute(
@@ -56,20 +63,18 @@ fun FamilyRoute(
     var renameFamilyFeedback by remember { mutableStateOf<String?>(null) }
     var savingFamilyName by remember { mutableStateOf(false) }
     var wizardNetworkFeedback by remember { mutableStateOf<String?>(null) }
+    var wizardNetworkInfoHint by remember { mutableStateOf<String?>(null) }
+    var inviteInputError by remember { mutableStateOf<String?>(null) }
+    var networkProvenance by remember { mutableStateOf(JoinNetworkProvenance.None) }
     var savingWizardNetwork by remember { mutableStateOf(false) }
+    var removingMember by remember { mutableStateOf(false) }
 
     val novice = remember {
         HomeLanServerConfig.noviceUiDefaults(
             if (HomeWifiPermission.hasRequiredPermissions(context)) vm.currentWifiSsid() else null,
         )
     }
-    var joinDraft by remember(
-        ui.serverHost,
-        ui.serverPort,
-        ui.serverScheme,
-        ui.baseUrl,
-        ui.allowedSsids,
-    ) {
+    fun draftFromUiOrNovice(): JoinFamilyDraft {
         val saved = when {
             ui.serverHost.isNotBlank() -> HomeLanServerConfig(
                 host = ui.serverHost,
@@ -82,15 +87,64 @@ fun FamilyRoute(
             )
             else -> novice
         }
-        mutableStateOf(JoinFamilyDraft.fromConfig(saved))
+        return JoinFamilyDraft.fromConfig(saved)
+    }
+    // Stable draft: never key on prefs (that wiped invitation). Merge when prefs
+    // change only if we are not in an active wizard session.
+    var joinDraft by remember { mutableStateOf(draftFromUiOrNovice()) }
+    val wizardSessionActive = isWizardSessionDialog(dialog)
+    LaunchedEffect(
+        ui.serverHost,
+        ui.serverPort,
+        ui.serverScheme,
+        ui.baseUrl,
+        ui.allowedSsids,
+        wizardSessionActive,
+    ) {
+        if (wizardSessionActive) return@LaunchedEffect
+        val prefsConfigured = isHomeLanNetworkConfigured(ui.serverHost, ui.baseUrl, ui.allowedSsids)
+        joinDraft = if (prefsConfigured || joinDraft.invitation.isBlank()) {
+            draftFromUiOrNovice().copy(invitation = joinDraft.invitation)
+        } else {
+            joinDraft.mergeFromSaved(
+                when {
+                    ui.serverHost.isNotBlank() -> HomeLanServerConfig(
+                        host = ui.serverHost,
+                        port = ui.serverPort,
+                        allowedSsids = ui.allowedSsids,
+                        scheme = ui.serverScheme,
+                    )
+                    ui.baseUrl.isNotBlank() -> HomeLanServerConfig.fromBaseUrl(ui.baseUrl).copy(
+                        allowedSsids = ui.allowedSsids,
+                    )
+                    else -> novice
+                },
+            )
+        }
+        networkProvenance = initialProvenanceAfterDismiss(prefsConfigured, joinDraft)
     }
 
     fun showMessage(copy: String, resume: FamilyDialog? = null) {
         dialog = FamilyDialog.Message(copy, resume)
     }
+    fun finalWizardDismiss() {
+        inviteInputError = null
+        wizardNetworkInfoHint = null
+        wizardNetworkFeedback = null
+        networkProvenance = initialProvenanceAfterDismiss(
+            isHomeLanNetworkConfigured(ui.serverHost, ui.baseUrl, ui.allowedSsids),
+            joinDraft,
+        )
+        dialog = null
+    }
     fun dismissDialog() {
         val current = dialog
-        dialog = current?.let(::familyDialogAfterDismiss)
+        val next = current?.let(::familyDialogAfterDismiss)
+        if (next == null && isWizardSessionDialog(current)) {
+            finalWizardDismiss()
+        } else {
+            dialog = next
+        }
     }
 
     val homeWifiPermission = rememberLauncherForActivityResult(
@@ -127,38 +181,64 @@ fun FamilyRoute(
 
     fun openWizard(mode: FamilyWizardMode) {
         wizardNetworkFeedback = null
-        val step = familyWizardInitialStep(networkConfigured = isHomeLanNetworkConfigured(
+        wizardNetworkInfoHint = null
+        inviteInputError = null
+        val prefsConfigured = isHomeLanNetworkConfigured(
             ui.serverHost,
             ui.baseUrl,
             ui.allowedSsids,
-        ))
+        )
+        networkProvenance = if (prefsConfigured) {
+            JoinNetworkProvenance.PrefsSaved
+        } else {
+            initialProvenanceAfterDismiss(false, joinDraft)
+        }
+        val step = familyWizardInitialStep(networkConfigured = prefsConfigured)
         if (step == FamilyWizardStep.Network &&
             joinDraft.ssid1.isBlank() &&
             HomeWifiPermission.isSsidAccessReady(context)
         ) {
             vm.currentWifiSsid()?.trim()?.takeIf(String::isNotEmpty)?.let {
                 joinDraft = joinDraft.copy(ssid1 = it)
+                if (networkProvenance == JoinNetworkProvenance.None) {
+                    networkProvenance = JoinNetworkProvenance.NoviceHint
+                }
             }
         }
         dialog = FamilyDialog.Wizard(mode, step)
     }
 
+    fun applyInvitationField(raw: String) {
+        val result = joinDraft.applyInvitationInput(raw)
+        joinDraft = result.draft
+        inviteInputError = result.error
+        if (result.error == null) {
+            networkProvenance = provenanceAfterInviteInput(networkProvenance, result)
+        }
+    }
+
     fun applyScannedInvite(raw: String) {
         val payload = raw.trim()
         if (payload.isEmpty()) return
-        joinDraft = runCatching { joinDraft.prefillInvitation(payload) }
-            .getOrElse { joinDraft.copy(invitation = payload) }
-        val scanCopy = runCatching { InvitePayloadCodec.decode(payload) }.getOrNull()?.let { decoded ->
-            val config = decoded.homeLanConfig
-            buildString {
-                append("已扫入邀请")
-                if (config.host.isNotBlank()) append(" · ${config.host}:${config.port}")
-                if (decoded.ssids.isNotEmpty()) append(" · Wi‑Fi ${decoded.ssids.joinToString(" / ")}")
-            }
+        val result = joinDraft.applyInvitationInput(payload)
+        joinDraft = result.draft
+        inviteInputError = result.error
+        if (result.error != null) {
+            wizardNetworkFeedback = null
+            wizardNetworkInfoHint = null
+            dialog = FamilyDialog.Wizard(FamilyWizardMode.Join, FamilyWizardStep.Network)
+            return
         }
-        val joinWizard = FamilyDialog.Wizard(FamilyWizardMode.Join, FamilyWizardStep.Identity)
-        dialog = if (scanCopy == null) joinWizard
-        else FamilyDialog.Message(scanCopy, resume = joinWizard)
+        networkProvenance = provenanceAfterInviteInput(networkProvenance, result)
+        val step = joinStepAfterInviteInput(joinDraft.hasJoinNetwork())
+        if (step == FamilyWizardStep.Network) {
+            wizardNetworkFeedback = null
+            wizardNetworkInfoHint = joinNetworkPartialPrefillHint(joinDraft)
+        } else {
+            wizardNetworkInfoHint = null
+            wizardNetworkFeedback = null
+        }
+        dialog = FamilyDialog.Wizard(FamilyWizardMode.Join, step)
     }
     val scanInvite = rememberLauncherForActivityResult(ScanContract()) { result ->
         result.contents?.let(::applyScannedInvite)
@@ -191,6 +271,7 @@ fun FamilyRoute(
     val networkConfigured = remember(ui.serverHost, ui.baseUrl, ui.allowedSsids) {
         isHomeLanNetworkConfigured(ui.serverHost, ui.baseUrl, ui.allowedSsids)
     }
+    val draftNetworkReady = joinDraft.hasJoinNetwork()
     val controls = remember(ui.enabled, ui.role) {
         familyControlVisibility(ui.enabled, ui.role)
     }
@@ -208,8 +289,35 @@ fun FamilyRoute(
         }.getOrDefault("")
     }
 
-    /** Wizard network step: save in-place and advance to identity (no NetworkSettings bounce). */
+    fun markNetworkUserEdited() {
+        networkProvenance = provenanceAfterManualNetworkEdit(networkProvenance)
+        wizardNetworkFeedback = null
+    }
+
+    /** Join Network next: validate draft only — do not write prefs mid-flow. */
+    fun advanceJoinNetwork() {
+        if (joinDraft.host.isBlank() || joinDraft.ssids.isEmpty()) {
+            wizardNetworkFeedback = "请填写服务器主机并至少绑定一个家庭 Wi‑Fi 名称"
+            dialog = FamilyDialog.Wizard(FamilyWizardMode.Join, FamilyWizardStep.Network)
+            return
+        }
+        if (
+            networkProvenance != JoinNetworkProvenance.ScannedFull &&
+            networkProvenance != JoinNetworkProvenance.PrefsSaved
+        ) {
+            networkProvenance = JoinNetworkProvenance.UserEdited
+        }
+        wizardNetworkFeedback = null
+        wizardNetworkInfoHint = null
+        dialog = FamilyDialog.Wizard(FamilyWizardMode.Join, FamilyWizardStep.Identity)
+    }
+
+    /** Create Network step: save prefs then advance (unchanged). */
     fun saveWizardNetworkThenAdvance(mode: FamilyWizardMode) {
+        if (mode == FamilyWizardMode.Join) {
+            advanceJoinNetwork()
+            return
+        }
         if (!HomeWifiPermission.isSsidAccessReady(context)) {
             withHomeWifiAccess { saveWizardNetworkThenAdvance(mode) }
             return
@@ -249,6 +357,7 @@ fun FamilyRoute(
             when (result) {
                 is NetworkSaveResult.Saved -> {
                     wizardNetworkFeedback = null
+                    networkProvenance = JoinNetworkProvenance.PrefsSaved
                     dialog = FamilyDialog.Wizard(mode, FamilyWizardStep.Identity)
                 }
                 is NetworkSaveResult.Failed -> {
@@ -372,7 +481,40 @@ fun FamilyRoute(
                 editDisplayNameFeedback = null
                 dialog = FamilyDialog.EditMyDisplayName
             },
+            onRemoveMember = if (controls.showRemoveMember) {
+                { membershipId, displayName ->
+                    dialog = FamilyDialog.ConfirmRemoveMember(membershipId, displayName)
+                }
+            } else {
+                null
+            },
             onDismiss = { dialog = null },
+        )
+        is FamilyDialog.ConfirmRemoveMember -> RemoveMemberConfirmDialog(
+            displayName = active.displayName,
+            removing = removingMember,
+            onConfirm = {
+                withHomeWifiAccess {
+                    removingMember = true
+                    vm.removeMember(
+                        membershipId = active.membershipId,
+                        displayName = active.displayName,
+                    ) { success, copy ->
+                        removingMember = false
+                        if (success) {
+                            dialog = FamilyDialog.Message(
+                                copy,
+                                resume = FamilyDialog.MembersList,
+                            )
+                        } else {
+                            showMessage(copy, resume = FamilyDialog.MembersList)
+                        }
+                    }
+                }
+            },
+            onDismiss = {
+                if (!removingMember) dialog = FamilyDialog.MembersList
+            },
         )
         is FamilyDialog.Wizard -> when (active.step) {
             FamilyWizardStep.Network -> FamilyWizardNetworkDialog(
@@ -380,25 +522,29 @@ fun FamilyRoute(
                 host = joinDraft.host,
                 onHostChange = {
                     joinDraft = joinDraft.copy(host = it)
-                    wizardNetworkFeedback = null
+                    markNetworkUserEdited()
                 },
                 port = joinDraft.portText,
                 onPortChange = {
                     joinDraft = joinDraft.copy(portText = it)
-                    wizardNetworkFeedback = null
+                    markNetworkUserEdited()
                 },
                 ssid1 = joinDraft.ssid1,
                 onSsid1Change = {
                     joinDraft = joinDraft.copy(ssid1 = it)
-                    wizardNetworkFeedback = null
+                    markNetworkUserEdited()
                 },
                 ssid2 = joinDraft.ssid2,
                 onSsid2Change = {
                     joinDraft = joinDraft.copy(ssid2 = it)
-                    wizardNetworkFeedback = null
+                    markNetworkUserEdited()
                 },
-                networkConfigured = networkConfigured,
+                networkReady = draftNetworkReady,
                 feedback = wizardNetworkFeedback,
+                networkInfoHint = wizardNetworkInfoHint.takeIf { active.mode == FamilyWizardMode.Join },
+                inviteCodeSummary = joinDraft.invitation.takeIf {
+                    it.isNotBlank() && active.mode == FamilyWizardMode.Join
+                },
                 saving = savingWizardNetwork,
                 onUseCurrentWifi = {
                     withHomeWifiAccess {
@@ -406,28 +552,42 @@ fun FamilyRoute(
                         when {
                             current.isEmpty() ->
                                 dialog = FamilyDialog.HomeWifiAccessGuide(active)
-                            joinDraft.ssid1.isBlank() ->
+                            joinDraft.ssid1.isBlank() -> {
                                 joinDraft = joinDraft.copy(ssid1 = current)
-                            joinDraft.ssid2.isBlank() && joinDraft.ssid1 != current ->
+                                markNetworkUserEdited()
+                            }
+                            joinDraft.ssid2.isBlank() && joinDraft.ssid1 != current -> {
                                 joinDraft = joinDraft.copy(ssid2 = current)
+                                markNetworkUserEdited()
+                            }
                             joinDraft.ssid1 != current && joinDraft.ssid2 != current ->
                                 wizardNetworkFeedback = "Wi‑Fi 名称已满 2 个，请先清空一格"
                             else -> wizardNetworkFeedback = "当前 Wi‑Fi 已在列表中"
                         }
                     }
                 },
+                onScan = if (active.mode == FamilyWizardMode.Join) {
+                    { scanWithPermission() }
+                } else {
+                    null
+                },
                 onContinue = { saveWizardNetworkThenAdvance(active.mode) },
                 onDismiss = {
-                    // Interruptible: already-saved host/SSID stay in session prefs.
-                    wizardNetworkFeedback = null
                     savingWizardNetwork = false
-                    dialog = null
+                    finalWizardDismiss()
                 },
             )
             FamilyWizardStep.Identity -> when (active.mode) {
                 FamilyWizardMode.Join -> if (controls.showJoin) JoinFamilyDialog(
                     joinCode = joinDraft.invitation,
-                    onJoinCodeChange = { joinDraft = joinDraft.copy(invitation = it) },
+                    onJoinCodeChange = { raw ->
+                        if (raw.trim().startsWith("{") || raw.contains('\n')) {
+                            applyInvitationField(raw)
+                        } else {
+                            joinDraft = joinDraft.copy(invitation = raw)
+                            inviteInputError = null
+                        }
+                    },
                     displayName = joinDisplayName,
                     onDisplayNameChange = {
                         joinDisplayName = it
@@ -435,12 +595,15 @@ fun FamilyRoute(
                     },
                     displayNameError = joinDisplayNameError,
                     joining = joiningFamily,
-                    networkConfigured = networkConfigured ||
-                        isHomeLanNetworkConfigured(
-                            joinDraft.host,
-                            "",
-                            joinDraft.ssids,
-                        ),
+                    networkReady = draftNetworkReady,
+                    networkSummary = identityNetworkSummary(joinDraft, networkProvenance),
+                    networkMissingHint = identityNetworkMissingHint(joinDraft),
+                    inviteFieldError = inviteInputError,
+                    confirmEnabled = joinConfirmEnabled(
+                        joinDraft,
+                        joinDisplayName,
+                        joining = joiningFamily,
+                    ),
                     onScan = ::scanWithPermission,
                     onBackToNetwork = {
                         dialog = FamilyDialog.Wizard(FamilyWizardMode.Join, FamilyWizardStep.Network)
@@ -453,6 +616,7 @@ fun FamilyRoute(
                                 if (success) {
                                     joinDisplayName = ""
                                     joinDisplayNameError = null
+                                    inviteInputError = null
                                     dialog = FamilyDialog.Message(copy)
                                 } else {
                                     joinDisplayNameError = copy.takeIf {
@@ -471,7 +635,7 @@ fun FamilyRoute(
                     },
                     onDismiss = {
                         joinDisplayNameError = null
-                        dialog = null
+                        finalWizardDismiss()
                     },
                 )
                 FamilyWizardMode.Create -> if (controls.showCreateFamily) CreateFamilyDialog(
@@ -494,12 +658,7 @@ fun FamilyRoute(
                     },
                     feedback = bootstrapSecretFeedback,
                     creating = creatingFamily,
-                    networkConfigured = networkConfigured ||
-                        isHomeLanNetworkConfigured(
-                            joinDraft.host,
-                            "",
-                            joinDraft.ssids,
-                        ),
+                    networkConfigured = draftNetworkReady || networkConfigured,
                     onBackToNetwork = {
                         dialog = FamilyDialog.Wizard(
                             FamilyWizardMode.Create,
@@ -552,7 +711,7 @@ fun FamilyRoute(
                         createFamilyName = ""
                         createFamilyNameError = null
                         creatingFamily = false
-                        dialog = null
+                        finalWizardDismiss()
                     },
                 )
             }

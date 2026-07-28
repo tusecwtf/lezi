@@ -348,6 +348,62 @@ class FamilySessionCoordinatorTest {
     }
 
     @Test
+    fun ownerCanRemoveAnotherMember() = runTest {
+        val session = joinedFamilySession(role = FamilyRole.Owner).copy(
+            membershipId = "owner-m",
+        )
+        val backend = RecordingSyncBackend()
+        val coordinator = coordinator(
+            preferences = MemorySyncPreferences(session),
+            backend = backend,
+        )
+
+        val outcome = coordinator.execute(
+            FamilySessionCommand.RemoveMember("member-m"),
+        ).getOrThrow()
+
+        assertThat(outcome).isEqualTo(FamilySessionOutcome.Completed)
+        assertThat(backend.removedMembershipIds).containsExactly("member-m")
+    }
+
+    @Test
+    fun ownerCannotRemoveSelf() = runTest {
+        val session = joinedFamilySession(role = FamilyRole.Owner).copy(
+            membershipId = "owner-m",
+        )
+        val backend = RecordingSyncBackend()
+        val coordinator = coordinator(
+            preferences = MemorySyncPreferences(session),
+            backend = backend,
+        )
+
+        val failure = coordinator.execute(
+            FamilySessionCommand.RemoveMember("owner-m"),
+        ).exceptionOrNull()
+
+        assertThat(failure).hasMessageThat().contains("自己")
+        assertThat(backend.removedMembershipIds).isEmpty()
+    }
+
+    @Test
+    fun memberCannotRemoveOthers() = runTest {
+        val backend = RecordingSyncBackend()
+        val coordinator = coordinator(
+            preferences = MemorySyncPreferences(
+                joinedFamilySession(role = FamilyRole.Member).copy(membershipId = "member-m"),
+            ),
+            backend = backend,
+        )
+
+        val failure = coordinator.execute(
+            FamilySessionCommand.RemoveMember("other-m"),
+        ).exceptionOrNull()
+
+        assertThat(failure).hasMessageThat().contains("管理员")
+        assertThat(backend.removedMembershipIds).isEmpty()
+    }
+
+    @Test
     fun membersValidatesCurrentSelfMembershipThroughTheReplicaSeam() = runTest {
         val previous = joinedFamilySession().copy(membershipId = "membership-self")
         val preferences = MemorySyncPreferences(previous)

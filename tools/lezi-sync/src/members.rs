@@ -7,8 +7,8 @@ use axum::Json;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::model::UpdateDisplayNameRequest;
-use crate::{authenticate, json_body, ApiError, AppState};
+use crate::model::{RemoveMemberRequest, UpdateDisplayNameRequest};
+use crate::{authenticate, json_body, require_owner, ApiError, AppState};
 
 #[derive(Debug, Serialize)]
 struct MemberView {
@@ -65,6 +65,40 @@ pub(super) async fn update_my_display_name(
     Ok(Json(json!({
         "ok": true,
         "display_name": display_name,
+    })))
+}
+
+/// Owner removes another active **member** (not self, not the owner role).
+/// Reuses leave semantics: mark membership left + revoke all credentials.
+/// Historical records keep their `created_by_membership_id`; only access ends.
+pub(super) async fn remove_family_member(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<RemoveMemberRequest>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let principal = require_owner(&state, &headers)?;
+    let request = json_body(body)?;
+    let target_id = request.validate()?;
+    if target_id == principal.membership_id {
+        return Err(ApiError::forbidden(
+            "Cannot remove yourself; delete the family to stop sharing as admin",
+        ));
+    }
+    let memberships = state.store.active_memberships(&principal.family_id)?;
+    let target = memberships
+        .iter()
+        .find(|m| m.membership_id == target_id)
+        .ok_or_else(|| ApiError::not_found("Member not found or already left"))?;
+    if target.role == "owner" {
+        // Single-owner product: never demote/remove the admin this way.
+        return Err(ApiError::forbidden("Cannot remove the family admin"));
+    }
+    state
+        .store
+        .leave_membership(&target_id, state.now())?;
+    Ok(Json(json!({
+        "ok": true,
+        "membership_id": target_id,
     })))
 }
 

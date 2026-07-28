@@ -23,6 +23,8 @@ class OnboardingJoinConfigTest {
         assertEquals("https", draft.scheme)
         assertEquals("https://lezi.home:443", config.baseUrl)
         assertEquals(listOf("Home"), config.allowedSsids)
+        assertEquals("ABCD1234", draft.invitation)
+        assertEquals("ABCD1234", draft.toCommand(displayName = "妈妈").invitation)
     }
 
     @Test

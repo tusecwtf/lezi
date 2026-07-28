@@ -153,6 +153,17 @@ class FakeSyncBackend : SyncBackend {
 
     override suspend fun leave(session: SyncSession) = Unit
 
+    override suspend fun removeMember(session: SyncSession, membershipId: String) {
+        require(session.role == FamilyRole.Owner) { "仅家庭管理员可移除家人" }
+        val target = membershipId.trim()
+        require(target.isNotEmpty()) { "请选择要移除的家人" }
+        require(target != session.membershipId.trim()) { "不能移除自己" }
+        removedMembershipIds += target
+    }
+
+    /** Membership ids removed via [removeMember] (test inspection). */
+    val removedMembershipIds = mutableListOf<String>()
+
     override suspend fun deleteFamily(session: SyncSession) {
         rows.remove(session.familyId)
         mediaBytes.remove(session.familyId)

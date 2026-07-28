@@ -193,6 +193,17 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
         post(session.baseUrl, "/v1/leave", session.familyToken, buildJsonObject {})
     }
 
+    override suspend fun removeMember(session: SyncSession, membershipId: String) {
+        val id = membershipId.trim()
+        require(id.isNotEmpty()) { "请选择要移除的家人" }
+        post(
+            session.baseUrl,
+            "/v1/family/members/remove",
+            session.familyToken,
+            buildJsonObject { put("membership_id", id) },
+        )
+    }
+
     override suspend fun deleteFamily(session: SyncSession) {
         post(session.baseUrl, "/v1/family/delete", session.familyToken, buildJsonObject {})
     }

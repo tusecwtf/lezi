@@ -303,10 +303,10 @@ fun OnboardingRoute(
     fun applyScannedInvite(raw: String) {
         val payload = raw.trim()
         if (payload.isEmpty()) return
-        formError = null
-        // Prefill host, port, and optional SSIDs; persist them only after join succeeds.
-        joinDraft = runCatching { joinDraft.prefillInvitation(payload) }
-            .getOrElse { joinDraft.copy(invitation = payload) }
+        // Prefill short code + host/port/optional SSIDs; persist only after join succeeds.
+        val result = joinDraft.applyInvitationInput(payload)
+        joinDraft = result.draft
+        formError = result.error
         showJoin = true
     }
     val scanInvite = rememberLauncherForActivityResult(ScanContract()) { result ->

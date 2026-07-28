@@ -98,6 +98,8 @@ interface SyncPort {
     /** Self-only rename of this device's membership 家庭称呼. */
     suspend fun updateMyDisplayName(displayName: String): Result<Unit>
     suspend fun leave(familyId: String): Result<Unit>
+    /** Owner removes another active member by server membership id. */
+    suspend fun removeMember(membershipId: String): Result<Unit>
     suspend fun deleteFamily(): Result<Unit>
     /** [workflow] joins domain Room work and committed cleanup to the replica barrier. */
     suspend fun clearLocalRecords(
@@ -142,6 +144,8 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
     override suspend fun updateMyDisplayName(displayName: String) =
         Result.failure<Unit>(SyncNotEnabledException())
     override suspend fun leave(familyId: String) = Result.failure<Unit>(SyncNotEnabledException())
+    override suspend fun removeMember(membershipId: String) =
+        Result.failure<Unit>(SyncNotEnabledException())
     override suspend fun deleteFamily() = Result.failure<Unit>(SyncNotEnabledException())
     override suspend fun clearLocalRecords(
         workflow: LocalClearWorkflow,

@@ -25,7 +25,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use futures_util::StreamExt;
 use hmac::{Hmac, Mac};
-use members::{list_family_members, update_my_display_name};
+use members::{list_family_members, remove_family_member, update_my_display_name};
 use model::{
     BundleCommitRequest, BundleStageRequest, EmptyRequest, FamilyCreateRequest, InviteRequest,
     JoinRequest, PushRequest, RenameFamilyRequest,
@@ -316,6 +316,7 @@ pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
         .route("/ready", get(readiness))
         .route("/v1/family/create", post(create_family))
         .route("/v1/family/members", get(list_family_members))
+        .route("/v1/family/members/remove", post(remove_family_member))
         .route("/v1/family/display-name", post(update_my_display_name))
         .route("/v1/family/name", post(rename_family))
         .route("/v1/invite", post(create_invite))

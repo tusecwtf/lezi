@@ -182,6 +182,7 @@ SSID 白名单 **仅存本机**，不随家庭同步到 NAS。两台手机可登
 | createInvite | ✓ | × |
 | delete family data | ✓ | × |
 | leave | ×（首版无管理员转移，避免产生无管理员家庭） | ✓（退出） |
+| **移除家人** | ✓（仅移除 role=member；不能移自己/owner） | × |
 
 头像与日志媒体的区分：见 §6.3。
 
@@ -601,6 +602,20 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
   **不**删家庭数据。单 credential 轮换/吊销不改变 membership。owner 必须使用
   `/v1/family/delete`，首版不提供“停止共享但保留无管理员家庭”的语义。
 
+### 9.11 `POST /v1/family/members/remove`
+
+- Auth：**仅 owner** family token（member → `403`）
+- Body：`{ "membership_id" }` — 目标为同家庭 **active** membership；未知字段 → `422`
+- 规则：
+  - 不能移除自己（`membership_id == principal`）→ `403`（管理员请用 `/v1/family/delete`）
+  - 目标不存在或已离开 → `404`
+  - 目标 role 为 `owner` → `403`（首版单管理员，禁止移管理员）
+  - 目标 role 为 `member` → 与 leave 相同：标记 `left_at` 并原子吊销其全部 credentials
+- 响应：`{ "ok": true, "membership_id": "…" }`
+- **不**删除家庭实体/历史记录；记录上的 `created_by_membership_id` 仍可引用已离开 membership
+  （客户端展示用当前称呼解析失败时走「家人」等兜底）
+- 被移除设备下次 API 调用 → `401`；不主动推送通知（家网无后台推送）
+
 ---
 
 ## 10. Current entity payload 约定
@@ -692,7 +707,7 @@ Record 与 CarePlan 共享以下 current-wire 约束：
 
 | 项 | 要求 |
 |----|------|
-| 服务器 | host+端口（空态预填 192.168.50.4:8765）+ SSID 白名单≤2（预填当前 SSID）；扫码可填入 host+port+code 与可选 SSID≤2 |
+| 服务器 | host+端口（空态预填 192.168.50.4:8765）+ SSID 白名单≤2（预填当前 SSID）；扫码可填入 host+port+code 与可选 SSID≤2；账户加入向导 **Network 步即可扫码**，完整载荷预填后仅需家庭称呼即可 join；draft 存短码不存 JSON |
 | 建家 | 输入 NAS 部署时设置的一次性初始化口令；仅随本次请求发送，结束后立即清除 |
 | 引导 | 账户**首屏**为家庭概览（家庭名、成员人数、宝宝、一句结果向同步状态）；未加入用「新建/加入」家庭向导；网络/SSID/技术原因在**网络设置**二次界面；不用首屏三步条或独立 PRD 说明段落 |
 | 身份 | 建家/加入硬必填**家庭称呼**（自由文本，引导「我是宝宝的？」）；共享**家庭名**仅 owner 可改；成员列表管理员标 ★；见 ADR-0002 |
@@ -736,7 +751,7 @@ Record 与 CarePlan 共享以下 current-wire 约束：
 
 - [x] Rust/Axum 项目骨架 + 多阶段 Dockerfile + compose（静态单卷 `/data` 配置）
 - [x] SQLite schema：entities、invites、tokens、meta.rev
-- [x] health / create / invite / join / members / push / pull / media / leave / delete
+- [x] health / create / invite / join / members / members/remove / push / pull / media / leave / delete
 - [x] avatar 写权限
 - [x] README：部署、备份、示例 `192.168.50.4:8765`
 - [x] 在本机全局 Docker 构建并启动 Rust 镜像，核对单卷、非 root、`/health`

@@ -4756,6 +4756,14 @@ internal class RecordingSyncBackend : SyncBackend {
         onLeave()
     }
 
+    val removedMembershipIds = mutableListOf<String>()
+    var removeMemberFailure: Throwable? = null
+
+    override suspend fun removeMember(session: SyncSession, membershipId: String) {
+        removeMemberFailure?.let { throw it }
+        removedMembershipIds += membershipId.trim()
+    }
+
     override suspend fun deleteFamily(session: SyncSession) {
         deleteFamilyCalls += 1
         deleteFailure?.let { throw it }

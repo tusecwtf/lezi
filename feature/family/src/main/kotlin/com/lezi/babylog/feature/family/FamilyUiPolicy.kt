@@ -44,6 +44,11 @@ internal sealed interface FamilyDialog {
     data object RenameFamily : FamilyDialog
     data class Invite(val invite: FamilyInviteView) : FamilyDialog
     data object ConfirmLeave : FamilyDialog
+    /** Owner confirms removing another member (not self). */
+    data class ConfirmRemoveMember(
+        val membershipId: String,
+        val displayName: String,
+    ) : FamilyDialog
     data class DeleteFamily(val stage: DeleteStage) : FamilyDialog
     data class HomeWifiAccessGuide(val resume: FamilyDialog? = null) : FamilyDialog
     data class Message(val copy: String, val resume: FamilyDialog? = null) : FamilyDialog
@@ -55,14 +60,18 @@ internal sealed interface FamilyDialog {
     enum class DeleteStage { Warning, Final }
 }
 
-/** Overview primary CTA copy (S1). Scan lives inside the join wizard, not as a split CTA. */
+/**
+ * Overview primary CTA copy (S1).
+ * Scan is available inside the join wizard Network/Identity steps (Must);
+ * overview secondary「扫码加入」is Should and not shipped here.
+ */
 internal object FamilyPrimaryCta {
     const val CREATE = "新建家庭"
     const val JOIN = "加入家庭"
     const val INVITE = "邀请家人"
 }
 
-/** Where the family wizard should open given current home-LAN readiness. */
+/** Where the family wizard should open given current home-LAN readiness (prefs only). */
 internal fun familyWizardInitialStep(networkConfigured: Boolean): FamilyWizardStep =
     if (networkConfigured) FamilyWizardStep.Identity else FamilyWizardStep.Network
 
@@ -74,14 +83,17 @@ internal fun familyWizardTitle(mode: FamilyWizardMode, step: FamilyWizardStep): 
     }
 }
 
-/** Step chip labels for the wizard chrome (1/2 network → identity). */
+/**
+ * Step chip labels for the wizard chrome (1/2 network → identity).
+ * [networkReady] must reflect real host+≥1 SSID readiness — never true merely
+ * because [step] is Identity.
+ */
 internal fun familyWizardProgress(
     mode: FamilyWizardMode,
     step: FamilyWizardStep,
-    networkConfigured: Boolean,
+    networkReady: Boolean,
 ): Pair<String, String> {
-    val networkDone = networkConfigured || step == FamilyWizardStep.Identity
-    val step1 = if (networkDone) "✓ 家庭网络" else "1 家庭网络"
+    val step1 = if (networkReady) "✓ 家庭网络" else "1 家庭网络"
     val step2 = when {
         step == FamilyWizardStep.Identity -> when (mode) {
             FamilyWizardMode.Create -> "2 新建家庭"
@@ -93,6 +105,22 @@ internal fun familyWizardProgress(
         }
     }
     return step1 to step2
+}
+
+/** After invite input: Identity only when draft has host + ≥1 SSID. */
+internal fun joinStepAfterInviteInput(networkReady: Boolean): FamilyWizardStep =
+    if (networkReady) FamilyWizardStep.Identity else FamilyWizardStep.Network
+
+/**
+ * Wizard session remains active while on Wizard or a stack layer that resumes
+ * back to Wizard (Message / HomeWifiAccessGuide). Used to avoid wiping draft
+ * invitation when prefs update mid-flow.
+ */
+internal fun isWizardSessionDialog(dialog: FamilyDialog?): Boolean = when (dialog) {
+    is FamilyDialog.Wizard -> true
+    is FamilyDialog.Message -> dialog.resume is FamilyDialog.Wizard
+    is FamilyDialog.HomeWifiAccessGuide -> dialog.resume is FamilyDialog.Wizard
+    else -> false
 }
 
 internal fun familyDialogAfterDismiss(dialog: FamilyDialog): FamilyDialog? = when (dialog) {
@@ -155,6 +183,8 @@ internal data class FamilyControlVisibility(
     val showInvite: Boolean,
     val showJoinedActions: Boolean,
     val showLeave: Boolean,
+    /** Owner may remove non-self members from the roster. */
+    val showRemoveMember: Boolean,
 )
 
 internal fun familyControlVisibility(
@@ -166,7 +196,18 @@ internal fun familyControlVisibility(
     showInvite = isJoined && role == FamilyRole.Owner,
     showJoinedActions = isJoined,
     showLeave = isJoined && role == FamilyRole.Member,
+    showRemoveMember = isJoined && role == FamilyRole.Owner,
 )
+
+/** Whether this roster row can show owner「移除」. Never for self or owner role. */
+internal fun canRemoveFamilyMember(
+    viewerIsOwner: Boolean,
+    member: FamilyMember,
+): Boolean =
+    viewerIsOwner &&
+        !member.isSelf &&
+        member.role == FamilyRole.Member &&
+        member.membershipId.trim().isNotEmpty()
 
 internal fun isHomeLanNetworkConfigured(
     serverHost: String,

@@ -383,6 +383,33 @@ class FamilyViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Owner removes another active member. On success, refreshes the roster.
+     * Does not clear this device's session.
+     */
+    fun removeMember(
+        membershipId: String,
+        displayName: String,
+        onDone: (success: Boolean, message: String) -> Unit,
+    ) {
+        viewModelScope.launch {
+            val result = sync.removeMember(membershipId)
+            if (result.isSuccess) {
+                refreshMembersNow(showErrors = true)
+                val label = displayName.trim().ifBlank { "家人" }
+                onDone(true, "已将「$label」移出家庭")
+            } else {
+                onDone(
+                    false,
+                    familySyncError(
+                        result.exceptionOrNull() ?: Exception(),
+                        fallback = "移除家人失败，请稍后重试",
+                    ),
+                )
+            }
+        }
+    }
+
     fun pullNow(onMessage: (String) -> Unit) {
         viewModelScope.launch {
             val id = ui.value.familyId

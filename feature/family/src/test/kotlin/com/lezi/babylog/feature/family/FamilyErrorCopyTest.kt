@@ -186,6 +186,7 @@ class FamilyErrorCopyTest {
         assertTrue(ownerJoined.showInvite)
         assertTrue(ownerJoined.showJoinedActions)
         assertFalse(ownerJoined.showLeave)
+        assertTrue(ownerJoined.showRemoveMember)
 
         val memberJoined = familyControlVisibility(isJoined = true, role = FamilyRole.Member)
         assertFalse(memberJoined.showJoin)
@@ -193,6 +194,7 @@ class FamilyErrorCopyTest {
         assertFalse(memberJoined.showInvite)
         assertTrue(memberJoined.showJoinedActions)
         assertTrue(memberJoined.showLeave)
+        assertFalse(memberJoined.showRemoveMember)
 
         val unjoined = familyControlVisibility(isJoined = false, role = FamilyRole.None)
         assertTrue(unjoined.showJoin)
@@ -200,6 +202,18 @@ class FamilyErrorCopyTest {
         assertFalse(unjoined.showInvite)
         assertFalse(unjoined.showJoinedActions)
         assertFalse(unjoined.showLeave)
+        assertFalse(unjoined.showRemoveMember)
+    }
+
+    @Test
+    fun canRemoveFamilyMemberOnlyForOwnerOnOtherMembers() {
+        val member = FamilyMember("爸爸", FamilyRole.Member, isSelf = false, membershipId = "m1")
+        val selfMember = FamilyMember("妈妈", FamilyRole.Owner, isSelf = true, membershipId = "o1")
+        val otherOwner = FamilyMember("妈妈", FamilyRole.Owner, isSelf = false, membershipId = "o1")
+        assertTrue(canRemoveFamilyMember(viewerIsOwner = true, member = member))
+        assertFalse(canRemoveFamilyMember(viewerIsOwner = false, member = member))
+        assertFalse(canRemoveFamilyMember(viewerIsOwner = true, member = selfMember))
+        assertFalse(canRemoveFamilyMember(viewerIsOwner = true, member = otherOwner))
     }
 
     @Test
@@ -253,6 +267,36 @@ class FamilyErrorCopyTest {
             FamilyPrimaryCta.JOIN,
             familyWizardTitle(FamilyWizardMode.Join, FamilyWizardStep.Identity),
         )
+        // Progress must not claim ✓ solely because step is Identity
+        val dishonestWouldBe = familyWizardProgress(
+            FamilyWizardMode.Join,
+            FamilyWizardStep.Identity,
+            networkReady = false,
+        )
+        assertEquals("1 家庭网络", dishonestWouldBe.first)
+        val ready = familyWizardProgress(
+            FamilyWizardMode.Join,
+            FamilyWizardStep.Network,
+            networkReady = true,
+        )
+        assertEquals("✓ 家庭网络", ready.first)
+        assertEquals(
+            FamilyWizardStep.Identity,
+            joinStepAfterInviteInput(networkReady = true),
+        )
+        assertEquals(
+            FamilyWizardStep.Network,
+            joinStepAfterInviteInput(networkReady = false),
+        )
+        assertTrue(
+            isWizardSessionDialog(
+                FamilyDialog.Message("x", resume = FamilyDialog.Wizard(
+                    FamilyWizardMode.Join,
+                    FamilyWizardStep.Identity,
+                )),
+            ),
+        )
+        assertFalse(isWizardSessionDialog(FamilyDialog.MembersList))
     }
 
     @Test
