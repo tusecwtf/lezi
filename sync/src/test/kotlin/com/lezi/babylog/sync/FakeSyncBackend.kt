@@ -9,7 +9,7 @@ import kotlinx.serialization.json.jsonPrimitive
  * Deterministic in-memory backend for coordinator and dual-client tests.
  *
  * Mirrors core lezi-sync push rules used by client tests: LWW with existing
- * win on equal `updatedAt`, member avatar ACL, immutable media association,
+ * win on equal `updatedAt`, member Baby/avatar ACL, immutable media association,
  * and basic baby/record/media reference checks.
  */
 class FakeSyncBackend : SyncBackend {
@@ -313,6 +313,9 @@ class FakeSyncBackend : SyncBackend {
         role: FamilyRole,
         membershipId: String,
     ): Int {
+        if (role == FamilyRole.Member && entities.any { it.type == "baby" }) {
+            throw SyncHttpException(403, "Only the family owner may change babies")
+        }
         val family = rows.getOrPut(familyId) { mutableMapOf() }
         // Apply LWW first so validation sees the same effective set as the server.
         val winners = LinkedHashMap<String, SyncEntity>()

@@ -1349,13 +1349,11 @@ async fn owner_can_remove_member_and_revokes_access() {
     )
     .await;
     assert_eq!(member_remove, StatusCode::FORBIDDEN);
-    assert!(
-        member_remove_body["detail"]
-            .as_str()
-            .unwrap_or("")
-            .to_lowercase()
-            .contains("owner")
-    );
+    assert!(member_remove_body["detail"]
+        .as_str()
+        .unwrap_or("")
+        .to_lowercase()
+        .contains("owner"));
 
     // Owner cannot remove self.
     let (self_remove, self_body) = json_request(
@@ -2532,7 +2530,11 @@ async fn strict_entity_contract_rejects_sort_order_and_orders_same_batch_referen
         }]}),
     )
     .await;
-    assert_eq!(unresolved, StatusCode::UNPROCESSABLE_ENTITY, "{unresolved_body}");
+    assert_eq!(
+        unresolved,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{unresolved_body}"
+    );
     assert!(
         unresolved_body["detail"]
             .as_str()
@@ -2997,7 +2999,7 @@ async fn media_upload_rejects_empty_or_mismatched_body() {
 }
 
 #[tokio::test]
-async fn member_can_edit_baby_but_not_avatar_pointer() {
+async fn member_cannot_create_update_or_tombstone_baby() {
     let rig = Rig::new();
     let owner = create_family(
         &rig.app,
@@ -3010,7 +3012,6 @@ async fn member_can_edit_baby_but_not_avatar_pointer() {
     let member_token = member["token"].as_str().unwrap();
     let baby_id = Uuid::new_v4().to_string();
     let avatar_id = Uuid::new_v4().to_string();
-    let replacement_id = Uuid::new_v4().to_string();
     assert_eq!(
         json_request(
             &rig.app,
@@ -3021,39 +3022,37 @@ async fn member_can_edit_baby_but_not_avatar_pointer() {
                 {"type":"media","client_uuid":avatar_id,"updated_at":1,
                  "payload":avatar_media_payload(&baby_id)},
                 {"type":"baby","client_uuid":baby_id,"updated_at":1,
-                 "payload":baby_payload("年年", Some(&avatar_id))},
-                {"type":"media","client_uuid":replacement_id,"updated_at":1,
-                 "payload":avatar_media_payload(&baby_id)}
+                 "payload":baby_payload("年年", Some(&avatar_id))}
             ]}),
         )
         .await
         .0,
         StatusCode::OK
     );
-    let (nickname, _) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(member_token),
-        json!({"entities":[{
-            "type":"baby","client_uuid":baby_id,"updated_at":2,
-            "payload":baby_payload("成员可改昵称", Some(&avatar_id))
-        }]}),
-    )
-    .await;
-    assert_eq!(nickname, StatusCode::OK);
-    for payload in [
-        baby_payload("禁止清空", None),
-        baby_payload("禁止替换", Some(&replacement_id)),
+    for entity in [
+        json!({
+            "type":"baby","client_uuid":Uuid::new_v4().to_string(),"updated_at":2,
+            "payload":baby_payload("禁止新建", None)
+        }),
+        json!({
+            "type":"baby","client_uuid":baby_id,"updated_at":3,
+            "payload":baby_payload("禁止改名", Some(&avatar_id))
+        }),
+        json!({
+            "type":"baby","client_uuid":baby_id,"updated_at":4,"deleted_at":4,
+            "payload":baby_payload("禁止删除", Some(&avatar_id))
+        }),
+        json!({
+            "type":"baby","client_uuid":baby_id,"updated_at":5,
+            "payload":baby_payload("禁止清空", None)
+        }),
     ] {
         let (status, _) = json_request(
             &rig.app,
             Method::POST,
             "/v1/push",
             Some(member_token),
-            json!({"entities":[{
-                "type":"baby","client_uuid":baby_id,"updated_at":3,"payload":payload
-            }]}),
+            json!({"entities":[entity]}),
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -3095,7 +3094,7 @@ async fn stale_member_avatar_snapshot_does_not_block_newer_record() {
     .await;
     assert_eq!(seeded, StatusCode::OK, "{seeded_body}");
 
-    // Stale baby snapshot is ignored (LWW skip); the newer record still publishes.
+    // Even a stale member Baby snapshot is forbidden; a following Record is unaffected.
     let (stale_baby, stale_body) = json_request(
         &rig.app,
         Method::POST,
@@ -3107,10 +3106,15 @@ async fn stale_member_avatar_snapshot_does_not_block_newer_record() {
         ]}),
     )
     .await;
-    assert_eq!(stale_baby, StatusCode::OK, "{stale_body}");
-    assert_eq!(stale_body["applied"], 0);
-    assert_eq!(stale_body["skipped"], 1);
-    seed_record_with_id(&rig.app, member_token, &record_id, 400, record_payload(&baby_id)).await;
+    assert_eq!(stale_baby, StatusCode::FORBIDDEN, "{stale_body}");
+    seed_record_with_id(
+        &rig.app,
+        member_token,
+        &record_id,
+        400,
+        record_payload(&baby_id),
+    )
+    .await;
     let (_, pulled) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
     let entities = pulled["entities"].as_array().unwrap();
     let baby = entities
@@ -3966,14 +3970,7 @@ async fn seed_record_then_log_media(
     baby_id: &str,
     updated_at: i64,
 ) {
-    seed_record_with_id(
-        app,
-        token,
-        record_id,
-        updated_at,
-        record_payload(baby_id),
-    )
-    .await;
+    seed_record_with_id(app, token, record_id, updated_at, record_payload(baby_id)).await;
     let (status, body) = json_request(
         app,
         Method::POST,
@@ -4675,7 +4672,14 @@ async fn foreign_bundle_commit_cannot_leave_claimable_final_bytes() {
     let media_id = Uuid::new_v4().to_string();
     let bundle_id = Uuid::new_v4().to_string();
 
-    seed_record_with_id(&rig.app, owner_token, &record_id, 1, record_payload(&baby_id)).await;
+    seed_record_with_id(
+        &rig.app,
+        owner_token,
+        &record_id,
+        1,
+        record_payload(&baby_id),
+    )
+    .await;
     let (stage_status, stage_body) = json_request(
         &rig.app,
         Method::POST,
@@ -6016,6 +6020,36 @@ async fn care_plan_member_acl_and_owner_override() {
     .await;
     assert_eq!(forbid, StatusCode::FORBIDDEN, "{body}");
 
+    // The same ACL applies to plan photos even if a client bypasses the
+    // atomic-package route and submits media metadata directly.
+    let foreign_media_id = Uuid::new_v4().to_string();
+    let (foreign_media, foreign_media_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(member_b_token),
+        json!({
+            "entities": [entity_wire(
+                "media",
+                &foreign_media_id,
+                2,
+                json!({
+                    "kind": "log",
+                    "record_client_uuid": null,
+                    "care_plan_client_uuid": plan_id,
+                    "baby_client_uuid": baby_id,
+                    "mime": "image/jpeg",
+                    "width": null,
+                    "height": null,
+                    "byte_size": 3,
+                }),
+                None,
+            )]
+        }),
+    )
+    .await;
+    assert_eq!(foreign_media, StatusCode::FORBIDDEN, "{foreign_media_body}");
+
     // Owner may edit any plan.
     let bundle_o = Uuid::new_v4().to_string();
     payload["note"] = json!("管理员改");
@@ -6060,6 +6094,385 @@ async fn care_plan_member_acl_and_owner_override() {
         plan["payload"]["created_by_membership_id"],
         member_a["membership_id"]
     );
+}
+
+#[tokio::test]
+async fn concurrent_member_next_feed_create_keeps_nas_winner_without_forbidden() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "next-feed-race-owner",
+        "next-feed-race-request-0000000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let member_a = invite_and_join(&rig.app, owner_token, "next-feed-race-a").await;
+    let member_b = invite_and_join(&rig.app, owner_token, "next-feed-race-b").await;
+    let member_a_token = member_a["token"].as_str().unwrap();
+    let member_b_token = member_b["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let plan_id = Uuid::new_v4().to_string();
+    let winner_media_id = Uuid::new_v4().to_string();
+    let attacker_media_id = Uuid::new_v4().to_string();
+
+    let mut winner_payload = care_plan_payload(&baby_id, "formula");
+    winner_payload["scheduled_at"] = json!(1_700_000_060_000i64);
+    winner_payload["note"] = json!("[[lezi:next-feed:v1]]");
+    winner_payload["payload_json"] = json!({"amount_ml": 0});
+    winner_payload["created_by_membership_id"] = member_a["membership_id"].clone();
+    let winner_bundle = Uuid::new_v4().to_string();
+    let (winner_stage, winner_stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(member_a_token),
+        json!({
+            "bundle_id": winner_bundle,
+            "root": entity_wire("care_plan", &plan_id, 2, winner_payload, None),
+            "media": [entity_wire(
+                "media",
+                &winner_media_id,
+                2,
+                json!({
+                    "kind": "log",
+                    "record_client_uuid": null,
+                    "care_plan_client_uuid": plan_id,
+                    "baby_client_uuid": baby_id,
+                    "mime": "image/jpeg",
+                    "width": null,
+                    "height": null,
+                    "byte_size": 3,
+                }),
+                None,
+            )]
+        }),
+    )
+    .await;
+    assert_eq!(winner_stage, StatusCode::OK, "{winner_stage_body}");
+    assert_eq!(
+        request(
+            &rig.app,
+            Method::PUT,
+            &format!("/v1/bundles/{winner_bundle}/media/{winner_media_id}"),
+            Some(member_a_token),
+            Body::from("img"),
+            Some("image/jpeg"),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let mut loser_payload = care_plan_payload(&baby_id, "formula");
+    loser_payload["scheduled_at"] = json!(1_700_000_120_000i64);
+    loser_payload["note"] = json!("[[lezi:next-feed:v1]]");
+    loser_payload["payload_json"] = json!({"amount_ml": 0});
+    loser_payload["created_by_membership_id"] = member_b["membership_id"].clone();
+    let loser_bundle = Uuid::new_v4().to_string();
+    let (loser_stage, loser_stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(member_b_token),
+        json!({
+            "bundle_id": loser_bundle,
+            // An offline loser can carry an older timestamp and must not fall
+            // back to the ordinary edit ACL after the NAS winner publishes.
+            "root": entity_wire("care_plan", &plan_id, 1, loser_payload, None),
+            "media": [
+                entity_wire(
+                    "media",
+                    &winner_media_id,
+                    2,
+                    json!({
+                        "kind": "log",
+                        "record_client_uuid": null,
+                        "care_plan_client_uuid": plan_id,
+                        "baby_client_uuid": baby_id,
+                        "mime": "image/jpeg",
+                        "width": null,
+                        "height": null,
+                        "byte_size": 3,
+                    }),
+                    Some(2),
+                ),
+                entity_wire(
+                    "media",
+                    &attacker_media_id,
+                    1,
+                    json!({
+                        "kind": "log",
+                        "record_client_uuid": null,
+                        "care_plan_client_uuid": plan_id,
+                        "baby_client_uuid": baby_id,
+                        "mime": "image/jpeg",
+                        "width": null,
+                        "height": null,
+                        "byte_size": 3,
+                    }),
+                    None,
+                ),
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(loser_stage, StatusCode::OK, "{loser_stage_body}");
+    assert_eq!(
+        loser_stage_body["missing_media"],
+        json!([attacker_media_id])
+    );
+    assert_eq!(
+        request(
+            &rig.app,
+            Method::PUT,
+            &format!("/v1/bundles/{loser_bundle}/media/{attacker_media_id}"),
+            Some(member_b_token),
+            Body::from("bad"),
+            Some("image/jpeg"),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    // Both members staged against an empty family view. A wins publication;
+    // B must become an exact whole-package no-op when it commits afterward.
+    let (winner_commit, winner_commit_body) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{winner_bundle}/commit"),
+        Some(member_a_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(winner_commit, StatusCode::OK, "{winner_commit_body}");
+    let (loser_commit, loser_commit_body) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{loser_bundle}/commit"),
+        Some(member_b_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(loser_commit, StatusCode::OK, "{loser_commit_body}");
+
+    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
+    let plans = pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entity| entity["type"] == "care_plan" && entity["client_uuid"] == plan_id)
+        .collect::<Vec<_>>();
+    assert_eq!(plans.len(), 1);
+    assert_eq!(
+        plans[0]["payload"]["created_by_membership_id"],
+        member_a["membership_id"]
+    );
+    assert_eq!(plans[0]["payload"]["scheduled_at"], 1_700_000_060_000i64);
+    let winner_media = pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entity| entity["client_uuid"] == winner_media_id)
+        .expect("winner media remains published");
+    assert!(winner_media["deleted_at"].is_null());
+    assert!(!pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entity| entity["client_uuid"] == attacker_media_id));
+
+    let family_media = rig.directory.path().join("media").join(family_id);
+    assert!(family_media.join(&winner_media_id).is_file());
+    assert!(!family_media.join(&attacker_media_id).exists());
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let attacker_publications: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_publications WHERE family_id = ?1 AND media_uuid = ?2",
+            rusqlite::params![family_id, attacker_media_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(attacker_publications, 0);
+    let attacker_manifest_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sync_bundle_media WHERE family_id = ?1 AND bundle_id = ?2 AND media_uuid = ?3",
+            rusqlite::params![family_id, loser_bundle, attacker_media_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(attacker_manifest_rows, 0);
+    let winner_publications: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_publications WHERE family_id = ?1 AND media_uuid = ?2 AND source = 'bundle'",
+            rusqlite::params![family_id, winner_media_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(winner_publications, 1);
+
+    // A crash after the SQLite commit but before final-path cleanup leaves a
+    // durable pending row. Startup must finish that exact deletion and clear
+    // both ownership and manifest evidence.
+    let recovery_media_id = Uuid::new_v4().to_string();
+    let recovery_path = family_media.join(&recovery_media_id);
+    fs::write(&recovery_path, b"old").unwrap();
+    connection
+        .execute(
+            "INSERT INTO sync_bundle_media(family_id, bundle_id, media_uuid, declared_byte_size) VALUES (?1, ?2, ?3, 3)",
+            rusqlite::params![family_id, loser_bundle, recovery_media_id],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO media_publications(family_id, media_uuid, source, bundle_id) VALUES (?1, ?2, 'bundle_pending', ?3)",
+            rusqlite::params![family_id, recovery_media_id, loser_bundle],
+        )
+        .unwrap();
+    drop(connection);
+
+    let _restarted = rig.restart("generation-a");
+    assert!(!recovery_path.exists());
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let recovery_publications: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM media_publications WHERE family_id = ?1 AND media_uuid = ?2",
+            rusqlite::params![family_id, recovery_media_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(recovery_publications, 0);
+    let recovery_manifest_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sync_bundle_media WHERE family_id = ?1 AND bundle_id = ?2 AND media_uuid = ?3",
+            rusqlite::params![family_id, loser_bundle, recovery_media_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(recovery_manifest_rows, 0);
+}
+
+#[tokio::test]
+async fn later_staged_member_next_feed_create_replays_nas_winner_as_noop() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "next-feed-late-owner",
+        "next-feed-late-request-00000000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let family_id = owner["family_id"].as_str().unwrap();
+    let member_a = invite_and_join(&rig.app, owner_token, "next-feed-late-a").await;
+    let member_b = invite_and_join(&rig.app, owner_token, "next-feed-late-b").await;
+    let member_a_token = member_a["token"].as_str().unwrap();
+    let member_b_token = member_b["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let plan_id = Uuid::new_v4().to_string();
+
+    let mut winner_payload = care_plan_payload(&baby_id, "formula");
+    winner_payload["scheduled_at"] = json!(1_700_000_060_000i64);
+    winner_payload["note"] = json!("[[lezi:next-feed:v1]]");
+    winner_payload["payload_json"] = json!({"amount_ml": 0});
+    winner_payload["created_by_membership_id"] = member_a["membership_id"].clone();
+    let winner_bundle = Uuid::new_v4().to_string();
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/bundles",
+            Some(member_a_token),
+            json!({
+                "bundle_id": winner_bundle,
+                "root": entity_wire("care_plan", &plan_id, 2, winner_payload, None),
+                "media": []
+            }),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/bundles/{winner_bundle}/commit"),
+            Some(member_a_token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    // B starts only after A is already published. Stage canonicalizes B's
+    // deterministic collision to the exact NAS winner and discards all media;
+    // commit must recognize that durable canonical replay as the same no-op.
+    let attacker_media_id = Uuid::new_v4().to_string();
+    let mut loser_payload = care_plan_payload(&baby_id, "formula");
+    loser_payload["scheduled_at"] = json!(1_700_000_120_000i64);
+    loser_payload["note"] = json!("[[lezi:next-feed:v1]]");
+    loser_payload["payload_json"] = json!({"amount_ml": 0});
+    loser_payload["created_by_membership_id"] = member_b["membership_id"].clone();
+    let loser_bundle = Uuid::new_v4().to_string();
+    let (loser_stage, loser_stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(member_b_token),
+        json!({
+            "bundle_id": loser_bundle,
+            "root": entity_wire("care_plan", &plan_id, 1, loser_payload, None),
+            "media": [entity_wire(
+                "media",
+                &attacker_media_id,
+                1,
+                json!({
+                    "kind": "log",
+                    "record_client_uuid": null,
+                    "care_plan_client_uuid": plan_id,
+                    "baby_client_uuid": baby_id,
+                    "mime": "image/jpeg",
+                    "width": null,
+                    "height": null,
+                    "byte_size": 3,
+                }),
+                None,
+            )]
+        }),
+    )
+    .await;
+    assert_eq!(loser_stage, StatusCode::OK, "{loser_stage_body}");
+    assert_eq!(loser_stage_body["missing_media"], json!([]));
+    let (loser_commit, loser_commit_body) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{loser_bundle}/commit"),
+        Some(member_b_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(loser_commit, StatusCode::OK, "{loser_commit_body}");
+    assert_eq!(loser_commit_body["applied"], 0);
+
+    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
+    let plan = pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entity| entity["type"] == "care_plan" && entity["client_uuid"] == plan_id)
+        .unwrap();
+    assert_eq!(
+        plan["payload"]["created_by_membership_id"],
+        member_a["membership_id"]
+    );
+    assert_eq!(plan["payload"]["scheduled_at"], 1_700_000_060_000i64);
+    assert!(!rig
+        .directory
+        .path()
+        .join("media")
+        .join(family_id)
+        .join(attacker_media_id)
+        .exists());
 }
 
 #[tokio::test]
@@ -6126,7 +6539,6 @@ async fn ordinary_push_rejects_record_roots() {
     );
 }
 
-
 #[tokio::test]
 async fn fulfillment_candidate_stamps_submitter_and_rejects_bad_refs() {
     let rig = Rig::new();
@@ -6178,7 +6590,14 @@ async fn fulfillment_candidate_stamps_submitter_and_rejects_bad_refs() {
     );
 
     let record_id = Uuid::new_v4().to_string();
-    seed_record_with_id(&rig.app, member_token, &record_id, 2, record_payload(&baby_id)).await;
+    seed_record_with_id(
+        &rig.app,
+        member_token,
+        &record_id,
+        2,
+        record_payload(&baby_id),
+    )
+    .await;
 
     let cand_id = Uuid::new_v4().to_string();
     let (ok, _) = json_request(
@@ -6295,8 +6714,22 @@ async fn fulfillment_candidate_freeze_is_idempotent_and_arrival_order_independen
 
     let member_record = Uuid::new_v4().to_string();
     let owner_record = Uuid::new_v4().to_string();
-    seed_record_with_id(&rig.app, member_token, &member_record, 2, record_payload(&baby_id)).await;
-    seed_record_with_id(&rig.app, owner_token, &owner_record, 3, record_payload(&baby_id)).await;
+    seed_record_with_id(
+        &rig.app,
+        member_token,
+        &member_record,
+        2,
+        record_payload(&baby_id),
+    )
+    .await;
+    seed_record_with_id(
+        &rig.app,
+        owner_token,
+        &owner_record,
+        3,
+        record_payload(&baby_id),
+    )
+    .await;
 
     let member_cand = Uuid::new_v4().to_string();
     let owner_cand = Uuid::new_v4().to_string();

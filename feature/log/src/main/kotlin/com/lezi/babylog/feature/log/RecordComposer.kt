@@ -4,8 +4,6 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -46,7 +44,6 @@ import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CustomRecordItem
-import com.lezi.babylog.domain.FeedReminderPort
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
@@ -121,6 +118,23 @@ internal class RecordComposerSavedState(
 
     fun draftForCleanup(): QuickRecordDraft? = handle[DRAFT_KEY]
 
+    fun savePendingNextFeed(babyId: Long, type: RecordType) {
+        handle[PENDING_NEXT_FEED_BABY_KEY] = babyId
+        handle[PENDING_NEXT_FEED_TYPE_KEY] = type.key
+    }
+
+    fun pendingNextFeed(): Pair<Long, RecordType>? {
+        val babyId = handle.get<Long>(PENDING_NEXT_FEED_BABY_KEY) ?: return null
+        val type = handle.get<String>(PENDING_NEXT_FEED_TYPE_KEY)
+            ?.let(RecordType::fromKey) ?: return null
+        return babyId to type
+    }
+
+    fun clearPendingNextFeed() {
+        handle.remove<Long>(PENDING_NEXT_FEED_BABY_KEY)
+        handle.remove<String>(PENDING_NEXT_FEED_TYPE_KEY)
+    }
+
     fun clear() {
         handle.remove<RecordComposerRequest>(REQUEST_KEY)
         handle.remove<QuickRecordDraft>(DRAFT_KEY)
@@ -129,6 +143,8 @@ internal class RecordComposerSavedState(
     private companion object {
         const val REQUEST_KEY = "record_composer_saved_request"
         const val DRAFT_KEY = "record_composer_saved_draft"
+        const val PENDING_NEXT_FEED_BABY_KEY = "pending_next_feed_baby"
+        const val PENDING_NEXT_FEED_TYPE_KEY = "pending_next_feed_type"
     }
 }
 
@@ -166,6 +182,15 @@ internal enum class ComposerWriteDecision {
     AddRecord,
 }
 
+internal fun shouldOfferNextFeedPlan(
+    decision: ComposerWriteDecision,
+    type: RecordType,
+): Boolean = decision == ComposerWriteDecision.AddRecord && type in setOf(
+    RecordType.NURSING,
+    RecordType.FORMULA,
+    RecordType.PUMPED_FEED,
+)
+
 internal fun QuickRecordDraft.writeDecision(nowMillis: Long): ComposerWriteDecision = when {
     isEditingCarePlan -> ComposerWriteDecision.UpdateCarePlan
     carePlanId != null -> ComposerWriteDecision.FulfillCarePlan
@@ -183,7 +208,6 @@ internal fun QuickRecordDraft.writeDecision(nowMillis: Long): ComposerWriteDecis
 class RecordComposerViewModel @Inject constructor(
     private val careLog: CareLog,
     private val settingsStore: SettingsStore,
-    private val feedReminder: FeedReminderPort,
     private val photoStore: RecordPhotoStore,
     savedStateHandle: SavedStateHandle,
 ) : ViewModel() {
@@ -605,10 +629,13 @@ class RecordComposerViewModel @Inject constructor(
                         "已记录$label"
                     }
                 }
-                message to (
-                    command.existingRecordId == null &&
-                        command.type in FEED_TYPES
-                    )
+                val offerNextFeed = shouldOfferNextFeedPlan(writeDecision, command.type)
+                if (offerNextFeed) {
+                    savedState.savePendingNextFeed(babyId, command.type)
+                } else {
+                    savedState.clearPendingNextFeed()
+                }
+                message to offerNextFeed
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
@@ -636,14 +663,28 @@ class RecordComposerViewModel @Inject constructor(
         }
     }
 
-    internal fun scheduleReminder(atMillis: Long?, onResult: (Boolean) -> Unit) {
+    internal fun scheduleNextFeedPlan(atMillis: Long?, onResult: (Boolean) -> Unit) {
         viewModelScope.launch {
             val success = runCatching {
-                feedReminder.scheduleAfterFeed(atMillis)
+                val (babyId, type) = requireNotNull(savedState.pendingNextFeed()) {
+                    "待安排的喂养记录已失效"
+                }
+                val scheduledAt = atMillis ?: run {
+                    val intervalMin = settingsStore.settings.first().nursingIntervalMin
+                    System.currentTimeMillis() + intervalMin * 60_000L
+                }
+                careLog.scheduleNextFeedCarePlan(
+                    babyId = babyId,
+                    feedType = type,
+                    scheduledAt = scheduledAt,
+                )
+                savedState.clearPendingNextFeed()
             }.isSuccess
             onResult(success)
         }
     }
+
+    internal fun dismissNextFeedPlan() = savedState.clearPendingNextFeed()
 
     internal fun delete(onDeleted: (String) -> Unit) {
         val snapshot = _state.value
@@ -700,13 +741,6 @@ class RecordComposerViewModel @Inject constructor(
         savedState.save(request, draft)
     }
 
-    private companion object {
-        val FEED_TYPES = setOf(
-            RecordType.NURSING,
-            RecordType.FORMULA,
-            RecordType.PUMPED_FEED,
-        )
-    }
 }
 
 internal const val RECORD_COMPOSER_SKIP_PARTIALLY_EXPANDED = true
@@ -729,51 +763,40 @@ fun RecordComposerHost(
     var deleteAttempted by remember(request) { mutableStateOf(false) }
     /** Explicit convert confirm; cancel keeps the draft and original record untouched. */
     var confirmConvert by remember(request) { mutableStateOf(false) }
-    // These outlive request=null so a saved record can finish its optional reminder flow after
+    // These outlive request=null so a saved fact can finish its optional next-plan flow after
     // the restorable root request has already been consumed. rememberSaveable also preserves the
     // prompt across process recreation without ever reopening the persisted New request.
     var pendingSavedMessage by rememberSaveable { mutableStateOf<String?>(null) }
     var adjustReminder by rememberSaveable { mutableStateOf(false) }
-    var pendingReminderAt by rememberSaveable { mutableStateOf<Long?>(null) }
+    var nextFeedScheduleError by rememberSaveable { mutableStateOf<String?>(null) }
     val context = LocalContext.current
     fun finishSaved(message: String) {
         pendingSavedMessage = null
         adjustReminder = false
-        pendingReminderAt = null
+        nextFeedScheduleError = null
         onSaved(message)
     }
-    val notificationPermission = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        val message = pendingSavedMessage ?: return@rememberLauncherForActivityResult
-        if (!granted) {
-            finishSaved("$message；通知权限未开启，未设置提醒")
-        } else {
-            vm.scheduleReminder(pendingReminderAt) { scheduled ->
-                finishSaved(
-                    if (scheduled) "$message；提醒已设置"
-                    else "$message；提醒设置失败，可在设置中重试",
-                )
-            }
-        }
-    }
     fun requestOrScheduleReminder(atMillis: Long?) {
-        pendingReminderAt = atMillis
-        val hasPermission = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.POST_NOTIFICATIONS,
-            ) == PackageManager.PERMISSION_GRANTED
-        if (hasPermission) {
-            val message = pendingSavedMessage ?: return
-            vm.scheduleReminder(atMillis) { scheduled ->
+        if (pendingSavedMessage == null) return
+        nextFeedScheduleError = null
+        vm.scheduleNextFeedPlan(atMillis) { scheduled ->
+            if (scheduled) {
+                val hasNotificationPermission =
+                    Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                        ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.POST_NOTIFICATIONS,
+                        ) == PackageManager.PERMISSION_GRANTED
                 finishSaved(
-                    if (scheduled) "$message；提醒已设置"
-                    else "$message；提醒设置失败，可在设置中重试",
+                    carePlanSaveMessageWithPermission(
+                        baseMessage = "已安排下次喂养",
+                        notificationPermissionGranted = hasNotificationPermission,
+                        isCarePlanWrite = true,
+                    ),
                 )
+            } else {
+                nextFeedScheduleError = "下次喂养安排失败，可重试或选择不安排"
             }
-        } else {
-            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
     val sheetState = rememberModalBottomSheetState(
@@ -998,15 +1021,20 @@ fun RecordComposerHost(
     pendingSavedMessage?.let { message ->
         AlertDialog(
             onDismissRequest = {},
-            title = { Text(if (adjustReminder) "调整提醒时间" else "设置下次喂养提醒？") },
+            title = { Text(if (adjustReminder) "调整计划时间" else "安排下次喂养？") },
             text = {
-                Text(
-                    if (adjustReminder) {
-                        "选择从现在起的提醒间隔。记录已经安全保存。"
-                    } else {
-                        "记录已经安全保存。你可以按设置间隔提醒、调整时间，或不提醒。"
-                    },
-                )
+                androidx.compose.foundation.layout.Column {
+                    Text(
+                        if (adjustReminder) {
+                            "选择从现在起的计划间隔。记录已经安全保存。"
+                        } else {
+                            "记录已经安全保存。你可以按设置间隔创建家庭护理计划、调整时间，或不安排。"
+                        },
+                    )
+                    nextFeedScheduleError?.let {
+                        Text(it, color = MaterialTheme.colorScheme.error)
+                    }
+                }
             },
             confirmButton = {
                 if (adjustReminder) {
@@ -1017,7 +1045,7 @@ fun RecordComposerHost(
                     ) { Text("60 分钟") }
                 } else {
                     TextButton(onClick = { requestOrScheduleReminder(null) }) {
-                        Text("确认提醒")
+                        Text("确认安排")
                     }
                 }
             },
@@ -1032,8 +1060,11 @@ fun RecordComposerHost(
                     TextButton(onClick = { adjustReminder = true }) {
                         Text("调整时间")
                     }
-                    TextButton(onClick = { finishSaved("$message；未设置提醒") }) {
-                        Text("不提醒")
+                    TextButton(onClick = {
+                        vm.dismissNextFeedPlan()
+                        finishSaved("$message；未安排下次喂养")
+                    }) {
+                        Text("不安排")
                     }
                 }
             },

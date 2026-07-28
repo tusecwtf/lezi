@@ -61,6 +61,9 @@ data class BabyEntity(
     val avatarMediaUuid: String? = null,
     /** App-private relative path. Never sync this device-local value. */
     val avatarPath: String? = null,
+    /** Local-only: this Baby identity was applied from the joined family authority. */
+    @ColumnInfo(defaultValue = "0")
+    val familyAuthority: Boolean = false,
 )
 
 @Entity(

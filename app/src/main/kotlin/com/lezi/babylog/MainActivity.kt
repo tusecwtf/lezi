@@ -91,6 +91,8 @@ import com.lezi.babylog.feature.timer.TimerRoute
 import com.lezi.babylog.feature.widget.CareWidgetRefreshController
 import com.lezi.babylog.feature.widget.WidgetComposerContract
 import com.lezi.babylog.feature.widget.WidgetComposerTarget
+import com.lezi.babylog.sync.FamilyRole
+import com.lezi.babylog.sync.SyncPort
 import dagger.hilt.android.AndroidEntryPoint
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Duration
@@ -213,6 +215,7 @@ data class PendingFulfillPlan(
 
 data class RootUi(
     val hasBaby: Boolean = false,
+    val familyRole: FamilyRole = FamilyRole.None,
     val baby: Baby? = null,
     val babies: List<Baby> = emptyList(),
     val sleeping: Boolean = false,
@@ -227,6 +230,7 @@ data class RootUi(
 @HiltViewModel
 class RootViewModel @Inject constructor(
     private val careLog: CareLog,
+    private val syncPort: SyncPort,
     private val settings: SettingsStore,
     private val systemCalendarConfiguration: SystemCalendarConfigurationCoordinator,
     private val savedStateHandle: SavedStateHandle,
@@ -250,7 +254,7 @@ class RootViewModel @Inject constructor(
         savedStateHandle[SELECTED_DATE_KEY] = dayFlow.value.toEpochDay()
     }
 
-    private val baseUi = combine(
+    private val localBaseUi = combine(
         careLog.observeHasBaby(),
         careLog.observeCurrentBaby(),
         careLog.observeBabies(),
@@ -265,6 +269,10 @@ class RootViewModel @Inject constructor(
             visualStyle = s.visualStyle,
             selectedDate = day,
         )
+    }
+
+    private val baseUi = combine(localBaseUi, syncPort.session()) { base, session ->
+        base.copy(familyRole = session.role)
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -449,7 +457,7 @@ fun LeziRoot(
     onWidgetComposerConsumed: () -> Unit = {},
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
-    if (!ui.hasBaby) {
+    if (shouldShowOnboarding(ui.hasBaby, ui.familyRole)) {
         // Baby creation updates this route through CareLog; no completion callback is needed.
         OnboardingRoute(onFinished = {})
         return
@@ -646,7 +654,11 @@ fun LeziRoot(
     ) { padding ->
         NavHost(
             navController = nav,
-            startDestination = TopDest.Log.route,
+            startDestination = if (!ui.hasBaby && ui.familyRole == FamilyRole.Member) {
+                TopDest.Family.route
+            } else {
+                TopDest.Log.route
+            },
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
@@ -808,6 +820,9 @@ fun LeziRoot(
         )
     }
 }
+
+internal fun shouldShowOnboarding(hasBaby: Boolean, familyRole: FamilyRole): Boolean =
+    !hasBaby && familyRole != FamilyRole.Member
 
 private const val TIMER_SEED_NOTE_KEY = "timer_seed_note"
 private const val TIMER_SEED_AMOUNT_KEY = "timer_seed_amount_ml"

@@ -66,12 +66,12 @@ class NextFeedScheduler @Inject constructor(
 
     suspend fun rescheduleFromStore() = mutationGuard.withLock {
         val stored = settings.settings.first()
-        val at = stored.nextFeedAt ?: return@withLock
-        if (at <= System.currentTimeMillis()) return@withLock
-        val epoch = stored.nextFeedEpoch.ifBlank { settings.setNextFeedAt(at) }
-        ensureChannel(context)
-        val am = context.getSystemService(AlarmManager::class.java)
-        am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pending(context, epoch))
+        if (stored.nextFeedAt == null) return@withLock
+        // Current authority is the family-shared CarePlan. A legacy device-local
+        // alarm has no baby/type identity, so discard it instead of creating a
+        // second reminder source or fabricating plan data.
+        settings.clearNextFeedAt()
+        cancelAlarmLocked()
     }
 
     /** Atomically rejects a stale delivery before it can notify or clear a newer epoch. */

@@ -75,6 +75,34 @@ class DayChartFilterWiringTest {
         assertNull(resolveDayChartSelection("NOT_A_CATEGORY"))
     }
 
+    @Test
+    fun summaryTypes_mapToTheSameFiveDayChartCategories() {
+        assertEquals(DayChartCategory.MILK, summaryDayChartCategory(RecordType.FORMULA))
+        assertEquals(DayChartCategory.MILK, summaryDayChartCategory(RecordType.PUMPED_FEED))
+        assertEquals(DayChartCategory.NURSING, summaryDayChartCategory(RecordType.NURSING))
+        assertEquals(DayChartCategory.SLEEP, summaryDayChartCategory(RecordType.SLEEP))
+        assertEquals(DayChartCategory.PEE, summaryDayChartCategory(RecordType.PEE))
+        assertEquals(DayChartCategory.POOP, summaryDayChartCategory(RecordType.POOP))
+        assertNull(summaryDayChartCategory(RecordType.TEMPERATURE))
+    }
+
+    @Test
+    fun summarySelection_togglesThroughSharedReducer_andNoDataIsNoOp() {
+        val records = listOf(stubRecord(1, RecordType.FORMULA), stubRecord(2, RecordType.PEE))
+        var state = DayChartFilterState(
+            DayChartFilterContext(babyId = 1, day = LocalDate.of(2026, 7, 27)),
+        )
+
+        state = reduceSummaryDayChartSelection(state, RecordType.FORMULA, records)
+        assertEquals(DayChartCategory.MILK, state.selection)
+        state = reduceSummaryDayChartSelection(state, RecordType.FORMULA, records)
+        assertNull(state.selection)
+        state = reduceSummaryDayChartSelection(state, RecordType.POOP, records)
+        assertNull(state.selection)
+        state = reduceSummaryDayChartSelection(state, RecordType.PEE, records)
+        assertEquals(DayChartCategory.PEE, state.selection)
+    }
+
     private fun stubRecord(id: Long, type: RecordType) = com.lezi.babylog.core.model.Record(
         id = id,
         clientUuid = "u$id",

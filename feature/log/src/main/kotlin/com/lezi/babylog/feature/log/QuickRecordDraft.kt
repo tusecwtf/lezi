@@ -452,11 +452,10 @@ internal data class QuickRecordDraft(
             }
             else -> Unit
         }
-        // Nursing fact/fulfill still require at least one side; schedule/edit/convert skips.
-        if (scheduleOrEditPlan && mode == QuickRecordMode.Nursing) {
-            return null
-        }
-        val payloadError = RecordPayloadCodec.validate(payloadDocument().payload).firstOrNull()
+        val payloadError = RecordPayloadCodec.validate(
+            payloadDocument().payload,
+            allowIntentOnlyFeed = scheduleOrEditPlan,
+        ).firstOrNull()
             ?: return null
         return payloadValidationResult(payloadError)
     }
@@ -834,8 +833,14 @@ internal data class QuickRecordDraft(
         /** Prefill edit-plan Composer; timestamp stays on the plan's scheduledAt. */
         fun fromCarePlanForEdit(plan: CarePlan): QuickRecordDraft {
             val base = fromCarePlan(plan, actualTimestamp = plan.scheduledAt)
+            val intentMilkAmount = (
+                RecordPayloadCodec.decode(plan.type, plan.payloadJson, plan.schemaVersion).payload
+                    as? MilkPayload
+                )?.amountMl
             return base.copy(
                 editCarePlan = true,
+                // Editing intent must round-trip zero instead of inventing a fact amount.
+                amountMl = intentMilkAmount ?: base.amountMl,
                 // Edit plan is pure intent — no sleep-down action chrome.
                 sleepAction = null,
             )

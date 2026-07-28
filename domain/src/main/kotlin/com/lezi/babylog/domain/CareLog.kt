@@ -35,6 +35,7 @@ import com.lezi.babylog.core.model.FulfillmentCandidateEvidence
 import com.lezi.babylog.core.model.MAX_RECORD_PHOTOS
 import com.lezi.babylog.core.model.NursingPayload
 import com.lezi.babylog.core.model.MilkPayload
+import com.lezi.babylog.core.model.NEXT_FEED_PLAN_MARKER
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordPayloadCodec
 import com.lezi.babylog.core.model.RecordPayloadDocument
@@ -51,6 +52,7 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.temporal.ChronoUnit
+import java.nio.charset.StandardCharsets
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -89,6 +91,9 @@ data class UpdateBabyInput(
 class DuplicateBabyNicknameException(val nickname: String) :
     IllegalArgumentException("宝宝昵称「$nickname」已存在")
 
+class BabyProfilePermissionException :
+    IllegalStateException("宝宝档案由家庭管理员管理")
+
 class SleepStateChangedException :
     IllegalStateException("睡眠状态已变化，请重新打开睡眠菜单")
 
@@ -120,6 +125,35 @@ class ConflictAuditPermissionException :
 class CustomItemPermissionException :
     IllegalStateException("无权修改该自定义项目")
 
+private val NEXT_FEED_TYPES = setOf(
+    RecordType.NURSING,
+    RecordType.FORMULA,
+    RecordType.PUMPED_FEED,
+)
+
+internal fun isNextFeedPlanNote(note: String?): Boolean =
+    note?.startsWith(NEXT_FEED_PLAN_MARKER) == true
+
+internal fun visibleCarePlanNote(note: String?): String? = note
+    ?.removePrefix(NEXT_FEED_PLAN_MARKER)
+    ?.trimStart()
+    ?.takeIf(String::isNotBlank)
+
+private fun nextFeedPlanNote(visibleNote: String?): String = buildString {
+    append(NEXT_FEED_PLAN_MARKER)
+    visibleNote?.trim()?.takeIf(String::isNotBlank)?.let { append(' ').append(it) }
+}
+
+internal fun nextFeedPlanClientUuid(babyClientUuid: String, generationSeed: String): String =
+    UUID.nameUUIDFromBytes(
+        "lezi.next-feed.v1:$babyClientUuid:$generationSeed".toByteArray(StandardCharsets.UTF_8),
+    ).toString()
+
+private fun nextFeedPlanGenerationSeed(plans: List<CarePlanEntity>): String =
+    plans.maxWithOrNull(compareBy<CarePlanEntity> { it.updatedAt }.thenBy { it.clientUuid })
+        ?.let { "${it.clientUuid}:${it.updatedAt}:${it.status}:${it.deletedAt ?: 0L}" }
+        ?: "initial"
+
 data class LocalFamilyIdentity(
     val deviceId: String,
     val displayName: String,
@@ -133,6 +167,21 @@ data class BabyMergePreview(
     val targetNickname: String,
     val recordCount: Int,
     val carePlanCount: Int,
+)
+
+private data class BabyMergeWriteResult(
+    val reprojectPlanClientUuids: List<String>,
+    val discardedNextFeedPlanIds: List<Long>,
+    val carePlanIdentityMigrations: List<CarePlanIdentityMigration>,
+)
+
+private data class CarePlanIdentityMigration(
+    val carePlanId: Long,
+    val oldClientUuid: String,
+    val newClientUuid: String,
+    val oldSystemCalendarEventId: String?,
+    val oldSystemCalendarReminderReady: Boolean,
+    val oldSystemCalendarProjectionPending: Boolean,
 )
 
 @Singleton
@@ -191,14 +240,31 @@ class CareLog @Inject constructor(
     private val sleepMutationMutex = Mutex()
 
     fun observeHasBaby(): Flow<Boolean> =
-        babyDao.observeAll().map { it.isNotEmpty() }
+        combine(babyDao.observeAll(), syncPort.session()) { babies, session ->
+            visibleBabyEntities(babies, session.role).isNotEmpty()
+        }
 
     fun observeBabies(): Flow<List<Baby>> =
-        babyDao.observeAll().map { list -> list.map { it.toModel() } }
+        combine(babyDao.observeAll(), syncPort.session()) { babies, session ->
+            visibleBabyEntities(babies, session.role).map { it.toModel() }
+        }
+
+    fun observeMemberLocalBabyOrphans(): Flow<List<Baby>> =
+        combine(babyDao.observeAll(), syncPort.session()) { babies, session ->
+            if (session.role == com.lezi.babylog.sync.FamilyRole.Member) {
+                babies.filterNot(BabyEntity::familyAuthority).map { it.toModel() }
+            } else {
+                emptyList()
+            }
+        }
 
     fun observeCurrentBaby(): Flow<Baby?> =
-        combine(babyDao.observeAll(), settings.currentBabyId) { babies, storedId ->
-            pickCurrent(babies, storedId)
+        combine(babyDao.observeAll(), settings.currentBabyId, syncPort.session()) {
+                babies,
+                storedId,
+                session,
+            ->
+            pickCurrent(visibleBabyEntities(babies, session.role), storedId)
         }.map { entity ->
             entity?.toModel()
         }
@@ -218,6 +284,7 @@ class CareLog @Inject constructor(
     }
 
     suspend fun addBaby(input: CreateBabyInput): Long {
+        requireCanManageBabyProfiles()
         val now = System.currentTimeMillis()
         val userId = ensureLocalUser(now)
         val familyId = ensureFamily(userId, now)
@@ -251,6 +318,7 @@ class CareLog @Inject constructor(
      * @throws DuplicateBabyNicknameException when another baby already uses the name
      */
     suspend fun updateBabyProfile(babyId: Long, input: UpdateBabyInput) {
+        requireCanManageBabyProfiles()
         val changed = transactionRunner.run {
             val existing = babyDao.get(babyId) ?: return@run false
             val nickname = normalizeNickname(input.nickname)
@@ -278,6 +346,7 @@ class CareLog @Inject constructor(
 
     /** Soft-delete a baby profile. Reassigns current baby if needed. Keeps at least one baby. */
     suspend fun deleteBaby(babyId: Long): Boolean {
+        requireCanManageBabyProfiles()
         var deleted = false
         val remaining = transactionRunner.run {
             val babies = babyDao.listAll()
@@ -302,13 +371,17 @@ class CareLog @Inject constructor(
      * callers that mutate membership (delete/merge/set) must reassign explicitly.
      */
     suspend fun getCurrentBaby(): Baby? {
-        val babies = babyDao.listAll()
+        val role = syncPort.session().first().role
+        val babies = visibleBabyEntities(babyDao.listAll(), role)
         val stored = settings.currentBabyId.first()
         val entity = pickCurrent(babies, stored) ?: return null
         return entity.toModel()
     }
 
-    suspend fun listBabies(): List<Baby> = babyDao.listAll().map { it.toModel() }
+    suspend fun listBabies(): List<Baby> {
+        val role = syncPort.session().first().role
+        return visibleBabyEntities(babyDao.listAll(), role).map { it.toModel() }
+    }
 
     /** Read-only family identity seam for feature modules; never creates rows. */
     suspend fun localFamilyIdentity(): LocalFamilyIdentity {
@@ -338,7 +411,51 @@ class CareLog @Inject constructor(
 
     suspend fun setCurrentBaby(babyId: Long) {
         val baby = babyDao.get(babyId) ?: return
+        if (
+            syncPort.session().first().role == com.lezi.babylog.sync.FamilyRole.Member &&
+            !baby.familyAuthority
+        ) {
+            throw BabyProfilePermissionException()
+        }
         settings.setCurrentBabyId(baby.id)
+    }
+
+    /** Member-safe local appearance/order mutation; never advances family LWW data. */
+    suspend fun updateBabyLocalPreferences(
+        babyId: Long,
+        themeColorArgb: Int? = null,
+        sortOrder: Int? = null,
+    ) {
+        val baby = babyDao.get(babyId) ?: return
+        if (
+            syncPort.session().first().role == com.lezi.babylog.sync.FamilyRole.Member &&
+            !baby.familyAuthority
+        ) {
+            throw BabyProfilePermissionException()
+        }
+        themeColorArgb?.let { babyDao.updateLocalTheme(baby.id, it) }
+        sortOrder?.let { babyDao.updateLocalSortOrder(baby.id, it) }
+    }
+
+    /** Reorder only the locally visible Baby list; family profile revisions stay untouched. */
+    suspend fun updateBabyLocalOrder(orderedBabyIds: List<Long>) {
+        val role = syncPort.session().first().role
+        val visible = visibleBabyEntities(babyDao.listAll(), role)
+        require(
+            orderedBabyIds.size == visible.size &&
+                orderedBabyIds.toSet() == visible.mapTo(linkedSetOf(), BabyEntity::id),
+        ) {
+            "宝宝顺序与当前可见档案不一致"
+        }
+        val byId = visible.associateBy(BabyEntity::id)
+        transactionRunner.run {
+            orderedBabyIds.forEachIndexed { index, babyId ->
+                val baby = requireNotNull(byId[babyId])
+                if (baby.sortOrder != index) {
+                    babyDao.updateLocalSortOrder(baby.id, index)
+                }
+            }
+        }
     }
 
     /**
@@ -1124,6 +1241,120 @@ class CareLog @Inject constructor(
     }
 
     /**
+     * Create or move the one open, family-shared next-feed CarePlan for [babyId].
+     * The marker is stable sync data but is stripped from every model/UI surface.
+     * Intent-only feed payloads deliberately contain no fabricated amount/duration.
+     */
+    suspend fun scheduleNextFeedCarePlan(
+        babyId: Long,
+        feedType: RecordType,
+        scheduledAt: Long,
+        zone: ZoneId = ZoneId.systemDefault(),
+        nowMillis: Long = System.currentTimeMillis(),
+    ): Long {
+        require(feedType in NEXT_FEED_TYPES) { "仅喂养记录可安排下次喂养" }
+        require(scheduledAt > nowMillis) { "下次喂养须选择未来时刻" }
+        val baby = requireActiveBaby(babyId)
+        val payload = when (feedType) {
+            RecordType.NURSING -> NursingPayload()
+            RecordType.FORMULA, RecordType.PUMPED_FEED -> MilkPayload(feedType)
+            else -> error("unsupported next-feed type")
+        }
+        val payloadJson = RecordPayloadCodec.encode(
+            RecordPayloadDocument(
+                type = feedType,
+                payload = payload,
+                schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+            ),
+        )
+        val (id, duplicateIds) = transactionRunner.run {
+            val open = carePlanDao.listAllIncludingDeleted()
+                .filter {
+                    it.babyId == babyId &&
+                        it.deletedAt == null &&
+                        it.status in setOf(
+                            CarePlanStatus.PENDING.storageKey,
+                            CarePlanStatus.MISSED.storageKey,
+                        ) &&
+                        isNextFeedPlanNote(it.note)
+                }
+                .sortedWith(compareBy<CarePlanEntity> { it.updatedAt }.thenBy { it.id })
+            val existing = open.firstOrNull()
+            if (existing != null) {
+                requireCanManageCarePlan(existing)
+                open.drop(1).forEach { requireCanManageCarePlan(it) }
+            }
+            val at = nowMillis.coerceAtLeast((existing?.updatedAt ?: 0L) + 1L)
+            val plan = if (existing == null) {
+                val generationSeed = nextFeedPlanGenerationSeed(
+                    carePlanDao.listAllIncludingDeleted().filter {
+                        it.babyId == babyId && isNextFeedPlanNote(it.note)
+                    },
+                )
+                CarePlanEntity(
+                    clientUuid = nextFeedPlanClientUuid(baby.clientUuid, generationSeed),
+                    babyId = babyId,
+                    type = feedType.key,
+                    scheduledAt = scheduledAt,
+                    scheduledZoneId = zone.id,
+                    note = nextFeedPlanNote(null),
+                    payloadJson = payloadJson,
+                    schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+                    status = CarePlanStatus.PENDING.storageKey,
+                    createdByMembershipId = currentMembershipActorId(),
+                    updatedAt = at,
+                    syncDirty = true,
+                    systemCalendarProjectionEnabled = true,
+                )
+            } else {
+                existing.copy(
+                    type = feedType.key,
+                    scheduledAt = scheduledAt,
+                    scheduledZoneId = zone.id,
+                    note = nextFeedPlanNote(visibleCarePlanNote(existing.note)),
+                    payloadJson = payloadJson,
+                    schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+                    status = CarePlanStatus.PENDING.storageKey,
+                    fulfilledRecordClientUuid = null,
+                    fulfilledAt = null,
+                    updatedAt = at,
+                    syncDirty = true,
+                    systemCalendarProjectionEnabled = true,
+                    systemCalendarReminderReady = false,
+                )
+            }
+            val planId = carePlanDao.upsert(plan)
+            // Defensive healing for old concurrent duplicates: preserve the oldest
+            // stable identity and tombstone every other open marker row.
+            open.drop(1).forEach { duplicate ->
+                carePlanDao.softDelete(duplicate.id, at.coerceAtLeast(duplicate.updatedAt + 1L))
+            }
+            planId to open.drop(1).map(CarePlanEntity::id)
+        }
+        duplicateIds.forEach { duplicateId ->
+            reminderProjection.cancelCarePlanReminderBestEffort(duplicateId)
+            reminderProjection.removeSystemCalendarProjection(duplicateId)
+        }
+        // The CarePlan is already committed at this point. Retiring legacy reminder state is
+        // best-effort and must never make the caller believe the plan write failed.
+        try {
+            settings.clearNextFeedAt()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            // Legacy preference cleanup is intentionally best-effort.
+        }
+        carePlanDao.get(id)?.toModel()?.let { plan ->
+            reminderProjection.projectOrScheduleCarePlanReminder(
+                plan,
+                projectToSystemCalendar = true,
+            )
+        }
+        requestLocalSync()
+        return id
+    }
+
+    /**
      * Fulfill a pending/missed plan: confirm non-future actual time, insert linked
      * Record and complete the plan in one transaction. Any active family member may
      * fulfill any plan; manage rights (edit/skip/delete) stay author/admin-only.
@@ -1667,10 +1898,15 @@ class CareLog @Inject constructor(
             val nextZoneId = zone?.id ?: plan.scheduledZoneId
             val desiredProjection =
                 projectToSystemCalendar ?: plan.systemCalendarProjectionEnabled
+            val persistedNote = if (isNextFeedPlanNote(plan.note)) {
+                nextFeedPlanNote(note)
+            } else {
+                note
+            }
             val sharedChanged =
                 plan.scheduledAt != scheduledAt ||
                     plan.scheduledZoneId != nextZoneId ||
-                    plan.note != note ||
+                    plan.note != persistedNote ||
                     plan.payloadJson != nextPayload ||
                     plan.schemaVersion != nextSchemaVersion ||
                     plan.status != CarePlanStatus.PENDING.storageKey
@@ -1679,7 +1915,7 @@ class CareLog @Inject constructor(
                 carePlanDao.update(plan.copy(
                     scheduledAt = scheduledAt,
                     scheduledZoneId = nextZoneId,
-                    note = note,
+                    note = persistedNote,
                     payloadJson = nextPayload,
                     schemaVersion = nextSchemaVersion,
                     status = CarePlanStatus.PENDING.storageKey,
@@ -1911,6 +2147,7 @@ class CareLog @Inject constructor(
         .toList()
 
     suspend fun renameBaby(babyId: Long, nickname: String) {
+        requireCanManageBabyProfiles()
         val name = normalizeNickname(nickname)
         val changed = transactionRunner.run {
             val baby = babyDao.get(babyId) ?: return@run false
@@ -1941,6 +2178,7 @@ class CareLog @Inject constructor(
         val source = babyDao.get(sourceBabyId) ?: return null
         val target = babyDao.get(targetBabyId) ?: return null
         if (source.familyId != target.familyId) return null
+        requireAllowedBabyMerge(source, target)
         return BabyMergePreview(
             sourceBabyId = source.id,
             sourceNickname = source.nickname,
@@ -1958,14 +2196,22 @@ class CareLog @Inject constructor(
      * The target profile stays intact; source records and care plans (including
      * tombstones), plus avatar media rows, are re-bound to the target baby.
      */
-    suspend fun mergeBabyProfiles(sourceBabyId: Long, targetBabyId: Long): Boolean {
+    suspend fun mergeBabyProfiles(sourceBabyId: Long, targetBabyId: Long): Boolean =
+        mergeBabyProfiles(sourceBabyId, targetBabyId, forceMemberRules = false)
+
+    private suspend fun mergeBabyProfiles(
+        sourceBabyId: Long,
+        targetBabyId: Long,
+        forceMemberRules: Boolean,
+    ): Boolean {
         if (sourceBabyId == targetBabyId) return false
         val now = System.currentTimeMillis()
-        val movedCarePlanClientUuids = sleepMutationMutex.withLock {
+        val writeResult = sleepMutationMutex.withLock {
             transactionRunner.run {
                 val source = babyDao.get(sourceBabyId) ?: return@run null
                 val target = babyDao.get(targetBabyId) ?: return@run null
                 if (source.familyId != target.familyId) return@run null
+                val memberMerge = requireAllowedBabyMerge(source, target, forceMemberRules)
                 // Include soft-deleted rows so tombstones stay with the keeper profile.
                 recordDao.listAllIncludingDeleted()
                     .filter { it.babyId == source.id }
@@ -1978,16 +2224,83 @@ class CareLog @Inject constructor(
                             ),
                         )
                     }
-                val sourceCarePlans = carePlanDao.listAllIncludingDeleted()
+                val allCarePlans = carePlanDao.listAllIncludingDeleted()
+                val sourceCarePlans = allCarePlans
                     .filter { it.babyId == source.id }
+                val targetMarkerPlans = allCarePlans.filter {
+                    it.babyId == target.id && isNextFeedPlanNote(it.note)
+                }
+                var targetOpenNextFeed = targetMarkerPlans.firstOrNull {
+                    it.deletedAt == null &&
+                        it.status in setOf(
+                            CarePlanStatus.PENDING.storageKey,
+                            CarePlanStatus.MISSED.storageKey,
+                        )
+                }
+                val reprojectPlanUuids = mutableListOf<String>()
+                val discardedNextFeedIds = mutableListOf<Long>()
+                val identityMigrations = mutableListOf<CarePlanIdentityMigration>()
                 sourceCarePlans.forEach { plan ->
-                    carePlanDao.update(
-                        plan.copy(
-                            babyId = target.id,
-                            updatedAt = nextSyncUpdatedAt(plan.updatedAt, now),
-                            syncDirty = true,
-                        ),
-                    )
+                    val isOpenNextFeed = plan.deletedAt == null &&
+                        plan.status in setOf(
+                            CarePlanStatus.PENDING.storageKey,
+                            CarePlanStatus.MISSED.storageKey,
+                        ) &&
+                        isNextFeedPlanNote(plan.note)
+                    when {
+                        isOpenNextFeed && targetOpenNextFeed != null -> {
+                            val discardedAt = nextSyncUpdatedAt(plan.updatedAt, now)
+                            // Keep the target profile's stable plan identity. A member-local
+                            // orphan was never family data, while an owner merge publishes a
+                            // normal tombstone so every peer converges on one open plan.
+                            carePlanDao.update(
+                                plan.copy(
+                                    deletedAt = discardedAt,
+                                    updatedAt = discardedAt,
+                                    syncDirty = !memberMerge,
+                                ),
+                            )
+                            discardedNextFeedIds += plan.id
+                        }
+                        memberMerge && isOpenNextFeed -> {
+                            val canonicalUuid = nextFeedPlanClientUuid(
+                                target.clientUuid,
+                                nextFeedPlanGenerationSeed(targetMarkerPlans),
+                            )
+                            val moved = plan.copy(
+                                clientUuid = canonicalUuid,
+                                babyId = target.id,
+                                updatedAt = nextSyncUpdatedAt(plan.updatedAt, now),
+                                syncDirty = true,
+                            )
+                            carePlanDao.update(moved)
+                            targetOpenNextFeed = moved
+                            if (canonicalUuid == plan.clientUuid) {
+                                reprojectPlanUuids += canonicalUuid
+                            } else {
+                                identityMigrations += CarePlanIdentityMigration(
+                                    carePlanId = plan.id,
+                                    oldClientUuid = plan.clientUuid,
+                                    newClientUuid = canonicalUuid,
+                                    oldSystemCalendarEventId = plan.systemCalendarEventId,
+                                    oldSystemCalendarReminderReady =
+                                        plan.systemCalendarReminderReady,
+                                    oldSystemCalendarProjectionPending =
+                                        plan.systemCalendarProjectionPending,
+                                )
+                            }
+                        }
+                        else -> {
+                            carePlanDao.update(
+                                plan.copy(
+                                    babyId = target.id,
+                                    updatedAt = nextSyncUpdatedAt(plan.updatedAt, now),
+                                    syncDirty = true,
+                                ),
+                            )
+                            reprojectPlanUuids += plan.clientUuid
+                        }
+                    }
                 }
                 mediaAssetDao.listAllIncludingDeleted()
                     .filter { it.babyId == source.id }
@@ -2006,20 +2319,68 @@ class CareLog @Inject constructor(
                         source.copy(
                             deletedAt = deletedAt,
                             updatedAt = deletedAt,
-                            syncDirty = true,
+                            // A member-local orphan never becomes a family tombstone.
+                            syncDirty = !memberMerge,
                         )
                     },
                 )
-                sourceCarePlans.map { it.clientUuid }
+                BabyMergeWriteResult(
+                    reprojectPlanClientUuids = reprojectPlanUuids,
+                    discardedNextFeedPlanIds = discardedNextFeedIds,
+                    carePlanIdentityMigrations = identityMigrations,
+                )
             }
         }
-        if (movedCarePlanClientUuids == null) return false
+        if (writeResult == null) return false
         if (settings.currentBabyId.first() == sourceBabyId) {
             settings.setCurrentBabyId(targetBabyId)
         }
-        reminderProjection.reprojectMergedBabySystemCalendarCopies(movedCarePlanClientUuids)
+        writeResult.discardedNextFeedPlanIds.forEach { planId ->
+            reminderProjection.cancelCarePlanReminderBestEffort(planId)
+            reminderProjection.removeSystemCalendarProjection(planId)
+        }
+        writeResult.carePlanIdentityMigrations.forEach { migration ->
+            reminderProjection.migrateCarePlanIdentity(
+                carePlanId = migration.carePlanId,
+                oldClientUuid = migration.oldClientUuid,
+                newClientUuid = migration.newClientUuid,
+                oldSystemCalendarEventId = migration.oldSystemCalendarEventId,
+                oldSystemCalendarReminderReady = migration.oldSystemCalendarReminderReady,
+                oldSystemCalendarProjectionPending = migration.oldSystemCalendarProjectionPending,
+            )
+        }
+        reminderProjection.reprojectMergedBabySystemCalendarCopies(
+            writeResult.reprojectPlanClientUuids,
+        )
         requestLocalSync()
         return true
+    }
+
+    /**
+     * After a member applies the authority Baby set, deterministically rebind
+     * every local orphan only when there is exactly one authority target.
+     */
+    suspend fun reconcileMemberLocalBabies(): Int =
+        reconcileMemberLocalBabies(forceMemberRules = false)
+
+    internal suspend fun reconcileMemberLocalBabiesAfterFamilyApply(): Int =
+        reconcileMemberLocalBabies(forceMemberRules = true)
+
+    private suspend fun reconcileMemberLocalBabies(forceMemberRules: Boolean): Int {
+        if (
+            !forceMemberRules &&
+            syncPort.session().first().role != com.lezi.babylog.sync.FamilyRole.Member
+        ) return 0
+        val active = babyDao.listAll()
+        val authorities = active.filter(BabyEntity::familyAuthority)
+        if (authorities.size != 1) return 0
+        val target = authorities.single()
+        var merged = 0
+        active.filterNot(BabyEntity::familyAuthority).forEach { source ->
+            if (mergeBabyProfiles(source.id, target.id, forceMemberRules = true)) merged++
+        }
+        settings.setCurrentBabyId(target.id)
+        return merged
     }
 
     private fun normalizeNickname(raw: String): String =
@@ -2037,7 +2398,43 @@ class CareLog @Inject constructor(
     }
 
     private suspend fun requireActiveBaby(babyId: Long): BabyEntity =
-        requireNotNull(babyDao.get(babyId)) { "宝宝档案不存在，请返回后重试" }
+        requireNotNull(babyDao.get(babyId)) { "宝宝档案不存在，请返回后重试" }.also { baby ->
+            if (
+                syncPort.session().first().role == com.lezi.babylog.sync.FamilyRole.Member &&
+                !baby.familyAuthority
+            ) {
+                throw BabyProfilePermissionException()
+            }
+        }
+
+    private suspend fun requireCanManageBabyProfiles() {
+        if (syncPort.session().first().role == com.lezi.babylog.sync.FamilyRole.Member) {
+            throw BabyProfilePermissionException()
+        }
+    }
+
+    /** @return true only for the special member orphan -> authority merge path. */
+    private suspend fun requireAllowedBabyMerge(
+        source: BabyEntity,
+        target: BabyEntity,
+        forceMemberRules: Boolean = false,
+    ): Boolean {
+        val member = forceMemberRules ||
+            syncPort.session().first().role == com.lezi.babylog.sync.FamilyRole.Member
+        if (member && (source.familyAuthority || !target.familyAuthority)) {
+            throw BabyProfilePermissionException()
+        }
+        return member
+    }
+
+    private fun visibleBabyEntities(
+        babies: List<BabyEntity>,
+        role: com.lezi.babylog.sync.FamilyRole,
+    ): List<BabyEntity> = if (role == com.lezi.babylog.sync.FamilyRole.Member) {
+        babies.filter(BabyEntity::familyAuthority)
+    } else {
+        babies
+    }
 
     private suspend fun ensureLocalUser(now: Long): Long {
         localUserDao.get()?.id?.let { return it }
@@ -2353,7 +2750,7 @@ internal fun CarePlanEntity.toModel(): CarePlan =
         customItemId = customItemId,
         scheduledAt = scheduledAt,
         scheduledZoneId = scheduledZoneId,
-        note = note,
+        note = visibleCarePlanNote(note),
         payloadJson = payloadJson,
         schemaVersion = schemaVersion,
         status = CarePlanStatus.fromStorage(status),

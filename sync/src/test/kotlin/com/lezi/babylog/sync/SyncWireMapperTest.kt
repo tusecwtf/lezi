@@ -2,6 +2,7 @@ package com.lezi.babylog.sync
 
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.BabyEntity
+import com.lezi.babylog.core.database.CarePlanEntity
 import com.lezi.babylog.core.database.FulfillmentCandidateEntity
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.RecordEntity
@@ -12,6 +13,44 @@ import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Test
 
 class SyncWireMapperTest {
+    @Test
+    fun carePlanAllowsIntentOnlyFeedButRecordStillRequiresAFactAmount() {
+        val plan = CarePlanEntity(
+            clientUuid = "next-feed-plan",
+            babyId = 7,
+            type = "formula",
+            scheduledAt = 1_000,
+            scheduledZoneId = "Asia/Shanghai",
+            note = "[[lezi:next-feed:v1]]",
+            payloadJson = """{"amount_ml":0}""",
+            createdByMembershipId = "membership-a",
+            updatedAt = 456,
+        )
+
+        assertThat(SyncWireMapper.carePlan(plan, "baby-uuid", null).payloadJson)
+            .contains("\"amount_ml\":0")
+        assertThat(
+            runCatching {
+                SyncWireMapper.carePlan(plan.copy(note = "手动计划"), "baby-uuid", null)
+            }.isFailure,
+        ).isTrue()
+        assertThat(
+            runCatching {
+                SyncWireMapper.record(
+                    RecordEntity(
+                        clientUuid = "invalid-fact",
+                        babyId = 7,
+                        type = "formula",
+                        timestamp = 1_000,
+                        payloadJson = """{"amount_ml":0}""",
+                        updatedAt = 456,
+                    ),
+                    "baby-uuid",
+                )
+            }.isFailure,
+        ).isTrue()
+    }
+
     @Test
     fun recordUsesPortableBabyIdAndCurrentTypedObjectPayload() {
         val entity = RecordEntity(

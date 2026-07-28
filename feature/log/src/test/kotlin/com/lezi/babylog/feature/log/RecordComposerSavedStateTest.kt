@@ -70,6 +70,27 @@ class RecordComposerSavedStateTest {
     }
 
     @Test
+    fun persistedFactKeepsNextFeedIdentityAfterComposerDraftIsConsumed() {
+        val handle = SavedStateHandle()
+        val saved = RecordComposerSavedState(handle)
+        val request = RecordComposerRequest.New(
+            babyId = 7L,
+            type = RecordType.FORMULA,
+            timestamp = 1_000L,
+            historical = false,
+        )
+        saved.save(request, QuickRecordDraft.create(RecordType.FORMULA, 1_000L))
+        saved.savePendingNextFeed(7L, RecordType.FORMULA)
+
+        saved.clear()
+
+        assertNull(saved.restore(request))
+        assertEquals(7L to RecordType.FORMULA, saved.pendingNextFeed())
+        saved.clearPendingNextFeed()
+        assertNull(saved.pendingNextFeed())
+    }
+
+    @Test
     fun savedFeedConsumesRestorableRequestBeforeReminderChoice() {
         val events = mutableListOf<String>()
         var restorableRequest: RecordComposerRequest? = RecordComposerRequest.New(

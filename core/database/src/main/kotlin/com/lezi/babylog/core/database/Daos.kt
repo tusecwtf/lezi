@@ -54,6 +54,9 @@ interface BabyDao {
     @Query("SELECT * FROM babies WHERE deletedAt IS NULL ORDER BY sortOrder ASC, id ASC")
     suspend fun listAll(): List<BabyEntity>
 
+    @Query("SELECT * FROM babies WHERE deletedAt IS NULL AND familyAuthority = 1 ORDER BY sortOrder ASC, id ASC")
+    suspend fun listFamilyAuthority(): List<BabyEntity>
+
     @Query("SELECT * FROM babies WHERE id = :id AND deletedAt IS NULL")
     suspend fun get(id: Long): BabyEntity?
 
@@ -80,6 +83,9 @@ interface BabyDao {
     @Query("UPDATE babies SET syncDirty = 1")
     suspend fun markAllPendingSync()
 
+    @Query("UPDATE babies SET familyAuthority = 0")
+    suspend fun clearFamilyAuthority()
+
     @Query(
         """
         SELECT COUNT(*) FROM babies
@@ -98,6 +104,14 @@ interface BabyDao {
 
     @Update
     suspend fun update(baby: BabyEntity)
+
+    /** Device-local field only; cannot overwrite a concurrent family-authority revision. */
+    @Query("UPDATE babies SET themeColorArgb = :themeColorArgb WHERE id = :id")
+    suspend fun updateLocalTheme(id: Long, themeColorArgb: Int)
+
+    /** Device-local field only; cannot overwrite a concurrent family-authority revision. */
+    @Query("UPDATE babies SET sortOrder = :sortOrder WHERE id = :id")
+    suspend fun updateLocalSortOrder(id: Long, sortOrder: Int)
 
     @Query(
         """

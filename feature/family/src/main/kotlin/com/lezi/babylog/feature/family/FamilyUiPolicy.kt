@@ -173,6 +173,8 @@ internal fun syncStatusLabel(
 
 internal fun canEditFamilyAvatar(role: FamilyRole): Boolean = role != FamilyRole.Member
 
+internal fun canManageFamilyBabies(role: FamilyRole): Boolean = role != FamilyRole.Member
+
 internal fun familyStorageCopy(enabled: Boolean): String =
     if (enabled) "本机 + 家庭服务器" else "仅本机"
 

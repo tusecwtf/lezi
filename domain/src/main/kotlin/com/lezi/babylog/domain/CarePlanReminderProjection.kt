@@ -308,6 +308,7 @@ internal class CarePlanReminderProjection(
     /** Keep the durable map identity until provider deletion is confirmed. */
     internal suspend fun removeSystemCalendarProjectionByClientUuidLocked(
         clientUuid: String,
+        forceProviderLookup: Boolean = false,
     ): Boolean {
         val prefs = settings.settings.first()
         val map = parseSystemCalendarEventMap(prefs.systemCalendarEventMapJson).toMutableMap()
@@ -320,7 +321,8 @@ internal class CarePlanReminderProjection(
         // provably never touched the provider.
         val requiresProviderLookup = knownIds.isNotEmpty() ||
             plan?.systemCalendarReminderReady == true ||
-            plan?.systemCalendarProjectionPending == true
+            plan?.systemCalendarProjectionPending == true ||
+            forceProviderLookup
         suspend fun deleteKnown(eventId: String): Boolean {
             val deleted = runCatching {
                 systemCalendar.deleteEvent(eventId, clientUuid)
@@ -371,6 +373,60 @@ internal class CarePlanReminderProjection(
             settings.setSystemCalendarEventMapJson(encodeSystemCalendarEventMap(map))
         }
         return true
+    }
+
+    /**
+     * Retire every device-local side effect owned by an old sync identity, then
+     * establish the same open plan under its new identity.
+     */
+    internal suspend fun migrateCarePlanIdentity(
+        carePlanId: Long,
+        oldClientUuid: String,
+        newClientUuid: String,
+        oldSystemCalendarEventId: String?,
+        oldSystemCalendarReminderReady: Boolean,
+        oldSystemCalendarProjectionPending: Boolean,
+    ) {
+        if (oldClientUuid == newClientUuid) return
+        try {
+            calendarReminderMutationGuard.withLock {
+                cancelCarePlanReminderBestEffort(carePlanId)
+                if (oldSystemCalendarEventId != null) {
+                    putSystemCalendarEventMapping(oldClientUuid, oldSystemCalendarEventId)
+                }
+                val oldProjectionRemoved = removeSystemCalendarProjectionByClientUuidLocked(
+                    clientUuid = oldClientUuid,
+                    forceProviderLookup = oldSystemCalendarEventId != null ||
+                        oldSystemCalendarReminderReady ||
+                        oldSystemCalendarProjectionPending,
+                )
+                val entity = carePlanDao.get(carePlanId)
+                    ?.takeIf { it.clientUuid == newClientUuid }
+                    ?: return@withLock
+                if (!oldProjectionRemoved) {
+                    // A provider-owned old event may still exist. Keep delivery
+                    // fail-closed until foreground/boot reconciliation can retire it.
+                    cancelCarePlanReminderBestEffort(carePlanId)
+                    return@withLock
+                }
+                carePlanDao.updateSystemCalendarProjection(
+                    clientUuid = newClientUuid,
+                    eventId = null,
+                    reminderReady = false,
+                    pending = false,
+                )
+                val refreshed = carePlanDao.get(carePlanId) ?: return@withLock
+                projectOrScheduleCarePlanReminderLocked(
+                    refreshed.toModel(),
+                    projectToSystemCalendar = entity.systemCalendarProjectionEnabled,
+                )
+            }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            // The identity change is committed. Delivery remains fail-closed;
+            // normal boot/foreground reconciliation retries durable projection state.
+        }
     }
 
     internal suspend fun reconcileTerminalSystemCalendarProjectionsLocked() {

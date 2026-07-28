@@ -16,7 +16,7 @@
 | DI | Hilt | |
 | 导航 | Navigation Compose | |
 | 图表 | Canvas 时间条 + Compose 自绘 | 未引入第三方图表库（Vico 等为可选未来项，仓库无依赖） |
-| 通知 | NotificationCompat + **非精确**本地闹钟 | 下次喂奶 / 护理计划；**不要求** `SCHEDULE_EXACT_ALARM`；**不为同步/伴侣新记录推送** |
+| 通知 | NotificationCompat + **非精确**本地闹钟 | 护理计划（含下次喂养计划）；**不要求** `SCHEDULE_EXACT_ALARM`；**不为同步/伴侣新记录推送** |
 | 计时 | 前台服务 + 状态持久化 | 关 App 仍跑 |
 | Widget | Glance | |
 | 同步 | `RealSyncPort` + 家局域网 NAS | 已实现持久会话、家网/前台门闩、Outbox、Bearer push/pull 与媒体 |
@@ -120,11 +120,11 @@ UI 事件
 | INTERNET / ACCESS_NETWORK_STATE | 家网 health、push/pull 与媒体 | 已声明；网络调用仍受前台 + Wi-Fi + health 门闩 |
 | ACCESS_FINE_LOCATION | 读取当前 SSID，执行硬家庭 Wi-Fi 门闩 | 仅用户操作家庭同步时申请；Android 将 SSID 视为位置敏感字段，应用不读取坐标、不上传 SSID |
 | CAMERA | 扫描家庭邀请 QR | 可选硬件；无相机仍可粘贴载荷 |
-| SCHEDULE_EXACT_ALARM / USE_EXACT_ALARM | **不申请**；喂奶/护理计划提醒用非精确闹钟即可 | |
+| SCHEDULE_EXACT_ALARM / USE_EXACT_ALARM | **不申请**；护理计划提醒用非精确闹钟即可 | |
 | 麦克风 / 后台定位 / 附近设备 | **不申请** | |
 
 拒绝通知：仍可记账，无提醒。
-本地提醒（下次喂奶、护理计划）允许系统在省电策略下批量/延后触发，**不保证**准时到秒；产品不承诺「精确闹钟」体验。
+护理计划本地提醒允许系统在省电策略下批量/延后触发，**不保证**准时到秒；产品不承诺「精确闹钟」体验。下次喂养已复用家庭护理计划，不再写入独立 `nextFeedAt` 或安排第二个闹钟；恢复流程若在 current state 中发现遗留 `nextFeedAt`，会一次性取消并清除，避免与可见日程形成双响；依照 ADR-0008，不承诺旧 Room schema 升级。
 
 系统日历副本提供三级本机披露：仅“乐记 · 护理计划”、标题显示“宝宝昵称 · 记录类型”，或再把文字备注写入描述。标准 `CalendarContract.Events` 无通用照片附件字段；最高级别仅写“照片 N 张，打开乐记查看”并配置应用 URI，照片字节不交给系统日历账户。
 

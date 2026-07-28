@@ -176,6 +176,9 @@ class FamilyErrorCopyTest {
         assertTrue(canEditFamilyAvatar(FamilyRole.None))
         assertTrue(canEditFamilyAvatar(FamilyRole.Owner))
         assertFalse(canEditFamilyAvatar(FamilyRole.Member))
+        assertTrue(canManageFamilyBabies(FamilyRole.None))
+        assertTrue(canManageFamilyBabies(FamilyRole.Owner))
+        assertFalse(canManageFamilyBabies(FamilyRole.Member))
     }
 
     @Test

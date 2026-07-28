@@ -27,7 +27,7 @@
 | 3 | 建家 / 发码 / 加码 / 同步 | **全部** 受同一门闩约束（含 SSID；仅在家） |
 | 4 | 传输 | 默认 **HTTP + token**；可选 HTTPS 由 NAS 的 Caddy/Nginx/系统反向代理终止，服务本身不接收证书环境变量 |
 | 5 | 同步实体（首版） | **Baby + Record + 日志 MediaAsset** |
-| 5b | 写权限 | **宝宝头像：仅管理员（owner）**；**日志媒体：家庭内可同步** |
+| 5b | 写权限 | **Baby 全部档案字段与头像：仅管理员（owner）**；member 只 pull Baby；**日志媒体：家庭内可同步** |
 | 6 | 媒体字节 | NAS 本地文件；API 上传/下载；DB 只存元数据 |
 | 6b | 落盘布局 | **data 与 media 同一数据根路径**（单 volume） |
 | 7 | 多家庭 | **一家一栈** 交付；schema 保留 `family_id`，不多租户产品化 |
@@ -176,7 +176,8 @@ SSID 白名单 **仅存本机**，不随家庭同步到 NAS。两台手机可登
 | 操作 | owner | member |
 |------|-------|--------|
 | push/pull Record | ✓ | ✓ |
-| push/pull Baby 档案字段 | ✓ | ✓（建议：成员可改自己可见档案；冲突 LWW） |
+| push Baby 档案字段 / tombstone | ✓ | **拒绝（403）** |
+| pull Baby 档案字段 | ✓ | ✓（NAS 权威，只读） |
 | **改宝宝头像（avatar media）** | ✓ | **拒绝** |
 | 日志 MediaAsset 增删改 | ✓ | ✓（建议仅关联自己创建的 Record；服务端至少校验 token∈家庭） |
 | createInvite | ✓ | × |
@@ -198,15 +199,17 @@ SSID 白名单 **仅存本机**，不随家庭同步到 NAS。两台手机可登
 
 | 同步（首版） | 不同步 |
 |--------------|--------|
-| Baby（含头像引用；头像写限 owner） | SettingsLocal 全部 |
-| Record（含软删） | 下次喂奶提醒、Widget |
+| Baby（含头像引用；全部写入仅 owner） | SettingsLocal 全部 |
+| Record（含软删） | Widget |
 | CustomItemDef（不含布局、显隐与快捷槽位） | 本机-only 路径、主题与排序 |
 | CarePlan + FulfillmentCandidate | 系统日历 ID/权限/披露与提醒偏好 |
-| Record/计划 MediaAsset 元数据 + 字节 | Widget 配置与下次喂奶时刻 |
+| Record/计划 MediaAsset 元数据 + 字节 | Widget 配置、护理计划提醒与系统日历状态 |
 
 `CustomItemDef`、`CarePlan`、`FulfillmentCandidate` 与计划媒体均为现行同步域。
 带照片的 Record/CarePlan 必须在发送、服务端发布
 和接收应用阶段以完整照片包原子可见，不能先展示实体再补照片。
+
+member 的前台/下拉同步先完成全部 pull 页并应用 NAS 权威 Baby，再执行本机孤宝宝收敛与出站捕获；Baby 永不进入 member outbox。恰有一个权威宝宝时自动再绑定孤宝宝数据；多个权威宝宝时等待用户明确选择目标；零个时保留本机数据并等待管理员创建。尚未再绑定的孤宝宝 Record/CarePlan/媒体继续留在本机 dirty 状态，不以无效宝宝引用上行；合并后再捕获新版。owner 仍保持现有本地写入与 LWW 上行顺序。
 
 ### 5.2 冲突
 
@@ -502,6 +505,7 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 - `generation`：客户端已知服务代际；不匹配时服务端先返回结构化 `409`，
   不应用任何实体
 - LWW：请求 `updated_at` 小于库中则 skip
+- Baby ACL：member 请求中出现任何 `type=baby`（新建、更新或 tombstone）时，整次请求返回 `403`，不得在 LWW skip 前静默接受；owner 行为不变
 - Record 作者是 server-owned field：首次接受新 Record 时，NAS 从认证 principal
   写入 `created_by_membership_id`；客户端伪造的 membership/device claim 不会成为作者。后续编辑、软删与恢复保留
   已存首次作者。ordinary push 与 atomic bundle 必须调用同一 canonicalization 规则
@@ -583,6 +587,7 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 - **LWW 与 ordinary**：commit 与 `/v1/push` 共享实体键 LWW；不得用半套 ordinary 写穿破原子可见性
 - **根类型通用**：`record` 与 `care_plan` 共用同一 HTTP/Store 契约
 - **CarePlan ACL**：创建时服务端从认证 principal 盖章 `created_by_membership_id`（忽略客户端伪造）；任意成员可创建；普通成员仅可修改/跳过/删除自己创建的计划，管理员可管理全部；作者离开后管理员仍可管理。计划媒体引用、宝宝、具体项目与家庭必须一致，跨家庭引用以冲突错误拒绝
+- **下次喂养并发创建**：Android 按家庭权威 Baby 与计划代次生成确定性 CarePlan UUID。两个 member 离线创建同一 UUID 时，NAS 保留先发布的开放 next-feed 计划，并把后到 package（root 与全部 media）规范化为成功 no-op（不授予 winner 编辑权，也不允许给他人计划增删照片）；member 的本地写同步走 `pull → push → pull`，同轮采用 NAS winner、清理 losing plan/media/outbox 与本机副作用，并由普通 CarePlan apply 重挂唯一提醒。
 - **不经 ordinary push**：`record` 与 `care_plan` 不得走 `/v1/push`，必须经 atomic bundle，避免半套包
 - **履行候选**（`fulfillment_candidate`，ordinary push）：任意活动成员可提交；服务端在候选首次接受时固定认证 `submitter_membership_id`、`submitter_role` 与不可编辑 `confirmed_at`，后续请求/幂等重放不得改写；客户端用盖章字段按管理员 → 较早确认时间 → 候选 UUID 裁决唯一权威事实，落选标记 conflict-not-adopted 并排除于普通记录表面；管理员本机冲突审计与「转为独立记录」不改写候选盖章字段，也不通过 wire 同步 `adoptionStatus` / `convertedRecordClientUuid`
 - **暂存上限**：每包最多 8 个 media；每家庭最多 64 个 open staging bundle（防 NAS 磁盘无界）

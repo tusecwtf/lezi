@@ -127,8 +127,12 @@ data class SettingsUi(
     val current: Baby? = null,
     val customItems: List<CustomRecordItem> = emptyList(),
     val isFamilyJoined: Boolean = false,
+    val familyRole: com.lezi.babylog.sync.FamilyRole = com.lezi.babylog.sync.FamilyRole.None,
     val systemCalendarTargetSummary: String = "未配置",
-)
+) {
+    val canManageBabyProfiles: Boolean
+        get() = familyRole != com.lezi.babylog.sync.FamilyRole.Member
+}
 
 private data class LocalSettingsUi(
     val settings: SettingsLocal,
@@ -183,6 +187,7 @@ class SettingsViewModel @Inject constructor(
             current = cur,
             customItems = customItems,
             isFamilyJoined = session.isJoined,
+            familyRole = session.role,
             systemCalendarTargetSummary = local.systemCalendarTargetSummary,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsUi())
@@ -198,6 +203,27 @@ class SettingsViewModel @Inject constructor(
     fun setInterval(min: Int) = viewModelScope.launch { settingsStore.setNursingIntervalMin(min) }
     fun setRecordAt(v: String) = viewModelScope.launch { settingsStore.setRecordAt(v) }
     fun setCurrent(id: Long) = viewModelScope.launch { careLog.setCurrentBaby(id) }
+    fun setBabyLocalTheme(id: Long, argb: Int, onDone: (String?) -> Unit) =
+        viewModelScope.launch {
+            val result = runCatching {
+                careLog.updateBabyLocalPreferences(id, themeColorArgb = argb)
+            }
+            onDone(result.exceptionOrNull()?.let { productUiError(it, "本机主题保存失败") })
+        }
+
+    fun moveBabyLocal(id: Long, delta: Int, onDone: (String?) -> Unit) =
+        viewModelScope.launch {
+            val ordered = ui.value.babies.toMutableList()
+            val from = ordered.indexOfFirst { it.id == id }
+            val to = (from + delta).coerceIn(0, ordered.lastIndex)
+            val result = runCatching {
+                require(from >= 0 && from != to) { "宝宝已在该位置" }
+                val moved = ordered.removeAt(from)
+                ordered.add(to, moved)
+                careLog.updateBabyLocalOrder(ordered.map(Baby::id))
+            }
+            onDone(result.exceptionOrNull()?.let { productUiError(it, "本机顺序保存失败") })
+        }
     fun setVisualStyle(key: String) = viewModelScope.launch { settingsStore.setVisualStyle(key) }
     fun setPreferredHand(hand: String) = viewModelScope.launch { settingsStore.setPreferredHand(hand) }
     fun setTimelineOrder(order: String) =
@@ -351,10 +377,15 @@ fun SettingsRoute(
     var showPerItem by remember { mutableStateOf(false) }
     var showPlanCalendar by remember { mutableStateOf(false) }
     var showSystemCalendarSetup by remember { mutableStateOf(false) }
+    var localPreferenceBabyId by remember { mutableStateOf<Long?>(null) }
+    var localPreferenceError by remember { mutableStateOf<String?>(null) }
     fun finishAddBabyDialog() {
         showAdd = false
         addError = null
         if (initiallyShowAddBaby) onInitialAddBabyFinished()
+    }
+    LaunchedEffect(ui.canManageBabyProfiles, showAdd) {
+        if (!ui.canManageBabyProfiles && showAdd) finishAddBabyDialog()
     }
     fun finishQuickSlotsDialog() {
         showQuickSlots = false
@@ -423,17 +454,20 @@ fun SettingsRoute(
                         )
                     },
                     trailing = {
-                        Box(
-                            Modifier
-                                .size(22.dp)
-                                .clip(CircleShape)
-                                .background(Color(b.themeColorArgb))
-                                .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.45f), CircleShape),
-                        )
+                        TextButton(
+                            onClick = {
+                                localPreferenceError = null
+                                localPreferenceBabyId = b.id
+                            },
+                        ) { Text("本机外观") }
                     },
                 )
             }
-            MenuRow("添加宝宝", "新建本机宝宝档案", icon = "+", onClick = { showAdd = true })
+            if (ui.canManageBabyProfiles) {
+                MenuRow("添加宝宝", "新建本机宝宝档案", icon = "+", onClick = { showAdd = true })
+            } else {
+                MenuRow("宝宝档案", "宝宝档案由家庭管理员管理", icon = "·", onClick = {})
+            }
 
             Text("数据", style = LeziTypography.Eyebrow, color = MaterialTheme.colorScheme.onSurfaceVariant)
             MenuRow(
@@ -659,6 +693,72 @@ fun SettingsRoute(
             },
             confirmButton = { TextButton(onClick = { showDisplay = false }) { Text("完成") } },
         )
+    }
+
+    localPreferenceBabyId?.let { babyId ->
+        val baby = ui.babies.firstOrNull { it.id == babyId }
+        if (baby == null) {
+            LaunchedEffect(babyId) { localPreferenceBabyId = null }
+        } else {
+            val position = ui.babies.indexOfFirst { it.id == babyId }
+            AlertDialog(
+                onDismissRequest = { localPreferenceBabyId = null },
+                title = { Text("${baby.nickname}的本机外观") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("主题色与宝宝顺序只影响这台设备，不会修改家庭档案。")
+                        Text("主题色", style = LeziTypography.Label)
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                            maxItemsInEachRow = 4,
+                        ) {
+                            BabyThemePalette.forEachIndexed { index, argb ->
+                                FilterChip(
+                                    selected = baby.themeColorArgb == argb,
+                                    onClick = {
+                                        vm.setBabyLocalTheme(baby.id, argb) {
+                                            localPreferenceError = it
+                                        }
+                                    },
+                                    modifier = Modifier.semantics {
+                                        contentDescription = "本机主题色：${BabyThemePaletteLabels[index]}"
+                                    },
+                                    label = {
+                                        Box(
+                                            Modifier
+                                                .size(18.dp)
+                                                .clip(CircleShape)
+                                                .background(Color(argb)),
+                                        )
+                                    },
+                                )
+                            }
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(
+                                enabled = position > 0,
+                                onClick = {
+                                    vm.moveBabyLocal(baby.id, -1) { localPreferenceError = it }
+                                },
+                            ) { Text("前移") }
+                            OutlinedButton(
+                                enabled = position in 0 until ui.babies.lastIndex,
+                                onClick = {
+                                    vm.moveBabyLocal(baby.id, 1) { localPreferenceError = it }
+                                },
+                            ) { Text("后移") }
+                        }
+                        localPreferenceError?.let {
+                            Text(it, color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { localPreferenceBabyId = null }) { Text("完成") }
+                },
+            )
+        }
     }
 
     if (showAdd) {

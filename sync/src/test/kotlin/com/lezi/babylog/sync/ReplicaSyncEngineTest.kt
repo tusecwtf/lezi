@@ -6,6 +6,7 @@ import com.lezi.babylog.core.database.CarePlanEntity
 import com.lezi.babylog.core.database.CustomItemEntity
 import com.lezi.babylog.core.database.FamilyEntity
 import com.lezi.babylog.core.database.MediaAssetEntity
+import com.lezi.babylog.core.database.OutboxEntity
 import com.lezi.babylog.core.database.RecordEntity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -17,6 +18,222 @@ import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Test
 
 class ReplicaSyncEngineTest {
+    @Test
+    fun concurrentNextFeedCreateAcceptsNasWinnerAndDropsLosingOutbox() = runTest {
+        val session = joinedReplicaSession().copy(
+            role = FamilyRole.Member,
+            membershipId = "member-local",
+        )
+        val rig = ReplicaEngineRig(session)
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(syncDirty = false, familyAuthority = true),
+        )
+        val planUuid = "11111111-1111-3111-8111-111111111111"
+        rig.carePlans.seed(
+            localReplicaCarePlan(planUuid, "member-local", updatedAt = 300).copy(
+                babyId = babyId,
+                note = "[[lezi:next-feed:v1]]",
+                payloadJson = """{"amount_ml":0}""",
+                syncDirty = true,
+            ),
+        )
+        rig.outbox.enqueue(
+            OutboxEntity(
+                familyId = session.familyId,
+                entityType = "care_plan",
+                clientUuid = planUuid,
+                payloadJson = "{}",
+                updatedAt = 300,
+            ),
+        )
+        val remote = SyncEntity(
+            type = "care_plan",
+            clientUuid = planUuid,
+            payloadJson =
+                """{"baby_client_uuid":"baby-local","type":"formula","custom_item_client_uuid":null,"scheduled_at":9000000001000,"scheduled_zone_id":"Asia/Shanghai","note":"[[lezi:next-feed:v1]]","status":"pending","payload_json":{"amount_ml":0},"schema_version":2,"created_by_membership_id":"member-remote","fulfilled_record_client_uuid":null,"fulfilled_at":null}""",
+            updatedAt = 250,
+        )
+
+        rig.engine.applyInitialEntities(session, listOf(remote))
+
+        val winner = rig.carePlans.getByClientUuid(planUuid)!!
+        assertThat(winner.createdByMembershipId).isEqualTo("member-remote")
+        assertThat(winner.scheduledAt).isEqualTo(9_000_000_001_000)
+        assertThat(winner.syncDirty).isFalse()
+        assertThat(rig.outbox.all()).isEmpty()
+    }
+
+    @Test
+    fun memberNextFeedLocalWritePullsNasWinnerAgainAfterConcurrentNoOpPush() = runTest {
+        val session = joinedReplicaSession().copy(
+            role = FamilyRole.Member,
+            membershipId = "member-local",
+        )
+        val rig = ReplicaEngineRig(session)
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(syncDirty = false, familyAuthority = true),
+        )
+        val planUuid = "22222222-2222-3222-8222-222222222222"
+        val localPlanId = rig.carePlans.seed(
+            localReplicaCarePlan(planUuid, "member-local", updatedAt = 300).copy(
+                babyId = babyId,
+                note = "[[lezi:next-feed:v1]]",
+                payloadJson = """{"amount_ml":0}""",
+                syncDirty = true,
+            ),
+        )
+        val losingMediaUuid = "33333333-3333-3333-8333-333333333333"
+        rig.media.seed(
+            MediaAssetEntity(
+                carePlanId = localPlanId,
+                clientUuid = losingMediaUuid,
+                kind = "log",
+                localUri = "photos/losing-next-feed.jpg",
+                createdAt = 300,
+                updatedAt = 300,
+                syncDirty = true,
+            ),
+        )
+        val nasWinner = SyncEntity(
+            type = "care_plan",
+            clientUuid = planUuid,
+            payloadJson =
+                """{"baby_client_uuid":"baby-local","type":"formula","custom_item_client_uuid":null,"scheduled_at":9000000001000,"scheduled_zone_id":"Asia/Shanghai","note":"[[lezi:next-feed:v1]]","status":"pending","payload_json":{"amount_ml":0},"schema_version":2,"created_by_membership_id":"member-remote","fulfilled_record_client_uuid":null,"fulfilled_at":null}""",
+            updatedAt = 250,
+        )
+        rig.backend.pullResults += PullResult(
+            entities = emptyList(),
+            cursor = 0,
+            generation = "generation-a",
+            hasMore = false,
+        )
+        rig.backend.pullResults += PullResult(
+            entities = listOf(nasWinner),
+            cursor = 1,
+            generation = "generation-a",
+            hasMore = false,
+        )
+
+        val outcome = rig.engine.synchronize(session, SyncTrigger.LocalWrite)
+
+        val winner = rig.carePlans.getByClientUuid(planUuid)!!
+        assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
+        assertThat(rig.backend.pullCount).isEqualTo(2)
+        assertThat(rig.backend.stagedBundles.map { it.root.clientUuid })
+            .containsExactly(planUuid)
+        assertThat(rig.backend.stagedBundles.single().media.map(SyncEntity::clientUuid))
+            .containsExactly(losingMediaUuid)
+        assertThat(winner.createdByMembershipId).isEqualTo("member-remote")
+        assertThat(winner.scheduledAt).isEqualTo(9_000_000_001_000)
+        assertThat(winner.updatedAt).isEqualTo(250)
+        assertThat(winner.syncDirty).isFalse()
+        assertThat(rig.outbox.all()).isEmpty()
+        assertThat(rig.preferences.current().pendingCreatorAcknowledgements).isEmpty()
+        assertThat(rig.media.getByClientUuid(losingMediaUuid)).isNull()
+        assertThat(rig.mediaFiles.deleted).containsExactly("photos/losing-next-feed.jpg")
+    }
+
+    @Test
+    fun memberPullAppliesAuthorityBeforeCapture_andNeverPublishesLocalBaby() = runTest {
+        val session = joinedReplicaSession().copy(
+            role = FamilyRole.Member,
+            membershipId = "member-a",
+        )
+        val rig = ReplicaEngineRig(session)
+        rig.babies.seed(localReplicaBaby().copy(syncDirty = true, familyAuthority = false))
+        rig.backend.nextPull = PullResult(
+            entities = listOf(remoteReplicaBaby()),
+            cursor = 1,
+            generation = "generation-a",
+            hasMore = false,
+        )
+
+        rig.engine.synchronize(session, SyncTrigger.PullToRefresh)
+
+        assertThat(rig.backend.pushes.flatMap { it.entities }.none { it.type == "baby" }).isTrue()
+        assertThat(rig.babies.getByClientUuid("baby-local")!!.syncDirty).isTrue()
+        assertThat(rig.babies.getByClientUuid("baby-remote")!!.familyAuthority).isTrue()
+        assertThat(rig.familyBabyAppliedCalls).isEqualTo(1)
+        assertThat(rig.authorityVisibleAtCallback).isTrue()
+    }
+
+    @Test
+    fun memberWithMultipleAuthorityBabies_holdsOrphanFactsUntilExplicitMerge() = runTest {
+        val session = joinedReplicaSession().copy(
+            role = FamilyRole.Member,
+            membershipId = "member-a",
+        )
+        val rig = ReplicaEngineRig(session)
+        val orphanBabyId = rig.babies.seed(
+            localReplicaBaby().copy(syncDirty = true, familyAuthority = false),
+        )
+        rig.records.seed(
+            RecordEntity(
+                clientUuid = "record-local-orphan",
+                babyId = orphanBabyId,
+                type = "pee",
+                timestamp = 500,
+                payloadJson = "{\"amount\":\"medium\"}",
+                updatedAt = 500,
+                syncDirty = true,
+            ),
+        )
+        rig.outbox.enqueue(
+            OutboxEntity(
+                familyId = session.familyId,
+                entityType = "record",
+                clientUuid = "record-local-orphan",
+                payloadJson = "{}",
+                updatedAt = 500,
+            ),
+        )
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                remoteReplicaBaby(),
+                remoteReplicaBaby().copy(clientUuid = "baby-remote-2", updatedAt = 101),
+            ),
+            cursor = 2,
+            generation = "generation-a",
+            hasMore = false,
+        )
+
+        rig.engine.synchronize(session, SyncTrigger.PullToRefresh)
+
+        assertThat(rig.babies.listFamilyAuthority()).hasSize(2)
+        assertThat(rig.records.getByClientUuid("record-local-orphan")!!.syncDirty).isTrue()
+        assertThat(rig.outbox.all().none { it.clientUuid == "record-local-orphan" }).isTrue()
+        assertThat(
+            rig.backend.pushes.flatMap { it.entities }.none {
+                it.clientUuid == "record-local-orphan"
+            },
+        ).isTrue()
+    }
+
+    @Test
+    fun memberInitialSnapshot_replacesPreviousAuthoritySetBeforeCallback() = runTest {
+        val session = joinedReplicaSession().copy(
+            role = FamilyRole.Member,
+            membershipId = "member-a",
+        )
+        val rig = ReplicaEngineRig(session)
+        rig.babies.seed(
+            localReplicaBaby().copy(
+                clientUuid = "baby-from-previous-family",
+                syncDirty = false,
+                familyAuthority = true,
+            ),
+        )
+
+        rig.engine.applyInitialEntities(session, listOf(remoteReplicaBaby()))
+
+        assertThat(
+            rig.babies.getByClientUuid("baby-from-previous-family")!!.familyAuthority,
+        ).isFalse()
+        assertThat(rig.babies.getByClientUuid("baby-remote")!!.familyAuthority).isTrue()
+        assertThat(rig.familyBabyAppliedCalls).isEqualTo(1)
+        assertThat(rig.authorityVisibleAtCallback).isTrue()
+    }
+
     @Test
     fun pullToRefreshAppliesEveryPageAndPersistsTheCompletedCheckpoint() = runTest {
         val rig = ReplicaEngineRig(joinedReplicaSession())
@@ -48,7 +265,12 @@ class ReplicaSyncEngineTest {
     fun unknownPullEntityFailsBeforeApplyingThePageOrAdvancingTheCheckpoint() = runTest {
         val session = joinedReplicaSession().copy(pullCursor = 4)
         val rig = ReplicaEngineRig(session)
-        rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
+        rig.babies.seed(
+            localReplicaBaby().copy(
+                syncDirty = false,
+                familyAuthority = true,
+            ),
+        )
         rig.backend.nextPull = PullResult(
             entities = listOf(
                 remoteReplicaBaby(),
@@ -345,7 +567,12 @@ class ReplicaSyncEngineTest {
                 membershipId = "canonical-membership",
             ),
         )
-        rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
+        rig.babies.seed(
+            localReplicaBaby().copy(
+                syncDirty = false,
+                familyAuthority = true,
+            ),
+        )
         rig.carePlans.seed(
             localReplicaCarePlan("plan-commit-retry", "", updatedAt = 830)
                 .copy(syncDirty = true),
@@ -695,6 +922,8 @@ private class ReplicaEngineRig(
     val families = MemoryFamilyDao().apply {
         seed(FamilyEntity(id = 1, ownerUserId = 1, createdAt = 0))
     }
+    var familyBabyAppliedCalls = 0
+    var authorityVisibleAtCallback = false
     val engine = ReplicaSyncEngine(
         backend = backend,
         preferences = preferences,
@@ -711,6 +940,10 @@ private class ReplicaEngineRig(
         mediaFiles = mediaFiles,
         transactionRunner = transactions,
         carePlanAppliedListener = NoOpCarePlanFamilyAppliedListener(),
+        familyBabyAppliedListener = FamilyBabyAuthorityAppliedListener {
+            familyBabyAppliedCalls++
+            authorityVisibleAtCallback = babies.listFamilyAuthority().isNotEmpty()
+        },
         fulfillmentCandidateDao = fulfillmentCandidates,
         requireRemoteAllowed = {},
     )

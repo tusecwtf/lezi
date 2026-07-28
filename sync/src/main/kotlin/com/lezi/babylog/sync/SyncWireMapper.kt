@@ -7,6 +7,7 @@ import com.lezi.babylog.core.database.FulfillmentCandidateEntity
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
+import com.lezi.babylog.core.model.NEXT_FEED_PLAN_MARKER
 import com.lezi.babylog.core.model.RecordPayloadCodec
 import com.lezi.babylog.core.model.RecordType
 import java.time.LocalDate
@@ -177,6 +178,7 @@ object SyncWireMapper {
             type = type,
             localCustomItemId = entity.customItemId,
             customItemClientUuid = customItemClientUuid,
+            allowIntentOnlyFeed = entity.note?.startsWith(NEXT_FEED_PLAN_MARKER) == true,
         )
         return SyncEntity(
         type = "care_plan",
@@ -321,6 +323,7 @@ object SyncWireMapper {
         type: RecordType,
         payload: JsonObject,
         customItemId: Long?,
+        allowIntentOnlyFeed: Boolean = false,
     ): String {
         require("photos" !in payload && "custom_item_id" !in payload) {
             "payload_json 包含设备本地字段"
@@ -336,7 +339,11 @@ object SyncWireMapper {
                 payload
             },
         )
-        return requireStrictCurrentPayload(type, local.toString()).toString()
+        return requireStrictCurrentPayload(
+            type,
+            local.toString(),
+            allowIntentOnlyFeed = allowIntentOnlyFeed,
+        ).toString()
     }
 
     private fun localPayloadForWire(
@@ -344,8 +351,13 @@ object SyncWireMapper {
         type: RecordType,
         localCustomItemId: Long?,
         customItemClientUuid: String?,
+        allowIntentOnlyFeed: Boolean = false,
     ): JsonObject {
-        val parsed = requireStrictCurrentPayload(type, raw)
+        val parsed = requireStrictCurrentPayload(
+            type,
+            raw,
+            allowIntentOnlyFeed = allowIntentOnlyFeed,
+        )
         val payloadCustomItemId = parsed["custom_item_id"]
             ?.jsonPrimitive
             ?.longOrNull
@@ -368,7 +380,11 @@ object SyncWireMapper {
         return JsonObject(parsed - "photos" - "custom_item_id")
     }
 
-    private fun requireStrictCurrentPayload(type: RecordType, raw: String): JsonObject {
+    private fun requireStrictCurrentPayload(
+        type: RecordType,
+        raw: String,
+        allowIntentOnlyFeed: Boolean = false,
+    ): JsonObject {
         val parsed = runCatching { Json.parseToJsonElement(raw).jsonObject }
             .getOrElse { throw IllegalArgumentException("payload_json 必须是 JSON 对象", it) }
         val document = RecordPayloadCodec.decode(
@@ -377,7 +393,10 @@ object SyncWireMapper {
             schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
         )
         require(!document.isUnknown) { "payload_json 不是 current typed payload" }
-        val errors = RecordPayloadCodec.validate(document.payload)
+        val errors = RecordPayloadCodec.validate(
+            document.payload,
+            allowIntentOnlyFeed = allowIntentOnlyFeed,
+        )
         require(errors.isEmpty()) { "payload_json 无效: ${errors.joinToString()}" }
         val canonical = Json.parseToJsonElement(RecordPayloadCodec.encode(document)).jsonObject
         require(canonical == parsed) { "payload_json 不是 current canonical shape" }

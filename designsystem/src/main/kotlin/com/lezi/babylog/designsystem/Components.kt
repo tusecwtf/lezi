@@ -31,6 +31,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -153,15 +158,40 @@ fun SummaryMetric(
     tone: LeziTone = LeziTone.Neutral,
     modifier: Modifier = Modifier,
     icon: (@Composable () -> Unit)? = null,
+    selected: Boolean = false,
+    selectionLabel: String? = null,
+    onClick: (() -> Unit)? = null,
 ) {
     val bg = toneBg(tone)
     Surface(
-        modifier = modifier.heightIn(min = 82.dp),
+        modifier = modifier
+            .heightIn(min = 82.dp)
+            .then(
+                if (onClick != null) {
+                    Modifier
+                        .clickable(onClick = onClick)
+                        .semantics {
+                            role = Role.Button
+                            this.selected = selected
+                            contentDescription = selectionLabel ?: label
+                        }
+                } else {
+                    Modifier
+                },
+            ),
         shape = LeziShapes.Md,
-        color = bg,
+        color = if (selected) {
+            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.78f)
+        } else {
+            bg
+        },
         border = androidx.compose.foundation.BorderStroke(
-            1.dp,
-            MaterialTheme.colorScheme.outline.copy(alpha = 0.35f),
+            if (selected) 2.dp else 1.dp,
+            if (selected) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+            },
         ),
         shadowElevation = 0.dp,
         tonalElevation = 0.dp,

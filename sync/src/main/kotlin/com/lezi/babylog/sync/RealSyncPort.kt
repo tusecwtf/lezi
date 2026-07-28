@@ -48,6 +48,8 @@ class RealSyncPort @Inject constructor(
         NoOpLocalClearRecoveryGate(),
     private val carePlanAppliedListener: CarePlanFamilyAppliedListener =
         NoOpCarePlanFamilyAppliedListener(),
+    private val familyBabyAppliedListener: FamilyBabyAuthorityAppliedListener =
+        NoOpFamilyBabyAuthorityAppliedListener(),
     private val fulfillmentCandidateDao: FulfillmentCandidateDao,
 ) : SyncPort {
     private val currentStatus = MutableStateFlow(SyncStatus.Disabled)
@@ -67,6 +69,7 @@ class RealSyncPort @Inject constructor(
         mediaFiles = mediaFiles,
         transactionRunner = transactionRunner,
         carePlanAppliedListener = carePlanAppliedListener,
+        familyBabyAppliedListener = familyBabyAppliedListener,
         fulfillmentCandidateDao = fulfillmentCandidateDao,
         requireRemoteAllowed = { session ->
             val decision = policy.evaluate(

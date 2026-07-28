@@ -112,8 +112,11 @@ UI 占位名“我（本机）”当成真实成员名上传。管理员在 UI �
 | `birthday` | 日龄基准 |
 | `theme_color` | 本机展示；是否同步主题 **默认不同步**（见设置） |
 | `sort_order` | 本机展示顺序；不同步 |
+| `family_authority` | 仅本机派生标记：该行来自家庭服务器权威集合；不进 wire，不由普通成员编辑 |
 | `client_uuid` | |
 | `updated_at` / `deleted_at` | 软删 |
+
+家庭会话中只有 owner 可创建、修改、删除或上传 Baby；member 只 pull/apply 家庭权威宝宝，仍可切换当前宝宝并修改本机 `theme_color` / `sort_order`。member 加入前的本机孤宝宝不上传：若 pull 完整轮次后恰有一个家庭权威宝宝，自动把孤宝宝的 Record、CarePlan 与相关媒体再绑定过去；若有多个权威宝宝，只允许用户显式选择「孤宝宝 → 权威宝宝」，不得按昵称猜测；若没有权威宝宝则保留本机数据并展示等待管理员的空态。再绑定完成前，孤宝宝下的事实、计划与媒体保持本机 dirty，不携带无效宝宝引用上行；合并后再捕获新版。
 
 ### 3.5 Record
 
@@ -439,10 +442,10 @@ interface SyncPort {
 | 门闩 | **硬家庭局域网**：Wi‑Fi + NAS health；蜂窝不同步 |
 | 触发 | **仅前台**：回前台、下拉、前台写成功后 push；**无**后台轮询、**无**推送拉同步 |
 | 同步域（现行） | **Baby + Record + CustomItemDef + CarePlan + FulfillmentCandidate + Record/计划 MediaAsset（含原子照片包）** |
-| 写权限 | 宝宝**头像**仅 owner；日志媒体家庭内可同步 |
+| 写权限 | Baby 全部家庭档案字段与头像仅 owner；member 只 pull Baby，日志媒体家庭内可同步 |
 | 已落地扩展 | CustomItemDef、CarePlan、计划 MediaAsset、Record/CarePlan 原子照片包与履行候选 |
 | 继续不同步 | 系统日历 ID/权限/披露级别、提醒偏好、快捷槽位与布局顺序 |
-| 不同步 | SettingsLocal、Baby `theme_color`/`sort_order`、下次喂奶时刻、Widget 配置、本机路径 |
+| 不同步 | SettingsLocal、Baby `theme_color`/`sort_order`/`family_authority`、护理计划提醒与系统日历状态、Widget 配置、本机路径 |
 | 共享粒度 | **全量**（同步域内）；不做字段白名单 |
 | 冲突 | 同 `client_uuid` 幂等；否则 `updated_at` LWW；删除 tombstone |
 | 跨机引用 | Record 使用 `baby_client_uuid`，不用对端本地自增 id |
@@ -473,7 +476,7 @@ interface SyncPort {
 
 ## 8. 当前数据层
 
-当前 fresh schema 包含 LocalUser、Family、Membership、Baby、Record、MediaAsset、
+当前 Android fresh Room schema 为 v23，包含 LocalUser、Family、Membership、Baby、Record、MediaAsset、
 SettingsLocal、ShareInvite、Outbox、CustomItemDef、CarePlan 与 FulfillmentCandidate，
 并使用真实 `SyncPort` 和 Record/计划媒体原子包。非 current Room schema 不属于支持输入；
 当前数据库在进程重启后必须完整保留业务数据、Outbox、计时与提醒恢复状态。

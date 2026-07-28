@@ -52,6 +52,7 @@ internal fun FamilyOverview(
     onDeleteBaby: (Baby) -> Unit,
 ) {
     val current = ui.current
+    val canManage = canManageFamilyBabies(ui.role)
     val nickCounts = ui.babies.groupingBy { it.nickname.trim() }.eachCount()
     Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
             com.lezi.babylog.designsystem.PageHero(
@@ -121,7 +122,9 @@ internal fun FamilyOverview(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        LeziSecondaryButton("编辑", onClick = { onEditBaby(current) })
+                        if (canManage) {
+                            LeziSecondaryButton("编辑", onClick = { onEditBaby(current) })
+                        }
                         if (ui.babies.size > 1) {
                             LeziSecondaryButton("切换", onClick = {
                                 val cur = ui.current?.id
@@ -137,9 +140,20 @@ internal fun FamilyOverview(
             SectionHeading(
                 title = "宝宝档案",
                 trailing = {
-                    TextButton(onClick = onAddBaby) { Text("添加宝宝") }
+                    if (canManage) {
+                        TextButton(onClick = onAddBaby) { Text("添加宝宝") }
+                    } else {
+                        Text("家庭管理员管理", style = LeziTypography.Meta)
+                    }
                 },
             )
+            if (ui.role == com.lezi.babylog.sync.FamilyRole.Member && ui.babies.isEmpty()) {
+                Text(
+                    "等待家庭管理员添加宝宝",
+                    style = LeziTypography.Body,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             ui.babies.forEach { b ->
                 val selected = b.id == current?.id
                 val dup = (nickCounts[b.nickname.trim()] ?: 0) > 1
@@ -193,10 +207,43 @@ internal fun FamilyOverview(
                         if (!selected) {
                             LeziSecondaryButton("设为当前", onClick = { onSetCurrent(b.id) })
                         }
-                        LeziSecondaryButton("编辑", onClick = { onEditBaby(b) })
-                        if (ui.babies.size > 1) {
+                        if (canManage) {
+                            LeziSecondaryButton("编辑", onClick = { onEditBaby(b) })
+                        }
+                        if (canManage && ui.babies.size > 1) {
                             LeziSecondaryButton("合并", onClick = { onMergeBaby(b) })
                             LeziSecondaryButton("删除", onClick = { onDeleteBaby(b) })
+                        }
+                    }
+                }
+            }
+            if (ui.role == com.lezi.babylog.sync.FamilyRole.Member && ui.localOrphanBabies.isNotEmpty()) {
+                SectionHeading(title = "待并入的本机记录")
+                Text(
+                    "这些宝宝档案仅用于定位加入家庭前的本机记录，不会上传为家庭宝宝。",
+                    style = LeziTypography.Meta,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                ui.localOrphanBabies.forEach { orphan ->
+                    LeziCard(modifier = Modifier.fillMaxWidth()) {
+                        Text(orphan.nickname, style = LeziTypography.BodyStrong)
+                        Text(
+                            "本机孤宝宝档案",
+                            style = LeziTypography.Meta,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(LeziSpacing.Xs))
+                        if (ui.babies.isNotEmpty()) {
+                            LeziSecondaryButton(
+                                "并入家庭宝宝",
+                                onClick = { onMergeBaby(orphan) },
+                            )
+                        } else {
+                            Text(
+                                "等待家庭管理员添加宝宝后可并入",
+                                style = LeziTypography.Meta,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
                 }

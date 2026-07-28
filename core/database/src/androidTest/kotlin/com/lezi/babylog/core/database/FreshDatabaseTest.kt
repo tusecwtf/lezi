@@ -29,7 +29,7 @@ class FreshDatabaseTest {
         val db = openDatabase("fresh-schema")
         val sqlite = db.openHelper.writableDatabase
 
-        assertEquals(22, sqlite.version)
+        assertEquals(23, sqlite.version)
         val tables = buildSet {
             sqlite.query("SELECT name FROM sqlite_master WHERE type = 'table'").use { cursor ->
                 while (cursor.moveToNext()) add(cursor.getString(0))
@@ -64,6 +64,13 @@ class FreshDatabaseTest {
         assertFalse(recordColumns.contains("createdByUserId"))
         assertFalse(recordColumns.contains("createdByDeviceId"))
         assertTrue(recordColumns.contains("createdByMembershipId"))
+        val babyColumns = buildSet {
+            sqlite.query("PRAGMA table_info(babies)").use { cursor ->
+                val nameIndex = cursor.getColumnIndexOrThrow("name")
+                while (cursor.moveToNext()) add(cursor.getString(nameIndex))
+            }
+        }
+        assertTrue(babyColumns.contains("familyAuthority"))
     }
 
     @Test
@@ -147,7 +154,7 @@ class FreshDatabaseTest {
     fun nonCurrentSchemaFailsWithoutMutation() {
         val name = uniqueName("non-current-rejected")
         context.openOrCreateDatabase(name, Context.MODE_PRIVATE, null).use { sqlite ->
-            sqlite.version = 21
+            sqlite.version = 22
         }
         database = buildLeziDatabase(context, name)
 
@@ -156,11 +163,11 @@ class FreshDatabaseTest {
         }.exceptionOrNull()
 
         assertNotNull(failure)
-        assertTrue(failure!!.message.orEmpty().contains("migration from 21 to 22"))
+        assertTrue(failure!!.message.orEmpty().contains("migration from 22 to 23"))
         database!!.close()
         database = null
         context.openOrCreateDatabase(name, Context.MODE_PRIVATE, null).use { sqlite ->
-            assertEquals(21, sqlite.version)
+            assertEquals(22, sqlite.version)
         }
     }
 

@@ -44,6 +44,8 @@ data class FamilyUi(
     val membershipId: String = "",
     val current: Baby? = null,
     val babies: List<Baby> = emptyList(),
+    /** Local pre-join profiles kept only as merge sources while this device is a member. */
+    val localOrphanBabies: List<Baby> = emptyList(),
     val baseUrl: String = "",
     val serverHost: String = "",
     val serverPort: Int = com.lezi.babylog.sync.DEFAULT_SERVER_PORT,
@@ -91,13 +93,19 @@ class FamilyViewModel @Inject constructor(
 
     fun currentWifiSsid(): String? = networkState.currentWifiSsid()
 
+    private val babySurfaces = combine(
+        careLog.observeBabies(),
+        careLog.observeMemberLocalBabyOrphans(),
+    ) { babies, orphans -> babies to orphans }
+
     private val baseUi = combine(
         sync.status(),
         careLog.observeHasBaby(),
         careLog.observeCurrentBaby(),
-        careLog.observeBabies(),
+        babySurfaces,
         sync.session(),
-    ) { st, hasBaby, current, babies, session ->
+    ) { st, hasBaby, current, babyLists, session ->
+        val (babies, localOrphans) = babyLists
         val identity = careLog.localFamilyIdentity()
         FamilyUi(
             displayName = identity.displayName,
@@ -108,6 +116,7 @@ class FamilyViewModel @Inject constructor(
             membershipId = session.membershipId,
             current = current,
             babies = babies,
+            localOrphanBabies = localOrphans,
             baseUrl = session.baseUrl,
             serverHost = session.serverHost,
             serverPort = session.serverPort,

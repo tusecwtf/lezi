@@ -364,27 +364,7 @@ fun SummaryRoute(
                     totalValue = feedChartTotal,
                 )
                 Spacer(Modifier.height(12.dp))
-                if (ui.range == SummaryRange.Day) {
-                    if (t.feedTimeBuckets.any { it > 0f }) {
-                        FourBucketBars(values = t.feedTimeBuckets, color = ext.laneFeed)
-                        Spacer(Modifier.height(8.dp))
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            listOf("00–06", "06–12", "12–18", "18–24").forEach {
-                                Text(
-                                    it,
-                                    style = LeziTypography.Meta,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                        }
-                    } else {
-                        Text(
-                            "当日暂无喂养记录。",
-                            style = LeziTypography.Body,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                } else if (t.dayValuesFeed.all { it <= 0f } && t.nursingMin == 0L) {
+                if (t.dayValuesFeed.all { it <= 0f } && t.nursingMin == 0L) {
                     Text(
                         "范围内暂无喂养记录。",
                         style = LeziTypography.Body,
@@ -591,58 +571,33 @@ private fun ChartCardHeader(
     }
 }
 
-@Composable
-private fun FourBucketBars(values: List<Float>, color: Color) {
-    val grid = LeziThemeExt.colors.chartGrid
-    val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
-    val max = (values.maxOrNull() ?: 0f).coerceAtLeast(1f)
-    Canvas(
-        Modifier
-            .fillMaxWidth()
-            .height(108.dp)
-            .semantics {
-                contentDescription = listOf("00到06", "06到12", "12到18", "18到24")
-                    .zip(values)
-                    .joinToString("；") { (period, value) ->
-                        "$period ${value.toInt()}次"
-                    }
-            },
-    ) {
-        val topPad = 16.dp.toPx()
-        val plotH = (size.height - topPad).coerceAtLeast(1f)
-        for (i in 0..3) {
-            val y = topPad + plotH * i / 3f
-            drawLine(grid.copy(alpha = 0.4f), Offset(0f, y), Offset(size.width, y), 1f)
-        }
-        val gap = 10.dp.toPx()
-        val barW = (size.width - gap * 5) / 4f
-        val textPaint = AndroidPaint().apply {
-            isAntiAlias = true
-            textAlign = AndroidPaint.Align.CENTER
-            textSize = 10.sp.toPx()
-            typeface = Typeface.DEFAULT
-            this.color = labelColor.toArgb()
-        }
-        values.take(4).forEachIndexed { i, value ->
-            val x = gap + i * (barW + gap)
-            if (value > 0f) {
-                val height = (value / max) * plotH * 0.82f
-                val barTop = size.height - height
-                drawRoundRect(
-                    color = color.copy(alpha = 0.86f),
-                    topLeft = Offset(x, barTop),
-                    size = Size(barW, height),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(10f, 10f),
-                )
-                drawContext.canvas.nativeCanvas.drawText(
-                    "${value.toInt()}次",
-                    x + barW / 2f,
-                    (barTop - 4f).coerceAtLeast(textPaint.textSize),
-                    textPaint,
-                )
-            }
-        }
-    }
+internal data class BarSlotLayout(
+    val barWidth: Float,
+    val firstBarX: Float,
+    val gap: Float,
+)
+
+/**
+ * Keeps one-to-seven day charts on the same seven-slot geometry. A Day bar is
+ * therefore the same width as a Week bar and is centered instead of stretching.
+ */
+internal fun calculateBarSlotLayout(
+    canvasWidth: Float,
+    barCount: Int,
+    preferredGap: Float,
+    referenceBarCount: Int = 7,
+): BarSlotLayout {
+    val count = barCount.coerceAtLeast(1)
+    val referenceCount = referenceBarCount.coerceAtLeast(1)
+    val gap = preferredGap.coerceAtLeast(0f)
+    val slotCount = if (count <= referenceCount) referenceCount else count
+    val barWidth = ((canvasWidth - gap * (slotCount + 1)) / slotCount).coerceAtLeast(2f)
+    val usedWidth = count * barWidth + (count - 1).coerceAtLeast(0) * gap
+    return BarSlotLayout(
+        barWidth = barWidth,
+        firstBarX = ((canvasWidth - usedWidth) / 2f).coerceAtLeast(gap),
+        gap = gap,
+    )
 }
 
 @Composable
@@ -730,8 +685,13 @@ private fun StackedDiaperBarChart(
                 val y = topPad + plotH * i / 3f
                 drawLine(grid.copy(alpha = 0.45f), Offset(0f, y), Offset(size.width, y), 1f)
             }
-            val gap = if (n > 14) 2.dp.toPx() else 4.dp.toPx()
-            val barW = ((size.width - gap * (n + 1)) / n).coerceAtLeast(2f)
+            val layout = calculateBarSlotLayout(
+                canvasWidth = size.width,
+                barCount = n,
+                preferredGap = if (n > 14) 2.dp.toPx() else 4.dp.toPx(),
+            )
+            val gap = layout.gap
+            val barW = layout.barWidth
             val textPaint = AndroidPaint().apply {
                 isAntiAlias = true
                 textAlign = AndroidPaint.Align.CENTER
@@ -744,7 +704,7 @@ private fun StackedDiaperBarChart(
                 val peeV = peeValues[i]
                 val poopV = poopValues[i]
                 val total = peeV + poopV
-                val x = gap + i * (barW + gap)
+                val x = layout.firstBarX + i * (barW + gap)
                 val totalH = (total / max) * (plotH * 0.85f)
                 val peeH = if (total <= 0f) 0f else totalH * (peeV / total)
                 val poopH = (totalH - peeH).coerceAtLeast(0f)
@@ -820,8 +780,13 @@ private fun MiniBarChart(
                 drawLine(grid.copy(alpha = 0.45f), Offset(0f, y), Offset(size.width, y), 1f)
             }
             val n = values.size.coerceAtLeast(1)
-            val gap = if (n > 14) 2.dp.toPx() else 4.dp.toPx()
-            val barW = ((size.width - gap * (n + 1)) / n).coerceAtLeast(2f)
+            val layout = calculateBarSlotLayout(
+                canvasWidth = size.width,
+                barCount = n,
+                preferredGap = if (n > 14) 2.dp.toPx() else 4.dp.toPx(),
+            )
+            val gap = layout.gap
+            val barW = layout.barWidth
             val textPaint = AndroidPaint().apply {
                 isAntiAlias = true
                 textAlign = AndroidPaint.Align.CENTER
@@ -831,7 +796,7 @@ private fun MiniBarChart(
             }
             values.forEachIndexed { i, v ->
                 val h = (v / max) * (plotH * 0.85f)
-                val x = gap + i * (barW + gap)
+                val x = layout.firstBarX + i * (barW + gap)
                 val barTop = size.height - h.coerceAtLeast(if (v > 0f) 2f else 0f)
                 if (v > 0f) {
                     drawRoundRect(

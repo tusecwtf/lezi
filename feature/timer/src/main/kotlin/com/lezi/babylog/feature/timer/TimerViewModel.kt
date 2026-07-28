@@ -4,13 +4,14 @@ import android.content.Context
 import android.content.Intent
 import android.os.SystemClock
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.common.newClientUuid
 import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.domain.CareLog
-import com.lezi.babylog.domain.FeedReminderPort
+import com.lezi.babylog.core.model.RecordType
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.concurrent.atomic.AtomicBoolean
@@ -29,7 +30,7 @@ import kotlinx.coroutines.sync.withLock
 class TimerViewModel @Inject constructor(
     private val careLog: CareLog,
     private val settings: SettingsStore,
-    private val nextFeed: FeedReminderPort,
+    private val savedStateHandle: SavedStateHandle,
     @ApplicationContext private val app: Context,
 ) : ViewModel() {
     private val _state = MutableStateFlow(TimerState())
@@ -148,7 +149,7 @@ class TimerViewModel @Inject constructor(
 
     internal fun complete(
         draft: NursingCompletionDraft,
-        onDone: () -> Unit,
+        onDone: (offerNextFeedPlan: Boolean) -> Unit,
         onError: (String) -> Unit,
     ) {
         if (!completionInFlight.compareAndSet(false, true)) return
@@ -183,11 +184,17 @@ class TimerViewModel @Inject constructor(
                         completionClientUuid = completionClientUuid,
                         carePlanId = stableState.carePlanId,
                     )
+                    val offerNextFeedPlan = timerShouldOfferNextFeedPlan(stableState.carePlanId)
+                    if (offerNextFeedPlan) {
+                        savedStateHandle[PENDING_NEXT_FEED_BABY_KEY] = babyId
+                    } else {
+                        savedStateHandle.remove<Long>(PENDING_NEXT_FEED_BABY_KEY)
+                    }
                     // Await the DataStore clear. If the process dies before it commits, replay uses
                     // the same completionClientUuid and CareLog returns the existing record.
                     persist(TimerState())
                 }
-                onDone()
+                onDone(savedStateHandle.get<Long>(PENDING_NEXT_FEED_BABY_KEY) != null)
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (throwable: Throwable) {
@@ -198,10 +205,29 @@ class TimerViewModel @Inject constructor(
         }
     }
 
-    internal fun scheduleReminder(atMillis: Long?, onResult: (Boolean) -> Unit) {
+    internal fun scheduleNextFeedPlan(atMillis: Long?, onResult: (Boolean) -> Unit) {
         viewModelScope.launch {
-            onResult(runCatching { nextFeed.scheduleAfterFeed(atMillis) }.isSuccess)
+            val success = runCatching {
+                val babyId = requireNotNull(
+                    savedStateHandle.get<Long>(PENDING_NEXT_FEED_BABY_KEY),
+                ) { "待安排的喂养记录已失效" }
+                val scheduledAt = atMillis ?: run {
+                    val intervalMin = settings.settings.first().nursingIntervalMin
+                    System.currentTimeMillis() + intervalMin * 60_000L
+                }
+                careLog.scheduleNextFeedCarePlan(
+                    babyId = babyId,
+                    feedType = RecordType.NURSING,
+                    scheduledAt = scheduledAt,
+                )
+                savedStateHandle.remove<Long>(PENDING_NEXT_FEED_BABY_KEY)
+            }.isSuccess
+            onResult(success)
         }
+    }
+
+    internal fun dismissNextFeedPlan() {
+        savedStateHandle.remove<Long>(PENDING_NEXT_FEED_BABY_KEY)
     }
 
     fun clear(onCleared: () -> Unit = {}) {
@@ -244,4 +270,10 @@ class TimerViewModel @Inject constructor(
             }
         }
     }
+
+    private companion object {
+        const val PENDING_NEXT_FEED_BABY_KEY = "timer_pending_next_feed_baby"
+    }
 }
+
+internal fun timerShouldOfferNextFeedPlan(carePlanId: Long?): Boolean = carePlanId == null

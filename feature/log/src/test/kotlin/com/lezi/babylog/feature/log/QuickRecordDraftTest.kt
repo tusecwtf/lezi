@@ -1,6 +1,8 @@
 package com.lezi.babylog.feature.log
 
 import com.lezi.babylog.core.model.Record
+import com.lezi.babylog.core.model.CarePlan
+import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.RecordType
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -9,6 +11,37 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class QuickRecordDraftTest {
+    @Test
+    fun editingIntentOnlyMilkPlanDoesNotInventAnAmount() {
+        val plan = CarePlan(
+            id = 9,
+            clientUuid = "next-feed",
+            babyId = 3,
+            type = RecordType.FORMULA,
+            scheduledAt = tappedAt + 60_000,
+            scheduledZoneId = "Asia/Shanghai",
+            payloadJson = """{"amount_ml":0}""",
+            status = CarePlanStatus.PENDING,
+            updatedAt = tappedAt,
+        )
+
+        val draft = QuickRecordDraft.fromCarePlanForEdit(plan)
+
+        assertEquals(0, draft.amountMl)
+        assertTrue(draft.canConfirm(nowMillis = tappedAt))
+        assertTrue(draft.toSaveCommand().payloadJson.contains("\"amount_ml\":0"))
+    }
+
+    @Test
+    fun nextFeedPrompt_onlyFollowsNewFeedFact() {
+        assertTrue(shouldOfferNextFeedPlan(ComposerWriteDecision.AddRecord, RecordType.NURSING))
+        assertTrue(shouldOfferNextFeedPlan(ComposerWriteDecision.AddRecord, RecordType.FORMULA))
+        assertTrue(shouldOfferNextFeedPlan(ComposerWriteDecision.AddRecord, RecordType.PUMPED_FEED))
+        assertFalse(shouldOfferNextFeedPlan(ComposerWriteDecision.CreateCarePlan, RecordType.NURSING))
+        assertFalse(shouldOfferNextFeedPlan(ComposerWriteDecision.FulfillCarePlan, RecordType.FORMULA))
+        assertFalse(shouldOfferNextFeedPlan(ComposerWriteDecision.AddRecord, RecordType.SLEEP))
+    }
+
     private val tappedAt = 1_721_722_800_000L
 
     @Test

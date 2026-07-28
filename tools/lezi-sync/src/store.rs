@@ -17,6 +17,7 @@ use crate::model::{Entity, MAX_BUNDLE_MEDIA_ENTITIES, MAX_OPEN_STAGING_BUNDLES_P
 use crate::{PULL_ENTITY_TARGET_BYTES, PULL_PAGE_ENTITY_LIMIT, PULL_PAGE_TARGET_BYTES};
 
 const ENTITY_QUERY_CHUNK_SIZE: usize = 400;
+const NEXT_FEED_PLAN_MARKER: &str = "[[lezi:next-feed:v1]]";
 const DATABASE_SCHEMA_VERSION: i64 = 3;
 const CURRENT_SCHEMA_SQL: &str = "
     CREATE TABLE families (
@@ -196,6 +197,8 @@ pub enum StoreError {
     CursorAhead(i64),
     #[error("only owner may change avatar")]
     ForbiddenAvatar,
+    #[error("only owner may manage baby profiles")]
+    ForbiddenBaby,
     #[error("custom item change forbidden for this membership")]
     ForbiddenCustomItem,
     #[error("care plan change forbidden for this membership")]
@@ -262,6 +265,16 @@ pub struct StoredBundle {
 pub struct BundleMediaIntegrity {
     pub declared_byte_size: Option<usize>,
     pub staged_sha256: Option<String>,
+}
+
+/// Final-path media installed for a bundle that later committed without that
+/// media. The row remains durable until the filesystem entry is removed and
+/// the cleanup is acknowledged in SQLite.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedPendingBundleMedia {
+    pub family_id: String,
+    pub bundle_id: String,
+    pub media_uuid: String,
 }
 
 #[derive(Clone)]
@@ -798,6 +811,9 @@ impl Store {
         {
             return Err(StoreError::TimestampOutOfRange);
         }
+        if role != "owner" && entities.iter().any(|entity| entity.entity_type == "baby") {
+            return Err(StoreError::ForbiddenBaby);
+        }
         let original_count = entities.len();
         let incoming_record_ids = entities
             .iter()
@@ -811,7 +827,9 @@ impl Store {
         let mut effective = effective_lww_winners(entities, &existing);
         canonicalize_record_authors(membership_id, &mut effective, &existing)?;
         stamp_and_authorize_custom_items(role, membership_id, &mut effective, &existing)?;
-        stamp_and_authorize_care_plans(role, membership_id, &mut effective, &existing)?;
+        let noop_care_plan_ids =
+            stamp_and_authorize_care_plans(role, membership_id, &mut effective, &existing)?;
+        discard_media_for_noop_care_plans(&mut effective, &noop_care_plan_ids);
         // confirmed_at is millis-like; prefer entity.updated_at when already ms-scale.
         let confirmed_at = if now > 1_000_000_000_000 {
             now
@@ -839,7 +857,7 @@ impl Store {
             family_id,
             &missing_references,
         )?);
-        validate_push(role, &effective, &existing)?;
+        validate_push(role, membership_id, &effective, &existing)?;
 
         let entity_count = effective.len();
         let mut cursor: i64 = transaction.query_row(
@@ -1163,6 +1181,60 @@ impl Store {
         Ok(())
     }
 
+    pub fn committed_pending_bundle_media_for_bundle(
+        &self,
+        family_id: &str,
+        bundle_id: &str,
+    ) -> Result<Vec<CommittedPendingBundleMedia>, StoreError> {
+        let connection = self.connect()?;
+        committed_pending_bundle_media_query(&connection, Some((family_id, bundle_id)))
+    }
+
+    pub fn committed_pending_bundle_media(
+        &self,
+    ) -> Result<Vec<CommittedPendingBundleMedia>, StoreError> {
+        let connection = self.connect()?;
+        committed_pending_bundle_media_query(&connection, None)
+    }
+
+    /// Forget cleanup evidence only after the caller has removed and fsynced
+    /// the exact final-path file. Repeating this operation is harmless.
+    pub fn finalize_committed_pending_bundle_media(
+        &self,
+        pending: &CommittedPendingBundleMedia,
+    ) -> Result<(), StoreError> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let removed = transaction.execute(
+            "
+            DELETE FROM media_publications
+            WHERE family_id = ?1
+              AND media_uuid = ?2
+              AND source = 'bundle_pending'
+              AND bundle_id = ?3
+              AND EXISTS (
+                  SELECT 1 FROM sync_bundles
+                  WHERE family_id = ?1
+                    AND bundle_id = ?3
+                    AND status = 'committed'
+              )
+            ",
+            params![pending.family_id, pending.media_uuid, pending.bundle_id],
+        )?;
+        if removed > 0 {
+            transaction.execute(
+                "
+                DELETE FROM sync_bundle_media
+                WHERE family_id = ?1 AND bundle_id = ?2 AND media_uuid = ?3
+                ",
+                params![pending.family_id, pending.bundle_id, pending.media_uuid],
+            )?;
+        }
+        transaction.commit()?;
+        self.secure_database_files()?;
+        Ok(())
+    }
+
     /// Atomically claim final-path bytes for an ordinary PUT and bump the
     /// live metadata revision so clients that skipped it see it again.
     pub fn publish_ordinary_media(
@@ -1263,9 +1335,14 @@ impl Store {
         package.extend(media);
         let incoming_keys = package.iter().map(entity_key).collect::<BTreeSet<_>>();
         let mut existing = load_existing_entities(&transaction, family_id, &incoming_keys)?;
+        // CarePlan collision authorization must inspect the caller's creator
+        // claim before equal-LWW canonicalization replaces it with the published
+        // payload; two offline creates can share the same millisecond revision.
+        let noop_care_plan_ids =
+            stamp_and_authorize_care_plans(role, membership_id, &mut package, &existing)?;
+        discard_media_for_noop_care_plans(&mut package, &noop_care_plan_ids);
         canonicalize_equal_lww_bundle_root(&mut package, &existing);
         canonicalize_record_authors(membership_id, &mut package, &existing)?;
-        stamp_and_authorize_care_plans(role, membership_id, &mut package, &existing)?;
         let reference_keys = validation_reference_keys(&package);
         let missing_references = reference_keys
             .difference(&incoming_keys)
@@ -1286,7 +1363,7 @@ impl Store {
                 },
             );
         }
-        validate_push(role, &package, &existing)?;
+        validate_push(role, membership_id, &package, &existing)?;
         let root = package
             .iter()
             .find(|entity| entity.entity_type != "media")
@@ -1571,19 +1648,16 @@ impl Store {
             return Err(StoreError::TimestampOutOfRange);
         }
 
-        // Reject stale packages that would not update the published root (except
-        // identical re-publish of a never-committed package that lost the race
-        // to an equal/newer ordinary write of the same root).
+        // Record ordinary stale-root conflicts now, but defer rejection until
+        // after inspecting the full package. A cross-creator next-feed create
+        // intentionally becomes a successful whole-package no-op even when the
+        // NAS winner has a newer timestamp.
         let root_key = entity_key(&root);
         let existing_root =
             load_existing_entities(&transaction, family_id, &BTreeSet::from([root_key.clone()]))?;
-        if let Some(published) = existing_root.get(&root_key) {
-            if published.updated_at > root.updated_at {
-                return Err(StoreError::BundleRootNotNewer);
-            }
-            // Equal updated_at: allow commit so lost-response retries and
-            // same-version media repair can finish; LWW will skip the root row.
-        }
+        let stale_published_root = existing_root
+            .get(&root_key)
+            .is_some_and(|published| published.updated_at > root.updated_at);
 
         let mut package = Vec::with_capacity(1 + media.len());
         package.push(root);
@@ -1592,6 +1666,15 @@ impl Store {
         let original_count = package.len();
         let incoming_keys = package.iter().map(entity_key).collect::<BTreeSet<_>>();
         let mut existing = load_existing_entities(&transaction, family_id, &incoming_keys)?;
+        // A competing CarePlan can publish after this bundle was staged. Inspect
+        // the complete staged package before LWW removes an equal/stale root so a
+        // cross-creator next-feed no-op also discards every attached media change.
+        let noop_care_plan_ids =
+            stamp_and_authorize_care_plans(role, membership_id, &mut package, &existing)?;
+        discard_media_for_noop_care_plans(&mut package, &noop_care_plan_ids);
+        if stale_published_root && noop_care_plan_ids.is_empty() {
+            return Err(StoreError::BundleRootNotNewer);
+        }
         canonicalize_equal_lww_bundle_root(&mut package, &existing);
         canonicalize_record_authors(membership_id, &mut package, &existing)?;
         let canonical_root = package
@@ -1610,13 +1693,24 @@ impl Store {
             .filter(|entity| entity.entity_type == "media")
             .cloned()
             .collect::<Vec<_>>();
+        let canonical_media_ids = canonical_media
+            .iter()
+            .map(|entity| entity.client_uuid.as_str())
+            .collect::<BTreeSet<_>>();
+        let discarded_media_ids = media
+            .iter()
+            .filter(|entity| !canonical_media_ids.contains(entity.client_uuid.as_str()))
+            .map(|entity| entity.client_uuid.clone())
+            .collect::<Vec<_>>();
         let canonical_root_payload_json = serde_json::to_string(&canonical_root.payload)?;
         let canonical_media_entities_json = serde_json::to_string(&canonical_media)?;
         let canonical_content_hash = bundle_content_hash(canonical_root, &canonical_media)?;
         let mut effective = effective_lww_winners(package.clone(), &existing);
         // Re-stamp/authorize CarePlan winners on commit so a staged package cannot
         // bypass ACL after membership role changes.
-        stamp_and_authorize_care_plans(role, membership_id, &mut effective, &existing)?;
+        let noop_care_plan_ids =
+            stamp_and_authorize_care_plans(role, membership_id, &mut effective, &existing)?;
+        discard_media_for_noop_care_plans(&mut effective, &noop_care_plan_ids);
         for entity in &effective {
             let payload_bytes = serde_json::to_vec(&entity.payload)?.len();
             if payload_bytes.saturating_add(512) > PULL_ENTITY_TARGET_BYTES {
@@ -1643,7 +1737,7 @@ impl Store {
                     payload: entity.payload.clone(),
                 });
         }
-        validate_push(role, &effective, &existing)?;
+        validate_push(role, membership_id, &effective, &existing)?;
 
         let mut cursor: i64 = transaction.query_row(
             "SELECT rev FROM family_meta WHERE family_id = ?1",
@@ -1747,6 +1841,26 @@ impl Store {
                 bundle_id
             ],
         )?;
+        // Dropped manifest rows with no bundle-pending ownership are already
+        // safe to forget (for example, a UUID owned by a legitimate prior
+        // publication). Pending rows stay as durable cleanup evidence until the
+        // handler deletes the exact final-path file and acknowledges cleanup.
+        for media_uuid in discarded_media_ids {
+            transaction.execute(
+                "
+                DELETE FROM sync_bundle_media
+                WHERE family_id = ?1 AND bundle_id = ?2 AND media_uuid = ?3
+                  AND NOT EXISTS (
+                      SELECT 1 FROM media_publications
+                      WHERE family_id = ?1
+                        AND media_uuid = ?3
+                        AND source = 'bundle_pending'
+                        AND bundle_id = ?2
+                  )
+                ",
+                params![family_id, bundle_id, media_uuid],
+            )?;
+        }
         transaction.commit()?;
         self.secure_database_files()?;
         let _ = original_count;
@@ -1761,6 +1875,57 @@ impl Store {
             package,
         ))
     }
+}
+
+fn committed_pending_bundle_media_query(
+    connection: &Connection,
+    bundle: Option<(&str, &str)>,
+) -> Result<Vec<CommittedPendingBundleMedia>, StoreError> {
+    let (sql, parameters): (&str, Vec<SqlValue>) = match bundle {
+        Some((family_id, bundle_id)) => (
+            "
+            SELECT publication.family_id, publication.bundle_id, publication.media_uuid
+            FROM media_publications AS publication
+            JOIN sync_bundles AS bundle
+              ON bundle.family_id = publication.family_id
+             AND bundle.bundle_id = publication.bundle_id
+            WHERE publication.source = 'bundle_pending'
+              AND bundle.status = 'committed'
+              AND publication.family_id = ?1
+              AND publication.bundle_id = ?2
+            ORDER BY publication.media_uuid
+            ",
+            vec![
+                SqlValue::Text(family_id.to_owned()),
+                SqlValue::Text(bundle_id.to_owned()),
+            ],
+        ),
+        None => (
+            "
+            SELECT publication.family_id, publication.bundle_id, publication.media_uuid
+            FROM media_publications AS publication
+            JOIN sync_bundles AS bundle
+              ON bundle.family_id = publication.family_id
+             AND bundle.bundle_id = publication.bundle_id
+            WHERE publication.source = 'bundle_pending'
+              AND bundle.status = 'committed'
+            ORDER BY publication.family_id, publication.bundle_id, publication.media_uuid
+            ",
+            Vec::new(),
+        ),
+    };
+    let mut statement = connection.prepare(sql)?;
+    let rows = statement
+        .query_map(params_from_iter(parameters), |row| {
+            Ok(CommittedPendingBundleMedia {
+                family_id: row.get(0)?,
+                bundle_id: row.get(1)?,
+                media_uuid: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StoreError::from)?;
+    Ok(rows)
 }
 
 #[derive(Debug, Clone)]
@@ -2082,7 +2247,8 @@ fn stamp_and_authorize_care_plans(
     membership_id: &str,
     entities: &mut [Entity],
     existing: &HashMap<EntityKey, ExistingEntity>,
-) -> Result<(), StoreError> {
+) -> Result<BTreeSet<String>, StoreError> {
+    let mut noop_care_plan_ids = BTreeSet::new();
     for entity in entities.iter_mut() {
         if entity.entity_type != "care_plan" {
             continue;
@@ -2100,6 +2266,14 @@ fn stamp_and_authorize_care_plans(
                 .filter(|creator| !creator.is_empty())
                 .ok_or(StoreError::InvalidStoredPayload)?
                 .to_owned();
+            let incoming_creator = entity
+                .payload
+                .get("created_by_membership_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let incoming_is_exact_current = entity.updated_at == current.updated_at
+                && entity.deleted_at == current.deleted_at
+                && entity.payload == current.payload;
             entity.payload.insert(
                 "created_by_membership_id".to_owned(),
                 Value::String(creator.clone()),
@@ -2107,6 +2281,25 @@ fn stamp_and_authorize_care_plans(
             // Manage ACL (edit/skip/delete/status): creator or owner only.
             // Fulfillment is not a care_plan rewrite path here (separate candidate).
             if role != "owner" && creator != membership_id {
+                let current_is_open_next_feed =
+                    current.deleted_at.is_none() && is_open_next_feed_payload(&current.payload);
+                let incoming_is_open_next_feed =
+                    entity.deleted_at.is_none() && is_open_next_feed_payload(&entity.payload);
+                if (incoming_creator.as_deref() == Some(membership_id) || incoming_is_exact_current)
+                    && current_is_open_next_feed
+                    && incoming_is_open_next_feed
+                {
+                    // Offline members can independently create the same
+                    // deterministic next-feed UUID. An exact foreign replay is
+                    // also the durable form of a package already canonicalized
+                    // as no-op during stage. Keep the published NAS row as the
+                    // exact winner without granting edit rights to it.
+                    entity.updated_at = current.updated_at;
+                    entity.deleted_at = current.deleted_at;
+                    entity.payload = current.payload.clone();
+                    noop_care_plan_ids.insert(entity.client_uuid.clone());
+                    continue;
+                }
                 return Err(StoreError::ForbiddenCarePlan);
             }
         } else {
@@ -2116,7 +2309,35 @@ fn stamp_and_authorize_care_plans(
             );
         }
     }
-    Ok(())
+    Ok(noop_care_plan_ids)
+}
+
+fn discard_media_for_noop_care_plans(
+    entities: &mut Vec<Entity>,
+    noop_care_plan_ids: &BTreeSet<String>,
+) {
+    if noop_care_plan_ids.is_empty() {
+        return;
+    }
+    entities.retain(|entity| {
+        entity.entity_type != "media"
+            || entity
+                .payload
+                .get("care_plan_client_uuid")
+                .and_then(Value::as_str)
+                .is_none_or(|plan_uuid| !noop_care_plan_ids.contains(plan_uuid))
+    });
+}
+
+fn is_open_next_feed_payload(payload: &Map<String, Value>) -> bool {
+    payload
+        .get("note")
+        .and_then(Value::as_str)
+        .is_some_and(|note| note.starts_with(NEXT_FEED_PLAN_MARKER))
+        && payload
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status == "pending" || status == "missed")
 }
 
 /// Any active member may submit a fulfillment candidate for any plan. Server
@@ -2595,6 +2816,7 @@ fn validation_reference_keys(entities: &[Entity]) -> BTreeSet<EntityKey> {
 
 fn validate_push(
     role: &str,
+    membership_id: &str,
     entities: &[Entity],
     existing: &HashMap<EntityKey, ExistingEntity>,
 ) -> Result<(), StoreError> {
@@ -2772,6 +2994,16 @@ fn validate_push(
                 return Err(StoreError::UnresolvedReference(
                     "log media care_plan_client_uuid does not exist".to_owned(),
                 ));
+            }
+            if role != "owner" {
+                let creator = effective_care_plans[care_plan_id]
+                    .get("created_by_membership_id")
+                    .and_then(Value::as_str)
+                    .filter(|creator| !creator.is_empty())
+                    .ok_or(StoreError::InvalidStoredPayload)?;
+                if creator != membership_id {
+                    return Err(StoreError::ForbiddenCarePlan);
+                }
             }
             let plan_baby_id = effective_care_plans[care_plan_id]["baby_client_uuid"]
                 .as_str()

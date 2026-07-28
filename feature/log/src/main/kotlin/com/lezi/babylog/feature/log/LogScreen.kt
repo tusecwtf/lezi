@@ -533,6 +533,36 @@ internal fun resolveDayChartSelection(selectedKey: String?): DayChartCategory? {
     return DayChartCategory.entries.firstOrNull { it.name == selectedKey }
 }
 
+/** Summary-strip categories intentionally match the timeline/legend filter. */
+internal fun summaryDayChartCategory(type: RecordType): DayChartCategory? = when (type) {
+    RecordType.FORMULA, RecordType.PUMPED_FEED -> DayChartCategory.MILK
+    RecordType.NURSING -> DayChartCategory.NURSING
+    RecordType.SLEEP -> DayChartCategory.SLEEP
+    RecordType.PEE -> DayChartCategory.PEE
+    RecordType.POOP -> DayChartCategory.POOP
+    else -> null
+}
+
+internal fun summaryRecordType(category: DayChartCategory?): RecordType? = when (category) {
+    DayChartCategory.MILK -> RecordType.FORMULA
+    DayChartCategory.NURSING -> RecordType.NURSING
+    DayChartCategory.SLEEP -> RecordType.SLEEP
+    DayChartCategory.PEE -> RecordType.PEE
+    DayChartCategory.POOP -> RecordType.POOP
+    null -> null
+}
+
+internal fun reduceSummaryDayChartSelection(
+    state: DayChartFilterState,
+    type: RecordType,
+    records: List<Record>,
+): DayChartFilterState {
+    val category = summaryDayChartCategory(type) ?: return state
+    if (category !in DayChartCategories.legendCategories(records)) return state
+    val nextKey = category.name.takeUnless { state.selection == category }
+    return reduceDayChartFilter(state, DayChartFilterAction.Select(nextKey))
+}
+
 internal data class DayChartFilterContext(
     val babyId: Long?,
     val day: LocalDate,
@@ -647,6 +677,20 @@ fun LogRoute(
         }
     }
     val dayChartFilter = reconciledDayChartFilterState.selection
+    val selectedSummaryType = summaryRecordType(dayChartFilter)
+    val selectableSummaryTypes = remember(state.records) {
+        DayChartCategories.legendCategories(state.records)
+            .mapNotNull(::summaryRecordType)
+            .toSet()
+    }
+
+    fun selectSummary(type: RecordType) {
+        dayChartFilterState = reduceSummaryDayChartSelection(
+            reconciledDayChartFilterState,
+            type,
+            state.records,
+        )
+    }
     val timelineRecords = if (state.settings.timelineOrder == "oldest_first") {
         state.records.sortedBy(Record::timestamp)
     } else {
@@ -741,6 +785,9 @@ fun LogRoute(
                                         RecordSummaryValue(RecordType.PEE, "${state.summary.peeCount}", "尿"),
                                         RecordSummaryValue(RecordType.POOP, "${state.summary.poopCount}", "便"),
                                     ),
+                                    selectedType = selectedSummaryType,
+                                    selectableTypes = selectableSummaryTypes,
+                                    onSelect = ::selectSummary,
                                 )
                             } else {
                                 Row(
@@ -755,6 +802,11 @@ fun LogRoute(
                                         icon = {
                                             RecordTypeIcon(RecordType.FORMULA)
                                         },
+                                        selected = selectedSummaryType == RecordType.FORMULA,
+                                        selectionLabel = "奶量 ${state.summary.feedMl}毫升，${if (selectedSummaryType == RecordType.FORMULA) "已筛选" else "点按筛选"}",
+                                        onClick = if (RecordType.FORMULA in selectableSummaryTypes) {
+                                            { selectSummary(RecordType.FORMULA) }
+                                        } else null,
                                     )
                                     SummaryMetric(
                                         value = "${state.summary.nursingMinutes}min",
@@ -764,6 +816,11 @@ fun LogRoute(
                                         icon = {
                                             RecordTypeIcon(RecordType.NURSING)
                                         },
+                                        selected = selectedSummaryType == RecordType.NURSING,
+                                        selectionLabel = "母乳 ${state.summary.nursingMinutes}分钟，${if (selectedSummaryType == RecordType.NURSING) "已筛选" else "点按筛选"}",
+                                        onClick = if (RecordType.NURSING in selectableSummaryTypes) {
+                                            { selectSummary(RecordType.NURSING) }
+                                        } else null,
                                     )
                                     SummaryMetric(
                                         value = formatMinutes(state.summary.sleepMinutes),
@@ -773,6 +830,11 @@ fun LogRoute(
                                         icon = {
                                             RecordTypeIcon(RecordType.SLEEP)
                                         },
+                                        selected = selectedSummaryType == RecordType.SLEEP,
+                                        selectionLabel = "睡眠 ${formatMinutes(state.summary.sleepMinutes)}，${if (selectedSummaryType == RecordType.SLEEP) "已筛选" else "点按筛选"}",
+                                        onClick = if (RecordType.SLEEP in selectableSummaryTypes) {
+                                            { selectSummary(RecordType.SLEEP) }
+                                        } else null,
                                     )
                                     SummaryMetric(
                                         value = "${state.summary.peeCount}次",
@@ -782,6 +844,11 @@ fun LogRoute(
                                         icon = {
                                             RecordTypeIcon(RecordType.PEE)
                                         },
+                                        selected = selectedSummaryType == RecordType.PEE,
+                                        selectionLabel = "尿尿 ${state.summary.peeCount}次，${if (selectedSummaryType == RecordType.PEE) "已筛选" else "点按筛选"}",
+                                        onClick = if (RecordType.PEE in selectableSummaryTypes) {
+                                            { selectSummary(RecordType.PEE) }
+                                        } else null,
                                     )
                                     SummaryMetric(
                                         value = "${state.summary.poopCount}次",
@@ -791,6 +858,11 @@ fun LogRoute(
                                         icon = {
                                             RecordTypeIcon(RecordType.POOP)
                                         },
+                                        selected = selectedSummaryType == RecordType.POOP,
+                                        selectionLabel = "便便 ${state.summary.poopCount}次，${if (selectedSummaryType == RecordType.POOP) "已筛选" else "点按筛选"}",
+                                        onClick = if (RecordType.POOP in selectableSummaryTypes) {
+                                            { selectSummary(RecordType.POOP) }
+                                        } else null,
                                     )
                                 }
                             }

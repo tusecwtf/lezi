@@ -4,8 +4,6 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.SystemClock
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -49,9 +47,9 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.core.content.ContextCompat
 import com.lezi.babylog.designsystem.LeziDetailTopBar
 import kotlinx.coroutines.delay
 
@@ -73,20 +71,11 @@ internal fun timerViewportMode(
     }
 }
 
-internal sealed interface TimerReminderPermissionDecision {
-    data object ScheduleReminder : TimerReminderPermissionDecision
-
-    data class KeepPromptOpen(val message: String) : TimerReminderPermissionDecision
-}
-
-/** The record is already persisted before this decision; denial must not save or exit again. */
-internal fun timerReminderPermissionDecision(
-    granted: Boolean,
-): TimerReminderPermissionDecision =
-    if (granted) {
-        TimerReminderPermissionDecision.ScheduleReminder
+internal fun nextFeedPlanSuccessMessage(notificationPermissionGranted: Boolean): String =
+    if (notificationPermissionGranted) {
+        "护理计划已加入乐记日程"
     } else {
-        TimerReminderPermissionDecision.KeepPromptOpen("记录已保存、提醒未设置")
+        "护理计划已加入乐记日程；通知权限未开启，本机提醒已降级"
     }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -100,7 +89,6 @@ fun TimerRoute(
     babyId: Long? = null,
     vm: TimerViewModel = hiltViewModel(),
 ) {
-    val context = LocalContext.current
     val state by vm.state.collectAsStateWithLifecycle()
     LaunchedEffect(carePlanId, babyId) {
         vm.bindCarePlanIfIdle(carePlanId = carePlanId, babyId = babyId)
@@ -124,47 +112,31 @@ fun TimerRoute(
     var completionSaveError by remember { mutableStateOf<String?>(null) }
     var showDiscardConfirmation by remember { mutableStateOf(false) }
     var savedAwaitingReminder by rememberSaveable { mutableStateOf(false) }
-    var pendingReminderAt by rememberSaveable { mutableStateOf<Long?>(null) }
     var reminderScheduleError by rememberSaveable { mutableStateOf<String?>(null) }
     var reminderScheduling by remember { mutableStateOf(false) }
+    var reminderSuccessMessage by rememberSaveable { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
     fun finishReminderSchedule(success: Boolean) {
         reminderScheduling = false
         if (success) {
             savedAwaitingReminder = false
             reminderScheduleError = null
-            onDone()
+            val permissionGranted =
+                Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                    ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.POST_NOTIFICATIONS,
+                    ) == PackageManager.PERMISSION_GRANTED
+            reminderSuccessMessage = nextFeedPlanSuccessMessage(permissionGranted)
         } else {
-            reminderScheduleError = "提醒设置失败，请重试或选择不提醒"
-        }
-    }
-    val notificationPermission = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        when (val decision = timerReminderPermissionDecision(granted)) {
-            TimerReminderPermissionDecision.ScheduleReminder ->
-                vm.scheduleReminder(pendingReminderAt, ::finishReminderSchedule)
-
-            is TimerReminderPermissionDecision.KeepPromptOpen -> {
-                reminderScheduling = false
-                reminderScheduleError = decision.message
-            }
+            reminderScheduleError = "下次喂养安排失败，请重试或选择不安排"
         }
     }
     fun requestOrSchedule(atMillis: Long?) {
         if (reminderScheduling) return
-        pendingReminderAt = atMillis
         reminderScheduleError = null
         reminderScheduling = true
-        val granted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
-            ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.POST_NOTIFICATIONS,
-            ) == PackageManager.PERMISSION_GRANTED
-        if (granted) {
-            vm.scheduleReminder(atMillis, ::finishReminderSchedule)
-        } else {
-            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-        }
+        vm.scheduleNextFeedPlan(atMillis, ::finishReminderSchedule)
     }
     val completionSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val configuration = LocalConfiguration.current
@@ -331,10 +303,14 @@ fun TimerRoute(
                     completionSaveError = null
                     vm.complete(
                         draft = confirmed,
-                        onDone = {
+                        onDone = { offerNextFeedPlan ->
                             completionSaving = false
                             completionDraft = null
-                            savedAwaitingReminder = true
+                            if (offerNextFeedPlan) {
+                                savedAwaitingReminder = true
+                            } else {
+                                onDone()
+                            }
                         },
                         onError = {
                             completionSaving = false
@@ -349,10 +325,10 @@ fun TimerRoute(
     if (savedAwaitingReminder) {
         AlertDialog(
             onDismissRequest = {},
-            title = { Text("设置下次喂养提醒？") },
+            title = { Text("安排下次喂养？") },
             text = {
                 Column {
-                    Text("记录已保存。请选择提醒时间。")
+                    Text("记录已保存。请选择下次喂养护理计划时间。")
                     reminderScheduleError?.let {
                         Text(it, color = MaterialTheme.colorScheme.error)
                     }
@@ -363,7 +339,7 @@ fun TimerRoute(
                     onClick = { requestOrSchedule(null) },
                     enabled = !reminderScheduling,
                 ) {
-                    Text(if (reminderScheduling) "正在设置…" else "确认提醒")
+                    Text(if (reminderScheduling) "正在安排…" else "确认安排")
                 }
             },
             dismissButton = {
@@ -376,12 +352,35 @@ fun TimerRoute(
                     ) { Text("60 分钟") }
                     TextButton(
                         onClick = {
+                            requestOrSchedule(System.currentTimeMillis() + 120 * 60_000L)
+                        },
+                        enabled = !reminderScheduling,
+                    ) { Text("120 分钟") }
+                    TextButton(
+                        onClick = {
                             savedAwaitingReminder = false
+                            vm.dismissNextFeedPlan()
                             onDone()
                         },
                         enabled = !reminderScheduling,
-                    ) { Text("不提醒") }
+                    ) { Text("不安排") }
                 }
+            },
+        )
+    }
+
+    reminderSuccessMessage?.let { message ->
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("已安排下次喂养") },
+            text = { Text(message) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        reminderSuccessMessage = null
+                        onDone()
+                    },
+                ) { Text("完成") }
             },
         )
     }
@@ -431,4 +430,3 @@ private fun SideButton(
         }
     }
 }
-

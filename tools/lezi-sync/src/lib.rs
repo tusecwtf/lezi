@@ -39,7 +39,7 @@ use readiness::{readiness, CachedReadiness};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use store::{Principal, Store, StoreError};
+use store::{CommittedPendingBundleMedia, Principal, Store, StoreError};
 use tokio::sync::Mutex;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
@@ -293,6 +293,7 @@ pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
     }
     let store = Store::open(database_path)?;
     collect_orphan_family_media(&store, &media_root)?;
+    retry_committed_pending_bundle_media_cleanup(&store, &media_root)?;
     let state = AppState {
         store,
         data_root: config.data_dir,
@@ -569,6 +570,9 @@ async fn push_entities(
         .push(&principal, request.entities, max_updated_at, state.now())
     {
         Ok(value) => value,
+        Err(StoreError::ForbiddenBaby) => {
+            return Err(ApiError::forbidden("Only owner may manage baby profiles"))
+        }
         Err(StoreError::ForbiddenAvatar) => {
             return Err(ApiError::forbidden("Only owner may change avatar"))
         }
@@ -1155,6 +1159,12 @@ async fn commit_bundle(
         Err(StoreError::BundleNotFound) => return Err(ApiError::not_found("Bundle not found")),
         Err(error) => return Err(error.into()),
     };
+    cleanup_committed_pending_bundle_media_for_bundle(
+        &state.store,
+        &state.media_root,
+        &principal.family_id,
+        &bundle_id.to_string(),
+    )?;
     // Best-effort staging cleanup; failed/abandoned dirs are bounded by open-bundle limits.
     let _ = fs::remove_dir_all(state.bundle_stage_dir(&principal.family_id, &bundle_id)?);
 
@@ -1460,6 +1470,78 @@ fn collect_orphan_family_media(store: &Store, media_root: &Path) -> Result<(), A
     }
     if removed_any {
         sync_directory(media_root)?;
+    }
+    Ok(())
+}
+
+fn cleanup_committed_pending_bundle_media_for_bundle(
+    store: &Store,
+    media_root: &Path,
+    family_id: &str,
+    bundle_id: &str,
+) -> Result<(), ApiError> {
+    let pending = store.committed_pending_bundle_media_for_bundle(family_id, bundle_id)?;
+    for entry in pending {
+        cleanup_committed_pending_bundle_media(store, media_root, &entry)?;
+    }
+    Ok(())
+}
+
+fn cleanup_committed_pending_bundle_media(
+    store: &Store,
+    media_root: &Path,
+    pending: &CommittedPendingBundleMedia,
+) -> Result<(), ApiError> {
+    let family_id = Uuid::parse_str(&pending.family_id)
+        .map_err(|_| ApiError::internal("stored pending media family uuid is invalid"))?;
+    let media_id = Uuid::parse_str(&pending.media_uuid)
+        .map_err(|_| ApiError::internal("stored pending media uuid is invalid"))?;
+    let published = media_root
+        .join(family_id.to_string())
+        .join(media_id.to_string());
+    cleanup_committed_pending_media_with_ops(
+        &published,
+        |path| fs::remove_file(path),
+        sync_directory,
+        || {
+            store.finalize_committed_pending_bundle_media(pending)?;
+            Ok(())
+        },
+    )
+}
+
+fn cleanup_committed_pending_media_with_ops(
+    published: &Path,
+    remove: impl FnOnce(&Path) -> std::io::Result<()>,
+    sync: impl Fn(&Path) -> std::io::Result<()>,
+    finalize: impl FnOnce() -> Result<(), ApiError>,
+) -> Result<(), ApiError> {
+    match remove(published) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    // NotFound can mean an earlier attempt removed the file but crashed before
+    // its directory fsync. Re-sync both directory levels on every retry before
+    // deleting the durable SQLite cleanup evidence.
+    sync_published_media_directories(published, &sync)?;
+    finalize()
+}
+
+fn retry_committed_pending_bundle_media_cleanup(
+    store: &Store,
+    media_root: &Path,
+) -> Result<(), ApiError> {
+    for pending in store.committed_pending_bundle_media()? {
+        if let Err(error) = cleanup_committed_pending_bundle_media(store, media_root, &pending) {
+            tracing::error!(
+                family_id = %pending.family_id,
+                bundle_id = %pending.bundle_id,
+                media_uuid = %pending.media_uuid,
+                ?error,
+                "failed to finish committed bundle media cleanup; startup will retry"
+            );
+        }
     }
     Ok(())
 }
@@ -2047,6 +2129,48 @@ mod tests {
             synced.into_inner(),
             std::collections::BTreeSet::from([family_directory, media_root])
         );
+    }
+
+    #[test]
+    fn pending_media_cleanup_retries_directory_sync_before_finalizing_evidence() {
+        let directory = tempfile::tempdir().unwrap();
+        let media_root = directory.path().join("media");
+        let family_directory = media_root.join("11111111-2222-4333-8444-555555555555");
+        fs::create_dir_all(&family_directory).unwrap();
+        let published = family_directory.join("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+        write_private_file(&published, b"discarded").unwrap();
+        let fail_sync = std::cell::Cell::new(true);
+        let finalized = std::cell::Cell::new(0);
+
+        let attempt = || {
+            cleanup_committed_pending_media_with_ops(
+                &published,
+                |path| fs::remove_file(path),
+                |_directory| {
+                    if fail_sync.get() {
+                        Err(std::io::Error::other("injected directory sync failure"))
+                    } else {
+                        Ok(())
+                    }
+                },
+                || {
+                    finalized.set(finalized.get() + 1);
+                    Ok(())
+                },
+            )
+        };
+
+        assert!(attempt().is_err());
+        assert!(!published.exists());
+        assert_eq!(finalized.get(), 0);
+        // The second remove observes NotFound, but another fsync failure must
+        // still retain the durable publication/manifest evidence.
+        assert!(attempt().is_err());
+        assert_eq!(finalized.get(), 0);
+
+        fail_sync.set(false);
+        attempt().unwrap();
+        assert_eq!(finalized.get(), 1);
     }
 
     #[cfg(unix)]

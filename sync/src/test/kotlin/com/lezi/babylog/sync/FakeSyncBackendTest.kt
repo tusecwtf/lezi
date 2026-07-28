@@ -468,6 +468,12 @@ class FakeSyncBackendTest {
         )
         assertThat(backend.push(owner, listOf(baby)).applied).isEqualTo(1)
 
+        val memberBabyDenied = runCatching {
+            backend.push(member, listOf(baby.copy(updatedAt = 150, deletedAt = 150)))
+        }.exceptionOrNull()
+        assertThat(memberBabyDenied).isInstanceOf(SyncHttpException::class.java)
+        assertThat((memberBabyDenied as SyncHttpException).statusCode).isEqualTo(403)
+
         val avatar = SyncEntity(
             type = "media",
             clientUuid = MEDIA_AVATAR,

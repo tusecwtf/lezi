@@ -1268,7 +1268,7 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun clearKeepsGenerationSoDirtyMemberRecoversBeforeWritingToRestoredServer() = runTest {
+    fun clearKeepsGenerationSoMemberRecoversAuthorityWithoutPublishingBaby() = runTest {
         val rig = SyncRig(
             session = joinedSession("family-a").copy(
                 role = FamilyRole.Member,
@@ -1301,7 +1301,7 @@ class RealSyncPortTest {
         assertThat(rig.preferences.current().pullCursor).isEqualTo(0)
         assertThat(rig.preferences.current().pullGeneration).isEqualTo("old-generation")
 
-        rig.backend.pushFailures.add(
+        rig.backend.pullFailures.add(
             SyncHttpException(
                 statusCode = 409,
                 responseBody = """
@@ -1343,16 +1343,13 @@ class RealSyncPortTest {
             PullResult(emptyList(), cursor = 1, generation = "new-generation", hasMore = false),
         )
 
-        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
 
-        assertThat(rig.backend.pushAttempts.first().pullGeneration)
-            .isEqualTo("old-generation")
-        assertThat(rig.backend.pullCursors).containsExactly(0L, 1L).inOrder()
-        val accepted = rig.backend.pushes
-            .flatMap(PushedBatch::entities)
-            .single { it.type == "baby" }
-        assertThat(accepted.payloadJson).contains("\"avatar_media_uuid\":null")
+        assertThat(rig.backend.pullCursors).containsExactly(0L, 0L, 1L).inOrder()
+        assertThat(rig.backend.pushes.flatMap(PushedBatch::entities).map(SyncEntity::type))
+            .doesNotContain("baby")
         assertThat(rig.babies.getByClientUuid("baby-local")?.avatarMediaUuid).isNull()
+        assertThat(rig.babies.getByClientUuid("baby-local")?.familyAuthority).isTrue()
         assertThat(rig.preferences.current().pullGeneration).isEqualTo("new-generation")
     }
 
@@ -1421,7 +1418,7 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun memberFullResyncPullsOwnerAvatarAuthorityBeforeRequeueingLocalBaby() = runTest {
+    fun memberFullResyncPullsOwnerAvatarAuthorityWithoutRequeueingLocalBaby() = runTest {
         val session = joinedSession("family-a").copy(
             role = FamilyRole.Member,
             pullCursor = 1,
@@ -1448,8 +1445,7 @@ class RealSyncPortTest {
                 syncDirty = false,
             ),
         )
-        rig.backend.rejectMemberAvatarPointers = true
-        rig.backend.pushFailures.add(
+        rig.backend.pullFailures.add(
             SyncHttpException(
                 statusCode = 409,
                 responseBody = """
@@ -1494,12 +1490,11 @@ class RealSyncPortTest {
         val result = rig.port.sync(SyncTrigger.PullToRefresh)
         assertThat(result.exceptionOrNull()).isNull()
 
-        assertThat(rig.backend.pullCursors).containsExactly(0L, 1L).inOrder()
-        val pushedBaby = rig.backend.pushes
-            .flatMap(PushedBatch::entities)
-            .single { it.type == "baby" }
-        assertThat(pushedBaby.payloadJson).contains("\"avatar_media_uuid\":null")
+        assertThat(rig.backend.pullCursors).containsExactly(1L, 0L, 1L).inOrder()
+        assertThat(rig.backend.pushes.flatMap(PushedBatch::entities).map(SyncEntity::type))
+            .doesNotContain("baby")
         assertThat(rig.babies.getByClientUuid("baby-local")?.avatarMediaUuid).isNull()
+        assertThat(rig.babies.getByClientUuid("baby-local")?.familyAuthority).isTrue()
         assertThat(rig.backend.mediaUploads).isEmpty()
         assertThat(rig.preferences.current().pullGeneration).isEqualTo("new-generation")
     }
@@ -2398,7 +2393,10 @@ class RealSyncPortTest {
             session = joinedSession("family-a").copy(role = FamilyRole.Member),
         )
         val babyId = rig.babies.seed(
-            localBaby().copy(avatarPath = "baby_avatars/member-local.jpg"),
+            localBaby().copy(
+                avatarPath = "baby_avatars/member-local.jpg",
+                familyAuthority = true,
+            ),
         )
         val avatarUuid = "11111111-1111-1111-1111-111111111111"
         rig.media.seed(
@@ -2426,15 +2424,13 @@ class RealSyncPortTest {
 
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
 
-        val pushed = rig.backend.pushes.single().entities
-        assertThat(pushed.map(SyncEntity::type)).containsExactly("baby")
-        assertThat(pushed.single().payloadJson).contains("\"avatar_media_uuid\":null")
+        assertThat(rig.backend.pushes).isEmpty()
         assertThat(rig.backend.mediaUploads).isEmpty()
         assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
     }
 
     @Test
-    fun memberRejoiningSameFamilyKeepsCanonicalAvatarReceipt() = runTest {
+    fun memberRejoiningSameFamilyPullsCanonicalAvatarWithoutRepublishingBaby() = runTest {
         val session = joinedSession("family-a").copy(role = FamilyRole.Member)
         val rig = SyncRig(session = session)
         val avatarUuid = "11111111-1111-1111-1111-111111111111"
@@ -2461,16 +2457,38 @@ class RealSyncPortTest {
 
         assertThat(rig.port.leave("family-a").isSuccess).isTrue()
         rig.preferences.saveSession(session.copy(familyToken = "replacement-token"))
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                remoteBaby().copy(
+                    clientUuid = "baby-local",
+                    payloadJson = """
+                        {
+                          "nickname":"服务器宝宝",
+                          "sex":null,
+                          "birthday":"2024-01-01",
+                          "birth_weight_grams":null,
+                          "avatar_media_uuid":"$avatarUuid"
+                        }
+                    """.trimIndent(),
+                    updatedAt = 200,
+                ),
+            ),
+            cursor = 1,
+            generation = "current-generation",
+            hasMore = false,
+        )
 
-        val result = rig.port.sync(SyncTrigger.LocalWrite)
+        val result = rig.port.sync(SyncTrigger.PullToRefresh)
         assertThat(result.exceptionOrNull()).isNull()
 
-        val pushedBaby = rig.backend.pushes
-            .flatMap(PushedBatch::entities)
-            .single { it.type == "baby" }
-        assertThat(pushedBaby.payloadJson)
-            .contains("\"avatar_media_uuid\":\"$avatarUuid\"")
+        assertThat(rig.backend.pushes).isEmpty()
         assertThat(rig.backend.mediaUploads).isEmpty()
+        assertThat(rig.babies.getByClientUuid("baby-local")?.avatarMediaUuid).isEqualTo(avatarUuid)
+        assertThat(rig.babies.getByClientUuid("baby-local")?.avatarPath)
+            .isEqualTo("baby_avatars/remote.jpg")
+        assertThat(rig.babies.getByClientUuid("baby-local")?.familyAuthority).isTrue()
+        assertThat(rig.media.getByClientUuid(avatarUuid)?.remoteUri)
+            .isEqualTo(rig.preferences.current().expectedMediaReceipt(avatarUuid))
     }
 
     @Test
@@ -5640,6 +5658,8 @@ internal class MemoryBabyDao : BabyDao {
         rows.map { values -> values.filter { it.deletedAt == null } }
 
     override suspend fun listAll(): List<BabyEntity> = rows.value.filter { it.deletedAt == null }
+    override suspend fun listFamilyAuthority(): List<BabyEntity> =
+        rows.value.filter { it.deletedAt == null && it.familyAuthority }
     override suspend fun get(id: Long): BabyEntity? =
         rows.value.find { it.id == id && it.deletedAt == null }
 
@@ -5668,6 +5688,10 @@ internal class MemoryBabyDao : BabyDao {
         rows.value = rows.value.map { it.copy(syncDirty = true) }
     }
 
+    override suspend fun clearFamilyAuthority() {
+        rows.value = rows.value.map { it.copy(familyAuthority = false) }
+    }
+
     override suspend fun countByNickname(nickname: String, excludeId: Long): Int =
         rows.value.count {
             it.deletedAt == null &&
@@ -5681,6 +5705,18 @@ internal class MemoryBabyDao : BabyDao {
 
     override suspend fun update(baby: BabyEntity) {
         rows.value = rows.value.map { if (it.id == baby.id) baby else it }
+    }
+
+    override suspend fun updateLocalTheme(id: Long, themeColorArgb: Int) {
+        rows.value = rows.value.map {
+            if (it.id == id) it.copy(themeColorArgb = themeColorArgb) else it
+        }
+    }
+
+    override suspend fun updateLocalSortOrder(id: Long, sortOrder: Int) {
+        rows.value = rows.value.map {
+            if (it.id == id) it.copy(sortOrder = sortOrder) else it
+        }
     }
 
     override suspend fun updateAvatarReplica(

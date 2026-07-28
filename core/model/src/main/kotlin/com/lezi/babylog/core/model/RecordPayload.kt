@@ -12,6 +12,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
+const val NEXT_FEED_PLAN_MARKER = "[[lezi:next-feed:v1]]"
+
 const val CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION = 2
 
 /** Maximum photos attachable to one care record (or care plan) via the shared note area. */
@@ -258,16 +260,27 @@ object RecordPayloadCodec {
         return encodeKnown(document.payload).toString()
     }
 
-    fun validate(payload: RecordPayload): List<String> = buildList {
+    fun validate(
+        payload: RecordPayload,
+        allowIntentOnlyFeed: Boolean = false,
+    ): List<String> = buildList {
         when (payload) {
             is NursingPayload -> {
                 if (payload.leftMinutes < 0 || payload.rightMinutes < 0) add("喂养时长不能为负数")
-                if (payload.leftMinutes + payload.rightMinutes <= 0) add("至少记录一侧时长")
+                if (
+                    payload.leftMinutes + payload.rightMinutes <= 0 &&
+                    !allowIntentOnlyFeed
+                ) add("至少记录一侧时长")
                 if (payload.order !in setOf("L", "R", "LR", "RL")) add("不支持的喂养顺序")
                 if (payload.recordMode !in setOf("start", "end")) add("不支持的记录时刻模式")
             }
             is MilkPayload -> {
-                if (payload.amountMl !in 1..999) add("奶量需在 1–999 ml 之间")
+                val intentOnlyAmount = allowIntentOnlyFeed &&
+                    payload.type in setOf(RecordType.FORMULA, RecordType.PUMPED_FEED) &&
+                    payload.amountMl == 0
+                if (payload.amountMl !in 1..999 && !intentOnlyAmount) {
+                    add("奶量需在 1–999 ml 之间")
+                }
                 if (payload.preparedMl != null && payload.preparedMl !in 0..999) {
                     add("冲调量需在 0–999 ml 之间")
                 }

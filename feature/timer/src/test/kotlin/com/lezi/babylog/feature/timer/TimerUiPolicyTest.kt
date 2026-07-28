@@ -5,14 +5,17 @@ import org.junit.Test
 
 class TimerUiPolicyTest {
     @Test
-    fun deniedNotificationPermissionKeepsSavedRecordPromptOpenWithExplicitFeedback() {
-        assertEquals(
-            TimerReminderPermissionDecision.ScheduleReminder,
-            timerReminderPermissionDecision(granted = true),
-        )
+    fun onlyOrdinaryTimerFactOffersAnotherNextFeedPlan() {
+        assertEquals(true, timerShouldOfferNextFeedPlan(carePlanId = null))
+        assertEquals(false, timerShouldOfferNextFeedPlan(carePlanId = 42L))
+    }
 
-        val denied = timerReminderPermissionDecision(granted = false)
-            as TimerReminderPermissionDecision.KeepPromptOpen
-        assertEquals("记录已保存、提醒未设置", denied.message)
+    @Test
+    fun nextFeedSuccessCopyExplainsNotificationDegradation() {
+        assertEquals("护理计划已加入乐记日程", nextFeedPlanSuccessMessage(true))
+        assertEquals(
+            "护理计划已加入乐记日程；通知权限未开启，本机提醒已降级",
+            nextFeedPlanSuccessMessage(false),
+        )
     }
 }

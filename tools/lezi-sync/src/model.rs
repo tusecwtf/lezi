@@ -549,7 +549,7 @@ fn validate_record(payload: &mut Map<String, Value>) -> Result<(), ApiError> {
         ));
     }
     optional_nullable_string(payload, "note", 0, 20_000)?;
-    validate_current_payload_json(&record_type, payload.get_mut("payload_json"))?;
+    validate_current_payload_json(&record_type, payload.get_mut("payload_json"), false)?;
     integer(payload, "schema_version", 2, 2)?;
     optional_nullable_string(payload, "created_by_membership_id", 1, 64)?;
     Ok(())
@@ -708,7 +708,15 @@ fn validate_care_plan(payload: &mut Map<String, Value>) -> Result<(), ApiError> 
         ));
     }
     optional_nullable_string(payload, "note", 0, 20_000)?;
-    validate_current_payload_json(&record_type, payload.get_mut("payload_json"))?;
+    let allow_intent_only_feed = payload
+        .get("note")
+        .and_then(Value::as_str)
+        .is_some_and(|note| note.starts_with("[[lezi:next-feed:v1]]"));
+    validate_current_payload_json(
+        &record_type,
+        payload.get_mut("payload_json"),
+        allow_intent_only_feed,
+    )?;
     integer(payload, "schema_version", 2, 2)?;
     let status = string_value(payload, "status")?;
     if status != "pending" && status != "missed" && status != "completed" && status != "skipped" {
@@ -726,6 +734,7 @@ fn validate_care_plan(payload: &mut Map<String, Value>) -> Result<(), ApiError> 
 fn validate_current_payload_json(
     record_type: &str,
     payload_json: Option<&mut Value>,
+    allow_intent_only_feed: bool,
 ) -> Result<(), ApiError> {
     let payload = payload_json
         .and_then(Value::as_object_mut)
@@ -739,7 +748,7 @@ fn validate_current_payload_json(
             )?;
             let left = nested_integer(payload, "left_min", 0, i64::from(i32::MAX))?;
             let right = nested_integer(payload, "right_min", 0, i64::from(i32::MAX))?;
-            if left.saturating_add(right) <= 0 {
+            if left.saturating_add(right) <= 0 && !allow_intent_only_feed {
                 return Err(ApiError::unprocessable(
                     "payload_json nursing duration must be positive",
                 ));
@@ -756,14 +765,28 @@ fn validate_current_payload_json(
         "formula" => {
             require_keys(payload, &["amount_ml"])?;
             allow_keys(payload, &["amount_ml", "prepared_ml", "duration_min"])?;
-            nested_integer(payload, "amount_ml", 1, 999)?;
+            nested_integer(
+                payload,
+                "amount_ml",
+                if allow_intent_only_feed { 0 } else { 1 },
+                999,
+            )?;
             nested_optional_integer(payload, "prepared_ml", 0, 999)?;
             nested_optional_integer(payload, "duration_min", 0, 1_440)?;
         }
         "pumped_feed" | "pump_express" => {
             require_keys(payload, &["amount_ml"])?;
             allow_keys(payload, &["amount_ml"])?;
-            nested_integer(payload, "amount_ml", 1, 999)?;
+            nested_integer(
+                payload,
+                "amount_ml",
+                if allow_intent_only_feed && record_type == "pumped_feed" {
+                    0
+                } else {
+                    1
+                },
+                999,
+            )?;
         }
         "pee" => {
             allow_keys(payload, &["pee_amount"])?;
@@ -1404,14 +1427,11 @@ mod tests {
             .is_err());
     }
 
-
     #[test]
     fn record_is_rejected_on_ordinary_push() {
-        assert!(
-            record(record_payload())
-                .validate_as(1024, EntityValidationContext::OrdinaryPush)
-                .is_err()
-        );
+        assert!(record(record_payload())
+            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .is_err());
         record(record_payload())
             .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
             .unwrap();
@@ -1832,6 +1852,45 @@ mod tests {
             payload["type"] = json!(record_type);
             payload["payload_json"] = nested;
             assert!(care_plan(payload)
+                .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn care_plan_allows_intent_only_feed_without_weakening_record_facts() {
+        for (record_type, nested) in [
+            (
+                "nursing",
+                json!({
+                    "left_min": 0,
+                    "right_min": 0,
+                    "order": "LR",
+                    "record_mode": "end",
+                }),
+            ),
+            ("formula", json!({"amount_ml": 0})),
+            ("pumped_feed", json!({"amount_ml": 0})),
+        ] {
+            let mut plan_payload = care_plan_payload();
+            plan_payload["type"] = json!(record_type);
+            plan_payload["payload_json"] = nested.clone();
+            plan_payload["note"] = json!("[[lezi:next-feed:v1]]");
+            care_plan(plan_payload)
+                .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
+                .unwrap();
+
+            let mut unmarked_plan_payload = care_plan_payload();
+            unmarked_plan_payload["type"] = json!(record_type);
+            unmarked_plan_payload["payload_json"] = nested.clone();
+            assert!(care_plan(unmarked_plan_payload)
+                .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
+                .is_err());
+
+            let mut fact_payload = record_payload();
+            fact_payload["type"] = json!(record_type);
+            fact_payload["payload_json"] = nested;
+            assert!(record(fact_payload)
                 .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
                 .is_err());
         }

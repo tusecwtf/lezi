@@ -1,6 +1,8 @@
 package com.lezi.babylog.core.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,12 +16,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.lezi.babylog.core.model.Record
@@ -217,16 +225,46 @@ data class RecordSummaryValue(
 fun RecordSummaryStrip(
     values: List<RecordSummaryValue>,
     modifier: Modifier = Modifier,
+    selectedType: RecordType? = null,
+    selectableTypes: Set<RecordType> = values.mapTo(mutableSetOf()) { it.type },
+    onSelect: ((RecordType) -> Unit)? = null,
 ) {
     LeziCard(modifier = modifier.fillMaxWidth(), contentPadding = PaddingValues(0.dp)) {
         Row(Modifier.fillMaxWidth()) {
             val visibleValues = values.take(5)
             visibleValues.forEachIndexed { index, item ->
                 val color = leziRecordColor(item.type.presentation.colorRole)
+                val selected = item.type == selectedType
+                val selectable = onSelect != null && item.type in selectableTypes
                 Column(
                     Modifier
                         .weight(1f)
                         .heightIn(min = 62.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(
+                            if (selected) color.copy(alpha = 0.18f) else Color.Transparent,
+                        )
+                        .then(
+                            if (selected) {
+                                Modifier.border(1.dp, color.copy(alpha = 0.8f), RoundedCornerShape(10.dp))
+                            } else {
+                                Modifier
+                            },
+                        )
+                        .then(
+                            if (selectable) {
+                                Modifier
+                                    .clickable { onSelect?.invoke(item.type) }
+                                    .semantics {
+                                        role = Role.Button
+                                        this.selected = selected
+                                        contentDescription =
+                                            "${item.label} ${item.value}，${if (selected) "已筛选" else "点按筛选"}"
+                                    }
+                            } else {
+                                Modifier
+                            },
+                        )
                         .padding(horizontal = 3.dp, vertical = 7.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center,

@@ -1,6 +1,7 @@
 package com.lezi.babylog.domain
 
 import com.lezi.babylog.sync.CarePlanFamilyAppliedListener
+import com.lezi.babylog.sync.FamilyBabyAuthorityAppliedListener
 import com.lezi.babylog.sync.LocalClearRecoveryGate
 import com.lezi.babylog.sync.LocalClearRecoveryScope
 import dagger.Binds
@@ -61,6 +62,14 @@ object CarePlanFamilyProjectionModule {
         careLog: dagger.Lazy<CareLog>,
     ): CarePlanFamilyAppliedListener = CarePlanFamilyAppliedListener { planClientUuids ->
         careLog.get().onFamilyCarePlansApplied(planClientUuids)
+    }
+
+    @Provides
+    @Singleton
+    fun familyBabyAuthorityAppliedListener(
+        careLog: dagger.Lazy<CareLog>,
+    ): FamilyBabyAuthorityAppliedListener = FamilyBabyAuthorityAppliedListener {
+        careLog.get().reconcileMemberLocalBabiesAfterFamilyApply()
     }
 
     /** Breaks RealSyncPort → coordinator → SyncPort construction while gating every remote op. */

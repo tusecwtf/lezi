@@ -59,22 +59,19 @@ internal class OutboxPushPipeline(
             // rows is safe because ordinary soft deletes retain their DB row.
             outboxDao.deleteIds(staleAfterHardDelete.map(OutboxEntity::id))
         }
-        val unauthorizedAvatarRows = if (session.role == FamilyRole.Member) {
-            (queued - staleAfterHardDelete.toSet()).filter { row ->
-                row.entityType == "media" &&
-                    runCatching {
-                        Json.parseToJsonElement(row.payloadJson)
-                            .jsonObject
-                            .string("kind") == "avatar"
-                    }.getOrDefault(false)
+        val unauthorizedBabyRows = if (session.role == FamilyRole.Member) {
+            buildList {
+                for (row in queued - staleAfterHardDelete.toSet()) {
+                    if (!memberMayPublish(row)) add(row)
+                }
             }
         } else {
             emptyList()
         }
-        if (unauthorizedAvatarRows.isNotEmpty()) {
-            outboxDao.deleteIds(unauthorizedAvatarRows.map { it.id })
+        if (unauthorizedBabyRows.isNotEmpty()) {
+            outboxDao.deleteIds(unauthorizedBabyRows.map { it.id })
         }
-        val pending = queued - staleAfterHardDelete.toSet() - unauthorizedAvatarRows.toSet()
+        val pending = queued - staleAfterHardDelete.toSet() - unauthorizedBabyRows.toSet()
         if (pending.isEmpty()) return true
 
         val plan = OutboxPushPlanner.classify(
@@ -111,6 +108,43 @@ internal class OutboxPushPipeline(
         pushResidualBatch(session, plan.residual)
         return true
     }
+
+    /**
+     * Pre-join orphan facts stay local until their Baby is rebound to an authority profile.
+     * Deleting a stale outbox row is safe: the dirty entity remains in Room and capture will
+     * enqueue its newer rebound version after an automatic or explicit merge.
+     */
+    private suspend fun memberMayPublish(row: OutboxEntity): Boolean = when (row.entityType) {
+        "baby" -> false
+        "record" -> recordDao.getByClientUuid(row.clientUuid)
+            ?.let { record -> isFamilyAuthorityBaby(record.babyId) }
+            ?: false
+        "care_plan" -> carePlanDao.getByClientUuid(row.clientUuid)
+            ?.let { plan -> isFamilyAuthorityBaby(plan.babyId) }
+            ?: false
+        "media" -> mediaDao.getByClientUuid(row.clientUuid)?.let { asset ->
+            val recordId = asset.recordId
+            val carePlanId = asset.carePlanId
+            when {
+                asset.kind == "avatar" -> false
+                recordId != null -> recordDao.getIncludingDeleted(recordId)
+                    ?.let { record -> isFamilyAuthorityBaby(record.babyId) }
+                    ?: false
+                carePlanId != null -> carePlanDao.get(carePlanId)
+                    ?.let { plan -> isFamilyAuthorityBaby(plan.babyId) }
+                    ?: false
+                else -> false
+            }
+        } ?: false
+        "fulfillment_candidate" -> fulfillmentCandidateDao.getByClientUuid(row.clientUuid)
+            ?.let { candidate -> carePlanDao.getByClientUuid(candidate.carePlanClientUuid) }
+            ?.let { plan -> isFamilyAuthorityBaby(plan.babyId) }
+            ?: false
+        else -> true
+    }
+
+    private suspend fun isFamilyAuthorityBaby(babyId: Long): Boolean =
+        babyDao.get(babyId)?.familyAuthority == true
 
     private suspend fun pushResidualBatch(
         session: SyncSession,

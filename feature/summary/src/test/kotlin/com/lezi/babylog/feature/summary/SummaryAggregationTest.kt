@@ -99,6 +99,11 @@ class SummaryAggregationTest {
         )
         assertThat(day.totals.feedMl).isEqualTo(150)
         assertThat(day.totals.dayValuesFeed).containsExactly(150f)
+        assertThat(day.totals.dayValuesFeed.single()).isEqualTo(week.totals.dayValuesFeed[3])
+        assertThat(day.totals.dayValuesSleep.single()).isEqualTo(week.totals.dayValuesSleep[3])
+        assertThat(day.totals.dayValuesPee.single()).isEqualTo(week.totals.dayValuesPee[3])
+        assertThat(day.totals.dayValuesPoop.single()).isEqualTo(week.totals.dayValuesPoop[3])
+        assertThat(day.totals.dayValuesDiaper.single()).isEqualTo(week.totals.dayValuesDiaper[3])
         assertThat(day.totals.feedTimeBuckets).containsExactly(0f, 2f, 0f, 0f).inOrder()
         assertThat(day.week!!.days.first().date).isEqualTo(LocalDate.of(2026, 7, 20))
 
@@ -113,6 +118,16 @@ class SummaryAggregationTest {
         assertThat(month.totals.feedMl).isEqualTo(250)
         assertThat(month.totals.dayValuesFeed).hasSize(30)
         assertThat(month.week!!.days.first().date).isEqualTo(LocalDate.of(2026, 7, 20))
+    }
+
+    @Test
+    fun oneDayBar_usesWeekWidthAndIsCentered() {
+        val day = calculateBarSlotLayout(canvasWidth = 700f, barCount = 1, preferredGap = 4f)
+        val week = calculateBarSlotLayout(canvasWidth = 700f, barCount = 7, preferredGap = 4f)
+
+        assertThat(day.barWidth).isWithin(0.001f).of(week.barWidth)
+        assertThat(day.firstBarX + day.barWidth / 2f).isWithin(0.001f).of(350f)
+        assertThat(week.firstBarX).isWithin(0.001f).of(week.gap)
     }
 
     @Test

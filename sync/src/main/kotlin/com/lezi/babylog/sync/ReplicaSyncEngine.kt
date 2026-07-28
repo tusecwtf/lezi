@@ -13,6 +13,7 @@ import com.lezi.babylog.core.database.FulfillmentCandidateEntity
 import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.FulfillmentAuthority
 import com.lezi.babylog.core.model.FulfillmentCandidateEvidence
+import com.lezi.babylog.core.model.NEXT_FEED_PLAN_MARKER
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.OutboxDao
@@ -78,6 +79,8 @@ internal class ReplicaSyncEngine(
     private val mediaFiles: SyncMediaFileStore,
     private val transactionRunner: DatabaseTransactionRunner,
     private val carePlanAppliedListener: CarePlanFamilyAppliedListener,
+    private val familyBabyAppliedListener: FamilyBabyAuthorityAppliedListener =
+        NoOpFamilyBabyAuthorityAppliedListener(),
     private val fulfillmentCandidateDao: FulfillmentCandidateDao,
     private val requireRemoteAllowed: suspend (SyncSession) -> Unit,
 ) : FamilySessionReplica {
@@ -118,7 +121,20 @@ internal class ReplicaSyncEngine(
             backend.members(current),
         )
         var recovered = false
-        if (plan.push && !recovered) {
+        val requiresCreatorAcknowledgementPull =
+            current.pendingCreatorAcknowledgements.isNotEmpty()
+        val memberPullFirst = current.role == FamilyRole.Member &&
+            (plan.pull || requiresCreatorAcknowledgementPull)
+        if (memberPullFirst) {
+            try {
+                current = pullAllPages(current, mediaEditGuard = mediaEditGuard)
+            } catch (error: SyncHttpException) {
+                val checkpoint = error.fullResyncCheckpointOrNull() ?: throw error
+                current = recoverFullResync(current, checkpoint, mediaEditGuard)
+                recovered = true
+            }
+        }
+        if (plan.push && !recovered && !memberPullFirst) {
             try {
                 pushPending(current)
             } catch (error: SyncHttpException) {
@@ -130,9 +146,7 @@ internal class ReplicaSyncEngine(
         // Exact local provenance is durable across process death. It only
         // schedules an authoritative acknowledgement pull and never supplies a
         // creator membership value of its own.
-        val requiresCreatorAcknowledgementPull =
-            current.pendingCreatorAcknowledgements.isNotEmpty()
-        if ((plan.pull || requiresCreatorAcknowledgementPull) && !recovered) {
+        if ((plan.pull || requiresCreatorAcknowledgementPull) && !recovered && !memberPullFirst) {
             try {
                 current = pullAllPages(
                     initial = current,
@@ -141,6 +155,23 @@ internal class ReplicaSyncEngine(
             } catch (error: SyncHttpException) {
                 val checkpoint = error.fullResyncCheckpointOrNull() ?: throw error
                 current = recoverFullResync(current, checkpoint, mediaEditGuard)
+            }
+        }
+        if (memberPullFirst && plan.push && !recovered) {
+            val afterAuthorityCapture = captureLocalChanges(current)
+            if (afterAuthorityCapture.isNotEmpty()) {
+                preferences.updateCreatorAcknowledgements(add = afterAuthorityCapture)
+                current = preferences.session.first()
+            }
+            try {
+                pushPending(current)
+            } catch (error: SyncHttpException) {
+                val checkpoint = error.fullResyncCheckpointOrNull() ?: throw error
+                current = recoverFullResync(current, checkpoint, mediaEditGuard)
+                recovered = true
+            }
+            if (afterAuthorityCapture.isNotEmpty() && !recovered) {
+                pullAllPages(current, mediaEditGuard = mediaEditGuard)
             }
         }
         return ReplicaSyncOutcome.Synchronized
@@ -152,7 +183,15 @@ internal class ReplicaSyncEngine(
     ) {
         session.requireCurrentReplicaSession()
         cleanupPendingTombstonedMedia()
+        if (session.role == FamilyRole.Member) {
+            // A join snapshot starts a new authority set. Never let a Baby marker
+            // retained from a previous family/session masquerade as current authority.
+            babyDao.clearFamilyAuthority()
+        }
         applyRemote(session, entities)
+        if (session.role == FamilyRole.Member) {
+            familyBabyAppliedListener.onFamilyBabyAuthorityApplied()
+        }
     }
 
     private suspend fun pushPending(session: SyncSession) {
@@ -172,6 +211,7 @@ internal class ReplicaSyncEngine(
             "家庭服务器返回了非 current 实体类型: ${unsupportedTypes.joinToString()}"
         }
         val deletedMediaClientUuids = mutableListOf<String>()
+        val discardedLocalMediaPaths = mutableListOf<String>()
         // Atomic receive: download all log media bytes for new/updated packages into
         // a staging map BEFORE any Room apply, so partial failure never exposes a
         // record/plan with placeholder media or advances past an incomplete package.
@@ -192,7 +232,7 @@ internal class ReplicaSyncEngine(
                 if (!applyRecord(entity)) unresolved += entity
             }
             for (entity in entities.filter { it.type == "care_plan" }) {
-                val applied = applyCarePlan(session, entity)
+                val applied = applyCarePlan(session, entity, discardedLocalMediaPaths)
                 if (!applied) {
                     unresolved += entity
                 } else {
@@ -252,6 +292,7 @@ internal class ReplicaSyncEngine(
             cleanupUnownedStagedMedia(stagedLogMediaBytes.values.toSet())
         }
         cleanupPendingTombstonedMedia(deletedMediaClientUuids.toSet())
+        cleanupDiscardedLocalMedia(discardedLocalMediaPaths)
         // Side effects only after full package apply — never during partial download.
         if (appliedCarePlanUuids.isNotEmpty()) {
             carePlanAppliedListener.onFamilyCarePlansApplied(appliedCarePlanUuids.distinct())
@@ -266,6 +307,17 @@ internal class ReplicaSyncEngine(
         paths.filterNot(owned::contains).forEach { mediaFiles.delete(it) }
     }
 
+    private suspend fun cleanupDiscardedLocalMedia(paths: List<String>) {
+        if (paths.isEmpty()) return
+        val owned = mediaDao.listAllIncludingDeleted()
+            .filter { it.deletedAt == null }
+            .mapTo(hashSetOf(), MediaAssetEntity::localUri)
+        paths.filter(String::isNotBlank)
+            .distinct()
+            .filterNot(owned::contains)
+            .forEach { mediaFiles.delete(it) }
+    }
+
     /**
      * Apply a remote care plan. Custom-item plans wait until the definition is
      * local (return false → page retries, plan stays invisible). Concurrent local
@@ -278,6 +330,7 @@ internal class ReplicaSyncEngine(
     private suspend fun applyCarePlan(
         session: SyncSession,
         entity: SyncEntity,
+        discardedLocalMediaPaths: MutableList<String>,
     ): Boolean {
         val existing = carePlanDao.getByClientUuid(entity.clientUuid)
         val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
@@ -286,21 +339,35 @@ internal class ReplicaSyncEngine(
         val customItemId = wire.customItemClientUuid?.let { customItemUuid ->
             customItemDao.getByClientUuid(customItemUuid)?.id ?: return false
         }
-        // Match server LWW for business fields. Equal revisions may still carry
-        // the NAS-owned immutable creator acknowledgement after a push.
-        if (existing != null && existing.updatedAt > entity.updatedAt) return true
-        if (existing != null && existing.updatedAt == entity.updatedAt) {
-            acknowledgedEqualRevisionCreator(
-                session = session,
-                existingCreator = existing.createdByMembershipId,
-                payloadJson = entity.payloadJson,
-            )?.let { creator ->
-                carePlanDao.update(existing.copy(createdByMembershipId = creator))
+        val concurrentNextFeedCreate = existing != null &&
+            (
+                existing.syncDirty ||
+                    session.isCreatorAcknowledgementPending("care_plan", entity.clientUuid)
+            ) &&
+            existing.note?.startsWith(NEXT_FEED_PLAN_MARKER) == true &&
+            wire.note?.startsWith(NEXT_FEED_PLAN_MARKER) == true &&
+            existing.createdByMembershipId.isNotBlank() &&
+            existing.createdByMembershipId != wire.createdByMembershipId
+        // A deterministic next-feed UUID lets the NAS choose one creator when two
+        // members schedule offline. The losing local create must accept that winner;
+        // ordinary dirty CarePlan edits keep the standard creator ACL/LWW behavior.
+        if (!concurrentNextFeedCreate) {
+            // Match server LWW for business fields. Equal revisions may still carry
+            // the NAS-owned immutable creator acknowledgement after a push.
+            if (existing != null && existing.updatedAt > entity.updatedAt) return true
+            if (existing != null && existing.updatedAt == entity.updatedAt) {
+                acknowledgedEqualRevisionCreator(
+                    session = session,
+                    existingCreator = existing.createdByMembershipId,
+                    payloadJson = entity.payloadJson,
+                )?.let { creator ->
+                    carePlanDao.update(existing.copy(createdByMembershipId = creator))
+                }
+                return true
             }
-            return true
+            // Keep in-flight local create/edit until push commits.
+            if (existing != null && existing.syncDirty) return true
         }
-        // Keep in-flight local create/edit until push commits.
-        if (existing != null && existing.syncDirty) return true
         // Full-set co-gate: completed + linked record must not appear without the fact.
         if (
             entity.deletedAt == null &&
@@ -313,6 +380,7 @@ internal class ReplicaSyncEngine(
             wire.type,
             wire.payload,
             customItemId,
+            allowIntentOnlyFeed = wire.note?.startsWith(NEXT_FEED_PLAN_MARKER) == true,
         )
         val terminal = entity.deletedAt != null ||
             wire.status == CarePlanStatus.COMPLETED.storageKey ||
@@ -341,6 +409,15 @@ internal class ReplicaSyncEngine(
                 it.systemCalendarReminderReady ||
                 it.systemCalendarProjectionPending
         } == true
+        if (concurrentNextFeedCreate) {
+            val losingMedia = mediaDao.listForCarePlan(existing!!.id)
+            val losingMediaUuids = losingMedia.map(MediaAssetEntity::clientUuid)
+            discardedLocalMediaPaths += losingMedia.map(MediaAssetEntity::localUri)
+            if (losingMediaUuids.isNotEmpty()) {
+                mediaDao.deleteByClientUuids(losingMediaUuids)
+                outboxDao.deleteEntities(session.familyId, "media", losingMediaUuids)
+            }
+        }
         carePlanDao.upsert(
             CarePlanEntity(
                 id = existing?.id ?: 0,
@@ -354,11 +431,15 @@ internal class ReplicaSyncEngine(
                 payloadJson = remotePayloadJson,
                 schemaVersion = wire.schemaVersion,
                 status = wire.status,
-                createdByMembershipId = resolvedImmutableCreator(
-                    session = session,
-                    existingCreator = existing?.createdByMembershipId,
-                    remoteCreator = wire.createdByMembershipId,
-                ),
+                createdByMembershipId = if (concurrentNextFeedCreate) {
+                    wire.createdByMembershipId
+                } else {
+                    resolvedImmutableCreator(
+                        session = session,
+                        existingCreator = existing?.createdByMembershipId,
+                        remoteCreator = wire.createdByMembershipId,
+                    )
+                },
                 fulfilledRecordClientUuid = wire.fulfilledRecordClientUuid,
                 fulfilledAt = wire.fulfilledAt,
                 sourceRecordClientUuid = existing?.sourceRecordClientUuid,
@@ -380,6 +461,9 @@ internal class ReplicaSyncEngine(
                 },
             ),
         )
+        if (concurrentNextFeedCreate) {
+            outboxDao.deleteEntities(session.familyId, "care_plan", listOf(entity.clientUuid))
+        }
         return true
     }
 
@@ -584,18 +668,13 @@ internal class ReplicaSyncEngine(
         val existing = babyDao.getByClientUuid(entity.clientUuid)
         val payload = Json.parseToJsonElement(entity.payloadJson).jsonObject
         val wire = parseBabyWire(payload)
-        // Match server LWW: existing wins on equal updatedAt (>= skip).
-        if (existing != null && existing.updatedAt >= entity.updatedAt) {
-            if (session.role == FamilyRole.Member) {
-                if (existing.avatarMediaUuid != wire.avatarMediaUuid) {
-                    babyDao.update(
-                        existing.copy(
-                            avatarMediaUuid = wire.avatarMediaUuid,
-                            avatarPath = existing.avatarPath,
-                        ),
-                    )
-                }
-            }
+        // Members never own Baby LWW. The NAS snapshot wins even over an old
+        // local dirty/equal revision; local appearance/order/path stay device-local.
+        if (
+            existing != null &&
+            existing.updatedAt >= entity.updatedAt &&
+            session.role != FamilyRole.Member
+        ) {
             return true
         }
         val familyId = existing?.familyId ?: familyDao.listAll().firstOrNull()?.id ?: return false
@@ -615,6 +694,8 @@ internal class ReplicaSyncEngine(
                 syncDirty = false,
                 avatarMediaUuid = wire.avatarMediaUuid,
                 avatarPath = existing?.avatarPath,
+                familyAuthority = session.role == FamilyRole.Member ||
+                    existing?.familyAuthority == true,
             ),
         )
         return true
@@ -892,6 +973,9 @@ internal class ReplicaSyncEngine(
     ) {
         transactionRunner.run {
             babyDao.markAllPendingSync()
+            if (crossingFamilyBoundary || previous.role == FamilyRole.Member) {
+                babyDao.clearFamilyAuthority()
+            }
             recordDao.markAllPendingSync()
             if (crossingFamilyBoundary) {
                 carePlanDao.listAllIncludingDeleted().forEach { plan ->
@@ -1072,6 +1156,9 @@ internal class ReplicaSyncEngine(
             )
             current = preferences.session.first()
         }
+        if (initial.role == FamilyRole.Member) {
+            familyBabyAppliedListener.onFamilyBabyAuthorityApplied()
+        }
         return current
     }
 
@@ -1095,17 +1182,57 @@ internal class ReplicaSyncEngine(
     private suspend fun captureLocalChanges(
         session: SyncSession,
     ): Set<CreatorAcknowledgementRef> {
-        val babies = babyDao.listPendingSync()
-        val records = recordDao.listPendingSync()
-        val carePlans = carePlanDao.listPendingSync()
+        val authorityBabyIds = if (session.role == FamilyRole.Member) {
+            babyDao.listFamilyAuthority().mapTo(mutableSetOf(), BabyEntity::id)
+        } else {
+            null
+        }
+        val memberRecordsById = if (authorityBabyIds != null) {
+            recordDao.listAllIncludingDeleted().associateBy(RecordEntity::id)
+        } else {
+            emptyMap()
+        }
+        val memberPlans = if (authorityBabyIds != null) {
+            carePlanDao.listAllIncludingDeleted()
+        } else {
+            emptyList()
+        }
+        val memberPlansById = memberPlans.associateBy(CarePlanEntity::id)
+        val memberPlansByUuid = memberPlans.associateBy(CarePlanEntity::clientUuid)
+        val babies = if (session.role == FamilyRole.Member) {
+            emptyList()
+        } else {
+            babyDao.listPendingSync()
+        }
+        val records = recordDao.listPendingSync().filter { record ->
+            authorityBabyIds == null || record.babyId in authorityBabyIds
+        }
+        val carePlans = carePlanDao.listPendingSync().filter { plan ->
+            authorityBabyIds == null || plan.babyId in authorityBabyIds
+        }
         val customItems = customItemDao.listPendingSync()
-        val fulfillmentCandidates = fulfillmentCandidateDao.listPendingSync()
+        val fulfillmentCandidates = fulfillmentCandidateDao.listPendingSync().filter { candidate ->
+            authorityBabyIds == null ||
+                memberPlansByUuid[candidate.carePlanClientUuid]?.babyId in authorityBabyIds
+        }
         val capturedPendingCreatorAcknowledgements = mutableSetOf<CreatorAcknowledgementRef>()
         materializeLocalMedia(
             includeAvatars = session.role != FamilyRole.Member,
             babies = babies,
         )
-        val directlyChangedMedia = mediaDao.listPendingSync()
+        val directlyChangedMedia = mediaDao.listPendingSync().filter { asset ->
+            if (authorityBabyIds == null) {
+                true
+            } else {
+                when {
+                    asset.recordId != null ->
+                        memberRecordsById[asset.recordId]?.babyId in authorityBabyIds
+                    asset.carePlanId != null ->
+                        memberPlansById[asset.carePlanId]?.babyId in authorityBabyIds
+                    else -> false // Member avatar media never enters the family outbox.
+                }
+            }
+        }
         val referencedMedia = buildList {
             babies.forEach { baby ->
                 mediaDao.activeAvatarForBaby(baby.id)?.let(::add)
@@ -1187,7 +1314,14 @@ internal class ReplicaSyncEngine(
                     customItemUuid,
                 ),
             )
-            if (plan.createdByMembershipId.isBlank()) {
+            val memberNextFeedNeedsNasWinner = session.role == FamilyRole.Member &&
+                plan.deletedAt == null &&
+                plan.status in setOf(
+                    CarePlanStatus.PENDING.storageKey,
+                    CarePlanStatus.MISSED.storageKey,
+                ) &&
+                plan.note?.startsWith(NEXT_FEED_PLAN_MARKER) == true
+            if (plan.createdByMembershipId.isBlank() || memberNextFeedNeedsNasWinner) {
                 capturedPendingCreatorAcknowledgements += CreatorAcknowledgementRef(
                     entityType = "care_plan",
                     clientUuid = plan.clientUuid,
