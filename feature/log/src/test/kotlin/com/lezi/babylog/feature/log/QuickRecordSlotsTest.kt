@@ -83,11 +83,8 @@ class QuickRecordSlotsTest {
     }
 
     @Test
-    fun emptySlotOpensQuickRecordSettings() {
-        assertEquals(
-            QuickDockAction.OpenSlotSettings,
-            QuickDockCell.Empty.toAction(),
-        )
+    fun emptySlotShortPressIsNoOp() {
+        assertEquals(QuickDockAction.None, QuickDockCell.Empty.toAction())
     }
 
     @Test
@@ -102,29 +99,24 @@ class QuickRecordSlotsTest {
     }
 
     @Test
-    fun leftHandPutsSlotsNearLeftAndMoreOnFarSide() {
+    fun dockOrderIsFourSlotsThenMoreIndependentOfHand() {
         val slots = resolveQuickSlots(
             DEFAULT_QUICK_RECORD_SLOTS,
             hiddenItems = emptySet(),
             customItems = emptyList(),
         )
-        val order = oneHandQuickDockOrder("left", slots)
-        assertEquals(5, order.size)
-        assertEquals(QuickDockCell.More, order.last())
-        assertTrue(order.first() is QuickDockCell.Bound)
-        assertEquals("pee", (order.first() as QuickDockCell.Bound).catalogKey)
-    }
-
-    @Test
-    fun rightHandPutsMoreOnFarLeftAndSlotsNearRightThumb() {
-        val slots = resolveQuickSlots(
-            DEFAULT_QUICK_RECORD_SLOTS,
-            hiddenItems = emptySet(),
-            customItems = emptyList(),
+        val left = oneHandQuickDockOrder("left", slots)
+        val right = oneHandQuickDockOrder("right", slots)
+        assertEquals(left, right)
+        assertEquals(5, left.size)
+        assertEquals(QuickDockCell.More, left.last())
+        assertTrue(left.first() is QuickDockCell.Bound)
+        assertEquals("pee", (left.first() as QuickDockCell.Bound).catalogKey)
+        assertEquals(
+            "formula",
+            (left[3] as QuickDockCell.Bound).catalogKey,
         )
-        val order = oneHandQuickDockOrder("right", slots)
-        assertEquals(QuickDockCell.More, order.first())
-        assertEquals("formula", (order.last() as QuickDockCell.Bound).catalogKey)
+        assertEquals(fixedQuickDockOrder(slots), left)
     }
 
     @Test

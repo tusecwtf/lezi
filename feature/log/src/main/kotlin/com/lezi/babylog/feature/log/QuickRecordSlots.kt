@@ -22,7 +22,7 @@ internal sealed class QuickDockCell {
         val customIconSlot: Int? = null,
     ) : QuickDockCell()
 
-    /** Empty or unresolved slot — keeps its position and opens slot settings. */
+    /** Empty or unresolved slot — keeps its position; short-press is a no-op. */
     data object Empty : QuickDockCell()
 
     data object More : QuickDockCell()
@@ -62,11 +62,12 @@ internal fun quickDockPresentation(
         )
     }
 
-/** User intent emitted by a quick-dock cell; keeps empty slots actionable. */
+/** User intent emitted by a quick-dock cell in non-edit mode. */
 internal sealed interface QuickDockAction {
     data class OpenComposer(val identity: RecordItemIdentity) : QuickDockAction
 
-    data object OpenSlotSettings : QuickDockAction
+    /** Empty slot short-press: no navigation, no settings. */
+    data object None : QuickDockAction
 
     data object OpenMore : QuickDockAction
 }
@@ -74,7 +75,7 @@ internal sealed interface QuickDockAction {
 internal fun QuickDockCell.toAction(): QuickDockAction =
     when (this) {
         is QuickDockCell.Bound -> QuickDockAction.OpenComposer(identity)
-        QuickDockCell.Empty -> QuickDockAction.OpenSlotSettings
+        QuickDockCell.Empty -> QuickDockAction.None
         QuickDockCell.More -> QuickDockAction.OpenMore
     }
 
@@ -158,30 +159,24 @@ internal fun resolveQuickSlots(
     }
 
 /**
- * Lay out four slot cells + fixed More for the preferred thumb edge.
- * Slots stay in user order; the block as a whole sits toward the preferred hand,
- * with More on the far side.
+ * Everyday dock order: absolute left-to-right [slot0..slot3][更多].
+ * Preferred hand no longer mirrors the dock (惯用手 remains for dial/form chrome only).
  *
- * Left hand: [slot0, slot1, slot2, slot3, More]
- * Right hand: [More, slot0, slot1, slot2, slot3] — More far (left), slots near right thumb.
- *
- * Product: "四槽整体靠偏好手一侧，更多位于远侧". For right hand the four slots
- * should be nearest the right edge, so More is first (left/far). For left hand
- * slots are left-aligned and More is last (right/far).
+ * @param preferredHand retained for call-site compatibility; ignored.
  */
+@Suppress("UNUSED_PARAMETER")
 internal fun oneHandQuickDockOrder(
     preferredHand: String,
     slots: List<QuickDockCell>,
-): List<QuickDockCell> {
+): List<QuickDockCell> = fixedQuickDockOrder(slots)
+
+/** Fixed everyday dock: four slots then 更多. */
+internal fun fixedQuickDockOrder(slots: List<QuickDockCell>): List<QuickDockCell> {
     val four = slots.take(QUICK_RECORD_SLOT_COUNT).let { list ->
         if (list.size >= QUICK_RECORD_SLOT_COUNT) list
         else list + List(QUICK_RECORD_SLOT_COUNT - list.size) { QuickDockCell.Empty }
     }
-    return if (preferredHand == "left") {
-        four + QuickDockCell.More
-    } else {
-        listOf(QuickDockCell.More) + four
-    }
+    return four + QuickDockCell.More
 }
 
 /** Enabled built-ins and concrete custom definitions available as slot candidates. */

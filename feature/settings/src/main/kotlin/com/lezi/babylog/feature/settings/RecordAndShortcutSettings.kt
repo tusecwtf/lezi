@@ -46,48 +46,162 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.domain.CustomRecordItem
 
-/** Top-level hub destinations under「记录与快捷设置」. */
-internal enum class RecordShortcutHubDestination(val title: String, val subtitle: String) {
-    QuickSlots("常用记录", "四个快捷槽位：选择、拖动排序、清空"),
-    AllItems("所有记录项目", "拖动类别与项目，开启或关闭"),
-    PerItem("分项目设置", "仅展示确有专属设置的项目"),
+/**
+ * Sections inside single-page「记录设置」(no layout / quick-slot destinations).
+ */
+internal enum class RecordSettingsSection(val title: String, val subtitle: String) {
+    PerItem("分项目设置", "母乳计时、奶量步进、发热提示等"),
     PlanCalendar("护理计划与日历", "本机提醒、系统日历与内容披露"),
 }
 
-/**
- * Pure navigation surface for tests: the four fixed secondary destinations.
- */
-internal fun recordShortcutHubDestinations(): List<RecordShortcutHubDestination> =
-    RecordShortcutHubDestination.entries.toList()
+/** Pure navigation surface for tests: only non-layout record settings. */
+internal fun recordSettingsSections(): List<RecordSettingsSection> =
+    RecordSettingsSection.entries.toList()
 
+/** @deprecated Prefer [recordSettingsSections]; kept name for any external test refs. */
+internal fun recordShortcutHubDestinations(): List<RecordSettingsSection> =
+    recordSettingsSections()
+
+/**
+ * Single-page 记录设置: 分项目 + 护理计划/日历 in one dialog (no 常用/所有记录 layout).
+ */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-internal fun RecordAndShortcutSettingsHubDialog(
+internal fun RecordSettingsDialog(
+    settings: SettingsLocal,
+    carePlanRemindersEnabled: Boolean,
+    onCarePlanRemindersEnabled: (Boolean) -> Unit,
+    systemCalendarEnabled: Boolean,
+    systemCalendarSummary: String,
+    systemCalendarDisclosureSummary: String,
+    onConfigureSystemCalendar: () -> Unit,
+    onTimerEnabled: (Boolean) -> Unit,
+    onRecordAt: (String) -> Unit,
+    onInterval: (Int) -> Unit,
+    onAmountStep: (Int) -> Unit,
+    onFeverAdvice: (Boolean) -> Unit,
     onDismiss: () -> Unit,
-    onOpen: (RecordShortcutHubDestination) -> Unit,
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("记录与快捷设置") },
+        title = { Text("记录设置") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
+            Column(
+                Modifier
+                    .heightIn(max = 520.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
+            ) {
                 Text(
-                    "以下布局只保存在本机",
+                    "布局请在记录页长按图标编辑；本页仅非布局参数。",
                     style = LeziTypography.Meta,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                recordShortcutHubDestinations().forEach { dest ->
-                    TextButton(
-                        onClick = { onOpen(dest) },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Column(Modifier.fillMaxWidth()) {
-                            Text(dest.title, style = LeziTypography.BodyStrong)
-                            Text(
-                                dest.subtitle,
-                                style = LeziTypography.Meta,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
+                Text("分项目", style = LeziTypography.Label)
+                Text("母乳", style = LeziTypography.BodyStrong)
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("喂奶计时入口")
+                    Switch(checked = settings.timerEnabled, onCheckedChange = onTimerEnabled)
+                }
+                Text("记录时刻", style = LeziTypography.Meta)
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    FilterChip(
+                        selected = settings.recordAtStartOrEnd == "start",
+                        onClick = { onRecordAt("start") },
+                        label = { Text("开始") },
+                    )
+                    FilterChip(
+                        selected = settings.recordAtStartOrEnd == "end",
+                        onClick = { onRecordAt("end") },
+                        label = { Text("结束") },
+                    )
+                }
+                Text("下次喂奶间隔（分钟）", style = LeziTypography.Meta)
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    listOf(120, 150, 180, 210, 240).forEach { m ->
+                        FilterChip(
+                            selected = settings.nursingIntervalMin == m,
+                            onClick = { onInterval(m) },
+                            label = { Text("$m") },
+                        )
+                    }
+                }
+                Text("配方奶 / 挤出乳 / 母乳瓶喂", style = LeziTypography.BodyStrong)
+                Text("奶量步进 ml", style = LeziTypography.Meta)
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    listOf(5, 10, 15).forEach { s ->
+                        FilterChip(
+                            selected = settings.amountStepMl == s,
+                            onClick = { onAmountStep(s) },
+                            label = { Text("$s") },
+                        )
+                    }
+                }
+                Text("体温", style = LeziTypography.BodyStrong)
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("低月龄发热提示")
+                        Text(
+                            "仅记录时不足 3 个月且体温 ≥38℃",
+                            style = LeziTypography.Meta,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = settings.infantFeverAdviceEnabled,
+                        onCheckedChange = onFeverAdvice,
+                    )
+                }
+
+                Text("护理计划与日历", style = LeziTypography.Label)
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("家庭护理计划提醒", style = LeziTypography.Body)
+                        Text(
+                            "默认开启。仅本机有效，不上传家庭服务器。",
+                            style = LeziTypography.Meta,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = carePlanRemindersEnabled,
+                        onCheckedChange = onCarePlanRemindersEnabled,
+                    )
+                }
+                Column(Modifier.fillMaxWidth()) {
+                    Text("同步到系统日历", style = LeziTypography.Body)
+                    Text(
+                        if (systemCalendarEnabled) {
+                            "已启用 · $systemCalendarSummary · 披露：$systemCalendarDisclosureSummary。"
+                        } else {
+                            "未启用。主动配置后才会写入所选可写日历。"
+                        },
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    TextButton(onClick = onConfigureSystemCalendar) {
+                        Text(if (systemCalendarEnabled) "更改系统日历与披露" else "配置系统日历")
                     }
                 }
             }

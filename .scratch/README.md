@@ -17,7 +17,7 @@
 | 0.2.4 固定范围审查整改 | [spec.md](./post-0.2.4-review-remediation/spec.md) | [ISSUES.md](./post-0.2.4-review-remediation/ISSUES.md)（7 票） | complete |
 | 护理计划、记录自定义与照片原子同步 | [spec.md](./care-plan-record-customization/spec.md) | [ISSUES.md](./care-plan-record-customization/ISSUES.md)（28 票） | implementation-complete（final Release revalidation pending） |
 | 快捷记录坞中性空闲态 | [spec.md](./quick-dock-neutral-idle-state/spec.md) | [ISSUES.md](./quick-dock-neutral-idle-state/ISSUES.md)（1 票） | in-progress（device pending） |
-| 记录页就地布局编辑（桌面式常用/所有记录） | [spec.md](./record-layout-edit/spec.md) | [ISSUES.md](./record-layout-edit/ISSUES.md)（7 票） | in-progress（01 complete；frontier: 02/03/04） |
+| 记录页就地布局编辑（桌面式常用/所有记录） | [spec.md](./record-layout-edit/spec.md) | [ISSUES.md](./record-layout-edit/ISSUES.md)（7 票） | complete |
 | 0.2.4 后跟进（止血·拆骨·契约） | [spec.md](./post-0.2.4-followup/spec.md) | [ISSUES.md](./post-0.2.4-followup/ISSUES.md)（R2 · 15 票） | complete |
 
 已完成的实施过程、审查报告、截图和运行 dump 不在仓库中长期归档；产品结论应写回

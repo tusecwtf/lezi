@@ -1,8 +1,9 @@
 package com.lezi.babylog.feature.log
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -65,6 +66,7 @@ import com.lezi.babylog.core.ui.RecordSummaryStrip
 import com.lezi.babylog.core.ui.RecordSummaryValue
 import com.lezi.babylog.core.ui.RecordTypeIcon
 import com.lezi.babylog.core.ui.UiTags
+import com.lezi.babylog.core.ui.knownCatalogKeys
 import com.lezi.babylog.core.ui.orderedRecordSections
 import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.core.ui.presentationSummary
@@ -311,6 +313,40 @@ class LogViewModel @Inject constructor(
     fun setExternalDay(day: LocalDate) {
         dayFlow.value = day
     }
+
+    /** Persist a full device-layout snapshot from 布局编辑态. */
+    internal fun applyDeviceLayoutPrefs(prefs: DeviceLayoutPrefs) {
+        viewModelScope.launch {
+            settingsStore.setQuickRecordSlots(prefs.quickRecordSlots)
+            settingsStore.setHiddenItems(prefs.hiddenItems)
+            settingsStore.setItemOrderJson(prefs.itemOrderJson)
+            settingsStore.setCategoryOrderJson(prefs.categoryOrderJson)
+        }
+    }
+
+    fun addCustomItem(name: String, iconSlot: Int, onDone: (String?) -> Unit) {
+        viewModelScope.launch {
+            val result = runCatching { careLog.addCustomItem(name, iconSlot) }
+            onDone(result.exceptionOrNull()?.message)
+        }
+    }
+
+    fun updateCustomItem(item: CustomRecordItem, onDone: (String?) -> Unit) {
+        viewModelScope.launch {
+            val result = runCatching { careLog.updateCustomItem(item) }
+            onDone(result.exceptionOrNull()?.message)
+        }
+    }
+
+    fun deleteCustomItem(id: Long, onDone: (String?) -> Unit) {
+        viewModelScope.launch {
+            val result = runCatching { careLog.deleteCustomItem(id) }
+            onDone(result.exceptionOrNull()?.message)
+        }
+    }
+
+    suspend fun canManageCustomItem(item: CustomRecordItem): Boolean =
+        careLog.canManageCustomItem(item)
 
     fun refresh() {
         if (!refreshing.compareAndSet(expect = false, update = true)) return
@@ -640,14 +676,26 @@ private data class PublishChromeTarget(
 @Composable
 fun LogRoute(
     onOpenComposer: (RecordComposerRequest) -> Unit,
-    onOpenQuickSlotSettings: () -> Unit,
+    onOpenQuickSlotSettings: () -> Unit = {},
     onGoToday: () -> Unit,
     externalDay: LocalDate? = null,
     vm: LogViewModel = hiltViewModel(),
 ) {
     val state by vm.uiState.collectAsStateWithLifecycle()
     var showMore by remember { mutableStateOf(false) }
+    var showLayoutEdit by remember { mutableStateOf(false) }
+    var showCustomManage by remember { mutableStateOf(false) }
+    var layoutPrefs by remember { mutableStateOf<DeviceLayoutPrefs?>(null) }
     var publishChromeRecord by remember { mutableStateOf<PublishChromeTarget?>(null) }
+    fun openLayoutEdit() {
+        layoutPrefs = DeviceLayoutPrefs(
+            quickRecordSlots = state.settings.quickRecordSlots,
+            hiddenItems = state.settings.hiddenItems,
+            itemOrderJson = state.settings.itemOrderJson,
+            categoryOrderJson = state.settings.categoryOrderJson,
+        )
+        showLayoutEdit = true
+    }
     val dayChartContext = remember(state.baby?.id, state.day) {
         DayChartFilterContext(babyId = state.baby?.id, day = state.day)
     }
@@ -1104,11 +1152,47 @@ fun LogRoute(
                 customItems = state.customItems,
                 sleepRunning = state.openSleep != null,
                 onBound = { identity -> openComposer(identity) },
-                onEmpty = onOpenQuickSlotSettings,
+                onEmpty = { /* empty short-press is no-op; long-press opens layout edit */ },
                 onMore = { showMore = true },
+                onLongPress = { openLayoutEdit() },
             )
         }
     }
+
+    val editingPrefs = layoutPrefs
+    if (showLayoutEdit && editingPrefs != null) {
+        val known = remember(state.customItems) {
+            knownCatalogKeys(state.customItems.map { it.id })
+        }
+        LayoutEditModeDialog(
+            prefs = editingPrefs,
+            customItems = state.customItems,
+            onIntent = { intent ->
+                val next = reduceLayoutEdit(editingPrefs, intent, known)
+                layoutPrefs = next
+                vm.applyDeviceLayoutPrefs(next)
+            },
+            onDone = {
+                showLayoutEdit = false
+                layoutPrefs = null
+            },
+            onOpenCustomManage = { showCustomManage = true },
+        )
+    }
+
+    if (showCustomManage) {
+        LayoutCustomManageDialog(
+            items = state.customItems,
+            onDismiss = { showCustomManage = false },
+            onAdd = { name, icon, done -> vm.addCustomItem(name, icon, done) },
+            onUpdate = { item, done -> vm.updateCustomItem(item, done) },
+            onDelete = { id, done -> vm.deleteCustomItem(id, done) },
+        )
+    }
+
+    // Keep parameter referenced so nav call sites still compile during migration.
+    @Suppress("UNUSED_EXPRESSION")
+    onOpenQuickSlotSettings
 
     publishChromeRecord?.let { target ->
         AlertDialog(
@@ -1157,6 +1241,10 @@ fun LogRoute(
                     showMore = false
                     openComposer(identity)
                 },
+                onLongPressItem = {
+                    showMore = false
+                    openLayoutEdit()
+                },
             )
         }
     }
@@ -1165,9 +1253,11 @@ fun LogRoute(
 private val CustomSlotIcons = listOf("★", "♥", "☀", "☾", "♪", "●", "▲", "◆")
 
 /**
- * Always renders four configurable slots plus fixed "更多", laid out by preferred hand.
+ * Always renders four configurable slots plus fixed "更多" (absolute LTR order).
  * Hidden / deleted / invalid refs blank a cell rather than removing it.
+ * Long-press enters 布局编辑态.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun OneHandQuickDock(
     preferredHand: String,
@@ -1178,6 +1268,7 @@ private fun OneHandQuickDock(
     onBound: (RecordItemIdentity) -> Unit,
     onEmpty: () -> Unit,
     onMore: () -> Unit,
+    onLongPress: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val journal = LeziThemeExt.isJournal
@@ -1191,7 +1282,7 @@ private fun OneHandQuickDock(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = if (journal) 0.dp else 8.dp, vertical = 4.dp)
-            .testTag("one_hand_quick_dock_$preferredHand"),
+            .testTag("one_hand_quick_dock_fixed"),
         shape = LeziThemeExt.dockShape,
         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.7f)),
@@ -1225,13 +1316,19 @@ private fun OneHandQuickDock(
                         .weight(1f)
                         .heightIn(min = 64.dp)
                         .testTag(tag)
-                        .clickable {
-                            when (val action = cell.toAction()) {
-                                is QuickDockAction.OpenComposer -> onBound(action.identity)
-                                QuickDockAction.OpenSlotSettings -> onEmpty()
-                                QuickDockAction.OpenMore -> onMore()
-                            }
-                        },
+                        .combinedClickable(
+                            onClick = {
+                                when (val action = cell.toAction()) {
+                                    is QuickDockAction.OpenComposer -> onBound(action.identity)
+                                    QuickDockAction.None -> onEmpty()
+                                    QuickDockAction.OpenMore -> onMore()
+                                }
+                            },
+                            onLongClick = {
+                                // Long-press any dock cell (including empty/more) opens layout edit.
+                                if (cell !is QuickDockCell.More) onLongPress()
+                            },
+                        ),
                     shape = LeziThemeExt.controlShape,
                     color = if (quickDockIdleContainerIsEmphasized(cell)) {
                         MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f)
@@ -1359,11 +1456,13 @@ internal fun moreSheetQuickSuggestions(
     return preferredEntries.ifEmpty { catalog.take(4) }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MoreSheet(
     settings: SettingsLocal,
     customItems: List<CustomRecordItem>,
     onPick: (RecordItemIdentity) -> Unit,
+    onLongPressItem: () -> Unit = {},
 ) {
     val catalog = remember(
         settings.itemOrderJson,
@@ -1381,11 +1480,14 @@ private fun MoreSheet(
     ) {
         moreSheetQuickSuggestions(settings, customItems)
     }
+    // Everyday more: only non-empty sections with visible items; pure tap-to-log.
     val groups = orderedRecordSections(settings.categoryOrderJson).map { section ->
         section to catalog.filter { it.section == section }
     }
     LazyColumn(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("more_sheet_catalog"),
         contentPadding = PaddingValues(
             start = LeziSpacing.Md,
             top = LeziSpacing.Md,
@@ -1410,6 +1512,7 @@ private fun MoreSheet(
                     MoreCatalogCard(
                         entry = entry,
                         onClick = { onPick(entry.identity) },
+                        onLongClick = onLongPressItem,
                         modifier = Modifier.weight(1f),
                     )
                 }
@@ -1438,6 +1541,7 @@ private fun MoreSheet(
                                 MoreCatalogCard(
                                     entry = entry,
                                     onClick = { onPick(entry.identity) },
+                                    onLongClick = onLongPressItem,
                                     modifier = Modifier.weight(1f),
                                 )
                             }
@@ -1456,10 +1560,12 @@ private fun MoreSheet(
 
 private val CustomItemIconGlyphs = listOf("★", "♥", "☀", "☾", "♪", "●", "▲", "◆")
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MoreCatalogCard(
     entry: MoreCatalogEntry,
     onClick: () -> Unit,
+    onLongClick: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val colorRole = when (entry) {
@@ -1468,8 +1574,10 @@ private fun MoreCatalogCard(
     }
     val color = leziRecordColor(colorRole)
     LeziCard(
-        modifier = modifier.heightIn(min = 64.dp),
-        onClick = onClick,
+        modifier = modifier
+            .heightIn(min = 64.dp)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick),
+        onClick = null,
         contentPadding = PaddingValues(horizontal = 3.dp, vertical = 5.dp),
     ) {
         Column(

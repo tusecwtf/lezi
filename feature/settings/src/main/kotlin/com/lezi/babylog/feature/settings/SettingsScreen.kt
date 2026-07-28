@@ -352,14 +352,15 @@ fun SettingsRoute(
     var addError by remember { mutableStateOf<String?>(null) }
     var showAddDate by remember { mutableStateOf(false) }
     var showDisplay by remember { mutableStateOf(false) }
-    var showRecordHub by remember { mutableStateOf(false) }
-    var showRecordItems by remember { mutableStateOf(false) }
+    var showRecordSettings by remember { mutableStateOf(false) }
     var showCustomItems by remember { mutableStateOf(false) }
-    var showQuickSlots by remember(initiallyShowQuickSlots) {
-        mutableStateOf(initiallyShowQuickSlots)
+    // Legacy deep-link initiallyShowQuickSlots: open 记录设置 (layout moved to record page).
+    LaunchedEffect(initiallyShowQuickSlots) {
+        if (initiallyShowQuickSlots) {
+            showRecordSettings = true
+            onInitialQuickSlotsFinished()
+        }
     }
-    var showPerItem by remember { mutableStateOf(false) }
-    var showPlanCalendar by remember { mutableStateOf(false) }
     var showSystemCalendarSetup by remember { mutableStateOf(false) }
     var localPreferenceBabyId by remember { mutableStateOf<Long?>(null) }
     var localPreferenceError by remember { mutableStateOf<String?>(null) }
@@ -370,10 +371,6 @@ fun SettingsRoute(
     }
     LaunchedEffect(ui.canManageBabyProfiles, showAdd) {
         if (!ui.canManageBabyProfiles && showAdd) finishAddBabyDialog()
-    }
-    fun finishQuickSlotsDialog() {
-        showQuickSlots = false
-        if (initiallyShowQuickSlots) onInitialQuickSlotsFinished()
     }
 
     PageScaffoldBackground {
@@ -411,10 +408,10 @@ fun SettingsRoute(
                 },
             )
             MenuRow(
-                "记录与快捷设置",
-                "常用槽位、项目排序、分项目与计划日历",
+                "记录设置",
+                "分项目参数、护理计划与系统日历",
                 icon = "☰",
-                onClick = { showRecordHub = true },
+                onClick = { showRecordSettings = true },
             )
             MenuRow("显示设置", "界面模板与主题", icon = "◐", onClick = { showDisplay = true })
 
@@ -478,35 +475,9 @@ fun SettingsRoute(
         }
     }
 
-    if (showRecordHub) {
-        RecordAndShortcutSettingsHubDialog(
-            onDismiss = { showRecordHub = false },
-            onOpen = { dest ->
-                showRecordHub = false
-                when (dest) {
-                    RecordShortcutHubDestination.QuickSlots -> showQuickSlots = true
-                    RecordShortcutHubDestination.AllItems -> showRecordItems = true
-                    RecordShortcutHubDestination.PerItem -> showPerItem = true
-                    RecordShortcutHubDestination.PlanCalendar -> showPlanCalendar = true
-                }
-            },
-        )
-    }
-
-    if (showPerItem) {
-        PerItemSettingsDialog(
+    if (showRecordSettings) {
+        RecordSettingsDialog(
             settings = ui.settings,
-            onDismiss = { showPerItem = false },
-            onTimerEnabled = vm::setTimer,
-            onRecordAt = vm::setRecordAt,
-            onInterval = vm::setInterval,
-            onAmountStep = vm::setStep,
-            onFeverAdvice = vm::setInfantFeverAdvice,
-        )
-    }
-
-    if (showPlanCalendar) {
-        PlanCalendarSettingsDialog(
             carePlanRemindersEnabled = ui.settings.carePlanLocalRemindersEnabled,
             onCarePlanRemindersEnabled = vm::setCarePlanLocalReminders,
             systemCalendarEnabled = ui.settings.systemCalendarEnabled &&
@@ -516,11 +487,14 @@ fun SettingsRoute(
                 ui.settings.systemCalendarDisclosureLevel,
             ),
             onConfigureSystemCalendar = {
-                // Explicit user action only — opens device-local target pick flow.
-                // Permission request is deferred to the configure surface (no passive prompt).
                 showSystemCalendarSetup = true
             },
-            onDismiss = { showPlanCalendar = false },
+            onTimerEnabled = vm::setTimer,
+            onRecordAt = vm::setRecordAt,
+            onInterval = vm::setInterval,
+            onAmountStep = vm::setStep,
+            onFeverAdvice = vm::setInfantFeverAdvice,
+            onDismiss = { showRecordSettings = false },
         )
     }
 
@@ -576,7 +550,7 @@ fun SettingsRoute(
                         }
                     }
                     Text(
-                        "常用入口会靠近所选拇指侧。",
+                        "影响时间圆盘等表单靠边；常用四槽按你在记录页排的绝对顺序，不再镜像。",
                         style = LeziTypography.Meta,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -923,29 +897,7 @@ fun SettingsRoute(
         )
     }
 
-    if (showRecordItems) {
-        AllRecordItemsSettingsDialog(
-            settings = ui.settings,
-            customItems = ui.customItems,
-            onDismiss = { showRecordItems = false },
-            onItemOrderChanged = vm::setItemOrderJson,
-            onCategoryOrderChanged = vm::setCategoryOrderJson,
-            onToggleVisible = vm::toggleHiddenItem,
-            onOpenCustomManage = {
-                showRecordItems = false
-                showCustomItems = true
-            },
-        )
-    }
-
-    if (showQuickSlots) {
-        QuickRecordSlotsSettingsDialog(
-            settings = ui.settings,
-            customItems = ui.customItems,
-            onDismiss = ::finishQuickSlotsDialog,
-            onSlotsChanged = vm::setQuickRecordSlots,
-        )
-    }
+    // Layout (常用/所有记录) is edited on the record page; no parallel settings dialogs.
 
     if (clearStep == 1) {
         AlertDialog(
