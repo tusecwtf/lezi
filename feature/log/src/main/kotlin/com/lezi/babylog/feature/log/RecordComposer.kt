@@ -922,13 +922,12 @@ fun RecordComposerHost(
                 }
             },
             title = {
-                Text(planConfirmation?.title ?: "删除这条记录？")
+                Text(planConfirmation?.title ?: RECORD_DELETE_TITLE)
             },
             text = {
                 Text(
                     deleteConfirmationMessage(
-                        impact = planConfirmation?.message
-                            ?: "删除后会从时间轴和汇总中移除，无法撤销。",
+                        impact = planConfirmation?.message ?: RECORD_DELETE_IMPACT,
                         error = state.error.takeIf { deleteAttempted },
                     ),
                 )

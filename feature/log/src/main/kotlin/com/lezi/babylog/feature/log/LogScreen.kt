@@ -18,12 +18,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -33,6 +36,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -48,6 +52,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
+import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.CarePlan
@@ -60,6 +65,7 @@ import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SettingsLocal
 import com.lezi.babylog.core.model.SleepPayload
+import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.core.model.availableForNewEntry
 import com.lezi.babylog.core.model.displayLabel
 import com.lezi.babylog.core.ui.RecordSection
@@ -88,26 +94,26 @@ import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
 import com.lezi.babylog.designsystem.SummaryMetric
+import com.lezi.babylog.designsystem.SwipeEditDeleteRow
 import com.lezi.babylog.designsystem.TimelineAxis
 import com.lezi.babylog.designsystem.TimelineLaneSegment
 import com.lezi.babylog.designsystem.TimelineLegendEntry
 import com.lezi.babylog.designsystem.TimelineRailCard
 import com.lezi.babylog.designsystem.leziRecordColor
-import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CareAggregation
+import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CustomRecordItem
 import com.lezi.babylog.domain.DailySummary
 import com.lezi.babylog.domain.DayChartCategories
 import com.lezi.babylog.domain.DayChartCategory
 import com.lezi.babylog.domain.formatClock
 import com.lezi.babylog.domain.relativeTimeLabel
-import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.sync.UploaderMemberRef
-import com.lezi.babylog.sync.localRecordPublishDetail
 import com.lezi.babylog.sync.localCarePlanPublishDetail
 import com.lezi.babylog.sync.localCarePlanPublishLabel
+import com.lezi.babylog.sync.localRecordPublishDetail
 import com.lezi.babylog.sync.localRecordPublishLabel
 import com.lezi.babylog.sync.resolveRecordUploaderLabel
 import com.lezi.babylog.sync.toUploaderRef
@@ -127,8 +133,6 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.TextButton
 
 data class LogUiState(
     val loading: Boolean = true,
@@ -387,6 +391,44 @@ class LogViewModel @Inject constructor(
     fun skipCarePlan(planId: Long) {
         viewModelScope.launch {
             runCatching { careLog.skipCarePlan(planId) }
+        }
+    }
+
+    /**
+     * Soft-delete a care plan from the list swipe path.
+     * Same domain entry as Composer delete; [onResult] gets success toast or UI error.
+     */
+    fun deleteCarePlanFromList(planId: Long, onResult: (Result<String>) -> Unit) {
+        viewModelScope.launch {
+            val result = runCatching {
+                careLog.deleteCarePlan(planId)
+                "已删除护理计划"
+            }.fold(
+                onSuccess = { Result.success(it) },
+                onFailure = {
+                    Result.failure(Exception(productUiError(it, "删除失败，请重试")))
+                },
+            )
+            onResult(result)
+        }
+    }
+
+    /**
+     * Soft-delete a timeline record from the list swipe path.
+     * Same domain entry as Composer delete.
+     */
+    fun deleteRecordFromList(recordId: Long, onResult: (Result<String>) -> Unit) {
+        viewModelScope.launch {
+            val result = runCatching {
+                careLog.deleteRecord(recordId)
+                "已删除记录"
+            }.fold(
+                onSuccess = { Result.success(it) },
+                onFailure = {
+                    Result.failure(Exception(productUiError(it, "删除失败，请重试")))
+                },
+            )
+            onResult(result)
         }
     }
 }
@@ -828,12 +870,19 @@ private data class PublishChromeTarget(
     val priorRevision: Boolean,
 )
 
+/** List-level delete confirmation target (swipe path; Composer not opened first). */
+private sealed interface ListDeleteTarget {
+    data class Plan(val plan: CarePlan) : ListDeleteTarget
+    data class RecordItem(val record: Record) : ListDeleteTarget
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LogRoute(
     onOpenComposer: (RecordComposerRequest) -> Unit,
     onOpenQuickSlotSettings: () -> Unit = {},
     onGoToday: () -> Unit,
+    onMessage: (String) -> Unit = {},
     externalDay: LocalDate? = null,
     vm: LogViewModel = hiltViewModel(),
 ) {
@@ -843,6 +892,35 @@ fun LogRoute(
     var showCustomManage by remember { mutableStateOf(false) }
     var layoutPrefs by remember { mutableStateOf<DeviceLayoutPrefs?>(null) }
     var publishChromeRecord by remember { mutableStateOf<PublishChromeTarget?>(null) }
+    /** At most one timeline/plan row may stay revealed. */
+    var revealedSwipeRowId by remember { mutableStateOf<String?>(null) }
+    var listDeleteTarget by remember { mutableStateOf<ListDeleteTarget?>(null) }
+    var listDeleteError by remember { mutableStateOf<String?>(null) }
+    var listDeleting by remember { mutableStateOf(false) }
+    val listState = rememberLazyListState()
+
+    fun collapseSwipeRows() {
+        revealedSwipeRowId = null
+    }
+
+    fun openEditFromSwipe(request: RecordComposerRequest) {
+        collapseSwipeRows()
+        onOpenComposer(request)
+    }
+
+    fun requestListDelete(target: ListDeleteTarget) {
+        collapseSwipeRows()
+        listDeleteError = null
+        listDeleting = false
+        listDeleteTarget = target
+    }
+
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }
+            .collect { scrolling ->
+                if (scrolling) collapseSwipeRows()
+            }
+    }
     fun openLayoutEdit() {
         layoutPrefs = DeviceLayoutPrefs(
             quickRecordSlots = state.settings.quickRecordSlots,
@@ -979,6 +1057,7 @@ fun LogRoute(
                 modifier = Modifier.weight(1f),
             ) {
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(bottom = LeziSpacing.Md),
                     verticalArrangement = Arrangement.spacedBy(if (journal) 4.dp else LeziSpacing.SectionGap),
@@ -1184,58 +1263,81 @@ fun LogRoute(
                             } else {
                                 statusLine
                             }
+                            val planRowId = "plan-${plan.id}"
+                            val planRevealed = revealedSwipeRowId == planRowId
                             Column(
                                 Modifier
                                     .padding(horizontal = LeziSpacing.Page)
                                     .testTag("pending_care_plan_${plan.id}"),
                             ) {
-                                RecordRow(
-                                    time = formatClock(plan.scheduledAt),
-                                    title = title,
-                                    summary = planSummary,
-                                    relative = relativeTimeLabel(plan.scheduledAt),
-                                    // Amber (Yellow) for missed — never danger-red anomaly bang.
-                                    // Dirty publish chrome also uses amber via Yellow tone when missed;
-                                    // first-publish waiting still Blue for pending-to-do emphasis.
-                                    tone = if (isMissed || planPublishLabel != null) {
-                                        LeziTone.Yellow
-                                    } else {
-                                        LeziTone.Blue
-                                    },
-                                    anomaly = false,
-                                    leading = {
-                                        RecordTypeIcon(plan.type)
-                                    },
-                                    onClick = {
-                                        onOpenComposer(RecordComposerRequest.Fulfill(plan.id))
-                                    },
-                                    modifier = Modifier.semantics {
-                                        val publishDetail = if (planPublishLabel != null) {
-                                            "。" + localCarePlanPublishDetail(
-                                                lastSyncFailed = state.lastSyncFailed,
-                                                hasPriorFamilyRevision = planPrior,
-                                            )
-                                        } else {
-                                            ""
+                                SwipeEditDeleteRow(
+                                    open = planRevealed,
+                                    onOpenChange = { open ->
+                                        revealedSwipeRowId = if (open) planRowId else {
+                                            revealedSwipeRowId.takeUnless { it == planRowId }
                                         }
-                                        contentDescription = "完成${title}护理计划$publishDetail"
                                     },
-                                )
+                                    editEnabled = canManagePlan,
+                                    deleteEnabled = canManagePlan,
+                                    onEdit = {
+                                        openEditFromSwipe(
+                                            RecordComposerRequest.EditPlan(plan.id),
+                                        )
+                                    },
+                                    onDelete = {
+                                        requestListDelete(ListDeleteTarget.Plan(plan))
+                                    },
+                                    editTestTag = "timeline_swipe_edit_plan_${plan.id}",
+                                    deleteTestTag = "timeline_swipe_delete_plan_${plan.id}",
+                                ) {
+                                    RecordRow(
+                                        time = formatClock(plan.scheduledAt),
+                                        title = title,
+                                        summary = planSummary,
+                                        relative = relativeTimeLabel(plan.scheduledAt),
+                                        // Amber (Yellow) for missed — never danger-red anomaly bang.
+                                        // Dirty publish chrome also uses amber via Yellow tone when missed;
+                                        // first-publish waiting still Blue for pending-to-do emphasis.
+                                        tone = if (isMissed || planPublishLabel != null) {
+                                            LeziTone.Yellow
+                                        } else {
+                                            LeziTone.Blue
+                                        },
+                                        anomaly = false,
+                                        leading = {
+                                            RecordTypeIcon(plan.type)
+                                        },
+                                        onClick = {
+                                            if (planRevealed) {
+                                                collapseSwipeRows()
+                                            } else {
+                                                // Collapse any other open swipe row before fulfill.
+                                                collapseSwipeRows()
+                                                onOpenComposer(
+                                                    RecordComposerRequest.Fulfill(plan.id),
+                                                )
+                                            }
+                                        },
+                                        modifier = Modifier.semantics {
+                                            val publishDetail = if (planPublishLabel != null) {
+                                                "。" + localCarePlanPublishDetail(
+                                                    lastSyncFailed = state.lastSyncFailed,
+                                                    hasPriorFamilyRevision = planPrior,
+                                                )
+                                            } else {
+                                                ""
+                                            }
+                                            contentDescription =
+                                                "完成${title}护理计划$publishDetail"
+                                        },
+                                    )
+                                }
                                 if (canManagePlan) {
                                     Row(
                                         Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.End,
                                     ) {
-                                        TextButton(
-                                            onClick = {
-                                                onOpenComposer(
-                                                    RecordComposerRequest.EditPlan(plan.id),
-                                                )
-                                            },
-                                            modifier = Modifier.testTag(
-                                                "care_plan_edit_${plan.id}",
-                                            ),
-                                        ) { Text("编辑") }
+                                        // 编辑 is left-swipe only (absolute screen direction).
                                         TextButton(
                                             onClick = { vm.skipCarePlan(plan.id) },
                                             modifier = Modifier.testTag(
@@ -1285,42 +1387,66 @@ fun LogRoute(
                                 lastSyncFailed = state.lastSyncFailed,
                                 hasPriorFamilyRevision = priorRevision,
                             )
-                            RecordRow(
-                                time = formatClock(r.timestamp),
-                                title = title,
-                                summary = timelineRecordSummary(
-                                    recordSummaryLine(r),
-                                    state.uploaderLabels[r.id],
-                                    publishLabel,
-                                ),
-                                relative = relativeTimeLabel(r.timestamp),
-                                tone = toneOf(r.type),
-                                anomaly = (r.payload.payload as? SleepPayload)?.anomaly == true ||
-                                    (r.type == RecordType.SLEEP && r.endTimestamp == null),
-                                leading = {
-                                    RecordTypeIcon(r.type)
-                                },
-                                onClick = {
-                                    if (publishLabel != null) {
-                                        publishChromeRecord = PublishChromeTarget(
-                                            recordId = r.id,
-                                            title = title,
-                                            priorRevision = priorRevision,
-                                        )
-                                    } else {
-                                        onOpenComposer(RecordComposerRequest.Edit(r.id))
+                            val recordRowId = "record-${r.id}"
+                            val recordRevealed = revealedSwipeRowId == recordRowId
+                            SwipeEditDeleteRow(
+                                open = recordRevealed,
+                                onOpenChange = { open ->
+                                    revealedSwipeRowId = if (open) recordRowId else {
+                                        revealedSwipeRowId.takeUnless { it == recordRowId }
                                     }
                                 },
-                                modifier = Modifier
-                                    .padding(horizontal = LeziSpacing.Page)
-                                    .semantics {
+                                onEdit = {
+                                    // Amber publish chrome: tap prefers sync sheet; left-swipe still edits.
+                                    openEditFromSwipe(RecordComposerRequest.Edit(r.id))
+                                },
+                                onDelete = {
+                                    requestListDelete(ListDeleteTarget.RecordItem(r))
+                                },
+                                editTestTag = "timeline_swipe_edit_record_${r.id}",
+                                deleteTestTag = "timeline_swipe_delete_record_${r.id}",
+                                modifier = Modifier.padding(horizontal = LeziSpacing.Page),
+                            ) {
+                                RecordRow(
+                                    time = formatClock(r.timestamp),
+                                    title = title,
+                                    summary = timelineRecordSummary(
+                                        recordSummaryLine(r),
+                                        state.uploaderLabels[r.id],
+                                        publishLabel,
+                                    ),
+                                    relative = relativeTimeLabel(r.timestamp),
+                                    tone = toneOf(r.type),
+                                    anomaly =
+                                        (r.payload.payload as? SleepPayload)?.anomaly == true ||
+                                            (r.type == RecordType.SLEEP && r.endTimestamp == null),
+                                    leading = {
+                                        RecordTypeIcon(r.type)
+                                    },
+                                    onClick = {
+                                        if (recordRevealed) {
+                                            collapseSwipeRows()
+                                        } else if (publishLabel != null) {
+                                            collapseSwipeRows()
+                                            publishChromeRecord = PublishChromeTarget(
+                                                recordId = r.id,
+                                                title = title,
+                                                priorRevision = priorRevision,
+                                            )
+                                        } else {
+                                            collapseSwipeRows()
+                                            onOpenComposer(RecordComposerRequest.Edit(r.id))
+                                        }
+                                    },
+                                    modifier = Modifier.semantics {
                                         contentDescription = if (publishLabel != null) {
                                             "同步状态$title"
                                         } else {
                                             "编辑$title"
                                         }
                                     },
-                            )
+                                )
+                            }
                         }
                     }
 
@@ -1406,6 +1532,84 @@ fun LogRoute(
                     ) { Text("编辑") }
                     TextButton(onClick = { publishChromeRecord = null }) { Text("关闭") }
                 }
+            },
+        )
+    }
+
+    listDeleteTarget?.let { target ->
+        val planConfirmation = (target as? ListDeleteTarget.Plan)?.let {
+            carePlanDeleteConfirmation(it.plan)
+        }
+        AlertDialog(
+            onDismissRequest = {
+                if (!listDeleting) {
+                    listDeleteTarget = null
+                    listDeleteError = null
+                    collapseSwipeRows()
+                }
+            },
+            title = {
+                Text(planConfirmation?.title ?: RECORD_DELETE_TITLE)
+            },
+            text = {
+                Text(
+                    deleteConfirmationMessage(
+                        impact = planConfirmation?.message ?: RECORD_DELETE_IMPACT,
+                        error = listDeleteError,
+                    ),
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !listDeleting,
+                    onClick = {
+                        listDeleting = true
+                        listDeleteError = null
+                        when (target) {
+                            is ListDeleteTarget.Plan -> vm.deleteCarePlanFromList(target.plan.id) { result ->
+                                listDeleting = false
+                                result.fold(
+                                    onSuccess = { message ->
+                                        listDeleteTarget = null
+                                        listDeleteError = null
+                                        onMessage(message)
+                                    },
+                                    onFailure = { err ->
+                                        listDeleteError = err.message ?: "删除失败，请重试"
+                                    },
+                                )
+                            }
+                            is ListDeleteTarget.RecordItem -> vm.deleteRecordFromList(target.record.id) { result ->
+                                listDeleting = false
+                                result.fold(
+                                    onSuccess = { message ->
+                                        listDeleteTarget = null
+                                        listDeleteError = null
+                                        onMessage(message)
+                                    },
+                                    onFailure = { err ->
+                                        listDeleteError = err.message ?: "删除失败，请重试"
+                                    },
+                                )
+                            }
+                        }
+                    },
+                ) {
+                    Text(
+                        if (listDeleting) "删除中…" else "确认删除",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !listDeleting,
+                    onClick = {
+                        listDeleteTarget = null
+                        listDeleteError = null
+                        collapseSwipeRows()
+                    },
+                ) { Text("取消") }
             },
         )
     }

@@ -673,6 +673,9 @@ fun LeziRoot(
                     onOpenComposer = vm::openComposer,
                     onOpenQuickSlotSettings = { nav.navigate("settings/quick-records") },
                     onGoToday = { vm.setDay(today) },
+                    onMessage = { message ->
+                        scope.launch { snackbar.showSnackbar(message) }
+                    },
                 )
             }
             composable(TopDest.Summary.route) { SummaryRoute(anchorDate = ui.selectedDate) }
