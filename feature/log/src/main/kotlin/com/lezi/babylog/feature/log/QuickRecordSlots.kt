@@ -226,5 +226,49 @@ internal fun swapQuickRecordSlots(
     return normalized
 }
 
+/**
+ * Point slot [index] at [catalogKey] (trimmed). Blank key is ignored — use
+ * [clearQuickRecordSlot]. Out-of-range index is a no-op.
+ *
+ * Uniqueness: if [catalogKey] already occupies another slot, that slot and
+ * [index] swap so the key appears once. Assigning the same key to its current
+ * slot is a no-op. Overwriting a different key only drops that shortcut pointer
+ * (does not move anything into 本机已删除).
+ */
+internal fun assignQuickRecordSlot(
+    slots: List<String>,
+    index: Int,
+    catalogKey: String,
+): List<String> {
+    val normalized = normalizeStoredQuickSlots(slots).toMutableList()
+    if (index !in normalized.indices) return normalized
+    val key = catalogKey.trim()
+    if (key.isEmpty()) return normalized
+    val existing = normalized.indexOf(key)
+    if (existing == index) return normalized
+    if (existing >= 0) {
+        val tmp = normalized[index]
+        normalized[index] = normalized[existing]
+        normalized[existing] = tmp
+        return normalized
+    }
+    normalized[index] = key
+    return normalized
+}
+
+/**
+ * Clear the shortcut at [index] to an empty slot. Out-of-range index is a no-op.
+ * Does not alter catalog order or 本机已删除 membership.
+ */
+internal fun clearQuickRecordSlot(
+    slots: List<String>,
+    index: Int,
+): List<String> {
+    val normalized = normalizeStoredQuickSlots(slots).toMutableList()
+    if (index !in normalized.indices) return normalized
+    normalized[index] = ""
+    return normalized
+}
+
 /** Default value for first-run / missing preference. */
 internal fun defaultQuickRecordSlots(): List<String> = DEFAULT_QUICK_RECORD_SLOTS
