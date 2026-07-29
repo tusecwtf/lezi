@@ -31,23 +31,26 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.composed
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
@@ -61,8 +64,8 @@ import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.availableForNewEntry
 import com.lezi.babylog.core.ui.RecordSection
 import com.lezi.babylog.core.ui.RecordTypeIcon
-import com.lezi.babylog.core.ui.catalogSectionForKey
 import com.lezi.babylog.core.ui.knownCatalogKeys
+import com.lezi.babylog.core.ui.orderedKeysInSection
 import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.core.ui.storageKey
 import com.lezi.babylog.designsystem.LeziRecordColorRole
@@ -72,20 +75,28 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.leziRecordColor
 import com.lezi.babylog.domain.CustomRecordItem
-import kotlin.math.abs
 import kotlin.math.roundToInt
 
 private val CustomGlyphs = com.lezi.babylog.core.ui.CUSTOM_ITEM_ICON_GLYPHS
 
 private data class LayoutDragState(
+    val token: Long,
+    val source: LayoutDragSource,
     val catalogKey: String,
     val label: String,
     val pointerWindow: Offset,
-    val sourceSlotIndex: Int?,
-    val sourceIsDeleted: Boolean,
+    val currentTarget: LayoutDropTarget?,
     val colorRole: LeziRecordColorRole?,
     val recordType: RecordType?,
     val customIconSlot: Int?,
+)
+
+private data class LayoutConfigurationKey(
+    val orientation: Int,
+    val screenWidthDp: Int,
+    val screenHeightDp: Int,
+    val uiMode: Int,
+    val fontScale: Float,
 )
 
 private data class LayoutItemVisual(
@@ -103,6 +114,7 @@ internal fun LayoutEditCanvas(
     onIntent: (LayoutEditIntent) -> Unit,
     onDone: () -> Unit,
     onOpenCustomManage: () -> Unit,
+    cancelDragSignal: Long = 0L,
     modifier: Modifier = Modifier,
 ) {
     val known = remember(customItems) { knownCatalogKeys(customItems.map { it.id }) }
@@ -146,11 +158,12 @@ internal fun LayoutEditCanvas(
     val sections = remember(prefs, known) { layoutEditVisibleSections(prefs, known) }
     val deleted = remember(prefs, known) { layoutEditDeletedKeys(prefs, known) }
 
-    val slotBounds = remember { mutableStateMapOf<Int, Rect>() }
-    val catalogItemBounds = remember { mutableStateMapOf<String, Rect>() }
-    var trashBounds by remember { mutableStateOf<Rect?>(null) }
+    val targetRegistry = remember { LayoutVisibleTargetRegistry() }
+    var targetRegistryEpoch by remember { mutableLongStateOf(0L) }
     var rootWindowOrigin by remember { mutableStateOf(Offset.Zero) }
     var drag by remember { mutableStateOf<LayoutDragState?>(null) }
+    var activeSession by remember { mutableStateOf<LayoutDragSession?>(null) }
+    var nextDragToken by remember { mutableLongStateOf(0L) }
     val density = LocalDensity.current
     val isDragging = drag != null
 
@@ -167,44 +180,103 @@ internal fun LayoutEditCanvas(
     )
     val iconWiggle = if (isDragging) 0f else jiggleAngle
 
-    fun dropAt(
-        windowPos: Offset,
-        sourceKey: String,
-        sourceIsDeleted: Boolean,
-        sourceSlotIndex: Int? = null,
-    ) {
-        val intent = resolveLayoutDrop(
-            pointerWindow = windowPos,
-            slotBounds = slotBounds.toMap(),
-            trashBounds = trashBounds,
-            sourceKey = sourceKey,
-            sourceIsDeleted = sourceIsDeleted,
-            sourceSlotIndex = sourceSlotIndex,
-            catalogItemBounds = catalogItemBounds.toMap(),
-            itemOrderJson = prefs.itemOrderJson,
-            knownKeys = known,
-            hiddenItems = prefs.hiddenItems,
-        )
-        if (intent != null) onIntent(intent)
-    }
-
     fun beginDrag(
+        source: LayoutDragSource,
         key: String,
         windowPos: Offset,
-        sourceSlotIndex: Int? = null,
-        sourceIsDeleted: Boolean = false,
-    ) {
+    ): Long {
+        nextDragToken += 1L
+        val token = nextDragToken
+        val session = LayoutDragSession(token = token, source = source)
+        activeSession = session
+        val resolution = session.update(token, windowPos, targetRegistry.snapshot())
         val visual = visualByKey[key]
         drag = LayoutDragState(
+            token = token,
+            source = source,
             catalogKey = key,
             label = labels[key] ?: key,
             pointerWindow = windowPos,
-            sourceSlotIndex = sourceSlotIndex,
-            sourceIsDeleted = sourceIsDeleted,
+            currentTarget = resolution.currentTarget,
             colorRole = visual?.colorRole,
             recordType = visual?.recordType,
             customIconSlot = visual?.customIconSlot,
         )
+        return token
+    }
+
+    fun updateDrag(token: Long, windowPos: Offset) {
+        val current = drag?.takeIf { it.token == token } ?: return
+        val resolution = activeSession?.update(
+            token = token,
+            pointerWindow = windowPos,
+            targets = targetRegistry.snapshot(),
+        ) ?: return
+        if (resolution.accepted) {
+            drag = current.copy(
+                pointerWindow = windowPos,
+                currentTarget = resolution.currentTarget,
+            )
+        }
+    }
+
+    fun finishDrag(token: Long, windowPos: Offset) {
+        if (drag?.token != token) return
+        val intent = activeSession?.finish(
+            token = token,
+            pointerWindow = windowPos,
+            targets = targetRegistry.snapshot(),
+        )
+        activeSession = null
+        drag = null
+        if (intent != null) onIntent(intent)
+    }
+
+    fun cancelActiveDrag(reason: LayoutDragCancelReason, token: Long? = null) {
+        val current = drag ?: return
+        if (token != null && token != current.token) return
+        activeSession?.cancel(reason)
+        activeSession = null
+        drag = null
+    }
+
+    fun notifyTargetRegistryChanged() {
+        targetRegistryEpoch += 1L
+    }
+
+    LaunchedEffect(targetRegistryEpoch) {
+        val current = drag ?: return@LaunchedEffect
+        updateDrag(current.token, current.pointerWindow)
+    }
+
+    val configuration = LocalConfiguration.current
+    val configurationKey = LayoutConfigurationKey(
+        orientation = configuration.orientation,
+        screenWidthDp = configuration.screenWidthDp,
+        screenHeightDp = configuration.screenHeightDp,
+        uiMode = configuration.uiMode,
+        fontScale = configuration.fontScale,
+    )
+    val lifecyclePolicy = remember {
+        LayoutDragLifecyclePolicy(
+            initialCancelSignal = cancelDragSignal,
+            initialConfigurationKey = configurationKey,
+        )
+    }
+    LaunchedEffect(cancelDragSignal) {
+        lifecyclePolicy.cancelReasonForSignal(cancelDragSignal)?.let { reason ->
+            cancelActiveDrag(reason)
+        }
+    }
+    LaunchedEffect(configurationKey) {
+        lifecyclePolicy.cancelReasonForConfiguration(configurationKey)
+            ?.let { reason -> cancelActiveDrag(reason) }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            activeSession?.cancel(lifecyclePolicy.disposeReason())
+        }
     }
 
     Box(
@@ -252,6 +324,11 @@ internal fun LayoutEditCanvas(
             ) {
                 sections.forEach { section ->
                     val keys = layoutEditVisibleKeys(prefs, section, known)
+                    val fullSectionOrder = orderedKeysInSection(
+                        section = section,
+                        itemOrderJson = prefs.itemOrderJson,
+                        knownKeysForSection = known,
+                    )
                     if (keys.isNotEmpty() || section == RecordSection.Custom) {
                         Spacer(Modifier.height(LeziSpacing.SectionGap))
                     }
@@ -263,6 +340,9 @@ internal fun LayoutEditCanvas(
                         RecordCatalogSectionHeading(section.title)
                         Spacer(Modifier.height(LeziSpacing.Xs))
                         val showAdd = section == RecordSection.Custom
+                        val dropBorderColor = MaterialTheme.colorScheme.primary
+                        val dropBorderShape =
+                            com.lezi.babylog.designsystem.LeziThemeExt.cardShape
                         LayoutCatalogGrid(
                             keys = keys,
                             labels = labels,
@@ -271,26 +351,56 @@ internal fun LayoutEditCanvas(
                             showAddCell = showAdd,
                             onAddClick = onOpenCustomManage,
                             itemModifier = { key ->
-                                val dragging = drag?.catalogKey == key &&
-                                    drag?.sourceSlotIndex == null &&
-                                    drag?.sourceIsDeleted != true
+                                val targetIndex = fullSectionOrder.indexOf(key)
+                                val targetNode = LayoutTargetNode.CatalogItem(
+                                    catalogKey = key,
+                                    section = section,
+                                    toIndex = targetIndex,
+                                )
+                                val dragging = drag?.source == LayoutDragSource.CatalogItem(
+                                    catalogKey = key,
+                                    section = section,
+                                )
+                                val hot = drag?.currentTarget == LayoutDropTarget.CatalogItem(
+                                    catalogKey = key,
+                                    toIndex = targetIndex,
+                                )
                                 Modifier
-                                    .onGloballyPositioned { coords ->
-                                        catalogItemBounds[key] = coords.boundsInWindow()
-                                    }
+                                    .layoutTargetRegistration(
+                                        node = targetNode,
+                                        registry = targetRegistry,
+                                        onRegistryChanged = ::notifyTargetRegistryChanged,
+                                    )
                                     .draggableCatalogKey(
                                         catalogKey = key,
-                                        onDragStart = { beginDrag(key, it) },
-                                        onDrag = { pos ->
-                                            drag = drag?.copy(pointerWindow = pos)
+                                        onDragStart = { pos ->
+                                            beginDrag(
+                                                source = LayoutDragSource.CatalogItem(key, section),
+                                                key = key,
+                                                windowPos = pos,
+                                            )
                                         },
-                                        onDragEnd = { pos ->
-                                            dropAt(pos, key, sourceIsDeleted = false)
-                                            drag = null
+                                        onDrag = ::updateDrag,
+                                        onDragEnd = ::finishDrag,
+                                        onDragCancel = { token ->
+                                            cancelActiveDrag(
+                                                LayoutDragCancelReason.Dispose,
+                                                token,
+                                            )
                                         },
-                                        onDragCancel = { drag = null },
                                     )
                                     .testTag("layout_edit_item_$key")
+                                    .then(
+                                        if (hot) {
+                                            Modifier.border(
+                                                2.dp,
+                                                dropBorderColor,
+                                                dropBorderShape,
+                                            )
+                                        } else {
+                                            Modifier
+                                        },
+                                    )
                                     .then(
                                         if (dragging) Modifier.alpha(0.25f) else Modifier,
                                     )
@@ -302,14 +412,17 @@ internal fun LayoutEditCanvas(
             }
 
             // Local-only deleted section remains a clear, bounded drop zone.
-            val trashHot = drag != null &&
-                trashBounds?.contains(drag!!.pointerWindow) == true
+            val trashHot = drag?.currentTarget == LayoutDropTarget.LocalDeleted
             Column(
                 Modifier
                     .fillMaxWidth()
                     .padding(horizontal = LeziSpacing.Page)
                     .heightIn(min = 72.dp)
-                    .onGloballyPositioned { trashBounds = it.boundsInWindow() }
+                    .layoutTargetRegistration(
+                        node = LayoutTargetNode.LocalDeleted,
+                        registry = targetRegistry,
+                        onRegistryChanged = ::notifyTargetRegistryChanged,
+                    )
                     .clip(com.lezi.babylog.designsystem.LeziThemeExt.cardShape)
                     .background(
                         MaterialTheme.colorScheme.errorContainer.copy(
@@ -363,22 +476,25 @@ internal fun LayoutEditCanvas(
                         showAddCell = false,
                         onAddClick = {},
                         itemModifier = { key ->
-                            val dragging = drag?.catalogKey == key &&
-                                drag?.sourceIsDeleted == true
+                            val dragging = drag?.source == LayoutDragSource.LocalDeleted(key)
                             Modifier
                                 .draggableCatalogKey(
                                     catalogKey = key,
-                                    onDragStart = {
-                                        beginDrag(key, it, sourceIsDeleted = true)
+                                    onDragStart = { pos ->
+                                        beginDrag(
+                                            source = LayoutDragSource.LocalDeleted(key),
+                                            key = key,
+                                            windowPos = pos,
+                                        )
                                     },
-                                    onDrag = { pos ->
-                                        drag = drag?.copy(pointerWindow = pos)
+                                    onDrag = ::updateDrag,
+                                    onDragEnd = ::finishDrag,
+                                    onDragCancel = { token ->
+                                        cancelActiveDrag(
+                                            LayoutDragCancelReason.Dispose,
+                                            token,
+                                        )
                                     },
-                                    onDragEnd = { pos ->
-                                        dropAt(pos, key, sourceIsDeleted = true)
-                                        drag = null
-                                    },
-                                    onDragCancel = { drag = null },
                                 )
                                 .testTag("layout_edit_deleted_$key")
                                 .then(
@@ -396,21 +512,24 @@ internal fun LayoutEditCanvas(
                 slots = slots,
                 labels = labels,
                 visualByKey = visualByKey,
-                dragPointer = drag?.pointerWindow,
+                currentTarget = drag?.currentTarget,
                 dragKey = drag?.catalogKey,
-                dragFromSlot = drag?.sourceSlotIndex,
+                dragFromSlot = (drag?.source as? LayoutDragSource.BoundSlot)?.slotIndex,
                 wiggleDegrees = iconWiggle,
-                slotBounds = slotBounds,
-                onSlotBounds = { index, rect -> slotBounds[index] = rect },
+                targetRegistry = targetRegistry,
+                onTargetRegistryChanged = ::notifyTargetRegistryChanged,
                 onSlotDragStart = { index, key, pos ->
-                    beginDrag(key, pos, sourceSlotIndex = index)
+                    beginDrag(
+                        source = LayoutDragSource.BoundSlot(index, key),
+                        key = key,
+                        windowPos = pos,
+                    )
                 },
-                onSlotDrag = { pos -> drag = drag?.copy(pointerWindow = pos) },
-                onSlotDragEnd = { index, key, pos ->
-                    dropAt(pos, key, sourceIsDeleted = false, sourceSlotIndex = index)
-                    drag = null
+                onSlotDrag = ::updateDrag,
+                onSlotDragEnd = ::finishDrag,
+                onSlotDragCancel = { token ->
+                    cancelActiveDrag(LayoutDragCancelReason.Dispose, token)
                 },
-                onSlotDragCancel = { drag = null },
             )
         }
 
@@ -524,16 +643,16 @@ private fun LauncherEditDock(
     slots: List<String>,
     labels: Map<String, String>,
     visualByKey: Map<String, LayoutItemVisual>,
-    dragPointer: Offset?,
+    currentTarget: LayoutDropTarget?,
     dragKey: String?,
     dragFromSlot: Int?,
     wiggleDegrees: Float,
-    slotBounds: Map<Int, Rect>,
-    onSlotBounds: (Int, Rect) -> Unit,
-    onSlotDragStart: (Int, String, Offset) -> Unit,
-    onSlotDrag: (Offset) -> Unit,
-    onSlotDragEnd: (Int, String, Offset) -> Unit,
-    onSlotDragCancel: () -> Unit,
+    targetRegistry: LayoutVisibleTargetRegistry,
+    onTargetRegistryChanged: () -> Unit,
+    onSlotDragStart: (Int, String, Offset) -> Long,
+    onSlotDrag: (Long, Offset) -> Unit,
+    onSlotDragEnd: (Long, Offset) -> Unit,
+    onSlotDragCancel: (Long) -> Unit,
 ) {
     val journal = com.lezi.babylog.designsystem.LeziThemeExt.isJournal
     Surface(
@@ -542,6 +661,11 @@ private fun LauncherEditDock(
             .padding(
                 horizontal = if (journal) 0.dp else QuickDockVisualSpec.outerHorizontalWarm,
                 vertical = QuickDockVisualSpec.outerVertical,
+            )
+            .layoutTargetRegistration(
+                node = LayoutTargetNode.Dock,
+                registry = targetRegistry,
+                onRegistryChanged = onTargetRegistryChanged,
             )
             .testTag("layout_edit_dock"),
         shape = com.lezi.babylog.designsystem.LeziThemeExt.dockShape,
@@ -563,8 +687,7 @@ private fun LauncherEditDock(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             slots.forEachIndexed { index, key ->
-                val hot = dragPointer != null &&
-                    slotBounds[index]?.contains(dragPointer) == true
+                val hot = currentTarget == LayoutDropTarget.QuickSlot(index)
                 val visual = if (key.isNotBlank()) visualByKey[key] else null
                 val label = when {
                     key.isBlank() -> "空"
@@ -575,9 +698,11 @@ private fun LauncherEditDock(
                     modifier = Modifier
                         .weight(1f)
                         .heightIn(min = QuickDockVisualSpec.cellMinHeight)
-                        .onGloballyPositioned { coords ->
-                            onSlotBounds(index, coords.boundsInWindow())
-                        }
+                        .layoutTargetRegistration(
+                            node = LayoutTargetNode.QuickSlot(index),
+                            registry = targetRegistry,
+                            onRegistryChanged = onTargetRegistryChanged,
+                        )
                         .testTag("layout_edit_slot_$index")
                         .semantics {
                             contentDescription = if (key.isBlank()) {
@@ -606,7 +731,7 @@ private fun LauncherEditDock(
                                 catalogKey = key,
                                 onDragStart = { onSlotDragStart(index, key, it) },
                                 onDrag = onSlotDrag,
-                                onDragEnd = { onSlotDragEnd(index, key, it) },
+                                onDragEnd = onSlotDragEnd,
                                 onDragCancel = onSlotDragCancel,
                             )
                             .alpha(if (dimmed) 0.25f else 1f)
@@ -666,6 +791,11 @@ private fun LauncherEditDock(
                     .weight(1f)
                     .heightIn(min = QuickDockVisualSpec.cellMinHeight)
                     .alpha(0.55f)
+                    .layoutTargetRegistration(
+                        node = LayoutTargetNode.LockedMore,
+                        registry = targetRegistry,
+                        onRegistryChanged = onTargetRegistryChanged,
+                    )
                     .testTag("layout_edit_more_locked")
                     .semantics { contentDescription = "更多，编辑布局时已锁定" },
                 shape = com.lezi.babylog.designsystem.LeziThemeExt.controlShape,
@@ -703,12 +833,30 @@ private fun LauncherEditDock(
     }
 }
 
+internal fun Modifier.layoutTargetRegistration(
+    node: LayoutTargetNode,
+    registry: LayoutVisibleTargetRegistry,
+    onRegistryChanged: () -> Unit,
+): Modifier = composed {
+    val registrationOwner = remember(registry, node) { Any() }
+    DisposableEffect(registry, node) {
+        onDispose {
+            if (registry.unregister(node, registrationOwner)) onRegistryChanged()
+        }
+    }
+    this@layoutTargetRegistration.onGloballyPositioned { coordinates ->
+        if (registry.register(node, coordinates.boundsInWindow(), registrationOwner)) {
+            onRegistryChanged()
+        }
+    }
+}
+
 private fun Modifier.draggableCatalogKey(
     catalogKey: String,
-    onDragStart: (Offset) -> Unit,
-    onDrag: (Offset) -> Unit,
-    onDragEnd: (Offset) -> Unit,
-    onDragCancel: () -> Unit,
+    onDragStart: (Offset) -> Long,
+    onDrag: (Long, Offset) -> Unit,
+    onDragEnd: (Long, Offset) -> Unit,
+    onDragCancel: (Long) -> Unit,
 ): Modifier {
     val originHolder = floatArrayOf(0f, 0f)
     return this
@@ -719,86 +867,25 @@ private fun Modifier.draggableCatalogKey(
         }
         .pointerInput(catalogKey) {
             var lastWindow = Offset.Zero
+            var activeToken: Long? = null
             detectDragGesturesAfterLongPress(
                 onDragStart = { local ->
                     lastWindow = Offset(originHolder[0], originHolder[1]) + local
-                    onDragStart(lastWindow)
+                    activeToken = onDragStart(lastWindow)
                 },
                 onDrag = { change, _ ->
                     change.consume()
                     lastWindow = Offset(originHolder[0], originHolder[1]) + change.position
-                    onDrag(lastWindow)
+                    activeToken?.let { onDrag(it, lastWindow) }
                 },
-                onDragEnd = { onDragEnd(lastWindow) },
-                onDragCancel = onDragCancel,
+                onDragEnd = {
+                    activeToken?.let { onDragEnd(it, lastWindow) }
+                    activeToken = null
+                },
+                onDragCancel = {
+                    activeToken?.let(onDragCancel)
+                    activeToken = null
+                },
             )
         }
-}
-
-/**
- * Resolve drop using window coordinates.
- *
- * - Catalog → slot: [LayoutEditIntent.AssignToSlot]
- * - Bound slot → other slot: [LayoutEditIntent.SwapSlots]
- * - Any non-deleted → trash: [LayoutEditIntent.MoveToLocalDeleted]
- * - Deleted → outside trash: [LayoutEditIntent.RestoreFromLocalDeleted]
- * - Catalog → same-section catalog cell: [LayoutEditIntent.ReorderItemInSection]
- * - Bound slot drag-off: [LayoutEditIntent.ClearSlot]
- */
-internal fun resolveLayoutDrop(
-    pointerWindow: Offset?,
-    slotBounds: Map<Int, Rect>,
-    trashBounds: Rect?,
-    sourceKey: String,
-    sourceIsDeleted: Boolean,
-    sourceSlotIndex: Int? = null,
-    catalogItemBounds: Map<String, Rect> = emptyMap(),
-    itemOrderJson: String = "[]",
-    knownKeys: Collection<String> = emptyList(),
-    @Suppress("UNUSED_PARAMETER") hiddenItems: Set<String> = emptySet(),
-): LayoutEditIntent? {
-    val pos = pointerWindow ?: return null
-    if (trashBounds?.contains(pos) == true && !sourceIsDeleted) {
-        return LayoutEditIntent.MoveToLocalDeleted(sourceKey)
-    }
-    if (sourceIsDeleted && trashBounds?.contains(pos) != true) {
-        return LayoutEditIntent.RestoreFromLocalDeleted(sourceKey)
-    }
-    val hit = slotBounds.entries
-        .filter { it.value.contains(pos) }
-        .minByOrNull { abs(it.value.center.x - pos.x) }
-        ?.key
-    if (hit != null && !sourceIsDeleted) {
-        if (sourceSlotIndex != null) {
-            if (hit == sourceSlotIndex) return null
-            return LayoutEditIntent.SwapSlots(sourceSlotIndex, hit)
-        }
-        return LayoutEditIntent.AssignToSlot(hit, sourceKey)
-    }
-    if (!sourceIsDeleted && sourceSlotIndex == null && catalogItemBounds.isNotEmpty()) {
-        val hitKey = catalogItemBounds.entries
-            .filter { it.value.contains(pos) }
-            .minByOrNull {
-                abs(it.value.center.x - pos.x) + abs(it.value.center.y - pos.y)
-            }
-            ?.key
-        if (hitKey != null && hitKey != sourceKey) {
-            val sourceSection = catalogSectionForKey(sourceKey)
-            val targetSection = catalogSectionForKey(hitKey)
-            if (sourceSection != null && sourceSection == targetSection) {
-                val fullIndex = com.lezi.babylog.core.ui.orderedKeysInSection(
-                    sourceSection,
-                    itemOrderJson,
-                    knownKeys,
-                ).indexOf(hitKey)
-                if (fullIndex >= 0) {
-                    return LayoutEditIntent.ReorderItemInSection(sourceKey, fullIndex)
-                }
-            }
-        }
-    }
-    if (sourceSlotIndex != null && !sourceIsDeleted) {
-        return LayoutEditIntent.ClearSlot(sourceSlotIndex)
-    }
-    return null
 }

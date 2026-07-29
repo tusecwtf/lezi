@@ -129,27 +129,27 @@ class LocalLayoutEditPolicyTest {
 
     @Test
     fun reorderItemInSectionMovesToAbsoluteIndex() {
-        val feeding = visibleKeysInSection(
-            RecordSection.Feeding,
-            base.itemOrderJson,
-            known,
-            base.hiddenItems,
+        val feedingKeys = listOf(
+            "nursing",
+            "formula",
+            "pumped_feed",
+            "pump_express",
         )
-        assertTrue(feeding.size >= 2)
-        val first = feeding.first()
-        val lastIndex = feeding.lastIndex
+        val prefs = base.copy(itemOrderJson = encodeItemOrder(feedingKeys))
         val next = reduceLayoutEdit(
-            base,
-            LayoutEditIntent.ReorderItemInSection(first, lastIndex),
-            known,
+            prefs,
+            LayoutEditIntent.ReorderItemInSection("nursing", 2),
+            feedingKeys,
         )
         val after = visibleKeysInSection(
             RecordSection.Feeding,
             next.itemOrderJson,
-            known,
+            feedingKeys,
             next.hiddenItems,
         )
-        assertEquals(first, after.last())
-        assertEquals(feeding.size, after.size)
+        assertEquals(
+            listOf("formula", "pumped_feed", "nursing", "pump_express"),
+            after,
+        )
     }
 }

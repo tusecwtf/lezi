@@ -35,6 +35,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -904,6 +905,7 @@ fun LogRoute(
     var listDeleteError by remember { mutableStateOf<String?>(null) }
     var listDeleting by remember { mutableStateOf(false) }
     var layoutExitInProgress by remember { mutableStateOf(false) }
+    var layoutDragCancelSignal by remember { mutableLongStateOf(0L) }
     var exitAfterLayoutRetry by remember { mutableStateOf(false) }
     var dismissedLayoutFailure by remember { mutableStateOf<Long?>(null) }
     val listState = rememberLazyListState()
@@ -1080,6 +1082,7 @@ fun LogRoute(
         dismissedLayoutFailure = null
     }
     fun requestLayoutExit() {
+        layoutDragCancelSignal += 1L
         if (layoutExitInProgress) return
         layoutExitInProgress = true
         vm.awaitDeviceLayoutWrites { result ->
@@ -1116,6 +1119,7 @@ fun LogRoute(
                     },
                     onDone = ::requestLayoutExit,
                     onOpenCustomManage = { showCustomManage = true },
+                    cancelDragSignal = layoutDragCancelSignal,
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth(),

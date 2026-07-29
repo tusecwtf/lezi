@@ -58,18 +58,22 @@
 |----|------|--------|
 | 目录项 | 槽 | `AssignToSlot` |
 | 已绑槽 | 另一槽 | `SwapSlots` |
-| 已绑槽 | 坞外且非删除区 | `ClearSlot` |
+| 已绑槽 | 自身槽 | 无操作 |
+| 已绑槽 | 锁定“更多”或 Dock 内间隙 | 无操作 |
+| 已绑槽 | 整个 Dock 外且非删除区 | `ClearSlot` |
 | 目录/已绑槽 | 本机已删除 | `MoveToLocalDeleted` |
-| 本机已删除 | 删除区外 | `RestoreFromLocalDeleted` |
+| 本机已删除 | 删除区外（包括槽） | 只执行 `RestoreFromLocalDeleted`；槽不高亮、不绑定 |
 | 目录项 | 同 section 另一图标 | `ReorderItemInSection` |
 | 目录项 | 异 section 图标 | 忽略 |
+| 目录项 | 目录空白 / 坞外空白 | 无操作 |
 | — | 完成 / 返回 | 退出编辑态 |
 
 ## Visual feedback
 
 - 静止目录保持“添加记录”的四列卡片形态，不使用独立的桌面大图标墙。
 - 长按后源位弱化；**同款卡片浮层**跟随 pointer，不切换成另一套图标表达。
-- 悬停坞槽 / 删除区描边高亮；拖到坞槽即替换/互换。
+- 每个 pointer 时刻只显示一个合法当前目标；悬停合法坞槽 / 删除区 / 同类排序项时描边高亮，视觉目标与最终 reducer intent 相同。
+- 命中只读取当前可见节点边界；节点离开组合树、滚出可见区或重组移动后立即注销/替换旧边界，陈旧回调和陈旧 drag token 不产生 intent。
 - 本机已删除区保留可读标题与 ⌫ 空态，并与底部 Dock 分区清晰。
 - Dock 与日常记录页共用外边距、单元高度、图标尺寸、四槽加固定“更多”的顺序；编辑态将“更多”明确标为锁定。
 
@@ -83,4 +87,4 @@
 - 纯逻辑：`LocalLayoutEditPolicy` / `QuickRecordSlots` / `RecordCatalogOrder.moveCatalogKeyToIndexInSection`。
 - UI：`LayoutEditCanvas` 替换 `LayoutEditModeDialog`；`RecordCatalogCard`、`RecordCatalogVisualSpec` 同时服务“添加记录”和编辑目录；`QuickDockVisualSpec` 保持日常/编辑 Dock 几何连续。`LogScreen` 通知根容器隐藏日期与主 tabs，编辑页只显示“编辑布局 / 完成”。
 - 持久化：版本化 `DeviceLayoutSnapshot` 在一个 DataStore 事务内保存四槽、隐藏集合、类内序与类别序；FIFO writer 串行完整快照并让完成/返回等待最后写入。失败保留上一份耐久值并可重试，未来版本只读拒写；该状态永不进入家庭同步。
-- 测试：既有 drop/reduce 测试保留；补 reorder toIndex。
+- 测试：权威 `LayoutDragSession` 覆盖完整命中矩阵、互斥目标、陈旧 token/revision 与取消；Compose 测试覆盖节点注销和重组移动；reducer 断言精确类内最终顺序。

@@ -20,7 +20,7 @@ Frontier: **03、11**
 |---|--------|------------|--------|
 | 01 | [延续“添加记录”的四列分类卡片视觉](./issues/01-align-editor-with-add-record-visuals.md) | — | complete |
 | 02 | [原子持久化 DeviceLayoutSnapshot](./issues/02-atomic-device-layout-snapshot.md) | — | complete |
-| 03 | [当前可见且互斥的拖放目标](./issues/03-exclusive-current-drop-targets.md) | 01 | ready-for-agent |
+| 03 | [当前可见且互斥的拖放目标](./issues/03-exclusive-current-drop-targets.md) | 01 | complete |
 | 04 | [分类标题拖动与可靠类别排序](./issues/04-drag-category-headings-durably.md) | 02, 03 | ready-for-agent |
 | 05 | [有界、可读的本机已删除分区](./issues/05-bounded-readable-local-deleted.md) | 02, 03 | ready-for-agent |
 | 06 | [无障碍布局动作与真实空槽文案](./issues/06-accessible-layout-actions-truthful-empty-slot.md) | 04, 05 | ready-for-agent |
