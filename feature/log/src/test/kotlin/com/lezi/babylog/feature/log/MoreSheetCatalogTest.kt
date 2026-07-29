@@ -77,4 +77,25 @@ class MoreSheetCatalogTest {
         assertTrue(keys.indexOf("custom:5") < keys.indexOf("custom:3"))
         assertTrue(keys.indexOf("custom:3") < keys.indexOf("formula"))
     }
+
+    @Test
+    fun catalogImmediatelyReflectsTheLatestCategorySnapshot() {
+        val initial = moreSheetCatalog(SettingsLocal(), emptyList())
+        val moved = moreSheetCatalog(
+            SettingsLocal(
+                categoryOrderJson =
+                    """["routine","feeding","excretion","health","growth","custom"]""",
+            ),
+            emptyList(),
+        )
+
+        assertEquals(
+            com.lezi.babylog.core.ui.RecordSection.Feeding,
+            initial.first().section,
+        )
+        assertEquals(
+            com.lezi.babylog.core.ui.RecordSection.Routine,
+            moved.first().section,
+        )
+    }
 }

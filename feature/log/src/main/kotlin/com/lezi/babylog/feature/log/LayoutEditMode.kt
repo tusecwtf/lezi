@@ -66,6 +66,7 @@ import com.lezi.babylog.core.ui.RecordSection
 import com.lezi.babylog.core.ui.RecordTypeIcon
 import com.lezi.babylog.core.ui.knownCatalogKeys
 import com.lezi.babylog.core.ui.orderedKeysInSection
+import com.lezi.babylog.core.ui.orderedRecordSections
 import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.core.ui.storageKey
 import com.lezi.babylog.designsystem.LeziRecordColorRole
@@ -156,6 +157,9 @@ internal fun LayoutEditCanvas(
         normalizeStoredQuickSlots(prefs.quickRecordSlots)
     }
     val sections = remember(prefs, known) { layoutEditVisibleSections(prefs, known) }
+    val fullCategoryOrder = remember(prefs.categoryOrderJson) {
+        orderedRecordSections(prefs.categoryOrderJson)
+    }
     val deleted = remember(prefs, known) { layoutEditDeletedKeys(prefs, known) }
 
     val targetRegistry = remember { LayoutVisibleTargetRegistry() }
@@ -184,6 +188,7 @@ internal fun LayoutEditCanvas(
         source: LayoutDragSource,
         key: String,
         windowPos: Offset,
+        labelOverride: String? = null,
     ): Long {
         nextDragToken += 1L
         val token = nextDragToken
@@ -195,7 +200,7 @@ internal fun LayoutEditCanvas(
             token = token,
             source = source,
             catalogKey = key,
-            label = labels[key] ?: key,
+            label = labelOverride ?: labels[key] ?: key,
             pointerWindow = windowPos,
             currentTarget = resolution.currentTarget,
             colorRole = visual?.colorRole,
@@ -337,7 +342,79 @@ internal fun LayoutEditCanvas(
                             .fillMaxWidth()
                             .testTag("layout_edit_section_${section.storageKey}"),
                     ) {
-                        RecordCatalogSectionHeading(section.title)
+                        val categoryIndex = fullCategoryOrder.indexOf(section)
+                        val categorySource = LayoutDragSource.CategoryHeading(section)
+                        val categoryDragging = drag?.source == categorySource
+                        val categoryTarget = LayoutDropTarget.CategoryHeading(
+                            section = section,
+                            toIndex = categoryIndex,
+                        )
+                        val categoryHot = drag?.currentTarget == categoryTarget
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = LeziSpacing.Touch)
+                                .layoutTargetRegistration(
+                                    node = LayoutTargetNode.CategoryHeading(
+                                        section = section,
+                                        toIndex = categoryIndex,
+                                    ),
+                                    registry = targetRegistry,
+                                    onRegistryChanged = ::notifyTargetRegistryChanged,
+                                )
+                                .draggableLayoutSource(
+                                    dragKey = "category:${section.storageKey}",
+                                    onDragStart = { pos ->
+                                        beginDrag(
+                                            source = categorySource,
+                                            key = "category:${section.storageKey}",
+                                            windowPos = pos,
+                                            labelOverride = section.title,
+                                        )
+                                    },
+                                    onDrag = ::updateDrag,
+                                    onDragEnd = ::finishDrag,
+                                    onDragCancel = { token ->
+                                        cancelActiveDrag(
+                                            LayoutDragCancelReason.Dispose,
+                                            token,
+                                        )
+                                    },
+                                )
+                                .testTag("layout_edit_category_${section.storageKey}")
+                                .semantics {
+                                    contentDescription = "${section.title}分类，长按拖动排序"
+                                }
+                                .then(
+                                    if (categoryHot) {
+                                        Modifier
+                                            .clip(
+                                                com.lezi.babylog.designsystem.LeziThemeExt
+                                                    .controlShape,
+                                            )
+                                            .background(
+                                                MaterialTheme.colorScheme.primaryContainer.copy(
+                                                    alpha = 0.72f,
+                                                ),
+                                            )
+                                            .border(
+                                                2.dp,
+                                                MaterialTheme.colorScheme.primary,
+                                                com.lezi.babylog.designsystem.LeziThemeExt
+                                                    .controlShape,
+                                            )
+                                    } else {
+                                        Modifier
+                                    },
+                                )
+                                .then(
+                                    if (categoryDragging) Modifier.alpha(0.3f) else Modifier,
+                                )
+                                .padding(horizontal = LeziSpacing.Xs),
+                            contentAlignment = Alignment.CenterStart,
+                        ) {
+                            RecordCatalogSectionHeading(section.title)
+                        }
                         Spacer(Modifier.height(LeziSpacing.Xs))
                         val showAdd = section == RecordSection.Custom
                         val dropBorderColor = MaterialTheme.colorScheme.primary
@@ -371,8 +448,8 @@ internal fun LayoutEditCanvas(
                                         registry = targetRegistry,
                                         onRegistryChanged = ::notifyTargetRegistryChanged,
                                     )
-                                    .draggableCatalogKey(
-                                        catalogKey = key,
+                                    .draggableLayoutSource(
+                                        dragKey = key,
                                         onDragStart = { pos ->
                                             beginDrag(
                                                 source = LayoutDragSource.CatalogItem(key, section),
@@ -478,8 +555,8 @@ internal fun LayoutEditCanvas(
                         itemModifier = { key ->
                             val dragging = drag?.source == LayoutDragSource.LocalDeleted(key)
                             Modifier
-                                .draggableCatalogKey(
-                                    catalogKey = key,
+                                .draggableLayoutSource(
+                                    dragKey = key,
                                     onDragStart = { pos ->
                                         beginDrag(
                                             source = LayoutDragSource.LocalDeleted(key),
@@ -537,26 +614,48 @@ internal fun LayoutEditCanvas(
         drag?.let { d ->
             val localX = d.pointerWindow.x - rootWindowOrigin.x
             val localY = d.pointerWindow.y - rootWindowOrigin.y
-            val widthPx = with(density) { 80.dp.toPx() }
-            RecordCatalogCard(
-                label = d.label,
-                recordType = d.recordType,
-                customIconSlot = d.customIconSlot,
-                colorRole = d.colorRole ?: LeziRecordColorRole.Care,
-                contentDescription = "正在拖动${d.label}",
-                modifier = Modifier
-                    .zIndex(20f)
-                    .offset {
-                        IntOffset(
-                            (localX - widthPx / 2f).roundToInt(),
-                            (localY - widthPx / 2f - with(density) { LeziSpacing.Xs.toPx() })
-                                .roundToInt(),
-                        )
+            val headingDrag = d.source is LayoutDragSource.CategoryHeading
+            val avatarWidth = if (headingDrag) 160.dp else 80.dp
+            val widthPx = with(density) { avatarWidth.toPx() }
+            val avatarModifier = Modifier
+                .zIndex(20f)
+                .offset {
+                    IntOffset(
+                        (localX - widthPx / 2f).roundToInt(),
+                        (localY - with(density) { LeziSpacing.Touch.toPx() }).roundToInt(),
+                    )
+                }
+                .width(avatarWidth)
+                .scale(1.08f)
+                .testTag("layout_edit_drag_avatar")
+            if (headingDrag) {
+                Surface(
+                    modifier = avatarModifier.heightIn(min = LeziSpacing.Touch),
+                    shape = com.lezi.babylog.designsystem.LeziThemeExt.controlShape,
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    border = androidx.compose.foundation.BorderStroke(
+                        2.dp,
+                        MaterialTheme.colorScheme.primary,
+                    ),
+                    shadowElevation = 6.dp,
+                ) {
+                    Box(
+                        Modifier.padding(horizontal = LeziSpacing.Sm),
+                        contentAlignment = Alignment.CenterStart,
+                    ) {
+                        RecordCatalogSectionHeading(d.label)
                     }
-                    .width(80.dp)
-                    .scale(1.08f)
-                    .testTag("layout_edit_drag_avatar"),
-            )
+                }
+            } else {
+                RecordCatalogCard(
+                    label = d.label,
+                    recordType = d.recordType,
+                    customIconSlot = d.customIconSlot,
+                    colorRole = d.colorRole ?: LeziRecordColorRole.Care,
+                    contentDescription = "正在拖动${d.label}",
+                    modifier = avatarModifier,
+                )
+            }
         }
     }
 }
@@ -727,8 +826,8 @@ private fun LauncherEditDock(
                 ) {
                     val bodyMod = if (key.isNotBlank()) {
                         Modifier
-                            .draggableCatalogKey(
-                                catalogKey = key,
+                            .draggableLayoutSource(
+                                dragKey = key,
                                 onDragStart = { onSlotDragStart(index, key, it) },
                                 onDrag = onSlotDrag,
                                 onDragEnd = onSlotDragEnd,
@@ -851,8 +950,8 @@ internal fun Modifier.layoutTargetRegistration(
     }
 }
 
-private fun Modifier.draggableCatalogKey(
-    catalogKey: String,
+private fun Modifier.draggableLayoutSource(
+    dragKey: String,
     onDragStart: (Offset) -> Long,
     onDrag: (Long, Offset) -> Unit,
     onDragEnd: (Long, Offset) -> Unit,
@@ -865,7 +964,7 @@ private fun Modifier.draggableCatalogKey(
             originHolder[0] = p.x
             originHolder[1] = p.y
         }
-        .pointerInput(catalogKey) {
+        .pointerInput(dragKey) {
             var lastWindow = Offset.Zero
             var activeToken: Long? = null
             detectDragGesturesAfterLongPress(

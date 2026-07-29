@@ -11,6 +11,7 @@ import com.lezi.babylog.core.ui.localDeletedKeys
 import com.lezi.babylog.core.ui.moveCatalogKeyToIndexInSection
 import com.lezi.babylog.core.ui.moveCatalogKeyWithinSection
 import com.lezi.babylog.core.ui.moveCategoryOrder
+import com.lezi.babylog.core.ui.moveCategoryToIndex
 import com.lezi.babylog.core.ui.removeFromLocalDeleted
 import com.lezi.babylog.core.ui.visibleKeysInSection
 
@@ -54,6 +55,10 @@ internal sealed interface LayoutEditIntent {
     /** Absolute reorder within the key's section (grid drop onto index). */
     data class ReorderItemInSection(val catalogKey: String, val toIndex: Int) : LayoutEditIntent
     data class MoveCategory(val section: RecordSection, val delta: Int) : LayoutEditIntent
+    data class MoveCategoryToIndex(
+        val section: RecordSection,
+        val toIndex: Int,
+    ) : LayoutEditIntent
 }
 
 /**
@@ -133,6 +138,13 @@ internal fun reduceLayoutEdit(
                 categoryOrderJson = prefs.categoryOrderJson,
                 section = intent.section,
                 delta = intent.delta,
+            ),
+        )
+        is LayoutEditIntent.MoveCategoryToIndex -> prefs.copy(
+            categoryOrderJson = moveCategoryToIndex(
+                categoryOrderJson = prefs.categoryOrderJson,
+                section = intent.section,
+                toIndex = intent.toIndex,
             ),
         )
     }

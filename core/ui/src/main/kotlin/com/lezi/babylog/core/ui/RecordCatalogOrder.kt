@@ -86,6 +86,22 @@ fun moveCategoryOrder(
     return encodeCategoryOrder(order)
 }
 
+/** Move [section] to an absolute index in the complete device-local category order. */
+fun moveCategoryToIndex(
+    categoryOrderJson: String,
+    section: RecordSection,
+    toIndex: Int,
+): String {
+    val order = orderedRecordSections(categoryOrderJson).toMutableList()
+    val from = order.indexOf(section)
+    if (from < 0) return encodeCategoryOrder(order)
+    val target = toIndex.coerceIn(0, order.lastIndex.coerceAtLeast(0))
+    if (from == target) return encodeCategoryOrder(order)
+    val moved = order.removeAt(from)
+    order.add(target, moved)
+    return encodeCategoryOrder(order)
+}
+
 /**
  * All catalog keys known for layout (built-ins available for new entry + concrete customs).
  * Includes currently hidden keys so order survives disable/re-enable.

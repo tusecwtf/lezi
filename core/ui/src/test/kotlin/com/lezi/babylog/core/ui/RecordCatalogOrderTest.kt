@@ -48,6 +48,45 @@ class RecordCatalogOrderTest {
     }
 
     @Test
+    fun moveCategoryToIndexSupportsFirstMiddleAndLast() {
+        val start = encodeCategoryOrder(defaultCategoryOrder())
+
+        assertEquals(
+            listOf(
+                RecordSection.Custom,
+                RecordSection.Feeding,
+                RecordSection.Excretion,
+                RecordSection.Routine,
+                RecordSection.Health,
+                RecordSection.Growth,
+            ),
+            orderedRecordSections(moveCategoryToIndex(start, RecordSection.Custom, 0)),
+        )
+        assertEquals(
+            listOf(
+                RecordSection.Excretion,
+                RecordSection.Routine,
+                RecordSection.Health,
+                RecordSection.Feeding,
+                RecordSection.Growth,
+                RecordSection.Custom,
+            ),
+            orderedRecordSections(moveCategoryToIndex(start, RecordSection.Feeding, 3)),
+        )
+        assertEquals(
+            listOf(
+                RecordSection.Excretion,
+                RecordSection.Routine,
+                RecordSection.Health,
+                RecordSection.Growth,
+                RecordSection.Custom,
+                RecordSection.Feeding,
+            ),
+            orderedRecordSections(moveCategoryToIndex(start, RecordSection.Feeding, 5)),
+        )
+    }
+
+    @Test
     fun mergeItemOrderPreservesHiddenAndAppendsNewKeys() {
         val known = listOf("pee", "sleep", "nursing", "custom:3")
         val stored = encodeItemOrder(listOf("sleep", "pee", "removed_item", "unknown"))

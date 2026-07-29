@@ -152,4 +152,50 @@ class LocalLayoutEditPolicyTest {
             after,
         )
     }
+
+    @Test
+    fun moveCategoryToIndexChangesOnlyTheLiteralCategoryOrderSnapshotField() {
+        val prefs = base.copy(
+            categoryOrderJson =
+                """["feeding","excretion","routine","health","growth","custom"]""",
+        )
+
+        val first = reduceLayoutEdit(
+            prefs,
+            LayoutEditIntent.MoveCategoryToIndex(RecordSection.Custom, 0),
+            known,
+        )
+        val middle = reduceLayoutEdit(
+            prefs,
+            LayoutEditIntent.MoveCategoryToIndex(RecordSection.Feeding, 3),
+            known,
+        )
+        val last = reduceLayoutEdit(
+            prefs,
+            LayoutEditIntent.MoveCategoryToIndex(RecordSection.Feeding, 5),
+            known,
+        )
+
+        assertEquals(
+            prefs.copy(
+                categoryOrderJson =
+                    """["custom","feeding","excretion","routine","health","growth"]""",
+            ),
+            first,
+        )
+        assertEquals(
+            prefs.copy(
+                categoryOrderJson =
+                    """["excretion","routine","health","feeding","growth","custom"]""",
+            ),
+            middle,
+        )
+        assertEquals(
+            prefs.copy(
+                categoryOrderJson =
+                    """["excretion","routine","health","growth","custom","feeding"]""",
+            ),
+            last,
+        )
+    }
 }

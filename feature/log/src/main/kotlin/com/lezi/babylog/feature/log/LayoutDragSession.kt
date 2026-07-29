@@ -17,6 +17,8 @@ internal sealed interface LayoutDragSource {
     ) : LayoutDragSource
 
     data class LocalDeleted(val catalogKey: String) : LayoutDragSource
+
+    data class CategoryHeading(val section: RecordSection) : LayoutDragSource
 }
 
 internal sealed interface LayoutHitRegion {
@@ -24,6 +26,7 @@ internal sealed interface LayoutHitRegion {
     data object LockedMore : LayoutHitRegion
     data class QuickSlot(val slotIndex: Int) : LayoutHitRegion
     data class CatalogItem(val catalogKey: String) : LayoutHitRegion
+    data class CategoryHeading(val section: RecordSection) : LayoutHitRegion
     data object DockGap : LayoutHitRegion
     data object OutsideDock : LayoutHitRegion
 }
@@ -33,6 +36,10 @@ internal sealed interface LayoutDropTarget {
     data class QuickSlot(val slotIndex: Int) : LayoutDropTarget
     data class CatalogItem(
         val catalogKey: String,
+        val toIndex: Int,
+    ) : LayoutDropTarget
+    data class CategoryHeading(
+        val section: RecordSection,
         val toIndex: Int,
     ) : LayoutDropTarget
     data object OutsideDock : LayoutDropTarget
@@ -45,6 +52,11 @@ internal data class LayoutCatalogTargetBounds(
     val bounds: Rect,
 )
 
+internal data class LayoutCategoryHeadingTargetBounds(
+    val toIndex: Int,
+    val bounds: Rect,
+)
+
 internal data class LayoutVisibleTargetSnapshot(
     val revision: Long,
     val dockBounds: Rect?,
@@ -52,6 +64,7 @@ internal data class LayoutVisibleTargetSnapshot(
     val lockedMoreBounds: Rect?,
     val localDeletedBounds: Rect? = null,
     val catalogItemBounds: Map<String, LayoutCatalogTargetBounds> = emptyMap(),
+    val categoryHeadingBounds: Map<RecordSection, LayoutCategoryHeadingTargetBounds> = emptyMap(),
 )
 
 internal sealed interface LayoutTargetNode {
@@ -61,6 +74,10 @@ internal sealed interface LayoutTargetNode {
     data class QuickSlot(val slotIndex: Int) : LayoutTargetNode
     data class CatalogItem(
         val catalogKey: String,
+        val section: RecordSection,
+        val toIndex: Int,
+    ) : LayoutTargetNode
+    data class CategoryHeading(
         val section: RecordSection,
         val toIndex: Int,
     ) : LayoutTargetNode
@@ -105,6 +122,14 @@ internal class LayoutVisibleTargetRegistry {
             (node as? LayoutTargetNode.CatalogItem)?.let {
                 it.catalogKey to LayoutCatalogTargetBounds(
                     section = it.section,
+                    toIndex = it.toIndex,
+                    bounds = registration.bounds,
+                )
+            }
+        }.toMap(),
+        categoryHeadingBounds = registrations.entries.mapNotNull { (node, registration) ->
+            (node as? LayoutTargetNode.CategoryHeading)?.let {
+                it.section to LayoutCategoryHeadingTargetBounds(
                     toIndex = it.toIndex,
                     bounds = registration.bounds,
                 )
@@ -179,6 +204,12 @@ internal class LayoutDragSession(
                 abs(it.value.bounds.center.x - pointerWindow.x) +
                     abs(it.value.bounds.center.y - pointerWindow.y)
             }
+        val categoryHeadingHit = targets.categoryHeadingBounds.entries
+            .filter { it.value.bounds.contains(pointerWindow) }
+            .minByOrNull {
+                abs(it.value.bounds.center.x - pointerWindow.x) +
+                    abs(it.value.bounds.center.y - pointerWindow.y)
+            }
         val hit = when {
             targets.localDeletedBounds?.contains(pointerWindow) == true -> {
                 LayoutHitRegion.LocalDeleted
@@ -187,6 +218,7 @@ internal class LayoutDragSession(
                 LayoutHitRegion.LockedMore
             }
             slotHit != null -> LayoutHitRegion.QuickSlot(slotHit)
+            categoryHeadingHit != null -> LayoutHitRegion.CategoryHeading(categoryHeadingHit.key)
             catalogHit != null -> LayoutHitRegion.CatalogItem(catalogHit.key)
             targets.dockBounds?.contains(pointerWindow) == true -> LayoutHitRegion.DockGap
             else -> LayoutHitRegion.OutsideDock
@@ -206,6 +238,7 @@ internal class LayoutDragSession(
                 LayoutHitRegion.DockGap,
                 -> null
                 is LayoutHitRegion.CatalogItem,
+                is LayoutHitRegion.CategoryHeading,
                 LayoutHitRegion.OutsideDock,
                 -> LayoutDropTarget.OutsideDock
             }
@@ -227,6 +260,24 @@ internal class LayoutDragSession(
                     }
                 }
                 LayoutHitRegion.LockedMore,
+                LayoutHitRegion.DockGap,
+                LayoutHitRegion.OutsideDock,
+                is LayoutHitRegion.CategoryHeading,
+                -> null
+            }
+            is LayoutDragSource.CategoryHeading -> when (hit) {
+                is LayoutHitRegion.CategoryHeading -> {
+                    val bounds = targets.categoryHeadingBounds[hit.section]
+                    if (dragSource.section != hit.section && bounds != null) {
+                        LayoutDropTarget.CategoryHeading(hit.section, bounds.toIndex)
+                    } else {
+                        null
+                    }
+                }
+                LayoutHitRegion.LocalDeleted,
+                LayoutHitRegion.LockedMore,
+                is LayoutHitRegion.QuickSlot,
+                is LayoutHitRegion.CatalogItem,
                 LayoutHitRegion.DockGap,
                 LayoutHitRegion.OutsideDock,
                 -> null
@@ -281,6 +332,13 @@ internal class LayoutDragSession(
             source is LayoutDragSource.BoundSlot &&
                 resolution.currentTarget == LayoutDropTarget.OutsideDock -> {
                 LayoutEditIntent.ClearSlot(source.slotIndex)
+            }
+            source is LayoutDragSource.CategoryHeading &&
+                resolution.currentTarget is LayoutDropTarget.CategoryHeading -> {
+                LayoutEditIntent.MoveCategoryToIndex(
+                    source.section,
+                    resolution.currentTarget.toIndex,
+                )
             }
             else -> null
         }

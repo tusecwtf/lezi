@@ -589,4 +589,107 @@ class LayoutDragSessionTest {
         )
         assertTrue(registry.unregister(node, newOwner))
     }
+
+    @Test
+    fun categoryHeadingDropEmitsOneExactCategoryIndexIntent() {
+        val targets = LayoutVisibleTargetSnapshot(
+            revision = 1,
+            dockBounds = null,
+            quickSlotBounds = emptyMap(),
+            lockedMoreBounds = null,
+            categoryHeadingBounds = mapOf(
+                RecordSection.Routine to LayoutCategoryHeadingTargetBounds(
+                    toIndex = 2,
+                    bounds = Rect(0f, 200f, 400f, 260f),
+                ),
+            ),
+        )
+        val session = LayoutDragSession(
+            token = 49L,
+            source = LayoutDragSource.CategoryHeading(RecordSection.Custom),
+        )
+
+        val update = session.update(49L, Offset(200f, 230f), targets)
+
+        assertEquals(LayoutHitRegion.CategoryHeading(RecordSection.Routine), update.hitRegion)
+        assertEquals(
+            LayoutDropTarget.CategoryHeading(RecordSection.Routine, 2),
+            update.currentTarget,
+        )
+        assertEquals(
+            LayoutEditIntent.MoveCategoryToIndex(RecordSection.Custom, 2),
+            session.finish(49L, Offset(200f, 230f), targets),
+        )
+    }
+
+    @Test
+    fun categoryHeadingSelfAndOutsideDropsAreNoOps() {
+        val targets = LayoutVisibleTargetSnapshot(
+            revision = 1,
+            dockBounds = null,
+            quickSlotBounds = emptyMap(),
+            lockedMoreBounds = null,
+            categoryHeadingBounds = mapOf(
+                RecordSection.Feeding to LayoutCategoryHeadingTargetBounds(
+                    toIndex = 0,
+                    bounds = Rect(0f, 100f, 400f, 160f),
+                ),
+            ),
+        )
+
+        assertNull(
+            LayoutDragSession(50L, LayoutDragSource.CategoryHeading(RecordSection.Feeding))
+                .finish(50L, Offset(200f, 130f), targets),
+        )
+        assertNull(
+            LayoutDragSession(51L, LayoutDragSource.CategoryHeading(RecordSection.Feeding))
+                .finish(51L, Offset(800f, 800f), targets),
+        )
+    }
+
+    @Test
+    fun categoryHeadingsAndCatalogItemsRemainSeparateDragDomains() {
+        val targets = LayoutVisibleTargetSnapshot(
+            revision = 1,
+            dockBounds = null,
+            quickSlotBounds = emptyMap(),
+            lockedMoreBounds = null,
+            catalogItemBounds = mapOf(
+                "nursing" to LayoutCatalogTargetBounds(
+                    section = RecordSection.Feeding,
+                    toIndex = 0,
+                    bounds = Rect(0f, 200f, 200f, 300f),
+                ),
+            ),
+            categoryHeadingBounds = mapOf(
+                RecordSection.Routine to LayoutCategoryHeadingTargetBounds(
+                    toIndex = 2,
+                    bounds = Rect(0f, 100f, 400f, 160f),
+                ),
+            ),
+        )
+
+        assertNull(
+            LayoutDragSession(52L, LayoutDragSource.CategoryHeading(RecordSection.Routine))
+                .finish(52L, Offset(100f, 250f), targets),
+        )
+        assertNull(
+            LayoutDragSession(
+                53L,
+                LayoutDragSource.CatalogItem("nursing", RecordSection.Feeding),
+            ).finish(53L, Offset(200f, 130f), targets),
+        )
+    }
+
+    @Test
+    fun removedCategoryHeadingCannotRemainAVisibleTarget() {
+        val registry = LayoutVisibleTargetRegistry()
+        val node = LayoutTargetNode.CategoryHeading(RecordSection.Health, 3)
+        registry.register(node, Rect(0f, 100f, 400f, 160f))
+        assertTrue(registry.snapshot().categoryHeadingBounds.containsKey(RecordSection.Health))
+
+        registry.unregister(node)
+
+        assertFalse(registry.snapshot().categoryHeadingBounds.containsKey(RecordSection.Health))
+    }
 }
