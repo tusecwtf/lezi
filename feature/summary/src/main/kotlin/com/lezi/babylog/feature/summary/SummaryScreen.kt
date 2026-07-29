@@ -115,6 +115,7 @@ data class SummaryTotals(
 )
 
 data class SummaryUi(
+    val calculating: Boolean = true,
     val range: SummaryRange = SummaryRange.Day,
     val anchorDate: LocalDate = LocalDate.now(),
     val rangeStartDate: LocalDate = anchorDate,
@@ -146,6 +147,7 @@ class SummaryViewModel @Inject constructor(
     private val settings: SettingsStore,
 ) : ViewModel() {
     private val zone = ZoneId.systemDefault()
+    private val aggregationEngine = SummaryAggregationEngine()
     private val range = MutableStateFlow(SummaryRange.Day)
     private val anchorDate = MutableStateFlow(LocalDate.now(zone))
     private val preferences = combine(
@@ -176,6 +178,7 @@ class SummaryViewModel @Inject constructor(
         if (baby == null) {
             flowOf(
                 SummaryUi(
+                    calculating = false,
                     range = selectedRange,
                     anchorDate = anchor,
                     rangeStartDate = selectedRange.startDate(anchor, preferences.weekStart),
@@ -205,7 +208,7 @@ class SummaryViewModel @Inject constructor(
                 endDayExclusive = queryEnd,
                 zone = zone,
             ).map { records ->
-                buildSummaryUi(
+                SummaryAggregationRequest(
                     records = records,
                     range = selectedRange,
                     anchorDate = anchor,
@@ -215,9 +218,9 @@ class SummaryViewModel @Inject constructor(
                     babyName = baby.nickname,
                     zone = zone,
                 )
-            }
+            }.calculateLatest(aggregationEngine)
         }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SummaryUi())
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(), SummaryUi())
 
     fun setRange(r: SummaryRange) {
         range.value = r
@@ -237,6 +240,23 @@ fun SummaryRoute(
         vm.setAnchorDate(anchorDate)
     }
     val ui by vm.ui.collectAsStateWithLifecycle()
+    if (ui.calculating) {
+        PageScaffoldBackground {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(LeziSpacing.Page),
+                contentAlignment = Alignment.Center,
+            ) {
+                com.lezi.babylog.designsystem.StateContainer(
+                    kind = com.lezi.babylog.designsystem.StateKind.Loading,
+                    title = "正在计算汇总",
+                    message = "正在整理护理记录，请稍候。",
+                )
+            }
+        }
+        return
+    }
     val ext = LeziThemeExt.colors
     val journal = LeziThemeExt.isJournal
     val t = ui.totals
