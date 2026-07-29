@@ -4,7 +4,7 @@
 
 **Blocked by:** None — can start immediately
 
-**Status:** implemented-awaiting-device-smoke
+**Status:** complete
 
 **Size:** M
 
@@ -38,7 +38,10 @@
 - `./gradlew :feature:log:lintDebug :domain:lintDebug :app:assembleDebug --no-daemon`：通过。
 - 真实临时文件覆盖 0–3 张、有序 borrowed refs、重复路径、移除、放弃、成功确认、失败后
   重建/重试；逐文件断言原始字节保留或 owned 临时文件被删除。
-- 设备 smoke：等待共享 `emulator-5554` 释放后执行；完成前不把本票标记为 complete。
+- 设备 smoke：在 `lezi_api35` / API 35 的 `emulator-5554` 上，以 HEAD `d321436` 的
+  `0.2.6-debug` APK 创建含照片计划，两次进入履行草稿并取消；计划保持 `pending`，活跃
+  MediaAsset 保留，私有文件 SHA-256 与 379,367 字节前后完全一致，重新打开草稿仍显示
+  原照片。完整回执见 `../evidence/01/photo-plan-fulfillment-cancel.md`。
 
 ## Documentation Gate
 
