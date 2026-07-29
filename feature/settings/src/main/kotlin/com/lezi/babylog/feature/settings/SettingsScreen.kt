@@ -570,11 +570,6 @@ fun SettingsRoute(
                             )
                         }
                     }
-                    Text(
-                        "影响时间圆盘等表单靠边；常用四槽按你在记录页排的绝对顺序，不再镜像。",
-                        style = LeziTypography.Meta,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
                     Text("深色模式", style = LeziTypography.Label)
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),

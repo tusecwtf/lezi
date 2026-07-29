@@ -4,7 +4,7 @@ Spec: [spec.md](./spec.md)
 Status: ready-for-agent  
 Source: `docs/reviews/2026-07-29-redundancy-and-ui-review.md`  
 Ticket count: 10  
-Frontier count: 2
+Frontier count: 1
 
 ## 依赖图
 
@@ -23,10 +23,10 @@ record-layout-edit-remediation/06 ──► 02 布局迁移残留清理
 
 09 时间条与记录语义色单源（frontier） ──┐
                                         ├──► 07 LogScreen 结构拆分
-10 journal 主色政策 + PRD 坞条款 + 死组件 ─┘
+10 journal 主色政策 + PRD 坞条款 + 死组件（complete） ─┘
 ```
 
-**可立即开工（frontier）：** 09 · 10
+**可立即开工（frontier）：** 09
 
 **建议顺序（冲突面）：** 先 01、03–04 / 09–10 中小票；02 等布局整改 06 完成；07 避免与 09 同 PR 改时间条色；08 已完成。
 
@@ -43,7 +43,7 @@ record-layout-edit-remediation/06 ──► 02 布局迁移残留清理
 | [07](./issues/07-log-screen-structural-split.md) | LogScreen 结构拆分（轨 / 坞 / 宿主） | E | 建议 09 | L | ready-for-agent |
 | [08](./issues/08-carelog-first-slice.md) | CareLog 第一刀：展示 helper 与照片附件 | E | 05 | L | complete |
 | [09](./issues/09-timeline-record-color-single-source.md) | 时间条与记录语义色单源 | F | — | M | ready-for-agent |
-| [10](./issues/10-journal-primary-and-prd-dock-contract.md) | journal 主色政策 + PRD 坞条款 + 死组件 | F | — | M | ready-for-agent |
+| [10](./issues/10-journal-primary-and-prd-dock-contract.md) | journal 主色政策 + PRD 坞条款 + 死组件 | F | — | M | complete |
 
 ## 过程纪律
 
@@ -56,3 +56,4 @@ record-layout-edit-remediation/06 ──► 02 布局迁移残留清理
 
 - 2026-07-30：to-tickets 发布；G/H 与审查第二/三梯队未收录。
 - 2026-07-30：04 complete；原子媒体发布机械单源，root 领域语义与 ack/cleanup 保持分离。
+- 2026-07-30：10 complete；明确 journal 宝宝主题主色与绝对坞序政策，移除设置页重复说明并锁住退役组件不回流。

@@ -35,6 +35,7 @@
 - 选择持久化在本机，并与深色模式正交组合。
 - `journal` 的密度、层级与图表形态由 Compose `designsystem` 与各 feature
   实现固化，并使用乐记品牌和自有绘制组件。
+- warm 与 journal 的顶栏宝宝强调、主 CTA 与选中态均使用当前宝宝主题色；journal 珊瑚只作为无宝宝主题时的模板默认色，不是 CTA 例外。
 - 两套模板必须共享同一 ViewModel/domain/Room 数据流；禁止复制业务分支形成两套功能实现。
 
 | Token | 规则 |
