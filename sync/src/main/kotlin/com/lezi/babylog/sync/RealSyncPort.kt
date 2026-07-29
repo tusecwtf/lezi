@@ -163,14 +163,17 @@ class RealSyncPort @Inject constructor(
         displayName: String,
         bootstrapSecret: String,
         familyName: String?,
-    ): Result<SyncSession> =
+    ): Result<CreateFamilyResult> =
         executeFamily(
             FamilySessionCommand.CreateFamily(
                 displayName = displayName,
                 bootstrapSecret = bootstrapSecret,
                 familyName = familyName,
             ),
-        ).map { (it as FamilySessionOutcome.Joined).session }
+        ).map {
+            val joined = it as FamilySessionOutcome.Joined
+            CreateFamilyResult(session = joined.session, reclaimed = joined.reclaimed)
+        }
 
     override suspend fun renameFamily(familyName: String?): Result<Unit> =
         executeFamily(FamilySessionCommand.RenameFamily(familyName)).map { Unit }

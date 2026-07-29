@@ -43,6 +43,11 @@ data class JoinResult(
     val familyName: String? = null,
     /** Server-minted immutable membership identity. */
     val membershipId: String,
+    /**
+     * Create-only: true when the server reclaimed the existing one-stack owner
+     * membership instead of minting a new family.
+     */
+    val reclaimed: Boolean = false,
 )
 
 /** Client-generated atomic package for record/care_plan + full media manifest. */

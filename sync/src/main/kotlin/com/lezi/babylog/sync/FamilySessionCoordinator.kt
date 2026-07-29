@@ -27,7 +27,11 @@ internal sealed interface FamilySessionCommand {
 
 internal sealed interface FamilySessionOutcome {
     data object Completed : FamilySessionOutcome
-    data class Joined(val session: SyncSession) : FamilySessionOutcome
+    data class Joined(
+        val session: SyncSession,
+        /** True when create reclaimed an existing owner membership (not first create). */
+        val reclaimed: Boolean = false,
+    ) : FamilySessionOutcome
     data class InviteCreated(val invite: Invite) : FamilySessionOutcome
     data class MembersListed(val members: List<FamilyMember>) : FamilySessionOutcome
 }
@@ -179,12 +183,14 @@ internal class FamilySessionCoordinator(
             // saveSession atomically retires the create request id. Scheduling is
             // post-commit notification: a closed signal must not turn a durable
             // owner session into a user-visible create failure.
+            // Reclaim and first create both start at cursor 0 (JoinResult default)
+            // so the following sync full-pulls NAS entities by client_uuid.
             try {
                 requestSync(SyncTrigger.LocalWrite)
             } catch (_: Exception) {
                 // A later foreground transition retries from the durable outbox.
             }
-            FamilySessionOutcome.Joined(session)
+            FamilySessionOutcome.Joined(session, reclaimed = joined.reclaimed)
         }
     }
 

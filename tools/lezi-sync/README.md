@@ -158,6 +158,13 @@ Content-Type: application/json
 
 - Android 建家页输入相同的一次性初始化口令；客户端仅将其放入该请求头，不写入
   session、邀请载荷或本地持久化。缺失或错误时建家失败并允许重新输入。
+- **管理员卸载重装接回**：`POST /v1/family/create` 在数据根已有家庭且 bootstrap
+  校验通过时，接回**同一** owner `membership_id`（吊销旧 token、更新 `device_id`/
+  称呼，可选覆盖家庭名），响应含 `"reclaimed": true`。口令只在部署环境变量中；
+  可在 NAS 上查看或临时更换 `LEZI_BOOTSTRAP_SECRET` 后重启服务再接回。未配置
+  bootstrap 时（本地 `cargo run`）与开放 create 一样允许 LAN 内 reclaim。
+  实体数据在 `LEZI_DATA_DIR`，不在环境变量里；接回后客户端 full pull 按
+  `client_uuid` 恢复。
 
 ## 本地开发
 
@@ -187,7 +194,7 @@ lezi-sync healthcheck
 |---|---|---|
 | GET | `/health` | 廉价进程存活检查，正常 `{ok, version, capabilities:["atomic_bundle","record_membership_author"]}`，不访问 DB/文件系统 |
 | GET | `/ready` | DB 与数据目录就绪检查；结果缓存 5 秒，异常返回 `503 {ok:false,status:"degraded",version}` |
-| POST | `/v1/family/create` | 幂等创建家庭并返回 owner token；可选 `family_name` |
+| POST | `/v1/family/create` | 幂等创建家庭，或接回已有家庭的 owner（`reclaimed`）；可选 `family_name` |
 | GET | `/v1/family/members` | 当前家庭的 active 成员安全视图；owner/member 均可读 |
 | POST | `/v1/family/members/remove` | owner 移除另一 active member（不能移自己/owner）；吊销其凭证 |
 | POST | `/v1/family/display-name` | 成员更新自己的家庭称呼 |
@@ -227,8 +234,10 @@ null；最长 128 个 Unicode 字符，并拒绝控制符与双向文本格式�
 
 `POST /v1/family/create` 另接受可选 `family_name`（共享家庭名）：trim 后空则存
 `null`；最长 64 Unicode 字符；禁控制符/双向控制符。create/join 响应均含
-`family_name`（可 null）。同一 `create_request_id` 幂等重试须匹配相同
-`family_name`，否则 `409`。
+`family_name`（可 null）。create 响应另含 `reclaimed`（bool）。已有家庭时，
+正确 bootstrap（或未配置 bootstrap）会接回同一 owner membership，而不是 `409`；
+接回时 `family_name` 仅非空覆盖。同一 `create_request_id` 幂等重试须匹配相同
+`device_id` 与 `display_name`，否则 `409`。
 
 `POST /v1/family/name`（Auth：**仅 owner**）改共享家庭名；body
 `{"family_name":"…"}`（空/`null` 清除）；member 返回 `403`；响应

@@ -30,6 +30,11 @@ class FakeSyncBackend : SyncBackend {
     /** Stable membership_id keyed by familyId:deviceId (mirrors server immutability). */
     private val membershipIds = mutableMapOf<String, String>()
     private val familyNames = mutableMapOf<String, String?>()
+    /** One-stack owner membership (create/reclaim); independent of device keying. */
+    private var soleFamilyId: String? = null
+    private var ownerMembershipId: String? = null
+    private var ownerDeviceId: String? = null
+    private var ownerTokenSeq = 0
     private val bundles = mutableMapOf<String, MutableMap<String, StagedBundle>>()
     private val bundleMediaBytes =
         mutableMapOf<String, MutableMap<String, MutableMap<String, ByteArray>>>()
@@ -89,7 +94,38 @@ class FakeSyncBackend : SyncBackend {
     ): JoinResult {
         val name = requireMemberDisplayName(displayName)
         val sharedName = normalizeFamilyNameForWire(familyName)
+        val existingFamilyId = soleFamilyId
+        if (existingFamilyId != null) {
+            val membershipId = requireNotNull(ownerMembershipId) {
+                "owner membership missing for sole family"
+            }
+            val previousDevice = ownerDeviceId
+            if (previousDevice != null && previousDevice != deviceId) {
+                membershipNames.remove("$existingFamilyId:$previousDevice")
+            }
+            ownerDeviceId = deviceId
+            membershipNames["$existingFamilyId:$deviceId"] = name
+            if (sharedName != null) {
+                familyNames[existingFamilyId] = sharedName
+            }
+            ownerTokenSeq += 1
+            membershipIds["$existingFamilyId:$deviceId"] = membershipId
+            return JoinResult(
+                familyId = existingFamilyId,
+                token = "owner-token-reclaimed-$ownerTokenSeq",
+                role = FamilyRole.Owner,
+                generation = FAKE_SYNC_GENERATION,
+                familyName = familyNames[existingFamilyId],
+                membershipId = membershipId,
+                reclaimed = true,
+            )
+        }
         val familyId = "family-${rows.size + 1}"
+        rows.getOrPut(familyId) { mutableMapOf() }
+        soleFamilyId = familyId
+        val membershipId = membershipIdFor(familyId, deviceId)
+        ownerMembershipId = membershipId
+        ownerDeviceId = deviceId
         membershipNames["$familyId:$deviceId"] = name
         familyNames[familyId] = sharedName
         return JoinResult(
@@ -98,7 +134,8 @@ class FakeSyncBackend : SyncBackend {
             role = FamilyRole.Owner,
             generation = FAKE_SYNC_GENERATION,
             familyName = sharedName,
-            membershipId = membershipIdFor(familyId, deviceId),
+            membershipId = membershipId,
+            reclaimed = false,
         )
     }
 

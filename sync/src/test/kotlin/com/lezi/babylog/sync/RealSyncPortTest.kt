@@ -4614,6 +4614,7 @@ internal class RecordingSyncBackend : SyncBackend {
     var nextPushRecordAuthors: List<CanonicalRecordAuthor>? = null
     var nextCreateFamilyName: String? = null
     var nextCreateEntities: List<SyncEntity> = emptyList()
+    var nextCreateReclaimed: Boolean = false
     var nextJoinFamilyName: String? = null
     var nextJoinEntities: List<SyncEntity> = emptyList()
     var memberCalls = 0
@@ -4642,12 +4643,13 @@ internal class RecordingSyncBackend : SyncBackend {
         createFailure?.let { throw it }
         return JoinResult(
             familyId = "family-created",
-            token = "owner-token",
+            token = if (nextCreateReclaimed) "owner-token-reclaimed" else "owner-token",
             role = FamilyRole.Owner,
             generation = "current-generation",
             entities = nextCreateEntities,
             familyName = nextCreateFamilyName ?: familyName,
             membershipId = "membership-created",
+            reclaimed = nextCreateReclaimed,
         )
     }
 

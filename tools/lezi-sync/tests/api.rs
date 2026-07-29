@@ -591,25 +591,14 @@ async fn family_create_is_strict_idempotent_and_restart_safe() {
     let request_id = "Qk7Uj6hTH1xbqa9nYs8FQ2c4e5w7r9tB";
     let first = create_family(&rig.app, "owner-device", request_id).await;
     assert!(first["membership_id"].as_str().unwrap().len() >= 32);
+    assert_eq!(first["reclaimed"], false);
     let restarted = rig.restart("generation-b");
     let retry = create_family(&restarted, "owner-device", request_id).await;
     assert_eq!(retry["family_id"], first["family_id"]);
     assert_eq!(retry["token"], first["token"]);
     assert_eq!(retry["membership_id"], first["membership_id"]);
     assert_eq!(retry["generation"], "generation-b");
-    let (conflict, _) = json_request(
-        &restarted,
-        Method::POST,
-        "/v1/family/create",
-        None,
-        json!({
-            "create_request_id": "Bv4Na1mK9sQ8pR7tU6wX5yZ3cD2eF0gH",
-            "device_id": "owner-device",
-            "display_name": "妈妈",
-        }),
-    )
-    .await;
-    assert_eq!(conflict, StatusCode::CONFLICT);
+    assert_eq!(retry["reclaimed"], false);
 
     let persisted = fs::read(rig.directory.path().join("lezi.db")).unwrap();
     assert!(!persisted
@@ -619,6 +608,257 @@ async fn family_create_is_strict_idempotent_and_restart_safe() {
     assert!(!persisted
         .windows(token.len())
         .any(|window| window == token.as_bytes()));
+}
+
+#[tokio::test]
+async fn family_create_reclaims_existing_owner_and_full_resync_path() {
+    let rig = Rig::new();
+    let first = create_family(
+        &rig.app,
+        "owner-device-a",
+        "reclaim-owner-request-aaaa0000000001",
+    )
+    .await;
+    let old_token = first["token"].as_str().unwrap().to_owned();
+    let family_id = first["family_id"].as_str().unwrap().to_owned();
+    let membership_id = first["membership_id"].as_str().unwrap().to_owned();
+    assert_eq!(first["reclaimed"], false);
+
+    // Seed a baby so reclaim + pull proves data survives.
+    let baby_id = Uuid::new_v4().to_string();
+    let (push_status, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(&old_token),
+        json!({
+            "device_id": "owner-device-a",
+            "generation": first["generation"],
+            "entities": [{
+                "type": "baby",
+                "client_uuid": baby_id,
+                "updated_at": 10,
+                "payload": baby_payload("乐乐", None),
+            }],
+        }),
+    )
+    .await;
+    assert_eq!(push_status, StatusCode::OK);
+
+    // Rename family so reclaim with empty name keeps the shared name.
+    let (rename_status, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/name",
+        Some(&old_token),
+        json!({ "family_name": "乐乐一家" }),
+    )
+    .await;
+    assert_eq!(rename_status, StatusCode::OK);
+
+    let (reclaim_status, reclaimed) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": "reclaim-owner-request-bbbb0000000002",
+            "device_id": "owner-device-b",
+            "display_name": "爸爸",
+        }),
+    )
+    .await;
+    assert_eq!(reclaim_status, StatusCode::CREATED, "{reclaimed}");
+    assert_eq!(reclaimed["family_id"], family_id);
+    assert_eq!(reclaimed["membership_id"], membership_id);
+    assert_eq!(reclaimed["role"], "owner");
+    assert_eq!(reclaimed["reclaimed"], true);
+    assert_eq!(reclaimed["family_name"], "乐乐一家");
+    let new_token = reclaimed["token"].as_str().unwrap();
+    assert_ne!(new_token, old_token);
+
+    // Old owner session is dead.
+    assert_eq!(
+        get_json(&rig.app, "/v1/family/members", Some(&old_token))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // New session can list self and pull existing entities.
+    let (members_status, members) =
+        get_json(&rig.app, "/v1/family/members", Some(new_token)).await;
+    assert_eq!(members_status, StatusCode::OK);
+    let self_member = members["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["is_self"] == true)
+        .unwrap();
+    assert_eq!(self_member["membership_id"], membership_id);
+    assert_eq!(self_member["display_name"], "爸爸");
+    assert_eq!(self_member["role"], "owner");
+
+    let (pull_status, pull) = get_json(
+        &rig.app,
+        &format!(
+            "/v1/pull?cursor=0&generation={}",
+            reclaimed["generation"].as_str().unwrap()
+        ),
+        Some(new_token),
+    )
+    .await;
+    assert_eq!(pull_status, StatusCode::OK, "{pull}");
+    let entities = pull["entities"].as_array().unwrap();
+    assert!(
+        entities.iter().any(|entity| {
+            entity["type"] == "baby" && entity["client_uuid"] == baby_id
+        }),
+        "{pull}"
+    );
+
+    // Push with the new device_id works; stale device_id is rejected.
+    let (stale_device, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(new_token),
+        json!({
+            "device_id": "owner-device-a",
+            "generation": reclaimed["generation"],
+            "entities": [],
+        }),
+    )
+    .await;
+    assert_eq!(stale_device, StatusCode::FORBIDDEN);
+
+    let baby_b = Uuid::new_v4().to_string();
+    let (push_ok, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        Some(new_token),
+        json!({
+            "device_id": "owner-device-b",
+            "generation": reclaimed["generation"],
+            "entities": [{
+                "type": "baby",
+                "client_uuid": baby_b,
+                "updated_at": 20,
+                "payload": baby_payload("圆圆", None),
+            }],
+        }),
+    )
+    .await;
+    assert_eq!(push_ok, StatusCode::OK);
+
+    // Non-empty family_name on reclaim overwrites the shared name.
+    let (reclaim2_status, reclaimed2) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": "reclaim-owner-request-cccc0000000003",
+            "device_id": "owner-device-c",
+            "display_name": "妈妈",
+            "family_name": "新名字",
+        }),
+    )
+    .await;
+    assert_eq!(reclaim2_status, StatusCode::CREATED, "{reclaimed2}");
+    assert_eq!(reclaimed2["membership_id"], membership_id);
+    assert_eq!(reclaimed2["family_name"], "新名字");
+    assert_eq!(reclaimed2["reclaimed"], true);
+
+    // Idempotent reclaim retry returns the same session.
+    let (retry_status, retry) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": "reclaim-owner-request-cccc0000000003",
+            "device_id": "owner-device-c",
+            "display_name": "妈妈",
+            "family_name": "新名字",
+        }),
+    )
+    .await;
+    assert_eq!(retry_status, StatusCode::CREATED, "{retry}");
+    assert_eq!(retry["token"], reclaimed2["token"]);
+    assert_eq!(retry["membership_id"], membership_id);
+    assert_eq!(retry["reclaimed"], true);
+}
+
+#[tokio::test]
+async fn family_create_reclaim_requires_bootstrap_when_configured() {
+    let secret = "sixteen-chars!!!!";
+    let rig = Rig::with_config(|config| {
+        config.bootstrap_secret = Some(secret.to_owned());
+    });
+    let (create_status, first) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": "bootstrap-reclaim-request-aaaa000001",
+            "device_id": "owner-a",
+            "display_name": "妈妈",
+        }),
+        &[("x-lezi-bootstrap-secret", secret)],
+    )
+    .await;
+    assert_eq!(create_status, StatusCode::CREATED, "{first}");
+    let membership_id = first["membership_id"].as_str().unwrap().to_owned();
+
+    let (wrong_status, wrong_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": "bootstrap-reclaim-request-bbbb000002",
+            "device_id": "owner-b",
+            "display_name": "爸爸",
+        }),
+    )
+    .await;
+    // Missing bootstrap when configured → unauthorized (before reclaim).
+    assert_eq!(wrong_status, StatusCode::UNAUTHORIZED, "{wrong_body}");
+
+    let (bad_status, _) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": "bootstrap-reclaim-request-bbbb000002",
+            "device_id": "owner-b",
+            "display_name": "爸爸",
+        }),
+        &[("x-lezi-bootstrap-secret", "wrong-secret!!!!!!")],
+    )
+    .await;
+    assert_eq!(bad_status, StatusCode::UNAUTHORIZED);
+
+    let (ok_status, reclaimed) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": "bootstrap-reclaim-request-bbbb000002",
+            "device_id": "owner-b",
+            "display_name": "爸爸",
+        }),
+        &[("x-lezi-bootstrap-secret", secret)],
+    )
+    .await;
+    assert_eq!(ok_status, StatusCode::CREATED, "{reclaimed}");
+    assert_eq!(reclaimed["membership_id"], membership_id);
+    assert_eq!(reclaimed["reclaimed"], true);
 }
 
 #[tokio::test]
@@ -3559,10 +3799,9 @@ async fn create_and_join_limits_are_scoped_without_losing_global_protection() {
         "rate-limit-owner-request-0000000001",
     )
     .await;
-    let owner_token = first["token"].as_str().unwrap();
-    // A different device has its own scoped allowance, but remains subject to
-    // the limiter's process-wide fallback.
-    let (second, _) = json_request(
+    // A different device reclaims the one-stack owner (not 409). Each device
+    // id has its own create/reclaim allowance (max 2 here).
+    let (second, reclaimed) = json_request(
         &rig.app,
         Method::POST,
         "/v1/family/create",
@@ -3574,8 +3813,10 @@ async fn create_and_join_limits_are_scoped_without_losing_global_protection() {
         }),
     )
     .await;
-    assert_eq!(second, StatusCode::CONFLICT);
-    let (third, _) = json_request(
+    assert_eq!(second, StatusCode::CREATED, "{reclaimed}");
+    assert_eq!(reclaimed["reclaimed"], true);
+    let owner_token = reclaimed["token"].as_str().unwrap();
+    let (third, third_body) = json_request(
         &rig.app,
         Method::POST,
         "/v1/family/create",
@@ -3587,7 +3828,8 @@ async fn create_and_join_limits_are_scoped_without_losing_global_protection() {
         }),
     )
     .await;
-    assert_eq!(third, StatusCode::CONFLICT);
+    assert_eq!(third, StatusCode::CREATED, "{third_body}");
+    let owner_token = third_body["token"].as_str().unwrap();
     let (limited, body) = json_request(
         &rig.app,
         Method::POST,

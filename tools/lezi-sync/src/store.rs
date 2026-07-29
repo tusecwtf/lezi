@@ -439,9 +439,11 @@ impl Store {
         self.secure_database_files()?;
         Ok(())
     }
-    /// Creates a family (or returns the same credentials on matching idempotent retry).
+    /// Creates a family, returns the same credentials on matching idempotent retry,
+    /// or reclaims the sole existing family's owner membership when the stack already
+    /// has a family (one-family-per-deployment).
     ///
-    /// Returns `(family_id, token, membership_id, family_name)`.
+    /// Returns `(family_id, token, membership_id, family_name, reclaimed)`.
     pub fn create_family<F>(
         &self,
         now: i64,
@@ -450,7 +452,7 @@ impl Store {
         display_name: &str,
         family_name: Option<&str>,
         derive_token: F,
-    ) -> Result<(String, String, String, Option<String>), StoreError>
+    ) -> Result<(String, String, String, Option<String>, bool), StoreError>
     where
         F: Fn(&str, &str) -> String,
     {
@@ -488,25 +490,109 @@ impl Store {
         if let Some((family_id, stored_family_name, stored_device, stored_name, membership_id)) =
             retry
         {
-            if stored_device != device_id
-                || stored_name != display_name
-                || stored_family_name.as_deref() != family_name
-            {
+            // Same create_request_id retry: device + display must match. family_name is
+            // only enforced when the request supplies one, so reclaim retries that omit
+            // family_name (keep existing) still succeed.
+            if stored_device != device_id || stored_name != display_name {
                 return Err(StoreError::FamilyAlreadyExists);
             }
+            if let Some(requested_name) = family_name {
+                if stored_family_name.as_deref() != Some(requested_name) {
+                    return Err(StoreError::FamilyAlreadyExists);
+                }
+            }
+            let reclaimed = transaction
+                .query_row(
+                    "
+                    SELECT 1 FROM membership_credentials
+                    WHERE membership_id = ?1 AND revoked_at IS NOT NULL
+                    LIMIT 1
+                    ",
+                    params![membership_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
             return Ok((
                 family_id.clone(),
                 derive_token(&create_request_hash, &family_id),
                 membership_id,
                 stored_family_name,
+                reclaimed,
             ));
         }
-        if transaction
-            .query_row("SELECT 1 FROM families LIMIT 1", [], |_| Ok(()))
+
+        // One stack, one family: reclaim the existing owner instead of 409.
+        if let Some((family_id, stored_family_name, membership_id)) = transaction
+            .query_row(
+                "
+                SELECT families.id, families.name, memberships.membership_id
+                FROM families
+                JOIN memberships
+                  ON memberships.family_id = families.id
+                 AND memberships.role = 'owner'
+                 AND memberships.left_at IS NULL
+                LIMIT 1
+                ",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
             .optional()?
-            .is_some()
         {
-            return Err(StoreError::FamilyAlreadyExists);
+            transaction.execute(
+                "
+                UPDATE membership_credentials
+                SET revoked_at = ?1
+                WHERE membership_id = ?2 AND revoked_at IS NULL
+                ",
+                params![now, membership_id],
+            )?;
+            transaction.execute(
+                "
+                UPDATE memberships
+                SET device_id = ?1, display_name = ?2
+                WHERE membership_id = ?3 AND left_at IS NULL
+                ",
+                params![device_id, display_name, membership_id],
+            )?;
+            let effective_family_name = match family_name {
+                Some(name) => {
+                    transaction.execute(
+                        "UPDATE families SET name = ?1, create_request_hash = ?2 WHERE id = ?3",
+                        params![name, create_request_hash, family_id],
+                    )?;
+                    Some(name.to_owned())
+                }
+                None => {
+                    transaction.execute(
+                        "UPDATE families SET create_request_hash = ?1 WHERE id = ?2",
+                        params![create_request_hash, family_id],
+                    )?;
+                    stored_family_name
+                }
+            };
+            let token = derive_token(&create_request_hash, &family_id);
+            transaction.execute(
+                "
+                INSERT INTO membership_credentials(token_hash, membership_id)
+                VALUES (?1, ?2)
+                ",
+                params![crate::hash_secret(&token), membership_id],
+            )?;
+            transaction.commit()?;
+            return Ok((
+                family_id,
+                token,
+                membership_id,
+                effective_family_name,
+                true,
+            ));
         }
 
         let family_id = Uuid::new_v4().to_string();
@@ -544,6 +630,7 @@ impl Store {
             token,
             membership_id,
             family_name.map(str::to_owned),
+            false,
         ))
     }
 
@@ -3148,7 +3235,7 @@ mod tests {
         fs::File::create(&database_path).unwrap();
 
         let first = Store::open(&database_path).unwrap();
-        let (family_id, token, membership_id, _) = first
+        let (family_id, token, membership_id, _, reclaimed) = first
             .create_family(
                 1,
                 "fresh-schema-request-000000000001",
@@ -3158,6 +3245,7 @@ mod tests {
                 |_, _| "fresh-token".to_owned(),
             )
             .unwrap();
+        assert!(!reclaimed);
         drop(first);
 
         let restarted = Store::open(&database_path).unwrap();

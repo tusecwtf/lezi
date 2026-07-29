@@ -377,9 +377,11 @@ async fn create_family(
         family_name.as_deref(),
         move |request_hash, family_id| signing_state.owner_token(request_hash, family_id),
     );
-    let (family_id, token, membership_id, stored_family_name) = match result {
+    let (family_id, token, membership_id, stored_family_name, reclaimed) = match result {
         Ok(value) => value,
         Err(StoreError::FamilyAlreadyExists) => {
+            // Only reached when the same create_request_id is reused with a
+            // conflicting device_id / display_name — not for a second family.
             return Err(ApiError::conflict("Family already exists"))
         }
         Err(error) => return Err(error.into()),
@@ -393,6 +395,7 @@ async fn create_family(
             "membership_id": membership_id,
             "generation": state.generation,
             "family_name": stored_family_name,
+            "reclaimed": reclaimed,
         })),
     ))
 }

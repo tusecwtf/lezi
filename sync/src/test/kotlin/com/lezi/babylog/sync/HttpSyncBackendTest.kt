@@ -316,7 +316,7 @@ class HttpSyncBackendTest {
                     captured.complete(headers.joinToString("\n") + "\n\n" + String(body, 0, read))
 
                     val response =
-                        """{"family_id":"family","token":"owner-token","role":"owner","membership_id":"membership-owner","generation":"generation-a","family_name":null}"""
+                        """{"family_id":"family","token":"owner-token","role":"owner","membership_id":"membership-owner","generation":"generation-a","family_name":null,"reclaimed":false}"""
                             .toByteArray(Charsets.UTF_8)
                     socket.getOutputStream().use { output ->
                         output.write(
@@ -711,7 +711,8 @@ class HttpSyncBackendTest {
                         (
                             """{"family_id":"family","token":"owner-token","role":"owner",""" +
                                 """"membership_id":"membership-create-uuid",""" +
-                                """"generation":"generation-a","family_name":"Happy Home"}"""
+                                """"generation":"generation-a","family_name":"Happy Home",""" +
+                                """"reclaimed":false}"""
                             ).toByteArray(Charsets.UTF_8)
                     socket.getOutputStream().use { output ->
                         output.write(
@@ -741,6 +742,7 @@ class HttpSyncBackendTest {
 
             assertThat(result.familyName).isEqualTo("Happy Home")
             assertThat(result.membershipId).isEqualTo("membership-create-uuid")
+            assertThat(result.reclaimed).isFalse()
             assertThat(request.substringAfter("\n\n")).contains("\"family_name\":\"Happy Home\"")
             assertThat(request.substringAfter("\n\n")).contains("\"display_name\":\"Mom\"")
         } finally {
@@ -758,7 +760,7 @@ class HttpSyncBackendTest {
                 server.accept().use { socket ->
                     captured.complete(readRequest(socket))
                     val body =
-                        """{"family_id":"family","token":"owner-token","role":"owner","membership_id":"membership-owner","generation":"generation-a","family_name":null}"""
+                        """{"family_id":"family","token":"owner-token","role":"owner","membership_id":"membership-owner","generation":"generation-a","family_name":null,"reclaimed":true}"""
                             .toByteArray(Charsets.UTF_8)
                     socket.getOutputStream().use { output ->
                         output.write(
@@ -787,6 +789,7 @@ class HttpSyncBackendTest {
             val request = captured.get(2, TimeUnit.SECONDS)
 
             assertThat(result.familyName).isNull()
+            assertThat(result.reclaimed).isTrue()
             assertThat(request.substringAfter("\n\n")).doesNotContain("family_name")
         } finally {
             server.close()

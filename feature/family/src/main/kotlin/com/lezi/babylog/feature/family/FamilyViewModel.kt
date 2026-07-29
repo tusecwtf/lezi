@@ -490,7 +490,13 @@ class FamilyViewModel @Inject constructor(
             onDone(
                 result.isSuccess,
                 result.fold(
-                    { "家庭已创建" },
+                    { created ->
+                        if (created.reclaimed) {
+                            "已接回家庭，正在同步数据"
+                        } else {
+                            "家庭已创建"
+                        }
+                    },
                     { familySyncError(it, "创建家庭失败") },
                 ),
             )

@@ -69,6 +69,12 @@ class NoOpLocalClearRecoveryGate : LocalClearRecoveryGate {
 class SyncNotEnabledException : Exception("请先配置家庭服务器并加入家庭")
 class BootstrapSecretRejectedException : Exception("初始化口令不正确，请核对 NAS 配置")
 
+/** Outcome of [SyncPort.createFamily]: owner session plus whether the NAS reclaimed. */
+data class CreateFamilyResult(
+    val session: SyncSession,
+    val reclaimed: Boolean,
+)
+
 interface SyncPort {
     fun status(): Flow<SyncStatus>
     fun session(): Flow<SyncSession>
@@ -85,7 +91,7 @@ interface SyncPort {
         displayName: String,
         bootstrapSecret: String,
         familyName: String? = null,
-    ): Result<SyncSession>
+    ): Result<CreateFamilyResult>
     /** Owner-only rename of the shared family name; blank/null clears. */
     suspend fun renameFamily(familyName: String?): Result<Unit>
     suspend fun sync(trigger: SyncTrigger): Result<Unit>
@@ -130,7 +136,7 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
         displayName: String,
         bootstrapSecret: String,
         familyName: String?,
-    ) = Result.failure<SyncSession>(SyncNotEnabledException())
+    ) = Result.failure<CreateFamilyResult>(SyncNotEnabledException())
     override suspend fun renameFamily(familyName: String?) =
         Result.failure<Unit>(SyncNotEnabledException())
     override suspend fun sync(trigger: SyncTrigger) = Result.success(Unit)

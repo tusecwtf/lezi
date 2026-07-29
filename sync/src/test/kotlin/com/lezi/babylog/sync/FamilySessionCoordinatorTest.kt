@@ -197,11 +197,14 @@ class FamilySessionCoordinatorTest {
         ).getOrThrow()
 
         assertThat(outcome).isInstanceOf(FamilySessionOutcome.Joined::class.java)
-        val joined = (outcome as FamilySessionOutcome.Joined).session
+        val joinedOutcome = outcome as FamilySessionOutcome.Joined
+        assertThat(joinedOutcome.reclaimed).isFalse()
+        val joined = joinedOutcome.session
         assertThat(joined.familyId).isEqualTo("family-created")
         assertThat(joined.familyToken).isEqualTo("owner-token")
         assertThat(joined.membershipId).isEqualTo("membership-created")
         assertThat(joined.familyName).isEqualTo("乐乐一家")
+        assertThat(joined.pullCursor).isEqualTo(0)
         assertThat(backend.createDisplayNames).containsExactly("妈妈")
         assertThat(backend.createFamilyNames).containsExactly("乐乐一家")
         assertThat(backend.createBootstrapSecrets).containsExactly("one-time-secret")
@@ -213,6 +216,52 @@ class FamilySessionCoordinatorTest {
                 "session-published",
                 "sync-requested",
             )
+            .inOrder()
+    }
+
+    @Test
+    fun createFamilyReclaimPublishesOwnerSessionAtCursorZeroAndRequestsSync() = runTest {
+        val previous = SyncSession(
+            serverHost = "192.168.1.20",
+            serverPort = 8787,
+            allowedSsids = listOf("Home"),
+        )
+        val preferences = MemorySyncPreferences(previous)
+        val backend = RecordingSyncBackend().apply {
+            nextCreateReclaimed = true
+            nextCreateFamilyName = "乐乐一家"
+        }
+        val events = mutableListOf<String>()
+        val coordinator = coordinator(
+            preferences = preferences,
+            backend = backend,
+            requireRemoteAllowed = { events += "gate" },
+            onSessionChanged = { events += "session-published" },
+            requestSync = { trigger ->
+                assertThat(trigger).isEqualTo(SyncTrigger.LocalWrite)
+                events += "sync-requested"
+            },
+        )
+
+        val outcome = coordinator.execute(
+            FamilySessionCommand.CreateFamily(
+                displayName = "爸爸",
+                bootstrapSecret = "deploy-secret",
+                familyName = null,
+            ),
+        ).getOrThrow()
+
+        val joined = outcome as FamilySessionOutcome.Joined
+        assertThat(joined.reclaimed).isTrue()
+        assertThat(joined.session.familyId).isEqualTo("family-created")
+        assertThat(joined.session.familyToken).isEqualTo("owner-token-reclaimed")
+        assertThat(joined.session.membershipId).isEqualTo("membership-created")
+        assertThat(joined.session.role).isEqualTo(FamilyRole.Owner)
+        assertThat(joined.session.pullCursor).isEqualTo(0)
+        assertThat(joined.session.pullGeneration).isEqualTo("current-generation")
+        assertThat(joined.session.familyName).isEqualTo("乐乐一家")
+        assertThat(events)
+            .containsExactly("gate", "session-published", "sync-requested")
             .inOrder()
     }
 

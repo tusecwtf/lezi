@@ -520,6 +520,9 @@ private fun JsonObject.toBundleStageStatus(): BundleStageStatus = BundleStageSta
 
 private fun JsonObject.toCreateResult(): JoinResult {
     require(requiredString("role", "create") == "owner") { "create 响应 role 无效" }
+    val reclaimed = requireNotNull(get("reclaimed")?.jsonPrimitive?.booleanOrNull) {
+        "create 响应缺少 reclaimed"
+    }
     return JoinResult(
         familyId = requiredNonBlankString("family_id", "create"),
         token = requiredNonBlankString("token", "create"),
@@ -527,6 +530,7 @@ private fun JsonObject.toCreateResult(): JoinResult {
         generation = requiredNonBlankString("generation", "create"),
         familyName = requiredFamilyName("create"),
         membershipId = requiredNonBlankString("membership_id", "create"),
+        reclaimed = reclaimed,
     )
 }
 

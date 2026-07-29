@@ -20,6 +20,8 @@
 | 记录页就地布局编辑（桌面式常用/所有记录） | [spec.md](./record-layout-edit/spec.md) | [ISSUES.md](./record-layout-edit/ISSUES.md)（7 票） | complete |
 | 0.2.4 后跟进（止血·拆骨·契约） | [spec.md](./post-0.2.4-followup/spec.md) | [ISSUES.md](./post-0.2.4-followup/ISSUES.md)（R2 · 15 票） | complete |
 | 三日时间条窗口（72h 窥视 + 平移） | [spec.md](./three-day-timeline-rail/spec.md) | [ISSUES.md](./three-day-timeline-rail/ISSUES.md)（7 票） | ready-for-agent |
+| 管理员卸载后接回家庭并全量重同步 | [spec.md](./owner-reclaim-resync/spec.md) | [ISSUES.md](./owner-reclaim-resync/ISSUES.md)（2 票） | complete |
 
 已完成的实施过程、审查报告、截图和运行 dump 不在仓库中长期归档；产品结论应写回
 [`docs/prd/`](../docs/prd/)。
+

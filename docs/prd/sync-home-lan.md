@@ -417,9 +417,27 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
   - `display_name`：**家庭称呼**，产品层必填；校验同 join
   - `family_name`：共享家庭名，可空；trim 后空则存 null，由客户端兜底展示
   - 客户端在成功落盘会话前必须复用同一高熵 `create_request_id`
-- 响应：`{ "family_id", "token", "role": "owner", "membership_id", "generation", "family_name"? }`
+- 鉴权：配置了 `LEZI_BOOTSTRAP_SECRET` 时要求请求头
+  `X-Lezi-Bootstrap-Secret` 匹配；**未配置**时 create/reclaim 均对本机网络开放（仅开发）
+- 响应：
+  `{ "family_id", "token", "role": "owner", "membership_id", "generation", "family_name", "reclaimed" }`
   - `membership_id`：服务端生成的不可变 membership UUID；幂等重试返回同一值
-- 同一创建请求重试幂等恢复相同响应；一家一栈已有其它创建请求时返回 `409`
+  - `reclaimed`：`false` 表示首次建家（或同请求幂等重试）；`true` 表示接回已有家庭的 owner
+- **首次建家**（空库）：新建 family + owner membership + credential；`reclaimed=false`
+- **同一 `create_request_id` 幂等重试**：device + display 必须一致；返回同一
+  `family_id` / `membership_id` / 派生 token；`reclaimed` 反映该 membership 是否曾被接回
+- **管理员接回（reclaim）**：一家一栈已有家庭、且 bootstrap 校验通过（或未配置
+  bootstrap）时，**不**再 `409`。服务端：
+  1. 定位唯一家庭的 active owner membership（**同一** `membership_id`）
+  2. 吊销该 membership 下全部未吊销 credentials
+  3. 更新 owner 的 `device_id` 与 `display_name`
+  4. `family_name` **仅非空时覆盖**；空/省略则保留 NAS 现名
+  5. 用本请求的 `create_request_id` 派生并写入新 owner token；`reclaimed=true`
+  6. **不**删除 entities/media，**不**新建第二户或第二 owner membership
+- 客户端接回成功后以 cursor `0` + 当前 `generation` 走标准 full pull（按
+  `client_uuid` 幂等合入）；无独立导入 API
+- 仅 owner 可通过本接口接回；成员卸载后仍用邀请码加入（新 membership）
+- 同一 `create_request_id` 被另一 device/称呼复用 → 仍可 `409`（冲突重试，不是第二户）
 
 ### 9.3 `POST /v1/invite`
 
