@@ -41,12 +41,15 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -58,6 +61,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
@@ -83,12 +87,15 @@ import com.lezi.babylog.sync.HomeWifiPermission
 import com.lezi.babylog.sync.JoinFamilyDraft
 import com.lezi.babylog.sync.HomeWifiSettingsTarget
 import com.lezi.babylog.sync.NetworkState
+import com.lezi.babylog.sync.SyncPort
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import javax.inject.Inject
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 private val ThemePalette = com.lezi.babylog.designsystem.LeziBabyTheme.PaletteArgb.map {
@@ -96,13 +103,136 @@ private val ThemePalette = com.lezi.babylog.designsystem.LeziBabyTheme.PaletteAr
 }
 private val ThemePaletteLabels = com.lezi.babylog.designsystem.LeziBabyTheme.Labels
 
+internal enum class OnboardingStep {
+    ChooseFamily,
+    CreateFamily,
+    CreateBaby,
+    RecoveryPending,
+    RecoveryComplete,
+}
+
+internal enum class OnboardingPrimaryAction {
+    CreateFamily,
+    JoinFamily,
+}
+
+internal fun onboardingPrimaryActions(step: OnboardingStep): List<OnboardingPrimaryAction> =
+    if (step == OnboardingStep.ChooseFamily) {
+        listOf(OnboardingPrimaryAction.CreateFamily, OnboardingPrimaryAction.JoinFamily)
+    } else {
+        emptyList()
+    }
+
+internal data class OnboardingOwnerEntryTransition(
+    val finishRecovery: Boolean,
+    val nextStep: OnboardingStep,
+)
+
+internal fun onboardingOwnerEntryTransition(
+    state: OnboardingOwnerEntryState,
+    reclaimedFamilyEmpty: Boolean?,
+): OnboardingOwnerEntryTransition? = when (state) {
+    is OnboardingOwnerEntryState.Created -> OnboardingOwnerEntryTransition(
+        finishRecovery = false,
+        nextStep = OnboardingStep.CreateBaby,
+    )
+    is OnboardingOwnerEntryState.Reclaimed -> when (state.dataRecovery) {
+        com.lezi.babylog.sync.InitialFamilyDataRecovery.Complete ->
+            reclaimedFamilyEmpty?.let { empty ->
+                OnboardingOwnerEntryTransition(
+                    finishRecovery = true,
+                    nextStep = if (empty) {
+                        OnboardingStep.CreateBaby
+                    } else {
+                        OnboardingStep.RecoveryComplete
+                    },
+                )
+            }
+        com.lezi.babylog.sync.InitialFamilyDataRecovery.RetryRequired,
+        com.lezi.babylog.sync.InitialFamilyDataRecovery.NotRequired,
+        -> OnboardingOwnerEntryTransition(
+            finishRecovery = true,
+            nextStep = OnboardingStep.RecoveryPending,
+        )
+    }
+    OnboardingOwnerEntryState.Recovering,
+    is OnboardingOwnerEntryState.RecoveryRetryableFailure,
+    -> OnboardingOwnerEntryTransition(
+        finishRecovery = false,
+        nextStep = OnboardingStep.RecoveryPending,
+    )
+    OnboardingOwnerEntryState.Ready,
+    is OnboardingOwnerEntryState.Submitting,
+    is OnboardingOwnerEntryState.RetryableFailure,
+    -> null
+}
+
+private val JoinFamilyDraftSaver = listSaver<JoinFamilyDraft, String>(
+    save = {
+        listOf(
+            it.invitation,
+            it.host,
+            it.portText,
+            it.scheme,
+            it.ssid1,
+            it.ssid2,
+        )
+    },
+    restore = {
+        JoinFamilyDraft(
+            invitation = it[0],
+            host = it[1],
+            portText = it[2],
+            scheme = it[3],
+            ssid1 = it[4],
+            ssid2 = it[5],
+        )
+    },
+)
+
 @HiltViewModel
 class OnboardingViewModel @Inject constructor(
     private val careLog: CareLog,
     private val joinFamily: JoinFamilyUseCase,
     private val networkState: NetworkState,
+    sync: SyncPort,
 ) : ViewModel() {
+    private val ownerEntry = OnboardingOwnerEntryController(
+        SyncPortOnboardingOwnerEntryGateway(sync),
+    )
+    private val mutableReclaimedFamilyEmpty = MutableStateFlow<Boolean?>(null)
+    val ownerEntryState = ownerEntry.state
+    val reclaimedFamilyEmpty = mutableReclaimedFamilyEmpty.asStateFlow()
+
     fun currentWifiSsid(): String? = networkState.currentWifiSsid()
+
+    fun createOrReclaimFamily(
+        input: OnboardingOwnerEntryInput,
+        bootstrapSecret: String,
+    ) {
+        viewModelScope.launch {
+            mutableReclaimedFamilyEmpty.value = null
+            ownerEntry.submit(input, bootstrapSecret)
+            updateRecoveredFamilyEmptiness()
+        }
+    }
+
+    fun retryOwnerRecovery() {
+        viewModelScope.launch {
+            ownerEntry.restorePendingRecovery()
+            ownerEntry.retryDataRecovery()
+            updateRecoveredFamilyEmptiness()
+        }
+    }
+
+    private suspend fun updateRecoveredFamilyEmptiness() {
+        val state = ownerEntry.state.value
+        if (state is OnboardingOwnerEntryState.Reclaimed &&
+            state.dataRecovery == com.lezi.babylog.sync.InitialFamilyDataRecovery.Complete
+        ) {
+            mutableReclaimedFamilyEmpty.value = careLog.listBabies().isEmpty()
+        }
+    }
 
     fun createBaby(
         nickname: String,
@@ -236,16 +366,22 @@ fun OnboardingRoute(
     onFinished: () -> Unit,
     vm: OnboardingViewModel = hiltViewModel(),
 ) {
-    var name by remember { mutableStateOf("年年") }
-    var sex by remember { mutableStateOf<String?>(null) }
-    var birthday by remember { mutableLongStateOf(LocalDate.now().toEpochDay()) }
-    var weightText by remember { mutableStateOf("") }
-    var themeIdx by remember { mutableIntStateOf(0) }
-    var showDate by remember { mutableStateOf(false) }
-    var showJoin by remember { mutableStateOf(false) }
-    var joinDisplayName by remember { mutableStateOf("") }
-    var nameError by remember { mutableStateOf(false) }
-    var formError by remember { mutableStateOf<String?>(null) }
+    var step by rememberSaveable { mutableStateOf(OnboardingStep.ChooseFamily) }
+    var name by rememberSaveable { mutableStateOf("年年") }
+    var sex by rememberSaveable { mutableStateOf<String?>(null) }
+    var birthday by rememberSaveable { mutableLongStateOf(LocalDate.now().toEpochDay()) }
+    var weightText by rememberSaveable { mutableStateOf("") }
+    var themeIdx by rememberSaveable { mutableIntStateOf(0) }
+    var showDate by rememberSaveable { mutableStateOf(false) }
+    var showJoin by rememberSaveable { mutableStateOf(false) }
+    var joinDisplayName by rememberSaveable { mutableStateOf("") }
+    var createDisplayName by rememberSaveable { mutableStateOf("") }
+    var createFamilyName by rememberSaveable { mutableStateOf("") }
+    var bootstrapSecret by remember { mutableStateOf("") }
+    var nameError by rememberSaveable { mutableStateOf(false) }
+    var formError by rememberSaveable { mutableStateOf<String?>(null) }
+    val ownerEntryState by vm.ownerEntryState.collectAsState()
+    val reclaimedFamilyEmpty by vm.reclaimedFamilyEmpty.collectAsState()
     val context = LocalContext.current
     // Prefill unsaved defaults, including the current Wi-Fi name when available.
     val novice = remember {
@@ -253,7 +389,9 @@ fun OnboardingRoute(
             if (HomeWifiPermission.hasRequiredPermissions(context)) vm.currentWifiSsid() else null,
         )
     }
-    var joinDraft by remember { mutableStateOf(JoinFamilyDraft.fromConfig(novice)) }
+    var joinDraft by rememberSaveable(stateSaver = JoinFamilyDraftSaver) {
+        mutableStateOf(JoinFamilyDraft.fromConfig(novice))
+    }
     var pendingHomeWifiAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     var showHomeWifiAccessGuide by remember { mutableStateOf(false) }
     val homeWifiPermission = rememberLauncherForActivityResult(
@@ -339,6 +477,26 @@ fun OnboardingRoute(
             )
         }
     }
+    LaunchedEffect(ownerEntryState, reclaimedFamilyEmpty) {
+        val transition = onboardingOwnerEntryTransition(
+            state = ownerEntryState,
+            reclaimedFamilyEmpty = reclaimedFamilyEmpty,
+        )
+        if (transition != null) {
+            bootstrapSecret = ""
+            formError = null
+            if (transition.finishRecovery) onFinished()
+            // If a reclaimed family is genuinely empty, root routing keeps onboarding alive and
+            // this becomes its first authoritative Baby step instead of returning to start.
+            step = transition.nextStep
+        } else {
+            formError = when (val state = ownerEntryState) {
+                is OnboardingOwnerEntryState.RetryableFailure -> state.message
+                is OnboardingOwnerEntryState.RecoveryRetryableFailure -> state.message
+                else -> formError
+            }
+        }
+    }
     val dateLabel = remember(birthday) {
         LocalDate.ofEpochDay(birthday).format(DateTimeFormatter.ofPattern("yyyy年M月d日"))
     }
@@ -355,145 +513,307 @@ fun OnboardingRoute(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text("欢迎使用乐记", style = MaterialTheme.typography.headlineSmall)
-        Text(
-            "先创建本机宝宝档案开始记录；若要加入已有家庭，可在下方加入。",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        OutlinedTextField(
-            value = name,
-            onValueChange = {
-                name = limitBabyNicknameInput(it)
-                nameError = false
-            },
-            label = { Text("宝宝昵称") },
-            isError = nameError,
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            listOf(null to "未设置", "female" to "女", "male" to "男").forEach { (v, label) ->
-                FilterChip(
-                    selected = sex == v,
-                    onClick = { sex = v },
-                    label = { Text(label) },
+        when (step) {
+            OnboardingStep.ChooseFamily -> {
+                Text(
+                    "先建立家庭连接；已有家庭也从“新建家庭”接回管理员身份。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                onboardingPrimaryActions(step).forEach { action ->
+                    val onClick = {
+                        formError = null
+                        withHomeWifiAccess {
+                            fillCurrentWifiIfBlank()
+                            when (action) {
+                                OnboardingPrimaryAction.CreateFamily ->
+                                    step = OnboardingStep.CreateFamily
+                                OnboardingPrimaryAction.JoinFamily -> showJoin = true
+                            }
+                        }
+                    }
+                    when (action) {
+                        OnboardingPrimaryAction.CreateFamily -> Button(
+                            onClick = onClick,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(52.dp),
+                        ) { Text("新建家庭") }
+                        OnboardingPrimaryAction.JoinFamily -> OutlinedButton(
+                            onClick = onClick,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(52.dp),
+                        ) { Text("加入家庭") }
+                    }
+                }
             }
-        }
-        OutlinedButton(onClick = { showDate = true }, modifier = Modifier.fillMaxWidth()) {
-            Text("生日：$dateLabel")
-        }
-        OutlinedTextField(
-            value = weightText,
-            onValueChange = { weightText = it.filter { ch -> ch.isDigit() } },
-            label = { Text("出生体重（克，可选）") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Text("主题色", style = MaterialTheme.typography.labelLarge)
-        FlowRow(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            maxItemsInEachRow = 4,
-        ) {
-            ThemePalette.forEachIndexed { index, color ->
-                Box(
+            OnboardingStep.CreateFamily -> {
+                Text(
+                    "连接家里的 NAS。若 NAS 已有家庭，同一动作会接回原管理员与历史数据。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = joinDraft.host,
+                    onValueChange = { joinDraft = joinDraft.copy(host = it) },
+                    label = { Text("服务器主机（IP/域名）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = joinDraft.portText,
+                    onValueChange = {
+                        joinDraft = joinDraft.copy(portText = it.filter(Char::isDigit).take(5))
+                    },
+                    label = { Text("端口") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = joinDraft.ssid1,
+                    onValueChange = { joinDraft = joinDraft.copy(ssid1 = it) },
+                    label = { Text("家庭 Wi‑Fi 名称") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedButton(
+                    onClick = {
+                        withHomeWifiAccess {
+                            val current = vm.currentWifiSsid()?.trim().orEmpty()
+                            if (current.isEmpty()) showHomeWifiAccessGuide = true
+                            else joinDraft = joinDraft.copy(ssid1 = current)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("填入当前 Wi‑Fi 名称")
+                }
+                OutlinedTextField(
+                    value = createDisplayName,
+                    onValueChange = { createDisplayName = it },
+                    label = { Text("我是宝宝的？") },
+                    supportingText = { Text("家庭称呼，必填；家人用这个认出你") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = createFamilyName,
+                    onValueChange = { createFamilyName = it },
+                    label = { Text("家庭名（可选）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = bootstrapSecret,
+                    onValueChange = { bootstrapSecret = it },
+                    label = { Text("NAS 初始化口令（可空）") },
+                    supportingText = { Text("仅用于本次请求，不会保存") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                formError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                Button(
+                    enabled = ownerEntryState !is OnboardingOwnerEntryState.Submitting,
+                    onClick = {
+                        formError = null
+                        val config = runCatching {
+                            HomeLanServerConfig.fromUserInput(
+                                rawHostOrUrl = joinDraft.host,
+                                explicitPort = joinDraft.portText.toIntOrNull(),
+                                allowedSsids = joinDraft.ssids,
+                                fallbackScheme = joinDraft.scheme,
+                            ).also {
+                                require(it.isServerConfigured) { "请填写服务器主机" }
+                                require(it.hasSsidAllowlist) { "请至少填写一个家庭 Wi‑Fi 名称" }
+                            }
+                        }.getOrElse {
+                            formError = it.message ?: "家庭网络配置无效"
+                            return@Button
+                        }
+                        withHomeWifiAccess {
+                            vm.createOrReclaimFamily(
+                                input = OnboardingOwnerEntryInput(
+                                    homeLanConfig = config,
+                                    displayName = createDisplayName,
+                                    familyName = createFamilyName,
+                                ),
+                                bootstrapSecret = bootstrapSecret,
+                            )
+                        }
+                    },
                     modifier = Modifier
-                        .size(48.dp)
-                        .clip(CircleShape)
-                        .then(
-                            if (themeIdx == index) {
-                                Modifier.border(2.dp, MaterialTheme.colorScheme.onSurface, CircleShape)
-                            } else {
+                        .fillMaxWidth()
+                        .height(52.dp),
+                ) {
+                    Text(
+                        if (ownerEntryState is OnboardingOwnerEntryState.Submitting) {
+                            "正在连接…"
+                        } else {
+                            "新建家庭"
+                        },
+                    )
+                }
+                TextButton(
+                    enabled = ownerEntryState !is OnboardingOwnerEntryState.Submitting,
+                    onClick = { step = OnboardingStep.ChooseFamily },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("返回") }
+            }
+            OnboardingStep.CreateBaby -> {
+                Text(
+                    if (ownerEntryState is OnboardingOwnerEntryState.Reclaimed) {
+                        "家庭已接回；家庭中还没有宝宝，请创建第一个家庭宝宝。"
+                    } else {
+                        "家庭已建立，请创建第一个家庭宝宝。"
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = {
+                        name = limitBabyNicknameInput(it)
+                        nameError = false
+                    },
+                    label = { Text("宝宝昵称") },
+                    isError = nameError,
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    listOf(null to "未设置", "female" to "女", "male" to "男")
+                        .forEach { (value, label) ->
+                            FilterChip(
+                                selected = sex == value,
+                                onClick = { sex = value },
+                                label = { Text(label) },
+                            )
+                        }
+                }
+                OutlinedButton(
+                    onClick = { showDate = true },
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("生日：$dateLabel") }
+                OutlinedTextField(
+                    value = weightText,
+                    onValueChange = { weightText = it.filter { ch -> ch.isDigit() } },
+                    label = { Text("出生体重（克，可选）") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text("主题色", style = MaterialTheme.typography.labelLarge)
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    maxItemsInEachRow = 4,
+                ) {
+                    ThemePalette.forEachIndexed { index, color ->
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clip(CircleShape)
+                                .then(
+                                    if (themeIdx == index) {
+                                        Modifier.border(
+                                            2.dp,
+                                            MaterialTheme.colorScheme.onSurface,
+                                            CircleShape,
+                                        )
+                                    } else {
+                                        Modifier
+                                    },
+                                )
+                                .selectable(
+                                    selected = themeIdx == index,
+                                    role = Role.RadioButton,
+                                    onClick = { themeIdx = index },
+                                )
+                                .semantics {
+                                    contentDescription = "主题色：${ThemePaletteLabels[index]}"
+                                },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Box(
                                 Modifier
+                                    .size(32.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(color)),
+                            )
+                        }
+                    }
+                }
+                formError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                Button(
+                    onClick = {
+                        if (name.trim().isEmpty()) {
+                            nameError = true
+                            return@Button
+                        }
+                        val grams = weightText.toIntOrNull()
+                        birthWeightValidationError(grams)?.let {
+                            formError = it
+                            return@Button
+                        }
+                        vm.createBaby(
+                            nickname = name,
+                            sex = sex,
+                            birthdayEpochDay = birthday,
+                            birthWeightGrams = grams,
+                            themeColorArgb = ThemePalette[themeIdx],
+                            onDone = { error ->
+                                if (error == null) onFinished() else formError = error
                             },
                         )
-                        .selectable(
-                            selected = themeIdx == index,
-                            role = Role.RadioButton,
-                            onClick = { themeIdx = index },
-                        )
-                        .semantics {
-                            contentDescription = "主题色：${ThemePaletteLabels[index]}"
-                        },
-                    contentAlignment = Alignment.Center,
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp),
+                ) { Text("开始记录") }
+            }
+            OnboardingStep.RecoveryPending -> {
+                Text(
+                    "家庭身份已接回，但历史数据还没有恢复完成。请保持连接家庭 Wi‑Fi 后重试。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                if (ownerEntryState is OnboardingOwnerEntryState.RecoveryRetryableFailure) {
+                    Text(
+                        (ownerEntryState as OnboardingOwnerEntryState.RecoveryRetryableFailure)
+                            .message,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                Button(
+                    enabled = ownerEntryState !is OnboardingOwnerEntryState.Recovering,
+                    onClick = vm::retryOwnerRecovery,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp),
                 ) {
-                    Box(
-                        Modifier
-                            .size(32.dp)
-                            .clip(CircleShape)
-                            .background(Color(color)),
+                    Text(
+                        if (ownerEntryState is OnboardingOwnerEntryState.Recovering) {
+                            "正在恢复…"
+                        } else {
+                            "重试恢复"
+                        },
                     )
                 }
             }
-        }
-        formError?.let {
-            Text(it, color = MaterialTheme.colorScheme.error)
-        }
-        Button(
-            onClick = {
-                if (name.trim().isEmpty()) {
-                    nameError = true
-                    return@Button
-                }
-                val grams = weightText.toIntOrNull()
-                birthWeightValidationError(grams)?.let {
-                    formError = it
-                    return@Button
-                }
-                vm.createBaby(
-                    nickname = name,
-                    sex = sex,
-                    birthdayEpochDay = birthday,
-                    birthWeightGrams = grams,
-                    themeColorArgb = ThemePalette[themeIdx],
-                    onDone = { err ->
-                        if (err == null) onFinished()
-                        else formError = err
-                    },
+            OnboardingStep.RecoveryComplete -> {
+                Text(
+                    "家庭与历史宝宝已恢复完成，正在进入家庭记录。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-            },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(52.dp),
-        ) {
-            Text("开始记录")
-        }
-        Spacer(modifier = Modifier.height(12.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            OutlinedButton(
-                onClick = {
-                    withHomeWifiAccess {
-                        fillCurrentWifiIfBlank()
-                        showJoin = true
-                    }
-                },
-                modifier = Modifier
-                    .weight(1f)
-                    .height(52.dp),
-            ) {
-                Text("加入家庭")
-            }
-            OutlinedButton(
-                onClick = { withHomeWifiAccess { requestOrLaunchInviteScan() } },
-                modifier = Modifier.height(52.dp),
-            ) {
-                Icon(
-                    imageVector = Icons.Outlined.QrCodeScanner,
-                    contentDescription = "扫码加入家庭",
-                    modifier = Modifier.size(22.dp),
-                )
-                Spacer(Modifier.size(6.dp))
-                Text("扫码")
             }
         }
     }
