@@ -228,6 +228,7 @@ NAS 持久化和 pull 的 current MediaAsset payload 固定包含三个归属 UU
 | `category_order_json` | 记录类别区块顺序 |
 | `hidden_items` | 隐藏类型 |
 | `quick_record_slots` | 四个常用记录槽位；空槽允许 |
+| `device_layout_snapshot_version` | 当前完整本机布局快照版本；未知未来版本只读，不由旧客户端覆盖 |
 | `action_buttons` | 计时/搜索/日历等显隐 |
 | `timer_enabled` | |
 | `record_at_start_or_end` | 母乳记录时刻 |
@@ -247,6 +248,12 @@ NAS 持久化和 pull 的 current MediaAsset payload 固定包含三个归属 UU
 | `family_plan_reminders_enabled` | 当前设备是否提醒家庭护理计划；默认开 |
 | `system_calendar_enabled` / `system_calendar_id` | 当前设备的系统日历副本开关与用户选择的可写日历 |
 | `system_calendar_disclosure` | `event_only` \| `baby_and_type`（默认）\| `details` |
+
+四槽、隐藏集合、类内项目序和类别序以一个版本化 `DeviceLayoutSnapshot` 作为权威
+持久化单元；旧字段只在同一次 DataStore 事务内保留完整镜像以兼容降级。快照固定四槽、
+非空 key 唯一且允许任意数量空槽，不自动补位。每次布局意图串行写入一个完整快照；
+失败或取消保留上一份耐久快照并允许重试，未知未来版本不得被当前版本静默清空或回写。
+该快照只存在当前设备，不进入 Outbox、家庭同步 wire 或 NAS 数据。
 
 主题色存在 Baby 上，但 **同步策略默认：主题与排序属本机**（与参考产品一致）。若未来共享主题，再单开开关。
 

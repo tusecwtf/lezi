@@ -1,5 +1,6 @@
 package com.lezi.babylog.core.datastore
 
+import com.lezi.babylog.core.model.DeviceLayoutSnapshot
 import com.lezi.babylog.core.model.SettingsLocal
 import kotlinx.coroutines.flow.Flow
 
@@ -43,6 +44,10 @@ interface SettingsStore {
     suspend fun clearNextFeedAt()
     /** Atomically consumes only the alarm epoch carried by a delivered PendingIntent. */
     suspend fun clearNextFeedAtIfEpoch(expectedEpoch: String): Boolean
+    /** Persist one complete device-local layout in one atomic store transaction. */
+    suspend fun setDeviceLayoutSnapshot(snapshot: DeviceLayoutSnapshot) {
+        error("This SettingsStore does not implement atomic device-layout snapshots")
+    }
     suspend fun setItemOrderJson(json: String)
     suspend fun setCategoryOrderJson(json: String)
     suspend fun setHiddenItems(items: Set<String>)

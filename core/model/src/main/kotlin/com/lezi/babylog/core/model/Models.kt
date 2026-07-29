@@ -245,6 +245,8 @@ data class ConflictNotAdoptedAudit(
 }
 
 data class SettingsLocal(
+    /** Version of the complete device-local layout epoch represented by the fields below. */
+    val deviceLayoutSnapshotVersion: Int = DEVICE_LAYOUT_SNAPSHOT_VERSION,
     val itemOrderJson: String = "[]",
     /**
      * Device-local order of record category sections (feeding/excretion/…).

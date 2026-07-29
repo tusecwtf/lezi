@@ -1,5 +1,7 @@
 package com.lezi.babylog.feature.log
 
+import com.lezi.babylog.core.model.DEVICE_LAYOUT_SNAPSHOT_VERSION
+import com.lezi.babylog.core.model.DeviceLayoutSnapshot
 import com.lezi.babylog.core.model.QUICK_RECORD_SLOT_COUNT
 import com.lezi.babylog.core.ui.RecordSection
 import com.lezi.babylog.core.ui.addToLocalDeleted
@@ -17,11 +19,30 @@ import com.lezi.babylog.core.ui.visibleKeysInSection
  * Pure data — UI persists via SettingsStore after each reduce.
  */
 internal data class DeviceLayoutPrefs(
+    val version: Int = DEVICE_LAYOUT_SNAPSHOT_VERSION,
     val quickRecordSlots: List<String>,
     val hiddenItems: Set<String>,
     val itemOrderJson: String,
     val categoryOrderJson: String,
 )
+
+internal fun DeviceLayoutPrefs.toSnapshot(): DeviceLayoutSnapshot =
+    DeviceLayoutSnapshot(
+        version = version,
+        quickRecordSlots = quickRecordSlots,
+        hiddenItems = hiddenItems,
+        itemOrderJson = itemOrderJson,
+        categoryOrderJson = categoryOrderJson,
+    )
+
+internal fun DeviceLayoutSnapshot.toLayoutPrefs(): DeviceLayoutPrefs =
+    DeviceLayoutPrefs(
+        version = version,
+        quickRecordSlots = quickRecordSlots,
+        hiddenItems = hiddenItems,
+        itemOrderJson = itemOrderJson,
+        categoryOrderJson = categoryOrderJson,
+    )
 
 internal sealed interface LayoutEditIntent {
     data class AssignToSlot(val slotIndex: Int, val catalogKey: String) : LayoutEditIntent

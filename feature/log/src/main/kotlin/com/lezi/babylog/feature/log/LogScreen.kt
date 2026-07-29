@@ -68,6 +68,7 @@ import com.lezi.babylog.core.model.SettingsLocal
 import com.lezi.babylog.core.model.SleepPayload
 import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.core.model.availableForNewEntry
+import com.lezi.babylog.core.model.deviceLayoutSnapshot
 import com.lezi.babylog.core.model.displayLabel
 import com.lezi.babylog.core.ui.RecordSection
 import com.lezi.babylog.core.ui.RecordSummaryStrip
@@ -190,6 +191,10 @@ class LogViewModel @Inject constructor(
     private val uploaderMembers = MutableStateFlow<List<UploaderMemberRef>>(emptyList())
     private val selfUploaderIdentity = MutableStateFlow(SelfUploaderIdentity())
     private val familyJoined = MutableStateFlow(false)
+    private val deviceLayoutWriter = DeviceLayoutSnapshotWriter(viewModelScope) { snapshot ->
+        settingsStore.setDeviceLayoutSnapshot(snapshot)
+    }
+    internal val deviceLayoutWriteState = deviceLayoutWriter.state
 
     init {
         viewModelScope.launch {
@@ -345,11 +350,18 @@ class LogViewModel @Inject constructor(
 
     /** Persist a full device-layout snapshot from 布局编辑态. */
     internal fun applyDeviceLayoutPrefs(prefs: DeviceLayoutPrefs) {
+        deviceLayoutWriter.submit(prefs.toSnapshot())
+    }
+
+    internal fun awaitDeviceLayoutWrites(onDone: (Result<Unit>) -> Unit) {
         viewModelScope.launch {
-            settingsStore.setQuickRecordSlots(prefs.quickRecordSlots)
-            settingsStore.setHiddenItems(prefs.hiddenItems)
-            settingsStore.setItemOrderJson(prefs.itemOrderJson)
-            settingsStore.setCategoryOrderJson(prefs.categoryOrderJson)
+            onDone(deviceLayoutWriter.flush())
+        }
+    }
+
+    internal fun retryDeviceLayoutWrite(onDone: (Result<Unit>) -> Unit) {
+        viewModelScope.launch {
+            onDone(deviceLayoutWriter.retryLatest())
         }
     }
 
@@ -880,6 +892,7 @@ fun LogRoute(
     vm: LogViewModel = hiltViewModel(),
 ) {
     val state by vm.uiState.collectAsStateWithLifecycle()
+    val layoutWriteState by vm.deviceLayoutWriteState.collectAsStateWithLifecycle()
     var showMore by remember { mutableStateOf(false) }
     var showLayoutEdit by remember { mutableStateOf(false) }
     var showCustomManage by remember { mutableStateOf(false) }
@@ -890,6 +903,9 @@ fun LogRoute(
     var listDeleteTarget by remember { mutableStateOf<ListDeleteTarget?>(null) }
     var listDeleteError by remember { mutableStateOf<String?>(null) }
     var listDeleting by remember { mutableStateOf(false) }
+    var layoutExitInProgress by remember { mutableStateOf(false) }
+    var exitAfterLayoutRetry by remember { mutableStateOf(false) }
+    var dismissedLayoutFailure by remember { mutableStateOf<Long?>(null) }
     val listState = rememberLazyListState()
 
     fun collapseSwipeRows() {
@@ -915,12 +931,18 @@ fun LogRoute(
             }
     }
     fun openLayoutEdit() {
-        layoutPrefs = DeviceLayoutPrefs(
-            quickRecordSlots = state.settings.quickRecordSlots,
-            hiddenItems = state.settings.hiddenItems,
-            itemOrderJson = state.settings.itemOrderJson,
-            categoryOrderJson = state.settings.categoryOrderJson,
-        )
+        val snapshot = when (val write = layoutWriteState) {
+            is DeviceLayoutWriteState.Failed -> write.snapshot
+            is DeviceLayoutWriteState.Saving -> write.snapshot
+            is DeviceLayoutWriteState.Saved -> state.settings.deviceLayoutSnapshot()
+        }
+        if (!snapshot.isCurrentVersion) {
+            onMessage("布局由更新版本创建，当前版本不会覆盖它")
+            return
+        }
+        layoutPrefs = snapshot.toLayoutPrefs()
+        exitAfterLayoutRetry = false
+        dismissedLayoutFailure = null
         showLayoutEdit = true
     }
     val dayChartContext = remember(state.baby?.id, state.day) {
@@ -1044,9 +1066,28 @@ fun LogRoute(
 
     val editingPrefs = layoutPrefs
     val inLayoutEdit = showLayoutEdit && editingPrefs != null
-    BackHandler(enabled = inLayoutEdit) {
+    fun closeLayoutEditor() {
         showLayoutEdit = false
         layoutPrefs = null
+        layoutExitInProgress = false
+        exitAfterLayoutRetry = false
+        dismissedLayoutFailure = null
+    }
+    fun requestLayoutExit() {
+        if (layoutExitInProgress) return
+        layoutExitInProgress = true
+        vm.awaitDeviceLayoutWrites { result ->
+            layoutExitInProgress = false
+            if (result.isSuccess) {
+                closeLayoutEditor()
+            } else {
+                exitAfterLayoutRetry = true
+                dismissedLayoutFailure = null
+            }
+        }
+    }
+    BackHandler(enabled = inLayoutEdit) {
+        requestLayoutExit()
     }
 
     PageScaffoldBackground {
@@ -1062,13 +1103,12 @@ fun LogRoute(
                     onIntent = { intent ->
                         val current = layoutPrefs ?: return@LayoutEditCanvas
                         val next = reduceLayoutEdit(current, intent, known)
-                        layoutPrefs = next
-                        vm.applyDeviceLayoutPrefs(next)
+                        if (next != current) {
+                            layoutPrefs = next
+                            vm.applyDeviceLayoutPrefs(next)
+                        }
                     },
-                    onDone = {
-                        showLayoutEdit = false
-                        layoutPrefs = null
-                    },
+                    onDone = ::requestLayoutExit,
                     onOpenCustomManage = { showCustomManage = true },
                     modifier = Modifier
                         .weight(1f)
@@ -1517,6 +1557,45 @@ fun LogRoute(
             onAdd = { name, icon, done -> vm.addCustomItem(name, icon, done) },
             onUpdate = { item, done -> vm.updateCustomItem(item, done) },
             onDelete = { id, done -> vm.deleteCustomItem(id, done) },
+        )
+    }
+
+    val layoutFailure = layoutWriteState as? DeviceLayoutWriteState.Failed
+    if (
+        inLayoutEdit &&
+        layoutFailure != null &&
+        layoutFailure.sequence != dismissedLayoutFailure
+    ) {
+        AlertDialog(
+            onDismissRequest = {
+                dismissedLayoutFailure = layoutFailure.sequence
+                exitAfterLayoutRetry = false
+            },
+            title = { Text("布局尚未保存") },
+            text = { Text("上一项布局更改保存失败。当前页面仍保留更改，可重试后再退出。") },
+            confirmButton = {
+                TextButton(
+                    enabled = !layoutExitInProgress,
+                    onClick = {
+                        layoutExitInProgress = true
+                        vm.retryDeviceLayoutWrite { result ->
+                            layoutExitInProgress = false
+                            if (result.isSuccess && exitAfterLayoutRetry) {
+                                closeLayoutEditor()
+                            }
+                        }
+                    },
+                ) { Text(if (layoutExitInProgress) "重试中…" else "重试") }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !layoutExitInProgress,
+                    onClick = {
+                        dismissedLayoutFailure = layoutFailure.sequence
+                        exitAfterLayoutRetry = false
+                    },
+                ) { Text("继续编辑") }
+            },
         )
     }
 

@@ -2,14 +2,19 @@ package com.lezi.babylog.core.datastore
 
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import com.lezi.babylog.core.model.DEVICE_LAYOUT_SNAPSHOT_VERSION
 import com.lezi.babylog.core.model.DEFAULT_QUICK_RECORD_SLOTS
+import com.lezi.babylog.core.model.DeviceLayoutSnapshot
 import com.lezi.babylog.core.model.QUICK_RECORD_SLOT_COUNT
 import com.lezi.babylog.core.model.SettingsLocal
+import com.lezi.babylog.core.model.normalizeDeviceLayoutSnapshot
+import com.lezi.babylog.core.model.requireCurrentDeviceLayoutVersion
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -17,8 +22,10 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 
 @Singleton
@@ -26,15 +33,13 @@ class SettingsDataSource @Inject constructor(
     private val dataStore: DataStore<Preferences>,
 ) : SettingsStore {
     override val settings: Flow<SettingsLocal> = dataStore.data.map { prefs ->
+        val layout = readDeviceLayoutSnapshot(prefs)
         SettingsLocal(
-            itemOrderJson = prefs[Keys.ITEM_ORDER] ?: "[]",
-            categoryOrderJson = prefs[Keys.CATEGORY_ORDER] ?: "[]",
-            hiddenItems = prefs[Keys.HIDDEN_ITEMS]
-                ?.split(',')
-                ?.filter { it.isNotBlank() }
-                ?.toSet()
-                ?: emptySet(),
-            quickRecordSlots = parseQuickRecordSlots(prefs[Keys.QUICK_RECORD_SLOTS]),
+            deviceLayoutSnapshotVersion = layout.version,
+            itemOrderJson = layout.itemOrderJson,
+            categoryOrderJson = layout.categoryOrderJson,
+            hiddenItems = layout.hiddenItems,
+            quickRecordSlots = layout.quickRecordSlots,
             timerEnabled = prefs[Keys.TIMER_ENABLED] ?: true,
             recordAtStartOrEnd = prefs[Keys.RECORD_AT] ?: "end",
             nursingIntervalMin = prefs[Keys.NURSING_INTERVAL] ?: 180,
@@ -154,21 +159,48 @@ class SettingsDataSource @Inject constructor(
         return cleared
     }
 
+    override suspend fun setDeviceLayoutSnapshot(snapshot: DeviceLayoutSnapshot) {
+        val normalized = normalizeDeviceLayoutSnapshot(snapshot)
+        requireCurrentDeviceLayoutVersion(normalized)
+        dataStore.edit { prefs ->
+            writeDeviceLayoutSnapshot(prefs, normalized)
+        }
+    }
+
     override suspend fun setItemOrderJson(json: String) {
-        dataStore.edit { it[Keys.ITEM_ORDER] = json }
+        dataStore.edit { prefs ->
+            writeDeviceLayoutSnapshot(
+                prefs,
+                readDeviceLayoutSnapshot(prefs).copy(itemOrderJson = json),
+            )
+        }
     }
 
     override suspend fun setCategoryOrderJson(json: String) {
-        dataStore.edit { it[Keys.CATEGORY_ORDER] = json }
+        dataStore.edit { prefs ->
+            writeDeviceLayoutSnapshot(
+                prefs,
+                readDeviceLayoutSnapshot(prefs).copy(categoryOrderJson = json),
+            )
+        }
     }
 
     override suspend fun setHiddenItems(items: Set<String>) {
-        dataStore.edit { it[Keys.HIDDEN_ITEMS] = items.joinToString(",") }
+        dataStore.edit { prefs ->
+            writeDeviceLayoutSnapshot(
+                prefs,
+                readDeviceLayoutSnapshot(prefs).copy(hiddenItems = items),
+            )
+        }
     }
 
     override suspend fun setQuickRecordSlots(slots: List<String>) {
-        val normalized = normalizeQuickRecordSlots(slots)
-        dataStore.edit { it[Keys.QUICK_RECORD_SLOTS] = encodeQuickRecordSlots(normalized) }
+        dataStore.edit { prefs ->
+            writeDeviceLayoutSnapshot(
+                prefs,
+                readDeviceLayoutSnapshot(prefs).copy(quickRecordSlots = slots),
+            )
+        }
     }
 
     override suspend fun setTimelineOrder(order: String) {
@@ -293,6 +325,8 @@ class SettingsDataSource @Inject constructor(
         val HIDDEN_ITEMS = stringPreferencesKey("hidden_items")
         /** Comma-separated catalog keys; empty segments keep empty slots. Absent → defaults. */
         val QUICK_RECORD_SLOTS = stringPreferencesKey("quick_record_slots")
+        /** Authoritative versioned layout epoch; legacy fields above are atomic mirrors only. */
+        val DEVICE_LAYOUT_SNAPSHOT = stringPreferencesKey("device_layout_snapshot_json")
         val TIMER_ENABLED = booleanPreferencesKey("timer_enabled")
         val RECORD_AT = stringPreferencesKey("record_at")
         val NURSING_INTERVAL = intPreferencesKey("nursing_interval_min")
@@ -320,6 +354,102 @@ class SettingsDataSource @Inject constructor(
         val SYSTEM_CALENDAR_DISCLOSURE = intPreferencesKey("system_calendar_disclosure")
         val SYSTEM_CALENDAR_EVENT_MAP = stringPreferencesKey("system_calendar_event_map")
     }
+
+    private fun readDeviceLayoutSnapshot(prefs: Preferences): DeviceLayoutSnapshot {
+        val legacy = DeviceLayoutSnapshot(
+            quickRecordSlots = parseQuickRecordSlots(prefs[Keys.QUICK_RECORD_SLOTS]),
+            hiddenItems = prefs[Keys.HIDDEN_ITEMS]
+                ?.split(',')
+                ?.filter(String::isNotBlank)
+                ?.toSet()
+                ?: emptySet(),
+            itemOrderJson = prefs[Keys.ITEM_ORDER] ?: "[]",
+            categoryOrderJson = prefs[Keys.CATEGORY_ORDER] ?: "[]",
+        )
+        return decodeDeviceLayoutSnapshot(prefs[Keys.DEVICE_LAYOUT_SNAPSHOT], legacy)
+    }
+
+    private fun writeDeviceLayoutSnapshot(
+        prefs: MutablePreferences,
+        snapshot: DeviceLayoutSnapshot,
+    ) {
+        val normalized = normalizeDeviceLayoutSnapshot(snapshot)
+        requireCurrentDeviceLayoutVersion(normalized)
+        prefs[Keys.DEVICE_LAYOUT_SNAPSHOT] = encodeDeviceLayoutSnapshot(normalized)
+        // Keep a complete legacy mirror in this same atomic edit for downgrade compatibility.
+        prefs[Keys.QUICK_RECORD_SLOTS] = encodeQuickRecordSlots(normalized.quickRecordSlots)
+        prefs[Keys.HIDDEN_ITEMS] = normalized.hiddenItems.sorted().joinToString(",")
+        prefs[Keys.ITEM_ORDER] = normalized.itemOrderJson
+        prefs[Keys.CATEGORY_ORDER] = normalized.categoryOrderJson
+    }
+}
+
+internal fun encodeDeviceLayoutSnapshot(snapshot: DeviceLayoutSnapshot): String {
+    val normalized = normalizeDeviceLayoutSnapshot(snapshot)
+    requireCurrentDeviceLayoutVersion(normalized)
+    return buildJsonObject {
+        put("version", JsonPrimitive(normalized.version))
+        put(
+            "quickRecordSlots",
+            buildJsonArray { normalized.quickRecordSlots.forEach { add(JsonPrimitive(it)) } },
+        )
+        put(
+            "hiddenItems",
+            buildJsonArray { normalized.hiddenItems.sorted().forEach { add(JsonPrimitive(it)) } },
+        )
+        put("itemOrderJson", JsonPrimitive(normalized.itemOrderJson))
+        put("categoryOrderJson", JsonPrimitive(normalized.categoryOrderJson))
+    }.toString()
+}
+
+/**
+ * Decode all fields shared with the current schema. Future versions remain readable but are
+ * deliberately not writable by [SettingsDataSource]. Missing future fields fall back to the
+ * intact legacy mirror rather than silently clearing user layout.
+ */
+internal fun decodeDeviceLayoutSnapshot(
+    raw: String?,
+    legacy: DeviceLayoutSnapshot,
+): DeviceLayoutSnapshot {
+    if (raw == null) return normalizeDeviceLayoutSnapshot(legacy)
+    val parsed = Json.parseToJsonElement(raw) as? JsonObject
+        ?: throw IllegalArgumentException("Device layout snapshot must be a JSON object")
+    val version = (parsed["version"] as? JsonPrimitive)?.content?.toIntOrNull()
+        ?: throw IllegalArgumentException("Device layout snapshot version is missing")
+    require(version > 0) { "Device layout snapshot version must be positive" }
+    val future = version > DEVICE_LAYOUT_SNAPSHOT_VERSION
+
+    fun stringValue(name: String, fallback: String): String {
+        val element = parsed[name] ?: return if (future) fallback else error("Missing $name")
+        val primitive = element as? JsonPrimitive
+            ?: throw IllegalArgumentException("Device layout snapshot $name must be a string")
+        require(primitive.isString) { "Device layout snapshot $name must be a string" }
+        return primitive.content
+    }
+
+    fun stringList(name: String, fallback: Collection<String>): List<String> {
+        val element = parsed[name] ?: return if (future) fallback.toList() else error("Missing $name")
+        val array = element as? JsonArray
+            ?: throw IllegalArgumentException("Device layout snapshot $name must be an array")
+        return array.map { value ->
+            val primitive = value as? JsonPrimitive
+                ?: throw IllegalArgumentException("Device layout snapshot $name values must be strings")
+            require(primitive.isString) {
+                "Device layout snapshot $name values must be strings"
+            }
+            primitive.content
+        }
+    }
+
+    return normalizeDeviceLayoutSnapshot(
+        DeviceLayoutSnapshot(
+            version = version,
+            quickRecordSlots = stringList("quickRecordSlots", legacy.quickRecordSlots),
+            hiddenItems = stringList("hiddenItems", legacy.hiddenItems).toSet(),
+            itemOrderJson = stringValue("itemOrderJson", legacy.itemOrderJson),
+            categoryOrderJson = stringValue("categoryOrderJson", legacy.categoryOrderJson),
+        ),
+    )
 }
 
 internal fun decodeSystemCalendarEventMap(raw: String): Map<String, String> {

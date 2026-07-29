@@ -81,4 +81,5 @@
 
 - 纯逻辑：`LocalLayoutEditPolicy` / `QuickRecordSlots` / `RecordCatalogOrder.moveCatalogKeyToIndexInSection`。
 - UI：`LayoutEditCanvas` 替换 `LayoutEditModeDialog`；`LogScreen` 编辑态全屏替换内容区 + 日常坞。
+- 持久化：版本化 `DeviceLayoutSnapshot` 在一个 DataStore 事务内保存四槽、隐藏集合、类内序与类别序；FIFO writer 串行完整快照并让完成/返回等待最后写入。失败保留上一份耐久值并可重试，未来版本只读拒写；该状态永不进入家庭同步。
 - 测试：既有 drop/reduce 测试保留；补 reorder toIndex。

@@ -14,12 +14,12 @@ Validation HEAD: `d8873c45311820b7b23c35bcaa138d5de9caa046`
                        └──→ P1/02 清理 ─────────────┘
 ```
 
-Frontier: **01、02**
+Frontier: **01、11**
 
 | # | Ticket | Blocked by | Status |
 |---|--------|------------|--------|
 | 01 | [延续“添加记录”的四列分类卡片视觉](./issues/01-align-editor-with-add-record-visuals.md) | — | ready-for-agent |
-| 02 | [原子持久化 DeviceLayoutSnapshot](./issues/02-atomic-device-layout-snapshot.md) | — | ready-for-agent |
+| 02 | [原子持久化 DeviceLayoutSnapshot](./issues/02-atomic-device-layout-snapshot.md) | — | complete |
 | 03 | [当前可见且互斥的拖放目标](./issues/03-exclusive-current-drop-targets.md) | 01 | ready-for-agent |
 | 04 | [分类标题拖动与可靠类别排序](./issues/04-drag-category-headings-durably.md) | 02, 03 | ready-for-agent |
 | 05 | [有界、可读的本机已删除分区](./issues/05-bounded-readable-local-deleted.md) | 02, 03 | ready-for-agent |
