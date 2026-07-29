@@ -116,7 +116,7 @@ class HomeNetworkPolicyTest {
                     val reader = socket.getInputStream().bufferedReader()
                     while (!reader.readLine().isNullOrEmpty()) Unit
                     val body =
-                        """{"ok":true,"version":"0.2.5","capabilities":["atomic_bundle","record_membership_author"]}"""
+                        """{"ok":true,"version":"0.2.6","capabilities":["atomic_bundle","record_membership_author"]}"""
                             .toByteArray(Charsets.UTF_8)
                     socket.getOutputStream().use { output ->
                         output.write(
@@ -139,7 +139,7 @@ class HomeNetworkPolicyTest {
             )
             assertThat(status.ok).isTrue()
             assertThat(status.isCurrentServerContract()).isTrue()
-            assertThat(status.version).isEqualTo("0.2.5")
+            assertThat(status.version).isEqualTo("0.2.6")
         } finally {
             server.close()
             responder.join(2_000)

@@ -37,8 +37,8 @@ android {
         applicationId = "com.lezi.babylog"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.2.5"
+        versionCode = 5
+        versionName = "0.2.6"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }

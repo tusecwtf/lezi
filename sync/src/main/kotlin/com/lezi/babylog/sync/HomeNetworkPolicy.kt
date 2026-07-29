@@ -26,7 +26,7 @@ private const val MAX_HEALTH_RESPONSE_BYTES = 64 * 1024
 /** Capability strings advertised by lezi-sync on `GET /health`. */
 const val CAPABILITY_ATOMIC_BUNDLE = "atomic_bundle"
 const val CAPABILITY_RECORD_MEMBERSHIP_AUTHOR = "record_membership_author"
-internal const val CURRENT_SYNC_SERVER_VERSION = "0.2.5"
+internal const val CURRENT_SYNC_SERVER_VERSION = "0.2.6"
 internal val REQUIRED_SYNC_SERVER_CAPABILITIES = setOf(
     CAPABILITY_ATOMIC_BUNDLE,
     CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
