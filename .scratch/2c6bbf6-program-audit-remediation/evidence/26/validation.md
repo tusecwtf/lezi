@@ -59,5 +59,32 @@ sha256: 13379e4a80430cdffb504904953237599734d1475d613da817594246b92fab32
 The API 35 AVD does not contain a TalkBack package and
 `enabled_accessibility_services` was `null`. The connected semantics tests therefore verify the
 TalkBack-facing name, role, state, action label, focus traversal and effective bounds, but are not
-claimed as a spoken TalkBack smoke. Full-app touch smoke is recorded separately when the shared
-emulator is available.
+claimed as a spoken TalkBack smoke.
+
+## Fixed-APK full-app touch smoke
+
+The shared API 35 `emulator-5554` was available after the connected tests. The installed fixed APK
+was built from `e6742f1a3bcde05443b68dcb170b83b16ab69ccb` (which contains Ticket 26 implementation
+commit `6263af4`):
+
+```text
+package: com.lezi.babylog.debug
+version: 0.2.6-debug
+size: 28257340 bytes
+sha256: 8b6cca08e1ddad2610ad769ecc7a4b4a0d8bf2ebbe9998bffe31ef9e7355fc2e
+```
+
+- Account rendered the read-only baby row `计时宝宝（当前）` without a chevron or click semantics.
+  A physical tap on the row left the page on `账户`; no editor or unrelated route opened.
+- The offline sync entry exposed `同步状态：还没和家人一起记`, Button semantics and bounds
+  `[79,1786][1001,1912]`. At physical density 420 this is exactly 48dp high. A physical tap on the
+  row opened `家庭网络设置`, whose visible result included server, two Wi-Fi fields and
+  `保存家庭网络与服务器`.
+- Menu rendered the genuinely actionable baby row with `计时宝宝（当前）`, the explanatory result
+  `出生 2026-07-30 · 本机外观与顺序` and a chevron. A physical whole-row tap opened the single
+  matching result `计时宝宝的本机设置`, including the local-only explanation and theme controls.
+- The app remained focused in `MainActivity`; no crash or parallel family wizard appeared.
+
+The AVD still reports `enabled_accessibility_services=null`, `accessibility_enabled=0`, and only the
+system accessibility menu package—not TalkBack. Therefore closure combines connected semantic
+coverage with real full-app touch routing and continues to make no spoken-TalkBack claim.

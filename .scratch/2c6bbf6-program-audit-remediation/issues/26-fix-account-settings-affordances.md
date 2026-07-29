@@ -4,7 +4,7 @@
 
 **Blocked by:** 09 — 统一 Onboarding 与账户家庭向导
 
-**Status:** implemented-awaiting-device-smoke
+**Status:** complete
 
 **Size:** S
 
@@ -30,7 +30,8 @@
 
 设备限制：共享 API 35 AVD 未安装 TalkBack；当前 connected tests 已覆盖 TalkBack-facing
 name/role/state/action/focus/bounds，并通过真实输入注入验证点击结果，但不冒充 spoken TalkBack
-smoke。完整证据见 [`../evidence/26/validation.md`](../evidence/26/validation.md)。
+smoke。固定 APK 的完整应用触控 smoke 已验证只读宝宝行、可操作本机设置行和同步状态整行；
+完整证据见 [`../evidence/26/validation.md`](../evidence/26/validation.md)。
 
 ## Documentation Gate
 

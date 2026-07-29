@@ -71,7 +71,7 @@ layout/05 已删除分区 ────┘
 | [23](./issues/23-off-main-single-pass-summary-aggregation.md) | 汇总聚合移出主线程并降低重复扫描 | — | M | still-valid | complete |
 | [24](./issues/24-share-open-sleep-normalization-rule.md) | 共享开放睡眠修复决策 | — | M | still-valid | ready-for-agent |
 | [25](./issues/25-contract-superseded-compatibility-surfaces.md) | 收缩已迁移的兼容与重复表面 | 09、10、P1/02、17、24 | M | still-valid | ready-for-agent |
-| [26](./issues/26-fix-account-settings-affordances.md) | 修正账户与设置页错误可供性 | 09 | S | still-valid | implemented-awaiting-device-smoke |
+| [26](./issues/26-fix-account-settings-affordances.md) | 修正账户与设置页错误可供性 | 09 | S | still-valid | complete |
 
 ## Execution discipline
 
