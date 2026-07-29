@@ -80,6 +80,14 @@
 - 本机已删除区保留可读标题、明确的文字空态与恢复操作，并与底部 Dock 分区清晰。
 - Dock 与日常记录页共用外边距、单元高度、图标尺寸、四槽加固定“更多”的顺序；编辑态将“更多”明确标为锁定。
 
+## Edge auto-scroll
+
+- 只有 `CatalogItem` 与 `CategoryHeading` 拖动源获准驱动主目录；`BoundSlot` 和 `LocalDeleted` 永远返回零速度。
+- 目录视口使用窗口坐标测量。上、下边缘带最多占各半个小屏视口，速度随指针接近边缘线性增加并封顶；指针离开视口/边缘带或到达内容边界时速度归零。
+- `LocalDeleted`、四个 `QuickSlot`、锁定“更多”和 Dock 内间隙的命中优先于滚动。进入任一固定区域会立即取消帧循环，但保留该区域原有投放/no-op 语义。
+- 自动滚动循环仅在有效拖动 token 且速度非零时逐帧调用目录 `ScrollState`；速度、拖动 token、取消、放下或画布销毁变化都会取消旧协程，不保留后台任务。
+- 滚动后的目标继续由 `LayoutVisibleTargetRegistry` 当前窗口边界解析；源节点触摸点用 `LayoutCoordinates.localToWindow` 转换，兼容滚动、旋转和缩放，不使用会过期的“窗口原点 + 局部偏移”。
+
 ## A11y
 
 - 热区 ≥ 48dp；完成、分类、项目、槽、删除区以及固定“更多”的名称、位置/状态和可用动作可读。
@@ -92,4 +100,4 @@
 - 纯逻辑：`LocalLayoutEditPolicy` / `QuickRecordSlots` / `RecordCatalogOrder.moveCatalogKeyToIndexInSection`。
 - UI：`LayoutEditCanvas` 替换 `LayoutEditModeDialog`；`RecordCatalogCard`、`RecordCatalogVisualSpec` 同时服务“添加记录”和编辑目录；`QuickDockVisualSpec` 保持日常/编辑 Dock 几何连续。`LogScreen` 通知根容器隐藏日期与主 tabs，编辑页只显示“编辑布局 / 完成”。
 - 持久化：版本化 `DeviceLayoutSnapshot` 在一个 DataStore 事务内保存四槽、隐藏集合、类内序与类别序；FIFO writer 串行完整快照并让完成/返回等待最后写入。失败保留上一份耐久值并可重试，未来版本只读拒写；该状态永不进入家庭同步。
-- 测试：权威 `LayoutDragSession` 覆盖完整命中矩阵、互斥目标、陈旧 token/revision 与取消；Compose 测试覆盖节点注销、重组移动、语义动作、键盘焦点/chord、真实空槽、锁定“更多”、48dp、跟手浮层排除和保存播报；reducer/writer 断言精确顺序、槽唯一与 latest-wins。
+- 测试：权威 `LayoutDragSession` 覆盖完整命中矩阵、互斥目标、陈旧 token/revision 与取消；`LayoutEdgeAutoScrollPolicy` 覆盖授权来源、上下边缘速度、边界、小视口与固定目标抢占；Compose 设备测试在 320×640、放大字体的 24 项目录中验证持续滚到末项、取消后稳定与无误提交。现有 Drop Matrix、类别拖动和本机已删除设备测试继续证明精确投放/no-op；reducer/writer 断言精确顺序、槽唯一与 latest-wins。

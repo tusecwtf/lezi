@@ -12,6 +12,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -41,6 +42,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
@@ -52,6 +54,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.KeyEventType
@@ -60,6 +63,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
@@ -107,6 +111,7 @@ private data class LayoutDragState(
     val catalogKey: String,
     val label: String,
     val pointerWindow: Offset,
+    val hitRegion: LayoutHitRegion,
     val currentTarget: LayoutDropTarget?,
     val colorRole: LeziRecordColorRole?,
     val recordType: RecordType?,
@@ -344,6 +349,7 @@ internal fun LayoutEditCanvas(
         orderedRecordSections(prefs.categoryOrderJson)
     }
     val deleted = remember(prefs, known) { layoutEditDeletedKeys(prefs, known) }
+    val catalogScrollState = rememberScrollState()
     val localDeletedScrollState = rememberScrollState()
     val doneFocusRequester = remember { FocusRequester() }
     val categoryFocusRequesters = remember {
@@ -356,6 +362,7 @@ internal fun LayoutEditCanvas(
     val targetRegistry = remember { LayoutVisibleTargetRegistry() }
     var targetRegistryEpoch by remember { mutableLongStateOf(0L) }
     var rootWindowOrigin by remember { mutableStateOf(Offset.Zero) }
+    var catalogViewportWindowBounds by remember { mutableStateOf<Rect?>(null) }
     var drag by remember { mutableStateOf<LayoutDragState?>(null) }
     var activeSession by remember { mutableStateOf<LayoutDragSession?>(null) }
     var nextDragToken by remember { mutableLongStateOf(0L) }
@@ -393,6 +400,7 @@ internal fun LayoutEditCanvas(
             catalogKey = key,
             label = labelOverride ?: labels[key] ?: key,
             pointerWindow = windowPos,
+            hitRegion = resolution.hitRegion,
             currentTarget = resolution.currentTarget,
             colorRole = visual?.colorRole,
             recordType = visual?.recordType,
@@ -411,6 +419,7 @@ internal fun LayoutEditCanvas(
         if (resolution.accepted) {
             drag = current.copy(
                 pointerWindow = windowPos,
+                hitRegion = resolution.hitRegion,
                 currentTarget = resolution.currentTarget,
             )
         }
@@ -443,6 +452,28 @@ internal fun LayoutEditCanvas(
     LaunchedEffect(targetRegistryEpoch) {
         val current = drag ?: return@LaunchedEffect
         updateDrag(current.token, current.pointerWindow)
+    }
+
+    val autoScrollStepPx = drag?.let { current ->
+        catalogViewportWindowBounds?.let { viewport ->
+            LayoutEdgeAutoScrollPolicy.stepPx(
+                source = current.source,
+                pointerWindow = current.pointerWindow,
+                catalogViewport = viewport,
+                hitRegion = current.hitRegion,
+                canScrollBackward = catalogScrollState.canScrollBackward,
+                canScrollForward = catalogScrollState.canScrollForward,
+                edgeBandPx = with(density) { 64.dp.toPx() },
+                maxStepPx = with(density) { 12.dp.toPx() },
+            )
+        }
+    } ?: 0f
+    LaunchedEffect(drag?.token, autoScrollStepPx) {
+        if (autoScrollStepPx == 0f) return@LaunchedEffect
+        while (true) {
+            withFrameNanos { }
+            if (catalogScrollState.scrollBy(autoScrollStepPx) == 0f) break
+        }
     }
 
     val configuration = LocalConfiguration.current
@@ -564,170 +595,64 @@ internal fun LayoutEditCanvas(
 
                 Column(Modifier.fillMaxSize()) {
                     // Same categorized four-column card catalog as 添加记录.
-                    Column(
+                    Box(
                         Modifier
                             .weight(1f)
                             .fillMaxWidth()
-                            .focusGroup()
-                            .verticalScroll(rememberScrollState())
-                            .padding(horizontal = LeziSpacing.Page),
+                            .onGloballyPositioned { coordinates ->
+                                catalogViewportWindowBounds = coordinates.boundsInWindow()
+                            },
                     ) {
-                        sections.forEach { section ->
-                            val keys = layoutEditVisibleKeys(prefs, section, known)
-                            val fullSectionOrder = orderedKeysInSection(
-                                section = section,
-                                itemOrderJson = prefs.itemOrderJson,
-                                knownKeysForSection = known,
-                            )
-                            if (keys.isNotEmpty() || section == RecordSection.Custom) {
-                                Spacer(Modifier.height(LeziSpacing.SectionGap))
-                            }
-                            Column(
-                                Modifier
-                                    .fillMaxWidth()
-                                    .testTag("layout_edit_section_${section.storageKey}"),
-                            ) {
-                                val categoryIndex = fullCategoryOrder.indexOf(section)
-                                val categorySource = LayoutDragSource.CategoryHeading(section)
-                                val categoryDragging = drag?.source == categorySource
-                                val categoryTarget = LayoutDropTarget.CategoryHeading(
+                        Column(
+                            Modifier
+                                .fillMaxWidth()
+                                .focusGroup()
+                                .verticalScroll(catalogScrollState)
+                                .padding(horizontal = LeziSpacing.Page),
+                        ) {
+                            sections.forEach { section ->
+                                val keys = layoutEditVisibleKeys(prefs, section, known)
+                                val fullSectionOrder = orderedKeysInSection(
                                     section = section,
-                                    toIndex = categoryIndex,
+                                    itemOrderJson = prefs.itemOrderJson,
+                                    knownKeysForSection = known,
                                 )
-                                val categoryHot = drag?.currentTarget == categoryTarget
-                                Box(
+                                if (keys.isNotEmpty() || section == RecordSection.Custom) {
+                                    Spacer(Modifier.height(LeziSpacing.SectionGap))
+                                }
+                                Column(
                                     Modifier
                                         .fillMaxWidth()
-                                        .heightIn(min = LeziSpacing.Touch)
-                                        .layoutTargetRegistration(
-                                            node = LayoutTargetNode.CategoryHeading(
-                                                section = section,
-                                                toIndex = categoryIndex,
-                                            ),
-                                            registry = targetRegistry,
-                                            onRegistryChanged = ::notifyTargetRegistryChanged,
-                                        )
-                                        .draggableLayoutSource(
-                                            dragKey = "category:${section.storageKey}",
-                                            onDragStart = { pos ->
-                                                beginDrag(
-                                                    source = categorySource,
-                                                    key = "category:${section.storageKey}",
-                                                    windowPos = pos,
-                                                    labelOverride = section.title,
-                                                )
-                                            },
-                                            onDrag = ::updateDrag,
-                                            onDragEnd = ::finishDrag,
-                                            onDragCancel = { token ->
-                                                cancelActiveDrag(
-                                                    LayoutDragCancelReason.Dispose,
-                                                    token,
-                                                )
-                                            },
-                                        )
-                                        .focusRequester(
-                                            checkNotNull(categoryFocusRequesters[section]),
-                                        )
-                                        .focusProperties {
-                                            keys.firstOrNull()
-                                                ?.let(itemFocusRequesters::get)
-                                                ?.let { down = it }
-                                        }
-                                        .layoutAlternativeInput(
-                                            actions = categoryActions(
-                                                section = section,
-                                                index = categoryIndex,
-                                                count = fullCategoryOrder.size,
-                                            ),
-                                            keyIntent = {
-                                                categoryKeyIntent(
-                                                    section = section,
-                                                    index = categoryIndex,
-                                                    count = fullCategoryOrder.size,
-                                                    event = it,
-                                                )
-                                            },
-                                            onIntent = onIntent,
-                                        )
-                                        .testTag("layout_edit_category_${section.storageKey}")
-                                        .semantics(mergeDescendants = true) {
-                                            contentDescription = "${section.title}分类"
-                                            stateDescription =
-                                                "第${categoryIndex + 1}个分类，共${fullCategoryOrder.size}个"
-                                        }
-                                        .then(
-                                            if (categoryHot) {
-                                                Modifier
-                                                    .clip(
-                                                        com.lezi.babylog.designsystem.LeziThemeExt
-                                                            .controlShape,
-                                                    )
-                                                    .background(
-                                                        MaterialTheme.colorScheme.primaryContainer.copy(
-                                                            alpha = 0.72f,
-                                                        ),
-                                                    )
-                                                    .border(
-                                                        2.dp,
-                                                        MaterialTheme.colorScheme.primary,
-                                                        com.lezi.babylog.designsystem.LeziThemeExt
-                                                            .controlShape,
-                                                    )
-                                            } else {
-                                                Modifier
-                                            },
-                                        )
-                                        .then(
-                                            if (categoryDragging) Modifier.alpha(0.3f) else Modifier,
-                                        )
-                                        .padding(horizontal = LeziSpacing.Xs),
-                                    contentAlignment = Alignment.CenterStart,
+                                        .testTag("layout_edit_section_${section.storageKey}"),
                                 ) {
-                                    RecordCatalogSectionHeading(section.title)
-                                }
-                                Spacer(Modifier.height(LeziSpacing.Xs))
-                                val showAdd = section == RecordSection.Custom
-                                val dropBorderColor = MaterialTheme.colorScheme.primary
-                                val dropBorderShape =
-                                    com.lezi.babylog.designsystem.LeziThemeExt.cardShape
-                                LayoutCatalogGrid(
-                                    keys = keys,
-                                    labels = labels,
-                                    visualByKey = visualByKey,
-                                    wiggleDegrees = iconWiggle,
-                                    showAddCell = showAdd,
-                                    onAddClick = onOpenCustomManage,
-                                    itemModifier = { key ->
-                                        val targetIndex = fullSectionOrder.indexOf(key)
-                                        val visibleIndex = keys.indexOf(key)
-                                        val boundSlot = slots.indexOf(key)
-                                        val targetNode = LayoutTargetNode.CatalogItem(
-                                            catalogKey = key,
-                                            section = section,
-                                            toIndex = targetIndex,
-                                        )
-                                        val dragging = drag?.source == LayoutDragSource.CatalogItem(
-                                            catalogKey = key,
-                                            section = section,
-                                        )
-                                        val hot = drag?.currentTarget == LayoutDropTarget.CatalogItem(
-                                            catalogKey = key,
-                                            toIndex = targetIndex,
-                                        )
+                                    val categoryIndex = fullCategoryOrder.indexOf(section)
+                                    val categorySource = LayoutDragSource.CategoryHeading(section)
+                                    val categoryDragging = drag?.source == categorySource
+                                    val categoryTarget = LayoutDropTarget.CategoryHeading(
+                                        section = section,
+                                        toIndex = categoryIndex,
+                                    )
+                                    val categoryHot = drag?.currentTarget == categoryTarget
+                                    Box(
                                         Modifier
+                                            .fillMaxWidth()
+                                            .heightIn(min = LeziSpacing.Touch)
                                             .layoutTargetRegistration(
-                                                node = targetNode,
+                                                node = LayoutTargetNode.CategoryHeading(
+                                                    section = section,
+                                                    toIndex = categoryIndex,
+                                                ),
                                                 registry = targetRegistry,
                                                 onRegistryChanged = ::notifyTargetRegistryChanged,
                                             )
                                             .draggableLayoutSource(
-                                                dragKey = key,
+                                                dragKey = "category:${section.storageKey}",
                                                 onDragStart = { pos ->
                                                     beginDrag(
-                                                        source = LayoutDragSource.CatalogItem(key, section),
-                                                        key = key,
+                                                        source = categorySource,
+                                                        key = "category:${section.storageKey}",
                                                         windowPos = pos,
+                                                        labelOverride = section.title,
                                                     )
                                                 },
                                                 onDrag = ::updateDrag,
@@ -740,53 +665,167 @@ internal fun LayoutEditCanvas(
                                                 },
                                             )
                                             .focusRequester(
-                                                checkNotNull(itemFocusRequesters[key]),
+                                                checkNotNull(categoryFocusRequesters[section]),
                                             )
+                                            .focusProperties {
+                                                keys.firstOrNull()
+                                                    ?.let(itemFocusRequesters::get)
+                                                    ?.let { down = it }
+                                            }
                                             .layoutAlternativeInput(
-                                                actions = catalogActions(
-                                                    catalogKey = key,
-                                                    visibleIndex = visibleIndex,
-                                                    visibleCount = keys.size,
+                                                actions = categoryActions(
+                                                    section = section,
+                                                    index = categoryIndex,
+                                                    count = fullCategoryOrder.size,
                                                 ),
                                                 keyIntent = {
-                                                    catalogKeyIntent(
-                                                        catalogKey = key,
-                                                        visibleIndex = visibleIndex,
-                                                        visibleCount = keys.size,
+                                                    categoryKeyIntent(
+                                                        section = section,
+                                                        index = categoryIndex,
+                                                        count = fullCategoryOrder.size,
                                                         event = it,
                                                     )
                                                 },
                                                 onIntent = onIntent,
                                             )
-                                            .testTag("layout_edit_item_$key")
+                                            .testTag("layout_edit_category_${section.storageKey}")
                                             .semantics(mergeDescendants = true) {
-                                                stateDescription = buildString {
-                                                    append(section.title)
-                                                    append("分类，第${visibleIndex + 1}项，共${keys.size}项")
-                                                    if (boundSlot >= 0) {
-                                                        append("，当前在常用槽${boundSlot + 1}")
-                                                    }
-                                                }
+                                                contentDescription = "${section.title}分类"
+                                                stateDescription =
+                                                    "第${categoryIndex + 1}个分类，共${fullCategoryOrder.size}个"
                                             }
                                             .then(
-                                                if (hot) {
-                                                    Modifier.border(
-                                                        2.dp,
-                                                        dropBorderColor,
-                                                        dropBorderShape,
-                                                    )
+                                                if (categoryHot) {
+                                                    Modifier
+                                                        .clip(
+                                                            com.lezi.babylog.designsystem.LeziThemeExt
+                                                                .controlShape,
+                                                        )
+                                                        .background(
+                                                            MaterialTheme.colorScheme.primaryContainer.copy(
+                                                                alpha = 0.72f,
+                                                            ),
+                                                        )
+                                                        .border(
+                                                            2.dp,
+                                                            MaterialTheme.colorScheme.primary,
+                                                            com.lezi.babylog.designsystem.LeziThemeExt
+                                                                .controlShape,
+                                                        )
                                                 } else {
                                                     Modifier
                                                 },
                                             )
                                             .then(
-                                                if (dragging) Modifier.alpha(0.25f) else Modifier,
+                                                if (categoryDragging) Modifier.alpha(0.3f) else Modifier,
                                             )
-                                    },
-                                )
-                            }
+                                            .padding(horizontal = LeziSpacing.Xs),
+                                        contentAlignment = Alignment.CenterStart,
+                                    ) {
+                                        RecordCatalogSectionHeading(section.title)
+                                    }
+                                    Spacer(Modifier.height(LeziSpacing.Xs))
+                                    val showAdd = section == RecordSection.Custom
+                                    val dropBorderColor = MaterialTheme.colorScheme.primary
+                                    val dropBorderShape =
+                                        com.lezi.babylog.designsystem.LeziThemeExt.cardShape
+                                    LayoutCatalogGrid(
+                                        keys = keys,
+                                        labels = labels,
+                                        visualByKey = visualByKey,
+                                        wiggleDegrees = iconWiggle,
+                                        showAddCell = showAdd,
+                                        onAddClick = onOpenCustomManage,
+                                        itemModifier = { key ->
+                                            val targetIndex = fullSectionOrder.indexOf(key)
+                                            val visibleIndex = keys.indexOf(key)
+                                            val boundSlot = slots.indexOf(key)
+                                            val targetNode = LayoutTargetNode.CatalogItem(
+                                                catalogKey = key,
+                                                section = section,
+                                                toIndex = targetIndex,
+                                            )
+                                            val dragging = drag?.source == LayoutDragSource.CatalogItem(
+                                                catalogKey = key,
+                                                section = section,
+                                            )
+                                            val hot = drag?.currentTarget == LayoutDropTarget.CatalogItem(
+                                                catalogKey = key,
+                                                toIndex = targetIndex,
+                                            )
+                                            Modifier
+                                                .layoutTargetRegistration(
+                                                    node = targetNode,
+                                                    registry = targetRegistry,
+                                                    onRegistryChanged = ::notifyTargetRegistryChanged,
+                                                )
+                                                .draggableLayoutSource(
+                                                    dragKey = key,
+                                                    onDragStart = { pos ->
+                                                        beginDrag(
+                                                            source = LayoutDragSource.CatalogItem(key, section),
+                                                            key = key,
+                                                            windowPos = pos,
+                                                        )
+                                                    },
+                                                    onDrag = ::updateDrag,
+                                                    onDragEnd = ::finishDrag,
+                                                    onDragCancel = { token ->
+                                                        cancelActiveDrag(
+                                                            LayoutDragCancelReason.Dispose,
+                                                            token,
+                                                        )
+                                                    },
+                                                )
+                                                .focusRequester(
+                                                    checkNotNull(itemFocusRequesters[key]),
+                                                )
+                                                .layoutAlternativeInput(
+                                                    actions = catalogActions(
+                                                        catalogKey = key,
+                                                        visibleIndex = visibleIndex,
+                                                        visibleCount = keys.size,
+                                                    ),
+                                                    keyIntent = {
+                                                        catalogKeyIntent(
+                                                            catalogKey = key,
+                                                            visibleIndex = visibleIndex,
+                                                            visibleCount = keys.size,
+                                                            event = it,
+                                                        )
+                                                    },
+                                                    onIntent = onIntent,
+                                                )
+                                                .testTag("layout_edit_item_$key")
+                                                .semantics(mergeDescendants = true) {
+                                                    stateDescription = buildString {
+                                                        append(section.title)
+                                                        append("分类，第${visibleIndex + 1}项，共${keys.size}项")
+                                                        if (boundSlot >= 0) {
+                                                            append("，当前在常用槽${boundSlot + 1}")
+                                                        }
+                                                    }
+                                                }
+                                                .then(
+                                                    if (hot) {
+                                                        Modifier.border(
+                                                            2.dp,
+                                                            dropBorderColor,
+                                                            dropBorderShape,
+                                                        )
+                                                    } else {
+                                                        Modifier
+                                                    },
+                                                )
+                                                .then(
+                                                    if (dragging) Modifier.alpha(0.25f) else Modifier,
+                                                )
+                                        },
+                                    )
+                                }
                         }
-                        Spacer(Modifier.height(LeziSpacing.Md))
+                            Spacer(Modifier.height(LeziSpacing.Md))
+                        }
                     }
 
                     // Local-only deleted section remains a clear, bounded drop zone.
@@ -1339,28 +1378,42 @@ private fun Modifier.draggableLayoutSource(
     onDragEnd: (Long, Offset) -> Unit,
     onDragCancel: (Long) -> Unit,
 ): Modifier {
-    val originHolder = floatArrayOf(0f, 0f)
+    var coordinates: LayoutCoordinates? = null
     return this
         .onGloballyPositioned { coords ->
-            val p = coords.positionInWindow()
-            originHolder[0] = p.x
-            originHolder[1] = p.y
+            coordinates = coords
         }
         .pointerInput(dragKey) {
             var lastWindow = Offset.Zero
             var activeToken: Long? = null
             detectDragGesturesAfterLongPress(
-                onDragStart = { local ->
-                    lastWindow = Offset(originHolder[0], originHolder[1]) + local
+                onDragStart = start@{ local ->
+                    val currentCoordinates = coordinates
+                        ?.takeIf(LayoutCoordinates::isAttached)
+                        ?: return@start
+                    lastWindow = currentCoordinates.localToWindow(local)
                     activeToken = onDragStart(lastWindow)
                 },
-                onDrag = { change, _ ->
+                onDrag = drag@{ change, _ ->
                     change.consume()
-                    lastWindow = Offset(originHolder[0], originHolder[1]) + change.position
+                    val currentCoordinates = coordinates
+                        ?.takeIf(LayoutCoordinates::isAttached)
+                    if (currentCoordinates == null) {
+                        activeToken?.let(onDragCancel)
+                        activeToken = null
+                        return@drag
+                    }
+                    lastWindow = currentCoordinates.localToWindow(change.position)
                     activeToken?.let { onDrag(it, lastWindow) }
                 },
                 onDragEnd = {
-                    activeToken?.let { onDragEnd(it, lastWindow) }
+                    activeToken?.let { token ->
+                        if (coordinates?.isAttached == true) {
+                            onDragEnd(token, lastWindow)
+                        } else {
+                            onDragCancel(token)
+                        }
+                    }
                     activeToken = null
                 },
                 onDragCancel = {

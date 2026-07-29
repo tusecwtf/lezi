@@ -6,6 +6,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTouchInput
 import com.lezi.babylog.core.ui.encodeItemOrder
@@ -114,11 +115,10 @@ class LayoutEditDropMatrixDeviceTest {
     private fun drag(sourceTag: String, targetInRoot: Offset) {
         val source = composeRule.onNodeWithTag(sourceTag).assertIsDisplayed()
         val sourceBounds = source.fetchSemanticsNode().boundsInRoot
-        val targetInSource = targetInRoot - sourceBounds.topLeft
-        source.performTouchInput {
-            down(center)
+        composeRule.onRoot().performTouchInput {
+            down(sourceBounds.center)
             advanceEventTime(viewConfiguration.longPressTimeoutMillis + 100L)
-            moveTo(targetInSource)
+            moveTo(targetInRoot)
             advanceEventTime(100L)
             up()
         }
