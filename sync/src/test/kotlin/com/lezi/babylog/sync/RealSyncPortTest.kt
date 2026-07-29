@@ -3784,7 +3784,7 @@ class RealSyncPortTest {
                     type = "media",
                     clientUuid = testMediaUuid("remote-plan-media-1"),
                     payloadJson =
-                        """{"kind":"log","record_client_uuid":null,"care_plan_client_uuid":"remote-plan-1","baby_client_uuid":null,"mime":"image/jpeg","width":null,"height":null,"byte_size":3}""",
+                        """{"kind":"log","record_client_uuid":null,"care_plan_client_uuid":"remote-plan-1","baby_client_uuid":"$babyUuid","mime":"image/jpeg","width":null,"height":null,"byte_size":3}""",
                     updatedAt = 500,
                     deletedAt = null,
                 ),
@@ -3803,6 +3803,7 @@ class RealSyncPortTest {
         assertThat(media.localUri)
             .isEqualTo("downloaded/${testMediaUuid("remote-plan-media-1")}")
         assertThat(media.recordId).isNull()
+        assertThat(media.babyId).isNull()
         assertThat(applied).containsExactly("remote-plan-1")
     }
 

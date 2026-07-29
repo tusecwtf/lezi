@@ -1872,7 +1872,7 @@ private fun parseMediaWire(payload: JsonObject): MediaWire {
     val babyUuid = payload.requireNullableString("baby_client_uuid", "media")
     require(
         if (kind == "log") {
-            (recordUuid == null) != (carePlanUuid == null) && babyUuid == null
+            (recordUuid == null) != (carePlanUuid == null)
         } else {
             babyUuid != null && recordUuid == null && carePlanUuid == null
         },
@@ -1887,7 +1887,10 @@ private fun parseMediaWire(payload: JsonObject): MediaWire {
         kind = kind,
         recordClientUuid = recordUuid,
         carePlanClientUuid = carePlanUuid,
-        babyClientUuid = babyUuid,
+        // Current Android writes log ownership through its record/plan root only.
+        // The NAS contract also accepts a matching baby_client_uuid on historical
+        // log media, so tolerate it on pull without persisting dual ownership.
+        babyClientUuid = babyUuid.takeIf { kind == "avatar" },
         mime = payload.requireNullableString("mime", "media"),
         width = width?.toInt(),
         height = height?.toInt(),
