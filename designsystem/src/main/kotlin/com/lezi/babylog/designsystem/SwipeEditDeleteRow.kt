@@ -9,11 +9,10 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
@@ -30,19 +29,20 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -51,8 +51,9 @@ import kotlinx.coroutines.launch
 /**
  * Absolute-screen swipe secondary actions for timeline cells.
  *
- * - Content moves **left** (negative offset) → green **edit** on the right.
- * - Content moves **right** (positive offset) → red **delete** on the left.
+ * Gesture progress drives an **in-card fill** (content stays put):
+ * - Finger moves **left** (negative progress) → green **edit** grows from the right.
+ * - Finger moves **right** (positive progress) → red **delete** grows from the left.
  *
  * Directions never mirror with preferred-hand layout.
  */
@@ -74,8 +75,8 @@ const val SWIPE_COMMIT_RATIO = 0.55f
 const val SWIPE_SETTLE_MS = 200
 
 /**
- * Pure settle from content offset ratio (offsetX / width).
- * Positive ratio = content shifted right (delete side).
+ * Pure settle from swipe progress ratio (signedPx / width).
+ * Positive ratio = delete fill from the left; negative = edit fill from the right.
  */
 fun settleSwipeEditDelete(
     offsetRatio: Float,
@@ -98,7 +99,7 @@ fun settleSwipeEditDelete(
     }
 }
 
-/** Settled content offset ratio for a non-commit settle result. */
+/** Settled progress ratio for a non-commit settle result (drives in-card fill width). */
 fun targetOffsetRatioForSettle(
     settle: SwipeEditDeleteSettle,
     revealRatio: Float = SWIPE_REVEAL_RATIO,
@@ -110,6 +111,9 @@ fun targetOffsetRatioForSettle(
     SwipeEditDeleteSettle.CommitEdit,
     -> 0f
 }
+
+/** Show action label once the fill is wide enough to host icon + copy. */
+internal const val SWIPE_LABEL_MIN_RATIO = 0.16f
 
 @Composable
 fun SwipeEditDeleteRow(
@@ -130,10 +134,12 @@ fun SwipeEditDeleteRow(
     var dragOffset by remember { mutableFloatStateOf(0f) }
     var dragging by remember { mutableStateOf(false) }
     var widthPx by remember { mutableFloatStateOf(0f) }
+    var heightPx by remember { mutableFloatStateOf(0f) }
     var crossedCommit by remember { mutableStateOf(false) }
     val success = LocalLeziColors.current.success
     val danger = LocalLeziColors.current.danger
     val onAction = MaterialTheme.colorScheme.onError
+    val density = LocalDensity.current
 
     val displayOffset = if (dragging) dragOffset else animOffset.value
 
@@ -214,31 +220,128 @@ fun SwipeEditDeleteRow(
     }
 
     val canSwipe = editEnabled || deleteEnabled
-    // Direction-aware full-bleed fill (design: 绿/红满铺), not half-and-half.
-    // Half-split left a strip of the wrong color (or list 底色 at rounded card corners)
-    // once travel crossed the center of the row.
     val revealEdit = displayOffset < 0f
     val revealDelete = displayOffset > 0f
+    val fillFraction = (abs(displayOffset) / widthOrDefault()).coerceIn(0f, 1f)
     val actionColor = when {
         revealEdit -> success
         revealDelete -> danger
         else -> Color.Transparent
     }
+    val showActionLabel = fillFraction >= SWIPE_LABEL_MIN_RATIO
+    // Match RecordRow / LeziCard outer radius; only the outer edge of the strip is rounded.
+    val corner: Dp = if (LeziThemeExt.isJournal) 8.dp else 20.dp
+    val stripShape = if (revealEdit) {
+        RoundedCornerShape(topStart = 0.dp, topEnd = corner, bottomEnd = corner, bottomStart = 0.dp)
+    } else {
+        RoundedCornerShape(topStart = corner, topEnd = 0.dp, bottomEnd = 0.dp, bottomStart = corner)
+    }
 
     Box(
         modifier
             .fillMaxWidth()
-            .clipToBounds()
-            .onSizeChanged { widthPx = it.width.toFloat() },
+            .onSizeChanged {
+                widthPx = it.width.toFloat()
+                heightPx = it.height.toFloat()
+            }
+            .then(
+                if (canSwipe) {
+                    Modifier.pointerInput(editEnabled, deleteEnabled) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            val touchSlop = viewConfiguration.touchSlop
+                            var totalX = 0f
+                            var totalY = 0f
+                            var pastSlop = false
+                            var isHorizontal = false
+                            val pointerId = down.id
+                            val startOffset = if (dragging) dragOffset else animOffset.value
+                            try {
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    val change = event.changes.firstOrNull { it.id == pointerId }
+                                        ?: break
+                                    if (!change.pressed) break
+                                    val delta = change.positionChange()
+                                    if (!pastSlop) {
+                                        totalX += delta.x
+                                        totalY += delta.y
+                                        val distSq = totalX * totalX + totalY * totalY
+                                        if (distSq >= touchSlop * touchSlop) {
+                                            pastSlop = true
+                                            isHorizontal = abs(totalX) >= abs(totalY)
+                                            if (isHorizontal) {
+                                                change.consume()
+                                                // Claim exclusive open for this row.
+                                                onOpenChange(true)
+                                                dragging = true
+                                                val next = (startOffset + totalX)
+                                                    .coerceIn(maxEditOffset(), maxDeleteOffset())
+                                                dragOffset = next
+                                                maybeHaptic(
+                                                    next,
+                                                    widthOrDefault(),
+                                                    crossedCommit,
+                                                ) { crossed ->
+                                                    crossedCommit = crossed
+                                                    if (crossed) {
+                                                        haptic.performHapticFeedback(
+                                                            HapticFeedbackType.LongPress,
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } else if (isHorizontal) {
+                                        totalX += delta.x
+                                        change.consume()
+                                        val next = (startOffset + totalX)
+                                            .coerceIn(maxEditOffset(), maxDeleteOffset())
+                                        dragOffset = next
+                                        maybeHaptic(
+                                            next,
+                                            widthOrDefault(),
+                                            crossedCommit,
+                                        ) { crossed ->
+                                            crossedCommit = crossed
+                                            if (crossed) {
+                                                haptic.performHapticFeedback(
+                                                    HapticFeedbackType.LongPress,
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            } finally {
+                                if (isHorizontal) {
+                                    settleFromDrag(dragOffset)
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    Modifier
+                },
+            ),
     ) {
-        // Full-size action plate: only painted while revealed so closed rounded cards
-        // do not leak red/green through corner cutouts against the page background.
-        // Single full-bleed color (满铺) for the active direction — no half-split seam.
-        if (revealEdit || revealDelete) {
+        // Card stays put; color grows over it with swipe progress.
+        content()
+
+        // Only the filled strip is composed (not a full-size overlay), so taps on the
+        // unfilled part of the card still reach content (collapse / fulfill / edit).
+        if ((revealEdit || revealDelete) && fillFraction > 0f && heightPx > 0f) {
             val activeTag = if (revealEdit) editTestTag else deleteTestTag
+            val stripWidth = with(density) {
+                (widthOrDefault() * fillFraction).roundToInt().toDp()
+            }
+            val stripHeight = with(density) { heightPx.roundToInt().toDp() }
             Box(
                 Modifier
-                    .matchParentSize()
+                    .align(
+                        if (revealEdit) Alignment.CenterEnd else Alignment.CenterStart,
+                    )
+                    .size(width = stripWidth, height = stripHeight)
+                    .clip(stripShape)
                     .background(actionColor)
                     .then(if (activeTag != null) Modifier.testTag(activeTag) else Modifier)
                     .semantics {
@@ -250,126 +353,38 @@ fun SwipeEditDeleteRow(
                     ) {
                         if (revealEdit) closeAnimated(onEdit) else closeAnimated(onDelete)
                     },
-                contentAlignment = if (revealEdit) Alignment.CenterEnd else Alignment.CenterStart,
+                contentAlignment = Alignment.Center,
             ) {
-                if (revealEdit) {
-                    SwipeActionLabel(
-                        icon = {
-                            Icon(
-                                Icons.Outlined.Edit,
-                                contentDescription = null,
-                                tint = onAction,
-                            )
-                        },
-                        label = "编辑",
-                        contentColor = onAction,
-                        padStart = false,
-                    )
-                } else {
-                    SwipeActionLabel(
-                        icon = {
-                            Icon(
-                                Icons.Outlined.Delete,
-                                contentDescription = null,
-                                tint = onAction,
-                            )
-                        },
-                        label = "删除",
-                        contentColor = onAction,
-                        padStart = true,
-                    )
+                if (showActionLabel) {
+                    if (revealEdit) {
+                        SwipeActionLabel(
+                            icon = {
+                                Icon(
+                                    Icons.Outlined.Edit,
+                                    contentDescription = null,
+                                    tint = onAction,
+                                )
+                            },
+                            label = "编辑",
+                            contentColor = onAction,
+                            padStart = false,
+                        )
+                    } else {
+                        SwipeActionLabel(
+                            icon = {
+                                Icon(
+                                    Icons.Outlined.Delete,
+                                    contentDescription = null,
+                                    tint = onAction,
+                                )
+                            },
+                            label = "删除",
+                            contentColor = onAction,
+                            padStart = true,
+                        )
+                    }
                 }
             }
-        }
-
-        // Foreground content plate (record/plan card + type icon) tracks the finger.
-        // Action fill is a single full-size plate behind it, so revealed area is solid
-        // green/red with no half-split seam or list 底色 strip.
-        Box(
-            Modifier
-                .offset { IntOffset(displayOffset.roundToInt(), 0) }
-                .fillMaxWidth()
-                .then(
-                    if (canSwipe) {
-                        Modifier.pointerInput(editEnabled, deleteEnabled) {
-                            awaitEachGesture {
-                                val down = awaitFirstDown(requireUnconsumed = false)
-                                val touchSlop = viewConfiguration.touchSlop
-                                var totalX = 0f
-                                var totalY = 0f
-                                var pastSlop = false
-                                var isHorizontal = false
-                                val pointerId = down.id
-                                val startOffset = if (dragging) dragOffset else animOffset.value
-                                try {
-                                    while (true) {
-                                        val event = awaitPointerEvent()
-                                        val change = event.changes.firstOrNull { it.id == pointerId }
-                                            ?: break
-                                        if (!change.pressed) break
-                                        val delta = change.positionChange()
-                                        if (!pastSlop) {
-                                            totalX += delta.x
-                                            totalY += delta.y
-                                            val distSq = totalX * totalX + totalY * totalY
-                                            if (distSq >= touchSlop * touchSlop) {
-                                                pastSlop = true
-                                                isHorizontal = abs(totalX) >= abs(totalY)
-                                                if (isHorizontal) {
-                                                    change.consume()
-                                                    // Claim exclusive open for this row.
-                                                    onOpenChange(true)
-                                                    dragging = true
-                                                    val next = (startOffset + totalX)
-                                                        .coerceIn(maxEditOffset(), maxDeleteOffset())
-                                                    dragOffset = next
-                                                    maybeHaptic(
-                                                        next,
-                                                        widthOrDefault(),
-                                                        crossedCommit,
-                                                    ) { crossed ->
-                                                        crossedCommit = crossed
-                                                        if (crossed) {
-                                                            haptic.performHapticFeedback(
-                                                                HapticFeedbackType.LongPress,
-                                                            )
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        } else if (isHorizontal) {
-                                            totalX += delta.x
-                                            change.consume()
-                                            val next = (startOffset + totalX)
-                                                .coerceIn(maxEditOffset(), maxDeleteOffset())
-                                            dragOffset = next
-                                            maybeHaptic(
-                                                next,
-                                                widthOrDefault(),
-                                                crossedCommit,
-                                            ) { crossed ->
-                                                crossedCommit = crossed
-                                                if (crossed) {
-                                                    haptic.performHapticFeedback(
-                                                        HapticFeedbackType.LongPress,
-                                                    )
-                                                }
-                                            }
-                                        }
-                                    }
-                                } finally {
-                                    if (isHorizontal) {
-                                        settleFromDrag(dragOffset)
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        Modifier
-                    },
-                ),
-        ) {
-            content()
         }
     }
 }
