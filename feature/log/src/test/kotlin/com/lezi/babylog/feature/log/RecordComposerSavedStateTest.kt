@@ -80,12 +80,15 @@ class RecordComposerSavedStateTest {
             historical = false,
         )
         saved.save(request, QuickRecordDraft.create(RecordType.FORMULA, 1_000L))
-        saved.savePendingNextFeed(7L, RecordType.FORMULA)
+        saved.savePendingNextFeed(7L, RecordType.FORMULA, suggestedAtMillis = 9_000L)
 
         saved.clear()
 
         assertNull(saved.restore(request))
-        assertEquals(7L to RecordType.FORMULA, saved.pendingNextFeed())
+        assertEquals(
+            PendingNextFeed(7L, RecordType.FORMULA, suggestedAtMillis = 9_000L),
+            saved.pendingNextFeed(),
+        )
         saved.clearPendingNextFeed()
         assertNull(saved.pendingNextFeed())
     }
@@ -103,10 +106,10 @@ class RecordComposerSavedStateTest {
 
         dispatchRecordSaveCompletion(
             message = "已记录配方奶",
-            offerReminder = true,
-            onOfferReminder = {
+            suggestedNextFeedAt = 9_000L,
+            onOfferReminder = { message, suggestedAt ->
                 events += "reminder-ready"
-                pendingReminderMessage = it
+                pendingReminderMessage = "$message@$suggestedAt"
             },
             onPersisted = {
                 events += "root-consumed"
@@ -116,7 +119,7 @@ class RecordComposerSavedStateTest {
         )
 
         assertNull(restorableRequest)
-        assertEquals("已记录配方奶", pendingReminderMessage)
+        assertEquals("已记录配方奶@9000", pendingReminderMessage)
         assertEquals(listOf("reminder-ready", "root-consumed"), events)
         assertTrue("finished" !in events)
     }
@@ -127,8 +130,8 @@ class RecordComposerSavedStateTest {
 
         dispatchRecordSaveCompletion(
             message = "已记录笔记",
-            offerReminder = false,
-            onOfferReminder = { events += "unexpected-reminder" },
+            suggestedNextFeedAt = null,
+            onOfferReminder = { _, _ -> events += "unexpected-reminder" },
             onPersisted = { events += "root-consumed" },
             onFinished = { events += "finished:$it" },
         )

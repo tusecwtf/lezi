@@ -5,6 +5,7 @@ import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.NursingPayload
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.shouldOfferNextFeedPlanForFact
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -35,12 +36,12 @@ class QuickRecordDraftTest {
 
     @Test
     fun nextFeedPrompt_onlyFollowsNewFeedFact() {
-        assertTrue(shouldOfferNextFeedPlan(ComposerWriteDecision.AddRecord, RecordType.NURSING))
-        assertTrue(shouldOfferNextFeedPlan(ComposerWriteDecision.AddRecord, RecordType.FORMULA))
-        assertTrue(shouldOfferNextFeedPlan(ComposerWriteDecision.AddRecord, RecordType.PUMPED_FEED))
-        assertFalse(shouldOfferNextFeedPlan(ComposerWriteDecision.CreateCarePlan, RecordType.NURSING))
-        assertFalse(shouldOfferNextFeedPlan(ComposerWriteDecision.FulfillCarePlan, RecordType.FORMULA))
-        assertFalse(shouldOfferNextFeedPlan(ComposerWriteDecision.AddRecord, RecordType.SLEEP))
+        assertTrue(shouldOfferNextFeedPlanForFact(RecordType.NURSING, true, null))
+        assertTrue(shouldOfferNextFeedPlanForFact(RecordType.FORMULA, true, null))
+        assertTrue(shouldOfferNextFeedPlanForFact(RecordType.PUMPED_FEED, true, null))
+        assertFalse(shouldOfferNextFeedPlanForFact(RecordType.NURSING, false, null))
+        assertFalse(shouldOfferNextFeedPlanForFact(RecordType.FORMULA, true, 8L))
+        assertFalse(shouldOfferNextFeedPlanForFact(RecordType.SLEEP, true, null))
     }
 
     private val tappedAt = 1_721_722_800_000L

@@ -50,7 +50,10 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.core.content.ContextCompat
+import com.lezi.babylog.core.model.NextFeedPlanOrigin
 import com.lezi.babylog.designsystem.LeziDetailTopBar
+import com.lezi.babylog.designsystem.LeziNextFeedPlanFlow
+import com.lezi.babylog.designsystem.nextFeedPlanSuccessMessage
 import kotlinx.coroutines.delay
 
 internal enum class TimerViewportMode {
@@ -70,13 +73,6 @@ internal fun timerViewportMode(
         TimerViewportMode.Spacious
     }
 }
-
-internal fun nextFeedPlanSuccessMessage(notificationPermissionGranted: Boolean): String =
-    if (notificationPermissionGranted) {
-        "护理计划已加入乐记日程"
-    } else {
-        "护理计划已加入乐记日程；通知权限未开启，本机提醒已降级"
-    }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -111,33 +107,8 @@ fun TimerRoute(
     var completionSaving by remember { mutableStateOf(false) }
     var completionSaveError by remember { mutableStateOf<String?>(null) }
     var showDiscardConfirmation by remember { mutableStateOf(false) }
-    var savedAwaitingReminder by rememberSaveable { mutableStateOf(false) }
-    var reminderScheduleError by rememberSaveable { mutableStateOf<String?>(null) }
-    var reminderScheduling by remember { mutableStateOf(false) }
-    var reminderSuccessMessage by rememberSaveable { mutableStateOf<String?>(null) }
+    var suggestedNextFeedAt by rememberSaveable { mutableStateOf<Long?>(null) }
     val context = LocalContext.current
-    fun finishReminderSchedule(success: Boolean) {
-        reminderScheduling = false
-        if (success) {
-            savedAwaitingReminder = false
-            reminderScheduleError = null
-            val permissionGranted =
-                Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
-                    ContextCompat.checkSelfPermission(
-                        context,
-                        Manifest.permission.POST_NOTIFICATIONS,
-                    ) == PackageManager.PERMISSION_GRANTED
-            reminderSuccessMessage = nextFeedPlanSuccessMessage(permissionGranted)
-        } else {
-            reminderScheduleError = "下次喂养安排失败，请重试或选择不安排"
-        }
-    }
-    fun requestOrSchedule(atMillis: Long?) {
-        if (reminderScheduling) return
-        reminderScheduleError = null
-        reminderScheduling = true
-        vm.scheduleNextFeedPlan(atMillis, ::finishReminderSchedule)
-    }
     val completionSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val configuration = LocalConfiguration.current
     val viewportMode = timerViewportMode(
@@ -322,11 +293,11 @@ fun TimerRoute(
                     completionSaveError = null
                     vm.complete(
                         draft = confirmed,
-                        onDone = { offerNextFeedPlan ->
+                        onDone = { suggestedAt ->
                             completionSaving = false
                             completionDraft = null
-                            if (offerNextFeedPlan) {
-                                savedAwaitingReminder = true
+                            if (suggestedAt != null) {
+                                suggestedNextFeedAt = suggestedAt
                             } else {
                                 onDone()
                             }
@@ -341,65 +312,32 @@ fun TimerRoute(
         }
     }
 
-    if (savedAwaitingReminder) {
-        AlertDialog(
-            onDismissRequest = {},
-            title = { Text("安排下次喂养？") },
-            text = {
-                Column {
-                    Text("记录已保存。请选择下次喂养护理计划时间。")
-                    reminderScheduleError?.let {
-                        Text(it, color = MaterialTheme.colorScheme.error)
-                    }
-                }
+    suggestedNextFeedAt?.let { suggestedAt ->
+        val permissionGranted =
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS,
+                ) == PackageManager.PERMISSION_GRANTED
+        LeziNextFeedPlanFlow(
+            flowKey = "timer:$suggestedAt",
+            origin = NextFeedPlanOrigin.NursingTimer,
+            factMessage = "记录已保存",
+            suggestedAtMillis = suggestedAt,
+            scheduledMessage = nextFeedPlanSuccessMessage(permissionGranted),
+            minuteStep = timeStepMin,
+            timePickerStyle = timePickerStyle,
+            preferredHand = preferredHand,
+            onSchedule = vm::scheduleNextFeedPlan,
+            onFinishedScheduled = {
+                vm.dismissNextFeedPlan()
+                suggestedNextFeedAt = null
+                onDone()
             },
-            confirmButton = {
-                TextButton(
-                    onClick = { requestOrSchedule(null) },
-                    enabled = !reminderScheduling,
-                ) {
-                    Text(if (reminderScheduling) "正在安排…" else "确认安排")
-                }
-            },
-            dismissButton = {
-                Row {
-                    TextButton(
-                        onClick = {
-                            requestOrSchedule(System.currentTimeMillis() + 60 * 60_000L)
-                        },
-                        enabled = !reminderScheduling,
-                    ) { Text("60 分钟") }
-                    TextButton(
-                        onClick = {
-                            requestOrSchedule(System.currentTimeMillis() + 120 * 60_000L)
-                        },
-                        enabled = !reminderScheduling,
-                    ) { Text("120 分钟") }
-                    TextButton(
-                        onClick = {
-                            savedAwaitingReminder = false
-                            vm.dismissNextFeedPlan()
-                            onDone()
-                        },
-                        enabled = !reminderScheduling,
-                    ) { Text("不安排") }
-                }
-            },
-        )
-    }
-
-    reminderSuccessMessage?.let { message ->
-        AlertDialog(
-            onDismissRequest = {},
-            title = { Text("已安排下次喂养") },
-            text = { Text(message) },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        reminderSuccessMessage = null
-                        onDone()
-                    },
-                ) { Text("完成") }
+            onFinishedWithoutPlan = {
+                vm.dismissNextFeedPlan()
+                suggestedNextFeedAt = null
+                onDone()
             },
         )
     }

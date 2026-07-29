@@ -55,7 +55,7 @@ layout/05 已删除分区 ────┘
 | [07](./issues/07-reclaim-session-immediate-full-pull.md) | 接回会话后立即执行全量 pull | — | M | still-valid | complete |
 | [08](./issues/08-owner-reclaim-before-local-baby.md) | 无宝宝状态直接接回 owner | 07 | M | still-valid | complete |
 | [09](./issues/09-unify-onboarding-and-account-family-wizard.md) | 统一 Onboarding 与账户家庭向导 | 08 | M | partial | complete |
-| [10](./issues/10-unify-next-feed-scheduling-state-machine.md) | 统一下次喂养安排状态机 | — | M | partial | ready-for-agent |
+| [10](./issues/10-unify-next-feed-scheduling-state-machine.md) | 统一下次喂养安排状态机 | — | M | partial | complete |
 | [11](./issues/11-confirm-discard-dirty-composer.md) | 脏 Composer 草稿放弃确认 | 01 | M | still-valid | ready-for-agent |
 | [12](../record-layout-edit-remediation/issues/02-atomic-device-layout-snapshot.md) | 原子保存设备布局快照 | — | M | still-valid · canonical layout/02 | ready-for-agent |
 | [13](../record-layout-edit-remediation/issues/06-accessible-layout-actions-truthful-empty-slot.md) | 无障碍布局编辑与真实空槽文案 | layout/02、layout/04、layout/05 | M | still-valid · canonical layout/06 | ready-for-agent |

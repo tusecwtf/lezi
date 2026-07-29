@@ -8,8 +8,11 @@ import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.common.newClientUuid
 import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.datastore.SettingsStore
-import com.lezi.babylog.domain.CareLog
+import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.nextFeedSuggestedAt
+import com.lezi.babylog.core.model.shouldOfferNextFeedPlanForFact
+import com.lezi.babylog.domain.CareLog
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.concurrent.atomic.AtomicBoolean
@@ -205,11 +208,12 @@ class TimerViewModel @Inject constructor(
 
     internal fun complete(
         draft: NursingCompletionDraft,
-        onDone: (offerNextFeedPlan: Boolean) -> Unit,
+        onDone: (suggestedNextFeedAt: Long?) -> Unit,
         onError: (String) -> Unit,
     ) {
         if (!completionInFlight.compareAndSet(false, true)) return
         viewModelScope.launch {
+            var suggestedNextFeedAt: Long? = null
             try {
                 draft.validationError(System.currentTimeMillis())?.let {
                     onError(it)
@@ -226,7 +230,8 @@ class TimerViewModel @Inject constructor(
                         "计时会话尚未准备好，请重试"
                     }
                     val command = draft.toCommand()
-                    val recordMode = settings.settings.first().recordAtStartOrEnd
+                    val currentSettings = settings.settings.first()
+                    val recordMode = currentSettings.recordAtStartOrEnd
                     careLog.completeNursing(
                         babyId = babyId,
                         leftMin = command.leftMin,
@@ -240,17 +245,28 @@ class TimerViewModel @Inject constructor(
                         completionClientUuid = completionClientUuid,
                         carePlanId = stableState.carePlanId,
                     )
-                    val offerNextFeedPlan = timerShouldOfferNextFeedPlan(stableState.carePlanId)
+                    val offerNextFeedPlan = shouldOfferNextFeedPlanForFact(
+                        type = RecordType.NURSING,
+                        createdNewFact = true,
+                        sourceCarePlanId = stableState.carePlanId,
+                    )
                     if (offerNextFeedPlan) {
+                        suggestedNextFeedAt = nextFeedSuggestedAt(
+                            nowMillis = RecordTime.currentTimeMillis(),
+                            intervalMinutes = currentSettings.nursingIntervalMin,
+                        )
                         savedStateHandle[PENDING_NEXT_FEED_BABY_KEY] = babyId
+                        savedStateHandle[PENDING_NEXT_FEED_SUGGESTED_AT_KEY] =
+                            suggestedNextFeedAt
                     } else {
                         savedStateHandle.remove<Long>(PENDING_NEXT_FEED_BABY_KEY)
+                        savedStateHandle.remove<Long>(PENDING_NEXT_FEED_SUGGESTED_AT_KEY)
                     }
                     // Await the DataStore clear. If the process dies before it commits, replay uses
                     // the same completionClientUuid and CareLog returns the existing record.
                     applyTransition(TimerState())
                 }
-                onDone(savedStateHandle.get<Long>(PENDING_NEXT_FEED_BABY_KEY) != null)
+                onDone(suggestedNextFeedAt)
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (throwable: Throwable) {
@@ -261,29 +277,30 @@ class TimerViewModel @Inject constructor(
         }
     }
 
-    internal fun scheduleNextFeedPlan(atMillis: Long?, onResult: (Boolean) -> Unit) {
+    internal fun scheduleNextFeedPlan(atMillis: Long, onResult: (Boolean) -> Unit) {
         viewModelScope.launch {
-            val success = runCatching {
+            val success = try {
                 val babyId = requireNotNull(
                     savedStateHandle.get<Long>(PENDING_NEXT_FEED_BABY_KEY),
                 ) { "待安排的喂养记录已失效" }
-                val scheduledAt = atMillis ?: run {
-                    val intervalMin = settings.settings.first().nursingIntervalMin
-                    System.currentTimeMillis() + intervalMin * 60_000L
-                }
                 careLog.scheduleNextFeedCarePlan(
                     babyId = babyId,
                     feedType = RecordType.NURSING,
-                    scheduledAt = scheduledAt,
+                    scheduledAt = atMillis,
                 )
-                savedStateHandle.remove<Long>(PENDING_NEXT_FEED_BABY_KEY)
-            }.isSuccess
+                true
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                false
+            }
             onResult(success)
         }
     }
 
     internal fun dismissNextFeedPlan() {
         savedStateHandle.remove<Long>(PENDING_NEXT_FEED_BABY_KEY)
+        savedStateHandle.remove<Long>(PENDING_NEXT_FEED_SUGGESTED_AT_KEY)
     }
 
     fun clear(onCleared: () -> Unit = {}) {
@@ -329,7 +346,6 @@ class TimerViewModel @Inject constructor(
 
     private companion object {
         const val PENDING_NEXT_FEED_BABY_KEY = "timer_pending_next_feed_baby"
+        const val PENDING_NEXT_FEED_SUGGESTED_AT_KEY = "timer_pending_next_feed_suggested_at"
     }
 }
-
-internal fun timerShouldOfferNextFeedPlan(carePlanId: Long?): Boolean = carePlanId == null
