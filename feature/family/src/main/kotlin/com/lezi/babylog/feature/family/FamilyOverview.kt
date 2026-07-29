@@ -20,7 +20,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.ui.BabyAvatar
-import com.lezi.babylog.designsystem.LeziCard
+import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
@@ -56,11 +56,11 @@ internal fun FamilyOverview(
     val nickCounts = ui.babies.groupingBy { it.nickname.trim() }.eachCount()
     Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
             com.lezi.babylog.designsystem.PageHero(
-                eyebrow = "宝宝与家庭",
+                eyebrow = "",
                 title = "账户",
             )
 
-            LeziCard(modifier = Modifier.fillMaxWidth()) {
+            LeziSurfacePanel(modifier = Modifier.fillMaxWidth(), bottomBand = true) {
                 Row(
                     Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -157,7 +157,7 @@ internal fun FamilyOverview(
             ui.babies.forEach { b ->
                 val selected = b.id == current?.id
                 val dup = (nickCounts[b.nickname.trim()] ?: 0) > 1
-                LeziCard(modifier = Modifier.fillMaxWidth()) {
+                LeziSurfacePanel(modifier = Modifier.fillMaxWidth(), bottomBand = true) {
                     Row(
                         Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
@@ -225,7 +225,7 @@ internal fun FamilyOverview(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 ui.localOrphanBabies.forEach { orphan ->
-                    LeziCard(modifier = Modifier.fillMaxWidth()) {
+                    LeziSurfacePanel(modifier = Modifier.fillMaxWidth(), bottomBand = true) {
                         Text(orphan.nickname, style = LeziTypography.BodyStrong)
                         Text(
                             "本机孤宝宝档案",

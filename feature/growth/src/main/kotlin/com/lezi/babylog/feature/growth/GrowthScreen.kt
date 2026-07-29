@@ -52,7 +52,7 @@ import com.lezi.babylog.core.model.RecordDateDecision
 import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordTimeDecision
 import com.lezi.babylog.core.model.RecordType
-import com.lezi.babylog.designsystem.LeziCard
+import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziClockDialDialog
 import com.lezi.babylog.designsystem.LeziDatePicker
 import com.lezi.babylog.designsystem.LeziPrimaryButton
@@ -269,7 +269,6 @@ fun GrowthRoute(
     var showMeasureClock by remember { mutableStateOf(false) }
     var measurementError by remember { mutableStateOf<String?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
-    val journal = LeziThemeExt.isJournal
     val zone = ZoneId.systemDefault()
     val history = remember(ui.points) {
         ui.points.sortedByDescending(MeasurePoint::measuredAt)
@@ -320,7 +319,7 @@ fun GrowthRoute(
             verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
         ) {
             com.lezi.babylog.designsystem.PageHero(
-                eyebrow = if (journal) "百分位网格" else "每一次变化都算数",
+                eyebrow = "",
                 title = "成长",
                 trailing = {
                     LeziPrimaryButton("新增测量", onClick = { openNewMeasurement() })
@@ -355,7 +354,7 @@ fun GrowthRoute(
                 )
             } else {
                 val latest = ui.points.last()
-                LeziCard(Modifier.fillMaxWidth()) {
+                LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
                     Text(
                         when (ui.metric) {
                             GrowthMetric.WEIGHT -> "最新体重"
@@ -394,9 +393,12 @@ fun GrowthRoute(
 
                 SectionHeading(
                     title = "测量记录",
-                    meta = "点按可修改或删除错误数值",
                 )
-                LeziCard(Modifier.fillMaxWidth()) {
+                LeziSurfacePanel(
+                    Modifier.fillMaxWidth(),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+                    bottomBand = true,
+                ) {
                     history.forEachIndexed { index, point ->
                         if (index > 0) {
                             HorizontalDivider(

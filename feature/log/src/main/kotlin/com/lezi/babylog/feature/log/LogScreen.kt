@@ -1084,10 +1084,14 @@ fun LogRoute(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(bottom = LeziSpacing.Md),
-                    verticalArrangement = Arrangement.spacedBy(if (journal) 4.dp else LeziSpacing.SectionGap),
+                    verticalArrangement = Arrangement.spacedBy(if (journal) 0.dp else LeziSpacing.SectionGap),
                 ) {
                     item {
-                        Column(Modifier.padding(horizontal = LeziSpacing.Page)) {
+                        Column(
+                            Modifier.padding(
+                                horizontal = if (journal) 0.dp else LeziSpacing.Page,
+                            ),
+                        ) {
                             if (journal) {
                                 RecordSummaryStrip(
                                     values = listOf(
@@ -1227,7 +1231,9 @@ fun LogRoute(
                                 viewportDurationMinutes = timelineViewportDuration,
                                 onViewportStartChange = { timelineViewportStart = it },
                                 titleSecondary = "时间轴",
-                                modifier = Modifier.padding(horizontal = LeziSpacing.Page),
+                                modifier = Modifier.padding(
+                                    horizontal = if (journal) 0.dp else LeziSpacing.Page,
+                                ),
                             )
                         }
                     }
@@ -1246,7 +1252,11 @@ fun LogRoute(
 
                     if (state.pendingPlans.isNotEmpty()) {
                         item {
-                            Column(Modifier.padding(horizontal = LeziSpacing.Page)) {
+                            Column(
+                                Modifier.padding(
+                                    horizontal = if (journal) 0.dp else LeziSpacing.Page,
+                                ),
+                            ) {
                                 SectionHeading(
                                     eyebrow = if (journal) null else "待履行",
                                     title = "护理计划",
@@ -1290,7 +1300,9 @@ fun LogRoute(
                             val planRevealed = revealedSwipeRowId == planRowId
                             Column(
                                 Modifier
-                                    .padding(horizontal = LeziSpacing.Page)
+                                    .padding(
+                                        horizontal = if (journal) 0.dp else LeziSpacing.Page,
+                                    )
                                     .testTag("pending_care_plan_${plan.id}"),
                             ) {
                                 SwipeEditDeleteRow(
@@ -1374,7 +1386,11 @@ fun LogRoute(
                     }
 
                     item {
-                        Column(Modifier.padding(horizontal = LeziSpacing.Page)) {
+                        Column(
+                            Modifier.padding(
+                                horizontal = if (journal) 0.dp else LeziSpacing.Page,
+                            ),
+                        ) {
                             SectionHeading(
                                 title = "记录",
                             )
@@ -1387,7 +1403,9 @@ fun LogRoute(
                                 kind = StateKind.Loading,
                                 title = "加载中",
                                 message = "正在读取当日记录…",
-                                modifier = Modifier.padding(horizontal = LeziSpacing.Page),
+                                modifier = Modifier.padding(
+                                    horizontal = if (journal) 0.dp else LeziSpacing.Page,
+                                ),
                             )
                         }
                         state.records.isEmpty() -> item {
@@ -1395,7 +1413,9 @@ fun LogRoute(
                                 kind = StateKind.Empty,
                                 title = "还没有记录",
                                 message = "点下方快捷入口添加第一条记录",
-                                modifier = Modifier.padding(horizontal = LeziSpacing.Page),
+                                modifier = Modifier.padding(
+                                    horizontal = if (journal) 0.dp else LeziSpacing.Page,
+                                ),
                             )
                         }
                         else -> items(filteredTimelineRecords, key = { it.id }) { r ->
@@ -1426,7 +1446,9 @@ fun LogRoute(
                                 },
                                 editTestTag = "timeline_swipe_edit_record_${r.id}",
                                 deleteTestTag = "timeline_swipe_delete_record_${r.id}",
-                                modifier = Modifier.padding(horizontal = LeziSpacing.Page),
+                                modifier = Modifier.padding(
+                                    horizontal = if (journal) 0.dp else LeziSpacing.Page,
+                                ),
                             ) {
                                 RecordRow(
                                     time = formatClock(r.timestamp),

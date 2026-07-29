@@ -63,7 +63,7 @@ import com.lezi.babylog.core.model.businessLabel
 import com.lezi.babylog.core.model.displayLabel
 import com.lezi.babylog.core.model.SettingsLocal
 import com.lezi.babylog.designsystem.LeziDetailTopBar
-import com.lezi.babylog.designsystem.LeziCard
+import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
@@ -438,10 +438,11 @@ fun CalendarRoute(
                                 val effective = plan.effectiveStatus()
                                 val unsynced = plan.id in systemCalendarUnsyncedPlanIds
                                 val conflictCount = conflictCountByPlanUuid[plan.clientUuid] ?: 0
-                                LeziCard(
+                                LeziSurfacePanel(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .testTag("calendar_plan_${plan.id}"),
+                                    bottomBand = true,
                                     onClick = {
                                         val open = effective == CarePlanStatus.PENDING ||
                                             effective == CarePlanStatus.MISSED
@@ -561,10 +562,11 @@ fun CalendarRoute(
                         Text("暂无冲突未采纳项", style = LeziTypography.Meta)
                     }
                     conflictAudits.forEach { audit ->
-                        LeziCard(
+                        LeziSurfacePanel(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("conflict_audit_${audit.candidateClientUuid}"),
+                            bottomBand = true,
                             onClick = { vm.openConflictDetail(audit.candidateClientUuid) },
                         ) {
                             Text(audit.typeLabel, style = LeziTypography.BodyStrong)

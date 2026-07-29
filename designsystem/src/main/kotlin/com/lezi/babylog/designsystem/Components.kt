@@ -54,6 +54,11 @@ fun toneBg(tone: LeziTone): Color {
     }
 }
 
+/**
+ * Warm: soft floating card (8dp radius + light elevation).
+ * Journal: flat panel shell (0 radius, no elevation). Prefer [LeziSurfacePanel]
+ * for full-bleed grid sections; this remains the shared chrome for mixed call sites.
+ */
 @Composable
 fun LeziCard(
     modifier: Modifier = Modifier,
@@ -81,14 +86,83 @@ fun LeziCard(
             ),
         shape = LeziThemeExt.cardShape,
         color = MaterialTheme.colorScheme.surface,
-        border = androidx.compose.foundation.BorderStroke(
-            1.dp,
-            MaterialTheme.colorScheme.outline.copy(alpha = if (journal) 0.95f else 0.65f),
-        ),
+        border = if (journal) {
+            null
+        } else {
+            androidx.compose.foundation.BorderStroke(
+                1.dp,
+                MaterialTheme.colorScheme.outline.copy(alpha = 0.65f),
+            )
+        },
         shadowElevation = LeziThemeExt.cardElevation,
         tonalElevation = 0.dp,
     ) {
         Column(Modifier.padding(contentPadding), content = content)
+    }
+}
+
+/**
+ * Full-bleed section surface.
+ * Journal: grid/panel with optional bottom band (template 8px bg stripe).
+ * Warm: delegates to [LeziCard].
+ */
+@Composable
+fun LeziSurfacePanel(
+    modifier: Modifier = Modifier,
+    contentPadding: PaddingValues = PaddingValues(LeziSpacing.CardPad),
+    bottomBand: Boolean = false,
+    onClick: (() -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val journal = LeziThemeExt.isJournal
+    if (!journal) {
+        LeziCard(
+            modifier = modifier,
+            onClick = onClick,
+            contentPadding = contentPadding,
+            content = content,
+        )
+        return
+    }
+    val interaction = remember { MutableInteractionSource() }
+    Column(modifier = modifier.fillMaxWidth()) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(
+                    if (onClick != null) {
+                        Modifier.clickable(
+                            interactionSource = interaction,
+                            indication = ripple(bounded = true),
+                            onClick = onClick,
+                        )
+                    } else {
+                        Modifier
+                    },
+                ),
+            shape = LeziShapes.JournalFlat,
+            color = MaterialTheme.colorScheme.surface,
+            border = null,
+            shadowElevation = 0.dp,
+            tonalElevation = 0.dp,
+        ) {
+            Column(Modifier.padding(contentPadding), content = content)
+        }
+        if (bottomBand) {
+            Spacer(
+                Modifier
+                    .fillMaxWidth()
+                    .height(8.dp)
+                    .background(MaterialTheme.colorScheme.background),
+            )
+        } else {
+            Spacer(
+                Modifier
+                    .fillMaxWidth()
+                    .height(1.dp)
+                    .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.85f)),
+            )
+        }
     }
 }
 

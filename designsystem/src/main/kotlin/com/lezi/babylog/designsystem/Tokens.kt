@@ -104,18 +104,18 @@ object LeziSpacing {
 /**
  * Corner radii for the two visual templates.
  *
- * Warm: soft large cards — 12 / 20 / 28 / pill.
- * Journal: compact logbook — 4 / 8 / 12 / dialog 18 / pill; circles only for
- * record icons, timer mains, and avatars.
+ * Warm: soft cards with a single 8dp radius (aligned with journal controls).
+ * Journal: compact logbook — list/panels use 0; controls 4 / 8; dialog 18;
+ * circles only for record icons on the dock, timer mains, and avatars.
  */
 @Immutable
 object LeziShapes {
-    // Warm scale (also default Material small/medium/large mapping).
-    val Sm = RoundedCornerShape(12.dp)
-    val Md = RoundedCornerShape(20.dp)
-    val Lg = RoundedCornerShape(28.dp)
+    // Warm scale: one 8dp radius for cards, buttons, dock, dialogs.
+    val Sm = RoundedCornerShape(8.dp)
+    val Md = Sm
+    val Lg = Sm
     val Pill = RoundedCornerShape(999.dp)
-    /** Warm primary/secondary buttons — aligned with [Sm], not a free 14dp. */
+    /** Warm primary/secondary buttons — same 8dp as cards. */
     val Button = Sm
 
     // Journal scale.
@@ -124,6 +124,8 @@ object LeziShapes {
     val JournalButton = RoundedCornerShape(8.dp)
     val JournalLg = RoundedCornerShape(12.dp)
     val JournalDialog = RoundedCornerShape(18.dp)
+    /** Flat list / panel shells (journal de-card). */
+    val JournalFlat = RoundedCornerShape(0.dp)
     /** Chart marks / hairline chips shared by both templates. */
     val Micro = RoundedCornerShape(2.dp)
 }

@@ -36,6 +36,8 @@ import com.lezi.babylog.designsystem.LeziCard
 import com.lezi.babylog.designsystem.LeziRecordColorRole
 import com.lezi.babylog.designsystem.LeziRecordGlyph
 import com.lezi.babylog.designsystem.LeziRecordGlyphIcon
+import com.lezi.babylog.designsystem.LeziShapes
+import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTone
 import com.lezi.babylog.designsystem.LeziTypography
@@ -236,14 +238,16 @@ fun RecordSummaryStrip(
     selectableTypes: Set<RecordType> = values.mapTo(mutableSetOf()) { it.type },
     onSelect: ((RecordType) -> Unit)? = null,
 ) {
-    LeziCard(modifier = modifier.fillMaxWidth(), contentPadding = PaddingValues(0.dp)) {
+    val journal = LeziThemeExt.isJournal
+    val body: @Composable () -> Unit = {
         Row(Modifier.fillMaxWidth()) {
             val visibleValues = values.take(5)
             visibleValues.forEachIndexed { index, item ->
                 val color = leziRecordColor(item.type.presentation.colorRole)
                 val selected = item.type == selectedType
                 val selectable = onSelect != null && item.type in selectableTypes
-                val cellShape = LeziThemeExt.controlShape
+                // Journal: square cells in a grid (no per-cell card). Warm: soft control shape.
+                val cellShape = if (journal) LeziShapes.JournalFlat else LeziThemeExt.controlShape
                 Column(
                     Modifier
                         .weight(1f)
@@ -253,8 +257,10 @@ fun RecordSummaryStrip(
                             if (selected) color.copy(alpha = 0.18f) else Color.Transparent,
                         )
                         .then(
-                            if (selected) {
+                            if (selected && !journal) {
                                 Modifier.border(1.dp, color.copy(alpha = 0.8f), cellShape)
+                            } else if (selected) {
+                                Modifier.background(color.copy(alpha = 0.12f))
                             } else {
                                 Modifier
                             },
@@ -280,7 +286,7 @@ fun RecordSummaryStrip(
                     Box(
                         Modifier
                             .size(26.dp)
-                            .clip(CircleShape)
+                            .clip(if (journal) LeziShapes.JournalButton else CircleShape)
                             .background(color.copy(alpha = 0.14f)),
                         contentAlignment = Alignment.Center,
                     ) {
@@ -303,6 +309,19 @@ fun RecordSummaryStrip(
                     )
                 }
             }
+        }
+    }
+    if (journal) {
+        LeziSurfacePanel(
+            modifier = modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(0.dp),
+            bottomBand = true,
+        ) {
+            body()
+        }
+    } else {
+        LeziCard(modifier = modifier.fillMaxWidth(), contentPadding = PaddingValues(0.dp)) {
+            body()
         }
     }
 }

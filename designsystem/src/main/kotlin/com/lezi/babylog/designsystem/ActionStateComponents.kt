@@ -57,13 +57,14 @@ fun QuickRecordButton(
                 indication = ripple(bounded = true),
                 onClick = onClick,
             ),
-        shape = LeziThemeExt.cardShape,
+        // Journal more-grid tiles keep a light border + 8dp (not full section cards).
+        shape = if (journal) LeziShapes.JournalButton else LeziThemeExt.cardShape,
         color = MaterialTheme.colorScheme.surface,
         border = androidx.compose.foundation.BorderStroke(
             1.dp,
             MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
         ),
-        shadowElevation = LeziThemeExt.cardElevation,
+        shadowElevation = if (journal) LeziElevation.None else LeziThemeExt.cardElevation,
     ) {
         if (journal) Column(
             Modifier.fillMaxSize().padding(6.dp),
@@ -71,7 +72,10 @@ fun QuickRecordButton(
             verticalArrangement = Arrangement.Center,
         ) {
             Box(
-                Modifier.size(36.dp).clip(CircleShape).background(toneBg(tone)),
+                Modifier
+                    .size(36.dp)
+                    .clip(LeziShapes.JournalButton)
+                    .background(toneBg(tone)),
                 contentAlignment = Alignment.Center,
             ) { icon() }
             Text(title, style = LeziTypography.Label, maxLines = 1)
@@ -112,6 +116,7 @@ fun StateContainer(
     actionLabel: String? = null,
     onAction: (() -> Unit)? = null,
 ) {
+    // Use LeziCard (not banded panel) so nested empty states inside chart panels stay flat.
     LeziCard(modifier = modifier.fillMaxWidth()) {
         Column(
             Modifier

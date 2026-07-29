@@ -34,7 +34,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.common.productUiError
-import com.lezi.babylog.designsystem.LeziCard
+import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziDetailTopBar
 import com.lezi.babylog.designsystem.LeziDatePicker
 import com.lezi.babylog.designsystem.LeziPrimaryButton
@@ -186,7 +186,7 @@ fun ExportRoute(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
         ) {
-            LeziCard(Modifier.fillMaxWidth()) {
+            LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
                 Text("导出范围", style = LeziTypography.TitleSm)
                 Text(
                     "${fromDate.exportLabel()} — ${toDate.exportLabel()}",
@@ -231,7 +231,7 @@ fun ExportRoute(
                 Text(it, color = MaterialTheme.colorScheme.error)
             }
             state.preview?.let { text ->
-                LeziCard(Modifier.fillMaxWidth()) {
+                LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
                     Text("预览", style = LeziTypography.TitleSm)
                     Spacer(Modifier.height(LeziSpacing.Xs))
                     Text(text.take(2_000), style = LeziTypography.Mono)

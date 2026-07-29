@@ -13,27 +13,30 @@ import org.junit.Test
  */
 class ShapeElevationTokensTest {
     @Test
-    fun warmRadiiFollowSoftCardScale() {
-        assertEquals(RoundedCornerShape(12.dp), LeziShapes.Sm)
-        assertEquals(RoundedCornerShape(20.dp), LeziShapes.Md)
-        assertEquals(RoundedCornerShape(28.dp), LeziShapes.Lg)
-        // Button must not reintroduce a free 14.dp value.
+    fun warmRadiiUnifyToEight() {
+        assertEquals(RoundedCornerShape(8.dp), LeziShapes.Sm)
+        assertEquals(RoundedCornerShape(8.dp), LeziShapes.Md)
+        assertEquals(RoundedCornerShape(8.dp), LeziShapes.Lg)
+        // Single warm radius — no free-floating card values.
         assertEquals(LeziShapes.Sm, LeziShapes.Button)
+        assertEquals(LeziShapes.Sm, LeziShapes.Md)
+        assertEquals(LeziShapes.Sm, LeziShapes.Lg)
     }
 
     @Test
-    fun journalRadiiStayTighterThanWarm() {
+    fun journalRadiiKeepControlAndDialogScale() {
         assertEquals(RoundedCornerShape(4.dp), LeziShapes.JournalSm)
         assertEquals(RoundedCornerShape(8.dp), LeziShapes.JournalCard)
         assertEquals(RoundedCornerShape(8.dp), LeziShapes.JournalButton)
         assertEquals(RoundedCornerShape(12.dp), LeziShapes.JournalLg)
         assertEquals(RoundedCornerShape(18.dp), LeziShapes.JournalDialog)
+        assertEquals(RoundedCornerShape(0.dp), LeziShapes.JournalFlat)
 
-        // Distinct from warm large soft cards.
-        assertNotEquals(LeziShapes.Md, LeziShapes.JournalCard)
-        assertNotEquals(LeziShapes.Button, LeziShapes.JournalButton)
-        assertNotEquals(LeziShapes.Lg, LeziShapes.JournalLg)
+        // Controls share 8 with warm; dialog / flat stay distinct.
+        assertEquals(LeziShapes.Button, LeziShapes.JournalButton)
         assertNotEquals(LeziShapes.Md, LeziShapes.JournalDialog)
+        assertNotEquals(LeziShapes.Md, LeziShapes.JournalFlat)
+        assertNotEquals(LeziShapes.Lg, LeziShapes.JournalLg)
     }
 
     @Test

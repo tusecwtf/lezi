@@ -9,6 +9,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
@@ -534,7 +535,23 @@ fun TimelineRailCard(
             null
         }
 
-    LeziCard(modifier = modifier.fillMaxWidth(), contentPadding = contentPadding) {
+    val panel: @Composable (@Composable ColumnScope.() -> Unit) -> Unit = { body ->
+        if (journal) {
+            LeziSurfacePanel(
+                modifier = modifier.fillMaxWidth(),
+                contentPadding = contentPadding,
+                bottomBand = true,
+                content = body,
+            )
+        } else {
+            LeziCard(
+                modifier = modifier.fillMaxWidth(),
+                contentPadding = contentPadding,
+                content = body,
+            )
+        }
+    }
+    panel {
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,

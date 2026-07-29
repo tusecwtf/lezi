@@ -275,7 +275,7 @@ internal fun resolveLeziColorScheme(
 /** Exposed for unit tests that assert Material shape mapping per template. */
 internal fun leziShapes(style: LeziVisualStyle): Shapes = when (style) {
     LeziVisualStyle.Warm -> Shapes(
-        extraSmall = RoundedCornerShape(8.dp),
+        extraSmall = LeziShapes.Sm,
         small = LeziShapes.Sm,
         medium = LeziShapes.Md,
         large = LeziShapes.Lg,
@@ -401,8 +401,9 @@ object LeziThemeExt {
     val isJournal: Boolean
         @Composable get() = LocalLeziVisualStyle.current == LeziVisualStyle.Journal
 
+    /** Warm cards use 8dp; journal list/panel shells are flat (0). Controls keep 8. */
     val cardShape: Shape
-        @Composable get() = if (isJournal) LeziShapes.JournalCard else LeziShapes.Md
+        @Composable get() = if (isJournal) LeziShapes.JournalFlat else LeziShapes.Md
 
     val controlShape: Shape
         @Composable get() = if (isJournal) LeziShapes.JournalButton else LeziShapes.Sm
@@ -414,7 +415,7 @@ object LeziThemeExt {
         @Composable get() = if (isJournal) LeziShapes.JournalDialog else LeziShapes.Md
 
     val dockShape: Shape
-        @Composable get() = if (isJournal) LeziShapes.JournalCard else LeziShapes.Lg
+        @Composable get() = if (isJournal) LeziShapes.JournalFlat else LeziShapes.Lg
 
     val dockElevation: Dp
         @Composable get() = if (isJournal) LeziElevation.DockJournal else LeziElevation.DockWarm
@@ -424,4 +425,8 @@ object LeziThemeExt {
 
     val modalElevation: Dp
         @Composable get() = if (isJournal) LeziElevation.ModalJournal else LeziElevation.ModalWarm
+
+    /** Outer corner for swipe action strips (journal flat rows → 0). */
+    val swipeActionCorner: Dp
+        @Composable get() = if (isJournal) 0.dp else 8.dp
 }

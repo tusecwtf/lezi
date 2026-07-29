@@ -49,6 +49,7 @@ import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.designsystem.LeziCard
 import com.lezi.babylog.designsystem.LeziShapes
 import com.lezi.babylog.designsystem.LeziSpacing
+import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.PageHero
@@ -248,55 +249,47 @@ fun SummaryRoute(
             Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(LeziSpacing.Page),
-            verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
+                .padding(
+                    horizontal = if (journal) 0.dp else LeziSpacing.Page,
+                    vertical = LeziSpacing.Page,
+                ),
+            verticalArrangement = Arrangement.spacedBy(if (journal) 0.dp else LeziSpacing.Sm),
         ) {
-            PageHero(
-                eyebrow = "",
-                title = "汇总",
-            )
-
-            RangeTabs(
-                selected = ui.range,
-                onSelect = vm::setRange,
-            )
-
-            val windows = t.chartWindows
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            Column(
+                Modifier.padding(horizontal = if (journal) LeziSpacing.Page else 0.dp),
             ) {
-                CompactMetricCard(
-                    title = "喂养",
-                    value = if (windows.dayFeedCount == 0 && windows.dayFeedMl == 0) {
-                        "0次"
-                    } else {
-                        "${windows.dayFeedCount}次"
-                    },
-                    detail = if (windows.dayFeedMl == 0 && windows.dayNursingMin == 0L) {
-                        "当日暂无详情"
-                    } else {
-                        formatFeedWindowTotal(windows.dayFeedMl, windows.dayNursingMin)
-                    },
-                    modifier = Modifier.weight(1f),
+                PageHero(
+                    eyebrow = "",
+                    title = "汇总",
                 )
-                CompactMetricCard(
-                    title = "睡眠",
-                    value = formatMin(windows.daySleepMin),
-                    detail = if (windows.daySleepSegments == 0) {
-                        "当日 0 段"
-                    } else {
-                        "当日 ${windows.daySleepSegments} 段"
-                    },
-                    modifier = Modifier.weight(1f),
-                )
-                CompactMetricCard(
-                    title = "尿布",
-                    value = "${windows.dayDiaper}",
-                    detail = "当日 尿 ${windows.dayPee} · 便 ${windows.dayPoop}",
-                    modifier = Modifier.weight(1f),
+
+                RangeTabs(
+                    selected = ui.range,
+                    onSelect = vm::setRange,
                 )
             }
+
+            val windows = t.chartWindows
+            SummaryKpiStrip(
+                feedValue = if (windows.dayFeedCount == 0 && windows.dayFeedMl == 0) {
+                    "0次"
+                } else {
+                    "${windows.dayFeedCount}次"
+                },
+                feedDetail = if (windows.dayFeedMl == 0 && windows.dayNursingMin == 0L) {
+                    "当日暂无详情"
+                } else {
+                    formatFeedWindowTotal(windows.dayFeedMl, windows.dayNursingMin)
+                },
+                sleepValue = formatMin(windows.daySleepMin),
+                sleepDetail = if (windows.daySleepSegments == 0) {
+                    "当日 0 段"
+                } else {
+                    "当日 ${windows.daySleepSegments} 段"
+                },
+                diaperValue = "${windows.dayDiaper}",
+                diaperDetail = "当日 尿 ${windows.dayPee} · 便 ${windows.dayPoop}",
+            )
 
             if (ui.range != SummaryRange.Day && ui.showAvgSleep) {
                 val averageSleep = t.sleepMin / ui.range.dayCount.coerceAtLeast(1)
@@ -304,12 +297,13 @@ fun SummaryRoute(
                     "日均睡眠 ${formatMin(averageSleep)}",
                     style = LeziTypography.Meta,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = if (journal) LeziSpacing.Page else 0.dp),
                 )
             }
 
             if (ui.range == SummaryRange.Week && ui.comparePrevWeek) {
                 val previous = ui.previousWeekTotals
-                LeziCard(Modifier.fillMaxWidth()) {
+                LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
                     Text("对比上周", style = LeziTypography.TitleSm)
                     if (previous == null) {
                         Text(
@@ -356,10 +350,9 @@ fun SummaryRoute(
                 SummaryRange.Month -> "本月"
             }
 
-            LeziCard(Modifier.fillMaxWidth()) {
+            LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
                 ChartCardHeader(
-                    eyebrow = "记录分布",
-                    title = "喂养节律",
+                    title = "喂养",
                     scopeLabel = chartTotalScope,
                     totalValue = feedChartTotal,
                 )
@@ -381,9 +374,9 @@ fun SummaryRoute(
                 }
             }
 
-            LeziCard(Modifier.fillMaxWidth()) {
+            LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
                 ChartCardHeader(
-                    title = "睡眠片段",
+                    title = "睡眠",
                     scopeLabel = chartTotalScope,
                     totalValue = sleepChartTotal,
                 )
@@ -407,9 +400,9 @@ fun SummaryRoute(
                 }
             }
 
-            LeziCard(Modifier.fillMaxWidth()) {
+            LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
                 ChartCardHeader(
-                    title = "尿布趋势",
+                    title = "尿布",
                     scopeLabel = chartTotalScope,
                     totalValue = diaperChartTotal,
                 )
@@ -442,7 +435,7 @@ fun SummaryRoute(
                     detail = "${t.tempDays} 天有记录",
                 )
                 WeekLineChart(
-                    title = "体温趋势",
+                    title = "体温",
                     values = t.dayValuesTemp,
                     dates = chartDates,
                     color = ext.danger,
@@ -506,6 +499,74 @@ private fun RangeTabs(
                     } else {
                         MaterialTheme.colorScheme.onSurfaceVariant
                     },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SummaryKpiStrip(
+    feedValue: String,
+    feedDetail: String,
+    sleepValue: String,
+    sleepDetail: String,
+    diaperValue: String,
+    diaperDetail: String,
+) {
+    val journal = LeziThemeExt.isJournal
+    val cells = listOf(
+        Triple("喂养", feedValue, feedDetail),
+        Triple("睡眠", sleepValue, sleepDetail),
+        Triple("尿布", diaperValue, diaperDetail),
+    )
+    if (journal) {
+        LeziSurfacePanel(
+            modifier = Modifier.fillMaxWidth(),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+            bottomBand = true,
+        ) {
+            Row(Modifier.fillMaxWidth()) {
+                cells.forEachIndexed { index, (title, value, detail) ->
+                    Column(
+                        Modifier
+                            .weight(1f)
+                            .heightIn(min = 74.dp)
+                            .padding(horizontal = 8.dp, vertical = 10.dp),
+                    ) {
+                        Text(title, style = LeziTypography.Meta, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.height(4.dp))
+                        Text(value, style = LeziTypography.Metric.copy(fontSize = 20.sp), maxLines = 1)
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            detail,
+                            style = LeziTypography.Meta.copy(fontSize = 10.sp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                        )
+                    }
+                    if (index < cells.lastIndex) {
+                        Spacer(
+                            Modifier
+                                .width(1.dp)
+                                .height(74.dp)
+                                .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.7f)),
+                        )
+                    }
+                }
+            }
+        }
+    } else {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            cells.forEach { (title, value, detail) ->
+                CompactMetricCard(
+                    title = title,
+                    value = value,
+                    detail = detail,
+                    modifier = Modifier.weight(1f),
                 )
             }
         }
@@ -605,13 +666,14 @@ internal fun calculateBarSlotLayout(
 @Composable
 private fun MetricRow(title: String, value: String, detail: String, compare: String? = null) {
     val journal = LeziThemeExt.isJournal
-    LeziCard(
+    LeziSurfacePanel(
         modifier = Modifier.fillMaxWidth(),
         contentPadding = if (journal) {
             androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 8.dp)
         } else {
             androidx.compose.foundation.layout.PaddingValues(14.dp)
         },
+        bottomBand = true,
     ) {
         if (journal) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -829,12 +891,11 @@ private fun MiniBarChart(
 @Composable
 private fun JournalWeekGrid(summary: WeekSummary) {
     val ext = LeziThemeExt.colors
-    LeziCard(
+    LeziSurfacePanel(
         modifier = Modifier.fillMaxWidth(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(10.dp),
+        bottomBand = true,
     ) {
-        Text("周节律网格", style = LeziTypography.Label)
-        Spacer(Modifier.height(8.dp))
         Row(Modifier.fillMaxWidth()) {
             Column(
                 Modifier
@@ -928,7 +989,7 @@ private fun WeekLineChart(
 ) {
     val journal = LeziThemeExt.isJournal
     val grid = LeziThemeExt.colors.chartGrid
-    LeziCard(modifier = Modifier.fillMaxWidth()) {
+    LeziSurfacePanel(modifier = Modifier.fillMaxWidth(), bottomBand = true) {
         Text(title, style = LeziTypography.TitleSm)
         Spacer(Modifier.height(8.dp))
         val max = (values.filter { it > 0f }.maxOrNull() ?: 37f).coerceAtLeast(37.5f)

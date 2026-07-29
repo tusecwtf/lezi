@@ -229,8 +229,8 @@ fun SwipeEditDeleteRow(
         else -> Color.Transparent
     }
     val showActionLabel = fillFraction >= SWIPE_LABEL_MIN_RATIO
-    // Match RecordRow / LeziCard outer radius; only the outer edge of the strip is rounded.
-    val corner: Dp = if (LeziThemeExt.isJournal) 8.dp else 20.dp
+    // Match row outer radius: journal flat list = 0; warm cards = 8.
+    val corner: Dp = LeziThemeExt.swipeActionCorner
     val stripShape = if (revealEdit) {
         RoundedCornerShape(topStart = 0.dp, topEnd = corner, bottomEnd = corner, bottomStart = 0.dp)
     } else {

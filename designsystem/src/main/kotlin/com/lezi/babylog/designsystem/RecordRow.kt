@@ -7,13 +7,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -37,32 +37,30 @@ fun RecordRow(
     modifier: Modifier = Modifier,
 ) {
     if (LeziThemeExt.isJournal) {
-        Surface(
-            modifier = modifier
+        // Flat list row: grid columns + bottom hairline, no card chrome.
+        Column(
+            modifier
                 .fillMaxWidth()
-                .heightIn(min = LeziSpacing.Touch)
+                .background(MaterialTheme.colorScheme.surface)
                 .clickable(onClick = onClick),
-            shape = LeziShapes.JournalCard,
-            color = MaterialTheme.colorScheme.surface,
-            border = androidx.compose.foundation.BorderStroke(
-                1.dp,
-                MaterialTheme.colorScheme.outline,
-            ),
         ) {
             Row(
-                Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = LeziSpacing.Touch)
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
                     time,
                     style = LeziTypography.Mono,
-                    modifier = Modifier.width(48.dp),
+                    modifier = Modifier.width(52.dp),
                     maxLines = 1,
                 )
                 Box(
                     Modifier
-                        .size(30.dp)
-                        .clip(CircleShape)
+                        .size(34.dp)
+                        .clip(LeziShapes.JournalButton)
                         .background(toneBg(tone)),
                     contentAlignment = Alignment.Center,
                 ) { leading() }
@@ -93,8 +91,17 @@ fun RecordRow(
                     relative,
                     style = LeziTypography.Meta,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.width(48.dp),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
+            Spacer(
+                Modifier
+                    .fillMaxWidth()
+                    .height(1.dp)
+                    .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.85f)),
+            )
         }
         return
     }

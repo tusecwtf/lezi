@@ -62,7 +62,7 @@ import com.lezi.babylog.core.model.SettingsLocal
 import com.lezi.babylog.core.model.limitBabyNicknameInput
 import com.lezi.babylog.core.model.birthWeightValidationError
 import com.lezi.babylog.core.ui.BabyAvatar
-import com.lezi.babylog.designsystem.LeziCard
+import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziDatePicker
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
@@ -463,7 +463,7 @@ fun SettingsRoute(
             )
 
             Text("关于", style = LeziTypography.Eyebrow, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            LeziCard(Modifier.fillMaxWidth()) {
+            LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
                 Text("乐记", style = LeziTypography.TitleSm)
                 Text(
                     "无广告 · 无内购 · 本地优先",
@@ -994,10 +994,11 @@ private fun MenuRow(
     leading: (@Composable () -> Unit)? = null,
     trailing: (@Composable () -> Unit)? = null,
 ) {
-    LeziCard(
+    LeziSurfacePanel(
         modifier = Modifier.fillMaxWidth(),
         onClick = onClick,
         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 10.dp),
+        bottomBand = true,
     ) {
         Row(
             Modifier.fillMaxWidth(),

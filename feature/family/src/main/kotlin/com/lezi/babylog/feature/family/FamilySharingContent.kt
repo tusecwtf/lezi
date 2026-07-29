@@ -16,7 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import com.lezi.babylog.designsystem.LeziCard
+import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
@@ -69,7 +69,7 @@ internal fun FamilySharingContent(
     )
 
     SectionHeading(title = "我们家")
-    LeziCard(modifier = Modifier.fillMaxWidth()) {
+    LeziSurfacePanel(modifier = Modifier.fillMaxWidth(), bottomBand = true) {
         if (ui.enabled) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
