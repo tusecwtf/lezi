@@ -4,7 +4,7 @@
 
 **Blocked by:** None — can start immediately
 
-**Status:** implemented-awaiting-device-smoke
+**Status:** complete
 
 **Size:** S–M
 
@@ -16,6 +16,7 @@
 - [x] 服务成功启动后才发布运行确认；通知创建失败也走同一安全恢复契约。
 - [x] 应用重启能区分真实存活计时、可恢复待启动状态与已失败请求，不自动制造重复计时。
 - [x] 自动化测试覆盖成功、每类启动异常、重复点击、初始化恢复和重试成功。
+- [x] API 35 设备验证真实前台态、静默 AppOp 拒绝、显式重试和进程失联恢复。
 
 ## Validation
 
@@ -28,4 +29,5 @@
 ## Evidence
 
 - [实现与自动化证据](../evidence/21/timer-service-start-recovery.md)
-- 受限后台启动环境的设备 smoke 尚未执行，因此本票不得标记 `complete`。
+- 固定提交 `e6742f1a3bcde05443b68dcb170b83b16ab69ccb` 的 API 35 设备 smoke 已完成；
+  正常启动、静默拒绝、解除限制重试与 force-stop 恢复均有系统/UI 双重回执。
