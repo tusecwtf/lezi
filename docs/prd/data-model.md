@@ -194,8 +194,10 @@ server-owned metadata；不修改护理内容、照片、删除状态或业务�
 | `custom` | `title`, `detail?`, `custom_item_id`, `icon_slot?`；标题/图标为创建时快照 |
 
 Record 的本机 Room payload 使用正数 `custom_item_id`。家庭 wire 不发送这个设备自增 id，
-而是在实体根携带 `custom_item_client_uuid`：`type=custom` 时必须引用同家庭、未删除的
-CustomItemDef；接收端以该 UUID 解析自己的本机 id 后再写入 Room。其它类型必须省略或置空。
+而是在实体根携带 `custom_item_client_uuid`。同家庭且未删除的 CustomItemDef 才能用于
+新建 `custom` Record；已 tombstone 的定义只保留引用存在性，允许既有历史 Record
+编辑/删除，以及由既有计划明确关联的履行事实继续发布，但不能用于任意新事实。
+接收端以该 UUID 解析自己的本机 id 后再写入 Room。其它类型必须省略或置空。
 服务端只接受上表当前类型，`memo`、`other` 与未知字符串均返回 `422`。
 
 **不做**：挤奶库存余额表。
@@ -272,9 +274,10 @@ NAS 持久化和 pull 的 current MediaAsset payload 固定包含三个归属 UU
 最多 10：`id`, `family_id`, `name`, `icon_slot` (0–7), `client_uuid`,
 `created_by_membership_id`, `updated_at`, `deleted_at`，本机 `syncDirty`。
 图标固定模板，不支持自定义图标资源；排序、显隐和常用槽位属于 SettingsLocal，
-不进入共享定义。家庭同步实体类型为 `custom_item`（ordinary push），服务端在首次
+不进入共享定义。家庭同步实体类型为 `custom_item`（空媒体 atomic bundle），服务端在首次
 写入时从认证 membership 盖章创建者，普通成员仅可改自己的定义，管理员可改全部，
-tombstone 不可复活。删除目录项不级联删除或改写已存在的 `custom` 记录。
+tombstone 不可复活。删除目录项不级联删除或改写已存在的 `custom` 记录，也不会重新进入
+可选择目录；其 UUID 继续作为同家庭历史记录/计划的引用完整性证据。
 
 ### 3.11 CarePlan（本机、NAS wire/ACL 与客户端家庭 apply 已落地）
 
@@ -296,7 +299,8 @@ NAS 原子包根类型 `care_plan` 的 wire payload 为：
 `created_by_membership_id`（服务端盖章）, `fulfilled_record_client_uuid?`,
 `fulfilled_at?`。计划媒体为 bundle 内 `media` 且 `care_plan_client_uuid` 指向根。
 `type` 使用与 Record 相同的当前类型集合；`type=custom` 时
-`custom_item_client_uuid` 必须引用同家庭、未删除的 CustomItemDef，其它类型必须省略或置空。
+`custom_item_client_uuid` 新建时必须引用同家庭、未删除的 CustomItemDef；既有计划可继续
+引用同家庭 tombstone 定义并被编辑、删除或显式履行，其它类型必须省略或置空。
 
 当前状态为 `pending`, `missed`, `completed`, `skipped`，且只支持单次计划。
 `missed` 可由当前绝对时刻超过计划时刻且仍未完成/跳过派生。本机履行在同一事务

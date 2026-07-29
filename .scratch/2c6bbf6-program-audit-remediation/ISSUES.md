@@ -8,13 +8,13 @@ Current validation HEAD: `d7b3bea3483367d663fa330eb6596aba3ed73e50`
 ## Current audit disposition
 
 - Findings: **26**
-- Fixed: **0**
-- Active files in this tracker: **24**
+- Fixed: **2（05、15）**
+- Active tickets in this tracker: **22**
 - Canonical layout tickets: **2**
 - Partial findings: **02、04、06、09、10、14、17、19**
-- Still-valid findings: **01、03、05、07、08、11、12、13、15、16、18、20、21、22、23、24、25、26**
+- Still-valid findings: **01、03、07、08、11、12、13、16、18、20、21、22、23、24、25、26**
 
-`partial` 只描述 current HEAD 已有部分结构，不改变票状态；所有行均为 `ready-for-agent`。
+`partial` 只描述审计时已有部分结构，不改变未完成票状态。
 
 ## Dependency graph
 
@@ -38,9 +38,9 @@ layout/05 已删除分区 ────┘
 
 ## Frontier
 
-当前 audit frontier：**01、03、05、07、10、14、15、16、17、18、20、21、23、24**。
+当前 audit frontier：**01、03、06、07、10、14、16、17、18、20、21、23、24**。
 
-建议首轮并行：**01、05、07**。其余 frontier 同样可领取，但不得把“frontier”误解为必须同时开工。
+建议并行：**01、06、07**。其余 frontier 同样可领取，但不得把“frontier”误解为必须同时开工。
 
 ## Tickets
 
@@ -50,7 +50,7 @@ layout/05 已删除分区 ────┘
 | [02](./issues/02-reference-aware-photo-file-cleanup.md) | 按活跃引用回收共享照片文件 | 01 | M | partial | ready-for-agent |
 | [03](./issues/03-bounded-off-main-photo-decoding.md) | 统一有界、后台图片解码 | — | M | still-valid | ready-for-agent |
 | [04](./issues/04-bound-photo-import-and-upload-memory.md) | 限制照片导入与同步上传内存 | 03 | M | partial | ready-for-agent |
-| [05](./issues/05-server-historical-custom-item-references.md) | NAS 接受 tombstone 定义的历史引用 | — | M | still-valid | ready-for-agent |
+| [05](./issues/05-server-historical-custom-item-references.md) | NAS 接受 tombstone 定义的历史引用 | — | M | still-valid | complete |
 | [06](./issues/06-sync-historical-custom-records-and-plans.md) | 历史自定义记录与计划完整同步 | 05 | M | partial | ready-for-agent |
 | [07](./issues/07-reclaim-session-immediate-full-pull.md) | 接回会话后立即执行全量 pull | — | M | still-valid | ready-for-agent |
 | [08](./issues/08-owner-reclaim-before-local-baby.md) | 无宝宝状态直接接回 owner | 07 | M | still-valid | ready-for-agent |

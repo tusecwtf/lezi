@@ -1225,6 +1225,9 @@ impl Store {
             family_id,
             &missing_references,
         )?);
+        let persisted = existing.clone();
+        let fulfillment_custom_references =
+            load_fulfillment_custom_references(&transaction, family_id, &package)?;
         for entity in &package {
             existing.insert(
                 entity_key(entity),
@@ -1235,7 +1238,14 @@ impl Store {
                 },
             );
         }
-        validate_push(role, membership_id, &package, &existing)?;
+        validate_push(
+            role,
+            membership_id,
+            &package,
+            &existing,
+            &persisted,
+            &fulfillment_custom_references,
+        )?;
         let root = package
             .iter()
             .find(|entity| entity.entity_type != "media")
@@ -1613,6 +1623,9 @@ impl Store {
             family_id,
             &missing_references,
         )?);
+        let persisted = existing.clone();
+        let fulfillment_custom_references =
+            load_fulfillment_custom_references(&transaction, family_id, &effective)?;
         // Intra-package references: treat full package (not only LWW winners) as present.
         for entity in &package {
             existing
@@ -1623,7 +1636,14 @@ impl Store {
                     payload: entity.payload.clone(),
                 });
         }
-        validate_push(role, membership_id, &effective, &existing)?;
+        validate_push(
+            role,
+            membership_id,
+            &effective,
+            &existing,
+            &persisted,
+            &fulfillment_custom_references,
+        )?;
 
         let mut cursor: i64 = transaction.query_row(
             "SELECT rev FROM family_meta WHERE family_id = ?1",
@@ -2761,11 +2781,56 @@ fn validation_reference_keys(entities: &[Entity]) -> BTreeSet<EntityKey> {
     references
 }
 
+/// A completed, persisted CarePlan is the server-side proof that a subsequently
+/// published Record belongs to an explicit fulfillment. This reverse lookup is
+/// intentionally narrow: it does not make a deleted catalog item selectable for
+/// unrelated new facts.
+fn load_fulfillment_custom_references(
+    connection: &Connection,
+    family_id: &str,
+    entities: &[Entity],
+) -> Result<BTreeSet<(String, String)>, StoreError> {
+    let record_ids = entities
+        .iter()
+        .filter(|entity| entity.entity_type == "record")
+        .map(|entity| entity.client_uuid.as_str())
+        .collect::<BTreeSet<_>>();
+    if record_ids.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let mut statement = connection.prepare(
+        "
+        SELECT json_extract(payload_json, '$.custom_item_client_uuid')
+        FROM entities
+        WHERE family_id = ?1
+          AND entity_type = 'care_plan'
+          AND deleted_at IS NULL
+          AND json_extract(payload_json, '$.status') = 'completed'
+          AND json_extract(payload_json, '$.fulfilled_record_client_uuid') = ?2
+          AND json_extract(payload_json, '$.fulfilled_at') IS NOT NULL
+        ",
+    )?;
+    let mut references = BTreeSet::new();
+    for record_id in record_ids {
+        let rows = statement.query_map(params![family_id, record_id], |row| {
+            row.get::<_, Option<String>>(0)
+        })?;
+        for custom_item_id in rows {
+            if let Some(custom_item_id) = custom_item_id? {
+                references.insert((record_id.to_owned(), custom_item_id));
+            }
+        }
+    }
+    Ok(references)
+}
+
 fn validate_push(
     role: &str,
     membership_id: &str,
     entities: &[Entity],
     existing: &HashMap<EntityKey, ExistingEntity>,
+    persisted: &HashMap<EntityKey, ExistingEntity>,
+    fulfillment_custom_references: &BTreeSet<(String, String)>,
 ) -> Result<(), StoreError> {
     let mut baby_ids = existing
         .keys()
@@ -2795,6 +2860,11 @@ fn validate_push(
             live_custom_item_ids.remove(&entity.client_uuid);
         }
     }
+    let referential_custom_item_ids = existing
+        .keys()
+        .filter(|(entity_type, _)| entity_type == "custom_item")
+        .map(|(_, id)| id.clone())
+        .collect::<BTreeSet<_>>();
 
     let mut effective_records = existing
         .iter()
@@ -2813,7 +2883,13 @@ fn validate_push(
                 "record baby_client_uuid does not exist".to_owned(),
             ));
         }
-        validate_custom_item_reference(entity, &live_custom_item_ids)?;
+        validate_custom_item_reference(
+            entity,
+            &live_custom_item_ids,
+            &referential_custom_item_ids,
+            persisted,
+            fulfillment_custom_references,
+        )?;
         effective_records.insert(entity.client_uuid.clone(), entity.payload.clone());
     }
     let record_ids = effective_records.keys().cloned().collect::<BTreeSet<_>>();
@@ -2835,7 +2911,13 @@ fn validate_push(
                 "care_plan baby_client_uuid does not exist".to_owned(),
             ));
         }
-        validate_custom_item_reference(entity, &live_custom_item_ids)?;
+        validate_custom_item_reference(
+            entity,
+            &live_custom_item_ids,
+            &referential_custom_item_ids,
+            persisted,
+            fulfillment_custom_references,
+        )?;
         effective_care_plans.insert(entity.client_uuid.clone(), entity.payload.clone());
     }
     let care_plan_ids = effective_care_plans
@@ -3028,6 +3110,9 @@ fn validate_push(
 fn validate_custom_item_reference(
     entity: &Entity,
     live_custom_item_ids: &BTreeSet<String>,
+    referential_custom_item_ids: &BTreeSet<String>,
+    persisted: &HashMap<EntityKey, ExistingEntity>,
+    fulfillment_custom_references: &BTreeSet<(String, String)>,
 ) -> Result<(), StoreError> {
     let item_type = entity
         .payload
@@ -3053,9 +3138,29 @@ fn validate_custom_item_reference(
         }
         _ => {}
     }
-    if custom_item_id.is_some_and(|id| !live_custom_item_ids.contains(id)) {
+    let Some(custom_item_id) = custom_item_id else {
+        return Ok(());
+    };
+    if !referential_custom_item_ids.contains(custom_item_id) {
         return Err(StoreError::UnresolvedReference(format!(
             "{} custom_item_client_uuid does not exist",
+            entity.entity_type
+        )));
+    }
+    if live_custom_item_ids.contains(custom_item_id) {
+        return Ok(());
+    }
+    let historical_entity = persisted
+        .get(&(entity.entity_type.clone(), entity.client_uuid.clone()))
+        .and_then(|current| current.payload.get("custom_item_client_uuid"))
+        .and_then(Value::as_str)
+        == Some(custom_item_id);
+    let explicit_fulfillment = entity.entity_type == "record"
+        && fulfillment_custom_references
+            .contains(&(entity.client_uuid.clone(), custom_item_id.to_owned()));
+    if !historical_entity && !explicit_fulfillment {
+        return Err(StoreError::UnresolvedReference(format!(
+            "{} custom_item_client_uuid is deleted and cannot be selected for a new item",
             entity.entity_type
         )));
     }
@@ -3560,7 +3665,7 @@ mod tests {
             ),
             (
                 record_payload("custom", Some(deleted_custom_item_id)),
-                "record custom_item_client_uuid does not exist",
+                "record custom_item_client_uuid is deleted and cannot be selected for a new item",
             ),
         ] {
             let result = publish_root(
@@ -3584,6 +3689,151 @@ mod tests {
                     Uuid::new_v4(),
                     3,
                     record_payload("custom", Some(live_custom_item_id)),
+                ),
+                10,
+            )
+            .unwrap()
+            .applied,
+            1
+        );
+    }
+
+    #[test]
+    fn tombstoned_custom_item_supports_only_persisted_history_and_its_fulfillment() {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("lezi.db");
+        let store = Store::open(&database_path).unwrap();
+        let family_id = family(&store);
+        let principal = owner_principal(&family_id);
+        let baby_id = Uuid::new_v4();
+        let custom_item_id = Uuid::new_v4();
+        let historical_record_id = Uuid::new_v4();
+        let historical_plan_id = Uuid::new_v4();
+        let fulfilled_record_id = Uuid::new_v4();
+        let record_payload = |note: &str| {
+            json!({
+                "baby_client_uuid":baby_id,"type":"custom",
+                "custom_item_client_uuid":custom_item_id,"timestamp":100,
+                "end_timestamp":null,"note":note,"payload_json":{"title":"抚触"},
+                "schema_version":2
+            })
+        };
+        let plan_payload = |status: &str, fulfilled_record: Option<Uuid>| {
+            json!({
+                "baby_client_uuid":baby_id,"type":"custom",
+                "custom_item_client_uuid":custom_item_id,
+                "scheduled_at":1_700_000_000_000i64,
+                "scheduled_zone_id":"Asia/Shanghai","status":status,
+                "payload_json":{"title":"抚触"},"schema_version":2,"note":null,
+                "created_by_membership_id":"m-owner",
+                "fulfilled_record_client_uuid":fulfilled_record,"fulfilled_at":
+                    fulfilled_record.map(|_| 1_700_000_100_000i64)
+            })
+        };
+
+        for root in [
+            entity(
+                "baby",
+                baby_id,
+                1,
+                json!({
+                    "nickname":"年年","sex":"female","birthday":"2025-01-02",
+                    "avatar_media_uuid":null,"birth_weight_grams":3200
+                }),
+            ),
+            entity(
+                "custom_item",
+                custom_item_id,
+                1,
+                json!({
+                    "name":"抚触","icon_slot":2,"created_by_membership_id":null
+                }),
+            ),
+            entity(
+                "record",
+                historical_record_id,
+                2,
+                record_payload("历史记录"),
+            ),
+            entity(
+                "care_plan",
+                historical_plan_id,
+                2,
+                plan_payload("pending", None),
+            ),
+        ] {
+            publish_root(&store, &principal, root, 10).unwrap();
+        }
+        let mut tombstone = entity(
+            "custom_item",
+            custom_item_id,
+            3,
+            json!({
+                "name":"抚触","icon_slot":2,"created_by_membership_id":"m-owner"
+            }),
+        );
+        tombstone.deleted_at = Some(3);
+        publish_root(&store, &principal, tombstone, 10).unwrap();
+
+        // Reopen the database so acceptance cannot depend on staging memory.
+        let restarted = Store::open(&database_path).unwrap();
+        assert_eq!(
+            publish_root(
+                &restarted,
+                &principal,
+                entity(
+                    "record",
+                    historical_record_id,
+                    4,
+                    record_payload("历史记录已编辑"),
+                ),
+                10,
+            )
+            .unwrap()
+            .applied,
+            1
+        );
+
+        for root in [
+            entity("record", Uuid::new_v4(), 4, record_payload("伪造新事实")),
+            entity(
+                "care_plan",
+                Uuid::new_v4(),
+                4,
+                plan_payload("pending", None),
+            ),
+        ] {
+            assert!(matches!(
+                publish_root(&restarted, &principal, root, 10),
+                Err(StoreError::UnresolvedReference(_))
+            ));
+        }
+
+        assert_eq!(
+            publish_root(
+                &restarted,
+                &principal,
+                entity(
+                    "care_plan",
+                    historical_plan_id,
+                    5,
+                    plan_payload("completed", Some(fulfilled_record_id)),
+                ),
+                10,
+            )
+            .unwrap()
+            .applied,
+            1
+        );
+        assert_eq!(
+            publish_root(
+                &restarted,
+                &principal,
+                entity(
+                    "record",
+                    fulfilled_record_id,
+                    5,
+                    record_payload("显式履行事实"),
                 ),
                 10,
             )

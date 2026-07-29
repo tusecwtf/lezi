@@ -8086,6 +8086,187 @@ fn custom_item_payload(name: &str, icon_slot: i64) -> Value {
 }
 
 #[tokio::test]
+async fn tombstoned_custom_item_supports_history_and_fulfillment_but_not_new_roots() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "custom-history-owner",
+        "custom-history-owner-request-00001",
+    )
+    .await;
+    let token = owner["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, token).await;
+    let custom_item_id = Uuid::new_v4().to_string();
+    let historical_record_id = Uuid::new_v4().to_string();
+    let historical_plan_id = Uuid::new_v4().to_string();
+    let fulfilled_record_id = Uuid::new_v4().to_string();
+    let custom_record = |note: &str| {
+        json!({
+            "baby_client_uuid": baby_id,
+            "type": "custom",
+            "custom_item_client_uuid": custom_item_id,
+            "timestamp": 1_700_000_000_000i64,
+            "end_timestamp": null,
+            "note": note,
+            "payload_json": {"title": "抚触"},
+            "schema_version": 2,
+        })
+    };
+    let mut custom_plan = care_plan_payload(&baby_id, "custom");
+    custom_plan["custom_item_client_uuid"] = json!(custom_item_id);
+
+    for root in [
+        entity_wire(
+            "custom_item",
+            &custom_item_id,
+            2,
+            custom_item_payload("抚触", 2),
+            None,
+        ),
+        entity_wire(
+            "record",
+            &historical_record_id,
+            3,
+            custom_record("历史记录"),
+            None,
+        ),
+        entity_wire(
+            "care_plan",
+            &historical_plan_id,
+            3,
+            custom_plan.clone(),
+            None,
+        ),
+    ] {
+        let (status, body) = publish_root_bundle(&rig.app, token, root).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let (deleted_status, deleted_body) = publish_root_bundle(
+        &rig.app,
+        token,
+        entity_wire(
+            "custom_item",
+            &custom_item_id,
+            4,
+            custom_item_payload("抚触", 2),
+            Some(4),
+        ),
+    )
+    .await;
+    assert_eq!(deleted_status, StatusCode::OK, "{deleted_body}");
+
+    let (edit_status, edit_body) = publish_root_bundle(
+        &rig.app,
+        token,
+        entity_wire(
+            "record",
+            &historical_record_id,
+            5,
+            custom_record("历史记录已编辑"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(edit_status, StatusCode::OK, "{edit_body}");
+
+    for root in [
+        entity_wire(
+            "record",
+            &Uuid::new_v4().to_string(),
+            5,
+            custom_record("伪造新事实"),
+            None,
+        ),
+        entity_wire(
+            "care_plan",
+            &Uuid::new_v4().to_string(),
+            5,
+            custom_plan.clone(),
+            None,
+        ),
+    ] {
+        let (status, body) = publish_root_bundle(&rig.app, token, root).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(
+            body["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("is deleted and cannot be selected"),
+            "{body}"
+        );
+    }
+
+    custom_plan["status"] = json!("completed");
+    custom_plan["fulfilled_record_client_uuid"] = json!(fulfilled_record_id);
+    custom_plan["fulfilled_at"] = json!(1_700_000_100_000i64);
+    let (plan_status, plan_body) = publish_root_bundle(
+        &rig.app,
+        token,
+        entity_wire("care_plan", &historical_plan_id, 6, custom_plan, None),
+    )
+    .await;
+    assert_eq!(plan_status, StatusCode::OK, "{plan_body}");
+    let (record_status, record_body) = publish_root_bundle(
+        &rig.app,
+        token,
+        entity_wire(
+            "record",
+            &fulfilled_record_id,
+            7,
+            custom_record("显式履行事实"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(record_status, StatusCode::OK, "{record_body}");
+
+    let (candidate_status, candidate_body) = publish_root_bundle(
+        &rig.app,
+        token,
+        entity_wire(
+            "fulfillment_candidate",
+            &Uuid::new_v4().to_string(),
+            8,
+            json!({
+                "care_plan_client_uuid": historical_plan_id,
+                "record_client_uuid": fulfilled_record_id,
+                "actual_timestamp": 1_700_000_000_000i64,
+            }),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(candidate_status, StatusCode::OK, "{candidate_body}");
+
+    let (record_delete_status, record_delete_body) = publish_root_bundle(
+        &rig.app,
+        token,
+        entity_wire(
+            "record",
+            &historical_record_id,
+            9,
+            custom_record("历史记录已编辑"),
+            Some(9),
+        ),
+    )
+    .await;
+    assert_eq!(record_delete_status, StatusCode::OK, "{record_delete_body}");
+
+    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    let entities = pull["entities"].as_array().unwrap();
+    assert_eq!(
+        entities
+            .iter()
+            .find(|entity| entity["client_uuid"] == custom_item_id)
+            .unwrap()["deleted_at"],
+        4
+    );
+    assert!(entities
+        .iter()
+        .any(|entity| entity["client_uuid"] == fulfilled_record_id));
+}
+
+#[tokio::test]
 async fn custom_item_create_stamps_creator_and_syncs_to_peer() {
     let rig = Rig::new();
     let owner = create_family(

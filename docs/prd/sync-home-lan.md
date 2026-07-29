@@ -639,10 +639,12 @@ Record 与 CarePlan 共享以下 current-wire 约束：
   `vomit`、`injury`、`medicine`、`hospital`、`height`、`weight`、`baby_food`、`snack`、
   `drink`、`head`、`chest`、`foot_size`、`vaccine` 与 `custom`；`memo`、`other` 和未知值
   均返回 `422`。
-- `type=custom` 时 `custom_item_client_uuid` 必须引用同家庭、未删除的 CustomItemDef；
-  wire 内的 `payload_json` 不得携带设备自增 `custom_item_id`；接收端以 UUID 解析自己的
-  本机 id 后再落库。其它类型必须省略或置空。该规则同时适用于 atomic Record 与
-  CarePlan 根。
+- `type=custom` 的新建根只能选择同家庭、未删除的 CustomItemDef。tombstone 定义不再进入
+  可选目录，但仍证明既有同 UUID Record/CarePlan 的历史引用合法；这类历史根可继续编辑、
+  删除，既有计划完成后以 `fulfilled_record_client_uuid` 明确关联的新 Record 也可发布。
+  未知、跨家庭或把 tombstone 用于任意新事实/计划的引用均以冲突拒绝。wire 内的
+  `payload_json` 不得携带设备自增 `custom_item_id`；接收端以 UUID 解析自己的本机 id 后
+  再落库。该规则同时适用于 atomic Record 与 CarePlan 根。
 - NAS 在校验后只持久化并 pull 一种 Android 可直接应用的 canonical JSON：PRD 标记为
   optional/default 的字段可由请求省略，但 NAS 会补为显式 `null` 或当前默认值；这属于
   current wire 规范化，不是旧协议兼容。非法枚举、关系、时间区间、时区或已移除字段
