@@ -31,6 +31,10 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -304,6 +308,9 @@ internal fun LayoutEditCanvas(
     writeState: DeviceLayoutWriteState = DeviceLayoutWriteState.Saved(),
     hasSubmittedIntent: Boolean = false,
     cancelDragSignal: Long = 0L,
+    undoCandidate: LayoutUndoCandidate? = null,
+    onUndo: (Long) -> Unit = {},
+    onUndoExpired: (Long) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val known = remember(customItems) { knownCatalogKeys(customItems.map { it.id }) }
@@ -358,6 +365,7 @@ internal fun LayoutEditCanvas(
     val itemFocusRequesters = remember(known) {
         known.associateWith { FocusRequester() }
     }
+    val undoSnackbarHostState = remember { SnackbarHostState() }
 
     val targetRegistry = remember { LayoutVisibleTargetRegistry() }
     var targetRegistryEpoch by remember { mutableLongStateOf(0L) }
@@ -508,12 +516,46 @@ internal fun LayoutEditCanvas(
     LaunchedEffect(Unit) {
         doneFocusRequester.requestFocus()
     }
+    LaunchedEffect(undoCandidate?.token) {
+        val candidate = undoCandidate
+        undoSnackbarHostState.currentSnackbarData?.dismiss()
+        if (candidate == null) return@LaunchedEffect
+        val message = when (candidate.kind) {
+            LayoutUndoKind.ClearSlot -> "已清空常用槽"
+            LayoutUndoKind.MoveToLocalDeleted -> "已移入本机已删除"
+        }
+        when (
+            undoSnackbarHostState.showSnackbar(
+                message = message,
+                actionLabel = "撤销",
+                withDismissAction = true,
+                duration = SnackbarDuration.Short,
+            )
+        ) {
+            SnackbarResult.ActionPerformed -> onUndo(candidate.token)
+            SnackbarResult.Dismissed -> onUndoExpired(candidate.token)
+        }
+    }
 
     Box(
         modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
             .testTag("layout_edit_mode")
+            .onPreviewKeyEvent { event ->
+                val token = undoCandidate?.token ?: return@onPreviewKeyEvent false
+                if (!event.isCtrlPressed || event.key != Key.Z) {
+                    return@onPreviewKeyEvent false
+                }
+                when (event.type) {
+                    KeyEventType.KeyDown -> true
+                    KeyEventType.KeyUp -> {
+                        onUndo(token)
+                        true
+                    }
+                    else -> false
+                }
+            }
             .onGloballyPositioned { coords ->
                 val p = coords.positionInWindow()
                 rootWindowOrigin = Offset(p.x, p.y)
@@ -1057,6 +1099,19 @@ internal fun LayoutEditCanvas(
                 )
             }
         }
+
+        SnackbarHost(
+            hostState = undoSnackbarHostState,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(
+                    start = LeziSpacing.Page,
+                    end = LeziSpacing.Page,
+                    bottom = 96.dp,
+                )
+                .zIndex(30f)
+                .testTag("layout_edit_undo_snackbar"),
+        )
     }
 }
 

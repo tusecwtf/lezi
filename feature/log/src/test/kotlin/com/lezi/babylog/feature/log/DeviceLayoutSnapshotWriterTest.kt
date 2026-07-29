@@ -6,6 +6,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -32,6 +34,86 @@ class DeviceLayoutSnapshotWriterTest {
         assertTrue(result.isSuccess)
         assertEquals(listOf(first, second), synchronized(persisted) { persisted.toList() })
         assertEquals(DeviceLayoutWriteState.Saved(second), writer.state.value)
+        scope.cancel()
+    }
+
+    @Test
+    fun eachSubmitReturnsItsOwnNormalizedCompletionReceipt() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val first = snapshot("pee").copy(quickRecordSlots = listOf("pee"))
+        val normalizedFirst = snapshot("pee")
+        val second = snapshot("sleep")
+        val writer = DeviceLayoutSnapshotWriter(scope) { value ->
+            if (value == normalizedFirst) throw IllegalStateException("first failed")
+        }
+
+        val firstReceipt = writer.submit(first)
+        val secondReceipt = writer.submit(second)
+
+        assertEquals(1L, firstReceipt.sequence)
+        assertEquals(normalizedFirst, firstReceipt.snapshot)
+        assertTrue(firstReceipt.result.await().isFailure)
+        assertEquals(2L, secondReceipt.sequence)
+        assertEquals(second, secondReceipt.snapshot)
+        assertTrue(secondReceipt.result.await().isSuccess)
+        scope.cancel()
+    }
+
+    @Test
+    fun cancellingAReceiptWaiterDoesNotCancelItsPersistCommand() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val persistStarted = CompletableDeferred<Unit>()
+        val releasePersist = CompletableDeferred<Unit>()
+        val value = snapshot("pee")
+        val writer = DeviceLayoutSnapshotWriter(scope) {
+            persistStarted.complete(Unit)
+            releasePersist.await()
+        }
+
+        val receipt = writer.submit(value)
+        persistStarted.await()
+        val waiter = launch { receipt.result.await() }
+        waiter.cancelAndJoin()
+        releasePersist.complete(Unit)
+
+        assertTrue(receipt.result.await().isSuccess)
+        assertTrue(writer.flush().isSuccess)
+        assertEquals(DeviceLayoutWriteState.Saved(value), writer.state.value)
+        scope.cancel()
+    }
+
+    @Test
+    fun failedAfterCompensationIsVisibleAndRetryRestoresUiDurability() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val before = snapshot("pee")
+        val after = snapshot("")
+        var durable = after
+        var failCompensation = true
+        val writer = DeviceLayoutSnapshotWriter(scope) { value ->
+            if (value == after && failCompensation) {
+                throw IllegalStateException("compensation failed")
+            }
+            durable = value
+        }
+
+        assertTrue(writer.submit(before).result.await().isSuccess)
+        val compensation = writer.submit(after)
+        assertTrue(compensation.result.await().isFailure)
+
+        assertEquals(before, durable)
+        assertEquals(
+            "布局保存失败，可重试",
+            layoutWriteAnnouncement(
+                prefs = after.toLayoutPrefs(),
+                state = writer.state.value,
+                hasSubmittedIntent = true,
+            ),
+        )
+
+        failCompensation = false
+        assertTrue(writer.retryLatest().isSuccess)
+        assertEquals(after, durable)
+        assertEquals(DeviceLayoutWriteState.Saved(after), writer.state.value)
         scope.cancel()
     }
 

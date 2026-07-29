@@ -7,6 +7,7 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -22,6 +23,13 @@ internal sealed interface DeviceLayoutWriteState {
         val cause: Throwable,
     ) : DeviceLayoutWriteState
 }
+
+/** Completion owned by one exact normalized snapshot write. */
+internal data class DeviceLayoutWriteReceipt(
+    val sequence: Long,
+    val snapshot: DeviceLayoutSnapshot,
+    val result: Deferred<Result<Unit>>,
+)
 
 /**
  * User-facing save feedback for the snapshot currently shown by the editor.
@@ -60,6 +68,7 @@ internal class DeviceLayoutSnapshotWriter(
         data class Persist(
             val sequence: Long,
             val snapshot: DeviceLayoutSnapshot,
+            val result: CompletableDeferred<Result<Unit>>,
         ) : Command
 
         data class Barrier(
@@ -93,6 +102,7 @@ internal class DeviceLayoutSnapshotWriter(
                         } catch (failure: Throwable) {
                             Result.failure(failure)
                         }
+                        command.result.complete(result)
                         lastCompletedSequence = command.sequence
                         lastCompletedResult = result
                         if (command.sequence == latestRequestedSequence) {
@@ -126,15 +136,21 @@ internal class DeviceLayoutSnapshotWriter(
     }
 
     @Synchronized
-    fun submit(snapshot: DeviceLayoutSnapshot) {
+    fun submit(snapshot: DeviceLayoutSnapshot): DeviceLayoutWriteReceipt {
         val normalized = normalizeDeviceLayoutSnapshot(snapshot)
         requireCurrentDeviceLayoutVersion(normalized)
         val nextSequence = sequence.incrementAndGet()
+        val result = CompletableDeferred<Result<Unit>>()
         latestRequestedSequence = nextSequence
         mutableState.value = DeviceLayoutWriteState.Saving(normalized)
-        check(commands.trySend(Command.Persist(nextSequence, normalized)).isSuccess) {
+        check(commands.trySend(Command.Persist(nextSequence, normalized, result)).isSuccess) {
             "Device layout writer is closed"
         }
+        return DeviceLayoutWriteReceipt(
+            sequence = nextSequence,
+            snapshot = normalized,
+            result = result,
+        )
     }
 
     /** Wait until the newest snapshot at return time has durably succeeded or failed. */
