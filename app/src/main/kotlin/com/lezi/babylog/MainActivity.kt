@@ -100,6 +100,7 @@ import java.time.LocalDate
 import java.time.YearMonth
 import java.time.ZoneId
 import java.time.ZonedDateTime
+import java.time.temporal.ChronoUnit
 import java.util.Locale
 import javax.inject.Inject
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -347,11 +348,27 @@ class RootViewModel @Inject constructor(
     fun cycleBaby() {
         viewModelScope.launch {
             val state = ui.value
-            if (state.babies.size < 2) return@launch
-            val cur = state.baby?.id
-            val idx = state.babies.indexOfFirst { it.id == cur }.takeIf { it >= 0 } ?: 0
-            val next = state.babies[(idx + 1) % state.babies.size]
+            val nextId = nextSiblingId(state.babies.map(Baby::id), state.baby?.id)
+                ?: return@launch
+            careLog.setCurrentBaby(nextId)
+        }
+    }
+
+    fun jumpSiblingSameDayAge() {
+        viewModelScope.launch {
+            val state = ui.value
+            val current = state.baby ?: return@launch
+            val nextId = nextSiblingId(state.babies.map(Baby::id), current.id)
+                ?: return@launch
+            val next = state.babies.first { it.id == nextId }
+            val targetDate = siblingSameDayAgeDate(
+                currentBirthdayEpochDay = current.birthdayEpochDay,
+                siblingBirthdayEpochDay = next.birthdayEpochDay,
+                selectedDate = state.selectedDate,
+                today = state.today,
+            )
             careLog.setCurrentBaby(next.id)
+            updateSelectedDate(targetDate)
         }
     }
 
@@ -427,6 +444,32 @@ internal fun clampSelectedDate(
     requested: LocalDate,
     today: LocalDate = LocalDate.now(),
 ): LocalDate = if (requested.isAfter(today)) today else requested
+
+internal fun siblingSameDayAgeDate(
+    currentBirthdayEpochDay: Long,
+    siblingBirthdayEpochDay: Long,
+    selectedDate: LocalDate,
+    today: LocalDate = LocalDate.now(),
+): LocalDate {
+    val currentBirth = LocalDate.ofEpochDay(currentBirthdayEpochDay)
+    val siblingBirth = LocalDate.ofEpochDay(siblingBirthdayEpochDay)
+    val ageInWholeDays = ChronoUnit.DAYS.between(currentBirth, selectedDate)
+    return clampSelectedDate(siblingBirth.plusDays(ageInWholeDays), today)
+}
+
+internal fun nextSiblingId(
+    babyIds: List<Long>,
+    currentId: Long?,
+): Long? {
+    if (babyIds.size < 2) return null
+    val currentIndex = babyIds.indexOf(currentId)
+    val next = if (currentIndex >= 0) {
+        babyIds[(currentIndex + 1) % babyIds.size]
+    } else {
+        babyIds.first()
+    }
+    return next.takeIf { it != currentId }
+}
 
 private enum class TopDest(
     val route: String,
@@ -565,6 +608,7 @@ fun LeziRoot(
                             canGoNext = ui.selectedDate.isBefore(today),
                             dark = dark,
                             onCycleBaby = { vm.cycleBaby() },
+                            onJumpSiblingSameDayAge = { vm.jumpSiblingSameDayAge() },
                             onPreviousDate = { vm.shiftDay(-1) },
                             onNextDate = { vm.shiftDay(1) },
                             onOpenDatePicker = {

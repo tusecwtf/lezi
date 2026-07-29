@@ -7,7 +7,7 @@
 | [03](./issues/03-retire-ordinary-push-android.md) | Android 出站全部走 atomic bundle | 02 | ready-for-agent |
 | [04](./issues/04-pull-co-group-photo-packages.md) | Pull 共组 record/care_plan↔log 媒体 | None | ready-for-agent |
 | [05](./issues/05-health-capability-superset.md) | Health：capability 超集、忽略 version | None | complete |
-| [06](./issues/06-long-press-nickname-same-day-age.md) | 长按昵称跳下一孩相同日龄 | None | ready-for-agent |
+| [06](./issues/06-long-press-nickname-same-day-age.md) | 长按昵称跳下一孩相同日龄 | None | complete |
 | [07](./issues/07-prd-hygiene-timeline-acl-design-status.md) | PRD/design hygiene（时间轴文本、Record ACL、Status） | None | complete |
 
-**Frontier（无阻塞可并行）：** 02, 04, 06 → 然后 03。
+**Frontier（无阻塞可并行）：** 02, 04 → 然后 03。

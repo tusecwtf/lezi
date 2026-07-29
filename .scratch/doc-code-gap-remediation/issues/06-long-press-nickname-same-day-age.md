@@ -4,9 +4,9 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** complete
 
-- [ ] 纯函数 `siblingSameDayAgeDate` + 单测
-- [ ] `MainActivity` ViewModel：`jumpSiblingSameDayAge`
-- [ ] `AppHeaderBar`：`combinedClickable` 长按回调 + 可达性描述
-- [ ] 与 `docs/prd/ui.md` §5.2 手势表一致（07 可同步 PRD 若需补一句实现细节）
+- [x] 纯函数 `siblingSameDayAgeDate` + 单测
+- [x] `MainActivity` ViewModel：`jumpSiblingSameDayAge`
+- [x] `AppHeaderBar`：`combinedClickable` 长按回调 + 可达性描述
+- [x] 与 `docs/prd/ui.md` §5.2 手势表一致（07 可同步 PRD 若需补一句实现细节）

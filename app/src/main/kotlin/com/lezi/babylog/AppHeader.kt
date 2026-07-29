@@ -19,9 +19,11 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -82,6 +84,7 @@ import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun AppHeaderBar(
     babyName: String,
@@ -94,6 +97,7 @@ internal fun AppHeaderBar(
     canGoNext: Boolean,
     dark: Boolean,
     onCycleBaby: () -> Unit,
+    onJumpSiblingSameDayAge: () -> Unit,
     onPreviousDate: () -> Unit,
     onNextDate: () -> Unit,
     onOpenDatePicker: () -> Unit,
@@ -125,7 +129,13 @@ internal fun AppHeaderBar(
                 .weight(1f)
                 .height(54.dp)
                 .clip(controlShape)
-                .clickable(enabled = canCycleBaby, onClick = onCycleBaby)
+                .combinedClickable(
+                    enabled = canCycleBaby,
+                    onClickLabel = "切换宝宝",
+                    onLongClickLabel = "跳到下一位宝宝相同日龄",
+                    onClick = onCycleBaby,
+                    onLongClick = onJumpSiblingSameDayAge,
+                )
                 .padding(horizontal = 4.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -629,6 +639,7 @@ private fun AppHeaderPreview() {
             canGoNext = false,
             dark = false,
             onCycleBaby = {},
+            onJumpSiblingSameDayAge = {},
             onPreviousDate = {},
             onNextDate = {},
             onOpenDatePicker = {},
