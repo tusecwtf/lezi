@@ -47,20 +47,24 @@ internal inline fun confirmTimerServiceStartup(action: () -> Unit): TimerService
 /**
  * `Service.startForeground()` may return normally even when a platform AppOp silently ignores
  * the promotion. Do not acknowledge startup until Android exposes both the foreground-service
- * bit and its active notification.
+ * bit and, when the user permits app notifications, its active notification. Android 13+
+ * still permits a foreground service when notification permission is denied; in that case the
+ * system surfaces the service outside the normal notification drawer.
  */
 internal suspend fun awaitTimerServicePublication(
     maxAttempts: Int = 20,
     pauseBetweenAttempts: suspend () -> Unit = { delay(50L) },
     isActuallyForeground: () -> Boolean,
+    notificationsEnabled: () -> Boolean = { true },
     hasActiveNotification: () -> Boolean,
 ): TimerServiceStartResult {
     require(maxAttempts > 0)
     repeat(maxAttempts) { attempt ->
         val accepted = try {
             val foreground = isActuallyForeground()
+            val notificationPermission = notificationsEnabled()
             val notification = hasActiveNotification()
-            foreground && notification
+            foreground && (!notificationPermission || notification)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: RuntimeException) {

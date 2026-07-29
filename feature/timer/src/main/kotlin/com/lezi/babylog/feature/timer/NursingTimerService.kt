@@ -80,6 +80,7 @@ class NursingTimerService : Service() {
         serviceScope.launch {
             val publication = awaitTimerServicePublication(
                 isActuallyForeground = ::isActuallyForeground,
+                notificationsEnabled = ::notificationsEnabled,
                 hasActiveNotification = ::hasActiveTimerNotification,
             )
             if (publication is TimerServiceStartResult.Failed) {
@@ -152,6 +153,9 @@ class NursingTimerService : Service() {
             .any { notification ->
                 notification.packageName == packageName && notification.id == NOTIF_ID
             }
+
+    private fun notificationsEnabled(): Boolean =
+        getSystemService(NotificationManager::class.java).areNotificationsEnabled()
 
     private fun failStartup(
         sessionToken: String,

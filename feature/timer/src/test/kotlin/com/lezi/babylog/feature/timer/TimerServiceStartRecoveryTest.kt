@@ -125,6 +125,19 @@ class TimerServiceStartRecoveryTest {
     }
 
     @Test
+    fun deniedNotificationPermissionStillAcceptsTheRealForegroundService() = runBlocking {
+        val result = awaitTimerServicePublication(
+            maxAttempts = 1,
+            pauseBetweenAttempts = {},
+            isActuallyForeground = { true },
+            notificationsEnabled = { false },
+            hasActiveNotification = { false },
+        )
+
+        assertEquals(TimerServiceStartResult.Started, result)
+    }
+
+    @Test
     fun repeatedClickWhileStartIsPendingIsRejected() {
         val pending = runningLeftCandidate().pausedForServiceStart()
 
