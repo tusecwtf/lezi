@@ -3,7 +3,7 @@
 | 字段 | 值 |
 |------|-----|
 | **Date** | 2026-07-29 |
-| **Status** | Spec + Implementation |
+| **Status** | Implemented |
 | **Related** | `CONTEXT.md` 布局编辑态 / 常用记录 / 本机已删除；`docs/prd/ui.md` §2.2、§5.2；ADR-0006 |
 
 ## Overview

@@ -5,7 +5,7 @@
 | **Title** | 扫码加入一键预填家庭网络与邀请码 |
 | **Author** | (TBD) |
 | **Date** | 2026-07-28 |
-| **Status** | Draft（rev 3 — re-review minor/nit polish） |
+| **Status** | Must Implemented；Should open（概览扫码、Owner 空 SSID 提示） |
 | **Related PRD** | `docs/prd/sync-home-lan.md` §9.3 / §11；`docs/prd/ui.md` §5.7 |
 | **Related ADR** | ADR-0009（账户概览与称呼）；ADR-0008（仅 fresh-current） |
 
@@ -25,6 +25,9 @@
 4. 进度条 **✓ 家庭网络** 仅当 draft 真正具备 host+≥1 SSID，**绝不**因 `step == Identity` 而勾选  
 5. Identity **耐久摘要** + **未就绪时禁用「加入」**  
 6. 修 draft `remember(keys)` wipe；Join 主路径可不中途写 prefs  
+
+当前 Must 范围已实现；本文继续保留为详细交互依据。尚未实现的 Should 仅有：账户概览
+次级「扫码加入」入口、Owner 本机未绑定 SSID 时的发码软提示；二者不阻塞现行向导扫码。
 
 ---
 

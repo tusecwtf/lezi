@@ -16,10 +16,10 @@
 
 | 文件 | Status | 说明 |
 |------|--------|------|
-| [2026-07-28-qr-join-one-tap-prefill.md](./2026-07-28-qr-join-one-tap-prefill.md) | Draft | 扫码加入一键预填；实现前主设计文 |
+| [2026-07-28-qr-join-one-tap-prefill.md](./2026-07-28-qr-join-one-tap-prefill.md) | Must Implemented / Should open | 向导扫码主体已实现；概览扫码与 Owner 空 SSID 提示仍是 Should |
 | [2026-07-28-owner-remove-member.md](./2026-07-28-owner-remove-member.md) | Folded | 规则已在 `docs/prd/ui.md` §5.7 / sync PRD |
-| [2026-07-29-layout-edit-android-desktop.md](./2026-07-29-layout-edit-android-desktop.md) | Spec + Implementation | 布局编辑态；PRD `ui.md` 已有摘要，细则仍可参考 |
-| [2026-07-29-timeline-swipe-edit-delete.md](./2026-07-29-timeline-swipe-edit-delete.md) | Spec | 时间轴左右滑；`ui.md` 已链到本文 |
+| [2026-07-29-layout-edit-android-desktop.md](./2026-07-29-layout-edit-android-desktop.md) | Implemented | 布局编辑态；PRD `ui.md` 已有摘要，细则仍可参考 |
+| [2026-07-29-timeline-swipe-edit-delete.md](./2026-07-29-timeline-swipe-edit-delete.md) | Implemented | 时间轴左右滑；`ui.md` 已链到本文 |
 
 ## 命名
 
