@@ -301,6 +301,9 @@ NAS 原子包根类型 `care_plan` 的 wire payload 为：
 `type` 使用与 Record 相同的当前类型集合；`type=custom` 时
 `custom_item_client_uuid` 新建时必须引用同家庭、未删除的 CustomItemDef；既有计划可继续
 引用同家庭 tombstone 定义并被编辑、删除或显式履行，其它类型必须省略或置空。
+显式履行在本机事务中仍同时生成事实、完成计划和候选；家庭发布顺序固定为 completed
+CarePlan → 关联 Record（含 0–3 张照片）→ FulfillmentCandidate，使 NAS 能以已持久化计划
+证明 tombstone 引用来自既有计划。接收端在事实到达前不得把 completed plan 暴露为完整结果。
 
 当前状态为 `pending`, `missed`, `completed`, `skipped`，且只支持单次计划。
 `missed` 可由当前绝对时刻超过计划时刻且仍未完成/跳过派生。本机履行在同一事务

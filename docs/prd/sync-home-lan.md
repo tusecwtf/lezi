@@ -142,7 +142,11 @@ SSID 白名单 **仅存本机**，不随家庭同步到 NAS。两台手机可登
 
 ### 3.3 失败与其它
 
-- health 失败：指数退避（30s → 2min → 10min），禁止固定高频 ping。
+- 前台自动同步遇到 I/O、HTTP `408`/`429`/`5xx`、health 不可达或仍在退避时，保留
+  Room 事实和 durable Outbox，并按 30s → 2min → 10min（上限 10min）重试；退到后台
+  后不继续定时重试，下一次前台或手动同步再恢复。
+- HTTP `400`/`403`/`422`、ACL/未知引用与取消属于终止错误，不进入自动热重试；本地事实和
+  Outbox 不删除，记录/计划显示「仅本机 · 同步失败」并提供手动重试入口。
 - 白名单已满 2 个时自动绑定新 SSID：**不覆盖**，提示用户手动改。
 - 已加入后改 host/port：**允许**；保留已确认的新端点与 SSID 配置，但必须原子清除原
   `token`、`family`、`membership`、`cursor/generation`，由用户在新 NAS 重新创建或加入家庭；
@@ -645,6 +649,8 @@ Record 与 CarePlan 共享以下 current-wire 约束：
 - `type=custom` 的新建根只能选择同家庭、未删除的 CustomItemDef。tombstone 定义不再进入
   可选目录，但仍证明既有同 UUID Record/CarePlan 的历史引用合法；这类历史根可继续编辑、
   删除，既有计划完成后以 `fulfilled_record_client_uuid` 明确关联的新 Record 也可发布。
+  客户端履行这类计划时须先提交 `completed` CarePlan，再提交关联 Record，最后提交
+  FulfillmentCandidate；接收端在关联 Record 到达前 co-gate completed plan，不暴露半套状态。
   未知、跨家庭或把 tombstone 用于任意新事实/计划的引用均以冲突拒绝。wire 内的
   `payload_json` 不得携带设备自增 `custom_item_id`；接收端以 UUID 解析自己的本机 id 后
   再落库。该规则同时适用于 atomic Record 与 CarePlan 根。

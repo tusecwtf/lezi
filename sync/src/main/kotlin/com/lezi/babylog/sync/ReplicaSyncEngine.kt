@@ -1293,8 +1293,8 @@ internal class ReplicaSyncEngine(
                 )
             }
         }
-        // Outbox materialization only; atomic commit order is record packages →
-        // care_plan packages → fulfillment_candidate package (see pushOutboxBatch).
+        // Outbox materialization only; atomic commit order is care_plan packages →
+        // record packages → fulfillment_candidate package (see pushOutboxBatch).
         records.forEach { record ->
             val babyUuid = babyDao.getIncludingDeleted(record.babyId)?.clientUuid
                 ?: return@forEach

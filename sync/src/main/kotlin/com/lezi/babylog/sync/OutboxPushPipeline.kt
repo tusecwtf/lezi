@@ -91,15 +91,17 @@ internal class OutboxPushPipeline(
             val prerequisites = plan.residual.filter { it.isAtomicBundlePrerequisite() }
             pushAtomicResiduals(session, prerequisites)
             val residual = plan.residual - prerequisites.toSet()
-            // Prefer fulfill Record before completed care_plan so pull pages that
-            // end mid-set still apply the fact first. Receivers apply records then
-            // co-gate completed plans until the linked record is present (same-txn).
+            // Publish CarePlan before its fulfillment Record. The NAS uses the
+            // persisted completed plan as the authority that permits a new fact
+            // to retain a tombstoned custom definition. Receivers co-gate a
+            // completed plan until the linked Record arrives, so a pull page may
+            // safely end between the two atomic packages.
+            for (planRow in plan.carePlanRows) {
+                pushCarePlanAtomicBundle(session, planRow, pending)
+            }
             // Every Record (including 0-photo) is an atomic package root.
             for (recordRow in plan.recordRows) {
                 pushRecordAtomicBundle(session, recordRow, pending)
-            }
-            for (planRow in plan.carePlanRows) {
-                pushCarePlanAtomicBundle(session, planRow, pending)
             }
             if (residual.isEmpty()) return true
             pushAtomicResiduals(session, residual)

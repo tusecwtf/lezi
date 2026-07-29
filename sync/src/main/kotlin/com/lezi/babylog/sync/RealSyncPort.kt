@@ -18,8 +18,10 @@ import javax.inject.Singleton
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collect
@@ -132,13 +134,45 @@ class RealSyncPort @Inject constructor(
             }
         }
         processScope.launch {
+            var consecutiveRetryableFailures = 0
+            var scheduledRetry: Job? = null
+            var scheduledRetryNeedsPull = false
             for (ignored in syncSignal) {
+                if (scheduledRetryNeedsPull) {
+                    pullRequested.set(true)
+                }
+                scheduledRetryNeedsPull = false
+                scheduledRetry?.cancel()
+                scheduledRetry = null
                 val trigger = if (pullRequested.getAndSet(false)) {
                     SyncTrigger.Foreground
                 } else {
                     SyncTrigger.LocalWrite
                 }
-                sync(trigger)
+                val result = sync(trigger)
+                val failure = result.exceptionOrNull()
+                if (failure == null) {
+                    consecutiveRetryableFailures = 0
+                    continue
+                }
+                val retryDelay = ForegroundSyncRetryPolicy.delayMillis(
+                    failure = failure,
+                    consecutiveFailures = consecutiveRetryableFailures,
+                )
+                if (retryDelay == null || !foregroundState.isForeground()) {
+                    consecutiveRetryableFailures = 0
+                    continue
+                }
+                consecutiveRetryableFailures += 1
+                val retryNeedsPull = trigger != SyncTrigger.LocalWrite
+                scheduledRetryNeedsPull = retryNeedsPull
+                scheduledRetry = processScope.launch {
+                    delay(retryDelay)
+                    if (foregroundState.isForeground()) {
+                        if (retryNeedsPull) pullRequested.set(true)
+                        syncSignal.trySend(Unit)
+                    }
+                }
             }
         }
     }
@@ -284,7 +318,7 @@ class RealSyncPort @Inject constructor(
     private fun requireAllowed(decision: HomeNetworkDecision) {
         if (decision == HomeNetworkDecision.Allowed) return
         currentStatus.value = decision.toSyncStatus()
-        throw HomeNetworkBlockedException(decision.userMessage())
+        throw HomeNetworkBlockedException(decision)
     }
 
     private fun updateFailureStatus(error: Throwable) {
@@ -346,7 +380,9 @@ private fun HomeNetworkDecision.toSyncStatus(): SyncStatus = when (this) {
     HomeNetworkDecision.Allowed -> SyncStatus.Idle
 }
 
-private class HomeNetworkBlockedException(message: String) : IllegalStateException(message)
+internal class HomeNetworkBlockedException(
+    val decision: HomeNetworkDecision,
+) : IllegalStateException(decision.userMessage())
 
 /**
  * Creator-local publish chrome for a care record that is still waiting on an

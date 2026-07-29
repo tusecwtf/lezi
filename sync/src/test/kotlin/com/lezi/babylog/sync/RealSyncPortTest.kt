@@ -641,8 +641,8 @@ class RealSyncPortTest {
             .containsExactly(
                 "stage:baby",
                 "stage:custom_item",
-                "stage:record",
                 "stage:care_plan",
+                "stage:record",
                 "stage:fulfillment_candidate",
             )
             .inOrder()
@@ -1028,6 +1028,200 @@ class RealSyncPortTest {
         val stillDead = rig.customItems.get("custom-tomb")!!
         assertThat(stillDead.deletedAt).isEqualTo(20)
         assertThat(stillDead.name).isEqualTo("药")
+    }
+
+    @Test
+    fun tombstonedCustomDefinitionAllowsHistoricalRecordEditAndDeleteToDrainOutbox() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        rig.backend.enforceBundleReferences = true
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        rig.backend.remember("baby", "baby-local")
+        val customItemId = rig.customItems.seed(
+            CustomItemEntity(
+                clientUuid = "custom-history",
+                familyId = 1,
+                name = "抚触",
+                iconSlot = 2,
+                updatedAt = 150,
+                deletedAt = 150,
+                syncDirty = false,
+            ),
+        )
+        rig.backend.remember("custom_item", "custom-history")
+        val recordId = rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "custom-history-record",
+                type = "custom",
+                note = "编辑后",
+                payloadJson =
+                    """{"title":"抚触","detail":"睡前十分钟","custom_item_id":$customItemId,"icon_slot":2}""",
+                updatedAt = 200,
+                syncDirty = true,
+            ),
+        )
+
+        rig.backend.stageBundleFailure = SyncHttpException(503, "temporary")
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isFailure).isTrue()
+        assertThat(rig.records.getByClientUuid("custom-history-record")?.syncDirty).isTrue()
+        assertThat(rig.outbox.peek("family-a", 100).map(OutboxEntity::clientUuid))
+            .contains("custom-history-record")
+        rig.backend.stageBundleFailure = null
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        val editedDraft = rig.backend.stagedBundles.last {
+            it.root.clientUuid == "custom-history-record"
+        }
+        assertThat(editedDraft.root.payloadJson)
+            .contains("\"custom_item_client_uuid\":\"custom-history\"")
+        assertThat(editedDraft.root.payloadJson).contains("睡前十分钟")
+        assertThat(rig.backend.stagedBundles.map { it.root.type })
+            .doesNotContain("custom_item")
+        assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
+
+        rig.records.softDelete(recordId, deletedAt = 300)
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        val deletedDraft = rig.backend.stagedBundles.last {
+            it.root.clientUuid == "custom-history-record"
+        }
+        assertThat(deletedDraft.root.deletedAt).isEqualTo(300)
+        assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
+        assertThat(rig.customItems.get("custom-history")?.deletedAt).isEqualTo(150)
+    }
+
+    @Test
+    fun terminalCustomHistoryRejectionKeepsLocalFactAndOutboxForVisibleRecovery() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        rig.backend.enforceBundleReferences = true
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        rig.backend.remember("baby", "baby-local")
+        val customItemId = rig.customItems.seed(
+            CustomItemEntity(
+                clientUuid = "custom-terminal",
+                familyId = 1,
+                name = "抚触",
+                iconSlot = 2,
+                updatedAt = 150,
+                deletedAt = 150,
+                syncDirty = false,
+            ),
+        )
+        rig.backend.remember("custom_item", "custom-terminal")
+        rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "custom-terminal-record",
+                type = "custom",
+                payloadJson =
+                    """{"title":"抚触","custom_item_id":$customItemId,"icon_slot":2}""",
+                updatedAt = 200,
+                syncDirty = true,
+            ),
+        )
+        rig.backend.stageBundleFailure = SyncHttpException(422, "invalid historical snapshot")
+
+        val result = rig.port.sync(SyncTrigger.LocalWrite)
+
+        assertThat(result.isFailure).isTrue()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Error)
+        assertThat(rig.records.getByClientUuid("custom-terminal-record")?.syncDirty).isTrue()
+        assertThat(rig.outbox.peek("family-a", 100).map(OutboxEntity::clientUuid))
+            .contains("custom-terminal-record")
+        assertThat(rig.customItems.get("custom-terminal")?.deletedAt).isEqualTo(150)
+    }
+
+    @Test
+    fun tombstonedCustomPlanFulfillmentDrainsZeroAndTwoPhotoAtomicSets() = runTest {
+        suspend fun runCase(photoCount: Int) {
+            val rig = SyncRig(session = joinedSession("family-a"))
+            rig.backend.enforceBundleReferences = true
+            val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+            rig.backend.remember("baby", "baby-local")
+            val customItemId = rig.customItems.seed(
+                CustomItemEntity(
+                    clientUuid = "custom-plan-$photoCount",
+                    familyId = 1,
+                    name = "抚触",
+                    iconSlot = 2,
+                    updatedAt = 400,
+                    deletedAt = 400,
+                    syncDirty = false,
+                ),
+            )
+            rig.backend.remember("custom_item", "custom-plan-$photoCount")
+            val recordUuid = "custom-fact-$photoCount"
+            val planUuid = "custom-plan-root-$photoCount"
+            val candidateUuid = "custom-candidate-$photoCount"
+            val payload =
+                """{"title":"抚触","detail":"历史快照","custom_item_id":$customItemId,"icon_slot":2}"""
+            val recordId = rig.records.seed(
+                localRecord(babyId).copy(
+                    clientUuid = recordUuid,
+                    type = "custom",
+                    payloadJson = payload,
+                    updatedAt = 500,
+                    syncDirty = true,
+                ),
+            )
+            repeat(photoCount) { index ->
+                rig.media.seed(
+                    MediaAssetEntity(
+                        recordId = recordId,
+                        clientUuid = testMediaUuid("custom-history-$photoCount-$index"),
+                        kind = "log",
+                        localUri = "photos/custom-$photoCount-$index.jpg",
+                        mime = "image/jpeg",
+                        byteSize = 4,
+                        createdAt = 500,
+                        updatedAt = 500,
+                        syncDirty = true,
+                    ),
+                )
+            }
+            rig.carePlans.seed(
+                localCarePlan(babyId).copy(
+                    clientUuid = planUuid,
+                    type = "custom",
+                    customItemId = customItemId,
+                    payloadJson = payload,
+                    status = "completed",
+                    fulfilledRecordClientUuid = recordUuid,
+                    fulfilledAt = 500,
+                    updatedAt = 501,
+                    syncDirty = true,
+                ),
+            )
+            rig.fulfillmentCandidates.seed(
+                FulfillmentCandidateEntity(
+                    clientUuid = candidateUuid,
+                    carePlanClientUuid = planUuid,
+                    recordClientUuid = recordUuid,
+                    confirmedAt = 500,
+                    updatedAt = 502,
+                    syncDirty = true,
+                ),
+            )
+
+            assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+            val recordDraft = rig.backend.stagedBundles.first { it.root.clientUuid == recordUuid }
+            val planDraft = rig.backend.stagedBundles.first { it.root.clientUuid == planUuid }
+            val candidateDraft = rig.backend.stagedBundles.first {
+                it.root.clientUuid == candidateUuid
+            }
+            assertThat(recordDraft.media.filter { it.deletedAt == null }).hasSize(photoCount)
+            assertThat(recordDraft.root.payloadJson).contains("历史快照")
+            assertThat(planDraft.root.payloadJson).contains("custom-plan-$photoCount")
+            assertThat(rig.backend.committedBundles)
+                .containsAtLeast(recordDraft.bundleId, planDraft.bundleId, candidateDraft.bundleId)
+            assertThat(rig.backend.committedBundles.indexOf(planDraft.bundleId))
+                .isLessThan(rig.backend.committedBundles.indexOf(recordDraft.bundleId))
+            assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
+            assertThat(rig.customItems.get("custom-plan-$photoCount")?.deletedAt).isEqualTo(400)
+        }
+
+        runCase(0)
+        runCase(2)
     }
 
     @Test
@@ -3804,7 +3998,7 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun atomicCarePlanCustomItemWaitsForDefinitionBeforeApply() = runTest {
+    fun atomicCarePlanAcceptsTombstonedHistoricalDefinitionButNotMissingDefinition() = runTest {
         val applied = mutableListOf<String>()
         val rig = SyncRig(
             session = joinedSession("family-a"),
@@ -3833,7 +4027,8 @@ class RealSyncPortTest {
         assertThat(rig.carePlans.getByClientUuid("remote-custom-plan")).isNull()
         assertThat(applied).isEmpty()
 
-        // Same page with definition first → plan becomes visible once.
+        // Same page with a tombstoned historical definition first → plan becomes visible once,
+        // while the definition remains absent from all live creation selectors.
         rig.backend.nextPull = PullResult(
             entities = listOf(
                 SyncEntity(
@@ -3842,7 +4037,7 @@ class RealSyncPortTest {
                     payloadJson =
                         """{"name":"抚触","icon_slot":2,"created_by_membership_id":"m-a"}""",
                     updatedAt = 690,
-                    deletedAt = null,
+                    deletedAt = 690,
                 ),
                 SyncEntity(
                     type = "care_plan",
@@ -3861,7 +4056,8 @@ class RealSyncPortTest {
         val plan = rig.carePlans.getByClientUuid("remote-custom-plan")
         assertThat(plan).isNotNull()
         assertThat(plan!!.customItemId).isNotNull()
-        assertThat(rig.customItems.get("custom-def-1")).isNotNull()
+        assertThat(rig.customItems.get("custom-def-1")?.deletedAt).isEqualTo(690)
+        assertThat(rig.customItems.listAll()).isEmpty()
         assertThat(applied).containsExactly("remote-custom-plan")
     }
 
@@ -3983,7 +4179,8 @@ class RealSyncPortTest {
             )
             assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
 
-            // The fact publishes before the completed plan (both atomic packages).
+            // The completed plan publishes before its fact so the NAS can prove that a
+            // tombstoned custom definition is being used by an explicit fulfillment.
             val planDraft = rig.backend.stagedBundles.first {
                 it.root.type == "care_plan" && it.root.clientUuid == planUuid
             }
@@ -3994,7 +4191,7 @@ class RealSyncPortTest {
             }
             val recordCommitIdx = rig.backend.committedBundles.indexOf(recordDraft.bundleId)
             assertThat(recordCommitIdx).isAtLeast(0)
-            assertThat(recordCommitIdx).isLessThan(planCommitIdx)
+            assertThat(planCommitIdx).isLessThan(recordCommitIdx)
             assertThat(recordDraft.media.filter { it.deletedAt == null })
                 .hasSize(photoCount)
 

@@ -2035,6 +2035,74 @@ class CareLogTest {
     }
 
     @Test
+    fun tombstonedCustomDefinitionKeepsHistoricalRecordEditableAndDeletable() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val itemId = care.addCustomItem("抚触", iconSlot = 2)
+        val timestamp = System.currentTimeMillis() - 60_000L
+        val payload =
+            """{"title":"抚触","detail":"睡前十分钟","custom_item_id":$itemId,"icon_slot":2}"""
+        val recordId = care.addRecord(
+            babyId = babyId,
+            type = RecordType.CUSTOM,
+            timestamp = timestamp,
+            payloadJson = payload,
+        )
+
+        care.deleteCustomItem(itemId)
+        care.updateRecord(
+            id = recordId,
+            timestamp = timestamp,
+            endTimestamp = null,
+            note = "已完成",
+            payloadJson = payload,
+        )
+
+        val edited = requireNotNull(care.getRecord(recordId))
+        assertThat(edited.displayLabel()).isEqualTo("抚触")
+        assertThat(edited.note).isEqualTo("已完成")
+        assertThat(edited.payloadJson).contains("睡前十分钟")
+        assertThat(care.observeCustomItems().first()).isEmpty()
+
+        care.deleteRecord(recordId)
+        assertThat(fakes.records.getIncludingDeleted(recordId)?.deletedAt).isNotNull()
+    }
+
+    @Test
+    fun tombstonedCustomDefinitionStillAllowsPlanFulfillmentWithSnapshotAndPhotos() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val itemId = care.addCustomItem("抚触", iconSlot = 2)
+        val now = System.currentTimeMillis()
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.CUSTOM,
+            scheduledAt = now + 60_000L,
+            customItemId = itemId,
+            payloadJson = """{"title":"抚触","custom_item_id":$itemId,"icon_slot":2}""",
+            nowMillis = now,
+        )
+        care.deleteCustomItem(itemId)
+
+        val recordId = care.fulfillCarePlan(
+            carePlanId = planId,
+            actualTimestamp = now,
+            photoLocalPaths = listOf("photos/one.jpg", "photos/two.jpg"),
+            nowMillis = now + 1,
+        )
+
+        val fact = requireNotNull(care.getRecord(recordId))
+        assertThat(fact.displayLabel()).isEqualTo("抚触")
+        assertThat(fact.payloadJson).contains("\"custom_item_id\":$itemId")
+        assertThat(care.listRecordPhotoPaths(recordId))
+            .containsExactly("photos/one.jpg", "photos/two.jpg")
+        assertThat(care.getCarePlan(planId)?.status).isEqualTo(CarePlanStatus.COMPLETED)
+        assertThat(care.observeCustomItems().first()).isEmpty()
+    }
+
+    @Test
     fun customItemFieldSnapshotDoesNotUseLiveNameAfterRename() = runTest {
         val item = CustomRecordItem(id = 3, name = "抚触", iconSlot = 2, sortOrder = 0)
         val snap = item.toFieldSnapshot()
