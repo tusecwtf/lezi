@@ -1,5 +1,6 @@
 package com.lezi.babylog.feature.settings
 
+import com.lezi.babylog.core.ui.CustomItemManageRow
 import com.lezi.babylog.domain.CustomRecordItem
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
@@ -23,7 +24,7 @@ class CustomItemDeleteConfirmationTest {
             CustomItemDeleteAction.Cancel,
         )
 
-        assertEquals(item(), requested.state.target)
+        assertEquals(itemRow(), requested.state.target)
         assertNull(requested.command)
         assertEquals(CustomItemDeleteState(), cancelled.state)
         assertNull(cancelled.command)
@@ -56,7 +57,7 @@ class CustomItemDeleteConfirmationTest {
         )
         val retried = reduceCustomItemDelete(failed.state, CustomItemDeleteAction.Confirm)
 
-        assertEquals(item(), failed.state.target)
+        assertEquals(itemRow(), failed.state.target)
         assertEquals("删除失败，请重试", failed.state.error)
         assertFalse(failed.state.deleting)
         assertEquals(42L, retried.command?.itemId)
@@ -98,6 +99,21 @@ class CustomItemDeleteConfirmationTest {
         )
     }
 
+    @Test
+    fun layoutAndSettingsEntriesShareCoreReduce() {
+        // Shipped path: both feature wrappers call core.ui.reduceCustomItemDelete.
+        val fromSettings = reduceCustomItemDelete(
+            CustomItemDeleteState(),
+            CustomItemDeleteAction.Request(item()),
+        )
+        val fromCore = com.lezi.babylog.core.ui.reduceCustomItemDelete(
+            com.lezi.babylog.core.ui.CustomItemDeleteState(),
+            com.lezi.babylog.core.ui.CustomItemDeleteAction.Request(itemRow()),
+        )
+        assertEquals(fromCore.state, fromSettings.state)
+        assertEquals(fromCore.command, fromSettings.command)
+    }
+
     private fun requestedState(): CustomItemDeleteState = reduceCustomItemDelete(
         CustomItemDeleteState(),
         CustomItemDeleteAction.Request(item()),
@@ -108,5 +124,11 @@ class CustomItemDeleteConfirmationTest {
         name = "补充维生素 D",
         iconSlot = 2,
         sortOrder = 0,
+    )
+
+    private fun itemRow() = CustomItemManageRow(
+        id = 42L,
+        name = "补充维生素 D",
+        iconSlot = 2,
     )
 }
