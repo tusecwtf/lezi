@@ -121,7 +121,6 @@ const CURRENT_SCHEMA_SQL: &str = "
 pub struct Principal {
     pub family_id: String,
     pub role: String,
-    pub device_id: String,
     /// Server-minted immutable membership identity (UUID). Safe to expose to clients.
     pub membership_id: String,
 }
@@ -151,14 +150,6 @@ pub struct PullPage {
     pub cursor: i64,
     pub has_more: bool,
     pub family_name: Option<String>,
-}
-
-#[derive(Debug, Serialize, PartialEq, Eq)]
-pub struct PushResult {
-    pub applied: usize,
-    pub skipped: usize,
-    pub cursor: i64,
-    pub record_authors: Vec<RecordAuthor>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -586,13 +577,7 @@ impl Store {
                 params![crate::hash_secret(&token), membership_id],
             )?;
             transaction.commit()?;
-            return Ok((
-                family_id,
-                token,
-                membership_id,
-                effective_family_name,
-                true,
-            ));
+            return Ok((family_id, token, membership_id, effective_family_name, true));
         }
 
         let family_id = Uuid::new_v4().to_string();
@@ -655,7 +640,7 @@ impl Store {
             .query_row(
                 "
                 SELECT memberships.family_id, memberships.role,
-                       memberships.device_id, memberships.membership_id
+                       memberships.membership_id
                 FROM membership_credentials AS credentials
                 JOIN memberships
                   ON memberships.membership_id = credentials.membership_id
@@ -669,18 +654,16 @@ impl Store {
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((family_id, role, device_id, membership_id)) = row else {
+        let Some((family_id, role, membership_id)) = row else {
             return Ok(None);
         };
         Ok(Some(Principal {
             family_id,
             role,
-            device_id,
             membership_id,
         }))
     }
@@ -878,128 +861,6 @@ impl Store {
         Ok(())
     }
 
-    pub fn push(
-        &self,
-        principal: &Principal,
-        entities: Vec<Entity>,
-        max_updated_at: i64,
-        // Server wall clock (seconds or millis — stored as-is for confirmed_at).
-        now: i64,
-    ) -> Result<PushResult, StoreError> {
-        let Principal {
-            family_id,
-            role,
-            membership_id,
-            ..
-        } = principal;
-        if entities
-            .iter()
-            .any(|entity| entity.updated_at > max_updated_at)
-        {
-            return Err(StoreError::TimestampOutOfRange);
-        }
-        if role != "owner" && entities.iter().any(|entity| entity.entity_type == "baby") {
-            return Err(StoreError::ForbiddenBaby);
-        }
-        let original_count = entities.len();
-        let incoming_record_ids = entities
-            .iter()
-            .filter(|entity| entity.entity_type == "record")
-            .map(|entity| entity.client_uuid.clone())
-            .collect::<BTreeSet<_>>();
-        let mut connection = self.connect()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let incoming_keys = entities.iter().map(entity_key).collect::<BTreeSet<_>>();
-        let mut existing = load_existing_entities(&transaction, family_id, &incoming_keys)?;
-        let mut effective = effective_lww_winners(entities, &existing);
-        canonicalize_record_authors(membership_id, &mut effective, &existing)?;
-        stamp_and_authorize_custom_items(role, membership_id, &mut effective, &existing)?;
-        let noop_care_plan_ids =
-            stamp_and_authorize_care_plans(role, membership_id, &mut effective, &existing)?;
-        discard_media_for_noop_care_plans(&mut effective, &noop_care_plan_ids);
-        // confirmed_at is millis-like; prefer entity.updated_at when already ms-scale.
-        let confirmed_at = if now > 1_000_000_000_000 {
-            now
-        } else {
-            now.saturating_mul(1_000)
-        };
-        stamp_fulfillment_candidates(role, membership_id, confirmed_at, &mut effective, &existing)?;
-        for entity in &effective {
-            let payload_bytes = serde_json::to_vec(&entity.payload)?.len();
-            // Leave room for the entity envelope and the page response fields.
-            // A media page can need media -> record -> baby. Keeping each
-            // entity below one third of the page target guarantees that the
-            // complete dependency group can be emitted without stalling.
-            if payload_bytes.saturating_add(512) > PULL_ENTITY_TARGET_BYTES {
-                return Err(StoreError::PullEntityTooLarge);
-            }
-        }
-        let reference_keys = validation_reference_keys(&effective);
-        let missing_references = reference_keys
-            .difference(&incoming_keys)
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        existing.extend(load_existing_entities(
-            &transaction,
-            family_id,
-            &missing_references,
-        )?);
-        validate_push(role, membership_id, &effective, &existing)?;
-
-        let entity_count = effective.len();
-        let mut cursor: i64 = transaction.query_row(
-            "SELECT rev FROM family_meta WHERE family_id = ?1",
-            params![family_id],
-            |row| row.get(0),
-        )?;
-        effective.sort_by_key(|entity| match entity.entity_type.as_str() {
-            "baby" => 0,
-            "custom_item" => 1,
-            "record" | "care_plan" => 2,
-            "fulfillment_candidate" => 3,
-            _ => 4,
-        });
-        for entity in &effective {
-            cursor += 1;
-            transaction.execute(
-                "
-                INSERT INTO entities(
-                    family_id, entity_type, client_uuid, updated_at,
-                    deleted_at, payload_json, rev
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-                ON CONFLICT(family_id, entity_type, client_uuid) DO UPDATE SET
-                    updated_at = excluded.updated_at,
-                    deleted_at = excluded.deleted_at,
-                    payload_json = excluded.payload_json,
-                    rev = excluded.rev
-                ",
-                params![
-                    family_id,
-                    entity.entity_type,
-                    entity.client_uuid,
-                    entity.updated_at,
-                    entity.deleted_at,
-                    serde_json::to_string(&entity.payload)?,
-                    cursor
-                ],
-            )?;
-        }
-        transaction.execute(
-            "UPDATE family_meta SET rev = ?1 WHERE family_id = ?2",
-            params![cursor, family_id],
-        )?;
-        let record_authors =
-            record_author_acknowledgements(&incoming_record_ids, &effective, &existing);
-        transaction.commit()?;
-        self.secure_database_files()?;
-        Ok(PushResult {
-            applied: entity_count,
-            skipped: original_count.saturating_sub(entity_count),
-            cursor,
-            record_authors,
-        })
-    }
-
     pub fn pull(&self, family_id: &str, cursor: i64) -> Result<PullPage, StoreError> {
         let connection = self.connect()?;
         let (current, family_name): (i64, Option<String>) = connection.query_row(
@@ -1157,27 +1018,6 @@ impl Store {
             .is_some())
     }
 
-    pub fn is_media_bundle_owned(
-        &self,
-        family_id: &str,
-        client_uuid: &str,
-    ) -> Result<bool, StoreError> {
-        let connection = self.connect()?;
-        Ok(connection
-            .query_row(
-                "
-                SELECT 1 FROM media_publications
-                WHERE family_id = ?1
-                  AND media_uuid = ?2
-                  AND source IN ('bundle_pending', 'bundle')
-                ",
-                params![family_id, client_uuid],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some())
-    }
-
     pub fn published_media(
         &self,
         family_id: &str,
@@ -1322,77 +1162,11 @@ impl Store {
         Ok(())
     }
 
-    /// Atomically claim final-path bytes for an ordinary PUT and bump the
-    /// live metadata revision so clients that skipped it see it again.
-    pub fn publish_ordinary_media(
-        &self,
-        family_id: &str,
-        client_uuid: &str,
-    ) -> Result<bool, StoreError> {
-        let mut connection = self.connect()?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let live = transaction
-            .query_row(
-                "
-                SELECT 1 FROM entities
-                WHERE family_id = ?1
-                  AND entity_type = 'media'
-                  AND client_uuid = ?2
-                  AND deleted_at IS NULL
-                ",
-                params![family_id, client_uuid],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        if !live {
-            return Ok(false);
-        }
-        let claimed = transaction.execute(
-            "
-            INSERT INTO media_publications(family_id, media_uuid, source, bundle_id)
-            VALUES (?1, ?2, 'ordinary', NULL)
-            ON CONFLICT(family_id, media_uuid) DO UPDATE SET
-                source = 'ordinary',
-                bundle_id = NULL
-            WHERE media_publications.source = 'ordinary'
-            ",
-            params![family_id, client_uuid],
-        )?;
-        if claimed == 0 {
-            return Ok(false);
-        }
-        let mut cursor: i64 = transaction.query_row(
-            "SELECT rev FROM family_meta WHERE family_id = ?1",
-            params![family_id],
-            |row| row.get(0),
-        )?;
-        cursor += 1;
-        transaction.execute(
-            "
-            UPDATE entities
-            SET rev = ?1
-            WHERE family_id = ?2
-              AND entity_type = 'media'
-              AND client_uuid = ?3
-              AND deleted_at IS NULL
-            ",
-            params![cursor, family_id, client_uuid],
-        )?;
-        transaction.execute(
-            "UPDATE family_meta SET rev = ?1 WHERE family_id = ?2",
-            params![cursor, family_id],
-        )?;
-        transaction.commit()?;
-        self.secure_database_files()?;
-        Ok(true)
-    }
-
     /// Stage (or refresh) an atomic bundle: root + media metadata only.
-    /// Nothing is visible to ordinary pull until [Self::commit_bundle].
+    /// Nothing is visible to pull until [Self::commit_bundle].
     ///
     /// [Principal] supplies server-authenticated identity for canonical authors and
-    /// CarePlan creator ACL on the real publish path (not only ordinary push).
+    /// CarePlan creator ACL on the publish path.
     pub fn stage_bundle(
         &self,
         principal: &Principal,
@@ -1412,16 +1186,20 @@ impl Store {
                 "bundle media must contain at most {MAX_BUNDLE_MEDIA_ENTITIES} items"
             )));
         }
+        if role != "owner" && root.entity_type == "baby" {
+            return Err(StoreError::ForbiddenBaby);
+        }
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-        // Canonicalize server-owned Record/CarePlan authors before hashing so forged
-        // membership claims never become part of the durable package identity.
+        // Canonicalize every server-owned field before hashing so forged client
+        // claims never become part of the durable package identity.
         let mut package = Vec::with_capacity(1 + media.len());
         package.push(root);
         package.extend(media);
         let incoming_keys = package.iter().map(entity_key).collect::<BTreeSet<_>>();
         let mut existing = load_existing_entities(&transaction, family_id, &incoming_keys)?;
+        stamp_and_authorize_custom_items(role, membership_id, &mut package, &existing)?;
         // CarePlan collision authorization must inspect the caller's creator
         // claim before equal-LWW canonicalization replaces it with the published
         // payload; two offline creates can share the same millisecond revision.
@@ -1430,6 +1208,13 @@ impl Store {
         discard_media_for_noop_care_plans(&mut package, &noop_care_plan_ids);
         canonicalize_equal_lww_bundle_root(&mut package, &existing);
         canonicalize_record_authors(membership_id, &mut package, &existing)?;
+        stamp_fulfillment_candidates(
+            role,
+            membership_id,
+            confirmed_at_millis(now),
+            &mut package,
+            &existing,
+        )?;
         let reference_keys = validation_reference_keys(&package);
         let missing_references = reference_keys
             .difference(&incoming_keys)
@@ -1727,6 +1512,10 @@ impl Store {
             payload: parse_payload(&row.root_payload_json)?,
         };
 
+        if role != "owner" && root.entity_type == "baby" {
+            return Err(StoreError::ForbiddenBaby);
+        }
+
         if root.updated_at > max_updated_at
             || media
                 .iter()
@@ -1753,6 +1542,7 @@ impl Store {
         let original_count = package.len();
         let incoming_keys = package.iter().map(entity_key).collect::<BTreeSet<_>>();
         let mut existing = load_existing_entities(&transaction, family_id, &incoming_keys)?;
+        stamp_and_authorize_custom_items(role, membership_id, &mut package, &existing)?;
         // A competing CarePlan can publish after this bundle was staged. Inspect
         // the complete staged package before LWW removes an equal/stale root so a
         // cross-creator next-feed no-op also discards every attached media change.
@@ -1764,6 +1554,13 @@ impl Store {
         }
         canonicalize_equal_lww_bundle_root(&mut package, &existing);
         canonicalize_record_authors(membership_id, &mut package, &existing)?;
+        let confirmed_at = package
+            .iter()
+            .find(|entity| entity.entity_type == "fulfillment_candidate")
+            .and_then(|entity| entity.payload.get("confirmed_at"))
+            .and_then(Value::as_i64)
+            .unwrap_or_else(|| confirmed_at_millis(now));
+        stamp_fulfillment_candidates(role, membership_id, confirmed_at, &mut package, &existing)?;
         let canonical_root = package
             .iter()
             .find(|entity| entity.entity_type != "media")
@@ -1793,11 +1590,13 @@ impl Store {
         let canonical_media_entities_json = serde_json::to_string(&canonical_media)?;
         let canonical_content_hash = bundle_content_hash(canonical_root, &canonical_media)?;
         let mut effective = effective_lww_winners(package.clone(), &existing);
-        // Re-stamp/authorize CarePlan winners on commit so a staged package cannot
-        // bypass ACL after membership role changes.
+        // Re-stamp/authorize winners on commit so a staged package cannot bypass
+        // ACL after membership role changes or concurrent publication.
+        stamp_and_authorize_custom_items(role, membership_id, &mut effective, &existing)?;
         let noop_care_plan_ids =
             stamp_and_authorize_care_plans(role, membership_id, &mut effective, &existing)?;
         discard_media_for_noop_care_plans(&mut effective, &noop_care_plan_ids);
+        stamp_fulfillment_candidates(role, membership_id, confirmed_at, &mut effective, &existing)?;
         for entity in &effective {
             let payload_bytes = serde_json::to_vec(&entity.payload)?.len();
             if payload_bytes.saturating_add(512) > PULL_ENTITY_TARGET_BYTES {
@@ -2240,28 +2039,6 @@ fn canonicalize_record_authors(
     Ok(())
 }
 
-fn record_author_acknowledgements(
-    requested_record_ids: &BTreeSet<String>,
-    effective: &[Entity],
-    existing: &HashMap<EntityKey, ExistingEntity>,
-) -> Vec<RecordAuthor> {
-    requested_record_ids
-        .iter()
-        .filter_map(|client_uuid| {
-            let payload = effective
-                .iter()
-                .find(|entity| entity.entity_type == "record" && entity.client_uuid == *client_uuid)
-                .map(|entity| &entity.payload)
-                .or_else(|| {
-                    existing
-                        .get(&("record".to_owned(), client_uuid.clone()))
-                        .map(|entity| &entity.payload)
-                })?;
-            record_author_acknowledgement(client_uuid, payload)
-        })
-        .collect()
-}
-
 fn record_author_acknowledgement(
     client_uuid: &str,
     payload: &Map<String, Value>,
@@ -2306,13 +2083,13 @@ fn load_persisted_record_author(
 
 /// Equal `updated_at` keeps the already-published LWW winner. Atomic staging and
 /// commit must hash and persist that exact root rather than a losing same-version
-/// payload, otherwise committed bundle retries diverge from ordinary pull.
+/// payload, otherwise committed bundle retries diverge from pull.
 fn canonicalize_equal_lww_bundle_root(
     entities: &mut [Entity],
     existing: &HashMap<EntityKey, ExistingEntity>,
 ) {
     for entity in entities.iter_mut() {
-        if entity.entity_type != "record" && entity.entity_type != "care_plan" {
+        if entity.entity_type == "media" {
             continue;
         }
         let key = entity_key(entity);
@@ -2323,6 +2100,14 @@ fn canonicalize_equal_lww_bundle_root(
             entity.deleted_at = current.deleted_at;
             entity.payload = current.payload.clone();
         }
+    }
+}
+
+fn confirmed_at_millis(now: i64) -> i64 {
+    if now > 1_000_000_000_000 {
+        now
+    } else {
+        now.saturating_mul(1_000)
     }
 }
 
@@ -3510,9 +3295,42 @@ mod tests {
         Principal {
             family_id: family_id.to_owned(),
             role: "owner".to_owned(),
-            device_id: "owner-device".to_owned(),
             membership_id: "m-owner".to_owned(),
         }
+    }
+
+    fn publish_bundle(
+        store: &Store,
+        principal: &Principal,
+        root: Entity,
+        media: Vec<Entity>,
+        max_updated_at: i64,
+    ) -> Result<BundleCommitResult, StoreError> {
+        let bundle_id = Uuid::new_v4().to_string();
+        let media_ready = media
+            .iter()
+            .filter(|entity| entity.deleted_at.is_none())
+            .map(|entity| (entity.client_uuid.clone(), true))
+            .collect::<BTreeMap<_, _>>();
+        store.stage_bundle(principal, &bundle_id, root, media, 1_700_000_000)?;
+        store
+            .commit_bundle(
+                principal,
+                &bundle_id,
+                &media_ready,
+                max_updated_at,
+                1_700_000_000,
+            )
+            .map(|(result, _)| result)
+    }
+
+    fn publish_root(
+        store: &Store,
+        principal: &Principal,
+        root: Entity,
+        max_updated_at: i64,
+    ) -> Result<BundleCommitResult, StoreError> {
+        publish_bundle(store, principal, root, vec![], max_updated_at)
     }
 
     #[test]
@@ -3531,32 +3349,34 @@ mod tests {
             "end_timestamp":null,"note":null,"payload_json":{"amount_ml":120},
             "schema_version":2
         });
+        let principal = owner_principal(&family_id);
         assert_eq!(
-            store
-                .push(
-                    &owner_principal(&family_id),
-                    vec![
-                        entity("record", record_id, 1, record),
-                        entity("baby", baby_id, 1, baby.clone()),
-                    ],
-                    10,
-                    1_700_000_000_000,
-                )
-                .unwrap()
-                .applied,
-            2
+            publish_root(
+                &store,
+                &principal,
+                entity("baby", baby_id, 1, baby.clone()),
+                10,
+            )
+            .unwrap()
+            .applied,
+            1
         );
         assert_eq!(
-            store
-                .push(
-                    &owner_principal(&family_id),
-                    vec![entity("baby", baby_id, 1, baby)],
-                    10,
-                    1_700_000_000_000,
-                )
-                .unwrap()
-                .skipped,
+            publish_root(
+                &store,
+                &principal,
+                entity("record", record_id, 1, record),
+                10,
+            )
+            .unwrap()
+            .applied,
             1
+        );
+        assert_eq!(
+            publish_root(&store, &principal, entity("baby", baby_id, 1, baby), 10,)
+                .unwrap()
+                .applied,
+            0
         );
         assert_eq!(store.pull(&family_id, 0).unwrap().entities.len(), 2);
     }
@@ -3569,32 +3389,35 @@ mod tests {
         let principal = owner_principal(&family_id);
         let baby_id = Uuid::new_v4();
         let custom_item_id = Uuid::new_v4();
-        store
-            .push(
-                &principal,
-                vec![
-                    entity(
-                        "baby",
-                        baby_id,
-                        1,
-                        json!({
-                            "nickname":"年年","sex":"female","birthday":"2025-01-02",
-                            "avatar_media_uuid":null,"birth_weight_grams":3200
-                        }),
-                    ),
-                    entity(
-                        "custom_item",
-                        custom_item_id,
-                        1,
-                        json!({
-                            "name":"抚触","icon_slot":2,"created_by_membership_id":null
-                        }),
-                    ),
-                ],
-                10,
-                1_700_000_000_000,
-            )
-            .unwrap();
+        publish_root(
+            &store,
+            &principal,
+            entity(
+                "baby",
+                baby_id,
+                1,
+                json!({
+                    "nickname":"年年","sex":"female","birthday":"2025-01-02",
+                    "avatar_media_uuid":null,"birth_weight_grams":3200
+                }),
+            ),
+            10,
+        )
+        .unwrap();
+        publish_root(
+            &store,
+            &principal,
+            entity(
+                "custom_item",
+                custom_item_id,
+                1,
+                json!({
+                    "name":"抚触","icon_slot":2,"created_by_membership_id":null
+                }),
+            ),
+            10,
+        )
+        .unwrap();
 
         let base_payload = || {
             json!({
@@ -3666,7 +3489,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_record_push_requires_a_live_type_consistent_custom_item_reference() {
+    fn atomic_record_bundle_requires_a_live_type_consistent_custom_item_reference() {
         let directory = TempDir::new().unwrap();
         let store = Store::open(directory.path().join("lezi.db")).unwrap();
         let family_id = family(&store);
@@ -3674,48 +3497,41 @@ mod tests {
         let baby_id = Uuid::new_v4();
         let live_custom_item_id = Uuid::new_v4();
         let deleted_custom_item_id = Uuid::new_v4();
-        store
-            .push(
-                &principal,
-                vec![
-                    entity(
-                        "baby",
-                        baby_id,
-                        1,
-                        json!({
-                            "nickname":"年年","sex":"female","birthday":"2025-01-02",
-                            "avatar_media_uuid":null,"birth_weight_grams":3200
-                        }),
-                    ),
-                    entity(
-                        "custom_item",
-                        live_custom_item_id,
-                        1,
-                        json!({
-                            "name":"抚触","icon_slot":2,"created_by_membership_id":null
-                        }),
-                    ),
-                    entity(
-                        "custom_item",
-                        deleted_custom_item_id,
-                        1,
-                        json!({
-                            "name":"旧项目","icon_slot":3,"created_by_membership_id":null
-                        }),
-                    ),
-                ],
-                10,
-                1_700_000_000_000,
-            )
-            .unwrap();
+        for root in [
+            entity(
+                "baby",
+                baby_id,
+                1,
+                json!({
+                    "nickname":"年年","sex":"female","birthday":"2025-01-02",
+                    "avatar_media_uuid":null,"birth_weight_grams":3200
+                }),
+            ),
+            entity(
+                "custom_item",
+                live_custom_item_id,
+                1,
+                json!({
+                    "name":"抚触","icon_slot":2,"created_by_membership_id":null
+                }),
+            ),
+            entity(
+                "custom_item",
+                deleted_custom_item_id,
+                1,
+                json!({
+                    "name":"旧项目","icon_slot":3,"created_by_membership_id":null
+                }),
+            ),
+        ] {
+            publish_root(&store, &principal, root, 10).unwrap();
+        }
         let deleted_payload = json!({
             "name":"旧项目","icon_slot":3,"created_by_membership_id":"m-owner"
         });
         let mut deleted_entity = entity("custom_item", deleted_custom_item_id, 2, deleted_payload);
         deleted_entity.deleted_at = Some(2);
-        store
-            .push(&principal, vec![deleted_entity], 10, 1_700_000_000_000)
-            .unwrap();
+        publish_root(&store, &principal, deleted_entity, 10).unwrap();
 
         let record_payload = |record_type: &str, custom_item_id: Option<Uuid>| {
             json!({
@@ -3747,11 +3563,11 @@ mod tests {
                 "record custom_item_client_uuid does not exist",
             ),
         ] {
-            let result = store.push(
+            let result = publish_root(
+                &store,
                 &principal,
-                vec![entity("record", Uuid::new_v4(), 3, payload)],
+                entity("record", Uuid::new_v4(), 3, payload),
                 10,
-                1_700_000_000_000,
             );
             assert!(matches!(
                 result,
@@ -3760,20 +3576,19 @@ mod tests {
         }
 
         assert_eq!(
-            store
-                .push(
-                    &principal,
-                    vec![entity(
-                        "record",
-                        Uuid::new_v4(),
-                        3,
-                        record_payload("custom", Some(live_custom_item_id)),
-                    )],
-                    10,
-                    1_700_000_000_000,
-                )
-                .unwrap()
-                .applied,
+            publish_root(
+                &store,
+                &principal,
+                entity(
+                    "record",
+                    Uuid::new_v4(),
+                    3,
+                    record_payload("custom", Some(live_custom_item_id)),
+                ),
+                10,
+            )
+            .unwrap()
+            .applied,
             1
         );
     }
@@ -3787,62 +3602,56 @@ mod tests {
         let baby_id = Uuid::new_v4();
         let custom_item_id = Uuid::new_v4();
         let record_id = Uuid::new_v4();
-        store
-            .push(
-                &principal,
-                vec![
-                    entity(
-                        "baby",
-                        baby_id,
-                        1,
-                        json!({
-                            "nickname":"年年","sex":"female","birthday":"2025-01-02",
-                            "avatar_media_uuid":null,"birth_weight_grams":3200
-                        }),
-                    ),
-                    entity(
-                        "custom_item",
-                        custom_item_id,
-                        1,
-                        json!({
-                            "name":"抚触","icon_slot":2,"created_by_membership_id":null
-                        }),
-                    ),
-                    entity(
-                        "record",
-                        record_id,
-                        1,
-                        json!({
-                            "baby_client_uuid":baby_id,
-                            "type":"custom",
-                            "custom_item_client_uuid":custom_item_id,
-                            "timestamp":100,
-                            "end_timestamp":null,
-                            "note":null,
-                            "payload_json":{"title":"抚触"},
-                            "schema_version":2
-                        }),
-                    ),
-                ],
-                10,
-                1_700_000_000_000,
-            )
-            .unwrap();
-        store
-            .push(
-                &principal,
-                vec![entity(
-                    "custom_item",
-                    custom_item_id,
-                    2,
-                    json!({
-                        "name":"睡前抚触","icon_slot":2,"created_by_membership_id":"m-owner"
-                    }),
-                )],
-                10,
-                1_700_000_000_000,
-            )
-            .unwrap();
+        for root in [
+            entity(
+                "baby",
+                baby_id,
+                1,
+                json!({
+                    "nickname":"年年","sex":"female","birthday":"2025-01-02",
+                    "avatar_media_uuid":null,"birth_weight_grams":3200
+                }),
+            ),
+            entity(
+                "custom_item",
+                custom_item_id,
+                1,
+                json!({
+                    "name":"抚触","icon_slot":2,"created_by_membership_id":null
+                }),
+            ),
+            entity(
+                "record",
+                record_id,
+                1,
+                json!({
+                    "baby_client_uuid":baby_id,
+                    "type":"custom",
+                    "custom_item_client_uuid":custom_item_id,
+                    "timestamp":100,
+                    "end_timestamp":null,
+                    "note":null,
+                    "payload_json":{"title":"抚触"},
+                    "schema_version":2
+                }),
+            ),
+        ] {
+            publish_root(&store, &principal, root, 10).unwrap();
+        }
+        publish_root(
+            &store,
+            &principal,
+            entity(
+                "custom_item",
+                custom_item_id,
+                2,
+                json!({
+                    "name":"睡前抚触","icon_slot":2,"created_by_membership_id":"m-owner"
+                }),
+            ),
+            10,
+        )
+        .unwrap();
 
         let page = store.pull(&family_id, 0).unwrap();
         let ordered_keys = page
@@ -3870,22 +3679,21 @@ mod tests {
             let baby_id = Uuid::new_v4();
             let parent_id = Uuid::new_v4();
             let media_id = Uuid::new_v4();
-            store
-                .push(
-                    &principal,
-                    vec![entity(
-                        "baby",
-                        baby_id,
-                        1,
-                        json!({
-                            "nickname":"年年","sex":"female","birthday":"2025-01-02",
-                            "avatar_media_uuid":null,"birth_weight_grams":3200
-                        }),
-                    )],
-                    10,
-                    1_700_000_000_000,
-                )
-                .unwrap();
+            publish_root(
+                &store,
+                &principal,
+                entity(
+                    "baby",
+                    baby_id,
+                    1,
+                    json!({
+                        "nickname":"年年","sex":"female","birthday":"2025-01-02",
+                        "avatar_media_uuid":null,"birth_weight_grams":3200
+                    }),
+                ),
+                10,
+            )
+            .unwrap();
             let parent_payload = if parent_type == "record" {
                 json!({
                     "baby_client_uuid":baby_id,"type":"formula","timestamp":100,
@@ -3902,16 +3710,15 @@ mod tests {
                     "fulfilled_record_client_uuid":null,"fulfilled_at":null
                 })
             };
-            store
-                .push(
-                    &principal,
-                    vec![entity(parent_type, parent_id, 2, parent_payload)],
-                    10,
-                    1_700_000_000_000,
-                )
-                .unwrap();
+            publish_root(
+                &store,
+                &principal,
+                entity(parent_type, parent_id, 2, parent_payload.clone()),
+                10,
+            )
+            .unwrap();
 
-            let filler = (0..199)
+            let filler: Vec<_> = (0..199)
                 .map(|index| {
                     entity(
                         "baby",
@@ -3925,9 +3732,9 @@ mod tests {
                     )
                 })
                 .collect();
-            store
-                .push(&principal, filler, 10, 1_700_000_000_000)
-                .unwrap();
+            for root in filler {
+                publish_root(&store, &principal, root, 10).unwrap();
+            }
             let media_payload = if parent_type == "record" {
                 json!({
                     "kind":"log","record_client_uuid":parent_id,
@@ -3939,24 +3746,25 @@ mod tests {
                     "mime":"image/jpeg","byte_size":3
                 })
             };
-            store
-                .push(
-                    &principal,
-                    vec![entity("media", media_id, 4, media_payload)],
-                    10,
-                    1_700_000_000_000,
-                )
-                .unwrap();
+            publish_bundle(
+                &store,
+                &principal,
+                entity(parent_type, parent_id, 4, parent_payload),
+                vec![entity("media", media_id, 4, media_payload)],
+                10,
+            )
+            .unwrap();
 
             let first_page = store.pull(&family_id, 1).unwrap();
             assert!(first_page.has_more, "{parent_type}");
-            assert_eq!(first_page.entities.len(), PULL_PAGE_ENTITY_LIMIT);
-            let parent_index = first_page
+            assert_eq!(first_page.entities.len(), PULL_PAGE_ENTITY_LIMIT - 1);
+            let second_page = store.pull(&family_id, first_page.cursor).unwrap();
+            let parent_index = second_page
                 .entities
                 .iter()
                 .position(|entity| entity.client_uuid == parent_id.to_string())
                 .unwrap();
-            let media_index = first_page
+            let media_index = second_page
                 .entities
                 .iter()
                 .position(|entity| entity.client_uuid == media_id.to_string())
@@ -3966,7 +3774,7 @@ mod tests {
     }
 
     #[test]
-    fn push_rejects_entities_past_the_supplied_timestamp_limit_without_writing() {
+    fn atomic_bundle_rejects_entities_past_the_timestamp_limit_without_writing() {
         let directory = TempDir::new().unwrap();
         let store = Store::open(directory.path().join("lezi.db")).unwrap();
         let family_id = family(&store);
@@ -3975,11 +3783,11 @@ mod tests {
             "avatar_media_uuid":null,"birth_weight_grams":3200
         });
 
-        let result = store.push(
+        let result = publish_root(
+            &store,
             &owner_principal(&family_id),
-            vec![entity("baby", Uuid::new_v4(), 11, baby)],
+            entity("baby", Uuid::new_v4(), 11, baby),
             10,
-            1_700_000_000_000,
         );
 
         assert!(matches!(result, Err(StoreError::TimestampOutOfRange)));
@@ -3996,32 +3804,31 @@ mod tests {
             "nickname":"年年","sex":"female","birthday":"2025-01-02",
             "avatar_media_uuid":null,"birth_weight_grams":3200
         });
-        let mut entities = vec![entity("baby", baby_id, 1, baby)];
-        entities.extend((0..10).map(|index| {
-            entity(
-                "record",
-                Uuid::new_v4(),
-                index + 2,
-                json!({
-                    "baby_client_uuid":baby_id,
-                    "type":"diary",
-                    "custom_item_client_uuid":null,
-                    "timestamp":100,
-                    "end_timestamp":null,
-                    "note":null,
-                    "payload_json":{"body":"x".repeat(1024 * 1024)},
-                    "schema_version":2
-                }),
-            )
-        }));
-        store
-            .push(
-                &owner_principal(&family_id),
-                entities,
+        let principal = owner_principal(&family_id);
+        publish_root(&store, &principal, entity("baby", baby_id, 1, baby), 100).unwrap();
+        for index in 0..10 {
+            publish_root(
+                &store,
+                &principal,
+                entity(
+                    "record",
+                    Uuid::new_v4(),
+                    index + 2,
+                    json!({
+                        "baby_client_uuid":baby_id,
+                        "type":"diary",
+                        "custom_item_client_uuid":null,
+                        "timestamp":100,
+                        "end_timestamp":null,
+                        "note":null,
+                        "payload_json":{"body":"x".repeat(1024 * 1024)},
+                        "schema_version":2
+                    }),
+                ),
                 100,
-                1_700_000_000_000,
             )
             .unwrap();
+        }
 
         let first = store.pull(&family_id, 0).unwrap();
         let serialized_bytes = first
@@ -4041,26 +3848,27 @@ mod tests {
         let store = Store::open(directory.path().join("lezi.db")).unwrap();
         let family_id = family(&store);
         let baby_id = Uuid::new_v4();
-        store
-            .push(
-                &owner_principal(&family_id),
-                vec![entity(
-                    "baby",
-                    baby_id,
-                    1,
-                    json!({
-                        "nickname":"年年","sex":"female","birthday":"2025-01-02",
-                        "avatar_media_uuid":null
-                    }),
-                )],
-                100,
-                1_700_000_000_000,
-            )
-            .unwrap();
+        let principal = owner_principal(&family_id);
+        publish_root(
+            &store,
+            &principal,
+            entity(
+                "baby",
+                baby_id,
+                1,
+                json!({
+                    "nickname":"年年","sex":"female","birthday":"2025-01-02",
+                    "avatar_media_uuid":null
+                }),
+            ),
+            100,
+        )
+        .unwrap();
         let record_id = Uuid::new_v4();
-        let result = store.push(
-            &owner_principal(&family_id),
-            vec![entity(
+        let result = publish_root(
+            &store,
+            &principal,
+            entity(
                 "record",
                 record_id,
                 2,
@@ -4074,9 +3882,8 @@ mod tests {
                     "payload_json":{"body":"x".repeat(PULL_PAGE_TARGET_BYTES)},
                     "schema_version":2
                 }),
-            )],
+            ),
             100,
-            1_700_000_000_000,
         );
 
         assert!(matches!(result, Err(StoreError::PullEntityTooLarge)));

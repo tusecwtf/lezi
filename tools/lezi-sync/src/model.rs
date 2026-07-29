@@ -193,42 +193,6 @@ fn is_bidirectional_control(character: char) -> bool {
     )
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PushRequest {
-    pub device_id: String,
-    pub generation: String,
-    pub entities: Vec<RawEntity>,
-}
-
-pub struct ValidatedPush {
-    pub device_id: String,
-    pub generation: String,
-    pub entities: Vec<Entity>,
-}
-
-impl PushRequest {
-    pub fn validate(self, max_media_bytes: usize) -> Result<ValidatedPush, ApiError> {
-        validate_required_string(&self.device_id, 128, "device_id")?;
-        validate_required_string(&self.generation, 128, "generation")?;
-        if self.entities.len() > 1000 {
-            return Err(ApiError::unprocessable(
-                "entities must contain at most 1000 items",
-            ));
-        }
-        let entities = self
-            .entities
-            .into_iter()
-            .map(|entity| entity.validate(max_media_bytes))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(ValidatedPush {
-            device_id: self.device_id,
-            generation: self.generation,
-            entities,
-        })
-    }
-}
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawEntity {
@@ -252,11 +216,7 @@ pub struct Entity {
 }
 
 impl RawEntity {
-    fn validate(self, max_media_bytes: usize) -> Result<Entity, ApiError> {
-        self.validate_as(max_media_bytes, EntityValidationContext::OrdinaryPush)
-    }
-
-    /// Validate an entity for either ordinary push or atomic-bundle roots/media.
+    /// Validate an entity for an atomic-bundle root or media manifest entry.
     pub fn validate_as(
         mut self,
         max_media_bytes: usize,
@@ -268,16 +228,18 @@ impl RawEntity {
             ));
         }
         match (context, self.entity_type.as_str()) {
-            (_, "baby") => validate_baby(&mut self.payload)?,
-            (_, "media") => validate_media(
+            (EntityValidationContext::AtomicBundleRoot, "baby") => {
+                validate_baby(&mut self.payload)?
+            }
+            (EntityValidationContext::AtomicBundleMedia, "media") => validate_media(
                 &mut self.payload,
                 max_media_bytes,
                 self.deleted_at.is_some(),
             )?,
-            (EntityValidationContext::OrdinaryPush, "custom_item") => {
+            (EntityValidationContext::AtomicBundleRoot, "custom_item") => {
                 validate_custom_item(&mut self.payload)?
             }
-            (EntityValidationContext::OrdinaryPush, "fulfillment_candidate") => {
+            (EntityValidationContext::AtomicBundleRoot, "fulfillment_candidate") => {
                 validate_fulfillment_candidate(&mut self.payload)?
             }
             (EntityValidationContext::AtomicBundleRoot, "record") => {
@@ -286,26 +248,9 @@ impl RawEntity {
             (EntityValidationContext::AtomicBundleRoot, "care_plan") => {
                 validate_care_plan(&mut self.payload)?
             }
-            (EntityValidationContext::OrdinaryPush, "record") => {
-                // Align with Android OutboxPushPipeline: every Record is an
-                // atomic package root (0–3 photos), never ordinary /v1/push.
-                return Err(ApiError::unprocessable(
-                    "record must be published via atomic bundle",
-                ));
-            }
-            (EntityValidationContext::OrdinaryPush, "care_plan") => {
-                return Err(ApiError::unprocessable(
-                    "care_plan must be published via atomic bundle",
-                ));
-            }
-            (EntityValidationContext::OrdinaryPush, _) => {
-                return Err(ApiError::unprocessable(
-                    "entity type must be baby, media, custom_item, or fulfillment_candidate",
-                ))
-            }
             (EntityValidationContext::AtomicBundleRoot, _) => {
                 return Err(ApiError::unprocessable(
-                    "bundle root type must be record or care_plan",
+                    "bundle root type must be record, care_plan, baby, custom_item, or fulfillment_candidate",
                 ))
             }
             (EntityValidationContext::AtomicBundleMedia, _) => {
@@ -327,9 +272,7 @@ impl RawEntity {
 /// Where an entity is being accepted on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntityValidationContext {
-    /// Ordinary `/v1/push` (baby | media | custom_item | fulfillment_candidate).
-    OrdinaryPush,
-    /// Root of an atomic bundle (`record` | `care_plan`).
+    /// Root of an atomic bundle (every current publishable entity except `media`).
     AtomicBundleRoot,
     /// Media row inside an atomic bundle (must be `media`).
     AtomicBundleMedia,
@@ -369,11 +312,6 @@ impl BundleStageRequest {
         let root = self
             .root
             .validate_as(max_media_bytes, EntityValidationContext::AtomicBundleRoot)?;
-        if root.entity_type != "record" && root.entity_type != "care_plan" {
-            return Err(ApiError::unprocessable(
-                "bundle root type must be record or care_plan",
-            ));
-        }
         let mut media = Vec::with_capacity(self.media.len());
         let mut seen = BTreeSet::new();
         for raw in self.media {
@@ -406,6 +344,7 @@ impl BundleStageRequest {
                 }
             }
         }
+        validate_bundle_media_for_root(&root, &media)?;
         Ok(ValidatedBundleStage {
             bundle_id: self.bundle_id.to_string(),
             root,
@@ -413,6 +352,65 @@ impl BundleStageRequest {
             generation: self.generation,
         })
     }
+}
+
+fn validate_bundle_media_for_root(root: &Entity, media: &[Entity]) -> Result<(), ApiError> {
+    if matches!(
+        root.entity_type.as_str(),
+        "custom_item" | "fulfillment_candidate"
+    ) && !media.is_empty()
+    {
+        return Err(ApiError::unprocessable(format!(
+            "{} bundle root must not contain media",
+            root.entity_type
+        )));
+    }
+
+    let root_baby = root.payload.get("baby_client_uuid").and_then(Value::as_str);
+    for entity in media {
+        let kind = entity.payload.get("kind").and_then(Value::as_str);
+        let record = entity
+            .payload
+            .get("record_client_uuid")
+            .and_then(Value::as_str);
+        let baby = entity
+            .payload
+            .get("baby_client_uuid")
+            .and_then(Value::as_str);
+        let care_plan = entity
+            .payload
+            .get("care_plan_client_uuid")
+            .and_then(Value::as_str);
+        let matches_root = match root.entity_type.as_str() {
+            "record" => {
+                kind == Some("log")
+                    && record == Some(root.client_uuid.as_str())
+                    && care_plan.is_none()
+                    && baby.is_none_or(|value| Some(value) == root_baby)
+            }
+            "care_plan" => {
+                kind == Some("log")
+                    && care_plan == Some(root.client_uuid.as_str())
+                    && record.is_none()
+                    && baby.is_none_or(|value| Some(value) == root_baby)
+            }
+            "baby" => {
+                kind == Some("avatar")
+                    && baby == Some(root.client_uuid.as_str())
+                    && record.is_none()
+                    && care_plan.is_none()
+            }
+            "custom_item" | "fulfillment_candidate" => false,
+            _ => return Err(ApiError::unprocessable("unsupported bundle root type")),
+        };
+        if !matches_root {
+            return Err(ApiError::unprocessable(format!(
+                "bundle media kind and association must match {} root",
+                root.entity_type
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -1428,10 +1426,7 @@ mod tests {
     }
 
     #[test]
-    fn record_is_rejected_on_ordinary_push() {
-        assert!(record(record_payload())
-            .validate_as(1024, EntityValidationContext::OrdinaryPush)
-            .is_err());
+    fn record_is_accepted_as_an_atomic_bundle_root() {
         record(record_payload())
             .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
             .unwrap();
@@ -1504,7 +1499,7 @@ mod tests {
             "birth_weight_grams": null,
         });
         entity("baby", baby_payload.clone())
-            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
             .unwrap();
         let mut missing_birth_weight = baby_payload.clone();
         missing_birth_weight
@@ -1512,13 +1507,13 @@ mod tests {
             .unwrap()
             .remove("birth_weight_grams");
         let canonical_baby = entity("baby", missing_birth_weight)
-            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
             .unwrap();
         assert_eq!(canonical_baby.payload["birth_weight_grams"], Value::Null);
         let mut old_sort_order = baby_payload;
         old_sort_order["sort_order"] = json!(7);
         assert!(entity("baby", old_sort_order)
-            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
             .is_err());
 
         let media_payload = json!({
@@ -1532,7 +1527,7 @@ mod tests {
             "byte_size": 3,
         });
         entity("media", media_payload.clone())
-            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .validate_as(1024, EntityValidationContext::AtomicBundleMedia)
             .unwrap();
         for key in [
             "care_plan_client_uuid",
@@ -1544,7 +1539,7 @@ mod tests {
             let mut missing = media_payload.clone();
             missing.as_object_mut().unwrap().remove(key);
             let canonical = entity("media", missing)
-                .validate_as(1024, EntityValidationContext::OrdinaryPush)
+                .validate_as(1024, EntityValidationContext::AtomicBundleMedia)
                 .unwrap();
             assert_eq!(canonical.payload[key], Value::Null);
         }
@@ -1555,7 +1550,7 @@ mod tests {
             .unwrap()
             .remove("record_client_uuid");
         let canonical_care_plan_media = entity("media", care_plan_media)
-            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .validate_as(1024, EntityValidationContext::AtomicBundleMedia)
             .unwrap();
         assert_eq!(
             canonical_care_plan_media.payload["record_client_uuid"],
@@ -1567,7 +1562,7 @@ mod tests {
             .unwrap()
             .remove("byte_size");
         assert!(entity("media", live_without_byte_size)
-            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .validate_as(1024, EntityValidationContext::AtomicBundleMedia)
             .is_err());
         let mut tombstone_payload = media_payload;
         tombstone_payload
@@ -1587,7 +1582,7 @@ mod tests {
             "actual_timestamp": null,
         });
         entity("fulfillment_candidate", candidate_payload.clone())
-            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
             .unwrap();
         let mut missing_actual_timestamp = candidate_payload;
         missing_actual_timestamp
@@ -1595,7 +1590,7 @@ mod tests {
             .unwrap()
             .remove("actual_timestamp");
         let canonical_candidate = entity("fulfillment_candidate", missing_actual_timestamp)
-            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
             .unwrap();
         assert_eq!(canonical_candidate.payload["actual_timestamp"], Value::Null);
     }
@@ -1611,7 +1606,7 @@ mod tests {
                 "birth_weight_grams": null,
             });
             assert!(entity("baby", payload)
-                .validate_as(1024, EntityValidationContext::OrdinaryPush)
+                .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
                 .is_err());
         }
         let blank_nickname = json!({
@@ -1622,7 +1617,7 @@ mod tests {
             "birth_weight_grams": null,
         });
         assert!(entity("baby", blank_nickname)
-            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
             .is_err());
 
         let blank_custom_item = json!({
@@ -1630,7 +1625,7 @@ mod tests {
             "icon_slot": 1,
         });
         assert!(entity("custom_item", blank_custom_item)
-            .validate_as(1024, EntityValidationContext::OrdinaryPush)
+            .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
             .is_err());
 
         let mut invalid_interval = record_payload();

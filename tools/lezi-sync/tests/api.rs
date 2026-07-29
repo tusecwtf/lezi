@@ -26,7 +26,6 @@ struct Rig {
 
 #[derive(Clone)]
 struct TestClientSession {
-    device_id: String,
     generation: String,
 }
 
@@ -151,22 +150,9 @@ async fn json_request_with_headers(
     mut body: Value,
     extra_headers: &[(&str, &str)],
 ) -> (StatusCode, Value) {
-    let request_device_id = body
-        .get("device_id")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
     if method == Method::POST {
         if let Some(session) = token.and_then(test_client_session) {
-            if uri == "/v1/push" {
-                if let Some(object) = body.as_object_mut() {
-                    object
-                        .entry("device_id")
-                        .or_insert_with(|| Value::String(session.device_id.clone()));
-                    object
-                        .entry("generation")
-                        .or_insert_with(|| Value::String(session.generation.clone()));
-                }
-            } else if uri == "/v1/bundles" || uri.ends_with("/commit") {
+            if uri == "/v1/bundles" || uri.ends_with("/commit") {
                 if let Some(object) = body.as_object_mut() {
                     object
                         .entry("generation")
@@ -179,15 +165,13 @@ async fn json_request_with_headers(
     let (status, value) =
         raw_json_request_with_headers(app, method, uri, token, body, extra_headers).await;
     if status.is_success() && (uri == "/v1/family/create" || uri == "/v1/join") {
-        if let (Some(token), Some(generation), Some(device_id)) = (
+        if let (Some(token), Some(generation)) = (
             value.get("token").and_then(Value::as_str),
             value.get("generation").and_then(Value::as_str),
-            request_device_id,
         ) {
             test_client_sessions().lock().unwrap().insert(
                 token.to_owned(),
                 TestClientSession {
-                    device_id,
                     generation: generation.to_owned(),
                 },
             );
@@ -626,21 +610,10 @@ async fn family_create_reclaims_existing_owner_and_full_resync_path() {
 
     // Seed a baby so reclaim + pull proves data survives.
     let baby_id = Uuid::new_v4().to_string();
-    let (push_status, _) = json_request(
+    let (push_status, _) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(&old_token),
-        json!({
-            "device_id": "owner-device-a",
-            "generation": first["generation"],
-            "entities": [{
-                "type": "baby",
-                "client_uuid": baby_id,
-                "updated_at": 10,
-                "payload": baby_payload("乐乐", None),
-            }],
-        }),
+        &old_token,
+        entity_wire("baby", &baby_id, 10, baby_payload("乐乐", None), None),
     )
     .await;
     assert_eq!(push_status, StatusCode::OK);
@@ -686,8 +659,7 @@ async fn family_create_reclaims_existing_owner_and_full_resync_path() {
     );
 
     // New session can list self and pull existing entities.
-    let (members_status, members) =
-        get_json(&rig.app, "/v1/family/members", Some(new_token)).await;
+    let (members_status, members) = get_json(&rig.app, "/v1/family/members", Some(new_token)).await;
     assert_eq!(members_status, StatusCode::OK);
     let self_member = members["members"]
         .as_array()
@@ -711,13 +683,13 @@ async fn family_create_reclaims_existing_owner_and_full_resync_path() {
     assert_eq!(pull_status, StatusCode::OK, "{pull}");
     let entities = pull["entities"].as_array().unwrap();
     assert!(
-        entities.iter().any(|entity| {
-            entity["type"] == "baby" && entity["client_uuid"] == baby_id
-        }),
+        entities
+            .iter()
+            .any(|entity| { entity["type"] == "baby" && entity["client_uuid"] == baby_id }),
         "{pull}"
     );
 
-    // Push with the new device_id works; stale device_id is rejected.
+    // Ordinary push stays retired after credential reclaim.
     let (stale_device, _) = json_request(
         &rig.app,
         Method::POST,
@@ -730,24 +702,13 @@ async fn family_create_reclaims_existing_owner_and_full_resync_path() {
         }),
     )
     .await;
-    assert_eq!(stale_device, StatusCode::FORBIDDEN);
+    assert_eq!(stale_device, StatusCode::UNPROCESSABLE_ENTITY);
 
     let baby_b = Uuid::new_v4().to_string();
-    let (push_ok, _) = json_request(
+    let (push_ok, _) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(new_token),
-        json!({
-            "device_id": "owner-device-b",
-            "generation": reclaimed["generation"],
-            "entities": [{
-                "type": "baby",
-                "client_uuid": baby_b,
-                "updated_at": 20,
-                "payload": baby_payload("圆圆", None),
-            }],
-        }),
+        new_token,
+        entity_wire("baby", &baby_b, 20, baby_payload("圆圆", None), None),
     )
     .await;
     assert_eq!(push_ok, StatusCode::OK);
@@ -1010,26 +971,22 @@ async fn current_wire_rejects_removed_compatibility_fields() {
     assert_eq!(pull_status, StatusCode::UNPROCESSABLE_ENTITY, "{pull_body}");
 
     let obsolete_baby_id = Uuid::new_v4().to_string();
-    let (due_date_status, due_date_body) = json_request(
+    let (due_date_status, due_date_body) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({
-            "device_id": "strict-wire-owner",
-            "entities": [{
-                "type": "baby",
-                "client_uuid": obsolete_baby_id,
-                "updated_at": 1,
-                "payload": {
-                    "nickname": "年年",
-                    "sex": "female",
-                    "birthday": "2025-01-02",
-                    "due_date": null,
-                    "avatar_media_uuid": null,
-                },
-            }],
-        }),
+        token,
+        entity_wire(
+            "baby",
+            &obsolete_baby_id,
+            1,
+            json!({
+                "nickname": "年年",
+                "sex": "female",
+                "birthday": "2025-01-02",
+                "due_date": null,
+                "avatar_media_uuid": null,
+            }),
+            None,
+        ),
     )
     .await;
     assert_eq!(
@@ -1042,15 +999,10 @@ async fn current_wire_rejects_removed_compatibility_fields() {
     let record_id = Uuid::new_v4().to_string();
     let mut obsolete_record = record_payload(&baby_id);
     obsolete_record["created_by_device_id"] = json!("strict-wire-owner");
-    let (device_author_status, device_author_body) = json_request(
+    let (device_author_status, device_author_body) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({
-            "device_id": "strict-wire-owner",
-            "entities": [entity_wire("record", &record_id, 2, obsolete_record, None)],
-        }),
+        token,
+        entity_wire("record", &record_id, 2, obsolete_record, None),
     )
     .await;
     assert_eq!(
@@ -1061,7 +1013,7 @@ async fn current_wire_rejects_removed_compatibility_fields() {
 }
 
 #[tokio::test]
-async fn current_sync_requests_require_device_and_generation_envelopes() {
+async fn current_sync_requests_require_generation_envelopes_and_keep_push_retired() {
     let rig = Rig::new();
     let owner = create_family(
         &rig.app,
@@ -1085,22 +1037,10 @@ async fn current_sync_requests_require_device_and_generation_envelopes() {
     assert_eq!(pull_status, StatusCode::UNPROCESSABLE_ENTITY, "{pull_body}");
 
     let baby_id = Uuid::new_v4().to_string();
-    let (baby_status, baby_body) = json_request(
+    let (baby_status, baby_body) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({
-            "device_id": "strict-envelope-owner",
-            "generation": "generation-a",
-            "entities": [entity_wire(
-                "baby",
-                &baby_id,
-                1,
-                baby_payload("年年", None),
-                None,
-            )],
-        }),
+        token,
+        entity_wire("baby", &baby_id, 1, baby_payload("年年", None), None),
     )
     .await;
     assert_eq!(baby_status, StatusCode::OK, "{baby_body}");
@@ -1179,18 +1119,11 @@ async fn current_record_and_care_plan_wire_rejects_obsolete_or_untyped_payloads(
     for invalid_schema in [Value::Null, json!(1), json!(3), json!("2")] {
         let mut record = record_payload(&baby_id);
         record["schema_version"] = invalid_schema.clone();
-        let (record_status, record_body) = json_request(
+        let (record_status, record_body) = stage_bundle_with_media(
             &rig.app,
-            Method::POST,
-            "/v1/push",
-            Some(token),
-            json!({"entities": [entity_wire(
-                "record",
-                &Uuid::new_v4().to_string(),
-                2,
-                record,
-                None,
-            )]}),
+            token,
+            entity_wire("record", &Uuid::new_v4().to_string(), 2, record, None),
+            vec![],
         )
         .await;
         assert_eq!(
@@ -1229,41 +1162,13 @@ async fn current_record_and_care_plan_wire_rejects_obsolete_or_untyped_payloads(
             care_plan_payload(&baby_id, "formula")
         };
         payload.as_object_mut().unwrap().remove("schema_version");
-        let (status, body) = if root_type == "record" {
-            json_request(
-                &rig.app,
-                Method::POST,
-                "/v1/push",
-                Some(token),
-                json!({"entities": [entity_wire(
-                    root_type,
-                    &Uuid::new_v4().to_string(),
-                    2,
-                    payload,
-                    None,
-                )]}),
-            )
-            .await
-        } else {
-            json_request(
-                &rig.app,
-                Method::POST,
-                "/v1/bundles",
-                Some(token),
-                json!({
-                    "bundle_id": Uuid::new_v4(),
-                    "root": entity_wire(
-                        root_type,
-                        &Uuid::new_v4().to_string(),
-                        2,
-                        payload,
-                        None,
-                    ),
-                    "media": [],
-                }),
-            )
-            .await
-        };
+        let (status, body) = stage_bundle_with_media(
+            &rig.app,
+            token,
+            entity_wire(root_type, &Uuid::new_v4().to_string(), 2, payload, None),
+            vec![],
+        )
+        .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
     }
 
@@ -1281,18 +1186,11 @@ async fn current_record_and_care_plan_wire_rejects_obsolete_or_untyped_payloads(
         let mut record = record_payload(&baby_id);
         record["type"] = json!(record_type);
         record["payload_json"] = nested.clone();
-        let (record_status, record_body) = json_request(
+        let (record_status, record_body) = stage_bundle_with_media(
             &rig.app,
-            Method::POST,
-            "/v1/push",
-            Some(token),
-            json!({"entities": [entity_wire(
-                "record",
-                &Uuid::new_v4().to_string(),
-                2,
-                record,
-                None,
-            )]}),
+            token,
+            entity_wire("record", &Uuid::new_v4().to_string(), 2, record, None),
+            vec![],
         )
         .await;
         assert_eq!(
@@ -1732,7 +1630,7 @@ async fn membership_id_is_stable_across_restart_and_rejects_role_forgery() {
     .await;
     assert_eq!(forged_rename, StatusCode::FORBIDDEN);
 
-    // Push with a forged device_id (impersonating another membership) is rejected.
+    // Retired push rejects every caller before inspecting legacy device fields.
     let (forged_device_status, forged_device_body) = json_request(
         &restarted,
         Method::POST,
@@ -1744,10 +1642,10 @@ async fn membership_id_is_stable_across_restart_and_rejects_role_forgery() {
         }),
     )
     .await;
-    assert_eq!(forged_device_status, StatusCode::FORBIDDEN);
+    assert_eq!(forged_device_status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(
         forged_device_body,
-        json!({"detail":"device_id does not match token"})
+        json!({"detail":"ordinary push is retired; publish an atomic bundle"})
     );
 }
 
@@ -2394,7 +2292,7 @@ async fn family_members_project_canonical_memberships_without_role_promotion() {
 }
 
 #[tokio::test]
-async fn push_lww_cursor_and_generation_recovery_match_current_protocol() {
+async fn atomic_bundle_lww_cursor_and_generation_recovery_match_current_protocol() {
     let rig = Rig::new();
     let owner = create_family(
         &rig.app,
@@ -2408,60 +2306,30 @@ async fn push_lww_cursor_and_generation_recovery_match_current_protocol() {
         "type":"baby","client_uuid":baby_id,"updated_at":100,
         "payload":baby_payload("年年", None)
     });
-    let (_, applied) = json_request(
+    let (applied_status, applied) = publish_root_bundle(&rig.app, token, first.clone()).await;
+    let (retry_status, retry) = publish_root_bundle(&rig.app, token, first.clone()).await;
+    let (older_status, older) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[first.clone()]}),
+        token,
+        entity_wire("baby", &baby_id, 99, baby_payload("旧", None), None),
     )
     .await;
-    let (_, retry) = json_request(
+    let (newer_status, newer) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[first.clone()]}),
+        token,
+        entity_wire("baby", &baby_id, 101, baby_payload("年年", None), Some(101)),
     )
     .await;
-    let (_, older) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[{
-            "type":"baby","client_uuid":baby_id,"updated_at":99,
-            "payload":baby_payload("旧", None)
-        }]}),
-    )
-    .await;
-    let (_, newer) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[{
-            "type":"baby","client_uuid":baby_id,"updated_at":101,"deleted_at":101,
-            "payload":baby_payload("年年", None)
-        }]}),
-    )
-    .await;
-    assert_eq!(
-        applied,
-        json!({"applied":1,"skipped":0,"cursor":1,"record_authors":[]})
-    );
-    assert_eq!(
-        retry,
-        json!({"applied":0,"skipped":1,"cursor":1,"record_authors":[]})
-    );
-    assert_eq!(
-        older,
-        json!({"applied":0,"skipped":1,"cursor":1,"record_authors":[]})
-    );
-    assert_eq!(
-        newer,
-        json!({"applied":1,"skipped":0,"cursor":2,"record_authors":[]})
-    );
+    assert_eq!(applied_status, StatusCode::OK, "{applied}");
+    assert_eq!(applied["applied"], 1);
+    assert_eq!(applied["cursor"], 1);
+    assert_eq!(retry_status, StatusCode::OK, "{retry}");
+    assert_eq!(retry["applied"], 0);
+    assert_eq!(retry["cursor"], 1);
+    assert_eq!(older_status, StatusCode::CONFLICT, "{older}");
+    assert_eq!(newer_status, StatusCode::OK, "{newer}");
+    assert_eq!(newer["applied"], 1);
+    assert_eq!(newer["cursor"], 2);
     let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=1", Some(token)).await;
     assert_eq!(pull["cursor"], 2);
     assert_eq!(pull["entities"][0]["rev"], 2);
@@ -2479,15 +2347,20 @@ async fn push_lww_cursor_and_generation_recovery_match_current_protocol() {
     .await;
     assert_eq!(generation_status, StatusCode::CONFLICT);
     assert_eq!(generation_body["detail"]["code"], "generation_changed");
-    let (stale_push, _) = json_request(
+    let (stale_stage, _) = json_request(
         &restarted,
         Method::POST,
-        "/v1/push",
+        "/v1/bundles",
         Some(token),
-        json!({"generation":"generation-a","entities":[]}),
+        json!({
+            "bundle_id": Uuid::new_v4(),
+            "generation":"generation-a",
+            "root": entity_wire("baby", &Uuid::new_v4().to_string(), 200, baby_payload("圆圆", None), None),
+            "media": []
+        }),
     )
     .await;
-    assert_eq!(stale_push, StatusCode::CONFLICT);
+    assert_eq!(stale_stage, StatusCode::CONFLICT);
 }
 
 #[tokio::test]
@@ -2519,15 +2392,10 @@ async fn pull_pages_large_bootstrap_without_skipping_the_remaining_entities() {
             })
         })
         .collect::<Vec<_>>();
-    let (push_status, push_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":entities}),
-    )
-    .await;
-    assert_eq!(push_status, StatusCode::OK, "{push_body}");
+    for entity in entities {
+        let (publish_status, publish_body) = publish_root_bundle(&rig.app, token, entity).await;
+        assert_eq!(publish_status, StatusCode::OK, "{publish_body}");
+    }
 
     let (first_status, first) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
     assert_eq!(first_status, StatusCode::OK);
@@ -2558,17 +2426,10 @@ async fn paged_full_resync_includes_dependencies_that_have_a_later_revision() {
     let record_ids = (0..201)
         .map(|_| Uuid::new_v4().to_string())
         .collect::<Vec<_>>();
-    let (push_status, push_body) = json_request(
+    let (push_status, push_body) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[json!({
-            "type":"baby",
-            "client_uuid":baby_id,
-            "updated_at":1,
-            "payload":baby_payload("初始宝宝", None)
-        })]}),
+        token,
+        entity_wire("baby", &baby_id, 1, baby_payload("初始宝宝", None), None),
     )
     .await;
     assert_eq!(push_status, StatusCode::OK, "{push_body}");
@@ -2582,17 +2443,16 @@ async fn paged_full_resync_includes_dependencies_that_have_a_later_revision() {
         )
         .await;
     }
-    let (update_status, update_body) = json_request(
+    let (update_status, update_body) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[{
-            "type":"baby",
-            "client_uuid":baby_id,
-            "updated_at":10_000,
-            "payload":baby_payload("更新宝宝", None)
-        }]}),
+        token,
+        entity_wire(
+            "baby",
+            &baby_id,
+            10_000,
+            baby_payload("更新宝宝", None),
+            None,
+        ),
     )
     .await;
     assert_eq!(update_status, StatusCode::OK, "{update_body}");
@@ -2635,17 +2495,16 @@ async fn push_rejects_terminal_updated_at() {
     .await;
     let token = owner["token"].as_str().unwrap();
 
-    let (status, _) = json_request(
+    let (status, _) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[{
-            "type":"baby",
-            "client_uuid":Uuid::new_v4(),
-            "updated_at":i64::MAX,
-            "payload":baby_payload("年年", None)
-        }]}),
+        token,
+        entity_wire(
+            "baby",
+            &Uuid::new_v4().to_string(),
+            i64::MAX,
+            baby_payload("年年", None),
+            None,
+        ),
     )
     .await;
 
@@ -2664,17 +2523,16 @@ async fn push_rejects_updated_at_more_than_24_hours_ahead() {
     let token = owner["token"].as_str().unwrap();
     let server_now_millis = rig.now.load(Ordering::SeqCst) * 1_000;
 
-    let (status, _) = json_request(
+    let (status, _) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[{
-            "type":"baby",
-            "client_uuid":Uuid::new_v4(),
-            "updated_at":server_now_millis + 86_400_001,
-            "payload":baby_payload("年年", None)
-        }]}),
+        token,
+        entity_wire(
+            "baby",
+            &Uuid::new_v4().to_string(),
+            server_now_millis + 86_400_001,
+            baby_payload("年年", None),
+            None,
+        ),
     )
     .await;
 
@@ -2694,36 +2552,26 @@ async fn baby_nickname_accepts_20_unicode_chars_and_rejects_21() {
     let baby_id = Uuid::new_v4().to_string();
 
     let nickname_20 = "年".repeat(20);
-    let (accepted, body) = json_request(
+    let (accepted, body) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[{
-            "type":"baby","client_uuid":baby_id,"updated_at":1,
-            "payload":baby_payload(&nickname_20, None)
-        }]}),
+        token,
+        entity_wire("baby", &baby_id, 1, baby_payload(&nickname_20, None), None),
     )
     .await;
     assert_eq!(accepted, StatusCode::OK, "{body}");
 
     let nickname_21 = "年".repeat(21);
-    let (rejected, body) = json_request(
+    let (rejected, body) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[{
-            "type":"baby","client_uuid":baby_id,"updated_at":2,
-            "payload":baby_payload(&nickname_21, None)
-        }]}),
+        token,
+        entity_wire("baby", &baby_id, 2, baby_payload(&nickname_21, None), None),
     )
     .await;
     assert_eq!(rejected, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
 }
 
 #[tokio::test]
-async fn strict_entity_contract_rejects_sort_order_and_orders_same_batch_references() {
+async fn strict_atomic_entity_contract_rejects_legacy_fields_and_orders_dependencies() {
     let rig = Rig::new();
     let owner = create_family(
         &rig.app,
@@ -2733,25 +2581,16 @@ async fn strict_entity_contract_rejects_sort_order_and_orders_same_batch_referen
     .await;
     let token = owner["token"].as_str().unwrap();
     assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            "/v1/push",
-            None,
-            json!({"entities":[]}),
-        )
-        .await
-        .0,
+        json_request(&rig.app, Method::POST, "/v1/bundles", None, json!({}),)
+            .await
+            .0,
         StatusCode::UNAUTHORIZED
     );
-    let (unknown_type, _) = json_request(
+    let (unknown_type, _) = stage_bundle_with_media(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[{
-            "type":"settings","client_uuid":Uuid::new_v4(),"updated_at":1,"payload":{}
-        }]}),
+        token,
+        entity_wire("settings", &Uuid::new_v4().to_string(), 1, json!({}), None),
+        vec![],
     )
     .await;
     assert_eq!(unknown_type, StatusCode::UNPROCESSABLE_ENTITY);
@@ -2759,39 +2598,27 @@ async fn strict_entity_contract_rejects_sort_order_and_orders_same_batch_referen
     let baby_id = Uuid::new_v4().to_string();
     let record_id = Uuid::new_v4().to_string();
     let media_id = Uuid::new_v4().to_string();
-    let (unresolved, unresolved_body) = json_request(
+    let (unresolved, unresolved_body) = stage_bundle_with_media(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[{
-            "type":"record","client_uuid":record_id,"updated_at":1,
-            "payload":record_payload(&baby_id)
-        }]}),
+        token,
+        entity_wire("record", &record_id, 1, record_payload(&baby_id), None),
+        vec![],
     )
     .await;
-    assert_eq!(
-        unresolved,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{unresolved_body}"
-    );
+    assert_eq!(unresolved, StatusCode::CONFLICT, "{unresolved_body}");
     assert!(
         unresolved_body["detail"]
             .as_str()
             .unwrap_or_default()
-            .contains("atomic bundle"),
+            .contains("baby_client_uuid does not exist"),
         "{unresolved_body}"
     );
     let mut legacy_baby = baby_payload("年年", None);
     legacy_baby["sort_order"] = json!(99);
-    let (legacy_status, legacy_result) = json_request(
+    let (legacy_status, legacy_result) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[
-            {"type":"baby","client_uuid":baby_id,"updated_at":1,"payload":legacy_baby}
-        ]}),
+        token,
+        entity_wire("baby", &baby_id, 1, legacy_baby, None),
     )
     .await;
     assert_eq!(
@@ -2801,14 +2628,10 @@ async fn strict_entity_contract_rejects_sort_order_and_orders_same_batch_referen
     );
 
     let baby = baby_payload("年年", None);
-    let (baby_push, baby_result) = json_request(
+    let (baby_push, baby_result) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[
-            {"type":"baby","client_uuid":baby_id,"updated_at":1,"payload":baby}
-        ]}),
+        token,
+        entity_wire("baby", &baby_id, 1, baby, None),
     )
     .await;
     assert_eq!(baby_push, StatusCode::OK, "{baby_result}");
@@ -2820,8 +2643,7 @@ async fn strict_entity_contract_rejects_sort_order_and_orders_same_batch_referen
         .iter()
         .map(|entity| entity["type"].as_str().unwrap())
         .collect::<Vec<_>>();
-    // Media without durable bytes is omitted so clients can advance past half-uploads.
-    assert_eq!(types, ["baby", "record"]);
+    assert_eq!(types, ["baby", "media", "record"]);
     assert!(pulled["entities"][0]["payload"]
         .as_object()
         .unwrap()
@@ -2838,22 +2660,22 @@ async fn strict_entity_contract_rejects_sort_order_and_orders_same_batch_referen
         Some("application/octet-stream"),
     )
     .await;
-    assert_eq!(uploaded.status(), StatusCode::OK);
+    assert_eq!(uploaded.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let (_, after_bytes) = get_json(
         &rig.app,
         &format!("/v1/pull?cursor={seed_cursor}"),
         Some(token),
     )
     .await;
-    let media_types = after_bytes["entities"]
+    assert!(after_bytes["entities"].as_array().unwrap().is_empty());
+    let canonical_media = pulled["entities"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|entity| entity["type"].as_str().unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(media_types, ["media"]);
-    assert_eq!(after_bytes["entities"][0]["client_uuid"], media_id);
-    let canonical_media = after_bytes["entities"][0]["payload"].as_object().unwrap();
+        .find(|entity| entity["client_uuid"] == media_id)
+        .unwrap()["payload"]
+        .as_object()
+        .unwrap();
     assert_eq!(
         canonical_media
             .keys()
@@ -2874,7 +2696,7 @@ async fn strict_entity_contract_rejects_sort_order_and_orders_same_batch_referen
     assert!(canonical_media["care_plan_client_uuid"].is_null());
     assert!(canonical_media["width"].is_null());
     assert!(canonical_media["height"].is_null());
-    assert_eq!(after_bytes["cursor"], 4);
+    assert_eq!(after_bytes["cursor"], seed_cursor);
 }
 
 #[tokio::test]
@@ -2890,29 +2712,19 @@ async fn full_pull_includes_deleted_baby_dependency_before_retained_record() {
     let baby_id = Uuid::new_v4().to_string();
     let record_id = Uuid::new_v4().to_string();
 
-    let (seeded, body) = json_request(
+    let (seeded, body) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[
-            {"type":"baby","client_uuid":baby_id,"updated_at":1,
-             "payload":baby_payload("年年", None)}
-        ]}),
+        token,
+        entity_wire("baby", &baby_id, 1, baby_payload("年年", None), None),
     )
     .await;
     assert_eq!(seeded, StatusCode::OK, "{body}");
     seed_record_with_id(&rig.app, token, &record_id, 1, record_payload(&baby_id)).await;
 
-    let (deleted, body) = json_request(
+    let (deleted, body) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[{
-            "type":"baby","client_uuid":baby_id,"updated_at":2,"deleted_at":2,
-            "payload":baby_payload("年年", None)
-        }]}),
+        token,
+        entity_wire("baby", &baby_id, 2, baby_payload("年年", None), Some(2)),
     )
     .await;
     assert_eq!(deleted, StatusCode::OK, "{body}");
@@ -2948,44 +2760,34 @@ async fn media_bytes_size_acl_and_immutable_association_are_enforced() {
     let record_id = Uuid::new_v4().to_string();
     let log_id = Uuid::new_v4().to_string();
     let avatar_id = Uuid::new_v4().to_string();
-    let (seeded, body) = json_request(
+    let (seeded, body) = publish_bundle_with_media(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(owner_token),
-        json!({"entities":[
-            {"type":"baby","client_uuid":baby_id,"updated_at":1,
-             "payload":baby_payload("年年", Some(&avatar_id))},
-            {"type":"baby","client_uuid":second_baby_id,"updated_at":1,
-             "payload":baby_payload("二宝", None)},
-            {"type":"media","client_uuid":avatar_id,"updated_at":3,
-             "payload":avatar_media_payload(&baby_id)}
-        ]}),
+        owner_token,
+        entity_wire(
+            "baby",
+            &baby_id,
+            1,
+            baby_payload("年年", Some(&avatar_id)),
+            None,
+        ),
+        vec![(
+            entity_wire("media", &avatar_id, 3, avatar_media_payload(&baby_id), None),
+            b"avatar".to_vec(),
+        )],
     )
     .await;
     assert_eq!(seeded, StatusCode::OK, "{body}");
-    // Zero-media record package, then ordinary log-media metadata (avatar/log media
-    // ordinary path still exists; record roots are atomic on the product client).
-    seed_record_with_id(
-        &rig.app,
-        owner_token,
-        &record_id,
-        1,
-        record_payload(&baby_id),
-    )
-    .await;
-    let (media_seed, media_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(owner_token),
-        json!({"entities":[
-            {"type":"media","client_uuid":log_id,"updated_at":2,
-             "payload":log_media_payload(&record_id)}
-        ]}),
-    )
-    .await;
-    assert_eq!(media_seed, StatusCode::OK, "{media_body}");
+    assert_eq!(
+        publish_root_bundle(
+            &rig.app,
+            owner_token,
+            entity_wire("baby", &second_baby_id, 1, baby_payload("二宝", None), None,),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    seed_record_then_log_media(&rig.app, owner_token, &record_id, &log_id, &baby_id, 1).await;
 
     let uploaded = request(
         &rig.app,
@@ -2996,7 +2798,7 @@ async fn media_bytes_size_acl_and_immutable_association_are_enforced() {
         Some("application/octet-stream"),
     )
     .await;
-    assert_eq!(uploaded.status(), StatusCode::OK);
+    assert_eq!(uploaded.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let downloaded = request(
         &rig.app,
         Method::GET,
@@ -3020,7 +2822,7 @@ async fn media_bytes_size_acl_and_immutable_association_are_enforced() {
         None,
     )
     .await;
-    assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(oversized.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let denied_avatar = request(
         &rig.app,
         Method::PUT,
@@ -3030,7 +2832,7 @@ async fn media_bytes_size_acl_and_immutable_association_are_enforced() {
         None,
     )
     .await;
-    assert_eq!(denied_avatar.status(), StatusCode::FORBIDDEN);
+    assert_eq!(denied_avatar.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let accepted_avatar = request(
         &rig.app,
         Method::PUT,
@@ -3040,29 +2842,45 @@ async fn media_bytes_size_acl_and_immutable_association_are_enforced() {
         None,
     )
     .await;
-    assert_eq!(accepted_avatar.status(), StatusCode::OK);
+    assert_eq!(accepted_avatar.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
-    let (member_bypass, _) = json_request(
+    let (member_bypass, _) = publish_bundle_with_media(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(member_token),
-        json!({"entities":[{
-            "type":"media","client_uuid":avatar_id,"updated_at":4,
-            "payload":log_media_payload(&record_id)
-        }]}),
+        member_token,
+        entity_wire(
+            "baby",
+            &baby_id,
+            4,
+            baby_payload("年年", Some(&avatar_id)),
+            None,
+        ),
+        vec![(
+            entity_wire("media", &avatar_id, 4, avatar_media_payload(&baby_id), None),
+            b"avatar".to_vec(),
+        )],
     )
     .await;
     assert_eq!(member_bypass, StatusCode::FORBIDDEN);
-    let (owner_reassociate, _) = json_request(
+    let (owner_reassociate, _) = publish_bundle_with_media(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(owner_token),
-        json!({"entities":[{
-            "type":"media","client_uuid":avatar_id,"updated_at":4,
-            "payload":avatar_media_payload(&second_baby_id)
-        }]}),
+        owner_token,
+        entity_wire(
+            "baby",
+            &second_baby_id,
+            4,
+            baby_payload("二宝", Some(&avatar_id)),
+            None,
+        ),
+        vec![(
+            entity_wire(
+                "media",
+                &avatar_id,
+                4,
+                avatar_media_payload(&second_baby_id),
+                None,
+            ),
+            b"avatar".to_vec(),
+        )],
     )
     .await;
     assert_eq!(owner_reassociate, StatusCode::CONFLICT);
@@ -3084,28 +2902,18 @@ async fn media_metadata_rejects_zero_declared_byte_size() {
     let mut media_payload = log_media_payload(&record_id);
     media_payload["byte_size"] = json!(0);
 
-    let (baby_push, baby_body) = json_request(
+    let (baby_push, baby_body) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[
-            {"type":"baby","client_uuid":baby_id,"updated_at":1,
-             "payload":baby_payload("年年", None)}
-        ]}),
+        token,
+        entity_wire("baby", &baby_id, 1, baby_payload("年年", None), None),
     )
     .await;
     assert_eq!(baby_push, StatusCode::OK, "{baby_body}");
-    seed_record_with_id(&rig.app, token, &record_id, 1, record_payload(&baby_id)).await;
-    let (status, _) = json_request(
+    let (status, _) = stage_bundle_with_media(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[
-            {"type":"media","client_uuid":media_id,"updated_at":1,
-             "payload":media_payload}
-        ]}),
+        token,
+        entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
+        vec![entity_wire("media", &media_id, 2, media_payload, None)],
     )
     .await;
 
@@ -3130,28 +2938,24 @@ async fn media_metadata_enforces_server_byte_limit_and_android_dimension_bounds(
     boundary_payload["width"] = json!(i32::MAX);
     boundary_payload["height"] = json!(i32::MAX);
 
-    let (baby_push, baby_body) = json_request(
+    let (baby_push, baby_body) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[
-            {"type":"baby","client_uuid":baby_id,"updated_at":1,
-             "payload":baby_payload("年年", None)}
-        ]}),
+        token,
+        entity_wire("baby", &baby_id, 1, baby_payload("年年", None), None),
     )
     .await;
     assert_eq!(baby_push, StatusCode::OK, "{baby_body}");
-    seed_record_with_id(&rig.app, token, &record_id, 1, record_payload(&baby_id)).await;
-    let (accepted, body) = json_request(
+    let (accepted, body) = stage_bundle_with_media(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[
-            {"type":"media","client_uuid":boundary_media_id,"updated_at":1,
-             "payload":boundary_payload}
-        ]}),
+        token,
+        entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
+        vec![entity_wire(
+            "media",
+            &boundary_media_id,
+            2,
+            boundary_payload,
+            None,
+        )],
     )
     .await;
     assert_eq!(accepted, StatusCode::OK, "{body}");
@@ -3163,15 +2967,17 @@ async fn media_metadata_enforces_server_byte_limit_and_android_dimension_bounds(
     ] {
         let mut payload = log_media_payload(&record_id);
         payload[field] = invalid_value;
-        let (status, body) = json_request(
+        let (status, body) = stage_bundle_with_media(
             &rig.app,
-            Method::POST,
-            "/v1/push",
-            Some(token),
-            json!({"entities":[{
-                "type":"media","client_uuid":Uuid::new_v4(),"updated_at":2,
-                "payload":payload
-            }]}),
+            token,
+            entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
+            vec![entity_wire(
+                "media",
+                &Uuid::new_v4().to_string(),
+                2,
+                payload,
+                None,
+            )],
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{field}: {body}");
@@ -3191,24 +2997,32 @@ async fn media_upload_rejects_empty_or_mismatched_body() {
     let baby_id = Uuid::new_v4().to_string();
     let record_id = Uuid::new_v4().to_string();
     let media_id = Uuid::new_v4().to_string();
-    let (baby_push, baby_body) = json_request(
+    let bundle_id = Uuid::new_v4().to_string();
+    let (baby_push, baby_body) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[
-            {"type":"baby","client_uuid":baby_id,"updated_at":1,
-             "payload":baby_payload("年年", None)}
-        ]}),
+        token,
+        entity_wire("baby", &baby_id, 1, baby_payload("年年", None), None),
     )
     .await;
     assert_eq!(baby_push, StatusCode::OK, "{baby_body}");
-    seed_record_then_log_media(&rig.app, token, &record_id, &media_id, &baby_id, 1).await;
+    let (stage_status, stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
+            "media": [entity_wire("media", &media_id, 2, log_media_payload(&record_id), None)],
+        }),
+    )
+    .await;
+    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
 
     let uploaded = request(
         &rig.app,
         Method::PUT,
-        &format!("/v1/media/{media_id}"),
+        &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
         Some(token),
         Body::empty(),
         Some("application/octet-stream"),
@@ -3219,7 +3033,7 @@ async fn media_upload_rejects_empty_or_mismatched_body() {
     let mismatched = request(
         &rig.app,
         Method::PUT,
-        &format!("/v1/media/{media_id}"),
+        &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
         Some(token),
         Body::from("no"),
         Some("application/octet-stream"),
@@ -3253,17 +3067,20 @@ async fn member_cannot_create_update_or_tombstone_baby() {
     let baby_id = Uuid::new_v4().to_string();
     let avatar_id = Uuid::new_v4().to_string();
     assert_eq!(
-        json_request(
+        publish_bundle_with_media(
             &rig.app,
-            Method::POST,
-            "/v1/push",
-            Some(owner_token),
-            json!({"entities":[
-                {"type":"media","client_uuid":avatar_id,"updated_at":1,
-                 "payload":avatar_media_payload(&baby_id)},
-                {"type":"baby","client_uuid":baby_id,"updated_at":1,
-                 "payload":baby_payload("年年", Some(&avatar_id))}
-            ]}),
+            owner_token,
+            entity_wire(
+                "baby",
+                &baby_id,
+                1,
+                baby_payload("年年", Some(&avatar_id)),
+                None,
+            ),
+            vec![(
+                entity_wire("media", &avatar_id, 1, avatar_media_payload(&baby_id), None,),
+                b"avatar".to_vec(),
+            )],
         )
         .await
         .0,
@@ -3287,14 +3104,7 @@ async fn member_cannot_create_update_or_tombstone_baby() {
             "payload":baby_payload("禁止清空", None)
         }),
     ] {
-        let (status, _) = json_request(
-            &rig.app,
-            Method::POST,
-            "/v1/push",
-            Some(member_token),
-            json!({"entities":[entity]}),
-        )
-        .await;
+        let (status, _) = publish_root_bundle(&rig.app, member_token, entity).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
 }
@@ -3315,35 +3125,64 @@ async fn stale_member_avatar_snapshot_does_not_block_newer_record() {
     let first_avatar_id = Uuid::new_v4().to_string();
     let current_avatar_id = Uuid::new_v4().to_string();
     let record_id = Uuid::new_v4().to_string();
-    let (seeded, seeded_body) = json_request(
+    let (first_status, first_body) = publish_bundle_with_media(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(owner_token),
-        json!({"entities":[
-            {"type":"media","client_uuid":first_avatar_id,"updated_at":100,
-             "payload":avatar_media_payload(&baby_id)},
-            {"type":"baby","client_uuid":baby_id,"updated_at":100,
-             "payload":baby_payload("年年", Some(&first_avatar_id))},
-            {"type":"media","client_uuid":current_avatar_id,"updated_at":300,
-             "payload":avatar_media_payload(&baby_id)},
-            {"type":"baby","client_uuid":baby_id,"updated_at":300,
-             "payload":baby_payload("年年", Some(&current_avatar_id))}
-        ]}),
+        owner_token,
+        entity_wire(
+            "baby",
+            &baby_id,
+            100,
+            baby_payload("年年", Some(&first_avatar_id)),
+            None,
+        ),
+        vec![(
+            entity_wire(
+                "media",
+                &first_avatar_id,
+                100,
+                avatar_media_payload(&baby_id),
+                None,
+            ),
+            b"avatar".to_vec(),
+        )],
+    )
+    .await;
+    assert_eq!(first_status, StatusCode::OK, "{first_body}");
+    let (seeded, seeded_body) = publish_bundle_with_media(
+        &rig.app,
+        owner_token,
+        entity_wire(
+            "baby",
+            &baby_id,
+            300,
+            baby_payload("年年", Some(&current_avatar_id)),
+            None,
+        ),
+        vec![(
+            entity_wire(
+                "media",
+                &current_avatar_id,
+                300,
+                avatar_media_payload(&baby_id),
+                None,
+            ),
+            b"avatar".to_vec(),
+        )],
     )
     .await;
     assert_eq!(seeded, StatusCode::OK, "{seeded_body}");
 
     // Even a stale member Baby snapshot is forbidden; a following Record is unaffected.
-    let (stale_baby, stale_body) = json_request(
+    let (stale_baby, stale_body) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(member_token),
-        json!({"entities":[
-            {"type":"baby","client_uuid":baby_id,"updated_at":200,
-             "payload":baby_payload("旧快照", Some(&first_avatar_id))}
-        ]}),
+        member_token,
+        entity_wire(
+            "baby",
+            &baby_id,
+            200,
+            baby_payload("旧快照", Some(&first_avatar_id)),
+            None,
+        ),
     )
     .await;
     assert_eq!(stale_baby, StatusCode::FORBIDDEN, "{stale_body}");
@@ -3386,21 +3225,28 @@ async fn media_limit_stops_stream_and_family_delete_waits_for_upload() {
     let baby_id = Uuid::new_v4().to_string();
     let record_id = Uuid::new_v4().to_string();
     let media_id = Uuid::new_v4().to_string();
+    let bundle_id = Uuid::new_v4().to_string();
     {
-        let (baby_push, baby_body) = json_request(
+        let (baby_push, baby_body) = publish_root_bundle(
             &rig.app,
-            Method::POST,
-            "/v1/push",
-            Some(&token),
-            json!({"entities":[
-                {"type":"baby","client_uuid":baby_id,"updated_at":1,
-                 "payload":baby_payload("年年", None)}
-            ]}),
+            &token,
+            entity_wire("baby", &baby_id, 1, baby_payload("年年", None), None),
         )
         .await;
         assert_eq!(baby_push, StatusCode::OK, "{baby_body}");
-        seed_record_then_log_media(&rig.app, token.as_str(), &record_id, &media_id, &baby_id, 1)
-            .await;
+        let (stage_status, stage_body) = json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/bundles",
+            Some(&token),
+            json!({
+                "bundle_id": bundle_id,
+                "root": entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
+                "media": [entity_wire("media", &media_id, 2, log_media_payload(&record_id), None)],
+            }),
+        )
+        .await;
+        assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
     }
 
     let oversized_stream = futures_util::stream::unfold(0, |index| async move {
@@ -3413,7 +3259,7 @@ async fn media_limit_stops_stream_and_family_delete_waits_for_upload() {
     let oversized = request(
         &rig.app,
         Method::PUT,
-        &format!("/v1/media/{media_id}"),
+        &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
         Some(&token),
         Body::from_stream(oversized_stream),
         Some("application/octet-stream"),
@@ -3444,7 +3290,7 @@ async fn media_limit_stops_stream_and_family_delete_waits_for_upload() {
     );
     let upload_app = rig.app.clone();
     let upload_token = token.clone();
-    let upload_uri = format!("/v1/media/{media_id}");
+    let upload_uri = format!("/v1/bundles/{bundle_id}/media/{media_id}");
     let upload = tokio::spawn(async move {
         request(
             &upload_app,
@@ -3494,15 +3340,10 @@ async fn owner_delete_cleans_family_media_and_allows_replacement() {
     let record_id = Uuid::new_v4().to_string();
     let media_id = Uuid::new_v4().to_string();
     {
-        let (baby_push, baby_body) = json_request(
+        let (baby_push, baby_body) = publish_root_bundle(
             &rig.app,
-            Method::POST,
-            "/v1/push",
-            Some(token),
-            json!({"entities":[
-                {"type":"baby","client_uuid":baby_id,"updated_at":1,
-                 "payload":baby_payload("年年", None)}
-            ]}),
+            token,
+            entity_wire("baby", &baby_id, 1, baby_payload("年年", None), None),
         )
         .await;
         assert_eq!(baby_push, StatusCode::OK, "{baby_body}");
@@ -3519,7 +3360,7 @@ async fn owner_delete_cleans_family_media_and_allows_replacement() {
         )
         .await
         .status(),
-        StatusCode::OK
+        StatusCode::UNPROCESSABLE_ENTITY
     );
     let (deleted, _) = json_request(
         &rig.app,
@@ -3559,15 +3400,10 @@ async fn family_delete_keeps_media_when_database_deletion_fails() {
     let record_id = Uuid::new_v4().to_string();
     let media_id = Uuid::new_v4().to_string();
     {
-        let (baby_push, baby_body) = json_request(
+        let (baby_push, baby_body) = publish_root_bundle(
             &rig.app,
-            Method::POST,
-            "/v1/push",
-            Some(token),
-            json!({"entities":[
-                {"type":"baby","client_uuid":baby_id,"updated_at":1,
-                 "payload":baby_payload("年年", None)}
-            ]}),
+            token,
+            entity_wire("baby", &baby_id, 1, baby_payload("年年", None), None),
         )
         .await;
         assert_eq!(baby_push, StatusCode::OK, "{baby_body}");
@@ -3584,7 +3420,7 @@ async fn family_delete_keeps_media_when_database_deletion_fails() {
         )
         .await
         .status(),
-        StatusCode::OK
+        StatusCode::UNPROCESSABLE_ENTITY
     );
 
     let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
@@ -3793,7 +3629,7 @@ async fn create_and_join_limits_are_scoped_without_losing_global_protection() {
             window_seconds: 60,
         };
     });
-    let first = create_family(
+    let _first = create_family(
         &rig.app,
         "owner-device",
         "rate-limit-owner-request-0000000001",
@@ -3815,7 +3651,6 @@ async fn create_and_join_limits_are_scoped_without_losing_global_protection() {
     .await;
     assert_eq!(second, StatusCode::CREATED, "{reclaimed}");
     assert_eq!(reclaimed["reclaimed"], true);
-    let owner_token = reclaimed["token"].as_str().unwrap();
     let (third, third_body) = json_request(
         &rig.app,
         Method::POST,
@@ -3889,7 +3724,7 @@ async fn create_and_join_limits_are_scoped_without_losing_global_protection() {
 }
 
 #[tokio::test]
-async fn pull_omits_incomplete_media_until_bytes_are_uploaded() {
+async fn pull_omits_the_entire_atomic_bundle_until_media_bytes_are_committed() {
     let rig = Rig::new();
     let owner = create_family(
         &rig.app,
@@ -3901,26 +3736,34 @@ async fn pull_omits_incomplete_media_until_bytes_are_uploaded() {
     let baby_id = Uuid::new_v4().to_string();
     let record_id = Uuid::new_v4().to_string();
     let media_id = Uuid::new_v4().to_string();
-    let (baby_push, baby_body) = json_request(
+    let bundle_id = Uuid::new_v4().to_string();
+    let (baby_push, baby_body) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[
-            {"type":"baby","client_uuid":baby_id,"updated_at":1,
-             "payload":baby_payload("年年", None)}
-        ]}),
+        token,
+        entity_wire("baby", &baby_id, 1, baby_payload("年年", None), None),
     )
     .await;
     assert_eq!(baby_push, StatusCode::OK, "{baby_body}");
-    seed_record_then_log_media(&rig.app, token, &record_id, &media_id, &baby_id, 1).await;
+    let (stage_status, stage_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
+            "media": [entity_wire("media", &media_id, 2, log_media_payload(&record_id), None)],
+        }),
+    )
+    .await;
+    assert_eq!(stage_status, StatusCode::OK, "{stage_body}");
 
     let (status, pulled) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
     assert_eq!(status, StatusCode::OK);
     let seed_cursor = pulled["cursor"].as_i64().unwrap();
     let entities = pulled["entities"].as_array().unwrap();
-    assert_eq!(entities.len(), 2);
-    assert!(entities.iter().all(|entity| entity["type"] != "media"));
+    assert_eq!(entities.len(), 1);
+    assert_eq!(entities[0]["type"], "baby");
 
     let missing = request(
         &rig.app,
@@ -3936,13 +3779,33 @@ async fn pull_omits_incomplete_media_until_bytes_are_uploaded() {
     let uploaded = request(
         &rig.app,
         Method::PUT,
-        &format!("/v1/media/{media_id}"),
+        &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
         Some(token),
         Body::from("log"),
         Some("application/octet-stream"),
     )
     .await;
     assert_eq!(uploaded.status(), StatusCode::OK);
+
+    let (still_hidden_status, still_hidden) = get_json(
+        &rig.app,
+        &format!("/v1/pull?cursor={seed_cursor}"),
+        Some(token),
+    )
+    .await;
+    assert_eq!(still_hidden_status, StatusCode::OK);
+    assert_eq!(still_hidden["cursor"], seed_cursor);
+    assert!(still_hidden["entities"].as_array().unwrap().is_empty());
+
+    let (commit_status, commit_body) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(commit_status, StatusCode::OK, "{commit_body}");
 
     let (status, ready) = get_json(
         &rig.app,
@@ -3952,9 +3815,11 @@ async fn pull_omits_incomplete_media_until_bytes_are_uploaded() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(ready["cursor"].as_i64().unwrap() > seed_cursor);
-    assert_eq!(ready["entities"].as_array().unwrap().len(), 1);
-    assert_eq!(ready["entities"][0]["type"], "media");
-    assert_eq!(ready["entities"][0]["client_uuid"], media_id);
+    let ready_entities = ready["entities"].as_array().unwrap();
+    assert_eq!(ready_entities.len(), 2);
+    assert!(ready_entities
+        .iter()
+        .any(|entity| entity["client_uuid"] == media_id));
 
     let downloaded = request(
         &rig.app,
@@ -3973,7 +3838,7 @@ async fn pull_omits_incomplete_media_until_bytes_are_uploaded() {
 }
 
 #[tokio::test]
-async fn media_upload_retry_republishes_when_bytes_already_exist() {
+async fn ordinary_media_upload_retry_is_retired_even_when_bytes_exist() {
     let rig = Rig::new();
     let owner = create_family(
         &rig.app,
@@ -3987,15 +3852,10 @@ async fn media_upload_retry_republishes_when_bytes_already_exist() {
     let record_id = Uuid::new_v4().to_string();
     let media_id = Uuid::new_v4().to_string();
 
-    let (baby_push, baby_body) = json_request(
+    let (baby_push, baby_body) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[
-            {"type":"baby","client_uuid":baby_id,"updated_at":1,
-             "payload":baby_payload("年年", None)}
-        ]}),
+        token,
+        entity_wire("baby", &baby_id, 1, baby_payload("年年", None), None),
     )
     .await;
     assert_eq!(baby_push, StatusCode::OK, "{baby_body}");
@@ -4003,9 +3863,7 @@ async fn media_upload_retry_republishes_when_bytes_already_exist() {
     let (_, after_seed) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
     let seed_cursor = after_seed["cursor"].as_i64().unwrap();
 
-    // Reproduce a process failure after durable file replacement but before the
-    // metadata revision is republished. A retry must heal this state through
-    // the public PUT/pull contract even though the target file already exists.
+    // Even an existing target cannot turn the retired PUT into a publication path.
     let media_directory = rig.directory.path().join("media").join(family_id);
     fs::create_dir_all(&media_directory).unwrap();
     fs::write(media_directory.join(&media_id), b"old").unwrap();
@@ -4019,7 +3877,7 @@ async fn media_upload_retry_republishes_when_bytes_already_exist() {
         Some("application/octet-stream"),
     )
     .await;
-    assert_eq!(uploaded.status(), StatusCode::OK);
+    assert_eq!(uploaded.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
     let (status, ready) = get_json(
         &rig.app,
@@ -4028,10 +3886,8 @@ async fn media_upload_retry_republishes_when_bytes_already_exist() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(ready["cursor"].as_i64().unwrap() > seed_cursor);
-    assert_eq!(ready["entities"].as_array().unwrap().len(), 1);
-    assert_eq!(ready["entities"][0]["type"], "media");
-    assert_eq!(ready["entities"][0]["client_uuid"], media_id);
+    assert_eq!(ready["cursor"], seed_cursor);
+    assert!(ready["entities"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -4050,30 +3906,39 @@ async fn corrupt_ready_media_is_removed_and_not_advertised_until_reuploaded() {
     let zero_media_id = Uuid::new_v4().to_string();
     let mismatched_media_id = Uuid::new_v4().to_string();
 
-    let (pushed, body) = json_request(
+    let (pushed, body) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[
-            {"type":"baby","client_uuid":baby_id,"updated_at":1,
-             "payload":baby_payload("年年", None)}
-        ]}),
+        token,
+        entity_wire("baby", &baby_id, 1, baby_payload("年年", None), None),
     )
     .await;
     assert_eq!(pushed, StatusCode::OK, "{body}");
-    seed_record_with_id(&rig.app, token, &record_id, 1, record_payload(&baby_id)).await;
-    let (media_push, media_body) = json_request(
+    let (media_push, media_body) = publish_bundle_with_media(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[
-            {"type":"media","client_uuid":zero_media_id,"updated_at":1,
-             "payload":log_media_payload(&record_id)},
-            {"type":"media","client_uuid":mismatched_media_id,"updated_at":1,
-             "payload":log_media_payload(&record_id)}
-        ]}),
+        token,
+        entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
+        vec![
+            (
+                entity_wire(
+                    "media",
+                    &zero_media_id,
+                    2,
+                    log_media_payload(&record_id),
+                    None,
+                ),
+                b"log".to_vec(),
+            ),
+            (
+                entity_wire(
+                    "media",
+                    &mismatched_media_id,
+                    2,
+                    log_media_payload(&record_id),
+                    None,
+                ),
+                b"log".to_vec(),
+            ),
+        ],
     )
     .await;
     assert_eq!(media_push, StatusCode::OK, "{media_body}");
@@ -4109,20 +3974,30 @@ async fn corrupt_ready_media_is_removed_and_not_advertised_until_reuploaded() {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
-    let uploaded = request(
+    let (uploaded_status, uploaded_body) = publish_bundle_with_media(
         &rig.app,
-        Method::PUT,
-        &format!("/v1/media/{zero_media_id}"),
-        Some(token),
-        Body::from("log"),
-        Some("application/octet-stream"),
+        token,
+        entity_wire("record", &record_id, 3, record_payload(&baby_id), None),
+        vec![(
+            entity_wire(
+                "media",
+                &zero_media_id,
+                3,
+                log_media_payload(&record_id),
+                None,
+            ),
+            b"log".to_vec(),
+        )],
     )
     .await;
-    assert_eq!(uploaded.status(), StatusCode::OK);
+    assert_eq!(uploaded_status, StatusCode::OK, "{uploaded_body}");
     let (_, ready) = get_json(&rig.app, "/v1/pull?cursor=4", Some(token)).await;
-    assert_eq!(ready["cursor"], 5);
-    assert_eq!(ready["entities"].as_array().unwrap().len(), 1);
-    assert_eq!(ready["entities"][0]["client_uuid"], zero_media_id);
+    assert_eq!(ready["cursor"], 6);
+    assert!(ready["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entity| entity["client_uuid"] == zero_media_id));
 }
 
 // ---------------------------------------------------------------------------
@@ -4150,14 +4025,10 @@ fn entity_wire(
 
 async fn seed_baby(app: &Router, token: &str) -> String {
     let baby_id = Uuid::new_v4().to_string();
-    let (status, body) = json_request(
+    let (status, body) = publish_root_bundle(
         app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({
-            "entities": [entity_wire("baby", &baby_id, 1, baby_payload("年年", None), None)]
-        }),
+        token,
+        entity_wire("baby", &baby_id, 1, baby_payload("年年", None), None),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -4201,9 +4072,7 @@ async fn seed_record_with_id(
     assert_eq!(commit_status, StatusCode::OK, "{commit_body}");
 }
 
-/// Seed a zero-media record package, then ordinary-publish log media metadata.
-/// Product clients put log media in the atomic package; fixtures may separate them
-/// when testing ordinary media byte PUT ACL.
+/// Publish a record and its log-media bytes as one atomic package.
 async fn seed_record_then_log_media(
     app: &Router,
     token: &str,
@@ -4212,16 +4081,26 @@ async fn seed_record_then_log_media(
     baby_id: &str,
     updated_at: i64,
 ) {
-    seed_record_with_id(app, token, record_id, updated_at, record_payload(baby_id)).await;
-    let (status, body) = json_request(
+    let (status, body) = publish_bundle_with_media(
         app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({"entities":[
-            {"type":"media","client_uuid":media_id,"updated_at":updated_at + 1,
-             "payload":log_media_payload(record_id)}
-        ]}),
+        token,
+        entity_wire(
+            "record",
+            record_id,
+            updated_at,
+            record_payload(baby_id),
+            None,
+        ),
+        vec![(
+            entity_wire(
+                "media",
+                media_id,
+                updated_at + 1,
+                log_media_payload(record_id),
+                None,
+            ),
+            b"log".to_vec(),
+        )],
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -4259,6 +4138,360 @@ async fn seed_record_at(
     .await;
     assert_eq!(commit_status, StatusCode::OK, "{commit_body}");
     record_id
+}
+
+async fn publish_root_bundle(app: &Router, token: &str, root: Value) -> (StatusCode, Value) {
+    let bundle_id = Uuid::new_v4().to_string();
+    let (stage_status, stage_body) = json_request(
+        app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": root,
+            "media": [],
+        }),
+    )
+    .await;
+    if stage_status != StatusCode::OK {
+        return (stage_status, stage_body);
+    }
+    json_request(
+        app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(token),
+        json!({}),
+    )
+    .await
+}
+
+async fn stage_bundle_with_media(
+    app: &Router,
+    token: &str,
+    root: Value,
+    media: Vec<Value>,
+) -> (StatusCode, Value) {
+    json_request(
+        app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": Uuid::new_v4().to_string(),
+            "root": root,
+            "media": media,
+        }),
+    )
+    .await
+}
+
+async fn publish_bundle_with_media(
+    app: &Router,
+    token: &str,
+    root: Value,
+    media: Vec<(Value, Vec<u8>)>,
+) -> (StatusCode, Value) {
+    let bundle_id = Uuid::new_v4().to_string();
+    let manifest = media
+        .iter()
+        .map(|(entity, _)| entity.clone())
+        .collect::<Vec<_>>();
+    let (stage_status, stage_body) = json_request(
+        app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "bundle_id": bundle_id,
+            "root": root,
+            "media": manifest,
+        }),
+    )
+    .await;
+    if stage_status != StatusCode::OK {
+        return (stage_status, stage_body);
+    }
+    for (entity, bytes) in media {
+        let media_id = entity["client_uuid"]
+            .as_str()
+            .expect("media fixture has client_uuid");
+        let response = request(
+            app,
+            Method::PUT,
+            &format!("/v1/bundles/{bundle_id}/media/{media_id}"),
+            Some(token),
+            Body::from(bytes),
+            Some("application/octet-stream"),
+        )
+        .await;
+        let status = response.status();
+        if status != StatusCode::OK {
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            return (
+                status,
+                serde_json::from_slice(&body).unwrap_or_else(|_| json!({})),
+            );
+        }
+    }
+    json_request(
+        app,
+        Method::POST,
+        &format!("/v1/bundles/{bundle_id}/commit"),
+        Some(token),
+        json!({}),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn ordinary_entity_and_media_publication_routes_are_retired_fail_closed() {
+    let rig = Rig::new();
+
+    let (push_status, push_body) = raw_json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/push",
+        None,
+        json!({"this": "must never be parsed or applied"}),
+    )
+    .await;
+    assert_eq!(push_status, StatusCode::UNPROCESSABLE_ENTITY, "{push_body}");
+    assert_eq!(
+        push_body["detail"],
+        "ordinary push is retired; publish an atomic bundle"
+    );
+
+    let media_id = Uuid::new_v4();
+    let response = request(
+        &rig.app,
+        Method::PUT,
+        &format!("/v1/media/{media_id}"),
+        None,
+        Body::from("must not be stored"),
+        Some("application/octet-stream"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        value["detail"],
+        "ordinary media upload is retired; upload media through an atomic bundle"
+    );
+}
+
+#[tokio::test]
+async fn every_current_entity_root_can_publish_only_through_atomic_bundles() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "all-bundle-roots-owner",
+        "all-bundle-roots-request-00000001",
+    )
+    .await;
+    let token = owner["token"].as_str().unwrap();
+
+    let baby_id = Uuid::new_v4().to_string();
+    assert_eq!(
+        publish_root_bundle(
+            &rig.app,
+            token,
+            entity_wire("baby", &baby_id, 1, baby_payload("年年", None), None),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+
+    let custom_item_id = Uuid::new_v4().to_string();
+    assert_eq!(
+        publish_root_bundle(
+            &rig.app,
+            token,
+            entity_wire(
+                "custom_item",
+                &custom_item_id,
+                2,
+                json!({"name": "抚触", "icon_slot": 2}),
+                None,
+            ),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+
+    let record_id = Uuid::new_v4().to_string();
+    assert_eq!(
+        publish_root_bundle(
+            &rig.app,
+            token,
+            entity_wire("record", &record_id, 3, record_payload(&baby_id), None),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+
+    let plan_id = Uuid::new_v4().to_string();
+    assert_eq!(
+        publish_root_bundle(
+            &rig.app,
+            token,
+            entity_wire(
+                "care_plan",
+                &plan_id,
+                4,
+                care_plan_payload(&baby_id, "bath"),
+                None,
+            ),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+
+    let candidate_id = Uuid::new_v4().to_string();
+    let (candidate_status, candidate_body) = publish_root_bundle(
+        &rig.app,
+        token,
+        entity_wire(
+            "fulfillment_candidate",
+            &candidate_id,
+            5,
+            json!({
+                "care_plan_client_uuid": plan_id,
+                "record_client_uuid": record_id,
+                "actual_timestamp": 1_700_000_000_100i64,
+            }),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(candidate_status, StatusCode::OK, "{candidate_body}");
+}
+
+#[tokio::test]
+async fn atomic_bundle_media_must_match_its_root_kind_and_identity() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "bundle-media-matrix-owner",
+        "bundle-media-matrix-request-00001",
+    )
+    .await;
+    let token = owner["token"].as_str().unwrap();
+    let baby_id = Uuid::new_v4().to_string();
+    assert_eq!(
+        publish_root_bundle(
+            &rig.app,
+            token,
+            entity_wire("baby", &baby_id, 1, baby_payload("岁岁", None), None),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+
+    let record_id = Uuid::new_v4().to_string();
+    let wrong_record_id = Uuid::new_v4().to_string();
+    let (wrong_parent_status, wrong_parent_body) = stage_bundle_with_media(
+        &rig.app,
+        token,
+        entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
+        vec![entity_wire(
+            "media",
+            &Uuid::new_v4().to_string(),
+            2,
+            log_media_payload(&wrong_record_id),
+            None,
+        )],
+    )
+    .await;
+    assert_eq!(
+        wrong_parent_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{wrong_parent_body}"
+    );
+
+    let (wrong_kind_status, wrong_kind_body) = stage_bundle_with_media(
+        &rig.app,
+        token,
+        entity_wire("baby", &baby_id, 3, baby_payload("岁岁", None), None),
+        vec![entity_wire(
+            "media",
+            &Uuid::new_v4().to_string(),
+            3,
+            log_media_payload(&record_id),
+            None,
+        )],
+    )
+    .await;
+    assert_eq!(
+        wrong_kind_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{wrong_kind_body}"
+    );
+
+    let (custom_status, custom_body) = stage_bundle_with_media(
+        &rig.app,
+        token,
+        entity_wire(
+            "custom_item",
+            &Uuid::new_v4().to_string(),
+            4,
+            json!({"name": "抚触", "icon_slot": 2}),
+            None,
+        ),
+        vec![entity_wire(
+            "media",
+            &Uuid::new_v4().to_string(),
+            4,
+            avatar_media_payload(&baby_id),
+            None,
+        )],
+    )
+    .await;
+    assert_eq!(
+        custom_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{custom_body}"
+    );
+
+    let (record_status, record_body) = stage_bundle_with_media(
+        &rig.app,
+        token,
+        entity_wire("record", &record_id, 5, record_payload(&baby_id), None),
+        vec![entity_wire(
+            "media",
+            &Uuid::new_v4().to_string(),
+            5,
+            log_media_payload(&record_id),
+            None,
+        )],
+    )
+    .await;
+    assert_eq!(record_status, StatusCode::OK, "{record_body}");
+
+    let avatar_id = Uuid::new_v4().to_string();
+    let mut baby_with_avatar = baby_payload("岁岁", Some(&avatar_id));
+    baby_with_avatar["birth_weight_grams"] = json!(3250);
+    let (baby_status, baby_body) = stage_bundle_with_media(
+        &rig.app,
+        token,
+        entity_wire("baby", &baby_id, 6, baby_with_avatar, None),
+        vec![entity_wire(
+            "media",
+            &avatar_id,
+            6,
+            avatar_media_payload(&baby_id),
+            None,
+        )],
+    )
+    .await;
+    assert_eq!(baby_status, StatusCode::OK, "{baby_body}");
 }
 
 #[tokio::test]
@@ -4335,20 +4568,10 @@ async fn atomic_bundles_wait_for_baby_without_leaving_staging_rows() {
         assert_eq!(lookup_status, StatusCode::NOT_FOUND, "{lookup_body}");
     }
 
-    let (push_status, push_body) = json_request(
+    let (push_status, push_body) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({
-            "entities": [entity_wire(
-                "baby",
-                &baby_id,
-                1,
-                baby_payload("年年", None),
-                None,
-            )],
-        }),
+        token,
+        entity_wire("baby", &baby_id, 1, baby_payload("年年", None), None),
     )
     .await;
     assert_eq!(push_status, StatusCode::OK, "{push_body}");
@@ -4443,24 +4666,20 @@ async fn atomic_care_plan_waits_for_its_custom_item_definition() {
         get_json(&rig.app, &format!("/v1/bundles/{bundle_id}"), Some(token)).await;
     assert_eq!(lookup_status, StatusCode::NOT_FOUND, "{lookup_body}");
 
-    let (push_status, push_body) = json_request(
+    let (push_status, push_body) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({
-            "entities": [entity_wire(
-                "custom_item",
-                &custom_item_id,
-                1,
-                json!({
-                    "name": "抚触",
-                    "icon_slot": 2,
-                    "created_by_membership_id": null,
-                }),
-                None,
-            )],
-        }),
+        token,
+        entity_wire(
+            "custom_item",
+            &custom_item_id,
+            1,
+            json!({
+                "name": "抚触",
+                "icon_slot": 2,
+                "created_by_membership_id": null,
+            }),
+            None,
+        ),
     )
     .await;
     assert_eq!(push_status, StatusCode::OK, "{push_body}");
@@ -4492,24 +4711,20 @@ async fn atomic_care_plan_requires_a_type_consistent_custom_item_reference() {
     let token = owner["token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, token).await;
     let custom_item_id = Uuid::new_v4().to_string();
-    let (custom_status, custom_body) = json_request(
+    let (custom_status, custom_body) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({
-            "entities": [entity_wire(
-                "custom_item",
-                &custom_item_id,
-                1,
-                json!({
-                    "name": "抚触",
-                    "icon_slot": 2,
-                    "created_by_membership_id": null,
-                }),
-                None,
-            )],
-        }),
+        token,
+        entity_wire(
+            "custom_item",
+            &custom_item_id,
+            1,
+            json!({
+                "name": "抚触",
+                "icon_slot": 2,
+                "created_by_membership_id": null,
+            }),
+            None,
+        ),
     )
     .await;
     assert_eq!(custom_status, StatusCode::OK, "{custom_body}");
@@ -4987,7 +5202,11 @@ async fn foreign_bundle_commit_cannot_leave_claimable_final_bytes() {
         }),
     )
     .await;
-    assert_eq!(metadata_status, StatusCode::OK, "{metadata_body}");
+    assert_eq!(
+        metadata_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{metadata_body}"
+    );
 
     let (refine_status, refine_body) = json_request(
         &rig.app,
@@ -5022,7 +5241,7 @@ async fn foreign_bundle_commit_cannot_leave_claimable_final_bytes() {
             .unwrap()
             .iter()
             .any(|entity| entity["client_uuid"] == media_id),
-        "foreign commit left final bytes that restart claimed as ordinary media: {pull}"
+        "foreign commit left final bytes that restart claimed as published media: {pull}"
     );
     assert_eq!(
         request(
@@ -6262,32 +6481,28 @@ async fn care_plan_member_acl_and_owner_override() {
     .await;
     assert_eq!(forbid, StatusCode::FORBIDDEN, "{body}");
 
-    // The same ACL applies to plan photos even if a client bypasses the
-    // atomic-package route and submits media metadata directly.
+    // The same ACL applies when the unauthorized plan edit carries media.
     let foreign_media_id = Uuid::new_v4().to_string();
-    let (foreign_media, foreign_media_body) = json_request(
+    let (foreign_media, foreign_media_body) = stage_bundle_with_media(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(member_b_token),
-        json!({
-            "entities": [entity_wire(
-                "media",
-                &foreign_media_id,
-                2,
-                json!({
-                    "kind": "log",
-                    "record_client_uuid": null,
-                    "care_plan_client_uuid": plan_id,
-                    "baby_client_uuid": baby_id,
-                    "mime": "image/jpeg",
-                    "width": null,
-                    "height": null,
-                    "byte_size": 3,
-                }),
-                None,
-            )]
-        }),
+        member_b_token,
+        entity_wire("care_plan", &plan_id, 2, payload.clone(), None),
+        vec![entity_wire(
+            "media",
+            &foreign_media_id,
+            2,
+            json!({
+                "kind": "log",
+                "record_client_uuid": null,
+                "care_plan_client_uuid": plan_id,
+                "baby_client_uuid": baby_id,
+                "mime": "image/jpeg",
+                "width": null,
+                "height": null,
+                "byte_size": 3,
+            }),
+            None,
+        )],
     )
     .await;
     assert_eq!(foreign_media, StatusCode::FORBIDDEN, "{foreign_media_body}");
@@ -6842,27 +7057,23 @@ async fn fulfillment_candidate_stamps_submitter_and_rejects_bad_refs() {
     .await;
 
     let cand_id = Uuid::new_v4().to_string();
-    let (ok, _) = json_request(
+    let (ok, _) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(member_token),
-        json!({
-            "entities": [entity_wire(
-                "fulfillment_candidate",
-                &cand_id,
-                3,
-                json!({
-                    "care_plan_client_uuid": plan_id,
-                    "record_client_uuid": record_id,
-                    "actual_timestamp": 1_700_000_000_100i64,
-                    "submitter_membership_id": "forged",
-                    "submitter_role": "owner",
-                    "confirmed_at": 1,
-                }),
-                None
-            )]
-        }),
+        member_token,
+        entity_wire(
+            "fulfillment_candidate",
+            &cand_id,
+            3,
+            json!({
+                "care_plan_client_uuid": plan_id,
+                "record_client_uuid": record_id,
+                "actual_timestamp": 1_700_000_000_100i64,
+                "submitter_membership_id": "forged",
+                "submitter_role": "owner",
+                "confirmed_at": 1,
+            }),
+            None,
+        ),
     )
     .await;
     assert_eq!(ok, StatusCode::OK);
@@ -6882,23 +7093,19 @@ async fn fulfillment_candidate_stamps_submitter_and_rejects_bad_refs() {
 
     // Bad plan ref is rejected atomically.
     let bad_id = Uuid::new_v4().to_string();
-    let (bad, body) = json_request(
+    let (bad, body) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(member_token),
-        json!({
-            "entities": [entity_wire(
-                "fulfillment_candidate",
-                &bad_id,
-                4,
-                json!({
-                    "care_plan_client_uuid": Uuid::new_v4().to_string(),
-                    "record_client_uuid": record_id,
-                }),
-                None
-            )]
-        }),
+        member_token,
+        entity_wire(
+            "fulfillment_candidate",
+            &bad_id,
+            4,
+            json!({
+                "care_plan_client_uuid": Uuid::new_v4().to_string(),
+                "record_client_uuid": record_id,
+            }),
+            None,
+        ),
     )
     .await;
     assert_eq!(bad, StatusCode::CONFLICT, "{body}");
@@ -6977,52 +7184,44 @@ async fn fulfillment_candidate_freeze_is_idempotent_and_arrival_order_independen
     let owner_cand = Uuid::new_v4().to_string();
     // Member first, owner second — both accepted; stamps frozen per first accept.
     assert_eq!(
-        json_request(
+        publish_root_bundle(
             &rig.app,
-            Method::POST,
-            "/v1/push",
-            Some(member_token),
-            json!({
-                "entities": [entity_wire(
-                    "fulfillment_candidate",
-                    &member_cand,
-                    10,
-                    json!({
-                        "care_plan_client_uuid": plan_id,
-                        "record_client_uuid": member_record,
-                        "submitter_membership_id": "forged-member",
-                        "submitter_role": "owner",
-                        "confirmed_at": 1,
-                    }),
-                    None
-                )]
-            }),
+            member_token,
+            entity_wire(
+                "fulfillment_candidate",
+                &member_cand,
+                10,
+                json!({
+                    "care_plan_client_uuid": plan_id,
+                    "record_client_uuid": member_record,
+                    "submitter_membership_id": "forged-member",
+                    "submitter_role": "owner",
+                    "confirmed_at": 1,
+                }),
+                None
+            ),
         )
         .await
         .0,
         StatusCode::OK
     );
     assert_eq!(
-        json_request(
+        publish_root_bundle(
             &rig.app,
-            Method::POST,
-            "/v1/push",
-            Some(owner_token),
-            json!({
-                "entities": [entity_wire(
-                    "fulfillment_candidate",
-                    &owner_cand,
-                    11,
-                    json!({
-                        "care_plan_client_uuid": plan_id,
-                        "record_client_uuid": owner_record,
-                        "submitter_membership_id": "forged-owner",
-                        "submitter_role": "member",
-                        "confirmed_at": 2,
-                    }),
-                    None
-                )]
-            }),
+            owner_token,
+            entity_wire(
+                "fulfillment_candidate",
+                &owner_cand,
+                11,
+                json!({
+                    "care_plan_client_uuid": plan_id,
+                    "record_client_uuid": owner_record,
+                    "submitter_membership_id": "forged-owner",
+                    "submitter_role": "member",
+                    "confirmed_at": 2,
+                }),
+                None
+            ),
         )
         .await
         .0,
@@ -7056,26 +7255,22 @@ async fn fulfillment_candidate_freeze_is_idempotent_and_arrival_order_independen
 
     // Idempotent replay with higher updated_at and forged stamps must not rewrite.
     assert_eq!(
-        json_request(
+        publish_root_bundle(
             &rig.app,
-            Method::POST,
-            "/v1/push",
-            Some(member_token),
-            json!({
-                "entities": [entity_wire(
-                    "fulfillment_candidate",
-                    &member_cand,
-                    99,
-                    json!({
-                        "care_plan_client_uuid": plan_id,
-                        "record_client_uuid": member_record,
-                        "submitter_membership_id": "replay-forged",
-                        "submitter_role": "owner",
-                        "confirmed_at": 999_999,
-                    }),
-                    None
-                )]
-            }),
+            member_token,
+            entity_wire(
+                "fulfillment_candidate",
+                &member_cand,
+                99,
+                json!({
+                    "care_plan_client_uuid": plan_id,
+                    "record_client_uuid": member_record,
+                    "submitter_membership_id": "replay-forged",
+                    "submitter_role": "owner",
+                    "confirmed_at": 999_999,
+                }),
+                None
+            ),
         )
         .await
         .0,
@@ -7283,80 +7478,89 @@ async fn care_plan_media_integrity_rejects_bad_refs_and_baby_mismatch() {
 
     // Happy path: plan media with matching baby.
     let media_ok = Uuid::new_v4().to_string();
-    let (ok, _) = json_request(
+    let (ok, _) = stage_bundle_with_media(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(owner_token),
-        json!({
-            "entities": [entity_wire(
-                "media",
-                &media_ok,
-                2,
-                json!({
-                    "kind": "log",
-                    "care_plan_client_uuid": plan_id,
-                    "baby_client_uuid": baby_id,
-                    "mime": "image/jpeg",
-                    "byte_size": 3,
-                }),
-                None
-            )]
-        }),
+        owner_token,
+        entity_wire(
+            "care_plan",
+            &plan_id,
+            2,
+            care_plan_payload(&baby_id, "bath"),
+            None,
+        ),
+        vec![entity_wire(
+            "media",
+            &media_ok,
+            2,
+            json!({
+                "kind": "log",
+                "care_plan_client_uuid": plan_id,
+                "baby_client_uuid": baby_id,
+                "mime": "image/jpeg",
+                "byte_size": 3,
+            }),
+            None,
+        )],
     )
     .await;
     assert_eq!(ok, StatusCode::OK);
 
     // Unknown care_plan_client_uuid is rejected.
     let media_bad_plan = Uuid::new_v4().to_string();
-    let (bad_plan, body_plan) = json_request(
+    let (bad_plan, body_plan) = stage_bundle_with_media(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(owner_token),
-        json!({
-            "entities": [entity_wire(
-                "media",
-                &media_bad_plan,
-                3,
-                json!({
-                    "kind": "log",
-                    "care_plan_client_uuid": Uuid::new_v4().to_string(),
-                    "mime": "image/jpeg",
-                    "byte_size": 3,
-                }),
-                None
-            )]
-        }),
+        owner_token,
+        entity_wire(
+            "care_plan",
+            &plan_id,
+            3,
+            care_plan_payload(&baby_id, "bath"),
+            None,
+        ),
+        vec![entity_wire(
+            "media",
+            &media_bad_plan,
+            3,
+            json!({
+                "kind": "log",
+                "care_plan_client_uuid": Uuid::new_v4().to_string(),
+                "mime": "image/jpeg",
+                "byte_size": 3,
+            }),
+            None,
+        )],
     )
     .await;
-    assert_eq!(bad_plan, StatusCode::CONFLICT, "{body_plan}");
+    assert_eq!(bad_plan, StatusCode::UNPROCESSABLE_ENTITY, "{body_plan}");
 
     // Baby mismatch vs care_plan baby is rejected.
     let media_bad_baby = Uuid::new_v4().to_string();
-    let (bad_baby, body_baby) = json_request(
+    let (bad_baby, body_baby) = stage_bundle_with_media(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(owner_token),
-        json!({
-            "entities": [entity_wire(
-                "media",
-                &media_bad_baby,
-                4,
-                json!({
-                    "kind": "log",
-                    "care_plan_client_uuid": plan_id,
-                    "baby_client_uuid": other_baby,
-                    "mime": "image/jpeg",
-                    "byte_size": 3,
-                }),
-                None
-            )]
-        }),
+        owner_token,
+        entity_wire(
+            "care_plan",
+            &plan_id,
+            4,
+            care_plan_payload(&baby_id, "bath"),
+            None,
+        ),
+        vec![entity_wire(
+            "media",
+            &media_bad_baby,
+            4,
+            json!({
+                "kind": "log",
+                "care_plan_client_uuid": plan_id,
+                "baby_client_uuid": other_baby,
+                "mime": "image/jpeg",
+                "byte_size": 3,
+            }),
+            None,
+        )],
     )
     .await;
-    assert_eq!(bad_baby, StatusCode::CONFLICT, "{body_baby}");
+    assert_eq!(bad_baby, StatusCode::UNPROCESSABLE_ENTITY, "{body_baby}");
 }
 
 #[tokio::test]
@@ -7517,7 +7721,11 @@ async fn pending_bundle_bytes_are_not_claimed_by_ordinary_metadata_or_put_across
         }),
     )
     .await;
-    assert_eq!(ordinary_status, StatusCode::OK, "{ordinary_body}");
+    assert_eq!(
+        ordinary_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{ordinary_body}"
+    );
 
     let ordinary_put = request(
         &rig.app,
@@ -7530,8 +7738,8 @@ async fn pending_bundle_bytes_are_not_claimed_by_ordinary_metadata_or_put_across
     .await;
     assert_eq!(
         ordinary_put.status(),
-        StatusCode::CONFLICT,
-        "ordinary PUT claimed media bytes reserved by an incomplete bundle"
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "retired ordinary PUT claimed media bytes reserved by an incomplete bundle"
     );
     assert_eq!(
         fs::read(&final_path).unwrap(),
@@ -7553,7 +7761,7 @@ async fn pending_bundle_bytes_are_not_claimed_by_ordinary_metadata_or_put_across
                 .unwrap()
                 .iter()
                 .any(|entity| entity["client_uuid"] == media_id),
-            "metadata-only ordinary push claimed bytes from the rejected bundle: {pull}"
+            "retired ordinary push claimed bytes from the rejected bundle: {pull}"
         );
         let response = request(
             app,
@@ -7649,7 +7857,11 @@ async fn losing_bundle_media_tombstone_does_not_publish_quarantined_bytes() {
         }),
     )
     .await;
-    assert_eq!(metadata_status, StatusCode::OK, "{metadata_body}");
+    assert_eq!(
+        metadata_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{metadata_body}"
+    );
 
     let winner_bundle_id = Uuid::new_v4().to_string();
     let (winner_stage_status, winner_stage_body) = json_request(
@@ -7686,17 +7898,16 @@ async fn losing_bundle_media_tombstone_does_not_publish_quarantined_bytes() {
     )
     .await;
     assert_eq!(commit_status, StatusCode::OK, "{commit_body}");
-    assert_eq!(commit_body["applied"], 1);
+    assert_eq!(commit_body["applied"], 2);
 
     let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
-    assert!(
-        !pull["entities"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entity| entity["client_uuid"] == media_id),
-        "losing tombstone published another bundle's quarantined bytes: {pull}"
-    );
+    let media_tombstone = pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entity| entity["client_uuid"] == media_id)
+        .expect("winning bundle publishes the media tombstone metadata");
+    assert_eq!(media_tombstone["deleted_at"], 99, "{pull}");
     assert_eq!(
         request(
             &rig.app,
@@ -7713,7 +7924,7 @@ async fn losing_bundle_media_tombstone_does_not_publish_quarantined_bytes() {
 }
 
 #[tokio::test]
-async fn ordinary_push_still_supports_baby_and_avatar_media() {
+async fn atomic_bundle_supports_baby_and_avatar_media() {
     let rig = Rig::new();
     let created = create_family(
         &rig.app,
@@ -7724,47 +7935,38 @@ async fn ordinary_push_still_supports_baby_and_avatar_media() {
     let token = created["token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, token).await;
     let avatar_id = Uuid::new_v4().to_string();
-    let (status, body) = json_request(
+    let (status, body) = publish_bundle_with_media(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({
-            "entities": [
-                entity_wire(
-                    "media",
-                    &avatar_id,
-                    2,
-                    json!({
-                        "kind": "avatar",
-                        "record_client_uuid": null,
-                        "baby_client_uuid": baby_id,
-                        "care_plan_client_uuid": null,
-                        "mime": "image/jpeg",
-                        "width": 64,
-                        "height": 64,
-                        "byte_size": 3,
-                    }),
-                    None,
-                ),
-            ]
-        }),
+        token,
+        entity_wire(
+            "baby",
+            &baby_id,
+            2,
+            baby_payload("年年", Some(&avatar_id)),
+            None,
+        ),
+        vec![(
+            entity_wire(
+                "media",
+                &avatar_id,
+                2,
+                json!({
+                    "kind": "avatar",
+                    "record_client_uuid": null,
+                    "baby_client_uuid": baby_id,
+                    "care_plan_client_uuid": null,
+                    "mime": "image/jpeg",
+                    "width": 64,
+                    "height": 64,
+                    "byte_size": 3,
+                }),
+                None,
+            ),
+            b"img".to_vec(),
+        )],
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(
-        request(
-            &rig.app,
-            Method::PUT,
-            &format!("/v1/media/{avatar_id}"),
-            Some(token),
-            Body::from("img"),
-            Some("image/jpeg"),
-        )
-        .await
-        .status(),
-        StatusCode::OK
-    );
     let record_id = seed_record(&rig.app, token, &baby_id).await;
     let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
     let entities = pull["entities"].as_array().unwrap();
@@ -7854,7 +8056,7 @@ async fn ordinary_put_cannot_overwrite_committed_bundle_media() {
         Some("image/jpeg"),
     )
     .await;
-    assert_eq!(overwrite.status(), StatusCode::CONFLICT);
+    assert_eq!(overwrite.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
     let preserved = request(
         &rig.app,
@@ -7873,7 +8075,7 @@ async fn ordinary_put_cannot_overwrite_committed_bundle_media() {
 }
 
 // ---------------------------------------------------------------------------
-// Custom item family definitions (ordinary push + ACL)
+// Custom item family definitions (atomic bundle + ACL)
 // ---------------------------------------------------------------------------
 
 fn custom_item_payload(name: &str, icon_slot: i64) -> Value {
@@ -7899,25 +8101,21 @@ async fn custom_item_create_stamps_creator_and_syncs_to_peer() {
     let member_membership = member["membership_id"].as_str().unwrap().to_owned();
     let item_id = Uuid::new_v4().to_string();
 
-    let (status, body) = json_request(
+    let (status, body) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(member_token),
-        json!({
-            "entities": [entity_wire(
-                "custom_item",
-                &item_id,
-                10,
-                // Client-supplied creator must be ignored in favor of principal.
-                json!({
-                    "name": "抚触",
-                    "icon_slot": 2,
-                    "created_by_membership_id": "spoofed-id",
-                }),
-                None,
-            )]
-        }),
+        member_token,
+        entity_wire(
+            "custom_item",
+            &item_id,
+            10,
+            // Client-supplied creator must be ignored in favor of principal.
+            json!({
+                "name": "抚触",
+                "icon_slot": 2,
+                "created_by_membership_id": "spoofed-id",
+            }),
+            None,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -7962,20 +8160,16 @@ async fn custom_item_member_acl_rename_delete_and_owner_override() {
     let item_id = Uuid::new_v4().to_string();
 
     assert_eq!(
-        json_request(
+        publish_root_bundle(
             &rig.app,
-            Method::POST,
-            "/v1/push",
-            Some(member_a_token),
-            json!({
-                "entities": [entity_wire(
-                    "custom_item",
-                    &item_id,
-                    1,
-                    custom_item_payload("药", 1),
-                    None,
-                )]
-            }),
+            member_a_token,
+            entity_wire(
+                "custom_item",
+                &item_id,
+                1,
+                custom_item_payload("药", 1),
+                None
+            ),
         )
         .await
         .0,
@@ -7983,79 +8177,63 @@ async fn custom_item_member_acl_rename_delete_and_owner_override() {
     );
 
     // Creator may rename.
-    let (ok_rename, _) = json_request(
+    let (ok_rename, _) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(member_a_token),
-        json!({
-            "entities": [entity_wire(
-                "custom_item",
-                &item_id,
-                2,
-                custom_item_payload("用药", 1),
-                None,
-            )]
-        }),
+        member_a_token,
+        entity_wire(
+            "custom_item",
+            &item_id,
+            2,
+            custom_item_payload("用药", 1),
+            None,
+        ),
     )
     .await;
     assert_eq!(ok_rename, StatusCode::OK);
 
     // Peer member cannot rename.
-    let (denied, body) = json_request(
+    let (denied, body) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(member_b_token),
-        json!({
-            "entities": [entity_wire(
-                "custom_item",
-                &item_id,
-                3,
-                custom_item_payload("篡改", 0),
-                None,
-            )]
-        }),
+        member_b_token,
+        entity_wire(
+            "custom_item",
+            &item_id,
+            3,
+            custom_item_payload("篡改", 0),
+            None,
+        ),
     )
     .await;
     assert_eq!(denied, StatusCode::FORBIDDEN, "{body}");
 
     // Owner may rename and soft-delete.
     assert_eq!(
-        json_request(
+        publish_root_bundle(
             &rig.app,
-            Method::POST,
-            "/v1/push",
-            Some(owner_token),
-            json!({
-                "entities": [entity_wire(
-                    "custom_item",
-                    &item_id,
-                    4,
-                    custom_item_payload("管理员改名", 3),
-                    None,
-                )]
-            }),
+            owner_token,
+            entity_wire(
+                "custom_item",
+                &item_id,
+                4,
+                custom_item_payload("管理员改名", 3),
+                None,
+            ),
         )
         .await
         .0,
         StatusCode::OK
     );
     assert_eq!(
-        json_request(
+        publish_root_bundle(
             &rig.app,
-            Method::POST,
-            "/v1/push",
-            Some(owner_token),
-            json!({
-                "entities": [entity_wire(
-                    "custom_item",
-                    &item_id,
-                    5,
-                    custom_item_payload("管理员改名", 3),
-                    Some(5),
-                )]
-            }),
+            owner_token,
+            entity_wire(
+                "custom_item",
+                &item_id,
+                5,
+                custom_item_payload("管理员改名", 3),
+                Some(5),
+            ),
         )
         .await
         .0,
@@ -8063,20 +8241,16 @@ async fn custom_item_member_acl_rename_delete_and_owner_override() {
     );
 
     // Tombstone cannot be resurrected (even by owner).
-    let (resurrect, resurrect_body) = json_request(
+    let (resurrect, resurrect_body) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(owner_token),
-        json!({
-            "entities": [entity_wire(
-                "custom_item",
-                &item_id,
-                6,
-                custom_item_payload("管理员改名", 3),
-                None,
-            )]
-        }),
+        owner_token,
+        entity_wire(
+            "custom_item",
+            &item_id,
+            6,
+            custom_item_payload("管理员改名", 3),
+            None,
+        ),
     )
     .await;
     assert_eq!(resurrect, StatusCode::CONFLICT, "{resurrect_body}");
@@ -8093,24 +8267,20 @@ async fn custom_item_rejects_layout_fields_on_wire() {
     .await;
     let token = owner["token"].as_str().unwrap();
     let item_id = Uuid::new_v4().to_string();
-    let (status, body) = json_request(
+    let (status, body) = publish_root_bundle(
         &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(token),
-        json!({
-            "entities": [entity_wire(
-                "custom_item",
-                &item_id,
-                1,
-                json!({
-                    "name": "抚触",
-                    "icon_slot": 0,
-                    "sort_order": 3,
-                }),
-                None,
-            )]
-        }),
+        token,
+        entity_wire(
+            "custom_item",
+            &item_id,
+            1,
+            json!({
+                "name": "抚触",
+                "icon_slot": 0,
+                "sort_order": 3,
+            }),
+            None,
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");

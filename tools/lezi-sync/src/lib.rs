@@ -28,7 +28,7 @@ use hmac::{Hmac, Mac};
 use members::{list_family_members, remove_family_member, update_my_display_name};
 use model::{
     BundleCommitRequest, BundleStageRequest, EmptyRequest, FamilyCreateRequest, InviteRequest,
-    JoinRequest, PushRequest, RenameFamilyRequest,
+    JoinRequest, RenameFamilyRequest,
 };
 use rand::distributions::{Distribution, Uniform};
 use rand::rngs::OsRng;
@@ -324,9 +324,12 @@ pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
         .route("/v1/join", post(join))
         .route("/v1/leave", post(leave))
         .route("/v1/family/delete", post(delete_family))
-        .route("/v1/push", post(push_entities))
+        .route("/v1/push", post(retired_ordinary_push))
         .route("/v1/pull", get(pull_entities))
-        .route("/v1/media/{client_uuid}", put(put_media).get(get_media))
+        .route(
+            "/v1/media/{client_uuid}",
+            put(retired_ordinary_media_upload).get(get_media),
+        )
         .route("/v1/bundles", post(stage_bundle))
         .route("/v1/bundles/{bundle_id}", get(get_bundle))
         .route(
@@ -382,7 +385,7 @@ async fn create_family(
         Err(StoreError::FamilyAlreadyExists) => {
             // Only reached when the same create_request_id is reused with a
             // conflicting device_id / display_name — not for a second family.
-            return Err(ApiError::conflict("Family already exists"))
+            return Err(ApiError::conflict("Family already exists"));
         }
         Err(error) => return Err(error.into()),
     };
@@ -547,77 +550,10 @@ async fn delete_family(
     Ok(Json(json!({"ok": true})))
 }
 
-async fn push_entities(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    body: Result<Json<PushRequest>, JsonRejection>,
-) -> Result<Json<store::PushResult>, ApiError> {
-    let principal = authenticate(&state, &headers)?;
-    let request = json_body(body)?.validate(state.max_media_bytes)?;
-    if request.device_id != principal.device_id {
-        return Err(ApiError::forbidden("device_id does not match token"));
-    }
-    if request.generation != state.generation {
-        return Err(ApiError::conflict_value(
-            state.recovery_detail(&principal.family_id, "generation_changed")?,
-        ));
-    }
-    let family_lock = state.family_lock(&principal.family_id).await;
-    let _guard = family_lock.lock().await;
-    let max_updated_at = state
-        .now()
-        .saturating_mul(1_000)
-        .saturating_add(MAX_ENTITY_FUTURE_SKEW_MILLIS);
-    let result = match state
-        .store
-        .push(&principal, request.entities, max_updated_at, state.now())
-    {
-        Ok(value) => value,
-        Err(StoreError::ForbiddenBaby) => {
-            return Err(ApiError::forbidden("Only owner may manage baby profiles"))
-        }
-        Err(StoreError::ForbiddenAvatar) => {
-            return Err(ApiError::forbidden("Only owner may change avatar"))
-        }
-        Err(StoreError::ForbiddenCustomItem) => {
-            return Err(ApiError::forbidden(
-                "Only the creator or family owner may change this custom item",
-            ))
-        }
-        Err(StoreError::ForbiddenCarePlan) => {
-            return Err(ApiError::forbidden(
-                "Only the creator or family owner may change this care plan",
-            ))
-        }
-        Err(StoreError::CustomItemTombstoneResurrection) => {
-            return Err(ApiError::conflict(
-                "Deleted custom item cannot be resurrected",
-            ))
-        }
-        Err(StoreError::CarePlanTombstoneResurrection) => {
-            return Err(ApiError::conflict(
-                "Deleted care plan cannot be resurrected",
-            ))
-        }
-        Err(StoreError::ImmutableMediaAssociation) => {
-            return Err(ApiError::conflict(
-                "Media kind and association are immutable",
-            ))
-        }
-        Err(StoreError::TimestampOutOfRange) => {
-            return Err(ApiError::unprocessable(
-                "updated_at is outside the accepted server time window",
-            ))
-        }
-        Err(StoreError::PullEntityTooLarge) => {
-            return Err(ApiError::unprocessable(
-                "entity payload is too large for bounded sync pull",
-            ))
-        }
-        Err(StoreError::UnresolvedReference(message)) => return Err(ApiError::conflict(message)),
-        Err(error) => return Err(error.into()),
-    };
-    Ok(Json(result))
+async fn retired_ordinary_push() -> Result<Json<Value>, ApiError> {
+    Err(ApiError::unprocessable(
+        "ordinary push is retired; publish an atomic bundle",
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -691,78 +627,10 @@ async fn pull_entities(
     })))
 }
 
-async fn put_media(
-    State(state): State<Arc<AppState>>,
-    AxumPath(client_uuid): AxumPath<Uuid>,
-    request: Request,
-) -> Result<Json<Value>, ApiError> {
-    let principal = authenticate(&state, request.headers())?;
-    let family_lock = state.family_lock(&principal.family_id).await;
-    let _guard = family_lock.lock().await;
-    let metadata = state
-        .store
-        .media_metadata(&principal.family_id, &client_uuid.to_string())?
-        .ok_or_else(|| ApiError::not_found("Media metadata not found"))?;
-    if state
-        .store
-        .is_media_bundle_owned(&principal.family_id, &client_uuid.to_string())?
-    {
-        return Err(ApiError::conflict(
-            "Atomic bundle media cannot be replaced via ordinary upload",
-        ));
-    }
-    if metadata.kind == "avatar" && principal.role != "owner" {
-        return Err(ApiError::forbidden("Only owner may change avatar"));
-    }
-    if let Some(length) = request.headers().get(CONTENT_LENGTH) {
-        let length = length
-            .to_str()
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .ok_or_else(|| ApiError::bad_request("Invalid Content-Length"))?;
-        if length > state.max_media_bytes {
-            return Err(ApiError::payload_too_large("Media is too large"));
-        }
-    }
-
-    let mut content = Vec::new();
-    let mut stream = request.into_body().into_data_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| ApiError::bad_request(error.to_string()))?;
-        if content.len() + chunk.len() > state.max_media_bytes {
-            return Err(ApiError::payload_too_large("Media is too large"));
-        }
-        content.extend_from_slice(&chunk);
-    }
-    if content.is_empty() {
-        return Err(ApiError::unprocessable("Media body must not be empty"));
-    }
-    if metadata
-        .byte_size
-        .is_some_and(|declared_size| declared_size != content.len())
-    {
-        return Err(ApiError::unprocessable(
-            "Media body size does not match declared byte_size",
-        ));
-    }
-    let path = state.media_path(&principal.family_id, client_uuid)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-        secure_directory(parent)?;
-    }
-    write_private_file(&path, &content)?;
-    // Metadata may already have been pulled and skipped. Republish after every
-    // durable PUT so retrying a request also heals a process failure between
-    // the file replacement and this database transaction.
-    let republished = state
-        .store
-        .publish_ordinary_media(&principal.family_id, &client_uuid.to_string())?;
-    if !republished {
-        return Err(ApiError::conflict(
-            "Atomic bundle media cannot be replaced via ordinary upload",
-        ));
-    }
-    Ok(Json(json!({"ok": true, "size": content.len()})))
+async fn retired_ordinary_media_upload() -> Result<Json<Value>, ApiError> {
+    Err(ApiError::unprocessable(
+        "ordinary media upload is retired; upload media through an atomic bundle",
+    ))
 }
 
 async fn get_media(
@@ -818,8 +686,16 @@ async fn stage_bundle(
         state.now(),
     ) {
         Ok(value) => value,
+        Err(StoreError::ForbiddenBaby) => {
+            return Err(ApiError::forbidden("Only owner may manage baby profiles"))
+        }
         Err(StoreError::ForbiddenAvatar) => {
             return Err(ApiError::forbidden("Only owner may change avatar"))
+        }
+        Err(StoreError::ForbiddenCustomItem) => {
+            return Err(ApiError::forbidden(
+                "Only the creator or family owner may change this custom item",
+            ))
         }
         Err(StoreError::ForbiddenCarePlan) => {
             return Err(ApiError::forbidden(
@@ -829,6 +705,11 @@ async fn stage_bundle(
         Err(StoreError::CarePlanTombstoneResurrection) => {
             return Err(ApiError::conflict(
                 "Deleted care plan cannot be resurrected",
+            ))
+        }
+        Err(StoreError::CustomItemTombstoneResurrection) => {
+            return Err(ApiError::conflict(
+                "Deleted custom item cannot be resurrected",
             ))
         }
         Err(StoreError::ImmutableMediaAssociation) => {
@@ -1130,8 +1011,16 @@ async fn commit_bundle(
                 "bundle belongs to another family membership",
             ))
         }
+        Err(StoreError::ForbiddenBaby) => {
+            return Err(ApiError::forbidden("Only owner may manage baby profiles"))
+        }
         Err(StoreError::ForbiddenAvatar) => {
             return Err(ApiError::forbidden("Only owner may change avatar"))
+        }
+        Err(StoreError::ForbiddenCustomItem) => {
+            return Err(ApiError::forbidden(
+                "Only the creator or family owner may change this custom item",
+            ))
         }
         Err(StoreError::ForbiddenCarePlan) => {
             return Err(ApiError::forbidden(
@@ -1141,6 +1030,11 @@ async fn commit_bundle(
         Err(StoreError::CarePlanTombstoneResurrection) => {
             return Err(ApiError::conflict(
                 "Deleted care plan cannot be resurrected",
+            ))
+        }
+        Err(StoreError::CustomItemTombstoneResurrection) => {
+            return Err(ApiError::conflict(
+                "Deleted custom item cannot be resurrected",
             ))
         }
         Err(StoreError::ImmutableMediaAssociation) => {

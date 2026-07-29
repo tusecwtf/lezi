@@ -93,9 +93,7 @@ pub(super) async fn remove_family_member(
         // Single-owner product: never demote/remove the admin this way.
         return Err(ApiError::forbidden("Cannot remove the family admin"));
     }
-    state
-        .store
-        .leave_membership(&target_id, state.now())?;
+    state.store.leave_membership(&target_id, state.now())?;
     Ok(Json(json!({
         "ok": true,
         "membership_id": target_id,
