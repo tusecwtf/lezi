@@ -207,8 +207,6 @@ fun PreviewTimelineThreeDay() {
             nowContentMinute = nowMin,
             viewportStartMinutes = TimelineAxis.todayCenteredViewportStartMinutes(nowMin),
             viewportDurationMinutes = TimelineAxis.defaultViewportDurationMinutes(),
-            titlePrimary = "三天节奏",
-            titleSecondary = "72h 时间轴",
             legend = listOf(
                 TimelineLegendEntry("SLEEP", "睡眠", LeziColors.LaneSleep, isBar = true),
                 TimelineLegendEntry("MILK", "奶", LeziColors.LaneFeed),

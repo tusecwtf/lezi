@@ -1226,8 +1226,7 @@ fun LogRoute(
                                 viewportStartMinutes = timelineViewportStart,
                                 viewportDurationMinutes = timelineViewportDuration,
                                 onViewportStartChange = { timelineViewportStart = it },
-                                titlePrimary = if (journal) "三天记录轨道" else "三天节奏",
-                                titleSecondary = "72h 时间轴",
+                                titleSecondary = "时间轴",
                                 modifier = Modifier.padding(horizontal = LeziSpacing.Page),
                             )
                         }
@@ -1377,9 +1376,7 @@ fun LogRoute(
                     item {
                         Column(Modifier.padding(horizontal = LeziSpacing.Page)) {
                             SectionHeading(
-                                eyebrow = if (journal) null else "按时间排序",
-                                title = if (journal) "记录明细" else "当日记录",
-                                meta = if (journal) "新 → 旧" else null,
+                                title = "记录",
                             )
                         }
                     }

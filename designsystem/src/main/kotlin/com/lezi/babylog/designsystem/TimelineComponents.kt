@@ -487,6 +487,10 @@ fun TimelineRailCard(
      * 00/06/12/18/24 fill when the viewport is the classic 24h window.
      */
     hourLabels: List<Pair<Int, String>>? = null,
+    /**
+     * Optional header titles above the lanes. Product log home passes
+     * [titleSecondary] = 「时间轴」; previews may set either. Blank strings ignored.
+     */
     titlePrimary: String? = null,
     titleSecondary: String? = null,
 ) {
@@ -500,8 +504,9 @@ fun TimelineRailCard(
         viewportStartMinutes = viewportStartMinutes,
         viewportDurationMinutes = safeViewportDuration,
     )
-    val primaryTitle = titlePrimary ?: if (journal) "0–24h 记录轨道" else null
-    val secondaryTitle = titleSecondary ?: if (journal) null else "时间轴"
+    val primaryTitle = titlePrimary?.takeIf { it.isNotBlank() }
+    val secondaryTitle = titleSecondary?.takeIf { it.isNotBlank() }
+    val showTitleBlock = primaryTitle != null || secondaryTitle != null
     // One shared viewport for all lanes: origin fixed for the life of a pan gesture.
     val viewportStartState by rememberUpdatedState(viewportStartMinutes)
     val onViewportChangeState by rememberUpdatedState(onViewportStartChange)
@@ -535,30 +540,35 @@ fun TimelineRailCard(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (journal) {
-                Text(primaryTitle ?: "记录轨道", style = LeziTypography.Label)
-                Text(
-                    "$recordCount 条",
-                    style = LeziTypography.Meta,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else {
-                Column {
+            if (showTitleBlock) {
+                if (journal) {
                     Text(
-                        primaryTitle ?: "一天一眼",
-                        style = LeziTypography.Eyebrow,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        primaryTitle ?: secondaryTitle.orEmpty(),
+                        style = LeziTypography.Label,
                     )
-                    Text(secondaryTitle ?: "时间轴", style = LeziTypography.TitleSm)
+                } else {
+                    Column {
+                        if (primaryTitle != null) {
+                            Text(
+                                primaryTitle,
+                                style = LeziTypography.Eyebrow,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (secondaryTitle != null) {
+                            Text(secondaryTitle, style = LeziTypography.TitleSm)
+                        }
+                    }
                 }
-                Text(
-                    "$recordCount 条记录",
-                    style = LeziTypography.Meta,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            } else {
+                Spacer(Modifier.weight(1f))
             }
+            Text(
+                if (journal) "$recordCount 条" else "$recordCount 条记录",
+                style = LeziTypography.Meta,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
-        TimelineInteractionHint(panEnabled = onViewportStartChange != null)
         Spacer(Modifier.height(sectionGap))
         TimelineHourLabels(
             labels = resolvedHourLabels,
@@ -856,23 +866,3 @@ private fun TimelineLegendRow(
     }
 }
 
-@Composable
-private fun TimelineInteractionHint(panEnabled: Boolean = false) {
-    Surface(
-        shape = RoundedCornerShape(50),
-        color = MaterialTheme.colorScheme.primaryContainer,
-        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("点选类型", style = LeziTypography.Meta)
-            Text("筛选明细", style = LeziTypography.Meta)
-            if (panEnabled) {
-                Text("拖动窥视", style = LeziTypography.Meta)
-            }
-        }
-    }
-}
