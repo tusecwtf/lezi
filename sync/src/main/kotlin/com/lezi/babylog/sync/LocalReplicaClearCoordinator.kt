@@ -2,11 +2,11 @@ package com.lezi.babylog.sync
 
 import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.DatabaseTransactionRunner
+import com.lezi.babylog.core.database.LocalDataClearScope
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.OutboxDao
 import com.lezi.babylog.core.database.PendingReplicaCleanup
-import com.lezi.babylog.core.database.PendingReplicaCleanupScope
 import com.lezi.babylog.core.database.PendingReplicaCleanupStore
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.CancellationException
@@ -16,11 +16,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-
-internal enum class LocalReplicaClearScope {
-    RecordsOnly,
-    AllLocal,
-}
 
 /**
  * Owns the crash-recoverable hand-off from a domain Room clear to replica cleanup.
@@ -40,9 +35,9 @@ internal class LocalReplicaClearCoordinator(
     private val pendingStore: PendingReplicaCleanupStore,
 ) {
     suspend fun clear(
-        scope: LocalReplicaClearScope,
+        scope: LocalDataClearScope,
         workflow: LocalClearWorkflow,
-        recoverDomain: suspend () -> LocalClearRecoveryScope?,
+        recoverDomain: suspend () -> LocalDataClearScope?,
     ): Result<Unit> = runCatching {
         barrier.withLock {
             // Recovery completes an older committed request. It never satisfies
@@ -71,25 +66,25 @@ internal class LocalReplicaClearCoordinator(
     }
 
     /** Caller already owns [barrier]; used before any remote or session mutation. */
-    internal suspend fun recoverPendingLocked(): LocalClearRecoveryScope? {
+    internal suspend fun recoverPendingLocked(): LocalDataClearScope? {
         val pending = pendingStore.load() ?: return null
         finishCommitted(pending)
-        return pending.scope.toRecoveryScope()
+        return pending.scope
     }
 
     private suspend fun snapshot(
-        scope: LocalReplicaClearScope,
+        scope: LocalDataClearScope,
         session: SyncSession,
     ): PendingReplicaCleanup {
         val media = when (scope) {
-            LocalReplicaClearScope.RecordsOnly ->
+            LocalDataClearScope.RecordsOnly ->
                 mediaDao.listAllIncludingDeleted().filter { it.kind == "log" }
-            LocalReplicaClearScope.AllLocal -> mediaDao.listAllIncludingDeleted()
+            LocalDataClearScope.AllLocalData -> mediaDao.listAllIncludingDeleted()
         }
         check(media.all { it.clientUuid.isNotBlank() }) {
             "本机媒体清理快照包含无效同步标识"
         }
-        val retainedPaths = if (scope == LocalReplicaClearScope.RecordsOnly) {
+        val retainedPaths = if (scope == LocalDataClearScope.RecordsOnly) {
             buildSet {
                 mediaDao.listAllIncludingDeleted()
                     .filter { it.kind != "log" }
@@ -103,14 +98,14 @@ internal class LocalReplicaClearCoordinator(
         }
         val paths = buildSet {
             addAll(media.map(MediaAssetEntity::localUri))
-            if (scope == LocalReplicaClearScope.AllLocal) {
+            if (scope == LocalDataClearScope.AllLocalData) {
                 babyDao.listAllIncludingDeleted().forEach { baby ->
                     baby.avatarPath?.takeIf(String::isNotBlank)?.let(::add)
                 }
             }
         }.filterTo(linkedSetOf()) { it.isNotBlank() && it !in retainedPaths }
         return PendingReplicaCleanup(
-            scope = scope.toPendingScope(),
+            scope = scope,
             familyId = session.familyId,
             pullGeneration = session.pullGeneration,
             mediaClientUuids = media.mapTo(linkedSetOf(), MediaAssetEntity::clientUuid),
@@ -127,7 +122,7 @@ internal class LocalReplicaClearCoordinator(
             try {
                 finish(pending)
             } catch (error: Throwable) {
-                failure = LocalClearCommittedException(
+                failure = localClearCommittedFailure(
                     familyServerRetained = pending.familyId.isNotBlank(),
                     cause = error,
                 )
@@ -163,8 +158,8 @@ internal class LocalReplicaClearCoordinator(
         preferences.updateCursor(
             cursor = 0,
             generation = when (pending.scope) {
-                PendingReplicaCleanupScope.RECORDS_ONLY -> pending.pullGeneration
-                PendingReplicaCleanupScope.ALL_LOCAL -> ""
+                LocalDataClearScope.RecordsOnly -> pending.pullGeneration
+                LocalDataClearScope.AllLocalData -> ""
             },
         )
         transactionRunner.run {
@@ -184,8 +179,8 @@ internal class LocalReplicaClearCoordinator(
                 .filterNot(protectedPaths::contains)
                 .forEach { mediaFiles.delete(it) }
             when (pending.scope) {
-                PendingReplicaCleanupScope.RECORDS_ONLY -> finishRecordsOnly(pending)
-                PendingReplicaCleanupScope.ALL_LOCAL -> outboxDao.deleteAll()
+                LocalDataClearScope.RecordsOnly -> finishRecordsOnly(pending)
+                LocalDataClearScope.AllLocalData -> outboxDao.deleteAll()
             }
             pending.mediaClientUuids.chunked(OUTBOX_DELETE_CHUNK_SIZE).forEach { chunk ->
                 mediaDao.deleteByClientUuids(chunk)
@@ -202,16 +197,6 @@ internal class LocalReplicaClearCoordinator(
             outboxDao.deleteEntitiesAcrossFamilies("media", chunk)
         }
     }
-}
-
-private fun LocalReplicaClearScope.toPendingScope(): PendingReplicaCleanupScope = when (this) {
-    LocalReplicaClearScope.RecordsOnly -> PendingReplicaCleanupScope.RECORDS_ONLY
-    LocalReplicaClearScope.AllLocal -> PendingReplicaCleanupScope.ALL_LOCAL
-}
-
-private fun PendingReplicaCleanupScope.toRecoveryScope(): LocalClearRecoveryScope = when (this) {
-    PendingReplicaCleanupScope.RECORDS_ONLY -> LocalClearRecoveryScope.RecordsOnly
-    PendingReplicaCleanupScope.ALL_LOCAL -> LocalClearRecoveryScope.AllLocal
 }
 
 private const val OUTBOX_DELETE_CHUNK_SIZE = 400

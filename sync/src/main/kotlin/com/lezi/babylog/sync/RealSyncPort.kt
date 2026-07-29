@@ -6,6 +6,7 @@ import com.lezi.babylog.core.database.CustomItemDao
 import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.FamilyDao
 import com.lezi.babylog.core.database.FulfillmentCandidateDao
+import com.lezi.babylog.core.database.LocalDataClearScope
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.OutboxDao
 import com.lezi.babylog.core.database.PendingReplicaCleanupStore
@@ -225,38 +226,23 @@ class RealSyncPort @Inject constructor(
     override suspend fun deleteFamily(): Result<Unit> =
         executeFamily(FamilySessionCommand.DeleteFamily).map { Unit }
 
-    override suspend fun clearLocalRecords(
+    override suspend fun clearLocalData(
+        scope: LocalDataClearScope,
         workflow: LocalClearWorkflow,
     ): Result<Unit> = localReplicaClearCoordinator
         .clear(
-            scope = LocalReplicaClearScope.RecordsOnly,
-            workflow = workflow,
-            recoverDomain = localClearRecoveryGate::recoverPendingLocalClear,
-        )
-        .onFailure(::updateFailureStatus)
-
-    override suspend fun clearAllLocalData(
-        workflow: LocalClearWorkflow,
-    ): Result<Unit> = localReplicaClearCoordinator
-        .clear(
-            scope = LocalReplicaClearScope.AllLocal,
+            scope = scope,
             workflow = workflow,
             recoverDomain = localClearRecoveryGate::recoverPendingLocalClear,
         )
         .onFailure(::updateFailureStatus)
 
     /** Caller owns [syncMutex]; lock order is sync mutex then domain mutation guard. */
-    private suspend fun recoverPendingLocalClearLocked(): LocalClearRecoveryScope? {
+    private suspend fun recoverPendingLocalClearLocked(): LocalDataClearScope? {
         preferences.recoverPendingCredentialClear()
         val resumedDomain = localClearRecoveryGate.recoverPendingLocalClear()
         val resumedReplica = localReplicaClearCoordinator.recoverPendingLocked()
-        return when {
-            resumedDomain == LocalClearRecoveryScope.AllLocal ||
-                resumedReplica == LocalClearRecoveryScope.AllLocal ->
-                LocalClearRecoveryScope.AllLocal
-            resumedDomain != null || resumedReplica != null -> LocalClearRecoveryScope.RecordsOnly
-            else -> null
-        }
+        return LocalDataClearScope.widest(resumedDomain, resumedReplica)
     }
 
     private suspend fun executeFamily(

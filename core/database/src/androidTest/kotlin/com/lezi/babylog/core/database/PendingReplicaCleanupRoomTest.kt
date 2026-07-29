@@ -42,7 +42,7 @@ class PendingReplicaCleanupRoomTest {
             transactions.run {
                 store.stage(
                     PendingReplicaCleanup(
-                        scope = PendingReplicaCleanupScope.RECORDS_ONLY,
+                        scope = LocalDataClearScope.RecordsOnly,
                         familyId = "family-a",
                         pullGeneration = "generation-a",
                         mediaClientUuids = emptySet(),

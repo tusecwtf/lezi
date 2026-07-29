@@ -9,16 +9,14 @@ import com.lezi.babylog.core.database.FulfillmentCandidateDao
 import com.lezi.babylog.core.database.LocalUserDao
 import com.lezi.babylog.core.database.MembershipDao
 import com.lezi.babylog.core.database.PendingReminderCleanup
-import com.lezi.babylog.core.database.PendingReminderCleanupOperation
 import com.lezi.babylog.core.database.PendingReminderCleanupStore
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.datastore.LocalClearSettingsSnapshot
 import com.lezi.babylog.core.datastore.LocalClearSettingsFinish
 import com.lezi.babylog.core.datastore.SettingsStore
-import com.lezi.babylog.sync.LocalClearCommittedException
-import com.lezi.babylog.sync.LocalClearRecoveryScope
 import com.lezi.babylog.sync.LocalClearWorkflow
 import com.lezi.babylog.sync.SyncPort
+import com.lezi.babylog.sync.localClearCommittedFailure
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CancellationException
@@ -31,10 +29,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-enum class LocalDataClearScope {
-    RecordsOnly,
-    AllLocalData,
-}
+typealias LocalDataClearScope = com.lezi.babylog.core.database.LocalDataClearScope
 
 /** Deep module for local clear transactions, replica barriers, and recoverable cleanup. */
 interface LocalDataClearCoordinator {
@@ -118,7 +113,7 @@ internal class DaoLocalDataClearPersistence @Inject constructor(
         }
         pendingReminderCleanupStore.upsert(
             PendingReminderCleanup(
-                operation = scope.pendingCleanupOperation,
+                scope = scope,
                 carePlanIds = carePlanIds,
                 systemCalendarProjections = systemCalendarProjections,
                 currentBabyId = settingsSnapshot.currentBabyId,
@@ -193,9 +188,9 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
             }
         }
 
-        val failure = executeThroughSyncBarrier(scope, workflow).exceptionOrNull()
+        val failure = syncPort.clearLocalData(scope, workflow).exceptionOrNull()
             ?: return
-        throwClearFailure(failure.asDomainLocalClearFailure())
+        throwClearFailure(failure)
     }
 
     override suspend fun recoverPendingReminderCleanup(): LocalDataClearScope? =
@@ -215,22 +210,14 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
             finish.recoveredScope
         }
 
-    private suspend fun executeThroughSyncBarrier(
-        scope: LocalDataClearScope,
-        workflow: LocalClearWorkflow,
-    ): Result<Unit> = when (scope) {
-        LocalDataClearScope.RecordsOnly -> syncPort.clearLocalRecords(workflow)
-        LocalDataClearScope.AllLocalData -> syncPort.clearAllLocalData(workflow)
-    }
-
     private suspend fun finishPendingLocalClear(
         initialFailure: Throwable?,
     ): PendingLocalClearFinish {
         var failure = initialFailure
         var recoveredScope: LocalDataClearScope? = null
-        PendingReminderCleanupOperation.entries.forEach { operation ->
-            val loaded = pendingReminderCleanupStore.load(operation) ?: return@forEach
-            recoveredScope = recoveredScope.include(operation.localClearScope)
+        LocalDataClearScope.entries.forEach { scope ->
+            val loaded = pendingReminderCleanupStore.load(scope) ?: return@forEach
+            recoveredScope = LocalDataClearScope.widest(recoveredScope, loaded.scope)
             var operationFailed = false
             fun recordFailure(cleanupError: Throwable) {
                 operationFailed = true
@@ -262,7 +249,7 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
             var settingsFinish: LocalClearSettingsFinish? = null
             attempt {
                 settingsFinish = settings.finish(
-                    operation.localClearScope,
+                    loaded.scope,
                     settingsSnapshot,
                 )
             }
@@ -275,7 +262,7 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
                 attempt { reminderCleanup.cancelCarePlan(carePlanId) }
             }
             if (!operationFailed) {
-                attempt { pendingReminderCleanupStore.delete(operation) }
+                attempt { pendingReminderCleanupStore.delete(scope) }
             }
         }
         return PendingLocalClearFinish(recoveredScope = recoveredScope, failure = failure)
@@ -315,17 +302,13 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
         }
     }
 
-    private fun Throwable.asDomainLocalClearFailure(): Throwable =
-        // Single type: sync already throws LocalClearCommittedException (= domain alias).
-        this
-
     private fun mergeCommittedCleanupFailure(
         initialFailure: Throwable?,
         cleanupError: Throwable,
         familyServerRetained: Boolean,
     ): Throwable {
         if (cleanupError.cancellationCauseOrNull() != null) {
-            return LocalRecordsClearCommittedException(
+            return localClearCommittedFailure(
                 familyServerRetained = familyServerRetained,
                 cause = cleanupError,
             ).also { classified ->
@@ -336,7 +319,7 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
             is LocalRecordsClearCommittedException -> initialFailure.apply {
                 addSuppressed(cleanupError)
             }
-            else -> LocalRecordsClearCommittedException(
+            else -> localClearCommittedFailure(
                 familyServerRetained = familyServerRetained,
                 cause = initialFailure ?: cleanupError,
             ).also { classified ->
@@ -365,23 +348,3 @@ private data class PendingLocalClearFinish(
     val recoveredScope: LocalDataClearScope?,
     val failure: Throwable?,
 )
-
-private fun LocalDataClearScope?.include(other: LocalDataClearScope): LocalDataClearScope = when {
-    this == LocalDataClearScope.AllLocalData || other == LocalDataClearScope.AllLocalData ->
-        LocalDataClearScope.AllLocalData
-    else -> LocalDataClearScope.RecordsOnly
-}
-
-private val LocalDataClearScope.pendingCleanupOperation: PendingReminderCleanupOperation
-    get() = when (this) {
-        LocalDataClearScope.RecordsOnly -> PendingReminderCleanupOperation.RECORDS_CLEAR
-        LocalDataClearScope.AllLocalData ->
-            PendingReminderCleanupOperation.ALL_LOCAL_DATA_CLEAR
-    }
-
-private val PendingReminderCleanupOperation.localClearScope: LocalDataClearScope
-    get() = when (this) {
-        PendingReminderCleanupOperation.RECORDS_CLEAR -> LocalDataClearScope.RecordsOnly
-        PendingReminderCleanupOperation.ALL_LOCAL_DATA_CLEAR ->
-            LocalDataClearScope.AllLocalData
-    }

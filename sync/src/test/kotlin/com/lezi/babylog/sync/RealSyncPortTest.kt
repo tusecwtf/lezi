@@ -12,6 +12,7 @@ import com.lezi.babylog.core.database.FamilyDao
 import com.lezi.babylog.core.database.FamilyEntity
 import com.lezi.babylog.core.database.FulfillmentCandidateDao
 import com.lezi.babylog.core.database.FulfillmentCandidateEntity
+import com.lezi.babylog.core.database.LocalDataClearScope
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.OutboxDao
@@ -1203,7 +1204,8 @@ class RealSyncPortTest {
         )
         rig.outbox.failDeleteTypeAttempts = 1
 
-        val failure = rig.port.clearLocalRecords(
+        val failure = rig.port.clearLocalData(
+            LocalDataClearScope.RecordsOnly,
             realPortClearWorkflow { rig.records.deleteAll() },
         ).exceptionOrNull()
 
@@ -1221,10 +1223,11 @@ class RealSyncPortTest {
         rig.awaitStartupRecovery()
         val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
         rig.records.seed(localRecord(babyId).copy(syncDirty = false))
-        rig.pendingDomainRecovery.resumed = LocalClearRecoveryScope.RecordsOnly
+        rig.pendingDomainRecovery.resumed = LocalDataClearScope.RecordsOnly
         var roomClearCalls = 0
 
-        val result = rig.port.clearLocalRecords(
+        val result = rig.port.clearLocalData(
+            LocalDataClearScope.RecordsOnly,
             realPortClearWorkflow {
                 roomClearCalls += 1
                 rig.records.deleteAll()
@@ -1252,7 +1255,8 @@ class RealSyncPortTest {
         val pulling = async { rig.port.sync(SyncTrigger.PullToRefresh) }
         rig.backend.pullStarted!!.await()
         val clearing = async {
-            rig.port.clearLocalRecords(
+            rig.port.clearLocalData(
+                LocalDataClearScope.RecordsOnly,
                 realPortClearWorkflow { rig.records.deleteAll() },
             )
         }
@@ -1297,7 +1301,12 @@ class RealSyncPortTest {
             ),
         )
 
-        assertThat(rig.port.clearLocalRecords(realPortClearWorkflow()).isSuccess).isTrue()
+        assertThat(
+            rig.port.clearLocalData(
+                LocalDataClearScope.RecordsOnly,
+                realPortClearWorkflow(),
+            ).isSuccess,
+        ).isTrue()
         assertThat(rig.preferences.current().pullCursor).isEqualTo(0)
         assertThat(rig.preferences.current().pullGeneration).isEqualTo("old-generation")
 
@@ -5173,10 +5182,10 @@ private class SyncRig(
 
 internal class TestLocalClearRecoveryGate : LocalClearRecoveryGate {
     var calls = 0
-    var resumed: LocalClearRecoveryScope? = null
+    var resumed: LocalDataClearScope? = null
     val failures = ArrayDeque<Throwable>()
 
-    override suspend fun recoverPendingLocalClear(): LocalClearRecoveryScope? {
+    override suspend fun recoverPendingLocalClear(): LocalDataClearScope? {
         calls += 1
         failures.removeFirstOrNull()?.let { throw it }
         return resumed
@@ -5551,7 +5560,7 @@ private fun pendingReplicaCleanup(
     mediaClientUuids: Set<String> = emptySet(),
     localMediaPaths: Set<String> = emptySet(),
 ) = com.lezi.babylog.core.database.PendingReplicaCleanup(
-    scope = com.lezi.babylog.core.database.PendingReplicaCleanupScope.RECORDS_ONLY,
+    scope = LocalDataClearScope.RecordsOnly,
     familyId = familyId,
     pullGeneration = "known-generation",
     mediaClientUuids = mediaClientUuids,

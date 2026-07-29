@@ -4,7 +4,7 @@ Status: ready-for-agent
 Feature: p1-redundancy-ui-debt  
 Source: `docs/reviews/2026-07-29-redundancy-and-ui-review.md` 主题 A–F  
 Ticket count: 10  
-Frontier count: 8  
+Frontier count: 6
 
 Related:
 
@@ -45,7 +45,7 @@ Related:
 ```text
 01 统一母乳确认面（frontier）
 
-02 布局迁移残留清理（frontier）
+record-layout-edit-remediation/06 ──► 02 布局迁移残留清理
 
 03 全屏照片预览单源（frontier）
 
@@ -53,7 +53,7 @@ Related:
 
 05 照片 reconcile/tombstone 参数化（frontier） ──► 08 CareLog 第一刀切片
 
-06 清理 scope / committed 失败单源（frontier）
+06 清理 scope / committed 失败单源（complete）
 
 09 时间条与记录语义色单源（frontier） ──┐
                                         ├──► 07 LogScreen 结构拆分（建议 09 后或可并行，忌同 PR 混改）

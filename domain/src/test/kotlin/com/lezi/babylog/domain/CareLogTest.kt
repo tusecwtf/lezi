@@ -18,7 +18,6 @@ import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.MembershipDao
 import com.lezi.babylog.core.database.MembershipEntity
 import com.lezi.babylog.core.database.PendingReminderCleanup
-import com.lezi.babylog.core.database.PendingReminderCleanupOperation
 import com.lezi.babylog.core.database.PendingReminderCleanupStore
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
@@ -5065,14 +5064,14 @@ private class FakePendingReminderCleanupStore : PendingReminderCleanupStore {
     var deleteCount: Int = 0
 
     override suspend fun load(
-        operation: PendingReminderCleanupOperation,
+        scope: LocalDataClearScope,
     ): PendingReminderCleanup? {
         loadFailure?.let { throw it }
-        return pending?.takeIf { it.operation == operation }
+        return pending?.takeIf { it.scope == scope }
     }
 
     override suspend fun upsert(pending: PendingReminderCleanup) {
-        val existing = this.pending?.takeIf { it.operation == pending.operation }
+        val existing = this.pending?.takeIf { it.scope == pending.scope }
         this.pending = pending.copy(
             carePlanIds = existing?.carePlanIds.orEmpty() + pending.carePlanIds,
             systemCalendarProjections =
@@ -5083,9 +5082,9 @@ private class FakePendingReminderCleanupStore : PendingReminderCleanupStore {
         )
     }
 
-    override suspend fun delete(operation: PendingReminderCleanupOperation) {
+    override suspend fun delete(scope: LocalDataClearScope) {
         deleteCount += 1
-        if (pending?.operation == operation) pending = null
+        if (pending?.scope == scope) pending = null
     }
 }
 
@@ -5145,21 +5144,14 @@ private class RecordingSyncPort(
         requests++
     }
 
-    override suspend fun clearLocalRecords(
+    override suspend fun clearLocalData(
+        scope: LocalDataClearScope,
         workflow: com.lezi.babylog.sync.LocalClearWorkflow,
     ): Result<Unit> {
-        localRecordReconciliations++
-        workflow.withLocalExclusion {
-            workflow.clearRoom()
-            workflow.finishCommitted()
+        when (scope) {
+            LocalDataClearScope.RecordsOnly -> localRecordReconciliations++
+            LocalDataClearScope.AllLocalData -> fullLocalWipes++
         }
-        return Result.success(Unit)
-    }
-
-    override suspend fun clearAllLocalData(
-        workflow: com.lezi.babylog.sync.LocalClearWorkflow,
-    ): Result<Unit> {
-        fullLocalWipes++
         workflow.withLocalExclusion {
             workflow.clearRoom()
             workflow.finishCommitted()

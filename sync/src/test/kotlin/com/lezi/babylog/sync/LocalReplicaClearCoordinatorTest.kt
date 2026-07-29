@@ -7,7 +7,7 @@ import com.lezi.babylog.core.database.DatabaseTransactionRunner
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.OutboxEntity
 import com.lezi.babylog.core.database.PendingReplicaCleanup
-import com.lezi.babylog.core.database.PendingReplicaCleanupScope
+import com.lezi.babylog.core.database.LocalDataClearScope
 import com.lezi.babylog.core.database.PendingReplicaCleanupStore
 import com.lezi.babylog.core.database.RecordEntity
 import java.util.concurrent.CancellationException
@@ -52,7 +52,7 @@ class LocalReplicaClearCoordinatorTest {
         }
 
         val failure = rig.coordinator.clear(
-            scope = LocalReplicaClearScope.RecordsOnly,
+            scope = LocalDataClearScope.RecordsOnly,
             workflow = workflow,
             recoverDomain = {
                 events += "recover-domain"
@@ -72,7 +72,7 @@ class LocalReplicaClearCoordinatorTest {
         var roomCalls = 0
 
         val failure = rig.coordinator.clear(
-            scope = LocalReplicaClearScope.RecordsOnly,
+            scope = LocalDataClearScope.RecordsOnly,
             workflow = testLocalClearWorkflow { roomCalls += 1 },
             recoverDomain = { error("domain recovery failed") },
         ).exceptionOrNull()
@@ -89,9 +89,9 @@ class LocalReplicaClearCoordinatorTest {
         var roomCalls = 0
 
         val result = rig.coordinator.clear(
-            scope = LocalReplicaClearScope.RecordsOnly,
+            scope = LocalDataClearScope.RecordsOnly,
             workflow = testLocalClearWorkflow { roomCalls += 1 },
-            recoverDomain = { LocalClearRecoveryScope.RecordsOnly },
+            recoverDomain = { LocalDataClearScope.RecordsOnly },
         )
 
         assertThat(result.isSuccess).isTrue()
@@ -106,9 +106,9 @@ class LocalReplicaClearCoordinatorTest {
         var roomCalls = 0
 
         val result = rig.coordinator.clear(
-            scope = LocalReplicaClearScope.AllLocal,
+            scope = LocalDataClearScope.AllLocalData,
             workflow = testLocalClearWorkflow { roomCalls += 1 },
-            recoverDomain = { LocalClearRecoveryScope.RecordsOnly },
+            recoverDomain = { LocalDataClearScope.RecordsOnly },
         )
 
         assertThat(result.isSuccess).isTrue()
@@ -125,7 +125,7 @@ class LocalReplicaClearCoordinatorTest {
         val cancellation = CancellationException("domain finalizer cancelled")
 
         val failure = rig.coordinator.clear(
-            scope = LocalReplicaClearScope.RecordsOnly,
+            scope = LocalDataClearScope.RecordsOnly,
             workflow = testLocalClearWorkflow(
                 finishCommitted = { throw cancellation },
             ),
@@ -143,7 +143,7 @@ class LocalReplicaClearCoordinatorTest {
         val rig = ClearRig()
         var callbackDepth = 0
 
-        val result = rig.coordinator.clear(LocalReplicaClearScope.RecordsOnly) {
+        val result = rig.coordinator.clear(LocalDataClearScope.RecordsOnly) {
             callbackDepth = rig.transactions.depth
         }
 
@@ -162,7 +162,7 @@ class LocalReplicaClearCoordinatorTest {
         rig = ClearRig(mediaFiles = observingFiles)
         rig.media.seed(media("log-media", "log", "photos/log.jpg"))
 
-        val result = rig.coordinator.clear(LocalReplicaClearScope.RecordsOnly) {}
+        val result = rig.coordinator.clear(LocalDataClearScope.RecordsOnly) {}
 
         assertThat(result.isSuccess).isTrue()
         assertThat(observingFiles.deleteDepths).containsExactly(1)
@@ -180,7 +180,7 @@ class LocalReplicaClearCoordinatorTest {
         rig.pending.stageFailure = IllegalStateException("marker write failed")
         var callbackCalls = 0
 
-        val failure = rig.coordinator.clear(LocalReplicaClearScope.RecordsOnly) {
+        val failure = rig.coordinator.clear(LocalDataClearScope.RecordsOnly) {
             callbackCalls += 1
         }.exceptionOrNull()
 
@@ -199,7 +199,7 @@ class LocalReplicaClearCoordinatorTest {
         val fileFailure = IllegalStateException("file delete failed")
         rig.mediaFiles.deleteFailures += fileFailure
 
-        val failure = rig.coordinator.clear(LocalReplicaClearScope.RecordsOnly) {}
+        val failure = rig.coordinator.clear(LocalDataClearScope.RecordsOnly) {}
             .exceptionOrNull()
 
         assertThat(failure).isInstanceOf(LocalClearCommittedException::class.java)
@@ -225,7 +225,7 @@ class LocalReplicaClearCoordinatorTest {
         rig.preferences.failUpdateCursorAttempts = 1
         var callbackCalls = 0
 
-        val failure = rig.coordinator.clear(LocalReplicaClearScope.RecordsOnly) {
+        val failure = rig.coordinator.clear(LocalDataClearScope.RecordsOnly) {
             callbackCalls += 1
         }.exceptionOrNull()
 
@@ -249,7 +249,7 @@ class LocalReplicaClearCoordinatorTest {
         rig.outbox.enqueue(outbox(entityType = "media", clientUuid = "log-media"))
         rig.transactions.failRunNumbers += 2
 
-        val failure = rig.coordinator.clear(LocalReplicaClearScope.RecordsOnly) {}
+        val failure = rig.coordinator.clear(LocalDataClearScope.RecordsOnly) {}
             .exceptionOrNull()
 
         assertThat(failure).isInstanceOf(LocalClearCommittedException::class.java)
@@ -269,7 +269,7 @@ class LocalReplicaClearCoordinatorTest {
         rig.mediaFiles.deleteFailures += IllegalStateException("process stopped")
 
         assertThat(
-            rig.coordinator.clear(LocalReplicaClearScope.RecordsOnly) {}.isFailure,
+            rig.coordinator.clear(LocalDataClearScope.RecordsOnly) {}.isFailure,
         ).isTrue()
         rig.media.seed(media("new-log-media", "log", "photos/new.jpg"))
 
@@ -289,7 +289,7 @@ class LocalReplicaClearCoordinatorTest {
         rig.mediaFiles.deleteFailures += IllegalStateException("process stopped")
 
         assertThat(
-            rig.coordinator.clear(LocalReplicaClearScope.RecordsOnly) {}.isFailure,
+            rig.coordinator.clear(LocalDataClearScope.RecordsOnly) {}.isFailure,
         ).isTrue()
         rig.media.seed(media("new-log-media", "log", reusedPath))
 
@@ -323,7 +323,7 @@ class LocalReplicaClearCoordinatorTest {
             outbox("baby", "baby-local"),
         ).forEach { rig.outbox.enqueue(it) }
 
-        val result = rig.coordinator.clear(LocalReplicaClearScope.RecordsOnly) {
+        val result = rig.coordinator.clear(LocalDataClearScope.RecordsOnly) {
             rig.records.deleteAll()
             rig.carePlans.deleteAll()
         }
@@ -349,7 +349,7 @@ class LocalReplicaClearCoordinatorTest {
         rig.media.seed(media("record-shared", "log", sharedPath))
         rig.media.seed(media("avatar-shared", "avatar", sharedPath))
 
-        val result = rig.coordinator.clear(LocalReplicaClearScope.RecordsOnly) {
+        val result = rig.coordinator.clear(LocalDataClearScope.RecordsOnly) {
             rig.records.deleteAll()
         }
 
@@ -379,7 +379,7 @@ class LocalReplicaClearCoordinatorTest {
         rig.outbox.enqueue(outbox("record", "record-local"))
         rig.outbox.enqueue(outbox("baby", "other-family-baby", familyId = "family-b"))
 
-        val result = rig.coordinator.clear(LocalReplicaClearScope.AllLocal) {
+        val result = rig.coordinator.clear(LocalDataClearScope.AllLocalData) {
             rig.records.deleteAll()
             rig.babies.deleteAll()
         }
@@ -407,7 +407,7 @@ class LocalReplicaClearCoordinatorTest {
             rig.outbox.enqueue(outbox("media", uuid))
         }
 
-        val result = rig.coordinator.clear(LocalReplicaClearScope.RecordsOnly) {}
+        val result = rig.coordinator.clear(LocalDataClearScope.RecordsOnly) {}
 
         assertThat(result.isSuccess).isTrue()
         assertThat(rig.outbox.deleteEntityBatchSizes).containsExactly(400, 400, 205).inOrder()
@@ -426,7 +426,7 @@ class LocalReplicaClearCoordinatorTest {
             outbox("baby", "old-baby", familyId = "family-old"),
         ).forEach { rig.outbox.enqueue(it) }
 
-        assertThat(rig.coordinator.clear(LocalReplicaClearScope.RecordsOnly) {}.isSuccess)
+        assertThat(rig.coordinator.clear(LocalDataClearScope.RecordsOnly) {}.isSuccess)
             .isTrue()
 
         assertThat(rig.outbox.peek("family-old", 10).map(OutboxEntity::clientUuid))
@@ -440,7 +440,7 @@ class LocalReplicaClearCoordinatorTest {
         rig.media.seed(media("log-media", "log", "photos/log.jpg"))
 
         val clearing = launch {
-            rig.coordinator.clear(LocalReplicaClearScope.RecordsOnly) {}
+            rig.coordinator.clear(LocalDataClearScope.RecordsOnly) {}
         }
         gatedFiles.deleteStarted.await()
         clearing.cancel()
@@ -463,7 +463,7 @@ class LocalReplicaClearCoordinatorTest {
         var result: Result<Unit>? = null
 
         val clearing = launch {
-            result = rig.coordinator.clear(LocalReplicaClearScope.RecordsOnly) {}
+            result = rig.coordinator.clear(LocalDataClearScope.RecordsOnly) {}
         }
         gatedFiles.deleteStarted.await()
         clearing.cancel(cancellation)
@@ -484,7 +484,7 @@ class LocalReplicaClearCoordinatorTest {
         rig.barrier.lock()
 
         val clearing = async {
-            rig.coordinator.clear(LocalReplicaClearScope.RecordsOnly) {}
+            rig.coordinator.clear(LocalDataClearScope.RecordsOnly) {}
         }
         runCurrent()
         assertThat(clearing.isCompleted).isFalse()
@@ -496,7 +496,7 @@ class LocalReplicaClearCoordinatorTest {
 }
 
 private suspend fun LocalReplicaClearCoordinator.clear(
-    scope: LocalReplicaClearScope,
+    scope: LocalDataClearScope,
     clearRoom: suspend () -> Unit,
 ): Result<Unit> = clear(
     scope = scope,

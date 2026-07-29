@@ -6,7 +6,7 @@
 
 **Blocked by:** None — can start immediately
 
-**Status:** ready-for-agent
+**Status:** complete
 
 **Size:** M  
 **Theme:** D（R9）  
@@ -14,10 +14,17 @@
 
 ## Acceptance criteria
 
-- [ ] UI/domain 捕获的 committed-clear 失败类型一致（无第二套同形异常类并存生产路径）
-- [ ] records-only / all-local 在 domain→sync→pending 的映射有单一适配点；测试覆盖两端
-- [ ] 家庭服务器数据保留语义（`familyServerRetained` 等）与现文案策略不回退
-- [ ] 清理相关单元测试全绿；删除或合并冗余 mapper 测试后覆盖不降
+- [x] UI/domain 捕获的 committed-clear 失败类型一致（无第二套同形异常类并存生产路径）
+- [x] records-only / all-local 在 domain→sync→pending 的映射有单一适配点；测试覆盖两端
+- [x] 家庭服务器数据保留语义（`familyServerRetained` 等）与现文案策略不回退
+- [x] 清理相关单元测试全绿；删除或合并冗余 mapper 测试后覆盖不降
+
+## Validation evidence
+
+- `LocalDataClearScope` 是 domain、sync 与两类 pending store 共用的唯一业务 scope；两张表继续使用各自的兼容存储键。
+- `LocalClearCommittedException` 是唯一实体类型，domain 只保留兼容 typealias，生产构造统一经过 `localClearCommittedFailure`。
+- `:core:database:testDebugUnitTest :sync:testDebugUnitTest :domain:testDebugUnitTest :feature:settings:testDebugUnitTest` 通过。
+- 上述四模块的 `lintDebug` 与 `git diff --check` 通过；设置页两种 `familyServerRetained` 文案均有回归测试。
 
 ## Out of scope
 

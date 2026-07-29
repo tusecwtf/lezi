@@ -18,7 +18,7 @@ class PendingReminderCleanupStoreTest {
 
         store.upsert(
             PendingReminderCleanup(
-                operation = PendingReminderCleanupOperation.RECORDS_CLEAR,
+                scope = LocalDataClearScope.RecordsOnly,
                 carePlanIds = setOf(3L, 2L),
                 systemCalendarProjections = linkedMapOf(
                     "plan-3" to "evt,3",
@@ -43,21 +43,21 @@ class PendingReminderCleanupStoreTest {
     fun emptyCurrentSnapshotRemainsRecoverableUntilCompletion() = runBlocking {
         val dao = FakePendingReminderCleanupDao()
         val store = RoomPendingReminderCleanupStore(dao)
-        val operation = PendingReminderCleanupOperation.RECORDS_CLEAR
+        val scope = LocalDataClearScope.RecordsOnly
 
         store.upsert(
             PendingReminderCleanup(
-                operation = operation,
+                scope = scope,
                 familyServerRetained = true,
             ),
         )
 
-        assertThat(store.load(operation)?.carePlanIds).isEmpty()
-        assertThat(store.load(operation)?.systemCalendarProjections).isEmpty()
+        assertThat(store.load(scope)?.carePlanIds).isEmpty()
+        assertThat(store.load(scope)?.systemCalendarProjections).isEmpty()
 
-        store.delete(operation)
+        store.delete(scope)
 
-        assertThat(store.load(operation)).isNull()
+        assertThat(store.load(scope)).isNull()
     }
 
     @Test
@@ -65,7 +65,7 @@ class PendingReminderCleanupStoreTest {
         val dao = FakePendingReminderCleanupDao()
         val store = RoomPendingReminderCleanupStore(dao)
         val pending = PendingReminderCleanup(
-            operation = PendingReminderCleanupOperation.RECORDS_CLEAR,
+            scope = LocalDataClearScope.RecordsOnly,
             carePlanIds = setOf(8L),
             systemCalendarProjections = linkedMapOf(
                 "plan-with-id" to "evt-41",
@@ -78,25 +78,25 @@ class PendingReminderCleanupStoreTest {
 
         store.upsert(pending)
 
-        assertThat(store.load(PendingReminderCleanupOperation.RECORDS_CLEAR)).isEqualTo(pending)
+        assertThat(store.load(LocalDataClearScope.RecordsOnly)).isEqualTo(pending)
     }
 
     @Test
     fun allLocalCleanupUsesIndependentOperationKey() = runBlocking {
         val dao = FakePendingReminderCleanupDao()
         val store = RoomPendingReminderCleanupStore(dao)
-        val operation = PendingReminderCleanupOperation.ALL_LOCAL_DATA_CLEAR
+        val scope = LocalDataClearScope.AllLocalData
 
         store.upsert(
             PendingReminderCleanup(
-                operation = operation,
+                scope = scope,
                 carePlanIds = setOf(8L),
                 familyServerRetained = false,
             ),
         )
 
         assertThat(dao.pending?.operation).isEqualTo("all_local_data_clear")
-        assertThat(store.load(operation)?.operation).isEqualTo(operation)
+        assertThat(store.load(scope)?.scope).isEqualTo(scope)
     }
 
     @Test
@@ -110,7 +110,7 @@ class PendingReminderCleanupStoreTest {
         val store = RoomPendingReminderCleanupStore(dao)
 
         val failure = runCatching {
-            store.load(PendingReminderCleanupOperation.RECORDS_CLEAR)
+            store.load(LocalDataClearScope.RecordsOnly)
         }.exceptionOrNull()
 
         assertThat(failure).isInstanceOf(CorruptPendingReminderCleanupException::class.java)

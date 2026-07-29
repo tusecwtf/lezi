@@ -9,7 +9,7 @@ class PendingReplicaCleanupStoreTest {
     fun stageAndLoadRoundTripArbitraryMediaPaths() = runBlocking {
         val store = RoomPendingReplicaCleanupStore(FakePendingReplicaCleanupDao())
         val pending = PendingReplicaCleanup(
-            scope = PendingReplicaCleanupScope.RECORDS_ONLY,
+            scope = LocalDataClearScope.RecordsOnly,
             familyId = "family-a",
             pullGeneration = "generation-a",
             mediaClientUuids = setOf("media-b", "media-a"),
@@ -31,7 +31,7 @@ class PendingReplicaCleanupStoreTest {
 
         store.stage(
             PendingReplicaCleanup(
-                scope = PendingReplicaCleanupScope.ALL_LOCAL,
+                scope = LocalDataClearScope.AllLocalData,
                 familyId = "family-a",
                 pullGeneration = "generation-a",
                 mediaClientUuids = setOf("media-z", "media-a"),
@@ -73,7 +73,7 @@ class PendingReplicaCleanupStoreTest {
         val blankIdFailure = runCatching {
             store.stage(
                 PendingReplicaCleanup(
-                    scope = PendingReplicaCleanupScope.RECORDS_ONLY,
+                    scope = LocalDataClearScope.RecordsOnly,
                     familyId = "family-a",
                     pullGeneration = "",
                     mediaClientUuids = setOf(" "),
@@ -84,7 +84,7 @@ class PendingReplicaCleanupStoreTest {
         val blankPathFailure = runCatching {
             store.stage(
                 PendingReplicaCleanup(
-                    scope = PendingReplicaCleanupScope.RECORDS_ONLY,
+                    scope = LocalDataClearScope.RecordsOnly,
                     familyId = "family-a",
                     pullGeneration = "",
                     mediaClientUuids = emptySet(),

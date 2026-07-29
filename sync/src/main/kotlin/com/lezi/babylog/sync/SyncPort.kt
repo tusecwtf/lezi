@@ -1,5 +1,6 @@
 package com.lezi.babylog.sync
 
+import com.lezi.babylog.core.database.LocalDataClearScope
 import com.lezi.babylog.core.model.SyncStatus
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -51,19 +52,13 @@ interface LocalClearWorkflow {
     suspend fun finishCommitted()
 }
 
-/** Domain recovery gate invoked before any sync or family/session operation. */
-enum class LocalClearRecoveryScope {
-    RecordsOnly,
-    AllLocal,
-}
-
 fun interface LocalClearRecoveryGate {
     /** @return the widest previously committed clear resumed to completion. */
-    suspend fun recoverPendingLocalClear(): LocalClearRecoveryScope?
+    suspend fun recoverPendingLocalClear(): LocalDataClearScope?
 }
 
 class NoOpLocalClearRecoveryGate : LocalClearRecoveryGate {
-    override suspend fun recoverPendingLocalClear(): LocalClearRecoveryScope? = null
+    override suspend fun recoverPendingLocalClear(): LocalDataClearScope? = null
 }
 
 class SyncNotEnabledException : Exception("请先配置家庭服务器并加入家庭")
@@ -108,16 +103,13 @@ interface SyncPort {
     suspend fun removeMember(membershipId: String): Result<Unit>
     suspend fun deleteFamily(): Result<Unit>
     /** [workflow] joins domain Room work and committed cleanup to the replica barrier. */
-    suspend fun clearLocalRecords(
-        workflow: LocalClearWorkflow,
-    ): Result<Unit>
     /**
-     * Full local replica wipe (records, media, outbox, files) under the same
-     * sync barrier as pull/apply. Domain tables beyond records are cleared via
-     * [workflow]. Unlike [clearLocalRecords], avatar media and all outbox
-     * rows are removed so a subsequent join cannot push stale residue.
+     * Clears the selected local domain and replica state under one sync barrier.
+     * [LocalDataClearScope.AllLocalData] also removes avatar media and all
+     * outbox rows so a subsequent join cannot push stale residue.
      */
-    suspend fun clearAllLocalData(
+    suspend fun clearLocalData(
+        scope: LocalDataClearScope,
         workflow: LocalClearWorkflow,
     ): Result<Unit>
 }
@@ -153,7 +145,8 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
     override suspend fun removeMember(membershipId: String) =
         Result.failure<Unit>(SyncNotEnabledException())
     override suspend fun deleteFamily() = Result.failure<Unit>(SyncNotEnabledException())
-    override suspend fun clearLocalRecords(
+    override suspend fun clearLocalData(
+        scope: LocalDataClearScope,
         workflow: LocalClearWorkflow,
     ) = runCatching {
         workflow.withLocalExclusion {
@@ -161,8 +154,4 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
             workflow.finishCommitted()
         }
     }
-
-    override suspend fun clearAllLocalData(
-        workflow: LocalClearWorkflow,
-    ) = clearLocalRecords(workflow)
 }

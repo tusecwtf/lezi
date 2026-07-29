@@ -6,18 +6,8 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 
-/**
- * Durable reminder-cleanup kinds understood by callers.
- *
- * Room keys and collection encoding stay private to the database adapter.
- */
-enum class PendingReminderCleanupOperation {
-    RECORDS_CLEAR,
-    ALL_LOCAL_DATA_CLEAR,
-}
-
 data class PendingReminderCleanup(
-    val operation: PendingReminderCleanupOperation,
+    val scope: LocalDataClearScope,
     val carePlanIds: Set<Long> = emptySet(),
     /** Exact stable plan UUID -> provider event ID; null means recover through UID lookup only. */
     val systemCalendarProjections: Map<String, String?> = emptyMap(),
@@ -28,7 +18,7 @@ data class PendingReminderCleanup(
 )
 
 interface PendingReminderCleanupStore {
-    suspend fun load(operation: PendingReminderCleanupOperation): PendingReminderCleanup?
+    suspend fun load(scope: LocalDataClearScope): PendingReminderCleanup?
 
     /**
      * Merge a new hand-off into pending work.
@@ -37,16 +27,16 @@ interface PendingReminderCleanupStore {
      */
     suspend fun upsert(pending: PendingReminderCleanup)
 
-    suspend fun delete(operation: PendingReminderCleanupOperation)
+    suspend fun delete(scope: LocalDataClearScope)
 }
 
 class CorruptPendingReminderCleanupException internal constructor(
-    val operation: PendingReminderCleanupOperation,
+    val scope: LocalDataClearScope,
     val familyServerRetained: Boolean,
     reminderKind: String,
     invalidToken: String,
 ) : IllegalStateException(
-    "Corrupt pending reminder cleanup ${operation.name}: invalid $reminderKind id " +
+    "Corrupt pending reminder cleanup ${scope.name}: invalid $reminderKind id " +
         "'${invalidToken.take(MAX_DIAGNOSTIC_TOKEN_LENGTH)}'",
 )
 
@@ -54,9 +44,9 @@ internal class RoomPendingReminderCleanupStore(
     private val dao: PendingReminderCleanupDao,
 ) : PendingReminderCleanupStore {
     override suspend fun load(
-        operation: PendingReminderCleanupOperation,
+        scope: LocalDataClearScope,
     ): PendingReminderCleanup? =
-        dao.get(operation.storageKey)?.toSnapshot(operation)
+        dao.get(scope.reminderOperationKey)?.toSnapshot(scope)
 
     override suspend fun upsert(pending: PendingReminderCleanup) {
         require(pending.carePlanIds.all { it > 0L }) {
@@ -69,10 +59,10 @@ internal class RoomPendingReminderCleanupStore(
         ) {
             "Pending reminder cleanup projection identities must not be blank"
         }
-        val existing = load(pending.operation)
+        val existing = load(pending.scope)
         dao.upsert(
             PendingReminderCleanupEntity(
-                operation = pending.operation.storageKey,
+                operation = pending.scope.reminderOperationKey,
                 carePlanIds =
                     (existing?.carePlanIds.orEmpty() + pending.carePlanIds)
                         .sorted()
@@ -90,24 +80,24 @@ internal class RoomPendingReminderCleanupStore(
         )
     }
 
-    override suspend fun delete(operation: PendingReminderCleanupOperation) {
-        dao.delete(operation.storageKey)
+    override suspend fun delete(scope: LocalDataClearScope) {
+        dao.delete(scope.reminderOperationKey)
     }
 
     private fun PendingReminderCleanupEntity.toSnapshot(
-        typedOperation: PendingReminderCleanupOperation,
+        typedScope: LocalDataClearScope,
     ): PendingReminderCleanup =
         PendingReminderCleanup(
-            operation = typedOperation,
+            scope = typedScope,
             carePlanIds = decodeReminderIds(
                 encoded = carePlanIds,
-                operation = typedOperation,
+                scope = typedScope,
                 familyServerRetained = familyServerRetained,
                 reminderKind = "care-plan",
             ),
             systemCalendarProjections = decodeSystemCalendarProjections(
                 encoded = systemCalendarProjectionsJson,
-                operation = typedOperation,
+                scope = typedScope,
                 familyServerRetained = familyServerRetained,
             ),
             currentBabyId = currentBabyId,
@@ -117,15 +107,9 @@ internal class RoomPendingReminderCleanupStore(
         )
 }
 
-private val PendingReminderCleanupOperation.storageKey: String
-    get() = when (this) {
-        PendingReminderCleanupOperation.RECORDS_CLEAR -> "records_clear"
-        PendingReminderCleanupOperation.ALL_LOCAL_DATA_CLEAR -> "all_local_data_clear"
-    }
-
 private fun decodeReminderIds(
     encoded: String,
-    operation: PendingReminderCleanupOperation,
+    scope: LocalDataClearScope,
     familyServerRetained: Boolean,
     reminderKind: String,
 ): Set<Long> {
@@ -135,7 +119,7 @@ private fun decodeReminderIds(
         val id = normalized.toLongOrNull()
         if (normalized.isEmpty() || id == null || id <= 0L) {
             throw CorruptPendingReminderCleanupException(
-                operation = operation,
+                scope = scope,
                 familyServerRetained = familyServerRetained,
                 reminderKind = reminderKind,
                 invalidToken = token,
@@ -155,7 +139,7 @@ private fun encodeSystemCalendarProjections(values: Map<String, String?>): Strin
 
 private fun decodeSystemCalendarProjections(
     encoded: String,
-    operation: PendingReminderCleanupOperation,
+    scope: LocalDataClearScope,
     familyServerRetained: Boolean,
 ): Map<String, String?> {
     val objectValue = try {
@@ -163,7 +147,7 @@ private fun decodeSystemCalendarProjections(
             ?: throw IllegalArgumentException("not an object")
     } catch (_: Exception) {
         throw CorruptPendingReminderCleanupException(
-            operation = operation,
+            scope = scope,
             familyServerRetained = familyServerRetained,
             reminderKind = "system calendar projection",
             invalidToken = encoded,
@@ -177,7 +161,7 @@ private fun decodeSystemCalendarProjections(
         }
         if (clientUuid.isBlank() || (element !== JsonNull && eventId.isNullOrBlank())) {
             throw CorruptPendingReminderCleanupException(
-                operation = operation,
+                scope = scope,
                 familyServerRetained = familyServerRetained,
                 reminderKind = "system calendar projection",
                 invalidToken = "$clientUuid=$element",

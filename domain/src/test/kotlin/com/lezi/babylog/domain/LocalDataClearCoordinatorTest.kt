@@ -2,16 +2,15 @@ package com.lezi.babylog.domain
 
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.PendingReminderCleanup
-import com.lezi.babylog.core.database.PendingReminderCleanupOperation
 import com.lezi.babylog.core.database.PendingReminderCleanupStore
 import com.lezi.babylog.core.datastore.LocalClearSettingsFinish
 import com.lezi.babylog.core.datastore.LocalClearSettingsSnapshot
 import com.lezi.babylog.core.model.CarePlan
-import com.lezi.babylog.sync.LocalClearCommittedException
 import com.lezi.babylog.sync.LocalClearWorkflow
 import com.lezi.babylog.sync.NoOpSyncPort
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncSession
+import com.lezi.babylog.sync.localClearCommittedFailure
 import java.util.concurrent.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.Flow
@@ -245,7 +244,7 @@ class LocalDataClearCoordinatorTest {
     fun retainedCleanupCannotDeleteReusedEventIdOwnedByANewerPlanUuid() = runTest {
         val rig = ClearCoordinatorRig()
         rig.pending.pending = PendingReminderCleanup(
-            operation = PendingReminderCleanupOperation.RECORDS_CLEAR,
+            scope = LocalDataClearScope.RecordsOnly,
             systemCalendarProjections = mapOf("plan-old" to "evt-reused"),
             familyServerRetained = false,
         )
@@ -335,8 +334,8 @@ class LocalDataClearCoordinatorTest {
         }.exceptionOrNull()
 
         assertThat(failure).isInstanceOf(LocalRecordsClearCommittedException::class.java)
-        assertThat(rig.pending.pending?.operation)
-            .isEqualTo(PendingReminderCleanupOperation.ALL_LOCAL_DATA_CLEAR)
+        assertThat(rig.pending.pending?.scope)
+            .isEqualTo(LocalDataClearScope.AllLocalData)
         assertThat(rig.reminders.recordClearBatches).containsExactly(false)
         assertThat(rig.reminders.cancelledCarePlanIds).containsExactly(21L, 22L).inOrder()
 
@@ -358,11 +357,11 @@ class LocalDataClearCoordinatorTest {
     fun failedPriorRecoveryFinishesItsStoredScopeWithoutRunningTheNewScope() = runTest {
         val rig = ClearCoordinatorRig()
         rig.pending.pending = PendingReminderCleanup(
-            operation = PendingReminderCleanupOperation.ALL_LOCAL_DATA_CLEAR,
+            scope = LocalDataClearScope.AllLocalData,
             carePlanIds = setOf(41L),
             familyServerRetained = true,
         )
-        rig.sync.failureBeforeClear = LocalClearCommittedException(
+        rig.sync.failureBeforeClear = localClearCommittedFailure(
             familyServerRetained = true,
             cause = IllegalStateException("prior replica cleanup failed"),
         )
@@ -399,7 +398,7 @@ class LocalDataClearCoordinatorTest {
     fun callerCancellationWinsWhenNonCancellableRecoveryAlsoFails() = runTest {
         val rig = ClearCoordinatorRig(familyServerRetained = true)
         rig.pending.pending = PendingReminderCleanup(
-            operation = PendingReminderCleanupOperation.RECORDS_CLEAR,
+            scope = LocalDataClearScope.RecordsOnly,
             systemCalendarProjections = mapOf("plan-21" to "evt-21"),
             familyServerRetained = true,
         )
@@ -466,12 +465,7 @@ private class RecordingLocalDataClearPersistence(
         scopes += scope
         pendingStore.upsert(
             PendingReminderCleanup(
-                operation = when (scope) {
-                    LocalDataClearScope.RecordsOnly ->
-                        PendingReminderCleanupOperation.RECORDS_CLEAR
-                    LocalDataClearScope.AllLocalData ->
-                        PendingReminderCleanupOperation.ALL_LOCAL_DATA_CLEAR
-                },
+                scope = scope,
                 carePlanIds = setOf(21L, 22L),
                 systemCalendarProjections = settingsSnapshot.systemCalendarProjections,
                 currentBabyId = settingsSnapshot.currentBabyId,
@@ -553,14 +547,14 @@ private class RecordingPendingReminderCleanupStore : PendingReminderCleanupStore
     var deleteCount = 0
 
     override suspend fun load(
-        operation: PendingReminderCleanupOperation,
+        scope: LocalDataClearScope,
     ): PendingReminderCleanup? {
         loadFailure?.let { throw it }
-        return pending?.takeIf { it.operation == operation }
+        return pending?.takeIf { it.scope == scope }
     }
 
     override suspend fun upsert(pending: PendingReminderCleanup) {
-        val existing = this.pending?.takeIf { it.operation == pending.operation }
+        val existing = this.pending?.takeIf { it.scope == pending.scope }
         this.pending = pending.copy(
             carePlanIds = existing?.carePlanIds.orEmpty() + pending.carePlanIds,
             systemCalendarProjections =
@@ -573,9 +567,9 @@ private class RecordingPendingReminderCleanupStore : PendingReminderCleanupStore
         )
     }
 
-    override suspend fun delete(operation: PendingReminderCleanupOperation) {
+    override suspend fun delete(scope: LocalDataClearScope) {
         deleteCount += 1
-        if (pending?.operation == operation) pending = null
+        if (pending?.scope == scope) pending = null
     }
 }
 
@@ -690,17 +684,14 @@ private class RecordingClearSyncPort(
 
     override fun session(): Flow<SyncSession> = session
 
-    override suspend fun clearLocalRecords(
+    override suspend fun clearLocalData(
+        scope: LocalDataClearScope,
         workflow: LocalClearWorkflow,
     ): Result<Unit> {
-        recordsClearCount += 1
-        return executeClear(workflow)
-    }
-
-    override suspend fun clearAllLocalData(
-        workflow: LocalClearWorkflow,
-    ): Result<Unit> {
-        allLocalDataClearCount += 1
+        when (scope) {
+            LocalDataClearScope.RecordsOnly -> recordsClearCount += 1
+            LocalDataClearScope.AllLocalData -> allLocalDataClearCount += 1
+        }
         return executeClear(workflow)
     }
 
@@ -714,7 +705,7 @@ private class RecordingClearSyncPort(
             failureBeforeClear?.let { throw it }
             workflow.clearRoom()
             var committedFailure = failureAfterClear?.let { failure ->
-                LocalClearCommittedException(
+                localClearCommittedFailure(
                     familyServerRetained = familyServerRetained,
                     cause = failure,
                 )

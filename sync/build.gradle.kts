@@ -28,7 +28,7 @@ android {
 dependencies {
 
     implementation(project(":core:model"))
-    implementation(project(":core:database"))
+    api(project(":core:database"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.exifinterface)
     implementation(project(":core:common"))

@@ -5,12 +5,6 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 
-/** Scope of a crash-recoverable local replica cleanup hand-off. */
-enum class PendingReplicaCleanupScope {
-    RECORDS_ONLY,
-    ALL_LOCAL,
-}
-
 /**
  * Durable snapshot written in the same Room transaction as the domain clear.
  *
@@ -18,7 +12,7 @@ enum class PendingReplicaCleanupScope {
  * remains idempotent without deleting media created after a process restart.
  */
 data class PendingReplicaCleanup(
-    val scope: PendingReplicaCleanupScope,
+    val scope: LocalDataClearScope,
     val familyId: String,
     val pullGeneration: String,
     val mediaClientUuids: Set<String>,
@@ -51,7 +45,7 @@ internal class RoomPendingReplicaCleanupStore(
         dao.insert(
             PendingReplicaCleanupEntity(
                 operation = OPERATION_KEY,
-                scope = pending.scope.storageKey,
+                scope = pending.scope.replicaScopeKey,
                 familyId = pending.familyId,
                 pullGeneration = pending.pullGeneration,
                 mediaClientUuidsJson = encodeStringSet(pending.mediaClientUuids),
@@ -69,13 +63,8 @@ internal class RoomPendingReplicaCleanupStore(
             throw CorruptPendingReplicaCleanupException("unknown operation")
         }
         return PendingReplicaCleanup(
-            scope = when (scope) {
-                PendingReplicaCleanupScope.RECORDS_ONLY.storageKey ->
-                    PendingReplicaCleanupScope.RECORDS_ONLY
-                PendingReplicaCleanupScope.ALL_LOCAL.storageKey ->
-                    PendingReplicaCleanupScope.ALL_LOCAL
-                else -> throw CorruptPendingReplicaCleanupException("unknown scope")
-            },
+            scope = LocalDataClearScope.fromReplicaScopeKey(scope)
+                ?: throw CorruptPendingReplicaCleanupException("unknown scope"),
             familyId = familyId,
             pullGeneration = pullGeneration,
             mediaClientUuids = decodeStringSet(mediaClientUuidsJson, "media ids"),
@@ -83,12 +72,6 @@ internal class RoomPendingReplicaCleanupStore(
         )
     }
 }
-
-private val PendingReplicaCleanupScope.storageKey: String
-    get() = when (this) {
-        PendingReplicaCleanupScope.RECORDS_ONLY -> "records_only"
-        PendingReplicaCleanupScope.ALL_LOCAL -> "all_local"
-    }
 
 private fun encodeStringSet(values: Set<String>): String =
     buildJsonArray {
