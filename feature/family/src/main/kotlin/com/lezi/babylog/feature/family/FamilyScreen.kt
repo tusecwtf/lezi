@@ -674,10 +674,9 @@ fun FamilyRoute(
                             createFamilyNameError = it
                             return@CreateFamilyDialog
                         }
+                        // Empty bootstrap secret is allowed (NAS may omit LEZI_BOOTSTRAP_SECRET).
                         val secret = bootstrapSecret.trim()
-                        if (secret.isEmpty()) {
-                            bootstrapSecretFeedback = "请填写服务器初始化口令"
-                        } else withHomeWifiAccess {
+                        withHomeWifiAccess {
                             creatingFamily = true
                             bootstrapSecretFeedback = null
                             createDisplayNameError = null

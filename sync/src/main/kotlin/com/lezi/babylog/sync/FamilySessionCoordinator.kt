@@ -149,9 +149,6 @@ internal class FamilySessionCoordinator(
     private suspend fun createFamily(
         command: FamilySessionCommand.CreateFamily,
     ): FamilySessionOutcome {
-        require(command.bootstrapSecret.isNotBlank()) {
-            "请填写服务器初始化口令"
-        }
         return withBarrier {
             val current = preferences.session.first()
             require(!current.isJoined) {
@@ -160,13 +157,16 @@ internal class FamilySessionCoordinator(
             requireRemoteAllowed(current.homeLanConfig)
             val deviceId = preferences.ensureDeviceId()
             val createRequestId = preferences.ensureCreateRequestId()
+            // Blank secret is allowed: NAS may run without LEZI_BOOTSTRAP_SECRET.
+            // HttpSyncBackend omits the header when blank; non-blank wrong values still map to
+            // BootstrapSecretRejectedException below.
             val joined = try {
                 backend.create(
                     baseUrl = current.homeLanConfig.baseUrl,
                     deviceId = deviceId,
                     displayName = requireMemberDisplayName(command.displayName),
                     createRequestId = createRequestId,
-                    bootstrapSecret = command.bootstrapSecret,
+                    bootstrapSecret = command.bootstrapSecret.takeIf(String::isNotBlank),
                     familyName = normalizeFamilyNameForWire(command.familyName),
                 )
             } catch (error: SyncHttpException) {

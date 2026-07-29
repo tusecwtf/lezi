@@ -352,12 +352,14 @@ internal fun CreateFamilyDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                FamilyScopeRow("一次", "服务器初始化", "口令只用于本次建家")
+                FamilyScopeRow("一次", "服务器初始化", "可空；有口令时仅用于本次建家")
                 OutlinedTextField(
                     value = bootstrapSecret,
                     onValueChange = onBootstrapSecretChange,
-                    label = { Text("服务器初始化口令") },
-                    supportingText = { Text(feedback ?: "与 NAS 部署时设置的口令一致") },
+                    label = { Text("服务器初始化口令（可选）") },
+                    supportingText = {
+                        Text(feedback ?: "与 NAS 部署口令一致；未设置时可留空")
+                    },
                     isError = feedback != null,
                     enabled = !creating,
                     singleLine = true,

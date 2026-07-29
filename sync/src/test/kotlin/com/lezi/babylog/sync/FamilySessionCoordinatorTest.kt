@@ -673,7 +673,7 @@ class FamilySessionCoordinatorTest {
     }
 
     @Test
-    fun blankBootstrapSecretFailsBeforeGateOrBackendIo() = runTest {
+    fun blankBootstrapSecretIsNormalizedToNullAndStillCreates() = runTest {
         val backend = RecordingSyncBackend()
         var gateCalls = 0
         val coordinator = coordinator(
@@ -688,17 +688,18 @@ class FamilySessionCoordinatorTest {
             requireRemoteAllowed = { gateCalls += 1 },
         )
 
-        val failure = coordinator.execute(
+        val outcome = coordinator.execute(
             FamilySessionCommand.CreateFamily(
                 displayName = "妈妈",
                 bootstrapSecret = "  ",
                 familyName = null,
             ),
-        ).exceptionOrNull()
+        ).getOrThrow()
 
-        assertThat(failure).hasMessageThat().contains("初始化口令")
-        assertThat(gateCalls).isEqualTo(0)
-        assertThat(backend.createRequestIds).isEmpty()
+        assertThat(outcome).isInstanceOf(FamilySessionOutcome.Joined::class.java)
+        assertThat(gateCalls).isEqualTo(1)
+        assertThat(backend.createBootstrapSecrets).containsExactly(null)
+        assertThat(backend.createRequestIds).hasSize(1)
     }
 
     @Test
