@@ -50,9 +50,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -63,6 +61,7 @@ import com.lezi.babylog.core.ui.RecordTypeIcon
 import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.designsystem.LeziClockDialDialog
+import com.lezi.babylog.designsystem.LeziConfirmReasonCard
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziPrimaryButtonMode
 import com.lezi.babylog.designsystem.LeziSecondaryButton
@@ -448,23 +447,7 @@ internal fun QuickRecordSheet(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             confirmChrome.reasonMessage?.let { reason ->
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .semantics {
-                            contentDescription = reason
-                            liveRegion = LiveRegionMode.Polite
-                        },
-                    shape = LeziThemeExt.controlShape,
-                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.92f),
-                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                ) {
-                    Text(
-                        reason,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                        style = LeziTypography.BodyStrong,
-                    )
-                }
+                LeziConfirmReasonCard(reason)
             }
             // Ticket 21: schedule-care seam — default-on projection; setup is optional and
             // cancel/skip never blocks plan save (CareLog falls back to Lezi reminders).
@@ -656,5 +639,4 @@ internal fun QuickRecordSheet(
         )
     }
 }
-
 

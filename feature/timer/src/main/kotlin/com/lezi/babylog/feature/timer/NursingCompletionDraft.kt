@@ -1,5 +1,8 @@
 package com.lezi.babylog.feature.timer
 
+import com.lezi.babylog.core.model.NURSING_ORDERS
+import com.lezi.babylog.core.model.NursingConfirmInput
+
 /**
  * A snapshot taken when the user taps "完成并记录".
  *
@@ -18,16 +21,8 @@ internal data class NursingCompletionDraft(
     val capturedAt: Long,
 ) {
     fun validationError(nowMillis: Long): String? {
-        val left = leftMinutes.toIntOrNull()
-        val right = rightMinutes.toIntOrNull()
-        val amount = amountMl.toIntOrNull()
+        confirmInput().validationIssue()?.let { return it.message }
         return when {
-            left == null || right == null || left !in 0..1_440 || right !in 0..1_440 ->
-                "左右时长需为 0–1440 分钟的整数"
-            left + right <= 0 -> "请填写左侧或右侧喂养时长"
-            order !in NURSING_ORDERS -> "请选择喂养顺序"
-            amountMl.isNotBlank() && (amount == null || amount !in 1..999) ->
-                "奶量需在 1–999 ml 之间"
             note.length > 200 -> "备注最多 200 字"
             endedAt < startedAt -> "结束时刻不能早于开始时刻"
             endedAt > nowMillis -> "结束时刻不能晚于现在"
@@ -36,21 +31,33 @@ internal data class NursingCompletionDraft(
     }
 
     fun toCommand(): NursingCompletionCommand {
-        val left = requireNotNull(leftMinutes.toIntOrNull())
-        val right = requireNotNull(rightMinutes.toIntOrNull())
-        require(left in 0..1_440 && right in 0..1_440 && left + right > 0)
-        require(order in NURSING_ORDERS)
-        val amount = amountMl.takeIf(String::isNotBlank)?.toInt()
+        val input = confirmInput()
+        require(input.validationIssue() == null)
+        val payload = input.toPayload()
         return NursingCompletionCommand(
-            leftMin = left,
-            rightMin = right,
-            order = order,
-            amountMl = amount,
+            leftMin = payload.leftMinutes,
+            rightMin = payload.rightMinutes,
+            order = payload.order,
+            amountMl = payload.amountMl,
             note = note.trim().ifBlank { null },
             startedAt = startedAt,
             endedAt = endedAt,
         )
     }
+
+    fun confirmInput(): NursingConfirmInput = NursingConfirmInput(
+        leftMinutes = leftMinutes,
+        rightMinutes = rightMinutes,
+        order = order,
+        amountMl = amountMl,
+    )
+
+    fun withConfirmInput(input: NursingConfirmInput): NursingCompletionDraft = copy(
+        leftMinutes = input.leftMinutes,
+        rightMinutes = input.rightMinutes,
+        order = input.order,
+        amountMl = input.amountMl,
+    )
 }
 
 internal data class NursingCompletionCommand(
@@ -62,9 +69,6 @@ internal data class NursingCompletionCommand(
     val startedAt: Long,
     val endedAt: Long,
 )
-
-/** @see com.lezi.babylog.core.model.NURSING_ORDERS */
-internal val NURSING_ORDERS: Set<String> = com.lezi.babylog.core.model.NURSING_ORDERS
 
 internal fun freezeNursingCompletion(
     state: TimerState,

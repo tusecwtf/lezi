@@ -41,6 +41,8 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
+import com.lezi.babylog.core.model.NursingConfirmField
+import com.lezi.babylog.core.model.NursingConfirmInput
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.ui.RecordTypeIcon
 import com.lezi.babylog.core.ui.peeAmountLabel
@@ -49,6 +51,7 @@ import com.lezi.babylog.core.ui.stoolAmountLabel
 import com.lezi.babylog.core.ui.stoolColorLabel
 import com.lezi.babylog.core.ui.stoolConsistencyLabel
 import com.lezi.babylog.designsystem.LeziPeeAmountMark
+import com.lezi.babylog.designsystem.LeziNursingConfirmFields
 import com.lezi.babylog.designsystem.LeziShapes
 import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziStoolAmountMark
@@ -83,7 +86,6 @@ internal fun PurposeFields(
             onDraftChange,
             onStartNursingTimer,
             highlightedField = highlightedField,
-            fieldFocusRequester = fieldFocusRequester,
         )
         QuickRecordMode.Milk -> MilkFields(
             draft,
@@ -178,34 +180,33 @@ private fun NursingFields(
     onDraftChange: (QuickRecordDraft) -> Unit,
     onStartNursingTimer: () -> Unit,
     highlightedField: ComposerInvalidField? = null,
-    fieldFocusRequester: FocusRequester? = null,
 ) {
-    val nursingError = highlightedField == ComposerInvalidField.NursingDuration
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        IntegerField(
-            value = draft.leftMin,
-            label = "左侧（分）",
-            modifier = Modifier.weight(1f),
-            isError = nursingError,
-            focusRequester = fieldFocusRequester.takeIf { nursingError },
-        ) { onDraftChange(draft.copy(leftMin = it)) }
-        IntegerField(
-            value = draft.rightMin,
-            label = "右侧（分）",
-            modifier = Modifier.weight(1f),
-            isError = nursingError,
-        ) { onDraftChange(draft.copy(rightMin = it)) }
+    val input = NursingConfirmInput(
+        leftMinutes = draft.leftMin,
+        rightMinutes = draft.rightMin,
+        order = draft.order,
+        amountMl = draft.nursingAmountMl,
+    )
+    val nursingHighlight = when (highlightedField) {
+        ComposerInvalidField.NursingDuration -> NursingConfirmField.Duration
+        ComposerInvalidField.NursingOrder -> NursingConfirmField.Order
+        ComposerInvalidField.NursingAmount -> NursingConfirmField.Amount
+        else -> null
     }
-    ChoiceStrip(
-        label = "顺序",
-        choices = com.lezi.babylog.core.model.NURSING_ORDER_CHOICES,
-        selected = draft.order,
-    ) { onDraftChange(draft.copy(order = it)) }
-    IntegerField(
-        value = draft.nursingAmountMl,
-        label = "估算奶量 ml（可选）",
-        modifier = Modifier.fillMaxWidth(),
-    ) { onDraftChange(draft.copy(nursingAmountMl = it)) }
+    LeziNursingConfirmFields(
+        input = input,
+        onInputChange = { next ->
+            onDraftChange(
+                draft.copy(
+                    leftMin = next.leftMinutes,
+                    rightMin = next.rightMinutes,
+                    order = next.order,
+                    nursingAmountMl = next.amountMl,
+                ),
+            )
+        },
+        highlightedField = nursingHighlight,
+    )
     if (canStartNursingTimer) {
         Surface(
             onClick = onStartNursingTimer,

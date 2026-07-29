@@ -11,6 +11,8 @@ import com.lezi.babylog.core.model.HospitalPayload
 import com.lezi.babylog.core.model.MeasurementPayload
 import com.lezi.babylog.core.model.MedicinePayload
 import com.lezi.babylog.core.model.MilkPayload
+import com.lezi.babylog.core.model.NursingConfirmField
+import com.lezi.babylog.core.model.NursingConfirmInput
 import com.lezi.babylog.core.model.NursingPayload
 import com.lezi.babylog.core.model.PeePayload
 import com.lezi.babylog.core.model.Record
@@ -418,22 +420,15 @@ internal data class QuickRecordDraft(
                 converting
         when (mode) {
             QuickRecordMode.Nursing -> {
-                // Intent-only schedule/edit: durations are optional (fulfill fills them in).
-                if (!scheduleOrEditPlan) {
-                    val left = leftMin.toIntOrNull()
-                    val right = rightMin.toIntOrNull()
-                    if (left == null || right == null || left < 0 || right < 0) {
-                        return ComposerValidationResult(
-                            "左右时长请输入非负整数",
-                            ComposerInvalidField.NursingDuration,
-                        )
+                nursingConfirmInput().validationIssue(
+                    allowIntentOnly = scheduleOrEditPlan,
+                )?.let { issue ->
+                    val field = when (issue.field) {
+                        NursingConfirmField.Duration -> ComposerInvalidField.NursingDuration
+                        NursingConfirmField.Order -> ComposerInvalidField.NursingOrder
+                        NursingConfirmField.Amount -> ComposerInvalidField.NursingAmount
                     }
-                }
-                if (order !in com.lezi.babylog.core.model.NURSING_ORDERS) {
-                    return ComposerValidationResult(
-                        "请选择喂养顺序",
-                        ComposerInvalidField.NursingDuration,
-                    )
+                    return ComposerValidationResult(issue.message, field)
                 }
             }
             QuickRecordMode.Milk -> when {
@@ -573,11 +568,7 @@ internal data class QuickRecordDraft(
     private fun payloadDocument(): RecordPayloadDocument {
         val source = sourcePayloadDocument()
         val payload: RecordPayload = when (mode) {
-        QuickRecordMode.Nursing -> NursingPayload(
-            leftMinutes = leftMin.toIntOrNull() ?: 0,
-            rightMinutes = rightMin.toIntOrNull() ?: 0,
-            order = order,
-            amountMl = nursingAmountMl.toIntOrNull(),
+        QuickRecordMode.Nursing -> nursingConfirmInput().toPayload(
             recordMode = (source.payload as? NursingPayload)?.recordMode ?: "end",
         )
         QuickRecordMode.Milk -> MilkPayload(
@@ -658,6 +649,13 @@ internal data class QuickRecordDraft(
         )
     }
 
+    private fun nursingConfirmInput(): NursingConfirmInput = NursingConfirmInput(
+        leftMinutes = leftMin,
+        rightMinutes = rightMin,
+        order = order,
+        amountMl = nursingAmountMl,
+    )
+
     private fun sourcePayloadDocument(): RecordPayloadDocument =
         RecordPayloadCodec.decode(type, sourcePayloadJson, sourceSchemaVersion)
 
@@ -725,6 +723,7 @@ internal data class QuickRecordDraft(
             }
             val milk = payload as? MilkPayload
             val nursing = payload as? NursingPayload
+            val nursingInput = nursing?.let(NursingConfirmInput::fromPayload)
             val stool = payload as? StoolPayload
             val both = payload as? BothDiaperPayload
             val text = payload as? TextPayload
@@ -746,12 +745,12 @@ internal data class QuickRecordDraft(
                     ?: if (record.type == RecordType.PUMP_EXPRESS) 60 else 120,
                 preparedMl = milk?.preparedMl?.toString().orEmpty(),
                 durationMin = milk?.durationMinutes?.toString().orEmpty(),
-                leftMin = nursing?.leftMinutes?.coerceAtLeast(0)?.toString() ?: "0",
-                rightMin = nursing?.rightMinutes?.coerceAtLeast(0)?.toString() ?: "0",
-                order = nursing?.order?.takeIf {
+                leftMin = nursingInput?.leftMinutes ?: "0",
+                rightMin = nursingInput?.rightMinutes ?: "0",
+                order = nursingInput?.order?.takeIf {
                     it in com.lezi.babylog.core.model.NURSING_ORDERS
                 } ?: "LR",
-                nursingAmountMl = nursing?.amountMl?.toString().orEmpty(),
+                nursingAmountMl = nursingInput?.amountMl.orEmpty(),
                 peeAmount = when (payload) {
                     is PeePayload -> payload.amount
                     is BothDiaperPayload -> payload.peeAmount

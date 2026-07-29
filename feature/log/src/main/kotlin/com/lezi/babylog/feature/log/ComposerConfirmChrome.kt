@@ -1,5 +1,11 @@
 package com.lezi.babylog.feature.log
 
+import com.lezi.babylog.designsystem.LeziConfirmAppearance
+import com.lezi.babylog.designsystem.LeziConfirmChromeEvent
+import com.lezi.babylog.designsystem.LeziConfirmChromeState
+import com.lezi.babylog.designsystem.leziConfirmAppearance
+import com.lezi.babylog.designsystem.reduceLeziConfirmChrome
+
 /**
  * First invalid control to highlight / focus when the user requests an explanation.
  * Order of validation in [QuickRecordDraft.validationResult] must stay aligned with these.
@@ -9,6 +15,8 @@ internal enum class ComposerInvalidField {
     EndTime,
     Note,
     NursingDuration,
+    NursingOrder,
+    NursingAmount,
     MilkAmount,
     MilkPrepared,
     MilkDuration,
@@ -34,36 +42,15 @@ internal data class ComposerValidationResult(
     val field: ComposerInvalidField,
 )
 
-/** Visual / interactive mode of the composer primary confirm button. */
-internal enum class ComposerConfirmAppearance {
-    /** Valid draft — normal primary button that saves. */
-    Enabled,
+internal typealias ComposerConfirmAppearance = LeziConfirmAppearance
+internal typealias ComposerConfirmChromeState =
+    LeziConfirmChromeState<ComposerValidationResult>
 
-    /**
-     * Invalid draft — same size as enabled, light-grey fill, grey border, no shadow.
-     * Remains clickable only to explain; never persists.
-     */
-    ExplainedDisabled,
+internal val ComposerConfirmChromeState.reasonMessage: String?
+    get() = shownReason?.message?.takeIf { reasonVisible }
 
-    /** Saving or deleting — truly non-interactive; never opens the reason card. */
-    BusyDisabled,
-}
-
-/**
- * Lifecycle of the non-modal reason card above the confirm button.
- *
- * Pure state: show on grey-tap, clear on draft edit / re-tap / dismiss, never open while busy.
- */
-internal data class ComposerConfirmChromeState(
-    val reasonVisible: Boolean = false,
-    val shownReason: ComposerValidationResult? = null,
-) {
-    val reasonMessage: String?
-        get() = shownReason?.message?.takeIf { reasonVisible }
-
-    val focusField: ComposerInvalidField?
-        get() = shownReason?.field?.takeIf { reasonVisible }
-}
+internal val ComposerConfirmChromeState.focusField: ComposerInvalidField?
+    get() = shownReason?.field?.takeIf { reasonVisible }
 
 internal sealed interface ComposerConfirmChromeEvent {
     /** Any user edit to the draft; re-validation happens outside and clears the card. */
@@ -87,32 +74,19 @@ internal sealed interface ComposerConfirmChromeEvent {
 internal fun confirmAppearance(
     busy: Boolean,
     canConfirm: Boolean,
-): ComposerConfirmAppearance = when {
-    busy -> ComposerConfirmAppearance.BusyDisabled
-    canConfirm -> ComposerConfirmAppearance.Enabled
-    else -> ComposerConfirmAppearance.ExplainedDisabled
-}
+): ComposerConfirmAppearance = leziConfirmAppearance(busy, canConfirm)
 
 internal fun reduceConfirmChrome(
     state: ComposerConfirmChromeState,
     event: ComposerConfirmChromeEvent,
-): ComposerConfirmChromeState = when (event) {
-    ComposerConfirmChromeEvent.DraftEdited -> ComposerConfirmChromeState()
-    ComposerConfirmChromeEvent.Dismissed -> ComposerConfirmChromeState()
-    is ComposerConfirmChromeEvent.BusyChanged -> if (event.busy) {
-        ComposerConfirmChromeState()
-    } else {
-        state
-    }
-    is ComposerConfirmChromeEvent.GreyConfirmTapped -> {
-        val validation = event.validation ?: return state
-        if (state.reasonVisible) {
-            ComposerConfirmChromeState()
-        } else {
-            ComposerConfirmChromeState(
-                reasonVisible = true,
-                shownReason = validation,
-            )
-        }
-    }
-}
+): ComposerConfirmChromeState = reduceLeziConfirmChrome(
+    state = state,
+    event = when (event) {
+        ComposerConfirmChromeEvent.DraftEdited -> LeziConfirmChromeEvent.DraftEdited
+        ComposerConfirmChromeEvent.Dismissed -> LeziConfirmChromeEvent.Dismissed
+        is ComposerConfirmChromeEvent.BusyChanged ->
+            LeziConfirmChromeEvent.BusyChanged(event.busy)
+        is ComposerConfirmChromeEvent.GreyConfirmTapped ->
+            LeziConfirmChromeEvent.GreyConfirmTapped(event.validation)
+    },
+)

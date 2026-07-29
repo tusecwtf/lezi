@@ -90,6 +90,28 @@ class NursingCompletionDraftTest {
     }
 
     @Test
+    fun commandPreservesAllFourOrdersIncludingSingleSideDurations() {
+        val examples = listOf(
+            Triple("L", "7", "0"),
+            Triple("R", "0", "9"),
+            Triple("LR", "7", "9"),
+            Triple("RL", "7", "9"),
+        )
+
+        examples.forEach { (order, left, right) ->
+            val command = validDraft().copy(
+                leftMinutes = left,
+                rightMinutes = right,
+                order = order,
+            ).toCommand()
+
+            assertEquals(order, command.order)
+            assertEquals(left.toInt(), command.leftMin)
+            assertEquals(right.toInt(), command.rightMin)
+        }
+    }
+
+    @Test
     fun validation_rejectsEndBeforeStartAndAfterCurrentTime() {
         val start = 1_700_000_000_000L
         val now = start + 60_000L

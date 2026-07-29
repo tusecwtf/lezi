@@ -1,6 +1,5 @@
 package com.lezi.babylog.feature.timer
 
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -13,14 +12,13 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -29,9 +27,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.lezi.babylog.designsystem.LeziConfirmAppearance
+import com.lezi.babylog.designsystem.LeziConfirmChromeEvent
+import com.lezi.babylog.designsystem.LeziConfirmChromeState
+import com.lezi.babylog.designsystem.LeziConfirmReasonCard
 import com.lezi.babylog.designsystem.LeziClockDialDialog
+import com.lezi.babylog.designsystem.LeziNursingConfirmFields
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziPrimaryButtonMode
 import com.lezi.babylog.designsystem.LeziSecondaryButton
@@ -40,9 +42,9 @@ import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
+import com.lezi.babylog.designsystem.leziConfirmAppearance
+import com.lezi.babylog.designsystem.reduceLeziConfirmChrome
 import com.lezi.babylog.designsystem.rememberDismissKeyboard
-import androidx.compose.ui.semantics.LiveRegionMode
-import androidx.compose.ui.semantics.liveRegion
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -63,20 +65,35 @@ internal fun NursingCompletionSheet(
     val zone = ZoneId.systemDefault()
     val dismissKeyboard = rememberDismissKeyboard()
     var showClock by remember(draft.capturedAt) { mutableStateOf(false) }
-    var reasonVisible by remember(draft.capturedAt) { mutableStateOf(false) }
-    var shownReason by remember(draft.capturedAt) { mutableStateOf<String?>(null) }
+    var confirmChrome by remember(draft.capturedAt) {
+        mutableStateOf(LeziConfirmChromeState<String>())
+    }
     val nowMillis = System.currentTimeMillis()
     val validation = draft.validationError(nowMillis)
     val canConfirm = validation == null
-    val buttonMode = when {
-        saving -> LeziPrimaryButtonMode.Disabled
-        canConfirm -> LeziPrimaryButtonMode.Enabled
-        else -> LeziPrimaryButtonMode.ExplainedDisabled
+    val appearance = leziConfirmAppearance(busy = saving, canConfirm = canConfirm)
+    val buttonMode = when (appearance) {
+        LeziConfirmAppearance.Enabled -> LeziPrimaryButtonMode.Enabled
+        LeziConfirmAppearance.ExplainedDisabled -> LeziPrimaryButtonMode.ExplainedDisabled
+        LeziConfirmAppearance.BusyDisabled -> LeziPrimaryButtonMode.Disabled
+    }
+    val nursingIssue = draft.confirmInput().validationIssue()
+    val highlightedNursingField = nursingIssue?.field.takeIf {
+        confirmChrome.reasonVisible && confirmChrome.shownReason == nursingIssue?.message
+    }
+
+    LaunchedEffect(saving) {
+        confirmChrome = reduceLeziConfirmChrome(
+            confirmChrome,
+            LeziConfirmChromeEvent.BusyChanged(saving),
+        )
     }
 
     fun update(next: NursingCompletionDraft) {
-        reasonVisible = false
-        shownReason = null
+        confirmChrome = reduceLeziConfirmChrome(
+            confirmChrome,
+            LeziConfirmChromeEvent.DraftEdited,
+        )
         onDraftChange(next)
     }
 
@@ -114,37 +131,10 @@ internal fun NursingCompletionSheet(
             verticalArrangement = Arrangement.spacedBy(LeziSpacing.Md),
         ) {
             SectionLabel("基本信息")
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                IntegerField(
-                    value = draft.leftMinutes,
-                    label = "左侧（分钟）",
-                    modifier = Modifier.weight(1f),
-                    maxDigits = 4,
-                    onValueChange = { update(draft.copy(leftMinutes = it)) },
-                )
-                IntegerField(
-                    value = draft.rightMinutes,
-                    label = "右侧（分钟）",
-                    modifier = Modifier.weight(1f),
-                    maxDigits = 4,
-                    onValueChange = { update(draft.copy(rightMinutes = it)) },
-                )
-            }
-            ChoiceStrip(
-                label = "喂养顺序",
-                choices = com.lezi.babylog.core.model.NURSING_ORDER_CHOICES,
-                selected = draft.order,
-                onSelected = { update(draft.copy(order = it)) },
-            )
-            IntegerField(
-                value = draft.amountMl,
-                label = "奶量 ml（可选）",
-                modifier = Modifier.fillMaxWidth(),
-                maxDigits = 3,
-                onValueChange = { update(draft.copy(amountMl = it)) },
+            LeziNursingConfirmFields(
+                input = draft.confirmInput(),
+                onInputChange = { update(draft.withConfirmInput(it)) },
+                highlightedField = highlightedNursingField,
             )
 
             SectionLabel("时间")
@@ -152,8 +142,10 @@ internal fun NursingCompletionSheet(
             Surface(
                 onClick = {
                     dismissKeyboard()
-                    reasonVisible = false
-                    shownReason = null
+                    confirmChrome = reduceLeziConfirmChrome(
+                        confirmChrome,
+                        LeziConfirmChromeEvent.DraftEdited,
+                    )
                     showClock = true
                 },
                 modifier = Modifier
@@ -214,25 +206,9 @@ internal fun NursingCompletionSheet(
                 ),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            val reason = shownReason?.takeIf { reasonVisible }
+            val reason = confirmChrome.shownReason.takeIf { confirmChrome.reasonVisible }
             if (reason != null) {
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .semantics {
-                            contentDescription = reason
-                            liveRegion = LiveRegionMode.Polite
-                        },
-                    shape = LeziThemeExt.controlShape,
-                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.92f),
-                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                ) {
-                    Text(
-                        reason,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                        style = LeziTypography.BodyStrong,
-                    )
-                }
+                LeziConfirmReasonCard(reason)
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -242,6 +218,10 @@ internal fun NursingCompletionSheet(
                     label = "取消",
                     onClick = {
                         dismissKeyboard()
+                        confirmChrome = reduceLeziConfirmChrome(
+                            confirmChrome,
+                            LeziConfirmChromeEvent.Dismissed,
+                        )
                         onDismiss()
                     },
                     modifier = Modifier.weight(1f),
@@ -249,25 +229,35 @@ internal fun NursingCompletionSheet(
                 LeziPrimaryButton(
                     label = if (saving) "保存中…" else "确认记录",
                     onClick = {
-                        when (buttonMode) {
-                            LeziPrimaryButtonMode.Disabled -> Unit
-                            LeziPrimaryButtonMode.Enabled -> {
+                        when (appearance) {
+                            LeziConfirmAppearance.BusyDisabled -> Unit
+                            LeziConfirmAppearance.Enabled -> {
                                 dismissKeyboard()
-                                onConfirm(draft)
-                            }
-                            LeziPrimaryButtonMode.ExplainedDisabled -> {
-                                dismissKeyboard()
-                                if (reasonVisible) {
-                                    reasonVisible = false
-                                    shownReason = null
-                                } else {
-                                    reasonVisible = true
-                                    shownReason = validation
+                                if (draft.validationError(System.currentTimeMillis()) == null) {
+                                    onConfirm(draft)
                                 }
+                            }
+                            LeziConfirmAppearance.ExplainedDisabled -> {
+                                dismissKeyboard()
+                                confirmChrome = reduceLeziConfirmChrome(
+                                    confirmChrome,
+                                    LeziConfirmChromeEvent.GreyConfirmTapped(validation),
+                                )
                             }
                         }
                     },
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f)
+                        .semantics {
+                            contentDescription =
+                                if (appearance == LeziConfirmAppearance.ExplainedDisabled) {
+                                    validation ?: "确认记录"
+                                } else if (saving) {
+                                    "保存中…"
+                                } else {
+                                    "确认记录"
+                                }
+                        },
                     mode = buttonMode,
                 )
             }
@@ -286,12 +276,16 @@ internal fun NursingCompletionSheet(
                 val now = System.currentTimeMillis()
                 when {
                     pickedAt < draft.startedAt -> {
-                        reasonVisible = true
-                        shownReason = "结束时刻不能早于开始时刻"
+                        confirmChrome = LeziConfirmChromeState(
+                            reasonVisible = true,
+                            shownReason = "结束时刻不能早于开始时刻",
+                        )
                     }
                     pickedAt > now -> {
-                        reasonVisible = true
-                        shownReason = "结束时刻不能晚于现在"
+                        confirmChrome = LeziConfirmChromeState(
+                            reasonVisible = true,
+                            shownReason = "结束时刻不能晚于现在",
+                        )
                     }
                     else -> update(draft.copy(endedAt = pickedAt))
                 }
@@ -329,50 +323,6 @@ private fun ReadOnlyTimeField(label: String, value: Long, zone: ZoneId) {
             Text(formatTime(value, zone), style = LeziTypography.BodyStrong)
         }
     }
-}
-
-@Composable
-private fun ChoiceStrip(
-    label: String,
-    choices: List<Pair<String, String>>,
-    selected: String,
-    onSelected: (String) -> Unit,
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text(label, style = LeziTypography.Label)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            choices.forEach { (value, title) ->
-                FilterChip(
-                    selected = selected == value,
-                    onClick = { onSelected(value) },
-                    label = { Text(title) },
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun IntegerField(
-    value: String,
-    label: String,
-    modifier: Modifier,
-    maxDigits: Int,
-    onValueChange: (String) -> Unit,
-) {
-    OutlinedTextField(
-        value = value,
-        onValueChange = { onValueChange(it.filter(Char::isDigit).take(maxDigits)) },
-        modifier = modifier,
-        label = { Text(label) },
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-        singleLine = true,
-    )
 }
 
 @Composable

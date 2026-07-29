@@ -3,6 +3,7 @@ package com.lezi.babylog.feature.log
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.core.model.CarePlanStatus
+import com.lezi.babylog.core.model.NursingPayload
 import com.lezi.babylog.core.model.RecordType
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -97,6 +98,77 @@ class QuickRecordDraftTest {
         assertEquals(
             """{"amount_ml":135,"prepared_ml":135,"duration_min":8}""",
             command.payloadJson,
+        )
+    }
+
+    @Test
+    fun nursingEditRoundTripsAllOrdersIncludingSingleSideRecords() {
+        val examples = listOf(
+            NursingPayload(leftMinutes = 7, rightMinutes = 0, order = "L"),
+            NursingPayload(leftMinutes = 0, rightMinutes = 9, order = "R"),
+            NursingPayload(leftMinutes = 7, rightMinutes = 9, order = "LR"),
+            NursingPayload(leftMinutes = 7, rightMinutes = 9, order = "RL"),
+        )
+
+        examples.forEach { expected ->
+            val source = record(
+                type = RecordType.NURSING,
+                payload = com.lezi.babylog.core.model.RecordPayloadCodec.encode(
+                    com.lezi.babylog.core.model.RecordPayloadDocument(
+                        type = RecordType.NURSING,
+                        payload = expected,
+                        schemaVersion =
+                            com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+                    ),
+                ),
+            )
+
+            val draft = QuickRecordDraft.fromRecord(source)
+            val saved = com.lezi.babylog.core.model.RecordPayloadCodec.decode(
+                type = RecordType.NURSING,
+                payloadJson = draft.toSaveCommand().payloadJson,
+                schemaVersion = com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+            ).payload
+
+            assertEquals(expected.leftMinutes.toString(), draft.leftMin)
+            assertEquals(expected.rightMinutes.toString(), draft.rightMin)
+            assertEquals(expected.order, draft.order)
+            assertEquals(expected, saved)
+            assertTrue(draft.canConfirm(nowMillis = tappedAt + 1L))
+        }
+    }
+
+    @Test
+    fun nursingComposerUsesSharedDurationAndAmountLimits() {
+        val valid = QuickRecordDraft.create(RecordType.NURSING, tappedAt)
+            .copy(leftMin = "1", rightMin = "0", order = "L")
+
+        assertEquals(
+            "左右时长需为 0–1440 分钟的整数",
+            valid.copy(leftMin = "1441").validationError(tappedAt + 1L),
+        )
+        assertEquals(
+            "奶量需在 1–999 ml 之间",
+            valid.copy(nursingAmountMl = "1000").validationError(tappedAt + 1L),
+        )
+    }
+
+    @Test
+    fun nursingSharedIssuesTargetTheMatchingComposerControls() {
+        val valid = QuickRecordDraft.create(RecordType.NURSING, tappedAt)
+            .copy(leftMin = "1", rightMin = "0", order = "L")
+
+        assertEquals(
+            ComposerInvalidField.NursingDuration,
+            valid.copy(leftMin = "1441").validationResult(tappedAt + 1L)?.field,
+        )
+        assertEquals(
+            ComposerInvalidField.NursingOrder,
+            valid.copy(order = "UNKNOWN").validationResult(tappedAt + 1L)?.field,
+        )
+        assertEquals(
+            ComposerInvalidField.NursingAmount,
+            valid.copy(nursingAmountMl = "1000").validationResult(tappedAt + 1L)?.field,
         )
     }
 
