@@ -48,7 +48,7 @@
 
 **已落地扩展与边界**
 
-- 家庭同步 `CustomItemDef`（`custom_item` ordinary push）已落地：共享 UUID/名称/图标/创建者/tombstone；布局与槽位仍本机。
+- 家庭同步 `CustomItemDef` 已落地：共享 UUID/名称/图标/创建者/tombstone；布局与槽位仍本机。
 - 家庭同步 `CarePlan`、履行候选、计划照片以及 Record/计划原子包已落地；接收端完整包落地后才建立本机提醒。
 - 乐记日历只呈现 `CarePlan`；护理计划与 Android 系统日历副本是不同概念。
 - 自定义项目显隐/排序/常用槽位、系统日历 ID/权限/披露级别与提醒偏好继续只存本机。
@@ -206,8 +206,9 @@ SSID 白名单 **仅存本机**，不随家庭同步到 NAS。两台手机可登
 | Record/计划 MediaAsset 元数据 + 字节 | Widget 配置、护理计划提醒与系统日历状态 |
 
 `CustomItemDef`、`CarePlan`、`FulfillmentCandidate` 与计划媒体均为现行同步域。
-带照片的 Record/CarePlan 必须在发送、服务端发布
-和接收应用阶段以完整照片包原子可见，不能先展示实体再补照片。
+全部 Record（含零照片）与全部 CarePlan 必须经 atomic bundle 发布；Baby（可含头像）、
+CustomItemDef 与 FulfillmentCandidate 也经同一 bundle 入口发布。Record/CarePlan 与其
+全部照片在发送、服务端发布和接收应用阶段原子可见，不能先展示实体再补照片。
 
 member 的前台/下拉同步先完成全部 pull 页并应用 NAS 权威 Baby，再执行本机孤宝宝收敛与出站捕获；Baby 永不进入 member outbox。恰有一个权威宝宝时自动再绑定孤宝宝数据；多个权威宝宝时等待用户明确选择目标；零个时保留本机数据并等待管理员创建。尚未再绑定的孤宝宝 Record/CarePlan/媒体继续留在本机 dirty 状态，不以无效宝宝引用上行；合并后再捕获新版。owner 仍保持现有本地写入与 LWW 上行顺序。
 
@@ -501,38 +502,9 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 ### 9.6 `POST /v1/push`
 
 - Auth：member/owner token
-- Body：
-
-```json
-{
-  "device_id": "...",
-  "generation": "...",
-  "entities": [
-    {
-      "type": "record",
-      "client_uuid": "...",
-      "payload": { },
-      "updated_at": 0,
-      "deleted_at": null
-    }
-  ]
-}
-```
-
-- `type`：`baby` | `record` | `media` | `custom_item` | `fulfillment_candidate`；
-  `record` 与 `care_plan` 不经 ordinary push，必须使用 §9.8.1 原子同步包
-- `generation`：客户端已知服务代际；不匹配时服务端先返回结构化 `409`，
-  不应用任何实体
-- LWW：请求 `updated_at` 小于库中则 skip
-- Baby ACL：member 请求中出现任何 `type=baby`（新建、更新或 tombstone）时，整次请求返回 `403`，不得在 LWW skip 前静默接受；owner 行为不变
-- Record 作者是 server-owned field：首次接受新 Record 时，NAS 从认证 principal
-  写入 `created_by_membership_id`；客户端伪造的 membership/device claim 不会成为作者。后续编辑、软删与恢复保留
-  已存首次作者。ordinary push 与 atomic bundle 必须调用同一 canonicalization 规则
-- avatar 类 media：非 owner → `403`
-- 响应：
-  `{ "applied": N, "record_authors": [{ "client_uuid": "…", "created_by_membership_id": "…" }] }`
-  `record_authors` 是当前响应字段，只列出已知 canonical 作者；equal/LWW skip 也可
-  返回已存作者，使建家前本机 Record 无需等待下一次 pull 即可完成 metadata-only 回填
+- **已退役**：服务端固定返回 `422`，不得应用请求中的任何实体。
+- 全部实体发布使用 §9.8.1 atomic bundle；本路径不得作为 Baby、Record、Media、
+  CustomItemDef、CarePlan 或 FulfillmentCandidate 的兼容旁路。
 
 ### 9.7 `GET /v1/pull?cursor=&generation=`
 
@@ -566,15 +538,16 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `PUT` | `/v1/media/{client_uuid}` | body=bytes；需先/同时有 media 元数据 entity；鉴权 + avatar 规则 |
+| `PUT` | `/v1/media/{client_uuid}` | **已退役**；返回 `422`，媒体字节只可上传到 staging bundle |
 | `GET` | `/v1/media/{client_uuid}` | 下载；家庭 token |
 | `DELETE` | `/v1/media/{client_uuid}` | 可选；或仅走 entity tombstone |
 
 ### 9.8.1 原子同步包（`atomic_bundle`）
 
-根实体（`record` 或 `care_plan`）与完整媒体清单只能一起对其它设备可见。
-`/v1/push` + `/v1/media` 是 Baby、无照片 Record、头像、CustomItemDef 和履行候选的
-当前 ordinary 路径；带照片的 Record 与全部 CarePlan 必须走本协议。
+所有同步实体只经本协议发布。根类型为 `record | care_plan | baby | custom_item |
+fulfillment_candidate`：Record/CarePlan 的媒体成员只能是 `log`，Baby 的媒体成员只能是
+`avatar`，CustomItemDef/FulfillmentCandidate 不带媒体。零照片 Record 与零照片 CarePlan
+仍提交空媒体清单的包；`/v1/push` 和普通媒体上传不得成为发布旁路。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -596,19 +569,23 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
   link，不支持时使用已 fsync 暂存副本的
   no-replace 原子 rename
 - **幂等 commit**：重复 commit / 丢失响应可安全重试；已 commit 的 `bundle_id` 内容冲突 → `409`
-- **canonical 回执**：Record 根的首次 commit 与幂等 retry 都使用与 ordinary push
-  同形的 `record_authors` 数组；Android 只在请求对应的本地版本仍
+- **canonical 回执**：Record 根的首次 commit 与幂等 retry 都返回
+  `record_authors` 数组；Android 只在请求对应的本地版本仍
   存在时合并 membership 作者，不改护理内容、dirty 状态或 Outbox
 - **提交者绑定**：暂存包绑定 stage 时认证到的 membership；其它 membership 不得代为
   commit，从而保证 server-owned Record/CarePlan 作者、内容 hash 与幂等重试一致
 - **稳定 UUID**：Android 以命名空间、根类型、根实体 `client_uuid` 与 `updated_at` 确定性生成合法 UUID；同一版本重试复用同一 `bundle_id`，Record 与 CarePlan 不共享身份
 - **已发布版本保留**：新编辑在 commit 前不覆盖当前已发布完整版本；根 `updated_at` 落后于已发布 → commit `409`
-- **LWW 与 ordinary**：commit 与 `/v1/push` 共享实体键 LWW；不得用半套 ordinary 写穿破原子可见性
-- **根类型通用**：`record` 与 `care_plan` 共用同一 HTTP/Store 契约
+- **LWW**：commit 在同一实体键上执行 LWW；不得用 ordinary 写穿破原子可见性
+- **根类型与媒体约束**：`record`/`care_plan` 只允许 `log`，`baby` 只允许 `avatar`，
+  `custom_item`/`fulfillment_candidate` 只允许空媒体清单；所有根共享同一 HTTP/Store 契约
 - **CarePlan ACL**：创建时服务端从认证 principal 盖章 `created_by_membership_id`（忽略客户端伪造）；任意成员可创建；普通成员仅可修改/跳过/删除自己创建的计划，管理员可管理全部；作者离开后管理员仍可管理。计划媒体引用、宝宝、具体项目与家庭必须一致，跨家庭引用以冲突错误拒绝
 - **下次喂养并发创建**：Android 按家庭权威 Baby 与计划代次生成确定性 CarePlan UUID。两个 member 离线创建同一 UUID 时，NAS 保留先发布的开放 next-feed 计划，并把后到 package（root 与全部 media）规范化为成功 no-op（不授予 winner 编辑权，也不允许给他人计划增删照片）；member 的本地写同步走 `pull → push → pull`，同轮采用 NAS winner、清理 losing plan/media/outbox 与本机副作用，并由普通 CarePlan apply 重挂唯一提醒。
-- **不经 ordinary push**：`record` 与 `care_plan` 不得走 `/v1/push`，必须经 atomic bundle，避免半套包
-- **履行候选**（`fulfillment_candidate`，ordinary push）：任意活动成员可提交；服务端在候选首次接受时固定认证 `submitter_membership_id`、`submitter_role` 与不可编辑 `confirmed_at`，后续请求/幂等重放不得改写；客户端用盖章字段按管理员 → 较早确认时间 → 候选 UUID 裁决唯一权威事实，落选标记 conflict-not-adopted 并排除于普通记录表面；管理员本机冲突审计与「转为独立记录」不改写候选盖章字段，也不通过 wire 同步 `adoptionStatus` / `convertedRecordClientUuid`
+- **不经 ordinary push**：所有实体都不得走 `/v1/push`，必须经 atomic bundle
+- **pull 共组**：pull 发出 live Record/CarePlan 时，同页附带其全部 live `log` 媒体；
+  media→parent 与 parent→media 共享 visit-mark，避免依赖环重复递归。客户端仍逐页完整
+  stage/apply，不跨页持有半包
+- **履行候选**（`fulfillment_candidate`，空媒体 atomic bundle）：任意活动成员可提交；服务端在候选首次接受时固定认证 `submitter_membership_id`、`submitter_role` 与不可编辑 `confirmed_at`，后续请求/幂等重放不得改写；客户端用盖章字段按管理员 → 较早确认时间 → 候选 UUID 裁决唯一权威事实，落选标记 conflict-not-adopted 并排除于普通记录表面；管理员本机冲突审计与「转为独立记录」不改写候选盖章字段，也不通过 wire 同步 `adoptionStatus` / `convertedRecordClientUuid`
 - **暂存上限**：每包最多 8 个 media；每家庭最多 64 个 open staging bundle（防 NAS 磁盘无界）
 
 ### 9.9 `POST /v1/family/delete`
@@ -654,8 +631,8 @@ Record 与 CarePlan 共享以下 current-wire 约束：
   均返回 `422`。
 - `type=custom` 时 `custom_item_client_uuid` 必须引用同家庭、未删除的 CustomItemDef；
   wire 内的 `payload_json` 不得携带设备自增 `custom_item_id`；接收端以 UUID 解析自己的
-  本机 id 后再落库。其它类型必须省略或置空。该规则同时适用于 ordinary Record 和
-  atomic CarePlan 根。
+  本机 id 后再落库。其它类型必须省略或置空。该规则同时适用于 atomic Record 与
+  CarePlan 根。
 - NAS 在校验后只持久化并 pull 一种 Android 可直接应用的 canonical JSON：PRD 标记为
   optional/default 的字段可由请求省略，但 NAS 会补为显式 `null` 或当前默认值；这属于
   current wire 规范化，不是旧协议兼容。非法枚举、关系、时间区间、时区或已移除字段

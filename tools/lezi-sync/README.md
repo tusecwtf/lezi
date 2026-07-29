@@ -203,9 +203,9 @@ lezi-sync healthcheck
 | POST | `/v1/join` | 邀请码换 member token（响应含 `family_name`） |
 | POST | `/v1/leave` | member 退出自身 membership 并吊销其全部凭证 |
 | POST | `/v1/family/delete` | owner 删除家庭及媒体 |
-| POST | `/v1/push` | Baby、Record、Media、CustomItem 的当前 ordinary LWW push |
+| POST | `/v1/push` | 已退役；固定 `422`，实体只经 atomic bundle 发布 |
 | GET | `/v1/pull?cursor=&generation=` | 有界分页、单调 cursor 增量 pull |
-| PUT/GET | `/v1/media/{client_uuid}` | ordinary 流程上传或下载媒体字节 |
+| PUT/GET | `/v1/media/{client_uuid}` | PUT 已退役；GET 保留为已发布媒体下载 |
 | POST | `/v1/bundles` | 原子包暂存：根实体 + 媒体清单（commit 前不可 pull） |
 | PUT | `/v1/bundles/{id}/media/{uuid}` | 原子包媒体字节暂存 |
 | POST | `/v1/bundles/{id}/commit` | 单事务发布完整包（幂等） |
@@ -285,15 +285,16 @@ pull 响应包含当前字段 `has_more`。每页最多扫描 200 个实体，�
 ### 原子同步包（`atomic_bundle`）
 
 `GET /health` 广告
-`capabilities: ["atomic_bundle", "record_membership_author"]`。当前客户端在发布
-带照片的记录/计划前必须确认 `atomic_bundle`；不存在 metadata-first 回退路径。
+`capabilities: ["atomic_bundle", "record_membership_author"]`。当前客户端要求 health
+为 `ok` 且 capabilities 至少包含这两项；允许增加能力，`version` 仅展示、不参与门闩。
+所有实体发布前必须确认 `atomic_bundle`；不存在 metadata-first 回退路径。
 `record_membership_author` 表示服务端接受并回执 membership
 作者字段。
 
 典型发送流程：
 
 1. `POST /v1/bundles` — body
-   `{ "bundle_id", "root": {type: record|care_plan, ...}, "media": [...], "generation"? }`
+   `{ "bundle_id", "root": {type: record|care_plan|baby|custom_item|fulfillment_candidate, ...}, "media": [...], "generation"? }`
    live media 须带正 `byte_size`；响应
    `{bundle_id, status:"staging", missing_media, staged_media}`
 2. 对每个 missing media：`PUT /v1/bundles/{bundle_id}/media/{uuid}`（原始字节）
@@ -315,8 +316,11 @@ pull 响应包含当前字段 `has_more`。每页最多扫描 200 个实体，�
 - 根 `updated_at` 落后于已发布版本 → commit `409`
 - tombstone 包（root/media 带 `deleted_at`）不需上传字节即可 commit
 - 每包最多 8 个 media；每家庭最多 64 个 open staging bundle
-- `care_plan` 根类型与 `record` 共用原子发布契约，并执行当前字段、引用与成员 ACL 校验
-- ordinary `/v1/push` 与 `/v1/media` 仍用于 Baby、Media（头像）、CustomItem 与 fulfillment；Record/CarePlan 走 atomic bundle
+- `record`/`care_plan` 只允许 `kind=log` 的媒体成员，`baby` 只允许 `kind=avatar`；
+  `custom_item`/`fulfillment_candidate` 必须使用空媒体清单
+- 零照片 Record/CarePlan 仍提交空媒体清单的包；所有根执行当前字段、引用与成员 ACL 校验
+- `/v1/push` 与普通媒体 PUT 固定 `422`；GET 媒体下载保留
+- pull 发出 live Record/CarePlan 时，同页共组其全部 live `log` 媒体；客户端仍逐页完整 apply
 
 家庭删除先提交 SQLite 外键级联删除，再清理该家庭媒体目录。数据库删除失败时
 媒体保持完整；数据库已删除但文件清理失败或进程中断时，该 UUID 目录作为孤儿

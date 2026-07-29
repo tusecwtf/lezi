@@ -23,11 +23,17 @@ ADR-0002 对历史 `memo`、`other` 与裸 `custom` Record/快捷引用的保留
 - NAS 只初始化空目录、不存在或零字节的数据库为精确 SQLite schema v3。已有数据库只有
   在 `user_version=3` 且 schema 形状完全匹配时才可重启并保留家庭、凭证、实体与媒体；
   非空旧版、未来版或形状不匹配的数据库在任何目录、权限或 sidecar 变更前 fail closed。
-- HTTP 只接受当前 wire。`/v1/push` 与 `/v1/media` 是当前 ordinary 实体/媒体路径，
-  带照片的 Record 与全部 CarePlan 使用 atomic bundle；客户端不向旧 NAS 降级，服务端也不
-  接受为旧客户端保留的字段或别名。
+- HTTP 只接受当前 wire。所有 Record（含零照片）、CarePlan、Baby、CustomItemDef 与
+  FulfillmentCandidate 都只经 atomic bundle 发布；`/v1/push` 和普通媒体上传已退役，
+  `log` 只能作为 Record/CarePlan 包成员，`avatar` 只能作为 Baby 包成员。pull 发出 live
+  Record/CarePlan 时须在同页共组其 live `log` 媒体。客户端不向旧 NAS 降级，服务端也不
+  接受为旧客户端保留的字段、别名或 ordinary 发布旁路。
+- 客户端只要求 `/health` 为 `ok` 且 capabilities 至少包含 `atomic_bundle` 与
+  `record_membership_author`；允许服务端增加能力，展示用 `version` 不参与兼容门闩。
 - `membership_id` 是记录作者与 ACL 的唯一家庭身份。`device_id` 只用于当前建家、加入与
-  token 会话绑定，不进入 members 响应或 Record 作者 payload。
+  token 会话绑定，不进入 members 响应或 Record 作者 payload。当前 Record 合同允许任一
+  active 家庭成员按 LWW 编辑或删除任意护理记录；CarePlan 与 CustomItemDef 仍遵循
+  creator-or-owner 权限。
 
 ## 保留的兼容与恢复边界
 
