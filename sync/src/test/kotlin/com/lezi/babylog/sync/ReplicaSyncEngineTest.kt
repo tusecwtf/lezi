@@ -915,6 +915,11 @@ private class ReplicaEngineRig(
     val customItems = MemoryCustomItemDao()
     val mediaFiles = TestMediaFileStore()
     val transactions = RecordingTransactionRunner()
+    val mediaFileCleanup = ReferenceAwareMediaFileCleanup(
+        mediaDao = media,
+        mediaFiles = mediaFiles,
+        transactionRunner = transactions,
+    )
     val families = MemoryFamilyDao().apply {
         seed(FamilyEntity(id = 1, ownerUserId = 1, createdAt = 0))
     }
@@ -934,6 +939,7 @@ private class ReplicaEngineRig(
             override fun nowMillis(): Long = 1_000
         },
         mediaFiles = mediaFiles,
+        mediaFileCleanup = mediaFileCleanup,
         transactionRunner = transactions,
         carePlanAppliedListener = NoOpCarePlanFamilyAppliedListener(),
         familyBabyAppliedListener = FamilyBabyAuthorityAppliedListener {

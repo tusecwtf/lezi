@@ -66,11 +66,14 @@ class PhotoAttachmentReconcilerTest {
             "new-uuid-$generatedUuidCount"
         }
 
-        reconciler.reconcile(
+        val mutation = reconciler.reconcile(
             owner = PhotoAttachmentOwner.Record(7L),
             photoLocalPaths = listOf(" photos/revived.jpg ", "photos/new.jpg"),
             at = 100L,
         )
+
+        assertThat(mutation.changed).isTrue()
+        assertThat(mutation.tombstonedClientUuids).containsExactly("removed-uuid")
 
         val byPath = media.listForRecord(7L).associateBy(MediaAssetEntity::localUri)
         assertThat(byPath.getValue("photos/removed.jpg"))
@@ -142,7 +145,14 @@ class PhotoAttachmentReconcilerTest {
             error("tombstone must not generate a UUID")
         }
 
-        reconciler.tombstone(owner = PhotoAttachmentOwner.CarePlan(9L), deletedAt = 50L)
+        val planMutation = reconciler.tombstone(
+            owner = PhotoAttachmentOwner.CarePlan(9L),
+            deletedAt = 50L,
+        )
+
+        assertThat(planMutation.changed).isTrue()
+        assertThat(planMutation.tombstonedClientUuids)
+            .containsExactly("plan-shared", "plan-only")
 
         assertThat(media.listForRecord(7L))
             .containsExactly(
@@ -171,7 +181,11 @@ class PhotoAttachmentReconcilerTest {
                     at = 20L,
                 ).copy(deletedAt = 50L, updatedAt = 50L, syncDirty = true),
             ).inOrder()
-        reconciler.tombstone(owner = PhotoAttachmentOwner.Record(7L), deletedAt = 70L)
+        val recordMutation = reconciler.tombstone(
+            owner = PhotoAttachmentOwner.Record(7L),
+            deletedAt = 70L,
+        )
+        assertThat(recordMutation.tombstonedClientUuids).containsExactly("record-shared")
         assertThat(media.listForRecord(7L).single())
             .isEqualTo(
                 mediaAsset(

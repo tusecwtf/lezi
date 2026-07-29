@@ -2269,7 +2269,8 @@ class CareLogTest {
 
     @Test
     fun carePlanPhotosCreateUpdateFulfillAndTombstoneKeepOwnership() = runTest {
-        val fakes = Fakes()
+        val sync = RecordingSyncPort()
+        val fakes = Fakes(sync)
         fakes.wireTransactionalSnapshots()
         val care = fakes.careLog()
         val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
@@ -2296,6 +2297,7 @@ class CareLogTest {
         assertThat(care.listCarePlanPhotoPaths(planId)).containsExactly("plans/a.jpg", "plans/c.jpg")
         val tombstonedB = fakes.media.listForCarePlan(planId).first { it.localUri == "plans/b.jpg" }
         assertThat(tombstonedB.deletedAt).isNotNull()
+        assertThat(sync.mediaCleanupCandidates).containsExactly(setOf(tombstonedB.clientUuid))
 
         val recordId = care.fulfillCarePlan(
             carePlanId = planId,
@@ -2320,7 +2322,13 @@ class CareLogTest {
         )
         care.deleteCarePlan(plan2, nowMillis = now + 4)
         assertThat(fakes.media.listActiveForCarePlan(plan2)).isEmpty()
-        assertThat(fakes.media.listForCarePlan(plan2).single().deletedAt).isNotNull()
+        val deletedPlanMedia = fakes.media.listForCarePlan(plan2).single()
+        assertThat(deletedPlanMedia.deletedAt).isNotNull()
+        assertThat(sync.mediaCleanupCandidates)
+            .containsExactly(
+                setOf(tombstonedB.clientUuid),
+                setOf(deletedPlanMedia.clientUuid),
+            ).inOrder()
     }
 
     @Test
@@ -3381,7 +3389,8 @@ class CareLogTest {
 
     @Test
     fun updateRecordReconcilesMediaAndExplicitEmptyClearsPhotos() = runTest {
-        val fakes = Fakes()
+        val sync = RecordingSyncPort()
+        val fakes = Fakes(sync)
         val care = fakes.careLog()
         val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
         val keep = "/data/user/0/com.lezi/files/record-media/keep.jpg"
@@ -3408,7 +3417,9 @@ class CareLogTest {
         val allMedia = fakes.media.listForRecord(recordId)
         assertThat(allMedia.filter { it.deletedAt == null }.map { it.localUri })
             .containsExactly(keep, add)
-        assertThat(allMedia.single { it.localUri == drop }.deletedAt).isNotNull()
+        val dropped = allMedia.single { it.localUri == drop }
+        assertThat(dropped.deletedAt).isNotNull()
+        assertThat(sync.mediaCleanupCandidates).containsExactly(setOf(dropped.clientUuid))
 
         care.updateRecord(
             id = recordId,
@@ -3425,6 +3436,51 @@ class CareLogTest {
         assertThat(fakes.media.listActiveForRecord(recordId)).isEmpty()
         assertThat(fakes.media.listForRecord(recordId).all { it.deletedAt != null }).isTrue()
         assertThat(fakes.records.getIncludingDeleted(recordId)!!.deletedAt).isNotNull()
+    }
+
+    @Test
+    fun deleteRecordHandsExactPhotoTombstonesToCommittedCleanup() = runTest {
+        val sync = RecordingSyncPort()
+        val fakes = Fakes(sync)
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val recordId = care.addRecord(
+            babyId = babyId,
+            type = RecordType.DIARY,
+            timestamp = 1_000L,
+            payloadJson = """{"body":"日记"}""",
+            photoLocalPaths = listOf("record/delete.jpg"),
+        )
+        val mediaUuid = fakes.media.listActiveForRecord(recordId).single().clientUuid
+
+        care.deleteRecord(recordId)
+
+        assertThat(sync.mediaCleanupCandidates).containsExactly(setOf(mediaUuid))
+        assertThat(fakes.media.getByClientUuid(mediaUuid)?.deletedAt).isNotNull()
+    }
+
+    @Test
+    fun cleanupFailureDoesNotMisreportTheCommittedRecordDeleteAsReplayable() = runTest {
+        val sync = RecordingSyncPort().apply {
+            mediaCleanupFailures += IllegalStateException("gc retry required")
+        }
+        val fakes = Fakes(sync)
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val path = "record/retry.jpg"
+        val recordId = care.addRecord(
+            babyId = babyId,
+            type = RecordType.DIARY,
+            timestamp = 1_000L,
+            payloadJson = """{"body":"日记"}""",
+            photoLocalPaths = listOf(path),
+        )
+
+        care.deleteRecord(recordId)
+
+        assertThat(fakes.records.getIncludingDeleted(recordId)?.deletedAt).isNotNull()
+        assertThat(fakes.media.listForRecord(recordId).single().localUri).isEqualTo(path)
+        assertThat(sync.requests).isGreaterThan(0)
     }
 
     @Test
@@ -3468,10 +3524,12 @@ class CareLogTest {
 
     @Test
     fun confirmSleepPersistsPhotosWithOpenAndClosedIntervals() = runTest {
-        val fakes = Fakes()
+        val sync = RecordingSyncPort()
+        val fakes = Fakes(sync)
         val care = fakes.careLog()
         val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
         val path = "/data/user/0/com.lezi/files/record-media/sleep.jpg"
+        val removedPath = "/data/user/0/com.lezi/files/record-media/sleep-removed.jpg"
         val openId = care.confirmSleep(
             babyId = babyId,
             expectedOpenSleepId = null,
@@ -3479,9 +3537,12 @@ class CareLogTest {
             endTimestamp = null,
             note = null,
             payloadJson = """{"is_nap":true,"anomaly_flag":false}""",
-            photoLocalPaths = listOf(path),
+            photoLocalPaths = listOf(path, removedPath),
         )
-        assertThat(care.listRecordPhotoPaths(openId)).containsExactly(path)
+        assertThat(care.listRecordPhotoPaths(openId)).containsExactly(path, removedPath)
+        val removedUuid = fakes.media.listActiveForRecord(openId)
+            .single { it.localUri == removedPath }
+            .clientUuid
 
         care.confirmSleep(
             babyId = babyId,
@@ -3493,6 +3554,7 @@ class CareLogTest {
             photoLocalPaths = listOf(path),
         )
         assertThat(care.listRecordPhotoPaths(openId)).containsExactly(path)
+        assertThat(sync.mediaCleanupCandidates).containsExactly(setOf(removedUuid))
         assertThat(fakes.records.get(openId)!!.payloadJson).doesNotContain("sleep.jpg")
     }
 
@@ -4906,7 +4968,8 @@ class CareLogTest {
 
     @Test
     fun convertRecordToCarePlanTransfersFieldsPhotosAndTombstonesRecord() = runTest {
-        val fakes = Fakes()
+        val sync = RecordingSyncPort()
+        val fakes = Fakes(sync)
         fakes.wireTransactionalSnapshots()
         val care = fakes.careLog()
         val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
@@ -4922,6 +4985,8 @@ class CareLogTest {
             photoLocalPaths = listOf(keep, drop),
         )
         val sourceUuid = fakes.records.get(recordId)!!.clientUuid
+        val sourceMediaUuids = fakes.media.listActiveForRecord(recordId)
+            .mapTo(linkedSetOf()) { it.clientUuid }
 
         val planId = care.convertRecordToCarePlan(
             recordId = recordId,
@@ -4953,6 +5018,7 @@ class CareLogTest {
             fakes.media.listAllIncludingDeleted()
                 .filter { it.localUri == keep && it.deletedAt == null },
         ).hasSize(1)
+        assertThat(sync.mediaCleanupCandidates).containsExactly(sourceMediaUuids)
         assertThat(fakes.reminders.scheduledCarePlanIds).contains(planId)
     }
 
@@ -5406,6 +5472,8 @@ private class RecordingSyncPort(
     var requests = 0
     var localRecordReconciliations = 0
     var fullLocalWipes = 0
+    val mediaCleanupCandidates = mutableListOf<Set<String>>()
+    val mediaCleanupFailures = ArrayDeque<Throwable>()
 
     private val sessionState = MutableStateFlow(
         com.lezi.babylog.sync.SyncSession(
@@ -5427,6 +5495,13 @@ private class RecordingSyncPort(
 
     override fun requestSync(trigger: com.lezi.babylog.sync.SyncTrigger) {
         requests++
+    }
+
+    override suspend fun cleanupTombstonedMedia(clientUuids: Set<String>): Result<Unit> {
+        mediaCleanupCandidates += clientUuids
+        return mediaCleanupFailures.removeFirstOrNull()
+            ?.let { Result.failure(it) }
+            ?: Result.success(Unit)
     }
 
     override suspend fun clearLocalData(
@@ -5535,6 +5610,14 @@ internal class FakeMediaAssetDao : MediaAssetDao {
 
     override suspend fun getByClientUuid(uuid: String): MediaAssetEntity? =
         items.find { it.clientUuid == uuid }
+
+    override suspend fun countActiveReferences(localUri: String): Int =
+        items.count { it.localUri == localUri && it.deletedAt == null }
+
+    override suspend fun listPendingFileCleanupClientUuids(): List<String> =
+        items.filter { it.deletedAt != null && it.localUri.isNotBlank() }
+            .sortedBy { it.id }
+            .map { it.clientUuid }
 
     override suspend fun update(asset: MediaAssetEntity) {
         updateCount += 1

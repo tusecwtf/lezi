@@ -46,6 +46,7 @@ class RealSyncPort @Inject constructor(
     private val clock: PolicyClock,
     private val foregroundState: ForegroundState,
     private val mediaFiles: SyncMediaFileStore,
+    private val mediaFileCleanup: ReferenceAwareMediaFileCleanup,
     private val transactionRunner: DatabaseTransactionRunner,
     private val pendingReplicaCleanupStore: PendingReplicaCleanupStore,
     private val localClearRecoveryGate: LocalClearRecoveryGate =
@@ -71,6 +72,7 @@ class RealSyncPort @Inject constructor(
         familyDao = familyDao,
         clock = clock,
         mediaFiles = mediaFiles,
+        mediaFileCleanup = mediaFileCleanup,
         transactionRunner = transactionRunner,
         carePlanAppliedListener = carePlanAppliedListener,
         familyBabyAppliedListener = familyBabyAppliedListener,
@@ -187,6 +189,13 @@ class RealSyncPort @Inject constructor(
         }
         syncSignal.trySend(Unit)
     }
+
+    override suspend fun cleanupTombstonedMedia(clientUuids: Set<String>): Result<Unit> =
+        runCatching {
+            syncMutex.withLock {
+                mediaFileCleanup.cleanupTombstones(clientUuids)
+            }
+        }
 
     override suspend fun saveServer(baseUrl: String): Result<Unit> =
         executeFamily(FamilySessionCommand.SaveServer(baseUrl)).map { Unit }

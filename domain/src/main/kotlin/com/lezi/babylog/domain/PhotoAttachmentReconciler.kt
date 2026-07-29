@@ -21,6 +21,11 @@ sealed interface PhotoAttachmentOwner {
     }
 }
 
+data class PhotoAttachmentMutation(
+    val changed: Boolean,
+    val tombstonedClientUuids: Set<String> = emptySet(),
+)
+
 /**
  * Authoritative writer for record and care-plan photo attachment rows.
  *
@@ -32,12 +37,12 @@ class PhotoAttachmentReconciler(
     private val mediaAssetDao: MediaAssetDao,
     private val uuidFactory: () -> String = ::newClientUuid,
 ) {
-    /** @return true when at least one attachment row was inserted, revived, or tombstoned. */
+    /** Returns the exact tombstones that may be handed to physical cleanup after commit. */
     suspend fun reconcile(
         owner: PhotoAttachmentOwner,
         photoLocalPaths: List<String>,
         at: Long,
-    ): Boolean {
+    ): PhotoAttachmentMutation {
         val normalizedPaths = photoLocalPaths
             .map(String::trim)
             .filter(String::isNotEmpty)
@@ -53,6 +58,7 @@ class PhotoAttachmentReconciler(
         val active = existing.filter { it.deletedAt == null }
         val desired = normalizedPaths.toSet()
         var changed = false
+        val tombstonedClientUuids = linkedSetOf<String>()
 
         normalizedPaths.forEach { path ->
             val live = active.firstOrNull { it.localUri == path }
@@ -85,14 +91,18 @@ class PhotoAttachmentReconciler(
                 ),
             )
             changed = true
+            tombstonedClientUuids += asset.clientUuid
         }
-        return changed
+        return PhotoAttachmentMutation(
+            changed = changed,
+            tombstonedClientUuids = tombstonedClientUuids,
+        )
     }
 
     suspend fun tombstone(
         owner: PhotoAttachmentOwner,
         deletedAt: Long,
-    ) {
+    ): PhotoAttachmentMutation {
         val active = when (owner) {
             is PhotoAttachmentOwner.Record -> mediaAssetDao.listActiveForRecord(owner.id)
             is PhotoAttachmentOwner.CarePlan -> mediaAssetDao.listActiveForCarePlan(owner.id)
@@ -107,6 +117,10 @@ class PhotoAttachmentReconciler(
                 ),
             )
         }
+        return PhotoAttachmentMutation(
+            changed = active.isNotEmpty(),
+            tombstonedClientUuids = active.mapTo(linkedSetOf()) { it.clientUuid },
+        )
     }
 
     private fun newAttachment(

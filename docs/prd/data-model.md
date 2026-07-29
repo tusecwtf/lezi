@@ -229,6 +229,14 @@ NAS 持久化和 pull 的 current MediaAsset payload 固定包含三个归属 UU
 履行事务成功后，原 CarePlan 的媒体集合保持不变，事实 Record 只建立确认时仍在草稿内的
 计划照片和新导入照片媒体行；已被事实引用的新导入文件不进入物理清理候选。
 
+MediaAsset 行所有权与物理文件所有权是两层契约：每条 `log` 行仍只归属一个 Record 或
+CarePlan，但多个 active 行可以用相同 `local_uri` 共享同一份本机字节。编辑、整实体删除、
+Record→CarePlan 转换和同步 tombstone 只把精确媒体行标记删除；物理文件须在同一路径已无
+任何 `deleted_at IS NULL` 的媒体行后才可回收，因此待上传的 active dirty 行也会保护文件。
+回收成功（或文件已经缺失）后只清空 tombstone 行的本机 `local_uri`，不删除 MediaAsset
+tombstone 或 Outbox 元数据。删除失败或中断时保留该路径作为重启重试 marker；live 行若有
+`remote_uri` 但本机路径为空，继续按既有下载恢复规则补齐。
+
 ### 3.8 SettingsLocal（**不同步**）
 
 | 字段 | 说明 |

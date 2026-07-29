@@ -118,6 +118,25 @@ class RecordComposerPhotoLifecycleTest {
     }
 
     @Test
+    fun successfulEditLeavesDiscardedPersistedSourceForCommittedDomainCleanup() = runBlocking {
+        val sourceKeep = photo("source-keep.jpg", byteArrayOf(1, 2))
+        val sourceRemoved = photo("source-removed.jpg", byteArrayOf(3, 4))
+        val ownedRemoved = photo("owned-removed-edit.jpg", byteArrayOf(5, 6))
+        val draft = QuickRecordDraft.create(RecordType.DIARY, 1_000L).copy(
+            photos = listOf(sourceKeep.absolutePath),
+            sourcePhotos = listOf(sourceKeep.absolutePath, sourceRemoved.absolutePath),
+            borrowedPhotos = emptyList(),
+            ownedDraftPhotos = listOf(ownedRemoved.absolutePath),
+        )
+
+        lifecycle.cleanupAfterCommit(draft)
+
+        assertTrue(sourceKeep.isFile)
+        assertTrue(sourceRemoved.isFile)
+        assertFalse(ownedRemoved.exists())
+    }
+
+    @Test
     fun failedSaveThenRecreationRetainsOwnershipUntilExplicitAbandon() = runBlocking {
         val planBytes = byteArrayOf(11, 12)
         val ownedBytes = byteArrayOf(21, 22)

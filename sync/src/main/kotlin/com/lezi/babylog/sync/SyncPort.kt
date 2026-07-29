@@ -82,6 +82,8 @@ interface SyncPort {
     fun session(): Flow<SyncSession>
     fun isEnabled(): Boolean
     fun requestSync(trigger: SyncTrigger)
+    /** Reclaims exact committed media tombstones; logical mutation success is independent. */
+    suspend fun cleanupTombstonedMedia(clientUuids: Set<String>): Result<Unit>
     suspend fun saveServer(baseUrl: String): Result<Unit>
     /** Persists the host, port, and up to two SSIDs; form defaults are not applied here. */
     suspend fun saveHomeLanConfig(config: HomeLanServerConfig): Result<Unit>
@@ -129,6 +131,7 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
     override fun session(): Flow<SyncSession> = session
     override fun isEnabled() = false
     override fun requestSync(trigger: SyncTrigger) = Unit
+    override suspend fun cleanupTombstonedMedia(clientUuids: Set<String>) = Result.success(Unit)
     override suspend fun saveServer(baseUrl: String) = Result.success(Unit)
     override suspend fun saveHomeLanConfig(config: HomeLanServerConfig) = Result.success(Unit)
     override suspend fun createFamily(

@@ -581,8 +581,8 @@ class RecordComposerViewModel @Inject constructor(
                         photoLocalPaths = draft.photos,
                     )
                 }
-                // Physical cleanup only after the domain transaction committed. Fulfillment
-                // borrowed refs are excluded; retained imports now have active Record media rows.
+                // Only discarded draft-owned imports are cleaned here. Persisted source paths
+                // are reclaimed by reference-aware domain cleanup after the Room commit.
                 photoLifecycle.cleanupAfterCommit(draft)
                 val message = when (writeDecision) {
                     ComposerWriteDecision.UpdateCarePlan -> "已保存护理计划"
@@ -700,12 +700,9 @@ class RecordComposerViewModel @Inject constructor(
         actionJob = viewModelScope.launch {
             try {
                 if (editPlanId != null) {
-                    // Soft-delete plan + media tombstones in domain; physical GC deferred.
                     careLog.deleteCarePlan(editPlanId)
                 } else {
                     careLog.deleteRecord(recordId!!)
-                    // Tombstones are domain-owned; drop local bytes only after commit.
-                    photoStore.delete(draft.photos)
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled

@@ -632,9 +632,9 @@ class CareLog @Inject constructor(
         }
         val photos = photoLocalPaths
         val now = System.currentTimeMillis()
-        sleepMutationMutex.withLock {
+        val cleanupCandidates = sleepMutationMutex.withLock {
             transactionRunner.run {
-                val existing = recordDao.get(id) ?: return@run
+                val existing = recordDao.get(id) ?: return@run emptySet<String>()
                 requireActiveBaby(existing.babyId)
                 val type = RecordType.fromKey(existing.type) ?: error("未知记录类型")
                 requireCurrentPayloadDocument(type, existing.payloadJson, existing.schemaVersion)
@@ -667,9 +667,10 @@ class CareLog @Inject constructor(
                         it,
                         now,
                     )
-                }
+                }?.tombstonedClientUuids.orEmpty()
             }
         }
+        cleanupCommittedPhotoTombstones(cleanupCandidates)
         requestLocalSync()
     }
 
@@ -707,7 +708,7 @@ class CareLog @Inject constructor(
             "该项目不可转为护理计划"
         }
 
-        suspend fun writeConvert(): Long = transactionRunner.run {
+        suspend fun writeConvert(): Pair<Long, Set<String>> = transactionRunner.run {
             val existing = recordDao.get(recordId) ?: error("记录不存在")
             if (existing.deletedAt != null) error("记录已删除")
             requireActiveBaby(existing.babyId)
@@ -757,7 +758,10 @@ class CareLog @Inject constructor(
 
             val at = nextSyncUpdatedAt(existing.updatedAt, System.currentTimeMillis())
             recordDao.softDelete(recordId, at)
-            photoAttachmentReconciler.tombstone(PhotoAttachmentOwner.Record(recordId), at)
+            val recordPhotoMutation = photoAttachmentReconciler.tombstone(
+                PhotoAttachmentOwner.Record(recordId),
+                at,
+            )
 
             // Plan media rows are new ownership (separate clientUuids); record media
             // remain tombstoned only. Same localUri may be referenced by both, but
@@ -786,16 +790,17 @@ class CareLog @Inject constructor(
                 photos,
                 at,
             )
-            planId
+            planId to recordPhotoMutation.tombstonedClientUuids
         }
 
-        val planId = if (type == RecordType.SLEEP) {
+        val (planId, cleanupCandidates) = if (type == RecordType.SLEEP) {
             // Same mutex as soft-delete/open-sleep so convert cannot leave half-live intervals.
             sleepMutationMutex.withLock { writeConvert() }
         } else {
             writeConvert()
         }
         // The converted family data is publishable before optional device-local projection.
+        cleanupCommittedPhotoTombstones(cleanupCandidates)
         requestLocalSync()
         // Creator keeps full local plan + projection immediately.
         carePlanDao.get(planId)?.toModel()?.let { plan ->
@@ -808,7 +813,7 @@ class CareLog @Inject constructor(
     }
 
     suspend fun deleteRecord(id: Long) {
-        sleepMutationMutex.withLock {
+        val cleanupCandidates = sleepMutationMutex.withLock {
             transactionRunner.run {
                 val existing = recordDao.get(id)
                 if (existing != null) {
@@ -820,11 +825,13 @@ class CareLog @Inject constructor(
                     photoAttachmentReconciler.tombstone(
                         PhotoAttachmentOwner.Record(id),
                         deletedAt,
-                    )
+                    ).tombstonedClientUuids
+                } else {
+                    emptySet()
                 }
-                existing
             }
         }
+        cleanupCommittedPhotoTombstones(cleanupCandidates)
         requestLocalSync()
     }
 
@@ -954,7 +961,7 @@ class CareLog @Inject constructor(
             payloadJson = payloadJson,
             schemaVersion = schemaVersion,
         )
-        val id = sleepMutationMutex.withLock {
+        val (id, cleanupCandidates) = sleepMutationMutex.withLock {
             validateSleepInterval(RecordType.SLEEP, timestamp, endTimestamp)
             transactionRunner.run {
                 requireActiveBaby(babyId)
@@ -976,12 +983,12 @@ class CareLog @Inject constructor(
                             updatedAt = now,
                         ),
                     )
-                    photoAttachmentReconciler.reconcile(
+                    val photoMutation = photoAttachmentReconciler.reconcile(
                         PhotoAttachmentOwner.Record(inserted),
                         photos,
                         now,
                     )
-                    inserted
+                    inserted to photoMutation.tombstonedClientUuids
                 } else {
                     if (currentOpen?.id != expectedOpenSleepId) {
                         throw SleepStateChangedException()
@@ -1002,15 +1009,16 @@ class CareLog @Inject constructor(
                             updatedAt = now,
                         ),
                     )
-                    photoAttachmentReconciler.reconcile(
+                    val photoMutation = photoAttachmentReconciler.reconcile(
                         PhotoAttachmentOwner.Record(expectedOpenSleepId),
                         photos,
                         now,
                     )
-                    expectedOpenSleepId
+                    expectedOpenSleepId to photoMutation.tombstonedClientUuids
                 }
             }
         }
+        cleanupCommittedPhotoTombstones(cleanupCandidates)
         requestLocalSync()
         return id
     }
@@ -1879,7 +1887,7 @@ class CareLog @Inject constructor(
         projectToSystemCalendar: Boolean? = null,
     ) {
         val photos = photoLocalPaths
-        transactionRunner.run {
+        val cleanupCandidates = transactionRunner.run {
             val plan = carePlanDao.get(carePlanId) ?: error("护理计划不存在")
             if (plan.deletedAt != null) error("护理计划已删除")
             val status = CarePlanStatus.fromStorage(plan.status)
@@ -1932,13 +1940,14 @@ class CareLog @Inject constructor(
                     plan.status != CarePlanStatus.PENDING.storageKey
             // Photo-only edits are still atomic CarePlan bundle mutations. Reconcile first so an
             // identical explicit list remains a no-op; the enclosing transaction owns both writes.
-            val photosChanged = photos?.let {
+            val photoMutation = photos?.let {
                 photoAttachmentReconciler.reconcile(
                     PhotoAttachmentOwner.CarePlan(carePlanId),
                     it,
                     at,
                 )
-            } == true
+            }
+            val photosChanged = photoMutation?.changed == true
             if (sharedChanged || photosChanged) {
                 // Persist stored status as pending; missed is always derived from clock.
                 carePlanDao.update(plan.copy(
@@ -1959,8 +1968,10 @@ class CareLog @Inject constructor(
                     enabled = desiredProjection,
                 )
             }
+            photoMutation?.tombstonedClientUuids.orEmpty()
         }
         // Shared update is committed and publishable before optional local side effects.
+        cleanupCommittedPhotoTombstones(cleanupCandidates)
         requestLocalSync()
         calendarReminderMutationGuard.withLock {
             carePlanDao.get(carePlanId)?.toModel()?.let { plan ->
@@ -2012,17 +2023,18 @@ class CareLog @Inject constructor(
         carePlanId: Long,
         nowMillis: Long = System.currentTimeMillis(),
     ) {
-        transactionRunner.run {
-            val plan = carePlanDao.get(carePlanId) ?: return@run
-            if (plan.deletedAt != null) return@run
+        val cleanupCandidates = transactionRunner.run {
+            val plan = carePlanDao.get(carePlanId) ?: return@run emptySet<String>()
+            if (plan.deletedAt != null) return@run emptySet<String>()
             requireCanManageCarePlan(plan)
             val deletedAt = nowMillis.coerceAtLeast(plan.updatedAt + 1)
             carePlanDao.softDelete(carePlanId, deletedAt)
             photoAttachmentReconciler.tombstone(
                 PhotoAttachmentOwner.CarePlan(carePlanId),
                 deletedAt,
-            )
+            ).tombstonedClientUuids
         }
+        cleanupCommittedPhotoTombstones(cleanupCandidates)
         reminderProjection.cancelCarePlanReminderBestEffort(carePlanId)
         reminderProjection.removeSystemCalendarProjection(carePlanId)
         requestLocalSync()
@@ -2557,6 +2569,12 @@ class CareLog @Inject constructor(
 
     private fun requestLocalSync() {
         syncPort.requestSync(SyncTrigger.LocalWrite)
+    }
+
+    /** Logical writes stay committed when best-effort physical GC must retry. */
+    private suspend fun cleanupCommittedPhotoTombstones(clientUuids: Set<String>) {
+        if (clientUuids.isEmpty()) return
+        syncPort.cleanupTombstonedMedia(clientUuids)
     }
 
     private fun pickCurrent(babies: List<BabyEntity>, storedId: Long?): BabyEntity? {

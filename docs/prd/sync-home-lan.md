@@ -268,6 +268,14 @@ member 的前台/下拉同步先完成全部 pull 页并应用 NAS 权威 Baby�
 - 上传前压缩（长边约 1200–2000px，与 ui 规格一致）。
 - 本地可先写 `local_uri`；同步后写 `remote` 标识（`client_uuid` / 相对路径）。
 - **禁止**把设备绝对路径当同步主键。
+- Record/CarePlan 的 MediaAsset 行是单一实体所有权；相同 `local_uri` 的本机字节可以被多个
+  active 行共享。媒体 tombstone 的非空 `local_uri` 是可恢复的物理回收 marker，不是 wire
+  主键。
+- 物理回收走同步屏障，再在单个 Room transaction lease 内重新读取精确 tombstone、查询同
+  path 全部 active 引用、删除文件，并只在成功/文件已缺失后清 marker。pending upload 的
+  active 行保护字节；屏障同时排除 pull 下载暂存与原子 apply 的竞争。
+- 回收不删除 MediaAsset tombstone 或 Outbox；删除失败、取消或进程中断只留下 GC 待重试，
+  不回滚或伪报已提交的 Record/CarePlan 逻辑写入，也不丢失远端删除意图。
 
 ### 6.3 服务端
 

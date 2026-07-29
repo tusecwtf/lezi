@@ -41,6 +41,53 @@ import org.junit.Test
 
 class RealSyncPortTest {
     @Test
+    fun mediaCleanupWaitsForReplicaBarrierBeforeReclaimingBytes() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        rig.awaitStartupRecovery()
+        rig.backend.nextPull = PullResult(
+            entities = emptyList(),
+            cursor = 1L,
+            generation = "current-generation",
+            hasMore = false,
+        )
+        rig.backend.pullStarted = CompletableDeferred()
+        rig.backend.releasePull = CompletableDeferred()
+        val syncing = async {
+            rig.port.sync(SyncTrigger.PullToRefresh).getOrThrow()
+        }
+        rig.backend.pullStarted!!.await()
+        val tombstoneUuid = "11111111-1111-3111-8111-111111111111"
+        val path = "downloaded/staged-consumer.jpg"
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = 7L,
+                clientUuid = tombstoneUuid,
+                kind = "log",
+                localUri = path,
+                createdAt = 100L,
+                updatedAt = 200L,
+                deletedAt = 200L,
+                syncDirty = true,
+            ),
+        )
+
+        val cleanup = async {
+            rig.port.cleanupTombstonedMedia(setOf(tombstoneUuid)).getOrThrow()
+        }
+        runCurrent()
+
+        assertThat(cleanup.isCompleted).isFalse()
+        assertThat(rig.mediaFiles.deleted).doesNotContain(path)
+
+        rig.backend.releasePull!!.complete(Unit)
+        syncing.await()
+        cleanup.await()
+
+        assertThat(rig.mediaFiles.deleted).containsExactly(path)
+        assertThat(rig.media.getByClientUuid(tombstoneUuid)?.localUri).isEmpty()
+    }
+
+    @Test
     fun startupRecoveryContainsOperationalFailureAndReportsIt() = runTest {
         val failure = IllegalStateException("marker unavailable")
         var reported: Throwable? = null
@@ -5689,6 +5736,11 @@ private class SyncRig(
     val customItems = MemoryCustomItemDao()
     val mediaFiles = TestMediaFileStore()
     val transactions = RecordingTransactionRunner()
+    val mediaFileCleanup = ReferenceAwareMediaFileCleanup(
+        mediaDao = media,
+        mediaFiles = mediaFiles,
+        transactionRunner = transactions,
+    )
     val pendingReplicaCleanup = TestPendingReplicaCleanupStore()
     val pendingDomainRecovery = TestLocalClearRecoveryGate()
     val families = MemoryFamilyDao().apply {
@@ -5729,6 +5781,7 @@ private class SyncRig(
         clock = clock,
         foregroundState = foreground,
         mediaFiles = mediaFiles,
+        mediaFileCleanup = mediaFileCleanup,
         transactionRunner = transactions,
         pendingReplicaCleanupStore = pendingReplicaCleanup,
         localClearRecoveryGate = pendingDomainRecovery,
@@ -6570,6 +6623,14 @@ internal class MemoryMediaDao : MediaAssetDao {
 
     override suspend fun getByClientUuid(uuid: String): MediaAssetEntity? =
         rows.find { it.clientUuid == uuid }
+
+    override suspend fun countActiveReferences(localUri: String): Int =
+        rows.count { it.localUri == localUri && it.deletedAt == null }
+
+    override suspend fun listPendingFileCleanupClientUuids(): List<String> =
+        rows.filter { it.deletedAt != null && it.localUri.isNotBlank() }
+            .sortedBy(MediaAssetEntity::id)
+            .map(MediaAssetEntity::clientUuid)
 
     override suspend fun update(asset: MediaAssetEntity) {
         rows.replaceAll { if (it.id == asset.id) asset else it }

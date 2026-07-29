@@ -86,6 +86,7 @@ internal class ReplicaSyncEngine(
     private val familyDao: FamilyDao,
     private val clock: PolicyClock,
     private val mediaFiles: SyncMediaFileStore,
+    private val mediaFileCleanup: ReferenceAwareMediaFileCleanup,
     private val transactionRunner: DatabaseTransactionRunner,
     private val carePlanAppliedListener: CarePlanFamilyAppliedListener,
     private val familyBabyAppliedListener: FamilyBabyAuthorityAppliedListener =
@@ -111,7 +112,7 @@ internal class ReplicaSyncEngine(
         trigger: SyncTrigger,
     ): ReplicaSyncOutcome {
         session.requireCurrentReplicaSession()
-        cleanupPendingTombstonedMedia()
+        mediaFileCleanup.cleanupPendingTombstones()
         val capturedPendingCreatorAcknowledgements = captureLocalChanges(session)
         val mediaEditGuard = captureLocalMediaEditGuard()
         val plan = SyncPlan.forTrigger(trigger)
@@ -191,7 +192,7 @@ internal class ReplicaSyncEngine(
         entities: List<SyncEntity>,
     ) {
         session.requireCurrentReplicaSession()
-        cleanupPendingTombstonedMedia()
+        mediaFileCleanup.cleanupPendingTombstones()
         if (session.role == FamilyRole.Member) {
             // A join snapshot starts a new authority set. Never let a Baby marker
             // retained from a previous family/session masquerade as current authority.
@@ -300,7 +301,7 @@ internal class ReplicaSyncEngine(
         } finally {
             cleanupUnownedStagedMedia(stagedLogMediaBytes.values.toSet())
         }
-        cleanupPendingTombstonedMedia(deletedMediaClientUuids.toSet())
+        mediaFileCleanup.cleanupTombstones(deletedMediaClientUuids.toSet())
         cleanupDiscardedLocalMedia(discardedLocalMediaPaths)
         // Side effects only after full package apply — never during partial download.
         if (appliedCarePlanUuids.isNotEmpty()) {
@@ -924,49 +925,6 @@ internal class ReplicaSyncEngine(
             deletedMediaClientUuids += entity.clientUuid
         }
         return true
-    }
-
-    /**
-     * Finish durable media-tombstone cleanup.
-     *
-     * File deletion and clearing the tombstone path share the Room transaction
-     * lease. A delete failure or process stop leaves [MediaAssetEntity.localUri]
-     * intact for the next synchronization. If a new live row has taken ownership
-     * of the same path, only the stale tombstone reference is cleared.
-     */
-    private suspend fun cleanupPendingTombstonedMedia(
-        clientUuids: Set<String>? = null,
-    ) {
-        val pendingClientUuids = mediaDao.listAllIncludingDeleted()
-            .asSequence()
-            .filter { media ->
-                media.deletedAt != null &&
-                    media.localUri.isNotBlank() &&
-                    (clientUuids == null || media.clientUuid in clientUuids)
-            }
-            .map(MediaAssetEntity::clientUuid)
-            .distinct()
-            .toList()
-        pendingClientUuids.forEach { clientUuid ->
-            transactionRunner.run {
-                val current = mediaDao.getByClientUuid(clientUuid)
-                    ?.takeIf { it.deletedAt != null && it.localUri.isNotBlank() }
-                    ?: return@run
-                val path = current.localUri
-                val pathHasLiveOwner = mediaDao.listAllIncludingDeleted().any { media ->
-                    media.clientUuid != current.clientUuid &&
-                        media.deletedAt == null &&
-                        media.localUri == path
-                }
-                if (!pathHasLiveOwner) {
-                    mediaFiles.delete(path)
-                }
-                val stillPending = mediaDao.getByClientUuid(clientUuid)
-                if (stillPending?.deletedAt != null && stillPending.localUri == path) {
-                    mediaDao.update(stillPending.copy(localUri = ""))
-                }
-            }
-        }
     }
 
     override suspend fun convergeAuthenticatedSelfMembership(

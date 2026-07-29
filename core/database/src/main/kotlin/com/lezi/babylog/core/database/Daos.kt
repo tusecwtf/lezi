@@ -798,6 +798,23 @@ interface MediaAssetDao {
     @Query("SELECT * FROM media_assets WHERE clientUuid = :uuid LIMIT 1")
     suspend fun getByClientUuid(uuid: String): MediaAssetEntity?
 
+    @Query(
+        """
+        SELECT COUNT(*) FROM media_assets
+        WHERE localUri = :localUri AND deletedAt IS NULL
+        """,
+    )
+    suspend fun countActiveReferences(localUri: String): Int
+
+    @Query(
+        """
+        SELECT clientUuid FROM media_assets
+        WHERE deletedAt IS NOT NULL AND localUri != ''
+        ORDER BY id ASC
+        """,
+    )
+    suspend fun listPendingFileCleanupClientUuids(): List<String>
+
     @Update
     suspend fun update(asset: MediaAssetEntity)
 

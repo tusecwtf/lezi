@@ -6,8 +6,8 @@ import com.lezi.babylog.core.model.MAX_RECORD_PHOTOS
  * Owns Composer's transient photo contract independently from persisted MediaAsset ownership.
  *
  * Plan photos in a fulfillment draft are borrowed references. Only paths imported by this draft
- * are candidates for abandon/remove cleanup. Persisted source paths keep the pre-existing edit
- * behavior and are considered for physical cleanup only after their domain update commits.
+ * are candidates for abandon/remove cleanup. Persisted source paths are owned by MediaAsset rows;
+ * after commit, reference-aware domain cleanup is their only physical deletion authority.
  */
 internal class RecordComposerPhotoLifecycle(
     private val deleteFiles: suspend (Collection<String>) -> Unit,
@@ -50,10 +50,7 @@ internal class RecordComposerPhotoLifecycle(
 
     suspend fun cleanupAfterCommit(draft: QuickRecordDraft) {
         val discardedOwned = ownedCleanupCandidates(draft).filter { it !in draft.photos }
-        val discardedPersistedSource = draft.sourcePhotos
-            .distinct()
-            .filter { it !in draft.photos && it !in draft.borrowedPhotos }
-        deleteFiles((discardedOwned + discardedPersistedSource).distinct())
+        deleteFiles(discardedOwned)
     }
 
     private fun ownedCleanupCandidates(draft: QuickRecordDraft): List<String> {

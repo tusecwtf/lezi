@@ -8,10 +8,10 @@ Current validation HEAD: `d7b3bea3483367d663fa330eb6596aba3ed73e50`
 ## Current audit disposition
 
 - Findings: **26**
-- Fixed: **4（05、15、16、22）**
+- Fixed: **5（02、05、15、16、22）**
 - Active tickets in this tracker: **20**
 - Canonical layout tickets: **2**
-- Partial findings: **02、04、06、09、10、14、17、19**
+- Partial findings: **04、06、09、10、14、17、19**
 - Still-valid findings: **01、03、07、08、11、12、13、18、20、21、23、24、25、26**
 
 `partial` 只描述审计时已有部分结构，不改变未完成票状态。
@@ -47,7 +47,7 @@ layout/05 已删除分区 ────┘
 | ID | Ticket | Blocked by | Size | Current audit | Status |
 |---|---|---|---|---|---|
 | [01](./issues/01-protect-plan-photos-in-fulfillment-draft.md) | 履行草稿保护计划原图 | — | M | still-valid | complete |
-| [02](./issues/02-reference-aware-photo-file-cleanup.md) | 按活跃引用回收共享照片文件 | 01 | M | partial | ready-for-agent |
+| [02](./issues/02-reference-aware-photo-file-cleanup.md) | 按活跃引用回收共享照片文件 | 01 | M | partial | complete |
 | [03](./issues/03-bounded-off-main-photo-decoding.md) | 统一有界、后台图片解码 | — | M | still-valid | ready-for-agent |
 | [04](./issues/04-bound-photo-import-and-upload-memory.md) | 限制照片导入与同步上传内存 | 03 | M | partial | ready-for-agent |
 | [05](./issues/05-server-historical-custom-item-references.md) | NAS 接受 tombstone 定义的历史引用 | — | M | still-valid | complete |
