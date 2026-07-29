@@ -185,6 +185,25 @@ fun TimerRoute(
                     style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
+                state.serviceFeedbackText()?.let { feedback ->
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        feedback,
+                        color = if (state.serviceState == TimerServiceState.FAILED) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                    if (
+                        state.serviceState == TimerServiceState.FAILED ||
+                        state.serviceState == TimerServiceState.RECOVERABLE
+                    ) {
+                        TextButton(onClick = vm::retryServiceStart) {
+                            Text("重试启动")
+                        }
+                    }
+                }
             }
 
             BoxWithConstraints(

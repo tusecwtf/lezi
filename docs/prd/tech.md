@@ -98,13 +98,16 @@ UI 事件
 计时器：
 
 ```text
-开始 → 持久化当前 TimerState → 前台服务走秒
+开始 → 先持久化暂停的 STARTING 快照 → 请求前台服务与通知
+     → 收到服务启动回执后才持久化 RUNNING 并在 UI 走秒
+     → 受限启动 / 权限 / 通知 / 运行时失败则持久化 FAILED，保留侧别与累计值供重试
 完成 → 写入 nursing Record → 停服务
-进程被杀 → 启动时读当前 TimerState 恢复或提示结束
+进程被杀 → 启动时冻结旧运行快照并标记 RECOVERABLE，不假定服务仍存活、不自动重复启动
 ```
 
 只解析当前 TimerState；非 current 计时状态不属于支持输入。当前状态的进程重启恢复、幂等完成与异常安全结束仍是
-必须门禁，fresh-current 不能被解释为丢弃当前会话恢复。
+必须门禁，fresh-current 不能被解释为丢弃当前会话恢复。UI 只有在服务完成 `startForeground`
+回执后才显示“运行中”；`FAILED` / `RECOVERABLE` 明示已安全暂停并提供“重试启动”。
 
 ---
 

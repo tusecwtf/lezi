@@ -1,9 +1,7 @@
 package com.lezi.babylog.feature.timer
 
 import android.content.Context
-import android.content.Intent
 import android.os.SystemClock
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -31,11 +29,13 @@ class TimerViewModel @Inject constructor(
     private val careLog: CareLog,
     private val settings: SettingsStore,
     private val savedStateHandle: SavedStateHandle,
+    private val serviceController: NursingTimerServiceController,
     @ApplicationContext private val app: Context,
 ) : ViewModel() {
     private val _state = MutableStateFlow(TimerState())
     val state: StateFlow<TimerState> = _state
     private val completionInFlight = AtomicBoolean(false)
+    private val serviceStartInFlight = AtomicBoolean(false)
     /** Serializes L/R toggles so concurrent launches cannot clobber either side. */
     private val toggleMutex = Mutex()
     val timeStepMin = settings.settings
@@ -54,16 +54,19 @@ class TimerViewModel @Inject constructor(
                 val restored = TimerState.fromJson(
                     raw = settings.nursingTimerJson.first(),
                     nowBootCount = currentBootCount(app),
+                    activeServiceSession = NursingTimerServiceRuntime.activeSession(),
                 )
-                _state.value = restored
-                // A restored running snapshot is deliberately frozen by fromJson; reconcile any
-                // surviving service notification with that authoritative paused state.
-                updateService(restored)
+                // Only an in-process service witness with the same session may remain RUNNING.
+                // Process restoration has no witness and therefore becomes RECOVERABLE.
+                persistLocal(restored)
+                if (restored.serviceState != TimerServiceState.RUNNING) {
+                    serviceController.stop()
+                }
             }
         }
     }
 
-    private suspend fun persist(s: TimerState) {
+    private suspend fun persistLocal(s: TimerState) {
         settings.setNursingTimerJson(
             if (!s.hasTimerData()) {
                 null
@@ -72,66 +75,119 @@ class TimerViewModel @Inject constructor(
             },
         )
         _state.value = s
-        updateService(s)
     }
 
-    private fun updateService(s: TimerState) {
-        val running = s.leftRunning || s.rightRunning
-        val intent = Intent(app, NursingTimerService::class.java)
-        if (running) {
-            val snapshotElapsed = SystemClock.elapsedRealtime()
-            intent.action = NursingTimerService.ACTION_UPDATE
-            intent.putExtra(NursingTimerService.EXTRA_LEFT_MS, s.leftMs(snapshotElapsed))
-            intent.putExtra(NursingTimerService.EXTRA_RIGHT_MS, s.rightMs(snapshotElapsed))
-            intent.putExtra(NursingTimerService.EXTRA_LEFT_RUNNING, s.leftRunning)
-            intent.putExtra(NursingTimerService.EXTRA_RIGHT_RUNNING, s.rightRunning)
-            intent.putExtra(NursingTimerService.EXTRA_SNAPSHOT_ELAPSED, snapshotElapsed)
-            ContextCompat.startForegroundService(app, intent)
-        } else {
-            app.stopService(Intent(app, NursingTimerService::class.java))
+    private suspend fun applyTransition(next: TimerState) {
+        if (!next.leftRunning && !next.rightRunning) {
+            persistLocal(
+                next.copy(
+                    serviceState = TimerServiceState.PAUSED,
+                    requestedSide = null,
+                    serviceFailure = null,
+                ),
+            )
+            serviceController.stop()
+            return
+        }
+        try {
+            startTimerWithConfirmation(
+                candidate = next,
+                publish = ::persistLocal,
+                startService = { serviceController.startAndConfirm(next) },
+            )
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            serviceController.stop()
+            throw cancelled
+        } catch (_: RuntimeException) {
+            serviceController.stop()
+            val pending = _state.value
+            val failed = if (pending.serviceState == TimerServiceState.STARTING) {
+                pending.copy(
+                    serviceState = TimerServiceState.FAILED,
+                    serviceFailure = TimerServiceFailure.RUNTIME,
+                )
+            } else {
+                pending
+            }
+            runCatching { persistLocal(failed) }
+                .onFailure { _state.value = failed }
         }
     }
 
     fun toggleLeft() {
+        val snapshot = _state.value
+        if (!snapshot.canRequestServiceStart()) return
+        val starting = !snapshot.leftRunning
+        if (starting && !serviceStartInFlight.compareAndSet(false, true)) return
         viewModelScope.launch {
-            toggleMutex.withLock {
-                val now = SystemClock.elapsedRealtime()
-                val wall = System.currentTimeMillis()
-                val cur = _state.value
-                val babyIdForStart = if (!cur.leftRunning && cur.babyId == null) {
-                    careLog.getCurrentBaby()?.id ?: return@withLock
-                } else {
-                    null
+            try {
+                toggleMutex.withLock {
+                    val now = SystemClock.elapsedRealtime()
+                    val wall = System.currentTimeMillis()
+                    val cur = _state.value
+                    val babyIdForStart = if (!cur.leftRunning && cur.babyId == null) {
+                        careLog.getCurrentBaby()?.id ?: return@withLock
+                    } else {
+                        null
+                    }
+                    val next = cur.withToggleLeft(
+                        nowElapsed = now,
+                        nowWall = wall,
+                        babyIdForStart = babyIdForStart,
+                        completionClientUuidForStart = cur.completionClientUuid ?: newClientUuid(),
+                    ) ?: return@withLock
+                    applyTransition(next)
                 }
-                val next = cur.withToggleLeft(
-                    nowElapsed = now,
-                    nowWall = wall,
-                    babyIdForStart = babyIdForStart,
-                    completionClientUuidForStart = cur.completionClientUuid ?: newClientUuid(),
-                ) ?: return@withLock
-                persist(next)
+            } finally {
+                if (starting) serviceStartInFlight.set(false)
             }
         }
     }
 
     fun toggleRight() {
+        val snapshot = _state.value
+        if (!snapshot.canRequestServiceStart()) return
+        val starting = !snapshot.rightRunning
+        if (starting && !serviceStartInFlight.compareAndSet(false, true)) return
         viewModelScope.launch {
-            toggleMutex.withLock {
-                val now = SystemClock.elapsedRealtime()
-                val wall = System.currentTimeMillis()
-                val cur = _state.value
-                val babyIdForStart = if (!cur.rightRunning && cur.babyId == null) {
-                    careLog.getCurrentBaby()?.id ?: return@withLock
-                } else {
-                    null
+            try {
+                toggleMutex.withLock {
+                    val now = SystemClock.elapsedRealtime()
+                    val wall = System.currentTimeMillis()
+                    val cur = _state.value
+                    val babyIdForStart = if (!cur.rightRunning && cur.babyId == null) {
+                        careLog.getCurrentBaby()?.id ?: return@withLock
+                    } else {
+                        null
+                    }
+                    val next = cur.withToggleRight(
+                        nowElapsed = now,
+                        nowWall = wall,
+                        babyIdForStart = babyIdForStart,
+                        completionClientUuidForStart = cur.completionClientUuid ?: newClientUuid(),
+                    ) ?: return@withLock
+                    applyTransition(next)
                 }
-                val next = cur.withToggleRight(
-                    nowElapsed = now,
-                    nowWall = wall,
-                    babyIdForStart = babyIdForStart,
-                    completionClientUuidForStart = cur.completionClientUuid ?: newClientUuid(),
-                ) ?: return@withLock
-                persist(next)
+            } finally {
+                if (starting) serviceStartInFlight.set(false)
+            }
+        }
+    }
+
+    fun retryServiceStart() {
+        if (!_state.value.canRequestServiceStart()) return
+        if (!serviceStartInFlight.compareAndSet(false, true)) return
+        viewModelScope.launch {
+            try {
+                toggleMutex.withLock {
+                    val candidate = _state.value.retryServiceStartCandidate(
+                        nowElapsed = SystemClock.elapsedRealtime(),
+                        nowWall = System.currentTimeMillis(),
+                    ) ?: return@withLock
+                    applyTransition(candidate)
+                }
+            } finally {
+                serviceStartInFlight.set(false)
             }
         }
     }
@@ -192,7 +248,7 @@ class TimerViewModel @Inject constructor(
                     }
                     // Await the DataStore clear. If the process dies before it commits, replay uses
                     // the same completionClientUuid and CareLog returns the existing record.
-                    persist(TimerState())
+                    applyTransition(TimerState())
                 }
                 onDone(savedStateHandle.get<Long>(PENDING_NEXT_FEED_BABY_KEY) != null)
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
@@ -232,7 +288,7 @@ class TimerViewModel @Inject constructor(
 
     fun clear(onCleared: () -> Unit = {}) {
         viewModelScope.launch {
-            toggleMutex.withLock { persist(TimerState()) }
+            toggleMutex.withLock { applyTransition(TimerState()) }
             onCleared()
         }
     }
@@ -251,14 +307,14 @@ class TimerViewModel @Inject constructor(
                     cur.carePlanId == carePlanId -> {
                         // Same plan re-open: keep association, do not double-start.
                         if (babyId != null && cur.babyId == null) {
-                            persist(cur.copy(babyId = babyId))
+                            applyTransition(cur.copy(babyId = babyId))
                         }
                     }
                     cur.hasTimerData() || cur.carePlanId != null -> {
                         // Active unrelated session — leave it alone (fail closed).
                     }
                     else -> {
-                        persist(
+                        applyTransition(
                             cur.copy(
                                 carePlanId = carePlanId,
                                 babyId = babyId ?: cur.babyId,

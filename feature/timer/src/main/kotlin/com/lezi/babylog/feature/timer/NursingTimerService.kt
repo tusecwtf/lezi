@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Bundle
 import android.os.IBinder
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
@@ -22,6 +23,7 @@ import kotlinx.coroutines.launch
 class NursingTimerService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var tickerJob: Job? = null
+    private var activeSessionToken: String? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -30,7 +32,17 @@ class NursingTimerService : Service() {
             stopSelf(startId)
             return START_NOT_STICKY
         }
-        ensureChannel()
+        val receiver = intent.timerStartResultReceiver()
+        val sessionToken = intent.getStringExtra(EXTRA_SESSION_TOKEN)?.takeIf { it.isNotBlank() }
+        if (sessionToken == null) {
+            stopSelf(startId)
+            sendStartResult(
+                receiver,
+                RESULT_FAILED,
+                Bundle().apply { putString(EXTRA_START_FAILURE, TimerServiceFailure.RUNTIME.name) },
+            )
+            return START_NOT_STICKY
+        }
         val snapshot = NursingNotificationSnapshot(
             leftMs = intent.getLongExtra(EXTRA_LEFT_MS, 0L),
             rightMs = intent.getLongExtra(EXTRA_RIGHT_MS, 0L),
@@ -42,12 +54,37 @@ class NursingTimerService : Service() {
             ),
         )
         val initial = snapshot.at(SystemClock.elapsedRealtime())
-        val notification = buildNotification(initial.first, initial.second)
-        if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-        } else {
-            startForeground(NOTIF_ID, notification)
+        val startup = confirmTimerServiceStartup {
+            val notification = try {
+                ensureChannel()
+                buildNotification(initial.first, initial.second)
+            } catch (failure: RuntimeException) {
+                throw TimerNotificationCreationException(failure)
+            }
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(
+                    NOTIF_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+                )
+            } else {
+                startForeground(NOTIF_ID, notification)
+            }
         }
+        if (startup is TimerServiceStartResult.Failed) {
+            NursingTimerServiceRuntime.clear(sessionToken)
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf(startId)
+            sendStartResult(
+                receiver = receiver,
+                resultCode = RESULT_FAILED,
+                data = Bundle().apply { putString(EXTRA_START_FAILURE, startup.failure.name) },
+            )
+            return START_NOT_STICKY
+        }
+        activeSessionToken = sessionToken
+        NursingTimerServiceRuntime.markActive(sessionToken)
+        sendStartResult(receiver, RESULT_STARTED, Bundle())
         tickerJob?.cancel()
         tickerJob = serviceScope.launch {
             val manager = getSystemService(NotificationManager::class.java)
@@ -61,6 +98,8 @@ class NursingTimerService : Service() {
     }
 
     override fun onDestroy() {
+        NursingTimerServiceRuntime.clear(activeSessionToken)
+        activeSessionToken = null
         tickerJob?.cancel()
         serviceScope.cancel()
         super.onDestroy()
@@ -92,6 +131,14 @@ class NursingTimerService : Service() {
             .build()
     }
 
+    private fun sendStartResult(receiver: android.os.ResultReceiver?, resultCode: Int, data: Bundle) {
+        try {
+            receiver?.send(resultCode, data)
+        } catch (_: RuntimeException) {
+            // The caller also has a timeout fail-safe; a dead receiver must not crash the service.
+        }
+    }
+
     companion object {
         const val CHANNEL_ID = "nursing_timer"
         const val NOTIF_ID = 42
@@ -101,6 +148,11 @@ class NursingTimerService : Service() {
         const val EXTRA_LEFT_RUNNING = "left_running"
         const val EXTRA_RIGHT_RUNNING = "right_running"
         const val EXTRA_SNAPSHOT_ELAPSED = "snapshot_elapsed"
+        const val EXTRA_SESSION_TOKEN = "session_token"
+        const val EXTRA_START_RECEIVER = "start_receiver"
+        const val EXTRA_START_FAILURE = "start_failure"
+        const val RESULT_STARTED = 1
+        const val RESULT_FAILED = 2
     }
 }
 
