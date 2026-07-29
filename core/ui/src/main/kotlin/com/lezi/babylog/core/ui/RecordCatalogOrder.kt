@@ -145,8 +145,8 @@ fun orderedKeysInSection(
 }
 
 /**
- * Move a catalog key within its section only. Cross-section moves are rejected
- * (order unchanged). Returns new item-order JSON covering all [allKnownKeys].
+ * Move a catalog key within its section only by relative [delta] (−1 / +1 …).
+ * Cross-section moves are rejected (order unchanged).
  */
 fun moveCatalogKeyWithinSection(
     itemOrderJson: String,
@@ -154,20 +154,40 @@ fun moveCatalogKeyWithinSection(
     delta: Int,
     allKnownKeys: Collection<String>,
 ): String {
-    val section = catalogSectionForKey(catalogKey) ?: return mergeItemOrder(itemOrderJson, allKnownKeys)
-        .let(::encodeItemOrder)
-    val full = mergeItemOrder(itemOrderJson, allKnownKeys).toMutableList()
-    val sectionKeys = orderedKeysInSection(section, encodeItemOrder(full), allKnownKeys).toMutableList()
+    val section = catalogSectionForKey(catalogKey)
+        ?: return encodeItemOrder(mergeItemOrder(itemOrderJson, allKnownKeys))
+    val full = mergeItemOrder(itemOrderJson, allKnownKeys)
+    val sectionKeys = orderedKeysInSection(section, encodeItemOrder(full), allKnownKeys)
     val from = sectionKeys.indexOf(catalogKey)
     if (from < 0) return encodeItemOrder(full)
     val to = from + delta
     if (to !in sectionKeys.indices) return encodeItemOrder(full)
-    val moved = sectionKeys.removeAt(from)
-    sectionKeys.add(to, moved)
+    return moveCatalogKeyToIndexInSection(itemOrderJson, catalogKey, to, allKnownKeys)
+}
 
-    // Rebuild full order: walk sections in enum/default order, but keep non-section
-    // keys' relative positions by rewriting only the keys of this section in place
-    // of their previous section subsequence.
+/**
+ * Move [catalogKey] to absolute [toIndex] within its section only.
+ * [toIndex] is clamped to the section list; cross-section / unknown keys are no-ops.
+ * Returns new item-order JSON covering all [allKnownKeys].
+ */
+fun moveCatalogKeyToIndexInSection(
+    itemOrderJson: String,
+    catalogKey: String,
+    toIndex: Int,
+    allKnownKeys: Collection<String>,
+): String {
+    val section = catalogSectionForKey(catalogKey)
+        ?: return encodeItemOrder(mergeItemOrder(itemOrderJson, allKnownKeys))
+    val full = mergeItemOrder(itemOrderJson, allKnownKeys).toMutableList()
+    val sectionKeys = orderedKeysInSection(section, encodeItemOrder(full), allKnownKeys).toMutableList()
+    val from = sectionKeys.indexOf(catalogKey)
+    if (from < 0) return encodeItemOrder(full)
+    val target = toIndex.coerceIn(0, sectionKeys.lastIndex.coerceAtLeast(0))
+    if (from == target) return encodeItemOrder(full)
+    val moved = sectionKeys.removeAt(from)
+    sectionKeys.add(target, moved)
+
+    // Rebuild full order: rewrite only this section's subsequence in place.
     val sectionKeySet = sectionKeys.toSet()
     val result = mutableListOf<String>()
     var sectionWritten = false
@@ -182,7 +202,6 @@ fun moveCatalogKeyWithinSection(
         }
     }
     if (!sectionWritten) result += sectionKeys
-    // Append any known keys that somehow dropped out.
     for (key in allKnownKeys) {
         if (key !in result) result += key
     }

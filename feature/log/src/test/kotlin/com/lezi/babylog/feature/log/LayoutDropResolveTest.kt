@@ -7,6 +7,7 @@ import com.lezi.babylog.core.ui.knownCatalogKeys
 import com.lezi.babylog.core.ui.mergeItemOrder
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LayoutDropResolveTest {
@@ -141,5 +142,50 @@ class LayoutDropResolveTest {
             sourceSlotIndex = 0,
         )
         assertEquals(LayoutEditIntent.MoveToLocalDeleted("pee"), intent)
+    }
+
+    @Test
+    fun catalogDropOnSameSectionItemReorders() {
+        val catalogBounds = mapOf(
+            "nursing" to Rect(0f, 120f, 80f, 200f),
+            "formula" to Rect(80f, 120f, 160f, 200f),
+            "pee" to Rect(0f, 220f, 80f, 300f),
+        )
+        val itemOrder = encodeItemOrder(mergeItemOrder("[]", known))
+        val intent = resolveLayoutDrop(
+            pointerWindow = Offset(100f, 160f),
+            slotBounds = slots,
+            trashBounds = trash,
+            sourceKey = "nursing",
+            sourceIsDeleted = false,
+            catalogItemBounds = catalogBounds,
+            itemOrderJson = itemOrder,
+            knownKeys = known,
+        )
+        // formula is feeding; nursing → formula index in section order
+        assertTrue(intent is LayoutEditIntent.ReorderItemInSection)
+        val reorder = intent as LayoutEditIntent.ReorderItemInSection
+        assertEquals("nursing", reorder.catalogKey)
+        assertTrue(reorder.toIndex >= 0)
+    }
+
+    @Test
+    fun catalogDropOnOtherSectionIgnores() {
+        val catalogBounds = mapOf(
+            "nursing" to Rect(0f, 120f, 80f, 200f),
+            "pee" to Rect(0f, 220f, 80f, 300f),
+        )
+        assertNull(
+            resolveLayoutDrop(
+                pointerWindow = Offset(40f, 260f),
+                slotBounds = slots,
+                trashBounds = trash,
+                sourceKey = "nursing",
+                sourceIsDeleted = false,
+                catalogItemBounds = catalogBounds,
+                itemOrderJson = encodeItemOrder(mergeItemOrder("[]", known)),
+                knownKeys = known,
+            ),
+        )
     }
 }

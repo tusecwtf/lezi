@@ -126,4 +126,30 @@ class LocalLayoutEditPolicyTest {
         )
         assertEquals(customKey, customVisible.last())
     }
+
+    @Test
+    fun reorderItemInSectionMovesToAbsoluteIndex() {
+        val feeding = visibleKeysInSection(
+            RecordSection.Feeding,
+            base.itemOrderJson,
+            known,
+            base.hiddenItems,
+        )
+        assertTrue(feeding.size >= 2)
+        val first = feeding.first()
+        val lastIndex = feeding.lastIndex
+        val next = reduceLayoutEdit(
+            base,
+            LayoutEditIntent.ReorderItemInSection(first, lastIndex),
+            known,
+        )
+        val after = visibleKeysInSection(
+            RecordSection.Feeding,
+            next.itemOrderJson,
+            known,
+            next.hiddenItems,
+        )
+        assertEquals(first, after.last())
+        assertEquals(feeding.size, after.size)
+    }
 }

@@ -118,6 +118,21 @@ class RecordCatalogOrderTest {
     }
 
     @Test
+    fun moveCatalogKeyToIndexInSectionIsAbsolute() {
+        val feeding = RecordType.availableForNewEntry()
+            .filter { it.presentation.section == RecordSection.Feeding }
+            .map { it.key }
+        require(feeding.size >= 3)
+        val known = feeding
+        val order = encodeItemOrder(feeding)
+        val first = feeding.first()
+        val moved = moveCatalogKeyToIndexInSection(order, first, feeding.lastIndex, known)
+        val section = orderedKeysInSection(RecordSection.Feeding, moved, known)
+        assertEquals(first, section.last())
+        assertEquals(feeding.size, section.size)
+    }
+
+    @Test
     fun sortCatalogAppliesCategoryThenItemOrder() {
         data class Entry(val section: RecordSection, val key: String)
         val entries = listOf(

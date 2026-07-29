@@ -29,6 +29,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -1041,8 +1042,39 @@ fun LogRoute(
         )
     }
 
+    val editingPrefs = layoutPrefs
+    val inLayoutEdit = showLayoutEdit && editingPrefs != null
+    BackHandler(enabled = inLayoutEdit) {
+        showLayoutEdit = false
+        layoutPrefs = null
+    }
+
     PageScaffoldBackground {
         Column(Modifier.fillMaxSize().testTag(UiTags.LOG_HOME)) {
+            if (inLayoutEdit) {
+                val prefs = checkNotNull(editingPrefs)
+                val known = remember(state.customItems) {
+                    knownCatalogKeys(state.customItems.map { it.id })
+                }
+                LayoutEditCanvas(
+                    prefs = prefs,
+                    customItems = state.customItems,
+                    onIntent = { intent ->
+                        val current = layoutPrefs ?: return@LayoutEditCanvas
+                        val next = reduceLayoutEdit(current, intent, known)
+                        layoutPrefs = next
+                        vm.applyDeviceLayoutPrefs(next)
+                    },
+                    onDone = {
+                        showLayoutEdit = false
+                        layoutPrefs = null
+                    },
+                    onOpenCustomManage = { showCustomManage = true },
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                )
+            } else {
             PullToRefreshBox(
                 isRefreshing = state.refreshing,
                 onRefresh = vm::refresh,
@@ -1455,28 +1487,8 @@ fun LogRoute(
                 onMore = { showMore = true },
                 onLongPress = { openLayoutEdit() },
             )
+            } // end everyday (non-layout-edit) branch
         }
-    }
-
-    val editingPrefs = layoutPrefs
-    if (showLayoutEdit && editingPrefs != null) {
-        val known = remember(state.customItems) {
-            knownCatalogKeys(state.customItems.map { it.id })
-        }
-        LayoutEditModeDialog(
-            prefs = editingPrefs,
-            customItems = state.customItems,
-            onIntent = { intent ->
-                val next = reduceLayoutEdit(editingPrefs, intent, known)
-                layoutPrefs = next
-                vm.applyDeviceLayoutPrefs(next)
-            },
-            onDone = {
-                showLayoutEdit = false
-                layoutPrefs = null
-            },
-            onOpenCustomManage = { showCustomManage = true },
-        )
     }
 
     if (showCustomManage) {
