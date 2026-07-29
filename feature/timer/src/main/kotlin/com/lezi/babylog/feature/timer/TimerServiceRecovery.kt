@@ -1,6 +1,7 @@
 package com.lezi.babylog.feature.timer
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 
 internal object NursingTimerServiceRuntime {
     @Volatile
@@ -42,6 +43,34 @@ internal inline fun confirmTimerServiceStartup(action: () -> Unit): TimerService
     } catch (failure: RuntimeException) {
         TimerServiceStartResult.Failed(failure.toTimerServiceFailure())
     }
+
+/**
+ * `Service.startForeground()` may return normally even when a platform AppOp silently ignores
+ * the promotion. Do not acknowledge startup until Android exposes both the foreground-service
+ * bit and its active notification.
+ */
+internal suspend fun awaitTimerServicePublication(
+    maxAttempts: Int = 20,
+    pauseBetweenAttempts: suspend () -> Unit = { delay(50L) },
+    isActuallyForeground: () -> Boolean,
+    hasActiveNotification: () -> Boolean,
+): TimerServiceStartResult {
+    require(maxAttempts > 0)
+    repeat(maxAttempts) { attempt ->
+        val accepted = try {
+            val foreground = isActuallyForeground()
+            val notification = hasActiveNotification()
+            foreground && notification
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: RuntimeException) {
+            return TimerServiceStartResult.Failed(failure.toTimerServiceFailure())
+        }
+        if (accepted) return TimerServiceStartResult.Started
+        if (attempt < maxAttempts - 1) pauseBetweenAttempts()
+    }
+    return TimerServiceStartResult.Failed(TimerServiceFailure.RESTRICTED)
+}
 
 internal fun TimerState.pausedForServiceStart(): TimerState {
     val side = when {

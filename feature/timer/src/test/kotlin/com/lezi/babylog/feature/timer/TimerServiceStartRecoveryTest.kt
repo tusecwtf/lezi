@@ -84,6 +84,47 @@ class TimerServiceStartRecoveryTest {
     }
 
     @Test
+    fun silentPlatformIgnoreIsNotAcknowledgedAsForegroundStartup() = runBlocking {
+        var foregroundChecks = 0
+        var notificationChecks = 0
+
+        val result = awaitTimerServicePublication(
+            maxAttempts = 3,
+            pauseBetweenAttempts = {},
+            isActuallyForeground = {
+                foregroundChecks += 1
+                false
+            },
+            hasActiveNotification = {
+                notificationChecks += 1
+                false
+            },
+        )
+
+        assertEquals(
+            TimerServiceStartResult.Failed(TimerServiceFailure.RESTRICTED),
+            result,
+        )
+        assertEquals(3, foregroundChecks)
+        assertEquals(3, notificationChecks)
+    }
+
+    @Test
+    fun startupAckWaitsForBothForegroundStateAndActiveNotification() = runBlocking {
+        var attempt = 0
+
+        val result = awaitTimerServicePublication(
+            maxAttempts = 4,
+            pauseBetweenAttempts = { attempt += 1 },
+            isActuallyForeground = { attempt >= 1 },
+            hasActiveNotification = { attempt >= 2 },
+        )
+
+        assertEquals(TimerServiceStartResult.Started, result)
+        assertEquals(2, attempt)
+    }
+
+    @Test
     fun repeatedClickWhileStartIsPendingIsRejected() {
         val pending = runningLeftCandidate().pausedForServiceStart()
 

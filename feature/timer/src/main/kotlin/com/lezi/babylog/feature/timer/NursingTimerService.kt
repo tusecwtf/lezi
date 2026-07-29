@@ -1,5 +1,6 @@
 package com.lezi.babylog.feature.timer
 
+import android.app.ActivityManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -21,7 +22,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class NursingTimerService : Service() {
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var tickerJob: Job? = null
     private var activeSessionToken: String? = null
 
@@ -72,26 +73,30 @@ class NursingTimerService : Service() {
             }
         }
         if (startup is TimerServiceStartResult.Failed) {
-            NursingTimerServiceRuntime.clear(sessionToken)
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf(startId)
-            sendStartResult(
-                receiver = receiver,
-                resultCode = RESULT_FAILED,
-                data = Bundle().apply { putString(EXTRA_START_FAILURE, startup.failure.name) },
-            )
+            failStartup(sessionToken, startId, receiver, startup.failure)
             return START_NOT_STICKY
         }
-        activeSessionToken = sessionToken
-        NursingTimerServiceRuntime.markActive(sessionToken)
-        sendStartResult(receiver, RESULT_STARTED, Bundle())
-        tickerJob?.cancel()
-        tickerJob = serviceScope.launch {
-            val manager = getSystemService(NotificationManager::class.java)
-            while (true) {
-                delay(1_000L)
-                val current = snapshot.at(SystemClock.elapsedRealtime())
-                manager.notify(NOTIF_ID, buildNotification(current.first, current.second))
+
+        serviceScope.launch {
+            val publication = awaitTimerServicePublication(
+                isActuallyForeground = ::isActuallyForeground,
+                hasActiveNotification = ::hasActiveTimerNotification,
+            )
+            if (publication is TimerServiceStartResult.Failed) {
+                failStartup(sessionToken, startId, receiver, publication.failure)
+            } else {
+                activeSessionToken = sessionToken
+                NursingTimerServiceRuntime.markActive(sessionToken)
+                sendStartResult(receiver, RESULT_STARTED, Bundle())
+                tickerJob?.cancel()
+                tickerJob = serviceScope.launch {
+                    val manager = getSystemService(NotificationManager::class.java)
+                    while (true) {
+                        delay(1_000L)
+                        val current = snapshot.at(SystemClock.elapsedRealtime())
+                        manager.notify(NOTIF_ID, buildNotification(current.first, current.second))
+                    }
+                }
             }
         }
         return START_NOT_STICKY
@@ -129,6 +134,39 @@ class NursingTimerService : Service() {
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .build()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun isActuallyForeground(): Boolean =
+        getSystemService(ActivityManager::class.java)
+            .getRunningServices(Int.MAX_VALUE)
+            .any { service ->
+                service.service.packageName == packageName &&
+                    service.service.className == javaClass.name &&
+                    service.foreground
+            }
+
+    private fun hasActiveTimerNotification(): Boolean =
+        getSystemService(NotificationManager::class.java)
+            .activeNotifications
+            .any { notification ->
+                notification.packageName == packageName && notification.id == NOTIF_ID
+            }
+
+    private fun failStartup(
+        sessionToken: String,
+        startId: Int,
+        receiver: android.os.ResultReceiver?,
+        failure: TimerServiceFailure,
+    ) {
+        NursingTimerServiceRuntime.clear(sessionToken)
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf(startId)
+        sendStartResult(
+            receiver = receiver,
+            resultCode = RESULT_FAILED,
+            data = Bundle().apply { putString(EXTRA_START_FAILURE, failure.name) },
+        )
     }
 
     private fun sendStartResult(receiver: android.os.ResultReceiver?, resultCode: Int, data: Bundle) {
