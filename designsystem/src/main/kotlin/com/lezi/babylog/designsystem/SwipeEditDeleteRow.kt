@@ -9,8 +9,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -215,6 +214,16 @@ fun SwipeEditDeleteRow(
     }
 
     val canSwipe = editEnabled || deleteEnabled
+    // Direction-aware full-bleed fill (design: 绿/红满铺), not half-and-half.
+    // Half-split left a strip of the wrong color (or list 底色 at rounded card corners)
+    // once travel crossed the center of the row.
+    val revealEdit = displayOffset < 0f
+    val revealDelete = displayOffset > 0f
+    val actionColor = when {
+        revealEdit -> success
+        revealDelete -> danger
+        else -> Color.Transparent
+    }
 
     Box(
         modifier
@@ -222,66 +231,60 @@ fun SwipeEditDeleteRow(
             .clipToBounds()
             .onSizeChanged { widthPx = it.width.toFloat() },
     ) {
-        // Full-height action layer (half red / half green).
-        Row(
-            Modifier
-                .matchParentSize()
-                .fillMaxWidth(),
-        ) {
+        // Full-size action plate: only painted while revealed so closed rounded cards
+        // do not leak red/green through corner cutouts against the page background.
+        // Single full-bleed color (满铺) for the active direction — no half-split seam.
+        if (revealEdit || revealDelete) {
+            val activeTag = if (revealEdit) editTestTag else deleteTestTag
             Box(
                 Modifier
-                    .weight(1f)
-                    .fillMaxHeight()
-                    .background(danger)
-                    .then(
-                        if (deleteTestTag != null) Modifier.testTag(deleteTestTag) else Modifier,
-                    )
+                    .matchParentSize()
+                    .background(actionColor)
+                    .then(if (activeTag != null) Modifier.testTag(activeTag) else Modifier)
                     .semantics {
-                        contentDescription = "删除"
+                        contentDescription = if (revealEdit) "编辑" else "删除"
                         role = Role.Button
                     }
-                    .clickable(enabled = deleteEnabled && displayOffset > 0f) {
-                        closeAnimated(onDelete)
+                    .clickable(
+                        enabled = (revealEdit && editEnabled) || (revealDelete && deleteEnabled),
+                    ) {
+                        if (revealEdit) closeAnimated(onEdit) else closeAnimated(onDelete)
                     },
-                contentAlignment = Alignment.CenterStart,
+                contentAlignment = if (revealEdit) Alignment.CenterEnd else Alignment.CenterStart,
             ) {
-                SwipeActionLabel(
-                    icon = {
-                        Icon(Icons.Outlined.Delete, contentDescription = null, tint = onAction)
-                    },
-                    label = "删除",
-                    contentColor = onAction,
-                    padStart = true,
-                )
-            }
-            Box(
-                Modifier
-                    .weight(1f)
-                    .fillMaxHeight()
-                    .background(success)
-                    .then(
-                        if (editTestTag != null) Modifier.testTag(editTestTag) else Modifier,
+                if (revealEdit) {
+                    SwipeActionLabel(
+                        icon = {
+                            Icon(
+                                Icons.Outlined.Edit,
+                                contentDescription = null,
+                                tint = onAction,
+                            )
+                        },
+                        label = "编辑",
+                        contentColor = onAction,
+                        padStart = false,
                     )
-                    .semantics {
-                        contentDescription = "编辑"
-                        role = Role.Button
-                    }
-                    .clickable(enabled = editEnabled && displayOffset < 0f) {
-                        closeAnimated(onEdit)
-                    },
-                contentAlignment = Alignment.CenterEnd,
-            ) {
-                SwipeActionLabel(
-                    icon = {
-                        Icon(Icons.Outlined.Edit, contentDescription = null, tint = onAction)
-                    },
-                    label = "编辑",
-                    contentColor = onAction,
-                    padStart = false,
-                )
+                } else {
+                    SwipeActionLabel(
+                        icon = {
+                            Icon(
+                                Icons.Outlined.Delete,
+                                contentDescription = null,
+                                tint = onAction,
+                            )
+                        },
+                        label = "删除",
+                        contentColor = onAction,
+                        padStart = true,
+                    )
+                }
             }
         }
 
+        // Foreground content plate (record/plan card + type icon) tracks the finger.
+        // Action fill is a single full-size plate behind it, so revealed area is solid
+        // green/red with no half-split seam or list 底色 strip.
         Box(
             Modifier
                 .offset { IntOffset(displayOffset.roundToInt(), 0) }

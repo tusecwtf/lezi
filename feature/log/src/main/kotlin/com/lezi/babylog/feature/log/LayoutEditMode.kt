@@ -576,18 +576,15 @@ private fun LauncherIconBadge(
     emptyPlus: Boolean = false,
 ) {
     val shape = RoundedCornerShape(14.dp)
+    // Opaque surface base + soft tint wash so page 底色 never peeks through the
+    // launcher tile around the foreground glyph (Android-home style solid plate).
+    val wash = tint.copy(alpha = if (emptyPlus) 0.12f else 0.22f)
     Box(
         Modifier
             .size(badgeSize)
-            .then(
-                if (elevated) {
-                    Modifier
-                } else {
-                    Modifier
-                },
-            )
             .clip(shape)
-            .background(tint.copy(alpha = if (emptyPlus) 0.10f else 0.18f))
+            .background(MaterialTheme.colorScheme.surface)
+            .background(wash)
             .then(
                 if (elevated) {
                     Modifier.border(1.5.dp, tint.copy(alpha = 0.55f), shape)
@@ -718,13 +715,11 @@ private fun LauncherEditDock(
                                 Modifier
                                     .size(48.dp)
                                     .clip(RoundedCornerShape(14.dp))
+                                    .background(MaterialTheme.colorScheme.surface)
                                     .border(
                                         1.5.dp,
                                         MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
                                         RoundedCornerShape(14.dp),
-                                    )
-                                    .background(
-                                        MaterialTheme.colorScheme.surface.copy(alpha = 0.4f),
                                     ),
                                 contentAlignment = Alignment.Center,
                             ) {
