@@ -53,7 +53,7 @@ layout/05 已删除分区 ────┘
 | [05](./issues/05-server-historical-custom-item-references.md) | NAS 接受 tombstone 定义的历史引用 | — | M | still-valid | complete |
 | [06](./issues/06-sync-historical-custom-records-and-plans.md) | 历史自定义记录与计划完整同步 | 05 | M | partial | implemented-awaiting-device-smoke |
 | [07](./issues/07-reclaim-session-immediate-full-pull.md) | 接回会话后立即执行全量 pull | — | M | still-valid | complete |
-| [08](./issues/08-owner-reclaim-before-local-baby.md) | 无宝宝状态直接接回 owner | 07 | M | still-valid | implemented-awaiting-device-smoke |
+| [08](./issues/08-owner-reclaim-before-local-baby.md) | 无宝宝状态直接接回 owner | 07 | M | still-valid | complete |
 | [09](./issues/09-unify-onboarding-and-account-family-wizard.md) | 统一 Onboarding 与账户家庭向导 | 08 | M | partial | implemented-awaiting-device-smoke |
 | [10](./issues/10-unify-next-feed-scheduling-state-machine.md) | 统一下次喂养安排状态机 | — | M | partial | ready-for-agent |
 | [11](./issues/11-confirm-discard-dirty-composer.md) | 脏 Composer 草稿放弃确认 | 01 | M | still-valid | ready-for-agent |

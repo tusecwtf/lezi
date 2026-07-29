@@ -4,7 +4,7 @@
 
 **Blocked by:** 07 — 接回会话后立即执行全量 pull
 
-**Status:** implemented-awaiting-device-smoke
+**Status:** complete
 
 **Size:** M
 
@@ -37,5 +37,7 @@
 - API35 历史 NAS fresh-install smoke 已通过：首屏仅两个权威动作，同一 create/reclaim 提交
   直接恢复 `历史宝宝`；服务端与本机均只有一个 Baby，Room receipt 与强停重启证据见
   [`../evidence/07/fresh-install-current-head.md`](../evidence/07/fresh-install-current-head.md)。
-- 空 NAS 首次建家 device smoke 尚未执行，因此本票继续保持
-  `implemented-awaiting-device-smoke`，不提前标为 complete。
+- API35 空 NAS fresh-install smoke 也已通过：`reclaimed=false` 进入唯一的新建宝宝步骤，
+  创建 `年年` 后回到记录页；Room 与服务端均只有一个家庭、一个成员和一个宝宝，
+  outbox 已清空，强停重启仍恢复 `年年` 与正常主导航。固定 APK、服务端健康与只读数据库
+  收据见 [`../evidence/08/empty-nas-first-create.md`](../evidence/08/empty-nas-first-create.md)。
