@@ -1,6 +1,5 @@
 package com.lezi.babylog.feature.log
 
-import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -44,7 +43,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.foundation.Image
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -69,9 +67,12 @@ import com.lezi.babylog.designsystem.LeziShapes
 import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.designsystem.LocalPhotoLoadResult
+import com.lezi.babylog.designsystem.LocalPhotoTarget
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.designsystem.leziRecordColor
 import com.lezi.babylog.designsystem.rememberDismissKeyboard
+import com.lezi.babylog.designsystem.rememberLocalPhoto
 import java.time.Instant
 import java.time.ZoneId
 
@@ -376,21 +377,32 @@ internal fun QuickRecordSheet(
                 ) {
                     draft.photos.forEachIndexed { index, path ->
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            remember(path) {
-                                BitmapFactory.decodeFile(path)?.asImageBitmap()
-                            }?.let { bitmap ->
-                                Image(
-                                    bitmap = bitmap,
-                                    contentDescription = "记录图片，点击预览",
-                                    modifier = Modifier
-                                        .size(72.dp)
-                                        .clip(MaterialTheme.shapes.small)
-                                        .clickable(
-                                            enabled = actionsEnabled,
-                                            onClick = { previewPhotoIndex = index },
-                                        ),
-                                    contentScale = ContentScale.Crop,
-                                )
+                            val photo by rememberLocalPhoto(path, LocalPhotoTarget.THUMBNAIL)
+                            Box(
+                                modifier = Modifier
+                                    .size(72.dp)
+                                    .clip(MaterialTheme.shapes.small)
+                                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                                    .clickable(
+                                        enabled = actionsEnabled,
+                                        onClick = { previewPhotoIndex = index },
+                                    ),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                when (val result = photo) {
+                                    is LocalPhotoLoadResult.Ready -> {
+                                        Image(
+                                            bitmap = result.value,
+                                            contentDescription = "记录图片，点击预览",
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentScale = ContentScale.Crop,
+                                        )
+                                    }
+                                    LocalPhotoLoadResult.Loading -> Unit
+                                    LocalPhotoLoadResult.Unavailable -> {
+                                        Text("无法读取", style = LeziTypography.Meta)
+                                    }
+                                }
                             }
                             TextButton(
                                 enabled = actionsEnabled,
@@ -639,4 +651,3 @@ internal fun QuickRecordSheet(
         )
     }
 }
-

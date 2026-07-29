@@ -31,6 +31,7 @@ formula/pee UI 交叉可见均已验证；双模拟器还在严格使用
 | [ui.md](./ui.md) | 画风、设计原则、页面与组件 |
 | [data-model.md](./data-model.md) | 实体、字段、本地优先、SyncPort 契约 |
 | [sync-home-lan.md](./sync-home-lan.md) | **当前家庭局域网同步**：门闩、前台策略、NAS Docker（`lezi-sync`） |
+| [local-photo-loading.md](./local-photo-loading.md) | 记录照片缩略图/全屏统一采样、方向、取消与失败边界 |
 | [tech.md](./tech.md) | Android 技术栈、模块、权限、验收 |
 | [assets-notes.md](./assets-notes.md) | 排泄图标资源约定（尿尿量档 / 便便分档） |
 

@@ -2,26 +2,10 @@ package com.lezi.babylog.designsystem
 
 import java.io.File
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PhotoPreviewDialogTest {
-    @Test
-    fun `decode failures return null for the visible placeholder`() {
-        assertNull(
-            decodePhotoPreviewBitmap("oom.jpg") {
-                throw OutOfMemoryError("preview allocation failed")
-            },
-        )
-        assertNull(
-            decodePhotoPreviewBitmap("broken.jpg") {
-                throw IllegalArgumentException("invalid image")
-            },
-        )
-        assertNull(decodePhotoPreviewBitmap("missing.jpg") { null })
-    }
-
     @Test
     fun `composer and conflict audit retain the shared preview chrome`() {
         val root = repositoryRoot()
@@ -44,6 +28,12 @@ class PhotoPreviewDialogTest {
                 "${sourceFile.name} must not own another full-screen photo pager",
                 source.contains("HorizontalPager("),
             )
+            assertTrue(
+                "${sourceFile.name} must use the bounded local-photo loader",
+                source.contains("rememberLocalPhoto("),
+            )
+            assertTrue(source.contains("LocalPhotoTarget.THUMBNAIL"))
+            assertFalse(source.contains("BitmapFactory.decodeFile"))
         }
 
         val sharedSource = root.resolve(
@@ -54,7 +44,9 @@ class PhotoPreviewDialogTest {
         assertTrue(sharedSource.contains("onClick = onDismiss"))
         assertTrue(sharedSource.contains("\"无法预览图片\""))
         assertTrue(sharedSource.contains("contentDescription ="))
-        assertTrue(sharedSource.contains("decodePhotoPreviewBitmap(path)"))
+        assertTrue(sharedSource.contains("rememberLocalPhoto("))
+        assertTrue(sharedSource.contains("LocalPhotoTarget.FULLSCREEN"))
+        assertFalse(sharedSource.contains("decodePhotoPreviewBitmap(path)"))
     }
 
     private fun repositoryRoot(): File = generateSequence(

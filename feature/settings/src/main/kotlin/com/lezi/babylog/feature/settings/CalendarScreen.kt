@@ -1,6 +1,5 @@
 package com.lezi.babylog.feature.settings
 
-import android.graphics.BitmapFactory
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
@@ -40,7 +39,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
@@ -67,8 +65,11 @@ import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
+import com.lezi.babylog.designsystem.LocalPhotoLoadResult
+import com.lezi.babylog.designsystem.LocalPhotoTarget
 import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
+import com.lezi.babylog.designsystem.rememberLocalPhoto
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CustomRecordItem
 import com.lezi.babylog.domain.SYSTEM_CALENDAR_UNSYNCED_LABEL
@@ -638,9 +639,7 @@ fun CalendarRoute(
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             detail.photoLocalPaths.forEachIndexed { index, path ->
-                                val bitmap = remember(path) {
-                                    BitmapFactory.decodeFile(path)?.asImageBitmap()
-                                }
+                                val photo by rememberLocalPhoto(path, LocalPhotoTarget.THUMBNAIL)
                                 Box(
                                     modifier = Modifier
                                         .size(72.dp)
@@ -651,15 +650,20 @@ fun CalendarRoute(
                                         },
                                     contentAlignment = Alignment.Center,
                                 ) {
-                                    if (bitmap != null) {
-                                        Image(
-                                            bitmap = bitmap,
-                                            contentDescription = "冲突未采纳照片 ${index + 1}",
-                                            modifier = Modifier.fillMaxSize(),
-                                            contentScale = ContentScale.Crop,
-                                        )
-                                    } else {
-                                        Text("图", style = LeziTypography.Meta)
+                                    when (val result = photo) {
+                                        is LocalPhotoLoadResult.Ready -> {
+                                            Image(
+                                                bitmap = result.value,
+                                                contentDescription =
+                                                    "冲突未采纳照片 ${index + 1}",
+                                                modifier = Modifier.fillMaxSize(),
+                                                contentScale = ContentScale.Crop,
+                                            )
+                                        }
+                                        LocalPhotoLoadResult.Loading -> Unit
+                                        LocalPhotoLoadResult.Unavailable -> {
+                                            Text("无法读取", style = LeziTypography.Meta)
+                                        }
                                     }
                                 }
                             }
