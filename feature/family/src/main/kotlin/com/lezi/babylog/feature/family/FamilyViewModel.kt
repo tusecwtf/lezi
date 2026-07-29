@@ -7,16 +7,19 @@ import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.domain.BabyMergePreview
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.DuplicateBabyNicknameException
-import com.lezi.babylog.domain.JoinFamilyRequest
-import com.lezi.babylog.domain.JoinFamilyResult
+import com.lezi.babylog.domain.FamilyWizardController
+import com.lezi.babylog.domain.FamilyWizardEntry
+import com.lezi.babylog.domain.FamilyWizardOutcome
+import com.lezi.babylog.domain.FamilyWizardSnapshot
+import com.lezi.babylog.domain.FamilyWizardState
 import com.lezi.babylog.domain.JoinFamilyUseCase
+import com.lezi.babylog.domain.SyncFamilyWizardGateway
 import com.lezi.babylog.domain.UpdateBabyInput
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.sync.HomeLanServerConfig
 import com.lezi.babylog.sync.InvitePayload
 import com.lezi.babylog.sync.InvitePayloadCodec
-import com.lezi.babylog.sync.JoinFamilyDraft
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -90,6 +93,11 @@ class FamilyViewModel @Inject constructor(
     private val profileSaveMutex = Mutex()
     private val memberRefreshMutex = Mutex()
     private val familyMembers = MutableStateFlow(FamilyMembersState())
+    private val familyWizard = FamilyWizardController(
+        gateway = SyncFamilyWizardGateway(sync, joinFamily, careLog),
+        initialSnapshot = FamilyWizardSnapshot.empty(FamilyWizardEntry.Account),
+    )
+    val familyWizardState = familyWizard.state
 
     fun currentWifiSsid(): String? = networkState.currentWifiSsid()
 
@@ -358,25 +366,21 @@ class FamilyViewModel @Inject constructor(
         }
     }
 
-    fun join(
-        draft: JoinFamilyDraft,
-        displayName: String,
-        onDone: (success: Boolean, message: String) -> Unit,
-    ) {
+    fun submitFamilyWizard(snapshot: FamilyWizardSnapshot, bootstrapSecret: String = "") {
         viewModelScope.launch {
-            when (
-                val result = joinFamily.execute(
-                    JoinFamilyRequest(draft = draft, displayName = displayName),
-                )
-            ) {
-                is JoinFamilyResult.Joined -> {
-                    onDone(true, "已加入家庭")
-                    refreshMembersNow(showErrors = true)
-                }
-                is JoinFamilyResult.Failed -> onDone(false, result.message)
+            familyWizard.submit(snapshot, bootstrapSecret)
+            if (familyWizard.state.value is FamilyWizardState.Completed) {
+                refreshMembersNow(showErrors = true)
             }
         }
     }
+
+    fun beginFamilyWizard(snapshot: FamilyWizardSnapshot) {
+        familyWizard.begin(snapshot)
+    }
+
+    fun consumeFamilyWizardCompletion(): FamilyWizardOutcome? =
+        familyWizard.consumeCompletion()
 
     fun leave(onMessage: (String) -> Unit) {
         viewModelScope.launch {
@@ -461,40 +465,6 @@ class FamilyViewModel @Inject constructor(
                     },
                 ),
             )
-        }
-    }
-
-    fun createFamily(
-        displayName: String,
-        bootstrapSecret: String,
-        familyName: String = "",
-        onDone: (success: Boolean, message: String) -> Unit,
-    ) {
-        viewModelScope.launch {
-            validateFamilyDisplayNameInput(displayName)?.let {
-                onDone(false, it)
-                return@launch
-            }
-            validateFamilyNameInput(familyName)?.let {
-                onDone(false, it)
-                return@launch
-            }
-            val result = sync.createFamily(
-                displayName = displayName.trim(),
-                bootstrapSecret = bootstrapSecret,
-                familyName = familyName.trim().ifEmpty { null },
-            )
-            if (result.isSuccess) {
-                careLog.updateLocalDisplayName(displayName.trim())
-            }
-            onDone(
-                result.isSuccess,
-                result.fold(
-                    ::createFamilyResultCopy,
-                    { familySyncError(it, "创建家庭失败") },
-                ),
-            )
-            if (result.isSuccess) refreshMembersNow(showErrors = true)
         }
     }
 

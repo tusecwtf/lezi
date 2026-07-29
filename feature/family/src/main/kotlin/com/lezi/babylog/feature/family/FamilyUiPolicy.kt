@@ -3,7 +3,9 @@ package com.lezi.babylog.feature.family
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.domain.BabyMergePreview
-import com.lezi.babylog.sync.CreateFamilyResult
+import com.lezi.babylog.domain.FamilyWizardEntry
+import com.lezi.babylog.domain.FamilyWizardOutcome
+import com.lezi.babylog.domain.FamilyWizardSnapshot
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
@@ -31,20 +33,38 @@ internal inline fun deliverNetworkSaveResult(
     if (result is NetworkSaveResult.Saved) onSaved()
 }
 
-internal fun createFamilyResultCopy(result: CreateFamilyResult): String = when {
-    !result.reclaimed -> "家庭已创建"
-    result.dataRecovery == InitialFamilyDataRecovery.Complete ->
-        "已接回家庭，数据恢复完成"
-    result.dataRecovery == InitialFamilyDataRecovery.RetryRequired ->
-        "已接回家庭，但数据同步失败，请点“同步”重试"
-    else -> "已接回家庭，正在同步数据"
+/** UI aliases; the authoritative wizard enums live in domain and are shared with onboarding. */
+internal typealias FamilyWizardMode = com.lezi.babylog.domain.FamilyWizardMode
+internal typealias FamilyWizardStep = com.lezi.babylog.domain.FamilyWizardStep
+
+internal fun accountFamilyActions(): List<FamilyWizardMode> =
+    listOf(FamilyWizardMode.Create, FamilyWizardMode.Join)
+
+internal fun accountFamilyWizardSnapshot(
+    mode: FamilyWizardMode,
+    step: FamilyWizardStep,
+    draft: com.lezi.babylog.sync.JoinFamilyDraft,
+    displayName: String,
+    familyName: String = "",
+): FamilyWizardSnapshot = FamilyWizardSnapshot.fromDraft(
+    entry = FamilyWizardEntry.Account,
+    mode = mode,
+    step = step,
+    draft = draft,
+    displayName = displayName,
+    familyName = familyName,
+)
+
+internal fun familyWizardOutcomeCopy(outcome: FamilyWizardOutcome): String = when (outcome) {
+    is FamilyWizardOutcome.Created -> "家庭已创建"
+    is FamilyWizardOutcome.Joined -> "已加入家庭"
+    is FamilyWizardOutcome.Reclaimed -> when (outcome.dataRecovery) {
+        InitialFamilyDataRecovery.Complete -> "已接回家庭，数据恢复完成"
+        InitialFamilyDataRecovery.RetryRequired ->
+            "已接回家庭，但数据同步失败，请点“同步”重试"
+        InitialFamilyDataRecovery.NotRequired -> "已接回家庭，正在同步数据"
+    }
 }
-
-/** Create vs join path inside the multi-step family wizard (ticket 04). */
-internal enum class FamilyWizardMode { Create, Join }
-
-/** Wizard steps: network only when needed, then identity (create/join). */
-internal enum class FamilyWizardStep { Network, Identity }
 
 /** Exactly one family overlay can be active at a time. */
 internal sealed interface FamilyDialog {
@@ -360,11 +380,7 @@ internal fun displayFamilyName(
 
 /** Optional family name on create/rename; blank is allowed (server stores null). */
 internal fun validateFamilyNameInput(raw: String): String? {
-    val trimmed = raw.trim()
-    if (trimmed.isEmpty()) return null
-    if (trimmed.any { it.isISOControl() }) return "家庭名不能包含控制字符"
-    if (trimmed.codePointCount(0, trimmed.length) > 64) return "家庭名最多 64 个字符"
-    return null
+    return com.lezi.babylog.domain.familyNameValidationError(raw)
 }
 
 /** Member-count entry label on the family card (e.g.「3 位家人」). */

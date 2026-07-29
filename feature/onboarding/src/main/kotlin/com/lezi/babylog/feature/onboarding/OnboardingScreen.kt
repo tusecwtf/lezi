@@ -72,6 +72,8 @@ import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.model.limitBabyNicknameInput
 import com.lezi.babylog.core.model.birthWeightValidationError
 import com.lezi.babylog.core.ui.CameraCapture
+import com.lezi.babylog.core.ui.HomeWifiAccessGuideDialog
+import com.lezi.babylog.core.ui.HomeWifiSettingsAction
 import com.lezi.babylog.core.ui.UiTags
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.designsystem.LeziDatePicker
@@ -79,9 +81,15 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
-import com.lezi.babylog.domain.JoinFamilyRequest
-import com.lezi.babylog.domain.JoinFamilyResult
+import com.lezi.babylog.domain.FamilyWizardController
+import com.lezi.babylog.domain.FamilyWizardEntry
+import com.lezi.babylog.domain.FamilyWizardMode
+import com.lezi.babylog.domain.FamilyWizardOutcome
+import com.lezi.babylog.domain.FamilyWizardSnapshot
+import com.lezi.babylog.domain.FamilyWizardState
+import com.lezi.babylog.domain.FamilyWizardStep
 import com.lezi.babylog.domain.JoinFamilyUseCase
+import com.lezi.babylog.domain.SyncFamilyWizardGateway
 import com.lezi.babylog.sync.HomeLanServerConfig
 import com.lezi.babylog.sync.HomeWifiPermission
 import com.lezi.babylog.sync.JoinFamilyDraft
@@ -111,59 +119,72 @@ internal enum class OnboardingStep {
     RecoveryComplete,
 }
 
-internal enum class OnboardingPrimaryAction {
-    CreateFamily,
-    JoinFamily,
-}
+internal fun onboardingFamilyActions(): List<FamilyWizardMode> =
+    listOf(FamilyWizardMode.Create, FamilyWizardMode.Join)
 
-internal fun onboardingPrimaryActions(step: OnboardingStep): List<OnboardingPrimaryAction> =
-    if (step == OnboardingStep.ChooseFamily) {
-        listOf(OnboardingPrimaryAction.CreateFamily, OnboardingPrimaryAction.JoinFamily)
-    } else {
-        emptyList()
-    }
+internal fun onboardingFamilyWizardSnapshot(
+    mode: FamilyWizardMode,
+    step: FamilyWizardStep,
+    draft: JoinFamilyDraft,
+    displayName: String,
+    familyName: String = "",
+): FamilyWizardSnapshot = FamilyWizardSnapshot.fromDraft(
+    entry = FamilyWizardEntry.Onboarding,
+    mode = mode,
+    step = step,
+    draft = draft,
+    displayName = displayName,
+    familyName = familyName,
+)
 
-internal data class OnboardingOwnerEntryTransition(
+internal data class OnboardingFamilyTransition(
     val finishRecovery: Boolean,
     val nextStep: OnboardingStep,
 )
 
-internal fun onboardingOwnerEntryTransition(
-    state: OnboardingOwnerEntryState,
+internal fun onboardingFamilyWizardTransition(
+    state: FamilyWizardState,
     reclaimedFamilyEmpty: Boolean?,
-): OnboardingOwnerEntryTransition? = when (state) {
-    is OnboardingOwnerEntryState.Created -> OnboardingOwnerEntryTransition(
-        finishRecovery = false,
-        nextStep = OnboardingStep.CreateBaby,
-    )
-    is OnboardingOwnerEntryState.Reclaimed -> when (state.dataRecovery) {
-        com.lezi.babylog.sync.InitialFamilyDataRecovery.Complete ->
-            reclaimedFamilyEmpty?.let { empty ->
-                OnboardingOwnerEntryTransition(
-                    finishRecovery = true,
-                    nextStep = if (empty) {
-                        OnboardingStep.CreateBaby
-                    } else {
-                        OnboardingStep.RecoveryComplete
-                    },
-                )
-            }
-        com.lezi.babylog.sync.InitialFamilyDataRecovery.RetryRequired,
-        com.lezi.babylog.sync.InitialFamilyDataRecovery.NotRequired,
-        -> OnboardingOwnerEntryTransition(
+): OnboardingFamilyTransition? = when (state) {
+    is FamilyWizardState.Completed -> when (val outcome = state.outcome) {
+        is FamilyWizardOutcome.Created -> OnboardingFamilyTransition(
+            finishRecovery = false,
+            nextStep = OnboardingStep.CreateBaby,
+        )
+        is FamilyWizardOutcome.Joined -> OnboardingFamilyTransition(
             finishRecovery = true,
+            nextStep = OnboardingStep.ChooseFamily,
+        )
+        is FamilyWizardOutcome.Reclaimed -> when (outcome.dataRecovery) {
+            com.lezi.babylog.sync.InitialFamilyDataRecovery.Complete ->
+                reclaimedFamilyEmpty?.let { empty ->
+                    OnboardingFamilyTransition(
+                        finishRecovery = true,
+                        nextStep = if (empty) {
+                            OnboardingStep.CreateBaby
+                        } else {
+                            OnboardingStep.RecoveryComplete
+                        },
+                    )
+                }
+            com.lezi.babylog.sync.InitialFamilyDataRecovery.RetryRequired,
+            com.lezi.babylog.sync.InitialFamilyDataRecovery.NotRequired,
+            -> OnboardingFamilyTransition(
+                finishRecovery = false,
+                nextStep = OnboardingStep.RecoveryPending,
+            )
+        }
+    }
+    is FamilyWizardState.RetryableFailure -> if (state.committedOutcome != null) {
+        OnboardingFamilyTransition(
+            finishRecovery = false,
             nextStep = OnboardingStep.RecoveryPending,
         )
+    } else {
+        null
     }
-    OnboardingOwnerEntryState.Recovering,
-    is OnboardingOwnerEntryState.RecoveryRetryableFailure,
-    -> OnboardingOwnerEntryTransition(
-        finishRecovery = false,
-        nextStep = OnboardingStep.RecoveryPending,
-    )
-    OnboardingOwnerEntryState.Ready,
-    is OnboardingOwnerEntryState.Submitting,
-    is OnboardingOwnerEntryState.RetryableFailure,
+    is FamilyWizardState.Editing,
+    is FamilyWizardState.Submitting,
     -> null
 }
 
@@ -197,38 +218,38 @@ class OnboardingViewModel @Inject constructor(
     private val networkState: NetworkState,
     sync: SyncPort,
 ) : ViewModel() {
-    private val ownerEntry = OnboardingOwnerEntryController(
-        SyncPortOnboardingOwnerEntryGateway(sync),
+    private val familyWizard = FamilyWizardController(
+        gateway = SyncFamilyWizardGateway(sync, joinFamily, careLog),
+        initialSnapshot = FamilyWizardSnapshot.empty(FamilyWizardEntry.Onboarding),
     )
     private val mutableReclaimedFamilyEmpty = MutableStateFlow<Boolean?>(null)
-    val ownerEntryState = ownerEntry.state
+    val familyWizardState = familyWizard.state
     val reclaimedFamilyEmpty = mutableReclaimedFamilyEmpty.asStateFlow()
 
     fun currentWifiSsid(): String? = networkState.currentWifiSsid()
 
-    fun createOrReclaimFamily(
-        input: OnboardingOwnerEntryInput,
-        bootstrapSecret: String,
-    ) {
+    fun submitFamilyWizard(snapshot: FamilyWizardSnapshot, bootstrapSecret: String = "") {
         viewModelScope.launch {
             mutableReclaimedFamilyEmpty.value = null
-            ownerEntry.submit(input, bootstrapSecret)
+            familyWizard.submit(snapshot, bootstrapSecret)
             updateRecoveredFamilyEmptiness()
         }
     }
 
     fun retryOwnerRecovery() {
         viewModelScope.launch {
-            ownerEntry.restorePendingRecovery()
-            ownerEntry.retryDataRecovery()
+            familyWizard.retryReclaimedDataRecovery()
             updateRecoveredFamilyEmptiness()
         }
     }
 
+    fun consumeFamilyWizardCompletion(): FamilyWizardOutcome? =
+        familyWizard.consumeCompletion()
+
     private suspend fun updateRecoveredFamilyEmptiness() {
-        val state = ownerEntry.state.value
-        if (state is OnboardingOwnerEntryState.Reclaimed &&
-            state.dataRecovery == com.lezi.babylog.sync.InitialFamilyDataRecovery.Complete
+        val outcome = (familyWizard.state.value as? FamilyWizardState.Completed)?.outcome
+        if (outcome is FamilyWizardOutcome.Reclaimed &&
+            outcome.dataRecovery == com.lezi.babylog.sync.InitialFamilyDataRecovery.Complete
         ) {
             mutableReclaimedFamilyEmpty.value = careLog.listBabies().isEmpty()
         }
@@ -262,59 +283,6 @@ class OnboardingViewModel @Inject constructor(
         }
     }
 
-    /**
-     * Join the existing family before publishing any Baby locally. The join response owns the
-     * family's Baby snapshot; creating a placeholder first would both exit onboarding on failure
-     * and later upload an unwanted extra Baby.
-     */
-    fun joinFamily(
-        draft: JoinFamilyDraft,
-        displayName: String,
-        onDone: (String?) -> Unit,
-    ) {
-        viewModelScope.launch {
-            when (
-                val result = joinFamily.execute(
-                    JoinFamilyRequest(draft = draft, displayName = displayName),
-                )
-            ) {
-                is JoinFamilyResult.Joined -> onDone(null)
-                is JoinFamilyResult.Failed -> onDone(result.message)
-            }
-        }
-    }
-}
-
-@Composable
-private fun HomeWifiGuideRow(
-    marker: String,
-    title: String,
-    detail: String,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Surface(
-            modifier = Modifier.size(40.dp),
-            shape = CircleShape,
-            color = MaterialTheme.colorScheme.primaryContainer,
-            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-        ) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(marker, style = LeziTypography.Eyebrow)
-            }
-        }
-        Spacer(Modifier.size(LeziSpacing.Sm))
-        Column(Modifier.weight(1f)) {
-            Text(title, style = LeziTypography.BodyStrong)
-            Text(
-                detail,
-                style = LeziTypography.Meta,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
 }
 
 @Composable
@@ -380,7 +348,8 @@ fun OnboardingRoute(
     var bootstrapSecret by remember { mutableStateOf("") }
     var nameError by rememberSaveable { mutableStateOf(false) }
     var formError by rememberSaveable { mutableStateOf<String?>(null) }
-    val ownerEntryState by vm.ownerEntryState.collectAsState()
+    val familyWizardState by vm.familyWizardState.collectAsState()
+    val familyWizardBusy = familyWizardState is FamilyWizardState.Submitting
     val reclaimedFamilyEmpty by vm.reclaimedFamilyEmpty.collectAsState()
     val context = LocalContext.current
     // Prefill unsaved defaults, including the current Wi-Fi name when available.
@@ -477,23 +446,28 @@ fun OnboardingRoute(
             )
         }
     }
-    LaunchedEffect(ownerEntryState, reclaimedFamilyEmpty) {
-        val transition = onboardingOwnerEntryTransition(
-            state = ownerEntryState,
+    LaunchedEffect(familyWizardState, reclaimedFamilyEmpty) {
+        val transition = onboardingFamilyWizardTransition(
+            state = familyWizardState,
             reclaimedFamilyEmpty = reclaimedFamilyEmpty,
         )
         if (transition != null) {
             bootstrapSecret = ""
             formError = null
+            vm.consumeFamilyWizardCompletion()
             if (transition.finishRecovery) onFinished()
             // If a reclaimed family is genuinely empty, root routing keeps onboarding alive and
             // this becomes its first authoritative Baby step instead of returning to start.
             step = transition.nextStep
         } else {
-            formError = when (val state = ownerEntryState) {
-                is OnboardingOwnerEntryState.RetryableFailure -> state.message
-                is OnboardingOwnerEntryState.RecoveryRetryableFailure -> state.message
+            formError = when (val state = familyWizardState) {
+                is FamilyWizardState.RetryableFailure -> state.message
                 else -> formError
+            }
+            if (familyWizardState is FamilyWizardState.RetryableFailure &&
+                familyWizardState.snapshot.mode == FamilyWizardMode.Join
+            ) {
+                showJoin = true
             }
         }
     }
@@ -520,26 +494,22 @@ fun OnboardingRoute(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                onboardingPrimaryActions(step).forEach { action ->
+                onboardingFamilyActions().forEach { action ->
                     val onClick = {
                         formError = null
-                        withHomeWifiAccess {
-                            fillCurrentWifiIfBlank()
-                            when (action) {
-                                OnboardingPrimaryAction.CreateFamily ->
-                                    step = OnboardingStep.CreateFamily
-                                OnboardingPrimaryAction.JoinFamily -> showJoin = true
-                            }
+                        when (action) {
+                            FamilyWizardMode.Create -> step = OnboardingStep.CreateFamily
+                            FamilyWizardMode.Join -> showJoin = true
                         }
                     }
                     when (action) {
-                        OnboardingPrimaryAction.CreateFamily -> Button(
+                        FamilyWizardMode.Create -> Button(
                             onClick = onClick,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(52.dp),
                         ) { Text("新建家庭") }
-                        OnboardingPrimaryAction.JoinFamily -> OutlinedButton(
+                        FamilyWizardMode.Join -> OutlinedButton(
                             onClick = onClick,
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -617,27 +587,15 @@ fun OnboardingRoute(
                 )
                 formError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 Button(
-                    enabled = ownerEntryState !is OnboardingOwnerEntryState.Submitting,
+                    enabled = !familyWizardBusy,
                     onClick = {
                         formError = null
-                        val config = runCatching {
-                            HomeLanServerConfig.fromUserInput(
-                                rawHostOrUrl = joinDraft.host,
-                                explicitPort = joinDraft.portText.toIntOrNull(),
-                                allowedSsids = joinDraft.ssids,
-                                fallbackScheme = joinDraft.scheme,
-                            ).also {
-                                require(it.isServerConfigured) { "请填写服务器主机" }
-                                require(it.hasSsidAllowlist) { "请至少填写一个家庭 Wi‑Fi 名称" }
-                            }
-                        }.getOrElse {
-                            formError = it.message ?: "家庭网络配置无效"
-                            return@Button
-                        }
                         withHomeWifiAccess {
-                            vm.createOrReclaimFamily(
-                                input = OnboardingOwnerEntryInput(
-                                    homeLanConfig = config,
+                            vm.submitFamilyWizard(
+                                snapshot = onboardingFamilyWizardSnapshot(
+                                    mode = FamilyWizardMode.Create,
+                                    step = FamilyWizardStep.Identity,
+                                    draft = joinDraft,
                                     displayName = createDisplayName,
                                     familyName = createFamilyName,
                                 ),
@@ -650,7 +608,7 @@ fun OnboardingRoute(
                         .height(52.dp),
                 ) {
                     Text(
-                        if (ownerEntryState is OnboardingOwnerEntryState.Submitting) {
+                        if (familyWizardBusy) {
                             "正在连接…"
                         } else {
                             "新建家庭"
@@ -658,14 +616,16 @@ fun OnboardingRoute(
                     )
                 }
                 TextButton(
-                    enabled = ownerEntryState !is OnboardingOwnerEntryState.Submitting,
+                    enabled = !familyWizardBusy,
                     onClick = { step = OnboardingStep.ChooseFamily },
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("返回") }
             }
             OnboardingStep.CreateBaby -> {
                 Text(
-                    if (ownerEntryState is OnboardingOwnerEntryState.Reclaimed) {
+                    if ((familyWizardState as? FamilyWizardState.Completed)?.outcome
+                            is FamilyWizardOutcome.Reclaimed
+                    ) {
                         "家庭已接回；家庭中还没有宝宝，请创建第一个家庭宝宝。"
                     } else {
                         "家庭已建立，请创建第一个家庭宝宝。"
@@ -780,27 +740,27 @@ fun OnboardingRoute(
                 ) { Text("开始记录") }
             }
             OnboardingStep.RecoveryPending -> {
+                val recoveryFailure = familyWizardState as? FamilyWizardState.RetryableFailure
                 Text(
                     "家庭身份已接回，但历史数据还没有恢复完成。请保持连接家庭 Wi‑Fi 后重试。",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.error,
                 )
-                if (ownerEntryState is OnboardingOwnerEntryState.RecoveryRetryableFailure) {
+                if (recoveryFailure?.committedOutcome != null) {
                     Text(
-                        (ownerEntryState as OnboardingOwnerEntryState.RecoveryRetryableFailure)
-                            .message,
+                        recoveryFailure.message,
                         color = MaterialTheme.colorScheme.error,
                     )
                 }
                 Button(
-                    enabled = ownerEntryState !is OnboardingOwnerEntryState.Recovering,
+                    enabled = !familyWizardBusy,
                     onClick = vm::retryOwnerRecovery,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(52.dp),
                 ) {
                     Text(
-                        if (ownerEntryState is OnboardingOwnerEntryState.Recovering) {
+                        if (familyWizardBusy) {
                             "正在恢复…"
                         } else {
                             "重试恢复"
@@ -981,21 +941,18 @@ fun OnboardingRoute(
                         withHomeWifiAccess {
                             fillCurrentWifiIfBlank()
                             formError = null
-                            vm.joinFamily(
-                                draft = joinDraft,
-                                displayName = joinDisplayName,
-                                onDone = { err ->
-                                    if (err == null) {
-                                        showJoin = false
-                                        onFinished()
-                                    } else {
-                                        formError = err
-                                    }
-                                },
+                            vm.submitFamilyWizard(
+                                snapshot = onboardingFamilyWizardSnapshot(
+                                    mode = FamilyWizardMode.Join,
+                                    step = FamilyWizardStep.Identity,
+                                    draft = joinDraft,
+                                    displayName = joinDisplayName,
+                                ),
                             )
                         }
                     },
-                ) { Text("加入") }
+                    enabled = !familyWizardBusy,
+                ) { Text(if (familyWizardBusy) "正在加入…" else "加入") }
             },
             dismissButton = {
                 TextButton(onClick = { showJoin = false }) { Text("取消") }
@@ -1005,34 +962,17 @@ fun OnboardingRoute(
 
     if (showHomeWifiAccessGuide) {
         val settingsTarget = HomeWifiPermission.settingsTarget(context)
-        AlertDialog(
-            onDismissRequest = { showHomeWifiAccessGuide = false },
-            title = { Text("允许识别家庭 Wi‑Fi") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
-                    HomeWifiGuideRow("1", "位置权限", "仅用于读取当前 Wi‑Fi 名称")
-                    HomeWifiGuideRow("2", "定位服务", "需保持开启；位置数据不会上传")
-                }
+        HomeWifiAccessGuideDialog(
+            settingsAction = when (settingsTarget) {
+                HomeWifiSettingsTarget.AppPermission -> HomeWifiSettingsAction.AppPermission
+                HomeWifiSettingsTarget.LocationServices -> HomeWifiSettingsAction.LocationServices
+                HomeWifiSettingsTarget.Wifi -> HomeWifiSettingsAction.Wifi
             },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showHomeWifiAccessGuide = false
-                        context.startActivity(HomeWifiPermission.settingsIntent(context))
-                    },
-                ) {
-                    Text(
-                        when (settingsTarget) {
-                            HomeWifiSettingsTarget.AppPermission -> "打开权限设置"
-                            HomeWifiSettingsTarget.LocationServices -> "开启定位服务"
-                            HomeWifiSettingsTarget.Wifi -> "打开 Wi-Fi 设置"
-                        },
-                    )
-                }
+            onOpenSettings = {
+                showHomeWifiAccessGuide = false
+                context.startActivity(HomeWifiPermission.settingsIntent(context))
             },
-            dismissButton = {
-                TextButton(onClick = { showHomeWifiAccessGuide = false }) { Text("稍后") }
-            },
+            onDismiss = { showHomeWifiAccessGuide = false },
         )
     }
 }

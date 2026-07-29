@@ -1,9 +1,9 @@
 package com.lezi.babylog.feature.family
 
 import com.lezi.babylog.core.model.SyncStatus
+import com.lezi.babylog.domain.FamilyWizardOutcome
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.FamilyRole
-import com.lezi.babylog.sync.CreateFamilyResult
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.SyncSession
 import com.lezi.babylog.sync.SyncNotEnabledException
@@ -32,20 +32,18 @@ class FamilyErrorCopyTest {
 
         assertEquals(
             "已接回家庭，数据恢复完成",
-            createFamilyResultCopy(
-                CreateFamilyResult(
+            familyWizardOutcomeCopy(
+                FamilyWizardOutcome.Reclaimed(
                     session = session,
-                    reclaimed = true,
                     dataRecovery = InitialFamilyDataRecovery.Complete,
                 ),
             ),
         )
         assertEquals(
             "已接回家庭，但数据同步失败，请点“同步”重试",
-            createFamilyResultCopy(
-                CreateFamilyResult(
+            familyWizardOutcomeCopy(
+                FamilyWizardOutcome.Reclaimed(
                     session = session,
-                    reclaimed = true,
                     dataRecovery = InitialFamilyDataRecovery.RetryRequired,
                 ),
             ),

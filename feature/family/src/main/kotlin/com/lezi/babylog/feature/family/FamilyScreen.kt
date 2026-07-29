@@ -13,6 +13,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -21,11 +23,16 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import com.lezi.babylog.core.ui.CameraCapture
+import com.lezi.babylog.core.ui.HomeWifiAccessGuideDialog
+import com.lezi.babylog.core.ui.HomeWifiSettingsAction
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.PageScaffoldBackground
+import com.lezi.babylog.domain.FamilyWizardState
+import com.lezi.babylog.domain.familyWizardNetworkValidationError
 import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.sync.HomeLanServerConfig
 import com.lezi.babylog.sync.HomeWifiPermission
+import com.lezi.babylog.sync.HomeWifiSettingsTarget
 import com.lezi.babylog.sync.JoinFamilyDraft
 import com.lezi.babylog.sync.JoinNetworkProvenance
 import com.lezi.babylog.sync.identityNetworkMissingHint
@@ -36,6 +43,22 @@ import com.lezi.babylog.sync.joinNetworkPartialPrefillHint
 import com.lezi.babylog.sync.provenanceAfterInviteInput
 import com.lezi.babylog.sync.provenanceAfterManualNetworkEdit
 
+private val JoinFamilyDraftSaver = listSaver<JoinFamilyDraft, String>(
+    save = {
+        listOf(it.invitation, it.host, it.portText, it.scheme, it.ssid1, it.ssid2)
+    },
+    restore = {
+        JoinFamilyDraft(
+            invitation = it[0],
+            host = it[1],
+            portText = it[2],
+            scheme = it[3],
+            ssid1 = it[4],
+            ssid2 = it[5],
+        )
+    },
+)
+
 @Composable
 fun FamilyRoute(
     onAddBaby: () -> Unit = {},
@@ -44,29 +67,28 @@ fun FamilyRoute(
     val ui by vm.ui.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var dialog by remember { mutableStateOf<FamilyDialog?>(null) }
+    var retainedWizardMode by rememberSaveable { mutableStateOf<String?>(null) }
+    var retainedWizardStep by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingHomeWifiAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     var pendingHomeWifiResume by remember { mutableStateOf<FamilyDialog?>(null) }
-    var joiningFamily by remember { mutableStateOf(false) }
     var bootstrapSecret by remember { mutableStateOf("") }
-    var bootstrapSecretFeedback by remember { mutableStateOf<String?>(null) }
-    var creatingFamily by remember { mutableStateOf(false) }
-    var createDisplayName by remember { mutableStateOf("") }
-    var createDisplayNameError by remember { mutableStateOf<String?>(null) }
-    var createFamilyName by remember { mutableStateOf("") }
-    var createFamilyNameError by remember { mutableStateOf<String?>(null) }
-    var joinDisplayName by remember { mutableStateOf("") }
-    var joinDisplayNameError by remember { mutableStateOf<String?>(null) }
+    var bootstrapSecretFeedback by rememberSaveable { mutableStateOf<String?>(null) }
+    var createDisplayName by rememberSaveable { mutableStateOf("") }
+    var createDisplayNameError by rememberSaveable { mutableStateOf<String?>(null) }
+    var createFamilyName by rememberSaveable { mutableStateOf("") }
+    var createFamilyNameError by rememberSaveable { mutableStateOf<String?>(null) }
+    var joinDisplayName by rememberSaveable { mutableStateOf("") }
+    var joinDisplayNameError by rememberSaveable { mutableStateOf<String?>(null) }
     var editDisplayName by remember { mutableStateOf("") }
     var editDisplayNameFeedback by remember { mutableStateOf<String?>(null) }
     var savingDisplayName by remember { mutableStateOf(false) }
     var renameFamilyName by remember { mutableStateOf("") }
     var renameFamilyFeedback by remember { mutableStateOf<String?>(null) }
     var savingFamilyName by remember { mutableStateOf(false) }
-    var wizardNetworkFeedback by remember { mutableStateOf<String?>(null) }
-    var wizardNetworkInfoHint by remember { mutableStateOf<String?>(null) }
-    var inviteInputError by remember { mutableStateOf<String?>(null) }
-    var networkProvenance by remember { mutableStateOf(JoinNetworkProvenance.None) }
-    var savingWizardNetwork by remember { mutableStateOf(false) }
+    var wizardNetworkFeedback by rememberSaveable { mutableStateOf<String?>(null) }
+    var wizardNetworkInfoHint by rememberSaveable { mutableStateOf<String?>(null) }
+    var inviteInputError by rememberSaveable { mutableStateOf<String?>(null) }
+    var networkProvenance by rememberSaveable { mutableStateOf(JoinNetworkProvenance.None) }
     var removingMember by remember { mutableStateOf(false) }
 
     val novice = remember {
@@ -91,7 +113,11 @@ fun FamilyRoute(
     }
     // Stable draft: never key on prefs (that wiped invitation). Merge when prefs
     // change only if we are not in an active wizard session.
-    var joinDraft by remember { mutableStateOf(draftFromUiOrNovice()) }
+    var joinDraft by rememberSaveable(stateSaver = JoinFamilyDraftSaver) {
+        mutableStateOf(draftFromUiOrNovice())
+    }
+    val familyWizardState by vm.familyWizardState.collectAsStateWithLifecycle()
+    val familyWizardBusy = familyWizardState is FamilyWizardState.Submitting
     val wizardSessionActive = isWizardSessionDialog(dialog)
     LaunchedEffect(
         ui.serverHost,
@@ -127,6 +153,22 @@ fun FamilyRoute(
     fun showMessage(copy: String, resume: FamilyDialog? = null) {
         dialog = FamilyDialog.Message(copy, resume)
     }
+    fun showWizard(mode: FamilyWizardMode, step: FamilyWizardStep) {
+        retainedWizardMode = mode.name
+        retainedWizardStep = step.name
+        dialog = FamilyDialog.Wizard(mode, step)
+    }
+    LaunchedEffect(Unit) {
+        val restoredMode = retainedWizardMode?.let {
+            runCatching { FamilyWizardMode.valueOf(it) }.getOrNull()
+        }
+        val restoredStep = retainedWizardStep?.let {
+            runCatching { FamilyWizardStep.valueOf(it) }.getOrNull()
+        }
+        if (dialog == null && restoredMode != null && restoredStep != null) {
+            dialog = FamilyDialog.Wizard(restoredMode, restoredStep)
+        }
+    }
     fun finalWizardDismiss() {
         inviteInputError = null
         wizardNetworkInfoHint = null
@@ -135,6 +177,8 @@ fun FamilyRoute(
             isHomeLanNetworkConfigured(ui.serverHost, ui.baseUrl, ui.allowedSsids),
             joinDraft,
         )
+        retainedWizardMode = null
+        retainedWizardStep = null
         dialog = null
     }
     fun dismissDialog() {
@@ -205,7 +249,20 @@ fun FamilyRoute(
                 }
             }
         }
-        dialog = FamilyDialog.Wizard(mode, step)
+        vm.beginFamilyWizard(
+            accountFamilyWizardSnapshot(
+                mode = mode,
+                step = step,
+                draft = joinDraft,
+                displayName = if (mode == FamilyWizardMode.Create) {
+                    createDisplayName
+                } else {
+                    joinDisplayName
+                },
+                familyName = createFamilyName,
+            ),
+        )
+        showWizard(mode, step)
     }
 
     fun applyInvitationField(raw: String) {
@@ -226,7 +283,7 @@ fun FamilyRoute(
         if (result.error != null) {
             wizardNetworkFeedback = null
             wizardNetworkInfoHint = null
-            dialog = FamilyDialog.Wizard(FamilyWizardMode.Join, FamilyWizardStep.Network)
+            showWizard(FamilyWizardMode.Join, FamilyWizardStep.Network)
             return
         }
         networkProvenance = provenanceAfterInviteInput(networkProvenance, result)
@@ -238,7 +295,7 @@ fun FamilyRoute(
             wizardNetworkInfoHint = null
             wizardNetworkFeedback = null
         }
-        dialog = FamilyDialog.Wizard(FamilyWizardMode.Join, step)
+        showWizard(FamilyWizardMode.Join, step)
     }
     val scanInvite = rememberLauncherForActivityResult(ScanContract()) { result ->
         result.contents?.let(::applyScannedInvite)
@@ -294,32 +351,10 @@ fun FamilyRoute(
         wizardNetworkFeedback = null
     }
 
-    /** Join Network next: validate draft only — do not write prefs mid-flow. */
-    fun advanceJoinNetwork() {
-        if (joinDraft.host.isBlank() || joinDraft.ssids.isEmpty()) {
-            wizardNetworkFeedback = "请填写服务器主机并至少绑定一个家庭 Wi‑Fi 名称"
-            dialog = FamilyDialog.Wizard(FamilyWizardMode.Join, FamilyWizardStep.Network)
-            return
-        }
-        if (
-            networkProvenance != JoinNetworkProvenance.ScannedFull &&
-            networkProvenance != JoinNetworkProvenance.PrefsSaved
-        ) {
-            networkProvenance = JoinNetworkProvenance.UserEdited
-        }
-        wizardNetworkFeedback = null
-        wizardNetworkInfoHint = null
-        dialog = FamilyDialog.Wizard(FamilyWizardMode.Join, FamilyWizardStep.Identity)
-    }
-
-    /** Create Network step: save prefs then advance (unchanged). */
-    fun saveWizardNetworkThenAdvance(mode: FamilyWizardMode) {
-        if (mode == FamilyWizardMode.Join) {
-            advanceJoinNetwork()
-            return
-        }
+    /** Both entries validate the same retained draft; submit owns the only config write. */
+    fun advanceWizardNetwork(mode: FamilyWizardMode) {
         if (!HomeWifiPermission.isSsidAccessReady(context)) {
-            withHomeWifiAccess { saveWizardNetworkThenAdvance(mode) }
+            withHomeWifiAccess { advanceWizardNetwork(mode) }
             return
         }
         if (joinDraft.ssid1.isBlank()) {
@@ -327,44 +362,84 @@ fun FamilyRoute(
                 joinDraft = joinDraft.copy(ssid1 = it)
             }
         }
-        val host = joinDraft.host.trim()
-        val ssids = joinDraft.ssids
-        if (host.isBlank() || ssids.isEmpty()) {
-            wizardNetworkFeedback = "请填写服务器主机并至少绑定一个家庭 Wi‑Fi 名称"
-            dialog = FamilyDialog.Wizard(mode, FamilyWizardStep.Network)
+        val snapshot = accountFamilyWizardSnapshot(
+            mode = mode,
+            step = FamilyWizardStep.Network,
+            draft = joinDraft,
+            displayName = if (mode == FamilyWizardMode.Create) {
+                createDisplayName
+            } else {
+                joinDisplayName
+            },
+            familyName = createFamilyName,
+        )
+        familyWizardNetworkValidationError(snapshot)?.let { message ->
+            wizardNetworkFeedback = message
+            showWizard(mode, FamilyWizardStep.Network)
             return
         }
-        val dirty = host != ui.serverHost.trim() ||
-            joinDraft.portText.toIntOrNull() != ui.serverPort ||
-            joinDraft.scheme != ui.serverScheme ||
-            ssids != ui.allowedSsids ||
-            ui.allowedSsids.isEmpty()
-        if (!dirty && ui.serverHost.isNotBlank() && ui.allowedSsids.isNotEmpty()) {
-            wizardNetworkFeedback = null
-            dialog = FamilyDialog.Wizard(mode, FamilyWizardStep.Identity)
-            return
+        if (networkProvenance != JoinNetworkProvenance.ScannedFull &&
+            networkProvenance != JoinNetworkProvenance.PrefsSaved
+        ) {
+            networkProvenance = JoinNetworkProvenance.UserEdited
         }
-        savingWizardNetwork = true
         wizardNetworkFeedback = null
-        vm.saveHomeLanConfig(
-            joinDraft.host,
-            joinDraft.portText,
-            joinDraft.ssid1,
-            joinDraft.ssid2,
-            joinDraft.scheme,
-        ) { result ->
-            savingWizardNetwork = false
-            when (result) {
-                is NetworkSaveResult.Saved -> {
-                    wizardNetworkFeedback = null
-                    networkProvenance = JoinNetworkProvenance.PrefsSaved
-                    dialog = FamilyDialog.Wizard(mode, FamilyWizardStep.Identity)
-                }
-                is NetworkSaveResult.Failed -> {
-                    wizardNetworkFeedback = result.message
-                    dialog = FamilyDialog.Wizard(mode, FamilyWizardStep.Network)
+        wizardNetworkInfoHint = null
+        showWizard(mode, FamilyWizardStep.Identity)
+    }
+
+    LaunchedEffect(familyWizardState) {
+        when (val state = familyWizardState) {
+            is FamilyWizardState.RetryableFailure -> {
+                val resume = FamilyDialog.Wizard(state.snapshot.mode, state.snapshot.step)
+                retainedWizardMode = state.snapshot.mode.name
+                retainedWizardStep = state.snapshot.step.name
+                when {
+                    state.snapshot.step == FamilyWizardStep.Network -> {
+                        wizardNetworkFeedback = state.message
+                        dialog = resume
+                    }
+                    state.snapshot.mode == FamilyWizardMode.Create -> {
+                        when {
+                            state.message.contains("称呼") || state.message.contains("本机") ->
+                                createDisplayNameError = state.message
+                            state.message.contains("家庭名") ->
+                                createFamilyNameError = state.message
+                            else -> bootstrapSecretFeedback = state.message
+                        }
+                        dialog = resume
+                    }
+                    else -> {
+                        joinDisplayNameError = state.message.takeIf {
+                            it.contains("称呼") || it.contains("本机")
+                        }
+                        if (joinDisplayNameError != null) {
+                            dialog = resume
+                        } else {
+                            showMessage(state.message, resume)
+                        }
+                    }
                 }
             }
+            is FamilyWizardState.Completed -> {
+                vm.consumeFamilyWizardCompletion()?.let { outcome ->
+                    bootstrapSecret = ""
+                    bootstrapSecretFeedback = null
+                    createDisplayName = ""
+                    createDisplayNameError = null
+                    createFamilyName = ""
+                    createFamilyNameError = null
+                    joinDisplayName = ""
+                    joinDisplayNameError = null
+                    inviteInputError = null
+                    retainedWizardMode = null
+                    retainedWizardStep = null
+                    dialog = FamilyDialog.Message(familyWizardOutcomeCopy(outcome))
+                }
+            }
+            is FamilyWizardState.Editing,
+            is FamilyWizardState.Submitting,
+            -> Unit
         }
     }
 
@@ -545,7 +620,7 @@ fun FamilyRoute(
                 inviteCodeSummary = joinDraft.invitation.takeIf {
                     it.isNotBlank() && active.mode == FamilyWizardMode.Join
                 },
-                saving = savingWizardNetwork,
+                saving = false,
                 onUseCurrentWifi = {
                     withHomeWifiAccess {
                         val current = vm.currentWifiSsid()?.trim().orEmpty()
@@ -571,9 +646,8 @@ fun FamilyRoute(
                 } else {
                     null
                 },
-                onContinue = { saveWizardNetworkThenAdvance(active.mode) },
+                onContinue = { advanceWizardNetwork(active.mode) },
                 onDismiss = {
-                    savingWizardNetwork = false
                     finalWizardDismiss()
                 },
             )
@@ -594,7 +668,7 @@ fun FamilyRoute(
                         joinDisplayNameError = null
                     },
                     displayNameError = joinDisplayNameError,
-                    joining = joiningFamily,
+                    joining = familyWizardBusy,
                     networkReady = draftNetworkReady,
                     networkSummary = identityNetworkSummary(joinDraft, networkProvenance),
                     networkMissingHint = identityNetworkMissingHint(joinDraft),
@@ -602,35 +676,23 @@ fun FamilyRoute(
                     confirmEnabled = joinConfirmEnabled(
                         joinDraft,
                         joinDisplayName,
-                        joining = joiningFamily,
+                        joining = familyWizardBusy,
                     ),
                     onScan = ::scanWithPermission,
                     onBackToNetwork = {
-                        dialog = FamilyDialog.Wizard(FamilyWizardMode.Join, FamilyWizardStep.Network)
+                        showWizard(FamilyWizardMode.Join, FamilyWizardStep.Network)
                     },
                     onConfirm = {
                         withHomeWifiAccess {
-                            joiningFamily = true
-                            vm.join(joinDraft, joinDisplayName) { success, copy ->
-                                joiningFamily = false
-                                if (success) {
-                                    joinDisplayName = ""
-                                    joinDisplayNameError = null
-                                    inviteInputError = null
-                                    dialog = FamilyDialog.Message(copy)
-                                } else {
-                                    joinDisplayNameError = copy.takeIf {
-                                        it.contains("称呼") || it.contains("本机")
-                                    }
-                                    showMessage(
-                                        copy,
-                                        resume = FamilyDialog.Wizard(
-                                            FamilyWizardMode.Join,
-                                            FamilyWizardStep.Identity,
-                                        ),
-                                    )
-                                }
-                            }
+                            joinDisplayNameError = null
+                            vm.submitFamilyWizard(
+                                accountFamilyWizardSnapshot(
+                                    mode = FamilyWizardMode.Join,
+                                    step = FamilyWizardStep.Identity,
+                                    draft = joinDraft,
+                                    displayName = joinDisplayName,
+                                ),
+                            )
                         }
                     },
                     onDismiss = {
@@ -657,13 +719,10 @@ fun FamilyRoute(
                         bootstrapSecretFeedback = null
                     },
                     feedback = bootstrapSecretFeedback,
-                    creating = creatingFamily,
+                    creating = familyWizardBusy,
                     networkConfigured = draftNetworkReady || networkConfigured,
                     onBackToNetwork = {
-                        dialog = FamilyDialog.Wizard(
-                            FamilyWizardMode.Create,
-                            FamilyWizardStep.Network,
-                        )
+                        showWizard(FamilyWizardMode.Create, FamilyWizardStep.Network)
                     },
                     onConfirm = {
                         validateFamilyDisplayNameInput(createDisplayName)?.let {
@@ -677,30 +736,19 @@ fun FamilyRoute(
                         // Empty bootstrap secret is allowed (NAS may omit LEZI_BOOTSTRAP_SECRET).
                         val secret = bootstrapSecret.trim()
                         withHomeWifiAccess {
-                            creatingFamily = true
                             bootstrapSecretFeedback = null
                             createDisplayNameError = null
                             createFamilyNameError = null
-                            vm.createFamily(
-                                displayName = createDisplayName,
+                            vm.submitFamilyWizard(
+                                snapshot = accountFamilyWizardSnapshot(
+                                    mode = FamilyWizardMode.Create,
+                                    step = FamilyWizardStep.Identity,
+                                    draft = joinDraft,
+                                    displayName = createDisplayName,
+                                    familyName = createFamilyName,
+                                ),
                                 bootstrapSecret = secret,
-                                familyName = createFamilyName,
-                            ) { success, copy ->
-                                creatingFamily = false
-                                if (success) {
-                                    bootstrapSecret = ""
-                                    createDisplayName = ""
-                                    createFamilyName = ""
-                                    dialog = FamilyDialog.Message(copy)
-                                } else {
-                                    when {
-                                        copy.contains("称呼") || copy.contains("本机") ->
-                                            createDisplayNameError = copy
-                                        copy.contains("家庭名") -> createFamilyNameError = copy
-                                        else -> bootstrapSecretFeedback = copy
-                                    }
-                                }
-                            }
+                            )
                         }
                     },
                     onDismiss = {
@@ -709,7 +757,6 @@ fun FamilyRoute(
                         createDisplayNameError = null
                         createFamilyName = ""
                         createFamilyNameError = null
-                        creatingFamily = false
                         finalWizardDismiss()
                     },
                 )
@@ -800,7 +847,11 @@ fun FamilyRoute(
             onDismiss = { dialog = null },
         )
         is FamilyDialog.HomeWifiAccessGuide -> HomeWifiAccessGuideDialog(
-            settingsTarget = HomeWifiPermission.settingsTarget(context),
+            settingsAction = when (HomeWifiPermission.settingsTarget(context)) {
+                HomeWifiSettingsTarget.AppPermission -> HomeWifiSettingsAction.AppPermission
+                HomeWifiSettingsTarget.LocationServices -> HomeWifiSettingsAction.LocationServices
+                HomeWifiSettingsTarget.Wifi -> HomeWifiSettingsAction.Wifi
+            },
             onOpenSettings = {
                 dialog = active.resume
                 context.startActivity(HomeWifiPermission.settingsIntent(context))

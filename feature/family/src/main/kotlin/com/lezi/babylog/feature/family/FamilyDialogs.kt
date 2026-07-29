@@ -39,7 +39,6 @@ import com.journeyapps.barcodescanner.BarcodeEncoder
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
-import com.lezi.babylog.sync.HomeWifiSettingsTarget
 
 @Composable
 private fun FamilyWizardStepHeader(
@@ -554,36 +553,6 @@ internal fun DeleteFamilyDialog(
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
-    )
-}
-
-@Composable
-internal fun HomeWifiAccessGuideDialog(
-    settingsTarget: HomeWifiSettingsTarget,
-    onOpenSettings: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("允许识别家庭 Wi‑Fi") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
-                FamilyScopeRow("权限", "位置权限", "仅用于读取当前 Wi-Fi 名称")
-                FamilyScopeRow("系统", "定位服务", "需保持开启，位置不会上传")
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onOpenSettings) {
-                Text(
-                    when (settingsTarget) {
-                        HomeWifiSettingsTarget.AppPermission -> "打开权限设置"
-                        HomeWifiSettingsTarget.LocationServices -> "开启定位服务"
-                        HomeWifiSettingsTarget.Wifi -> "打开 Wi-Fi 设置"
-                    },
-                )
-            }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("稍后") } },
     )
 }
 
