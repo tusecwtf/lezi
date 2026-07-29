@@ -173,8 +173,14 @@ internal data class QuickRecordDraft(
     val temperature: String = "36.5",
     val temperatureUnit: TemperatureUnit = TemperatureUnit.Celsius,
     val body: String = "",
+    /** Ordered paths currently visible in Composer and submitted on confirm. */
     val photos: List<String> = emptyList(),
+    /** Ordered persisted paths owned by the entity currently being edited. */
     val sourcePhotos: List<String> = emptyList(),
+    /** Ordered plan paths borrowed by a fulfillment draft; Composer never deletes their bytes. */
+    val borrowedPhotos: List<String> = emptyList(),
+    /** Ordered private-file imports created by this draft, including ones later removed. */
+    val ownedDraftPhotos: List<String> = emptyList(),
     val severity: Int = 2,
     val description: String = "",
     val medicineName: String = "",

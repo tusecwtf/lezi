@@ -46,7 +46,7 @@ layout/05 已删除分区 ────┘
 
 | ID | Ticket | Blocked by | Size | Current audit | Status |
 |---|---|---|---|---|---|
-| [01](./issues/01-protect-plan-photos-in-fulfillment-draft.md) | 履行草稿保护计划原图 | — | M | still-valid | ready-for-agent |
+| [01](./issues/01-protect-plan-photos-in-fulfillment-draft.md) | 履行草稿保护计划原图 | — | M | still-valid | implemented-awaiting-device-smoke |
 | [02](./issues/02-reference-aware-photo-file-cleanup.md) | 按活跃引用回收共享照片文件 | 01 | M | partial | ready-for-agent |
 | [03](./issues/03-bounded-off-main-photo-decoding.md) | 统一有界、后台图片解码 | — | M | still-valid | ready-for-agent |
 | [04](./issues/04-bound-photo-import-and-upload-memory.md) | 限制照片导入与同步上传内存 | 03 | M | partial | ready-for-agent |

@@ -2324,6 +2324,73 @@ class CareLogTest {
     }
 
     @Test
+    fun fulfillCarePlanKeepsOriginalPlanPhotosAndRecordsOnlyConfirmedDraftOrder() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 21_000_000L
+        val planPhotos = listOf("plans/a.jpg", "plans/b.jpg", "plans/c.jpg")
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.PEE,
+            scheduledAt = now + 60_000L,
+            photoLocalPaths = planPhotos,
+            nowMillis = now,
+        )
+
+        val recordId = care.fulfillCarePlan(
+            carePlanId = planId,
+            actualTimestamp = now,
+            // Removed plan b, retained a/c, imported draft.jpg; duplicate a is normalized.
+            photoLocalPaths = listOf("plans/a.jpg", "plans/c.jpg", "draft.jpg", "plans/a.jpg"),
+            nowMillis = now + 1L,
+        )
+
+        assertThat(care.listCarePlanPhotoPaths(planId)).containsExactlyElementsIn(planPhotos).inOrder()
+        assertThat(care.listRecordPhotoPaths(recordId))
+            .containsExactly("plans/a.jpg", "plans/c.jpg", "draft.jpg")
+            .inOrder()
+        assertThat(fakes.media.listActiveForCarePlan(planId).all { it.recordId == null }).isTrue()
+        assertThat(fakes.media.listActiveForRecord(recordId).all { it.carePlanId == null }).isTrue()
+    }
+
+    @Test
+    fun fulfillCarePlanMediaFailureRollsBackFactAndLeavesPlanPhotosUnchanged() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 22_000_000L
+        val planPhotos = listOf("plans/a.jpg", "plans/b.jpg")
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.PEE,
+            scheduledAt = now + 60_000L,
+            photoLocalPaths = planPhotos,
+            nowMillis = now,
+        )
+        val mediaBefore = fakes.media.listAllIncludingDeleted()
+
+        fakes.media.failUpserts = true
+        val error = runCatching {
+            care.fulfillCarePlan(
+                carePlanId = planId,
+                actualTimestamp = now,
+                photoLocalPaths = listOf("plans/a.jpg", "draft.jpg"),
+                nowMillis = now + 1L,
+            )
+        }.exceptionOrNull()
+
+        assertThat(error).isInstanceOf(IllegalStateException::class.java)
+        assertThat(fakes.records.listAllIncludingDeleted()).isEmpty()
+        assertThat(fakes.fulfillmentCandidates.listAllIncludingDeleted()).isEmpty()
+        assertThat(care.getCarePlan(planId)!!.status).isEqualTo(CarePlanStatus.PENDING)
+        assertThat(care.listCarePlanPhotoPaths(planId)).containsExactlyElementsIn(planPhotos).inOrder()
+        assertThat(fakes.media.listAllIncludingDeleted()).containsExactlyElementsIn(mediaBefore)
+    }
+
+    @Test
     fun carePlanManagePermissionMatchesMembershipAcl() = runTest {
         val creatorSync = RecordingSyncPort(
             membershipId = "m-creator",

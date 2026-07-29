@@ -34,7 +34,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.datastore.SettingsStore
-import com.lezi.babylog.core.model.MAX_RECORD_PHOTOS
 import com.lezi.babylog.core.model.RecordItemIdentity
 import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordType
@@ -215,6 +214,7 @@ class RecordComposerViewModel @Inject constructor(
     internal val state = _state.asStateFlow()
     private val sessionGate = RecordComposerSessionGate()
     private val savedState = RecordComposerSavedState(savedStateHandle)
+    private val photoLifecycle = RecordComposerPhotoLifecycle(photoStore::delete)
     private var loadJob: Job? = null
     private var actionJob: Job? = null
     private var settingsObserveJob: Job? = null
@@ -325,11 +325,11 @@ class RecordComposerViewModel @Inject constructor(
                             .firstOrNull { it.id == plan.babyId }
                             ?.birthdayEpochDay
                         val planPhotos = careLog.listCarePlanPhotoPaths(plan.id)
-                        // Hydrate plan field snapshot + plan photos into fulfill form.
-                        // sourcePhotos empty so fulfill save does not delete plan-owned files.
-                        val draft = QuickRecordDraft.fromCarePlan(plan).copy(
-                            photos = planPhotos,
-                            sourcePhotos = emptyList(),
+                        // Hydrate plan photos as ordered borrowed refs. They remain owned by the
+                        // plan and are never physical-cleanup candidates for this draft.
+                        val draft = photoLifecycle.fulfillmentDraft(
+                            base = QuickRecordDraft.fromCarePlan(plan),
+                            planPhotos = planPhotos,
                         )
                         Triple(plan.babyId, birthday, draft)
                     }
@@ -475,9 +475,7 @@ class RecordComposerViewModel @Inject constructor(
                 _state.update { state ->
                     val current = state.draft ?: return@update state
                     state.copy(
-                        draft = current.copy(
-                            photos = (current.photos + imported).distinct().take(MAX_RECORD_PHOTOS),
-                        ),
+                        draft = photoLifecycle.imported(current, imported),
                         error = null,
                     )
                 }
@@ -488,11 +486,10 @@ class RecordComposerViewModel @Inject constructor(
 
     internal fun removePhoto(path: String) {
         val draft = _state.value.draft ?: return
-        _state.update { it.copy(draft = draft.copy(photos = draft.photos - path)) }
+        val nextDraft = photoLifecycle.removed(draft, path)
+        _state.update { it.copy(draft = nextDraft) }
         persistCurrentDraft()
-        if (path !in draft.sourcePhotos) {
-            viewModelScope.launch { photoStore.delete(listOf(path)) }
-        }
+        viewModelScope.launch { photoLifecycle.cleanupRemoved(draft, nextDraft) }
     }
 
     internal fun save(onSaved: (message: String, offerReminder: Boolean) -> Unit) {
@@ -584,10 +581,9 @@ class RecordComposerViewModel @Inject constructor(
                         photoLocalPaths = draft.photos,
                     )
                 }
-                // Physical cleanup only after the domain transaction committed.
-                // Never delete plan-owned paths on fulfill (sourcePhotos empty);
-                // edit-plan, convert, and edit-record only drop discarded paths.
-                photoStore.delete(draft.sourcePhotos - draft.photos.toSet())
+                // Physical cleanup only after the domain transaction committed. Fulfillment
+                // borrowed refs are excluded; retained imports now have active Record media rows.
+                photoLifecycle.cleanupAfterCommit(draft)
                 val message = when (writeDecision) {
                     ComposerWriteDecision.UpdateCarePlan -> "已保存护理计划"
                     ComposerWriteDecision.FulfillCarePlan -> "已完成护理计划"
@@ -655,7 +651,13 @@ class RecordComposerViewModel @Inject constructor(
             // request is still active — never side-write a newer draft/session.
             sessionGate.deliver(session) {
                 _state.update {
-                    it.copy(draft = it.draft?.copy(sourcePhotos = draft.photos))
+                    it.copy(
+                        draft = it.draft?.copy(
+                            sourcePhotos = draft.photos,
+                            borrowedPhotos = emptyList(),
+                            ownedDraftPhotos = emptyList(),
+                        ),
+                    )
                 }
                 savedState.clear()
                 onSaved(message.first, message.second)
@@ -728,10 +730,8 @@ class RecordComposerViewModel @Inject constructor(
     }
 
     private fun cleanupUnpersistedPhotos(draft: QuickRecordDraft?) {
-        val paths = draft?.photos.orEmpty() - draft?.sourcePhotos.orEmpty().toSet()
-        if (paths.isNotEmpty()) {
-            viewModelScope.launch(NonCancellable) { photoStore.delete(paths) }
-        }
+        if (draft == null) return
+        viewModelScope.launch(NonCancellable) { photoLifecycle.cleanupAbandoned(draft) }
     }
 
     private fun persistCurrentDraft() {

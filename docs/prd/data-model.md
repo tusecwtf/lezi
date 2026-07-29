@@ -222,6 +222,12 @@ NAS 持久化和 pull 的 current MediaAsset payload 固定包含三个归属 UU
 `width`、`height` 与 `byte_size`；nullable 字段省略时规范为显式 `null`。live media 的
 `byte_size` 必须为正数，tombstone 规范为 `0` 且不要求字节。
 
+履行 Composer 中的计划照片是按原顺序带入的 **borrowed refs**，不是草稿拥有的临时文件：
+移除预填项、取消、返回、写入失败或进程重建后的放弃均不得删除计划原图。当前 Composer
+新导入的私有文件单独记为 draft-owned；写入失败时保留供重试，移除或明确放弃时才清理。
+履行事务成功后，原 CarePlan 的媒体集合保持不变，事实 Record 只建立确认时仍在草稿内的
+计划照片和新导入照片媒体行；已被事实引用的新导入文件不进入物理清理候选。
+
 ### 3.8 SettingsLocal（**不同步**）
 
 | 字段 | 说明 |

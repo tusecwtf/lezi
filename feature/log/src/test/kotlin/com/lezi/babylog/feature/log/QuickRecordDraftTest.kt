@@ -881,13 +881,15 @@ class QuickRecordDraftTest {
             schemaVersion = 2,
             updatedAt = tappedAt,
         )
-        // Composer fulfill path sets photos from listCarePlanPhotoPaths and sourcePhotos empty.
+        // Composer fulfill path retains plan photos as ordered borrowed references.
         val draft = QuickRecordDraft.fromCarePlan(plan, actualTimestamp = tappedAt).copy(
             photos = listOf("p1.jpg", "p2.jpg"),
             sourcePhotos = emptyList(),
+            borrowedPhotos = listOf("p1.jpg", "p2.jpg"),
         )
         assertEquals(listOf("p1.jpg", "p2.jpg"), draft.photos)
         assertTrue(draft.sourcePhotos.isEmpty())
+        assertEquals(listOf("p1.jpg", "p2.jpg"), draft.borrowedPhotos)
         assertEquals(ComposerWorkMode.FulfillPlan, draft.workMode(nowMillis = tappedAt))
     }
 
