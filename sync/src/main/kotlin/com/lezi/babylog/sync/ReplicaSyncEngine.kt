@@ -47,6 +47,15 @@ internal object AtomicBundleId {
     fun forCarePlan(planClientUuid: String, updatedAt: Long): String =
         fromRoot("care_plan", planClientUuid, updatedAt)
 
+    fun forBaby(babyClientUuid: String, updatedAt: Long): String =
+        fromRoot("baby", babyClientUuid, updatedAt)
+
+    fun forCustomItem(itemClientUuid: String, updatedAt: Long): String =
+        fromRoot("custom_item", itemClientUuid, updatedAt)
+
+    fun forFulfillmentCandidate(candidateClientUuid: String, updatedAt: Long): String =
+        fromRoot("fulfillment_candidate", candidateClientUuid, updatedAt)
+
     private fun fromRoot(rootType: String, clientUuid: String, updatedAt: Long): String =
         UUID.nameUUIDFromBytes(
             "$NAMESPACE:$rootType:$clientUuid:$updatedAt".toByteArray(Charsets.UTF_8),
@@ -350,7 +359,7 @@ internal class ReplicaSyncEngine(
             existing.createdByMembershipId != wire.createdByMembershipId
         // A deterministic next-feed UUID lets the NAS choose one creator when two
         // members schedule offline. The losing local create must accept that winner;
-        // ordinary dirty CarePlan edits keep the standard creator ACL/LWW behavior.
+        // Standard dirty CarePlan edits keep the creator ACL/LWW behavior.
         if (!concurrentNextFeedCreate) {
             // Match server LWW for business fields. Equal revisions may still carry
             // the NAS-owned immutable creator acknowledgement after a push.
@@ -1285,7 +1294,7 @@ internal class ReplicaSyncEngine(
             }
         }
         // Outbox materialization only; atomic commit order is record packages →
-        // care_plan packages → fulfillment_candidate residual (see pushOutboxBatch).
+        // care_plan packages → fulfillment_candidate package (see pushOutboxBatch).
         records.forEach { record ->
             val babyUuid = babyDao.getIncludingDeleted(record.babyId)?.clientUuid
                 ?: return@forEach

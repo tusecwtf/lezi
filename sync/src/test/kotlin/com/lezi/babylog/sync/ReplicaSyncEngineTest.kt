@@ -463,10 +463,10 @@ class ReplicaSyncEngineTest {
         )
 
         val planPayload = Json.parseToJsonElement(
-            rig.backend.stagedBundles.single().root.payloadJson,
+            rig.backend.stagedBundles.single { it.root.type == "care_plan" }.root.payloadJson,
         ).jsonObject
         val itemPayload = Json.parseToJsonElement(
-            rig.backend.pushes.single().entities.single { it.type == "custom_item" }.payloadJson,
+            rig.backend.stagedBundles.single { it.root.type == "custom_item" }.root.payloadJson,
         ).jsonObject
         assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
         assertThat(planPayload["created_by_membership_id"].toString()).isEqualTo("null")
@@ -719,11 +719,7 @@ class ReplicaSyncEngineTest {
         )
 
         assertThat(rig.backend.pullCursors).containsExactly(9L, 0L, 2L).inOrder()
-        assertThat(
-            rig.backend.pushes
-                .flatMap(PushedBatch::entities)
-                .map(SyncEntity::clientUuid),
-        ).contains("baby-local")
+        assertThat(rig.backend.stagedBundles.map { it.root.clientUuid }).contains("baby-local")
         assertThat(outcome).isEqualTo(ReplicaSyncOutcome.Synchronized)
         assertThat(rig.preferences.current().pullCursor).isEqualTo(2)
     }

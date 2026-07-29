@@ -18,15 +18,10 @@ data class PullResult(
     val familyName: String? = null,
 )
 
-/** Server-owned Record author returned after an accepted push or atomic commit. */
+/** Server-owned Record author returned after an accepted atomic commit. */
 data class CanonicalRecordAuthor(
     val clientUuid: String,
     val createdByMembershipId: String,
-)
-
-data class PushResult(
-    val applied: Int,
-    val recordAuthors: List<CanonicalRecordAuthor> = emptyList(),
 )
 
 data class JoinResult(
@@ -84,7 +79,6 @@ interface SyncBackend {
         familyName: String? = null,
     ): JoinResult
 
-    suspend fun push(session: SyncSession, entities: List<SyncEntity>): PushResult
     suspend fun pull(session: SyncSession): PullResult
     suspend fun invite(session: SyncSession): Invite
 
@@ -107,18 +101,11 @@ interface SyncBackend {
      */
     suspend fun removeMember(session: SyncSession, membershipId: String)
     suspend fun deleteFamily(session: SyncSession)
-    suspend fun putMedia(
-        session: SyncSession,
-        clientUuid: String,
-        bytes: ByteArray,
-        mime: String?,
-    )
-
     suspend fun getMedia(session: SyncSession, clientUuid: String): ByteArray
 
     /**
      * Stage root entity + media metadata for an atomic package.
-     * Nothing is visible on ordinary pull until [commitBundle].
+     * Nothing is visible on family pull until [commitBundle].
      */
     suspend fun stageBundle(session: SyncSession, draft: AtomicBundleDraft): BundleStageStatus
 

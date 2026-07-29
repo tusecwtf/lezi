@@ -5,6 +5,11 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
+data class LegacyPushResult(
+    val applied: Int,
+    val recordAuthors: List<CanonicalRecordAuthor> = emptyList(),
+)
+
 /**
  * Deterministic in-memory backend for coordinator and dual-client tests.
  *
@@ -139,9 +144,9 @@ class FakeSyncBackend : SyncBackend {
         )
     }
 
-    override suspend fun push(session: SyncSession, entities: List<SyncEntity>): PushResult {
+    suspend fun push(session: SyncSession, entities: List<SyncEntity>): LegacyPushResult {
         val applied = pushRows(session.familyId, entities, session.role, session.membershipId)
-        return PushResult(
+        return LegacyPushResult(
             applied = applied,
             recordAuthors = canonicalRecordAuthors(session.familyId, entities),
         )
@@ -206,7 +211,7 @@ class FakeSyncBackend : SyncBackend {
         mediaBytes.remove(session.familyId)
     }
 
-    override suspend fun putMedia(
+    suspend fun putMedia(
         session: SyncSession,
         clientUuid: String,
         bytes: ByteArray,

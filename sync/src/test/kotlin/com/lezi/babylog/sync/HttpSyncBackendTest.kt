@@ -13,14 +13,14 @@ import org.junit.Test
 
 class HttpSyncBackendTest {
     @Test
-    fun pushRejectsMalformedCanonicalRecordAuthors() = runTest {
+    fun commitRejectsMalformedCanonicalRecordAuthors() = runTest {
         val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
         val responder = thread(name = "lezi-push-author-test-server") {
             runCatching {
                 server.accept().use { socket ->
                     readRequest(socket)
                     val body =
-                        """{"applied":1,"record_authors":[{"client_uuid":"r1","created_by_membership_id":"membership-a"},{"client_uuid":"","created_by_membership_id":"forged"},{"client_uuid":"r2"}]}"""
+                        """{"bundle_id":"b1","status":"committed","applied":1,"cursor":1,"record_authors":[{"client_uuid":"r1","created_by_membership_id":"membership-a"},{"client_uuid":"","created_by_membership_id":"forged"},{"client_uuid":"r2"}]}"""
                             .toByteArray(Charsets.UTF_8)
                     socket.getOutputStream().use { output ->
                         output.write(
@@ -39,10 +39,7 @@ class HttpSyncBackendTest {
 
         try {
             val failure = runCatching {
-                HttpSyncBackend().push(
-                    testSession(server),
-                    listOf(SyncEntity("record", "r1", "{}", updatedAt = 1)),
-                )
+                HttpSyncBackend().commitBundle(testSession(server), "b1")
             }.exceptionOrNull()
 
             assertThat(failure).isInstanceOf(IllegalArgumentException::class.java)

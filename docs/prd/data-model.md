@@ -321,7 +321,7 @@ exact-key parser 使用同一 canonical shape。
 
 Android 本机表 `fulfillment_candidates` 在履行事务中写入稳定 `clientUuid` 与
 不可变本地 `confirmedAt`，并与 Record 原子包 + completed CarePlan 原子包一起出站
-（ordinary push 候选）；接收端 completed 计划须已有关联 Record，候选须 plan+record
+（空媒体 atomic bundle 根）；接收端 completed 计划须已有关联 Record，候选须 plan+record
 均已落地后才应用。全量候选就绪后裁决：赢家 `adoptionStatus=adopted` 并写入计划
 关联；落选 `conflict_not_adopted`，**不**软删除 Record/照片；落选记录不进入普通
 时间轴、汇总、搜索或普通导出。管理员可在本机审计落选并「转为独立记录」：创建**新的**

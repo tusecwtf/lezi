@@ -1,6 +1,7 @@
 package com.lezi.babylog.sync
 
 import com.lezi.babylog.core.database.BabyDao
+import com.lezi.babylog.core.database.BabyEntity
 import com.lezi.babylog.core.database.CarePlanDao
 import com.lezi.babylog.core.database.CustomItemDao
 import com.lezi.babylog.core.database.FulfillmentCandidateDao
@@ -20,11 +21,12 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 
 /**
- * Classifies outbox rows into ordinary vs atomic publish paths and executes them.
+ * Classifies outbox rows into atomic root packages and executes them.
  *
  * Product contract:
- * - Baby / CustomItem / avatar media / fulfillment_candidate → ordinary push (+ media PUT)
- * - Every Record (0–3 photos) and every CarePlan → atomic bundle endpoints
+ * - Baby + avatar media → one atomic bundle
+ * - CustomItem / FulfillmentCandidate → empty-media atomic bundles
+ * - Every Record (0–3 photos) and every CarePlan → atomic bundles
  */
 internal class OutboxPushPipeline(
     private val backend: SyncBackend,
@@ -56,7 +58,7 @@ internal class OutboxPushPipeline(
         if (staleAfterHardDelete.isNotEmpty()) {
             // A committed local clear can fail before its outbox cleanup. Never
             // resurrect a hard-deleted entity on a later sync; deleting these
-            // rows is safe because ordinary soft deletes retain their DB row.
+            // rows is safe because standard soft deletes retain their DB row.
             outboxDao.deleteIds(staleAfterHardDelete.map(OutboxEntity::id))
         }
         val unauthorizedBabyRows = if (session.role == FamilyRole.Member) {
@@ -87,7 +89,7 @@ internal class OutboxPushPipeline(
             // those roots (and cyclic Baby/avatar metadata) before asking the NAS
             // to validate an atomic Record/CarePlan bundle against them.
             val prerequisites = plan.residual.filter { it.isAtomicBundlePrerequisite() }
-            pushResidualBatch(session, prerequisites)
+            pushAtomicResiduals(session, prerequisites)
             val residual = plan.residual - prerequisites.toSet()
             // Prefer fulfill Record before completed care_plan so pull pages that
             // end mid-set still apply the fact first. Receivers apply records then
@@ -100,12 +102,12 @@ internal class OutboxPushPipeline(
                 pushCarePlanAtomicBundle(session, planRow, pending)
             }
             if (residual.isEmpty()) return true
-            pushResidualBatch(session, residual)
+            pushAtomicResiduals(session, residual)
             return true
         }
 
         if (plan.residual.isEmpty()) return true
-        pushResidualBatch(session, plan.residual)
+        pushAtomicResiduals(session, plan.residual)
         return true
     }
 
@@ -146,74 +148,224 @@ internal class OutboxPushPipeline(
     private suspend fun isFamilyAuthorityBaby(babyId: Long): Boolean =
         babyDao.get(babyId)?.familyAuthority == true
 
-    private suspend fun pushResidualBatch(
+    private suspend fun pushAtomicResiduals(
         session: SyncSession,
         residual: List<OutboxEntity>,
     ) {
         if (residual.isEmpty()) return
-        val uploads = mutableListOf<MediaAssetEntity>()
-        val entities = residual
-            .map { row ->
-                var payload = row.payloadJson
-                if (row.entityType == "media" && row.deletedAt == null) {
-                    val media = mediaDao.getByClientUuid(row.clientUuid)
-                        ?: error("本地媒体元数据不存在")
-                    if (!media.hasReceiptFor(session)) {
-                        val prepared = mediaFiles.prepareUpload(media.localUri)
-                        val updated = media.copy(
-                            mime = prepared.mime,
-                            width = prepared.width ?: media.width,
-                            height = prepared.height ?: media.height,
-                            byteSize = prepared.bytes.size.toLong(),
-                        )
-                        mediaDao.update(updated)
-                        uploads += updated
-                        val rawObject = Json.parseToJsonElement(payload).jsonObject
-                        payload = JsonObject(
-                            rawObject +
-                                ("mime" to JsonPrimitive(updated.mime)) +
-                                ("byte_size" to JsonPrimitive(updated.byteSize)) +
-                                listOfNotNull(
-                                    updated.width?.let { "width" to JsonPrimitive(it) },
-                                    updated.height?.let { "height" to JsonPrimitive(it) },
-                                ).toMap(),
-                        ).toString()
-                    }
-                }
-                SyncEntity(
-                    row.entityType,
-                    row.clientUuid,
-                    payload,
-                    row.updatedAt,
-                    row.deletedAt,
+        val consumed = mutableSetOf<Long>()
+        val avatarRows = residual.filter { row -> row.isAvatarMedia() }
+        for (babyRow in residual.filter { it.entityType == "baby" }) {
+            val baby = babyDao.getByClientUuid(babyRow.clientUuid)
+                ?: error("本地宝宝档案不存在")
+            val babyAvatarRows = avatarRows.filter { row ->
+                mediaDao.getByClientUuid(row.clientUuid)?.babyId == baby.id
+            }
+            pushBabyAtomicBundle(session, baby, babyRow, babyAvatarRows)
+            consumed += babyRow.id
+            consumed += babyAvatarRows.map(OutboxEntity::id)
+        }
+        for (avatarRow in avatarRows.filterNot { it.id in consumed }) {
+            val media = mediaDao.getByClientUuid(avatarRow.clientUuid)
+                ?: error("本地媒体元数据不存在")
+            val baby = media.babyId?.let { babyDao.getIncludingDeleted(it) }
+                ?: error("头像缺少本地宝宝根")
+            pushBabyAtomicBundle(session, baby, babyRow = null, listOf(avatarRow))
+            consumed += avatarRow.id
+        }
+
+        val standaloneLogRows = residual.filter { row ->
+            row.entityType == "media" && row.id !in consumed
+        }
+        pushStandaloneLogMediaBundles(session, standaloneLogRows)
+        consumed += standaloneLogRows.map(OutboxEntity::id)
+
+        for (row in residual.filterNot { it.id in consumed }) {
+            when (row.entityType) {
+                "custom_item", "fulfillment_candidate" -> pushEmptyMediaRoot(session, row)
+                "record", "care_plan" ->
+                    error("record/care_plan must be classified as an atomic root package")
+                else -> error("不支持的同步根类型：${row.entityType}")
+            }
+            consumed += row.id
+        }
+    }
+
+    private fun OutboxEntity.isAvatarMedia(): Boolean =
+        entityType == "media" && runCatching {
+            Json.parseToJsonElement(payloadJson).jsonObject.string("kind") == "avatar"
+        }.getOrDefault(false)
+
+    private suspend fun pushBabyAtomicBundle(
+        session: SyncSession,
+        baby: BabyEntity,
+        babyRow: OutboxEntity?,
+        avatarRows: List<OutboxEntity>,
+    ) {
+        val rootUpdatedAt = maxOf(
+            babyRow?.updatedAt ?: nextPackageVersion(baby.updatedAt),
+            avatarRows.maxOfOrNull(OutboxEntity::updatedAt) ?: baby.updatedAt,
+        )
+        val root = SyncWireMapper.baby(
+            entity = baby,
+            avatarMediaUuid = baby.avatarMediaUuid,
+        ).copy(
+            updatedAt = rootUpdatedAt,
+            deletedAt = babyRow?.deletedAt ?: baby.deletedAt,
+        )
+        publishRootWithMedia(
+            session = session,
+            bundleId = AtomicBundleId.forBaby(baby.clientUuid, rootUpdatedAt),
+            root = root,
+            mediaRows = avatarRows,
+        )
+        babyRow?.let {
+            babyDao.markSynced(it.clientUuid, it.updatedAt)
+            outboxDao.deleteIds(listOf(it.id))
+        }
+        acknowledgeMediaRows(avatarRows)
+    }
+
+    private suspend fun pushEmptyMediaRoot(
+        session: SyncSession,
+        row: OutboxEntity,
+    ) {
+        val bundleId = when (row.entityType) {
+            "custom_item" -> AtomicBundleId.forCustomItem(row.clientUuid, row.updatedAt)
+            "fulfillment_candidate" ->
+                AtomicBundleId.forFulfillmentCandidate(row.clientUuid, row.updatedAt)
+            else -> error("不支持的空媒体同步根：${row.entityType}")
+        }
+        requireRemoteAllowed(session)
+        backend.stageBundle(
+            session,
+            AtomicBundleDraft(
+                bundleId = bundleId,
+                root = row.toSyncEntity(),
+                media = emptyList(),
+            ),
+        )
+        requireRemoteAllowed(session)
+        backend.commitBundle(session, bundleId)
+        when (row.entityType) {
+            "custom_item" -> customItemDao.markSynced(row.clientUuid, row.updatedAt)
+            "fulfillment_candidate" ->
+                fulfillmentCandidateDao.markSynced(row.clientUuid, row.updatedAt)
+        }
+        outboxDao.deleteIds(listOf(row.id))
+    }
+
+    private suspend fun pushStandaloneLogMediaBundles(
+        session: SyncSession,
+        rows: List<OutboxEntity>,
+    ) {
+        val recordGroups = linkedMapOf<Long, MutableList<OutboxEntity>>()
+        val planGroups = linkedMapOf<Long, MutableList<OutboxEntity>>()
+        for (row in rows) {
+            val media = mediaDao.getByClientUuid(row.clientUuid)
+                ?: error("本地媒体元数据不存在")
+            require(media.kind == "log") { "独立媒体必须是 log 或 avatar" }
+            val recordId = media.recordId
+            val carePlanId = media.carePlanId
+            when {
+                recordId != null -> recordGroups.getOrPut(recordId) { mutableListOf() } += row
+                carePlanId != null -> planGroups.getOrPut(carePlanId) { mutableListOf() } += row
+                else -> error("日志媒体缺少 Record/CarePlan 根")
+            }
+        }
+        for ((recordId, mediaRows) in recordGroups) {
+            val record = recordDao.getIncludingDeleted(recordId)
+                ?: error("日志媒体对应的本地记录不存在")
+            val baby = babyDao.getIncludingDeleted(record.babyId)
+                ?: error("本地宝宝档案不存在")
+            val rootUpdatedAt = maxOf(
+                nextPackageVersion(record.updatedAt),
+                mediaRows.maxOf(OutboxEntity::updatedAt),
+            )
+            val root = SyncWireMapper.record(
+                entity = record,
+                babyClientUuid = baby.clientUuid,
+                customItemClientUuid = recordCustomItemClientUuid(record),
+            ).copy(updatedAt = rootUpdatedAt, deletedAt = record.deletedAt)
+            publishRootWithMedia(
+                session,
+                AtomicBundleId.forRecord(record.clientUuid, rootUpdatedAt),
+                root,
+                mediaRows,
+            )
+            acknowledgeMediaRows(mediaRows)
+        }
+        for ((planId, mediaRows) in planGroups) {
+            val plan = carePlanDao.get(planId)
+                ?: error("日志媒体对应的本地护理计划不存在")
+            val baby = babyDao.getIncludingDeleted(plan.babyId)
+                ?: error("本地宝宝档案不存在")
+            val rootUpdatedAt = maxOf(
+                nextPackageVersion(plan.updatedAt),
+                mediaRows.maxOf(OutboxEntity::updatedAt),
+            )
+            val root = SyncWireMapper.carePlan(
+                entity = plan,
+                babyClientUuid = baby.clientUuid,
+                customItemClientUuid = plan.customItemId?.let { customItemDao.getById(it)?.clientUuid },
+            ).copy(updatedAt = rootUpdatedAt, deletedAt = plan.deletedAt)
+            publishRootWithMedia(
+                session,
+                AtomicBundleId.forCarePlan(plan.clientUuid, rootUpdatedAt),
+                root,
+                mediaRows,
+            )
+            acknowledgeMediaRows(mediaRows)
+        }
+    }
+
+    private suspend fun publishRootWithMedia(
+        session: SyncSession,
+        bundleId: String,
+        root: SyncEntity,
+        mediaRows: List<OutboxEntity>,
+    ) {
+        val prepared = prepareAtomicMediaPackage(mediaRows)
+        requireRemoteAllowed(session)
+        val stage = backend.stageBundle(
+            session,
+            AtomicBundleDraft(bundleId, root, prepared.entities),
+        )
+        val toUpload = stage.mediaUuidsToUpload(
+            prepared.bytes.map { it.first.clientUuid }.toSet(),
+        )
+        for ((media, bytes) in prepared.bytes) {
+            if (media.clientUuid in toUpload) {
+                requireRemoteAllowed(session)
+                backend.putBundleMedia(
+                    session,
+                    bundleId,
+                    media.clientUuid,
+                    bytes.bytes,
+                    bytes.mime,
                 )
             }
-            .sortedBy { ENTITY_ORDER.indexOf(it.type).takeIf { index -> index >= 0 } ?: Int.MAX_VALUE }
-        requireRemoteAllowed(session)
-        // Ordinary residual never carries Record roots (those are atomic-only).
-        backend.push(session, entities)
-        uploads.forEach { media ->
-            requireRemoteAllowed(session)
-            // Metadata needs the compressed byte size, so preparation happens
-            // once before the metadata push and again here. Re-preparing one
-            // file at a time bounds resident JPEG bytes to a single upload.
-            val prepared = mediaFiles.prepareUpload(media.localUri)
-            backend.putMedia(session, media.clientUuid, prepared.bytes, prepared.mime)
             mediaDao.update(media.copy(remoteUri = session.receiptFor(media.clientUuid)))
         }
-        residual.forEach { row ->
-            when (row.entityType) {
-                "baby" -> babyDao.markSynced(row.clientUuid, row.updatedAt)
-                "media" -> mediaDao.markSynced(row.clientUuid, row.updatedAt)
-                "custom_item" -> customItemDao.markSynced(row.clientUuid, row.updatedAt)
-                "fulfillment_candidate" ->
-                    fulfillmentCandidateDao.markSynced(row.clientUuid, row.updatedAt)
-                "record", "care_plan" ->
-                    error("record/care_plan must not remain on the ordinary residual path")
-            }
-        }
-        outboxDao.deleteIds(residual.map { it.id })
+        requireRemoteAllowed(session)
+        backend.commitBundle(session, bundleId)
     }
+
+    private suspend fun acknowledgeMediaRows(rows: List<OutboxEntity>) {
+        rows.forEach { mediaDao.markSynced(it.clientUuid, it.updatedAt) }
+        if (rows.isNotEmpty()) outboxDao.deleteIds(rows.map(OutboxEntity::id))
+    }
+
+    private fun OutboxEntity.toSyncEntity(): SyncEntity = SyncEntity(
+        type = entityType,
+        clientUuid = clientUuid,
+        payloadJson = payloadJson,
+        updatedAt = updatedAt,
+        deletedAt = deletedAt,
+    )
+
+    private fun nextPackageVersion(updatedAt: Long): Long =
+        if (updatedAt == Long.MAX_VALUE) updatedAt else updatedAt + 1
 
     private fun OutboxEntity.isAtomicBundlePrerequisite(): Boolean = when (entityType) {
         "baby", "custom_item" -> true
@@ -534,7 +686,7 @@ private data class AtomicMediaPackage(
 )
 
 /**
- * Pure classification of a pending outbox snapshot into ordinary vs atomic lanes.
+ * Pure classification of a pending outbox snapshot into package roots and dependent rows.
  */
 internal data class OutboxPushPlan(
     /** Every pending Record root (0–3 log photos) publishes as an atomic package. */

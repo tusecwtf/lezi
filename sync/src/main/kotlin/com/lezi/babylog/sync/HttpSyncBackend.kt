@@ -96,19 +96,6 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
             }
         }).toCreateResult()
 
-    override suspend fun push(session: SyncSession, entities: List<SyncEntity>): PushResult {
-        session.requireCurrentReplicaTransport()
-        val json = post(session.baseUrl, "/v1/push", session.familyToken, buildJsonObject {
-            put("device_id", session.deviceId)
-            put("generation", session.pullGeneration)
-            put("entities", buildJsonArray { entities.forEach { add(it.toJson()) } })
-        })
-        return PushResult(
-            applied = json.requiredLong("applied", "push").toInt(),
-            recordAuthors = json.recordAuthors(),
-        )
-    }
-
     override suspend fun pull(session: SyncSession): PullResult {
         session.requireCurrentReplicaTransport()
         val generation = URLEncoder.encode(session.pullGeneration, Charsets.UTF_8.name())
@@ -207,20 +194,6 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
     override suspend fun deleteFamily(session: SyncSession) {
         post(session.baseUrl, "/v1/family/delete", session.familyToken, buildJsonObject {})
     }
-
-    override suspend fun putMedia(
-        session: SyncSession,
-        clientUuid: String,
-        bytes: ByteArray,
-        mime: String?,
-    ) = requestBytes(
-        session.baseUrl,
-        "/v1/media/$clientUuid",
-        "PUT",
-        session.familyToken,
-        bytes,
-        mime,
-    ).let { Unit }
 
     override suspend fun getMedia(session: SyncSession, clientUuid: String): ByteArray =
         requestBytes(session.baseUrl, "/v1/media/$clientUuid", "GET", session.familyToken)

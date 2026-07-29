@@ -102,6 +102,12 @@ class RealSyncPortTest {
         ).isEqualTo("d9d61874-0056-38c0-8540-8c6d1961ea92")
         assertThat(AtomicBundleId.forCarePlan(entityUuid, 1_725_123_456_789))
             .isEqualTo("48dc1a40-05dc-357f-b5c9-00ed00de6f57")
+        assertThat(AtomicBundleId.forBaby(entityUuid, 1_725_123_456_789))
+            .isNotEqualTo(recordBundle)
+        assertThat(AtomicBundleId.forCustomItem(entityUuid, 1_725_123_456_789))
+            .isNotEqualTo(recordBundle)
+        assertThat(AtomicBundleId.forFulfillmentCandidate(entityUuid, 1_725_123_456_789))
+            .isNotEqualTo(recordBundle)
         assertThat(AtomicBundleId.forRecord(entityUuid, 2))
             .isEqualTo("e4c2d0cf-4967-347c-b3bd-af9dae2b34f4")
     }
@@ -321,7 +327,7 @@ class RealSyncPortTest {
         assertThat(rig.port.session().first().familyToken).isEqualTo("owner-token-reclaimed")
         assertThat(rig.backend.pullCursors).containsExactly(0L)
         assertThat(rig.backend.syncOrder)
-            .containsExactly("push:baby", "pull:0")
+            .containsExactly("stage:baby", "pull:0")
             .inOrder()
         assertThat(rig.port.session().first().pullCursor).isEqualTo(7L)
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
@@ -473,13 +479,9 @@ class RealSyncPortTest {
         val result = rig.port.sync(SyncTrigger.LocalWrite)
         assertThat(result.exceptionOrNull()).isNull()
 
-        // Baby is ordinary; every Record (including 0-photo) is an atomic package.
-        val pushed = rig.backend.pushes.single()
-        assertThat(pushed.session.familyId).isEqualTo("family-a")
-        assertThat(pushed.entities.map(SyncEntity::type)).containsExactly("baby")
-        assertThat(rig.backend.committedBundles).hasSize(1)
-        val draft = rig.backend.stagedBundles.single()
-        assertThat(draft.root.type).isEqualTo("record")
+        assertThat(rig.backend.pushes).isEmpty()
+        assertThat(rig.backend.committedBundles).hasSize(2)
+        val draft = rig.backend.stagedBundles.single { it.root.type == "record" }
         val recordPayload = Json.parseToJsonElement(draft.root.payloadJson).jsonObject
         assertThat(recordPayload["baby_client_uuid"].toString()).isEqualTo("\"baby-local\"")
         assertThat(recordPayload["baby_id"]).isNull()
@@ -492,7 +494,7 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun freshFamilyPushesBabyAndZeroPhotoRecordInOneOrdinaryBatch() = runTest {
+    fun freshFamilyPushesBabyAndZeroPhotoRecordAsOrderedAtomicRoots() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         rig.backend.enforceBundleReferences = true
         val babyId = rig.babies.seed(localBaby())
@@ -502,7 +504,7 @@ class RealSyncPortTest {
 
         assertThat(result.exceptionOrNull()).isNull()
         assertThat(rig.backend.operationOrder)
-            .containsExactly("push:baby", "stage:record")
+            .containsExactly("stage:baby", "stage:record")
             .inOrder()
         assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
     }
@@ -528,7 +530,7 @@ class RealSyncPortTest {
                 mime = "image/jpeg",
                 byteSize = 1,
                 createdAt = 100,
-                updatedAt = 100,
+                updatedAt = 110,
             ),
         )
         rig.records.seed(localRecord(babyId))
@@ -538,11 +540,16 @@ class RealSyncPortTest {
         assertThat(result.exceptionOrNull()).isNull()
         assertThat(rig.backend.operationOrder)
             .containsExactly(
-                "push:baby,media",
-                "put_media:$avatarUuid",
+                "stage:baby",
+                "put_bundle_media:$avatarUuid",
                 "stage:record",
             )
             .inOrder()
+        val babyDraft = rig.backend.stagedBundles.first { it.root.type == "baby" }
+        assertThat(babyDraft.root.updatedAt).isEqualTo(110)
+        assertThat(babyDraft.bundleId).isEqualTo(
+            AtomicBundleId.forBaby("22222222-2222-4222-8222-222222222222", 110),
+        )
         assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
     }
 
@@ -573,7 +580,7 @@ class RealSyncPortTest {
 
         assertThat(result.exceptionOrNull()).isNull()
         assertThat(rig.backend.operationOrder)
-            .containsExactly("push:baby,custom_item", "stage:care_plan")
+            .containsExactly("stage:baby", "stage:custom_item", "stage:care_plan")
             .inOrder()
         assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
     }
@@ -632,10 +639,11 @@ class RealSyncPortTest {
         assertThat(result.exceptionOrNull()).isNull()
         assertThat(rig.backend.operationOrder)
             .containsExactly(
-                "push:baby,custom_item",
+                "stage:baby",
+                "stage:custom_item",
                 "stage:record",
                 "stage:care_plan",
-                "push:fulfillment_candidate",
+                "stage:fulfillment_candidate",
             )
             .inOrder()
         assertThat(rig.outbox.peek("family-new", 100)).isEmpty()
@@ -925,7 +933,9 @@ class RealSyncPortTest {
 
         val pushResult = rig.port.sync(SyncTrigger.LocalWrite)
         assertThat(pushResult.exceptionOrNull()).isNull()
-        val pushed = rig.backend.pushes.flatMap { it.entities }.filter { it.type == "custom_item" }
+        val pushed = rig.backend.stagedBundles
+            .map(AtomicBundleDraft::root)
+            .filter { it.type == "custom_item" }
         assertThat(pushed).hasSize(1)
         assertThat(pushed.single().payloadJson).contains("\"name\":\"抚触\"")
         assertThat(pushed.single().payloadJson).doesNotContain("sort_order")
@@ -1035,8 +1045,8 @@ class RealSyncPortTest {
 
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
 
-        assertThat(rig.backend.pushes).hasSize(2)
-        assertThat(rig.backend.pushes.flatMap { it.entities }.map(SyncEntity::clientUuid))
+        assertThat(rig.backend.stagedBundles).hasSize(205)
+        assertThat(rig.backend.stagedBundles.map { it.root.clientUuid })
             .containsExactlyElementsIn((0 until 205).map { "baby-$it" })
         assertThat(rig.outbox.peek("family-a", 300)).isEmpty()
     }
@@ -1052,13 +1062,13 @@ class RealSyncPortTest {
                 ),
             )
         }
-        rig.backend.afterPush = { rig.foreground.setForeground(false) }
+        rig.backend.afterCommit = { rig.foreground.setForeground(false) }
 
         val result = rig.port.sync(SyncTrigger.LocalWrite)
 
         assertThat(result.isFailure).isTrue()
-        assertThat(rig.backend.pushes).hasSize(1)
-        assertThat(rig.outbox.peek("family-a", 300)).hasSize(5)
+        assertThat(rig.backend.committedBundles).hasSize(1)
+        assertThat(rig.outbox.peek("family-a", 300)).hasSize(204)
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.BlockedOfflineHome)
     }
 
@@ -1088,7 +1098,7 @@ class RealSyncPortTest {
 
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
 
-        assertThat(rig.backend.pushes.flatMap { it.entities }.map(SyncEntity::clientUuid))
+        assertThat(rig.backend.stagedBundles.map { it.root.clientUuid })
             .containsExactly("changed-baby")
     }
 
@@ -1113,7 +1123,7 @@ class RealSyncPortTest {
 
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
 
-        assertThat(rig.backend.pushes.flatMap { it.entities }.map(SyncEntity::clientUuid))
+        assertThat(rig.backend.stagedBundles.map { it.root.clientUuid })
             .containsExactly("written-after-clock-rollback")
     }
 
@@ -1149,8 +1159,8 @@ class RealSyncPortTest {
 
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
 
-        val firstBatch = rig.backend.pushes.first().entities
-        assertThat(firstBatch.map(SyncEntity::clientUuid)).contains(avatarUuid)
+        val babyBundle = rig.backend.stagedBundles.first { it.root.clientUuid == "baby-0" }
+        assertThat(babyBundle.media.map(SyncEntity::clientUuid)).contains(avatarUuid)
         assertThat(rig.outbox.peek("family-a", 300)).isEmpty()
     }
     @Test
@@ -1536,7 +1546,7 @@ class RealSyncPortTest {
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
 
         assertThat(rig.backend.pullCursors).containsExactly(1L, 0L, 1L).inOrder()
-        assertThat(rig.backend.pushes.flatMap(PushedBatch::entities).map(SyncEntity::clientUuid))
+        assertThat(rig.backend.stagedBundles.map { it.root.clientUuid })
             .contains("baby-local")
     }
 
@@ -2101,16 +2111,11 @@ class RealSyncPortTest {
         val localMedia = requireNotNull(rig.media.getByClientUuid(mediaUuid))
         assertThat(localMedia.deletedAt).isNull()
         assertThat(localMedia.localUri).isEqualTo("downloaded/$mediaUuid")
-        // Record packages go through atomic bundles; residual media may still use
-        // ordinary push. Either path must never re-publish a tombstone for the
-        // photo we just accepted during download.
-        val residualMedia = rig.backend.pushes
-            .flatMap(PushedBatch::entities)
-            .filter { it.clientUuid == mediaUuid }
+        // Any republished photo stays inside its atomic root package and must remain live.
         val packageMedia = rig.backend.stagedBundles
             .flatMap { it.media }
             .filter { it.clientUuid == mediaUuid }
-        assertThat((residualMedia + packageMedia).all { it.deletedAt == null }).isTrue()
+        assertThat(packageMedia.all { it.deletedAt == null }).isTrue()
     }
 
     @Test
@@ -2164,10 +2169,11 @@ class RealSyncPortTest {
         assertThat(baby.nickname).isEqualTo("只改昵称")
         assertThat(baby.avatarPath).isEqualTo("downloaded/$mediaUuid")
         assertThat(rig.media.getByClientUuid(mediaUuid)?.deletedAt).isNull()
-        val pushedMedia = rig.backend.pushes
-            .flatMap(PushedBatch::entities)
+        val babyDraft = rig.backend.stagedBundles.last { it.root.type == "baby" }
+        val pushedMedia = rig.backend.stagedBundles
+            .flatMap { it.media }
             .filter { it.clientUuid == mediaUuid }
-        assertThat(pushedMedia).isNotEmpty()
+        assertThat(babyDraft.root.payloadJson).contains(mediaUuid)
         assertThat(pushedMedia.all { it.deletedAt == null }).isTrue()
     }
 
@@ -2671,7 +2677,7 @@ class RealSyncPortTest {
 
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
 
-        // Record packages publish via atomic bundle (not ordinary /v1/push).
+        // Record packages publish through the only supported atomic bundle path.
         val mediaPayload = rig.backend.stagedBundles
             .flatMap { it.media }
             .single { it.clientUuid == mediaUuid }
@@ -3077,7 +3083,7 @@ class RealSyncPortTest {
         // push-less path — here we clear outbox then pull with stage still failing
         // on the re-captured package so apply never runs; instead verify that a
         // direct higher remote cannot land while dirty by clearing outbox and
-        // temporarily making push a no-op residual: delete record outbox rows only).
+        // temporarily making publication a no-op: delete record outbox rows only).
         rig.records.seed(
             localRecord(babyId).copy(
                 clientUuid = "record-hold",
@@ -3992,8 +3998,8 @@ class RealSyncPortTest {
             assertThat(recordDraft.media.filter { it.deletedAt == null })
                 .hasSize(photoCount)
 
-            val candidatePush = rig.backend.pushes
-                .flatMap { it.entities }
+            val candidatePush = rig.backend.stagedBundles
+                .map(AtomicBundleDraft::root)
                 .first { it.type == "fulfillment_candidate" && it.clientUuid == candUuid }
             val candPayload = Json.parseToJsonElement(candidatePush.payloadJson).jsonObject
             assertThat(candPayload["care_plan_client_uuid"]?.jsonPrimitive?.contentOrNull)
@@ -4058,10 +4064,11 @@ class RealSyncPortTest {
                 syncDirty = true,
             ),
         )
-        // First push succeeds for atomics; fail residual candidate once (lost response).
-        rig.backend.pushFailures.add(IllegalStateException("candidate push lost"))
+        // Record and plan commit first; fail the candidate's atomic commit once.
+        rig.backend.failCommitRootTypeOnce =
+            "fulfillment_candidate" to IllegalStateException("candidate commit lost")
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isFalse()
-        // Atomics may have committed before residual failed.
+        // Record/plan packages may have committed before the candidate package failed.
         val recordBundleId = rig.backend.stagedBundles.first {
             it.root.type == "record" && it.root.clientUuid == recordUuid
         }.bundleId
@@ -4072,11 +4079,14 @@ class RealSyncPortTest {
         val cand = rig.fulfillmentCandidates.getByClientUuid(candUuid)!!
         rig.fulfillmentCandidates.seed(cand.copy(syncDirty = true))
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
-        val candPushes = rig.backend.pushes
-            .flatMap { it.entities }
+        val candidateDrafts = rig.backend.stagedBundles
+            .filter { it.root.type == "fulfillment_candidate" && it.root.clientUuid == candUuid }
+        val candPushes = candidateDrafts
+            .map(AtomicBundleDraft::root)
             .filter { it.type == "fulfillment_candidate" && it.clientUuid == candUuid }
         assertThat(candPushes).isNotEmpty()
         assertThat(candPushes.map { it.clientUuid }.distinct()).containsExactly(candUuid)
+        assertThat(candidateDrafts.map(AtomicBundleDraft::bundleId).distinct()).hasSize(1)
         assertThat(rig.fulfillmentCandidates.getByClientUuid(candUuid)?.syncDirty).isFalse()
     }
 
@@ -4730,6 +4740,7 @@ internal class RecordingSyncBackend : SyncBackend {
     val pushFailures = ArrayDeque<Throwable>()
     val pullCursors = mutableListOf<Long>()
     var afterPush: (() -> Unit)? = null
+    var afterCommit: (() -> Unit)? = null
     var pullStarted: CompletableDeferred<Unit>? = null
     var releasePull: CompletableDeferred<Unit>? = null
     var createStarted: CompletableDeferred<Unit>? = null
@@ -4802,7 +4813,7 @@ internal class RecordingSyncBackend : SyncBackend {
         )
     }
 
-    override suspend fun push(session: SyncSession, entities: List<SyncEntity>): PushResult {
+    suspend fun push(session: SyncSession, entities: List<SyncEntity>): LegacyPushResult {
         pushAttempts += session
         pushFailures.removeFirstOrNull()?.let { throw it }
         val available = knownEntities + entities.map { it.type to it.clientUuid }
@@ -4841,7 +4852,7 @@ internal class RecordingSyncBackend : SyncBackend {
         pushes += PushedBatch(session, entities)
         knownEntities += entities.map { it.type to it.clientUuid }
         afterPush?.invoke()
-        return PushResult(
+        return LegacyPushResult(
             applied = entities.size,
             recordAuthors = nextPushRecordAuthors ?: entities
                 .filter { it.type == "record" }
@@ -4942,7 +4953,7 @@ internal class RecordingSyncBackend : SyncBackend {
         onDeleteFamily()
     }
 
-    override suspend fun putMedia(
+    suspend fun putMedia(
         session: SyncSession,
         clientUuid: String,
         bytes: ByteArray,
@@ -4964,6 +4975,7 @@ internal class RecordingSyncBackend : SyncBackend {
     var stageBundleFailure: Throwable? = null
     var putBundleMediaFailure: Throwable? = null
     var commitBundleFailure: Throwable? = null
+    var failCommitRootTypeOnce: Pair<String, Throwable>? = null
     var nextCommitRecordAuthors: List<CanonicalRecordAuthor>? = null
     var stageBundleStatus = "staging"
     var stageBundleMissingMedia: List<String>? = null
@@ -4996,6 +5008,7 @@ internal class RecordingSyncBackend : SyncBackend {
             }
         }
         operationOrder += "stage:${draft.root.type}"
+        syncOrder += "stage:${draft.root.type}"
         stagedBundles += draft
         return BundleStageStatus(
             bundleId = draft.bundleId,
@@ -5014,6 +5027,7 @@ internal class RecordingSyncBackend : SyncBackend {
         mime: String?,
     ): BundleStageStatus {
         putBundleMediaFailure?.let { throw it }
+        operationOrder += "put_bundle_media:$clientUuid"
         bundleMediaUploads += bundleId to clientUuid
         return BundleStageStatus(
             bundleId = bundleId,
@@ -5026,12 +5040,20 @@ internal class RecordingSyncBackend : SyncBackend {
         session: SyncSession,
         bundleId: String,
     ): BundleCommitResult {
+        val stagedDraft = stagedBundles.lastOrNull { it.bundleId == bundleId }
+        failCommitRootTypeOnce
+            ?.takeIf { (rootType, _) -> stagedDraft?.root?.type == rootType }
+            ?.let { (_, failure) ->
+                failCommitRootTypeOnce = null
+                throw failure
+            }
         commitBundleFailure?.let { throw it }
         committedBundles += bundleId
-        stagedBundles.lastOrNull { it.bundleId == bundleId }?.let { draft ->
+        stagedDraft?.let { draft ->
             knownEntities += draft.root.type to draft.root.clientUuid
             draft.media.forEach { knownEntities += it.type to it.clientUuid }
         }
+        afterCommit?.invoke()
         val recordAuthors = nextCommitRecordAuthors ?: stagedBundles
             .lastOrNull { it.bundleId == bundleId }
             ?.root
