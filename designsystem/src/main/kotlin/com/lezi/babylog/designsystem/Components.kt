@@ -92,65 +92,6 @@ fun LeziCard(
     }
 }
 
-data class JournalSummaryValue(
-    val value: String,
-    val label: String,
-    val tone: LeziTone,
-)
-
-/** Five-column glance strip used by the compact record-book template. */
-@Composable
-fun JournalSummaryStrip(
-    values: List<JournalSummaryValue>,
-    modifier: Modifier = Modifier,
-) {
-    LeziCard(modifier = modifier.fillMaxWidth(), contentPadding = PaddingValues(0.dp)) {
-        Row(Modifier.fillMaxWidth()) {
-            val visibleValues = values.take(5)
-            visibleValues.forEachIndexed { index, item ->
-                Column(
-                    Modifier
-                        .weight(1f)
-                        .heightIn(min = 58.dp)
-                        .padding(horizontal = 3.dp, vertical = 7.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.Center,
-                ) {
-                    Box(
-                        Modifier
-                            .size(18.dp)
-                            .clip(CircleShape)
-                            .background(toneBg(item.tone)),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Box(
-                            Modifier
-                                .size(6.dp)
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.75f)),
-                        )
-                    }
-                    Text(item.value, style = LeziTypography.Mono, maxLines = 1)
-                    Text(
-                        item.label,
-                        style = LeziTypography.Meta,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                    )
-                }
-                if (index < visibleValues.lastIndex) {
-                    Box(
-                        Modifier
-                            .width(1.dp)
-                            .height(58.dp)
-                            .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.7f)),
-                    )
-                }
-            }
-        }
-    }
-}
-
 @Composable
 fun SummaryMetric(
     value: String,

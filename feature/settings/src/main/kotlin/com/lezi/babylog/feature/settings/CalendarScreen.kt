@@ -727,73 +727,13 @@ fun CalendarRoute(
     }
 
     previewPhotos?.let { photos ->
-        ConflictPhotoPreviewDialog(
+        com.lezi.babylog.designsystem.LeziPhotoPreviewDialog(
             photos = photos,
             startIndex = previewStartIndex.coerceIn(0, (photos.size - 1).coerceAtLeast(0)),
             onDismiss = { previewPhotos = null },
+            contentDescriptionPrefix = "冲突未采纳照片预览",
+            showPageCount = false,
         )
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun ConflictPhotoPreviewDialog(
-    photos: List<String>,
-    startIndex: Int,
-    onDismiss: () -> Unit,
-) {
-    if (photos.isEmpty()) return
-    val pagerState = rememberPagerState(
-        initialPage = startIndex.coerceIn(0, photos.lastIndex),
-        pageCount = { photos.size },
-    )
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
-    ) {
-        Surface(
-            modifier = Modifier.fillMaxSize(),
-            color = Color.Black,
-        ) {
-            Box(Modifier.fillMaxSize()) {
-                HorizontalPager(
-                    state = pagerState,
-                    modifier = Modifier.fillMaxSize(),
-                ) { page ->
-                    val path = photos[page]
-                    val bitmap = remember(path) {
-                        BitmapFactory.decodeFile(path)?.asImageBitmap()
-                    }
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        if (bitmap != null) {
-                            Image(
-                                bitmap = bitmap,
-                                contentDescription = "冲突未采纳照片预览 ${page + 1}/${photos.size}",
-                                modifier = Modifier.fillMaxSize(),
-                                contentScale = ContentScale.Fit,
-                            )
-                        } else {
-                            Text(
-                                "无法预览图片",
-                                color = Color.White,
-                                style = LeziTypography.Body,
-                            )
-                        }
-                    }
-                }
-                TextButton(
-                    onClick = onDismiss,
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(LeziSpacing.Page),
-                ) {
-                    Text("关闭", color = Color.White)
-                }
-            }
-        }
     }
 }
 

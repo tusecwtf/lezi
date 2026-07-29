@@ -198,7 +198,7 @@ private fun NursingFields(
     }
     ChoiceStrip(
         label = "顺序",
-        choices = listOf("LR" to "左→右", "RL" to "右→左"),
+        choices = com.lezi.babylog.core.model.NURSING_ORDER_CHOICES,
         selected = draft.order,
     ) { onDraftChange(draft.copy(order = it)) }
     IntegerField(
@@ -519,8 +519,8 @@ private fun SleepActionAnimation(
         label = "wake-pulse",
     )
     val surface = MaterialTheme.colorScheme.surface
-    val moon = Color(0xFF8065C8)
-    val sun = Color(0xFFF3A93B)
+    val moon = com.lezi.babylog.designsystem.LeziColors.SleepMoonCap
+    val sun = com.lezi.babylog.designsystem.LeziColors.SleepSun
     Canvas(
         modifier = Modifier
             .size(72.dp)

@@ -63,7 +63,8 @@ internal data class NursingCompletionCommand(
     val endedAt: Long,
 )
 
-internal val NURSING_ORDERS = setOf("L", "LR", "RL", "R")
+/** @see com.lezi.babylog.core.model.NURSING_ORDERS */
+internal val NURSING_ORDERS: Set<String> = com.lezi.babylog.core.model.NURSING_ORDERS
 
 internal fun freezeNursingCompletion(
     state: TimerState,

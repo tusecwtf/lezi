@@ -21,6 +21,25 @@ data class Baby(
 
 enum class Sex { MALE, FEMALE, UNKNOWN }
 
+/** Parse UI/wire/legacy enum labels into [Sex]. */
+fun parseBabySex(raw: String): Sex =
+    runCatching { Sex.valueOf(raw) }.getOrNull()
+        ?: when (raw.trim().lowercase()) {
+            "male", "m", "男", "男宝" -> Sex.MALE
+            "female", "f", "女", "女宝" -> Sex.FEMALE
+            else -> Sex.UNKNOWN
+        }
+
+/** Canonical Room / wire storage: `female` / `male` / null. */
+fun normalizeBabySex(raw: String?): String? {
+    if (raw.isNullOrBlank()) return null
+    return when (parseBabySex(raw)) {
+        Sex.FEMALE -> "female"
+        Sex.MALE -> "male"
+        Sex.UNKNOWN -> null
+    }
+}
+
 data class Family(
     val id: Long = 0,
     val ownerUserId: Long,
@@ -69,15 +88,28 @@ data class Record(
         get() = RecordPayloadCodec.decode(type, payloadJson, schemaVersion)
 }
 
+/**
+ * Domain view of a media attachment (record photo, plan photo, or avatar).
+ * Ownership is XOR for log kind: [recordId] or [carePlanId]; avatars use [babyId].
+ */
 data class MediaAsset(
     val id: Long = 0,
-    val recordId: Long,
+    val recordId: Long? = null,
+    val carePlanId: Long? = null,
+    val babyId: Long? = null,
+    val clientUuid: String = "",
+    /** "log" | "avatar" */
+    val kind: String = "log",
     val localUri: String,
     val remoteUri: String? = null,
     val mime: String? = null,
     val width: Int? = null,
     val height: Int? = null,
+    val byteSize: Long = 0,
     val createdAt: Long,
+    val updatedAt: Long = createdAt,
+    val deletedAt: Long? = null,
+    val syncDirty: Boolean = true,
 )
 
 /**
@@ -285,6 +317,16 @@ val DEFAULT_QUICK_RECORD_SLOTS: List<String> = listOf(
 )
 
 const val QUICK_RECORD_SLOT_COUNT: Int = 4
+
+/**
+ * Canonical pad/truncate for home quick-record slots.
+ * Empty strings are intentional blanks; callers must not invent replacements.
+ */
+fun normalizeQuickRecordSlots(slots: List<String>): List<String> {
+    val padded = slots.map { it.trim() }.toMutableList()
+    while (padded.size < QUICK_RECORD_SLOT_COUNT) padded += ""
+    return padded.take(QUICK_RECORD_SLOT_COUNT)
+}
 
 enum class SyncStatus {
     Disabled,

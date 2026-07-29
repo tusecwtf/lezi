@@ -108,7 +108,7 @@ fun Record.payloadSummary(): String = when (val value = payload.payload) {
     is SleepPayload -> endTimestamp?.takeIf { it >= timestamp }?.let {
         listOf(
             if (value.isNap) "午睡" else null,
-            "时长 ${formatDuration((it - timestamp) / 60_000L)}",
+            "时长 ${formatRecordDuration((it - timestamp) / 60_000L)}",
         ).filterNotNull().joinToString(" · ")
     } ?: if (value.isNap) "午睡 · 进行中" else "进行中"
     is TemperaturePayload -> "${value.celsius.normalizedText()}℃"
@@ -185,7 +185,11 @@ fun stoolColorLabel(index: Int): String = when (index.coerceIn(0, 7)) {
 private fun stoolSummary(amount: Int, consistency: Int, color: Int): String =
     "便量${stoolAmountLabel(amount)} · ${stoolConsistencyLabel(consistency)} · ${stoolColorLabel(color)}"
 
-private fun formatDuration(minutes: Long): String {
+/**
+ * Compact duration copy shared by saved-record summaries, draft previews, and day chips.
+ * Single source for "不足1分" / "N分" / "N小时" / "N小时M分".
+ */
+fun formatRecordDuration(minutes: Long): String {
     if (minutes <= 0) return "不足1分"
     val hours = minutes / 60
     val remaining = minutes % 60

@@ -312,9 +312,9 @@ private fun SleepMoonCap(
         ),
         label = "sleepCapBob",
     )
-    val capColor = Color(0xFF7965BE)
-    val capEdge = Color(0xFF4B3E7A)
-    val moonColor = Color(0xFFFFE59A)
+    val capColor = com.lezi.babylog.designsystem.LeziColors.SleepMoonCap
+    val capEdge = com.lezi.babylog.designsystem.LeziColors.SleepMoonCapEdge
+    val moonColor = com.lezi.babylog.designsystem.LeziColors.SleepMoon
 
     Canvas(
         modifier = modifier.fillMaxSize(),

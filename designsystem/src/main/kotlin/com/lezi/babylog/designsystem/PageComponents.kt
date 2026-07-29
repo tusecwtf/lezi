@@ -43,17 +43,25 @@ import androidx.compose.ui.unit.sp
 @Composable
 fun PageScaffoldBackground(content: @Composable BoxScope.() -> Unit) {
     val bg = MaterialTheme.colorScheme.background
+    val journal = LeziThemeExt.isJournal
     val sun = LocalLeziColors.current.sunSoft
     Box(
         Modifier
             .fillMaxSize()
             .background(bg)
-            .background(
-                Brush.radialGradient(
-                    colors = listOf(sun.copy(alpha = 0.55f), Color.Transparent),
-                    center = Offset(Float.POSITIVE_INFINITY, 0f),
-                    radius = 520f,
-                ),
+            .then(
+                // Warm only: soft sun radial wash. Journal stays flat paper/grey.
+                if (journal) {
+                    Modifier
+                } else {
+                    Modifier.background(
+                        Brush.radialGradient(
+                            colors = listOf(sun.copy(alpha = 0.55f), Color.Transparent),
+                            center = Offset(Float.POSITIVE_INFINITY, 0f),
+                            radius = 520f,
+                        ),
+                    )
+                },
             )
             .dismissKeyboardOnTap(),
         content = content,
@@ -167,116 +175,6 @@ fun AppBrandBar(
                     if (dark) Icons.Filled.DarkMode else Icons.Outlined.DarkMode,
                     contentDescription = "切换深色",
                     tint = content,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun AppContextRow(
-    babyName: String,
-    dayLabel: String,
-    onCycleBaby: () -> Unit,
-    onPrevDay: () -> Unit,
-    onNextDay: () -> Unit,
-    onOpenDayPicker: (() -> Unit)? = null,
-    canGoNext: Boolean = true,
-    accent: Color = MaterialTheme.colorScheme.primary,
-    modifier: Modifier = Modifier,
-) {
-    Row(
-        modifier
-            .fillMaxWidth()
-            .padding(horizontal = LeziSpacing.Page, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Surface(
-            modifier = Modifier
-                .heightIn(min = 48.dp)
-                .clickable(onClick = onCycleBaby),
-            shape = LeziShapes.Pill,
-            color = MaterialTheme.colorScheme.surface,
-            border = androidx.compose.foundation.BorderStroke(
-                1.5.dp,
-                accent.copy(alpha = 0.55f),
-            ),
-            shadowElevation = 0.dp,
-            tonalElevation = 0.dp,
-        ) {
-            Row(
-                Modifier.padding(start = 6.dp, end = 12.dp, top = 5.dp, bottom = 5.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(
-                    Modifier
-                        .size(34.dp)
-                        .clip(CircleShape)
-                        .background(accent),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        babyName.take(1).ifBlank { "乐" },
-                        color = Color.White,
-                        style = LeziTypography.BodyStrong,
-                    )
-                }
-                Spacer(Modifier.width(8.dp))
-                Column {
-                    Text(
-                        "正在记录",
-                        style = LeziTypography.Eyebrow,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(babyName.ifBlank { "乐记" }, style = LeziTypography.BodyStrong)
-                        Spacer(Modifier.width(2.dp))
-                        Text(
-                            "▾",
-                            style = LeziTypography.Meta,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-        }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onPrevDay, modifier = Modifier.size(36.dp)) {
-                Icon(
-                    Icons.Filled.ChevronLeft,
-                    contentDescription = "前一天",
-                    tint = MaterialTheme.colorScheme.onSurface,
-                )
-            }
-            Surface(
-                onClick = { onOpenDayPicker?.invoke() },
-                enabled = onOpenDayPicker != null,
-                shape = LeziShapes.Pill,
-                color = Color.Transparent,
-                shadowElevation = 0.dp,
-                tonalElevation = 0.dp,
-            ) {
-                Text(
-                    dayLabel,
-                    style = LeziTypography.BodyStrong,
-                    modifier = Modifier.padding(horizontal = 4.dp),
-                    maxLines = 1,
-                )
-            }
-            IconButton(
-                onClick = onNextDay,
-                enabled = canGoNext,
-                modifier = Modifier.size(36.dp),
-            ) {
-                Icon(
-                    Icons.Filled.ChevronRight,
-                    contentDescription = "后一天",
-                    tint = if (canGoNext) {
-                        MaterialTheme.colorScheme.onSurface
-                    } else {
-                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.28f)
-                    },
                 )
             }
         }

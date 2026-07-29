@@ -241,41 +241,9 @@ internal class OutboxPushPipeline(
             val media = mediaDao.getByClientUuid(row.clientUuid) ?: return@filter false
             media.kind == "log" && media.recordId == record.id
         }
-        val mediaEntities = mutableListOf<SyncEntity>()
-        val mediaBytes = mutableListOf<Pair<MediaAssetEntity, PreparedMedia>>()
-        for (row in mediaRows) {
-            var payload = row.payloadJson
-            val media = mediaDao.getByClientUuid(row.clientUuid)
-                ?: error("本地媒体元数据不存在")
-            if (row.deletedAt == null && media.localUri.isNotBlank()) {
-                val prepared = mediaFiles.prepareUpload(media.localUri)
-                val updated = media.copy(
-                    mime = prepared.mime,
-                    width = prepared.width ?: media.width,
-                    height = prepared.height ?: media.height,
-                    byteSize = prepared.bytes.size.toLong(),
-                )
-                mediaDao.update(updated)
-                mediaBytes += updated to prepared
-                val rawObject = Json.parseToJsonElement(payload).jsonObject
-                payload = JsonObject(
-                    rawObject +
-                        ("mime" to JsonPrimitive(updated.mime)) +
-                        ("byte_size" to JsonPrimitive(updated.byteSize)) +
-                        listOfNotNull(
-                            updated.width?.let { "width" to JsonPrimitive(it) },
-                            updated.height?.let { "height" to JsonPrimitive(it) },
-                        ).toMap(),
-                ).toString()
-            }
-            mediaEntities += SyncEntity(
-                type = "media",
-                clientUuid = row.clientUuid,
-                payloadJson = payload,
-                updatedAt = row.updatedAt,
-                deletedAt = row.deletedAt,
-            )
-        }
+        val preparedMedia = prepareAtomicMediaPackage(mediaRows)
+        val mediaEntities = preparedMedia.entities
+        val mediaBytes = preparedMedia.bytes
         requireRemoteAllowed(session)
         val customItemUuid = recordCustomItemClientUuid(record)
         val mapped = SyncWireMapper.record(
@@ -341,41 +309,9 @@ internal class OutboxPushPipeline(
             val media = mediaDao.getByClientUuid(row.clientUuid) ?: return@filter false
             media.kind == "log" && media.carePlanId == plan.id
         }
-        val mediaEntities = mutableListOf<SyncEntity>()
-        val mediaBytes = mutableListOf<Pair<MediaAssetEntity, PreparedMedia>>()
-        for (row in mediaRows) {
-            var payload = row.payloadJson
-            val media = mediaDao.getByClientUuid(row.clientUuid)
-                ?: error("本地媒体元数据不存在")
-            if (row.deletedAt == null && media.localUri.isNotBlank()) {
-                val prepared = mediaFiles.prepareUpload(media.localUri)
-                val updated = media.copy(
-                    mime = prepared.mime,
-                    width = prepared.width ?: media.width,
-                    height = prepared.height ?: media.height,
-                    byteSize = prepared.bytes.size.toLong(),
-                )
-                mediaDao.update(updated)
-                mediaBytes += updated to prepared
-                val rawObject = Json.parseToJsonElement(payload).jsonObject
-                payload = JsonObject(
-                    rawObject +
-                        ("mime" to JsonPrimitive(updated.mime)) +
-                        ("byte_size" to JsonPrimitive(updated.byteSize)) +
-                        listOfNotNull(
-                            updated.width?.let { "width" to JsonPrimitive(it) },
-                            updated.height?.let { "height" to JsonPrimitive(it) },
-                        ).toMap(),
-                ).toString()
-            }
-            mediaEntities += SyncEntity(
-                type = "media",
-                clientUuid = row.clientUuid,
-                payloadJson = payload,
-                updatedAt = row.updatedAt,
-                deletedAt = row.deletedAt,
-            )
-        }
+        val preparedMedia = prepareAtomicMediaPackage(mediaRows)
+        val mediaEntities = preparedMedia.entities
+        val mediaBytes = preparedMedia.bytes
         val customItemUuid = plan.customItemId
             ?.let { customItemDao.getById(it)?.clientUuid }
         val mapped = SyncWireMapper.carePlan(
@@ -543,25 +479,59 @@ internal class OutboxPushPipeline(
         }
     }
 
-    private suspend fun recordCustomItemClientUuid(record: RecordEntity): String? {
-        val type = SyncWireMapper.requireCurrentRecordType(record.type, "record type")
-        if (type != RecordType.CUSTOM) return null
-        require(record.schemaVersion == CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION) {
-            "custom record schema_version 必须是 $CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION"
+    private suspend fun recordCustomItemClientUuid(record: RecordEntity): String? =
+        resolveRecordCustomItemClientUuid(record, customItemDao)
+
+    /**
+     * Shared prepare path for record and care-plan atomic bundles:
+     * inspect/compress local files, patch outbox media payload metadata, collect PUT bytes.
+     */
+    private suspend fun prepareAtomicMediaPackage(
+        mediaRows: List<OutboxEntity>,
+    ): AtomicMediaPackage {
+        val mediaEntities = mutableListOf<SyncEntity>()
+        val mediaBytes = mutableListOf<Pair<MediaAssetEntity, PreparedMedia>>()
+        for (row in mediaRows) {
+            var payload = row.payloadJson
+            val media = mediaDao.getByClientUuid(row.clientUuid)
+                ?: error("本地媒体元数据不存在")
+            if (row.deletedAt == null && media.localUri.isNotBlank()) {
+                val prepared = mediaFiles.prepareUpload(media.localUri)
+                val updated = media.copy(
+                    mime = prepared.mime,
+                    width = prepared.width ?: media.width,
+                    height = prepared.height ?: media.height,
+                    byteSize = prepared.bytes.size.toLong(),
+                )
+                mediaDao.update(updated)
+                mediaBytes += updated to prepared
+                val rawObject = Json.parseToJsonElement(payload).jsonObject
+                payload = JsonObject(
+                    rawObject +
+                        ("mime" to JsonPrimitive(updated.mime)) +
+                        ("byte_size" to JsonPrimitive(updated.byteSize)) +
+                        listOfNotNull(
+                            updated.width?.let { "width" to JsonPrimitive(it) },
+                            updated.height?.let { "height" to JsonPrimitive(it) },
+                        ).toMap(),
+                ).toString()
+            }
+            mediaEntities += SyncEntity(
+                type = "media",
+                clientUuid = row.clientUuid,
+                payloadJson = payload,
+                updatedAt = row.updatedAt,
+                deletedAt = row.deletedAt,
+            )
         }
-        val localId = runCatching {
-            Json.parseToJsonElement(record.payloadJson).jsonObject["custom_item_id"]
-                ?.jsonPrimitive
-                ?.longOrNull
-        }.getOrNull()?.takeIf { it > 0L }
-        require(localId != null) { "custom record 缺少本地 custom_item_id" }
-        val definition = requireNotNull(customItemDao.getById(localId)) {
-            "custom record 引用的本地定义不存在"
-        }
-        return definition.clientUuid.takeIf(String::isNotBlank)
-            ?: error("custom record 引用的定义缺少 client_uuid")
+        return AtomicMediaPackage(mediaEntities, mediaBytes)
     }
 }
+
+private data class AtomicMediaPackage(
+    val entities: List<SyncEntity>,
+    val bytes: List<Pair<MediaAssetEntity, PreparedMedia>>,
+)
 
 /**
  * Pure classification of a pending outbox snapshot into ordinary vs atomic lanes.

@@ -316,14 +316,8 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
     }
 
     private fun Throwable.asDomainLocalClearFailure(): Throwable =
-        if (this is LocalClearCommittedException) {
-            LocalRecordsClearCommittedException(
-                familyServerRetained = familyServerRetained,
-                cause = this,
-            )
-        } else {
-            this
-        }
+        // Single type: sync already throws LocalClearCommittedException (= domain alias).
+        this
 
     private fun mergeCommittedCleanupFailure(
         initialFailure: Throwable?,

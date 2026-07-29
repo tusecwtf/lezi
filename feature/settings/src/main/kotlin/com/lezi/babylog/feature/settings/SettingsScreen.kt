@@ -537,6 +537,11 @@ fun SettingsRoute(
                         }
                     }
                     Text("单手操作 · 惯用手", style = LeziTypography.Label)
+                    Text(
+                        "影响圆盘调时与表单靠边；首页常用坞按你编排的左右序，不镜像。",
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp),

@@ -36,15 +36,7 @@ private fun PreviewFrame(visualStyle: String = "warm", content: @Composable () -
 @Composable
 fun PreviewJournalOverview() {
     PreviewFrame(visualStyle = "journal") {
-        JournalSummaryStrip(
-            listOf(
-                JournalSummaryValue("180", "奶ml", LeziTone.Blue),
-                JournalSummaryValue("20", "母乳min", LeziTone.Blue),
-                JournalSummaryValue("8h", "睡眠", LeziTone.Cream),
-                JournalSummaryValue("5", "尿", LeziTone.Yellow),
-                JournalSummaryValue("2", "便", LeziTone.Neutral),
-            ),
-        )
+        // Production journal day summary uses core.ui.RecordSummaryStrip (not a DS twin).
         TimelineRailCard(
             sleep = listOf(
                 TimelineLaneSegment(

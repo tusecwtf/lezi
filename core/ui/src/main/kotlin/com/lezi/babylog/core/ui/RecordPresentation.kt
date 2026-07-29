@@ -55,6 +55,13 @@ enum class RecordSection(val title: String) {
     companion object
 }
 
+/** Shared glyph palette for custom item icons (settings + layout manage + dock). */
+val CUSTOM_ITEM_ICON_GLYPHS: List<String> =
+    listOf("★", "♥", "☀", "☾", "♪", "●", "▲", "◆")
+
+fun customItemIconGlyph(slot: Int): String =
+    CUSTOM_ITEM_ICON_GLYPHS[slot.coerceIn(0, CUSTOM_ITEM_ICON_GLYPHS.lastIndex)]
+
 enum class RecordChartMark {
     Circle,
     SleepBlock,
@@ -322,14 +329,6 @@ fun Record.presentationSummary(): String {
     ).joinToString(" · ").ifBlank { type.presentation.tip }
 }
 
-/** Compact duration copy shared by saved-record summaries and draft previews. */
-fun formatRecordDuration(minutes: Long): String {
-    if (minutes <= 0) return "不足1分"
-    val hours = minutes / 60
-    val remaining = minutes % 60
-    return when {
-        hours == 0L -> "${remaining}分"
-        remaining == 0L -> "${hours}小时"
-        else -> "${hours}小时${remaining}分"
-    }
-}
+/** Re-export model duration formatter so UI callers keep a stable import path. */
+fun formatRecordDuration(minutes: Long): String =
+    com.lezi.babylog.core.model.formatRecordDuration(minutes)

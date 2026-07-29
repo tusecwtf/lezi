@@ -99,13 +99,10 @@ internal data class QuickSlotCandidate(
 
 /**
  * Normalize stored slot keys to exactly [QUICK_RECORD_SLOT_COUNT] entries.
- * Empty strings are kept as intentional blanks.
+ * Delegates to [com.lezi.babylog.core.model.normalizeQuickRecordSlots] (single source).
  */
-internal fun normalizeStoredQuickSlots(slots: List<String>): List<String> {
-    val padded = slots.map { it.trim() }.toMutableList()
-    while (padded.size < QUICK_RECORD_SLOT_COUNT) padded += ""
-    return padded.take(QUICK_RECORD_SLOT_COUNT)
-}
+internal fun normalizeStoredQuickSlots(slots: List<String>): List<String> =
+    com.lezi.babylog.core.model.normalizeQuickRecordSlots(slots)
 
 /**
  * Resolve one stored catalog key against enabled built-ins and concrete custom items.

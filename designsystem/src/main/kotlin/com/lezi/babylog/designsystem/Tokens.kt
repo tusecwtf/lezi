@@ -51,6 +51,12 @@ object LeziColors {
     val LaneFeed = Accent
     val LaneCare = Color(0xFF7A9E7E)
 
+    // Sleep-in-progress moon cap (header avatar + sleep composer accents)
+    val SleepMoonCap = Color(0xFF7965BE)
+    val SleepMoonCapEdge = Color(0xFF4B3E7A)
+    val SleepMoon = Color(0xFFFFE59A)
+    val SleepSun = Color(0xFFF3A93B)
+
     // Compact logbook colors.
     val JournalBg = Color(0xFFF4F3F5)
     val JournalSurface = Color(0xFFF9F7F8)

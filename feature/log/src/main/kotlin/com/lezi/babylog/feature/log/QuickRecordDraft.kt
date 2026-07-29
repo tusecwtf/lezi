@@ -423,6 +423,12 @@ internal data class QuickRecordDraft(
                         )
                     }
                 }
+                if (order !in com.lezi.babylog.core.model.NURSING_ORDERS) {
+                    return ComposerValidationResult(
+                        "请选择喂养顺序",
+                        ComposerInvalidField.NursingDuration,
+                    )
+                }
             }
             QuickRecordMode.Milk -> when {
                 preparedMl.isNotBlank() && preparedMl.toIntOrNull() == null ->
@@ -737,7 +743,7 @@ internal data class QuickRecordDraft(
                 leftMin = nursing?.leftMinutes?.coerceAtLeast(0)?.toString() ?: "0",
                 rightMin = nursing?.rightMinutes?.coerceAtLeast(0)?.toString() ?: "0",
                 order = nursing?.order?.takeIf {
-                    it in setOf("L", "R", "LR", "RL")
+                    it in com.lezi.babylog.core.model.NURSING_ORDERS
                 } ?: "LR",
                 nursingAmountMl = nursing?.amountMl?.toString().orEmpty(),
                 peeAmount = when (payload) {

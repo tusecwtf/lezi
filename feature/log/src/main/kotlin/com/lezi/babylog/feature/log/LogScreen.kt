@@ -627,7 +627,8 @@ internal fun buildTimelineLanes(
                     sleep += TimelineLaneSegment(
                         startMinOfDay = startMin,
                         endMinOfDay = endMin,
-                        color = Color(0xFFE09F3E),
+                        // Color filled at draw from LeziThemeExt (token single-source).
+                        color = Color.Unspecified,
                         title = title,
                         detail = detail,
                         isEvent = false,
@@ -661,7 +662,7 @@ internal fun buildTimelineLanes(
                 feed += TimelineLaneSegment(
                     startMinOfDay = startMin,
                     endMinOfDay = startMin,
-                    color = Color(0xFF007BAE),
+                    color = Color.Unspecified,
                     title = title,
                     detail = detail,
                     isEvent = true,
@@ -679,7 +680,7 @@ internal fun buildTimelineLanes(
                     RecordType.PEE -> care += TimelineLaneSegment(
                         startMinOfDay = startMin,
                         endMinOfDay = startMin,
-                        color = Color(CARE_PEE),
+                        color = Color.Unspecified,
                         title = "尿尿",
                         detail = "${clock(r.timestamp)}$notePart · 护理",
                         isEvent = true,
@@ -688,7 +689,7 @@ internal fun buildTimelineLanes(
                     RecordType.POOP -> care += TimelineLaneSegment(
                         startMinOfDay = startMin,
                         endMinOfDay = startMin,
-                        color = Color(CARE_POOP),
+                        color = Color.Unspecified,
                         title = "便便",
                         detail = "${clock(r.timestamp)}$notePart · 护理",
                         isEvent = true,
@@ -699,7 +700,7 @@ internal fun buildTimelineLanes(
                         care += TimelineLaneSegment(
                             startMinOfDay = startMin,
                             endMinOfDay = startMin,
-                            color = Color(CARE_PEE),
+                            color = Color.Unspecified,
                             title = "尿尿",
                             detail = "${clock(r.timestamp)}$notePart · 尿+便（尿）",
                             isEvent = true,
@@ -708,7 +709,7 @@ internal fun buildTimelineLanes(
                         care += TimelineLaneSegment(
                             startMinOfDay = startMin,
                             endMinOfDay = startMin,
-                            color = Color(CARE_POOP),
+                            color = Color.Unspecified,
                             title = "便便",
                             detail = "${clock(r.timestamp)}$notePart · 尿+便（便）",
                             isEvent = true,
@@ -718,7 +719,7 @@ internal fun buildTimelineLanes(
                     else -> care += TimelineLaneSegment(
                         startMinOfDay = startMin,
                         endMinOfDay = startMin,
-                        color = Color(CARE_OTHER),
+                        color = Color.Unspecified,
                         title = r.type.presentation.label,
                         detail = "${clock(r.timestamp)}$notePart · 护理",
                         isEvent = true,
@@ -852,17 +853,8 @@ internal fun dayChartLegendColor(
     DayChartCategory.POOP -> poop
 }
 
-private fun formatDurationMinutes(minutes: Long): String {
-    if (minutes < 60) return "${minutes}分钟"
-    val h = minutes / 60
-    val m = minutes % 60
-    return if (m == 0L) "${h}小时" else "${h}小时${m}分"
-}
-
-/** Care-lane pin colors: pee green, poop yellow, other muted green. */
-private const val CARE_PEE = 0xFF7A9E7E
-private const val CARE_POOP = 0xFFF3B84B
-private const val CARE_OTHER = 0xFF8FB894
+private fun formatDurationMinutes(minutes: Long): String =
+    com.lezi.babylog.core.model.formatRecordDuration(minutes)
 
 private data class PublishChromeTarget(
     val recordId: Long,
@@ -1635,7 +1627,7 @@ fun LogRoute(
     }
 }
 
-private val CustomSlotIcons = listOf("★", "♥", "☀", "☾", "♪", "●", "▲", "◆")
+private val CustomSlotIcons = com.lezi.babylog.core.ui.CUSTOM_ITEM_ICON_GLYPHS
 
 /**
  * Always renders four configurable slots plus fixed "更多" (absolute LTR order).
@@ -1943,7 +1935,7 @@ private fun MoreSheet(
     }
 }
 
-private val CustomItemIconGlyphs = listOf("★", "♥", "☀", "☾", "♪", "●", "▲", "◆")
+private val CustomItemIconGlyphs = com.lezi.babylog.core.ui.CUSTOM_ITEM_ICON_GLYPHS
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable

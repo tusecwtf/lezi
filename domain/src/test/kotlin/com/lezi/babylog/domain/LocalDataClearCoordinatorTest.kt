@@ -96,9 +96,9 @@ class LocalDataClearCoordinatorTest {
             rig.coordinator.clear(LocalDataClearScope.RecordsOnly)
         }.exceptionOrNull()
 
+        // Single committed-clear type (no domain re-wrap of sync's exception).
         assertThat(actual).isInstanceOf(LocalRecordsClearCommittedException::class.java)
-        assertThat(actual!!.cause).isInstanceOf(LocalClearCommittedException::class.java)
-        assertThat(actual.cause!!.cause).isSameInstanceAs(replicaFailure)
+        assertThat(actual!!.cause).isSameInstanceAs(replicaFailure)
         assertThat(rig.settings.scopes).containsExactly(LocalDataClearScope.RecordsOnly)
         assertThat(rig.reminders.recordClearBatches).containsExactly(true)
         assertThat(rig.reminders.cancelledCarePlanIds).containsExactly(21L, 22L).inOrder()

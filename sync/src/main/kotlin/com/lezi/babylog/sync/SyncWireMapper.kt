@@ -62,15 +62,8 @@ object SyncWireMapper {
      * Map local baby sex storage onto the Home-LAN contract.
      * Accepts wire values, Kotlin enum names, and common Chinese UI labels.
      */
-    internal fun normalizeBabySexForWire(raw: String?): String? {
-        if (raw.isNullOrBlank()) return null
-        return when (raw.trim().lowercase()) {
-            "female", "f", "女", "女宝" -> "female"
-            "male", "m", "男", "男宝" -> "male"
-            "unknown", "未设置" -> null
-            else -> null
-        }
-    }
+    internal fun normalizeBabySexForWire(raw: String?): String? =
+        com.lezi.babylog.core.model.normalizeBabySex(raw)
 
     /**
      * Care-plan status wire values: pending|missed|completed|skipped.

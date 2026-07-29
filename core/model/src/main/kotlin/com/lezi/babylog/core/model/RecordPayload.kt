@@ -19,6 +19,20 @@ const val CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION = 2
 /** Maximum photos attachable to one care record (or care plan) via the shared note area. */
 const val MAX_RECORD_PHOTOS = 3
 
+/** Supported nursing side-order wire values (payload + composer + timer). */
+val NURSING_ORDERS: Set<String> = setOf("L", "R", "LR", "RL")
+
+/**
+ * User-facing order chips shared by Composer and timer completion.
+ * Labels must stay aligned so edit-after-timer never shows a missing selection.
+ */
+val NURSING_ORDER_CHOICES: List<Pair<String, String>> = listOf(
+    "L" to "仅左",
+    "LR" to "先左后右",
+    "RL" to "先右后左",
+    "R" to "仅右",
+)
+
 sealed interface RecordPayload {
     val type: RecordType
 }
@@ -271,7 +285,7 @@ object RecordPayloadCodec {
                     payload.leftMinutes + payload.rightMinutes <= 0 &&
                     !allowIntentOnlyFeed
                 ) add("至少记录一侧时长")
-                if (payload.order !in setOf("L", "R", "LR", "RL")) add("不支持的喂养顺序")
+                if (payload.order !in NURSING_ORDERS) add("不支持的喂养顺序")
                 if (payload.recordMode !in setOf("start", "end")) add("不支持的记录时刻模式")
             }
             is MilkPayload -> {

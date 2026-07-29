@@ -33,6 +33,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.lezi.babylog.designsystem.LeziClockDialDialog
 import com.lezi.babylog.designsystem.LeziPrimaryButton
+import com.lezi.babylog.designsystem.LeziPrimaryButtonMode
 import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziShapes
 import com.lezi.babylog.designsystem.LeziThemeExt
@@ -40,6 +41,8 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.designsystem.rememberDismissKeyboard
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -60,10 +63,20 @@ internal fun NursingCompletionSheet(
     val zone = ZoneId.systemDefault()
     val dismissKeyboard = rememberDismissKeyboard()
     var showClock by remember(draft.capturedAt) { mutableStateOf(false) }
-    var error by remember(draft.capturedAt) { mutableStateOf<String?>(null) }
+    var reasonVisible by remember(draft.capturedAt) { mutableStateOf(false) }
+    var shownReason by remember(draft.capturedAt) { mutableStateOf<String?>(null) }
+    val nowMillis = System.currentTimeMillis()
+    val validation = draft.validationError(nowMillis)
+    val canConfirm = validation == null
+    val buttonMode = when {
+        saving -> LeziPrimaryButtonMode.Disabled
+        canConfirm -> LeziPrimaryButtonMode.Enabled
+        else -> LeziPrimaryButtonMode.ExplainedDisabled
+    }
 
     fun update(next: NursingCompletionDraft) {
-        error = null
+        reasonVisible = false
+        shownReason = null
         onDraftChange(next)
     }
 
@@ -122,12 +135,7 @@ internal fun NursingCompletionSheet(
             }
             ChoiceStrip(
                 label = "喂养顺序",
-                choices = listOf(
-                    "L" to "仅左",
-                    "LR" to "先左后右",
-                    "RL" to "先右后左",
-                    "R" to "仅右",
-                ),
+                choices = com.lezi.babylog.core.model.NURSING_ORDER_CHOICES,
                 selected = draft.order,
                 onSelected = { update(draft.copy(order = it)) },
             )
@@ -144,7 +152,8 @@ internal fun NursingCompletionSheet(
             Surface(
                 onClick = {
                     dismissKeyboard()
-                    error = null
+                    reasonVisible = false
+                    shownReason = null
                     showClock = true
                 },
                 modifier = Modifier
@@ -185,7 +194,7 @@ internal fun NursingCompletionSheet(
                 supportingText = { Text("${draft.note.length}/200") },
             )
 
-            (error ?: saveError)?.let {
+            saveError?.let {
                 Text(
                     it,
                     color = MaterialTheme.colorScheme.error,
@@ -194,7 +203,7 @@ internal fun NursingCompletionSheet(
             }
         }
 
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(
@@ -203,31 +212,65 @@ internal fun NursingCompletionSheet(
                     end = LeziSpacing.Lg,
                     bottom = LeziSpacing.Lg,
                 ),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            LeziSecondaryButton(
-                label = "取消",
-                onClick = {
-                    dismissKeyboard()
-                    onDismiss()
-                },
-                modifier = Modifier.weight(1f),
-            )
-            LeziPrimaryButton(
-                label = if (saving) "保存中…" else "确认记录",
-                onClick = {
-                    if (saving) return@LeziPrimaryButton
-                    dismissKeyboard()
-                    val validation = draft.validationError(System.currentTimeMillis())
-                    if (validation == null) {
-                        onConfirm(draft)
-                    } else {
-                        error = validation
-                    }
-                },
-                modifier = Modifier.weight(1f),
-                enabled = !saving,
-            )
+            val reason = shownReason?.takeIf { reasonVisible }
+            if (reason != null) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics {
+                            contentDescription = reason
+                            liveRegion = LiveRegionMode.Polite
+                        },
+                    shape = LeziThemeExt.controlShape,
+                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.92f),
+                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                ) {
+                    Text(
+                        reason,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        style = LeziTypography.BodyStrong,
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                LeziSecondaryButton(
+                    label = "取消",
+                    onClick = {
+                        dismissKeyboard()
+                        onDismiss()
+                    },
+                    modifier = Modifier.weight(1f),
+                )
+                LeziPrimaryButton(
+                    label = if (saving) "保存中…" else "确认记录",
+                    onClick = {
+                        when (buttonMode) {
+                            LeziPrimaryButtonMode.Disabled -> Unit
+                            LeziPrimaryButtonMode.Enabled -> {
+                                dismissKeyboard()
+                                onConfirm(draft)
+                            }
+                            LeziPrimaryButtonMode.ExplainedDisabled -> {
+                                dismissKeyboard()
+                                if (reasonVisible) {
+                                    reasonVisible = false
+                                    shownReason = null
+                                } else {
+                                    reasonVisible = true
+                                    shownReason = validation
+                                }
+                            }
+                        }
+                    },
+                    modifier = Modifier.weight(1f),
+                    mode = buttonMode,
+                )
+            }
         }
     }
 
@@ -242,8 +285,14 @@ internal fun NursingCompletionSheet(
                 val pickedAt = picked.toInstant().toEpochMilli()
                 val now = System.currentTimeMillis()
                 when {
-                    pickedAt < draft.startedAt -> error = "结束时刻不能早于开始时刻"
-                    pickedAt > now -> error = "结束时刻不能晚于现在"
+                    pickedAt < draft.startedAt -> {
+                        reasonVisible = true
+                        shownReason = "结束时刻不能早于开始时刻"
+                    }
+                    pickedAt > now -> {
+                        reasonVisible = true
+                        shownReason = "结束时刻不能晚于现在"
+                    }
                     else -> update(draft.copy(endedAt = pickedAt))
                 }
                 showClock = false

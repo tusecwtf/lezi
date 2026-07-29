@@ -2508,62 +2508,15 @@ class CareLog @Inject constructor(
         recordId: Long,
         photoPaths: List<String>,
         at: Long,
-    ) {
-        val existing = mediaAssetDao.listForRecord(recordId)
-            .filter { it.kind == "log" }
-        val active = existing.filter { it.deletedAt == null }
-        val desired = photoPaths.toSet()
-        for (path in photoPaths) {
-            val live = active.firstOrNull { it.localUri == path }
-            if (live != null) continue
-            val tombstoned = existing.firstOrNull { it.localUri == path && it.deletedAt != null }
-            if (tombstoned != null) {
-                mediaAssetDao.update(
-                    tombstoned.copy(
-                        deletedAt = null,
-                        updatedAt = nextSyncUpdatedAt(tombstoned.updatedAt, at),
-                        syncDirty = true,
-                    ),
-                )
-            } else {
-                mediaAssetDao.upsert(
-                    MediaAssetEntity(
-                        recordId = recordId,
-                        clientUuid = newClientUuid(),
-                        kind = "log",
-                        babyId = null,
-                        localUri = path,
-                        createdAt = at,
-                        updatedAt = at,
-                        syncDirty = true,
-                    ),
-                )
-            }
-        }
-        active.filter { it.localUri !in desired }.forEach { asset ->
-            mediaAssetDao.update(
-                asset.copy(
-                    deletedAt = at,
-                    updatedAt = nextSyncUpdatedAt(asset.updatedAt, at),
-                    syncDirty = true,
-                ),
-            )
-        }
-    }
+    ) = reconcileLogPhotos(
+        ownerRecordId = recordId,
+        ownerCarePlanId = null,
+        photoPaths = photoPaths,
+        at = at,
+    )
 
-    private suspend fun tombstoneRecordPhotos(recordId: Long, deletedAt: Long) {
-        mediaAssetDao.listActiveForRecord(recordId)
-            .filter { it.kind == "log" }
-            .forEach { asset ->
-                mediaAssetDao.update(
-                    asset.copy(
-                        deletedAt = deletedAt,
-                        updatedAt = nextSyncUpdatedAt(asset.updatedAt, deletedAt),
-                        syncDirty = true,
-                    ),
-                )
-            }
-    }
+    private suspend fun tombstoneRecordPhotos(recordId: Long, deletedAt: Long) =
+        tombstoneLogPhotos(ownerRecordId = recordId, ownerCarePlanId = null, deletedAt = deletedAt)
 
     /**
      * Reconcile plan-owned MediaAsset rows. Plan and record photos never share ownership.
@@ -2573,9 +2526,33 @@ class CareLog @Inject constructor(
         carePlanId: Long,
         photoPaths: List<String>,
         at: Long,
+    ) = reconcileLogPhotos(
+        ownerRecordId = null,
+        ownerCarePlanId = carePlanId,
+        photoPaths = photoPaths,
+        at = at,
+    )
+
+    private suspend fun tombstoneCarePlanPhotos(carePlanId: Long, deletedAt: Long) =
+        tombstoneLogPhotos(ownerRecordId = null, ownerCarePlanId = carePlanId, deletedAt = deletedAt)
+
+    /**
+     * Shared log-media reconcile for record **or** care-plan ownership (XOR).
+     * Domain roots stay separate; packaging algorithm is single-sourced.
+     */
+    private suspend fun reconcileLogPhotos(
+        ownerRecordId: Long?,
+        ownerCarePlanId: Long?,
+        photoPaths: List<String>,
+        at: Long,
     ) {
-        val existing = mediaAssetDao.listForCarePlan(carePlanId)
-            .filter { it.kind == "log" }
+        require((ownerRecordId != null) xor (ownerCarePlanId != null)) {
+            "log media must belong to exactly one record or care plan"
+        }
+        val existing = when {
+            ownerRecordId != null -> mediaAssetDao.listForRecord(ownerRecordId)
+            else -> mediaAssetDao.listForCarePlan(ownerCarePlanId!!)
+        }.filter { it.kind == "log" }
         val active = existing.filter { it.deletedAt == null }
         val desired = photoPaths.toSet()
         for (path in photoPaths) {
@@ -2593,8 +2570,8 @@ class CareLog @Inject constructor(
             } else {
                 mediaAssetDao.upsert(
                     MediaAssetEntity(
-                        carePlanId = carePlanId,
-                        recordId = null,
+                        recordId = ownerRecordId,
+                        carePlanId = ownerCarePlanId,
                         clientUuid = newClientUuid(),
                         kind = "log",
                         babyId = null,
@@ -2617,18 +2594,25 @@ class CareLog @Inject constructor(
         }
     }
 
-    private suspend fun tombstoneCarePlanPhotos(carePlanId: Long, deletedAt: Long) {
-        mediaAssetDao.listActiveForCarePlan(carePlanId)
-            .filter { it.kind == "log" }
-            .forEach { asset ->
-                mediaAssetDao.update(
-                    asset.copy(
-                        deletedAt = deletedAt,
-                        updatedAt = nextSyncUpdatedAt(asset.updatedAt, deletedAt),
-                        syncDirty = true,
-                    ),
-                )
-            }
+    private suspend fun tombstoneLogPhotos(
+        ownerRecordId: Long?,
+        ownerCarePlanId: Long?,
+        deletedAt: Long,
+    ) {
+        require((ownerRecordId != null) xor (ownerCarePlanId != null))
+        val active = when {
+            ownerRecordId != null -> mediaAssetDao.listActiveForRecord(ownerRecordId)
+            else -> mediaAssetDao.listActiveForCarePlan(ownerCarePlanId!!)
+        }.filter { it.kind == "log" }
+        active.forEach { asset ->
+            mediaAssetDao.update(
+                asset.copy(
+                    deletedAt = deletedAt,
+                    updatedAt = nextSyncUpdatedAt(asset.updatedAt, deletedAt),
+                    syncDirty = true,
+                ),
+            )
+        }
     }
 
     /**
@@ -2905,26 +2889,14 @@ fun CustomRecordItem.toFieldSnapshot(): CustomItemFieldSnapshot =
         customItemId = id.takeIf { it > 0L },
     )
 
-private fun parseSex(raw: String): Sex =
-    runCatching { Sex.valueOf(raw) }.getOrNull()
-        ?: when (raw.lowercase()) {
-            "male", "m", "男", "男宝" -> Sex.MALE
-            "female", "f", "女", "女宝" -> Sex.FEMALE
-            else -> Sex.UNKNOWN
-        }
+private fun parseSex(raw: String): Sex = com.lezi.babylog.core.model.parseBabySex(raw)
 
 /**
  * Canonical Room storage for baby sex: Home-LAN wire values only
- * (`female` / `male` / null). Rejects enum names and UI labels at the write edge.
+ * (`female` / `male` / null). Delegates to [com.lezi.babylog.core.model.normalizeBabySex].
  */
-internal fun normalizeBabySexForStorage(raw: String?): String? {
-    if (raw.isNullOrBlank()) return null
-    return when (parseSex(raw.trim())) {
-        Sex.FEMALE -> "female"
-        Sex.MALE -> "male"
-        Sex.UNKNOWN -> null
-    }
-}
+internal fun normalizeBabySexForStorage(raw: String?): String? =
+    com.lezi.babylog.core.model.normalizeBabySex(raw)
 
 private fun withAnomaly(payloadJson: String, schemaVersion: Int): Pair<String, Int> {
     val document = RecordPayloadCodec.decode(RecordType.SLEEP, payloadJson, schemaVersion)

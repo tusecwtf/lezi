@@ -24,7 +24,7 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.domain.CustomRecordItem
 
-private val CustomIcons = listOf("★", "♥", "☀", "☾", "♪", "●", "▲", "◆")
+private val CustomIcons = com.lezi.babylog.core.ui.CUSTOM_ITEM_ICON_GLYPHS
 
 /**
  * Lightweight custom-definition manage surface for 布局编辑态.

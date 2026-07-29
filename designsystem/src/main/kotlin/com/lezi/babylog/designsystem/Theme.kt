@@ -261,8 +261,9 @@ internal fun resolveLeziColorScheme(
         LeziVisualStyle.Warm -> if (darkTheme) DarkScheme else LightScheme
         LeziVisualStyle.Journal -> if (darkTheme) JournalDarkScheme else JournalLightScheme
     }
-    // Warm primary follows the baby theme; journal keeps coral chrome for CTAs.
-    if (style != LeziVisualStyle.Warm || babyThemeArgb == null) return base
+    // Both templates: baby theme drives primary (CTAs / selected), per PRD §2.1.
+    // Journal still keeps its own surface/typography base from Journal*Scheme.
+    if (babyThemeArgb == null) return base
 
     val primary = normalizeBabyThemeColor(Color(babyThemeArgb))
     return base.copy(

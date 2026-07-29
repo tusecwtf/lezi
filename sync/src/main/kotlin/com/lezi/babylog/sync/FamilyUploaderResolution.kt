@@ -36,22 +36,28 @@ fun resolveRecordUploaderLabel(
         if (selfMembership.isNotEmpty() && membershipAuthor == selfMembership) return null
         val member = members.firstOrNull {
             it.membershipId?.trim() == membershipAuthor
-        } ?: return "家人"
+        } ?: return FAMILY_MEMBER_FALLBACK_LABEL
         if (selfMembership.isEmpty() && member.isSelf) return null
         return member.uploaderLabel()
     }
 
-    return "家人"
+    return FAMILY_MEMBER_FALLBACK_LABEL
 }
 
 private fun UploaderMemberRef.uploaderLabel(): String {
     val name = displayName?.trim().orEmpty()
     if (name.isNotEmpty() && name != LOCAL_DEVICE_DISPLAY_NAME) return name
-    return when (role) {
-        FamilyRole.Owner -> "家庭管理员"
-        FamilyRole.Member, FamilyRole.None -> "家庭成员"
-    }
+    return familyRoleFallbackLabel(role)
 }
+
+/** Shared role fallback copy for timeline uploaders and conflict audit. */
+fun familyRoleFallbackLabel(role: FamilyRole): String = when (role) {
+    FamilyRole.Owner -> "家庭管理员"
+    FamilyRole.Member, FamilyRole.None -> "家庭成员"
+}
+
+/** Unknown membership / missing name fallback. */
+const val FAMILY_MEMBER_FALLBACK_LABEL: String = "家人"
 
 fun FamilyMember.toUploaderRef(): UploaderMemberRef? {
     return UploaderMemberRef(

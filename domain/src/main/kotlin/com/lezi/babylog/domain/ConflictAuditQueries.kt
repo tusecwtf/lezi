@@ -75,11 +75,7 @@ internal class ConflictAuditQueries(
         val byMembership = members.mapNotNull { member ->
             val id = member.membershipId?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
             val name = member.displayName?.trim()?.takeIf { it.isNotEmpty() }
-                ?: if (member.role == com.lezi.babylog.sync.FamilyRole.Owner) {
-                    "家庭管理员"
-                } else {
-                    "家庭成员"
-                }
+                ?: com.lezi.babylog.sync.familyRoleFallbackLabel(member.role)
             id to name
         }.toMap()
         // Ensure every candidate membership key exists for fallback labels.
@@ -89,8 +85,14 @@ internal class ConflictAuditQueries(
                 byMembership[mid]
                     ?: when {
                         mid.isEmpty() -> "未知提交者"
-                        FulfillmentAuthority.isAdminRole(candidate.submitterRole) -> "家庭管理员"
-                        candidate.submitterRole.isNotBlank() -> "家庭成员"
+                        FulfillmentAuthority.isAdminRole(candidate.submitterRole) ->
+                            com.lezi.babylog.sync.familyRoleFallbackLabel(
+                                com.lezi.babylog.sync.FamilyRole.Owner,
+                            )
+                        candidate.submitterRole.isNotBlank() ->
+                            com.lezi.babylog.sync.familyRoleFallbackLabel(
+                                com.lezi.babylog.sync.FamilyRole.Member,
+                            )
                         else -> mid
                     }
                 )

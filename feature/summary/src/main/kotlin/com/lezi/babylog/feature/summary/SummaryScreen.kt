@@ -365,10 +365,10 @@ fun SummaryRoute(
                 )
                 Spacer(Modifier.height(12.dp))
                 if (t.dayValuesFeed.all { it <= 0f } && t.nursingMin == 0L) {
-                    Text(
-                        "范围内暂无喂养记录。",
-                        style = LeziTypography.Body,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    com.lezi.babylog.designsystem.StateContainer(
+                        kind = com.lezi.babylog.designsystem.StateKind.Empty,
+                        title = "范围内暂无喂养记录",
+                        message = "换一周或去记录页添加喂养。",
                     )
                 } else {
                     MiniBarChart(
@@ -389,10 +389,10 @@ fun SummaryRoute(
                 )
                 Spacer(Modifier.height(8.dp))
                 if (t.dayValuesSleep.all { it <= 0f }) {
-                    Text(
-                        "范围内暂无已完成睡眠记录",
-                        style = LeziTypography.Body,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    com.lezi.babylog.designsystem.StateContainer(
+                        kind = com.lezi.babylog.designsystem.StateKind.Empty,
+                        title = "范围内暂无已完成睡眠记录",
+                        message = "完成的睡眠会按天汇总到这里。",
                     )
                 } else {
                     MiniBarChart(
@@ -420,10 +420,10 @@ fun SummaryRoute(
                 }
                 Spacer(Modifier.height(8.dp))
                 if (t.dayValuesDiaper.all { it <= 0f }) {
-                    Text(
-                        "范围内暂无尿布记录",
-                        style = LeziTypography.Body,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    com.lezi.babylog.designsystem.StateContainer(
+                        kind = com.lezi.babylog.designsystem.StateKind.Empty,
+                        title = "范围内暂无尿布记录",
+                        message = "尿/便记录会按天汇总到这里。",
                     )
                 } else {
                     StackedDiaperBarChart(

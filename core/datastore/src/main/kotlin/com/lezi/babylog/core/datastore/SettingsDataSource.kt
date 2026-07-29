@@ -352,11 +352,9 @@ internal fun parseQuickRecordSlots(raw: String?): List<String> {
     return normalizeQuickRecordSlots(parts)
 }
 
-internal fun normalizeQuickRecordSlots(slots: List<String>): List<String> {
-    val padded = slots.map { it.trim() }.toMutableList()
-    while (padded.size < QUICK_RECORD_SLOT_COUNT) padded += ""
-    return padded.take(QUICK_RECORD_SLOT_COUNT)
-}
+// Canonical implementation lives on core.model so feature docks and store share one pad rule.
+internal fun normalizeQuickRecordSlots(slots: List<String>): List<String> =
+    com.lezi.babylog.core.model.normalizeQuickRecordSlots(slots)
 
 internal fun encodeQuickRecordSlots(slots: List<String>): String =
     normalizeQuickRecordSlots(slots).joinToString(",")

@@ -576,10 +576,11 @@ internal fun QuickRecordSheet(
     previewPhotoIndex?.let { startIndex ->
         val previewStart = RecordPhotoChrome.previewStartIndex(startIndex, draft.photos.size)
         if (previewStart != null) {
-            RecordPhotoPreviewDialog(
+            com.lezi.babylog.designsystem.LeziPhotoPreviewDialog(
                 photos = draft.photos,
                 startIndex = previewStart,
                 onDismiss = { previewPhotoIndex = null },
+                contentDescriptionPrefix = "记录图片预览",
             )
         }
     }
@@ -656,73 +657,4 @@ internal fun QuickRecordSheet(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun RecordPhotoPreviewDialog(
-    photos: List<String>,
-    startIndex: Int,
-    onDismiss: () -> Unit,
-) {
-    val pagerState = rememberPagerState(
-        initialPage = startIndex,
-        pageCount = { photos.size },
-    )
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false),
-    ) {
-        Surface(
-            modifier = Modifier.fillMaxSize(),
-            color = Color.Black,
-        ) {
-            Box(Modifier.fillMaxSize()) {
-                HorizontalPager(
-                    state = pagerState,
-                    modifier = Modifier.fillMaxSize(),
-                ) { page ->
-                    val path = photos[page]
-                    val bitmap = remember(path) {
-                        BitmapFactory.decodeFile(path)?.asImageBitmap()
-                    }
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        if (bitmap != null) {
-                            Image(
-                                bitmap = bitmap,
-                                contentDescription = "记录图片预览 ${page + 1}/${photos.size}",
-                                modifier = Modifier.fillMaxSize(),
-                                contentScale = ContentScale.Fit,
-                            )
-                        } else {
-                            Text(
-                                "无法预览图片",
-                                color = Color.White,
-                                style = LeziTypography.Body,
-                            )
-                        }
-                    }
-                }
-                TextButton(
-                    onClick = onDismiss,
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(LeziSpacing.Md),
-                ) {
-                    Text("关闭", color = Color.White)
-                }
-                if (photos.size > 1) {
-                    Text(
-                        "${pagerState.currentPage + 1}/${photos.size}",
-                        color = Color.White,
-                        style = LeziTypography.Meta,
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .padding(LeziSpacing.Md),
-                    )
-                }
-            }
-        }
-    }
-}
+

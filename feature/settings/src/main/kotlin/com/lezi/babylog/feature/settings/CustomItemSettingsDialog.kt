@@ -31,7 +31,7 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.domain.CustomRecordItem
 
-private val CustomItemIcons = listOf("★", "♥", "☀", "☾", "♪", "●", "▲", "◆")
+private val CustomItemIcons = com.lezi.babylog.core.ui.CUSTOM_ITEM_ICON_GLYPHS
 
 internal fun customItemDialogScopeGuidance(): String =
     "「本机显示」只影响本机目录与快捷坞；关闭不等于删除家庭共享定义。"
