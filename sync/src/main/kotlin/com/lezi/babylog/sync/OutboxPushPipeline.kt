@@ -6,7 +6,6 @@ import com.lezi.babylog.core.database.CarePlanDao
 import com.lezi.babylog.core.database.CustomItemDao
 import com.lezi.babylog.core.database.FulfillmentCandidateDao
 import com.lezi.babylog.core.database.MediaAssetDao
-import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.OutboxDao
 import com.lezi.babylog.core.database.OutboxEntity
 import com.lezi.babylog.core.database.RecordDao
@@ -14,8 +13,6 @@ import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
 import com.lezi.babylog.core.model.RecordType
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
@@ -40,6 +37,14 @@ internal class OutboxPushPipeline(
     private val mediaFiles: SyncMediaFileStore,
     private val requireRemoteAllowed: suspend (SyncSession) -> Unit,
 ) {
+    private val atomicMediaBundlePublisher = AtomicMediaBundlePublisher(
+        backend = backend,
+        mediaFiles = mediaFiles,
+        loadMedia = mediaDao::getByClientUuid,
+        updateMedia = mediaDao::update,
+        requireRemoteAllowed = requireRemoteAllowed,
+    )
+
     suspend fun pushPending(session: SyncSession) {
         while (pushPendingBatch(session)) {
             // Each acknowledged batch is deleted before the next peek, so rows
@@ -326,32 +331,12 @@ internal class OutboxPushPipeline(
         bundleId: String,
         root: SyncEntity,
         mediaRows: List<OutboxEntity>,
-    ) {
-        val prepared = prepareAtomicMediaPackage(mediaRows)
-        requireRemoteAllowed(session)
-        val stage = backend.stageBundle(
-            session,
-            AtomicBundleDraft(bundleId, root, prepared.entities),
-        )
-        val toUpload = stage.mediaUuidsToUpload(
-            prepared.bytes.map { it.first.clientUuid }.toSet(),
-        )
-        for ((media, bytes) in prepared.bytes) {
-            if (media.clientUuid in toUpload) {
-                requireRemoteAllowed(session)
-                backend.putBundleMedia(
-                    session,
-                    bundleId,
-                    media.clientUuid,
-                    bytes.bytes,
-                    bytes.mime,
-                )
-            }
-            mediaDao.update(media.copy(remoteUri = session.receiptFor(media.clientUuid)))
-        }
-        requireRemoteAllowed(session)
-        backend.commitBundle(session, bundleId)
-    }
+    ): BundleCommitResult = atomicMediaBundlePublisher.publish(
+        session = session,
+        bundleId = bundleId,
+        root = root,
+        mediaRows = mediaRows,
+    )
 
     private suspend fun acknowledgeMediaRows(rows: List<OutboxEntity>) {
         rows.forEach { mediaDao.markSynced(it.clientUuid, it.updatedAt) }
@@ -395,10 +380,6 @@ internal class OutboxPushPipeline(
             val media = mediaDao.getByClientUuid(row.clientUuid) ?: return@filter false
             media.kind == "log" && media.recordId == record.id
         }
-        val preparedMedia = prepareAtomicMediaPackage(mediaRows)
-        val mediaEntities = preparedMedia.entities
-        val mediaBytes = preparedMedia.bytes
-        requireRemoteAllowed(session)
         val customItemUuid = recordCustomItemClientUuid(record)
         val mapped = SyncWireMapper.record(
             entity = record,
@@ -410,32 +391,7 @@ internal class OutboxPushPipeline(
             deletedAt = recordRow.deletedAt,
         )
         val bundleId = AtomicBundleId.forRecord(record.clientUuid, recordRow.updatedAt)
-        val stage = backend.stageBundle(
-            session,
-            AtomicBundleDraft(
-                bundleId = bundleId,
-                root = root,
-                media = mediaEntities,
-            ),
-        )
-        val mediaToUpload = stage.mediaUuidsToUpload(
-            mediaBytes.map { it.first.clientUuid }.toSet(),
-        )
-        for ((media, prepared) in mediaBytes) {
-            if (media.clientUuid in mediaToUpload) {
-                requireRemoteAllowed(session)
-                backend.putBundleMedia(
-                    session,
-                    bundleId,
-                    media.clientUuid,
-                    prepared.bytes,
-                    prepared.mime,
-                )
-            }
-            mediaDao.update(media.copy(remoteUri = session.receiptFor(media.clientUuid)))
-        }
-        requireRemoteAllowed(session)
-        val commit = backend.commitBundle(session, bundleId)
+        val commit = publishRootWithMedia(session, bundleId, root, mediaRows)
         mergeCanonicalRecordAuthors(
             authors = commit.recordAuthors,
             expectedUpdatedAt = mapOf(record.clientUuid to recordRow.updatedAt),
@@ -463,9 +419,6 @@ internal class OutboxPushPipeline(
             val media = mediaDao.getByClientUuid(row.clientUuid) ?: return@filter false
             media.kind == "log" && media.carePlanId == plan.id
         }
-        val preparedMedia = prepareAtomicMediaPackage(mediaRows)
-        val mediaEntities = preparedMedia.entities
-        val mediaBytes = preparedMedia.bytes
         val customItemUuid = plan.customItemId
             ?.let { customItemDao.getById(it)?.clientUuid }
         val mapped = SyncWireMapper.carePlan(
@@ -478,33 +431,7 @@ internal class OutboxPushPipeline(
             deletedAt = planRow.deletedAt,
         )
         val bundleId = AtomicBundleId.forCarePlan(plan.clientUuid, planRow.updatedAt)
-        requireRemoteAllowed(session)
-        val stage = backend.stageBundle(
-            session,
-            AtomicBundleDraft(
-                bundleId = bundleId,
-                root = root,
-                media = mediaEntities,
-            ),
-        )
-        val mediaToUpload = stage.mediaUuidsToUpload(
-            mediaBytes.map { it.first.clientUuid }.toSet(),
-        )
-        for ((media, prepared) in mediaBytes) {
-            if (media.clientUuid in mediaToUpload) {
-                requireRemoteAllowed(session)
-                backend.putBundleMedia(
-                    session,
-                    bundleId,
-                    media.clientUuid,
-                    prepared.bytes,
-                    prepared.mime,
-                )
-            }
-            mediaDao.update(media.copy(remoteUri = session.receiptFor(media.clientUuid)))
-        }
-        requireRemoteAllowed(session)
-        backend.commitBundle(session, bundleId)
+        publishRootWithMedia(session, bundleId, root, mediaRows)
         carePlanDao.acknowledgeFamilyPublishedVersion(plan.clientUuid, planRow.updatedAt)
         mediaRows.forEach { mediaDao.markSynced(it.clientUuid, it.updatedAt) }
         outboxDao.deleteIds((listOf(planRow) + mediaRows).map { it.id })
@@ -636,56 +563,7 @@ internal class OutboxPushPipeline(
     private suspend fun recordCustomItemClientUuid(record: RecordEntity): String? =
         resolveRecordCustomItemClientUuid(record, customItemDao)
 
-    /**
-     * Shared prepare path for record and care-plan atomic bundles:
-     * inspect/compress local files, patch outbox media payload metadata, collect PUT bytes.
-     */
-    private suspend fun prepareAtomicMediaPackage(
-        mediaRows: List<OutboxEntity>,
-    ): AtomicMediaPackage {
-        val mediaEntities = mutableListOf<SyncEntity>()
-        val mediaBytes = mutableListOf<Pair<MediaAssetEntity, PreparedMedia>>()
-        for (row in mediaRows) {
-            var payload = row.payloadJson
-            val media = mediaDao.getByClientUuid(row.clientUuid)
-                ?: error("本地媒体元数据不存在")
-            if (row.deletedAt == null && media.localUri.isNotBlank()) {
-                val prepared = mediaFiles.prepareUpload(media.localUri)
-                val updated = media.copy(
-                    mime = prepared.mime,
-                    width = prepared.width ?: media.width,
-                    height = prepared.height ?: media.height,
-                    byteSize = prepared.bytes.size.toLong(),
-                )
-                mediaDao.update(updated)
-                mediaBytes += updated to prepared
-                val rawObject = Json.parseToJsonElement(payload).jsonObject
-                payload = JsonObject(
-                    rawObject +
-                        ("mime" to JsonPrimitive(updated.mime)) +
-                        ("byte_size" to JsonPrimitive(updated.byteSize)) +
-                        listOfNotNull(
-                            updated.width?.let { "width" to JsonPrimitive(it) },
-                            updated.height?.let { "height" to JsonPrimitive(it) },
-                        ).toMap(),
-                ).toString()
-            }
-            mediaEntities += SyncEntity(
-                type = "media",
-                clientUuid = row.clientUuid,
-                payloadJson = payload,
-                updatedAt = row.updatedAt,
-                deletedAt = row.deletedAt,
-            )
-        }
-        return AtomicMediaPackage(mediaEntities, mediaBytes)
-    }
 }
-
-private data class AtomicMediaPackage(
-    val entities: List<SyncEntity>,
-    val bytes: List<Pair<MediaAssetEntity, PreparedMedia>>,
-)
 
 /**
  * Pure classification of a pending outbox snapshot into package roots and dependent rows.

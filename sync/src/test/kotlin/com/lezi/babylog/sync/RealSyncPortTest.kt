@@ -37,6 +37,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import org.junit.Test
 
 class RealSyncPortTest {
@@ -3910,6 +3911,75 @@ class RealSyncPortTest {
         runCase(0)
         runCase(1)
         runCase(3)
+    }
+
+    @Test
+    fun recordAndCarePlanPublishApplyTheSamePreparedMediaMetadataContract() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        rig.backend.remember("baby", "baby-local")
+        val recordId = rig.records.seed(
+            localRecord(babyId).copy(clientUuid = "record-shared-media-publisher"),
+        )
+        val planId = rig.carePlans.seed(
+            localCarePlan(babyId).copy(clientUuid = "plan-shared-media-publisher"),
+        )
+        val recordMediaUuid = testMediaUuid("record-shared-media-publisher")
+        val planMediaUuid = testMediaUuid("plan-shared-media-publisher")
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = recordMediaUuid,
+                kind = "log",
+                localUri = "photos/record-shared.jpg",
+                mime = "image/png",
+                byteSize = 99,
+                createdAt = 100,
+                updatedAt = 120,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                carePlanId = planId,
+                clientUuid = planMediaUuid,
+                kind = "log",
+                localUri = "photos/plan-shared.jpg",
+                mime = "image/png",
+                byteSize = 99,
+                createdAt = 100,
+                updatedAt = 100,
+            ),
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        val drafts = rig.backend.stagedBundles.filter {
+            it.root.clientUuid in setOf(
+                "record-shared-media-publisher",
+                "plan-shared-media-publisher",
+            )
+        }
+        assertThat(drafts.map { it.root.type }).containsExactly("record", "care_plan")
+        drafts.forEach { draft ->
+            val payload = Json.parseToJsonElement(draft.media.single().payloadJson).jsonObject
+            assertThat(payload["mime"]?.jsonPrimitive?.contentOrNull)
+                .isEqualTo("image/jpeg")
+            assertThat(payload["byte_size"]?.jsonPrimitive?.longOrNull).isEqualTo(1)
+            assertThat(rig.backend.committedBundles).contains(draft.bundleId)
+        }
+        assertThat(rig.backend.bundleMediaUploads.map { it.second })
+            .containsExactly(recordMediaUuid, planMediaUuid)
+        val currentSession = rig.preferences.current()
+        assertThat(rig.media.getByClientUuid(recordMediaUuid)?.remoteUri)
+            .isEqualTo(currentSession.expectedMediaReceipt(recordMediaUuid))
+        assertThat(rig.media.getByClientUuid(planMediaUuid)?.remoteUri)
+            .isEqualTo(currentSession.expectedMediaReceipt(planMediaUuid))
+        assertThat(rig.records.getByClientUuid("record-shared-media-publisher")?.syncDirty)
+            .isFalse()
+        assertThat(rig.carePlans.getByClientUuid("plan-shared-media-publisher")?.syncDirty)
+            .isFalse()
+        assertThat(rig.outbox.all()).isEmpty()
     }
 
     @Test
