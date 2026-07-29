@@ -4,7 +4,7 @@ Spec: [spec.md](./spec.md)
 Status: ready-for-agent  
 Source: `docs/reviews/2026-07-29-redundancy-and-ui-review.md`  
 Ticket count: 10  
-Frontier count: 5
+Frontier count: 4
 
 ## 依赖图
 
@@ -13,7 +13,7 @@ Frontier count: 5
 
 record-layout-edit-remediation/06 ──► 02 布局迁移残留清理
 
-03 全屏照片预览单源（frontier）
+03 全屏照片预览单源（complete）
 
 04 原子包媒体机械 + customItemUuid 单 helper（frontier）
 
@@ -26,7 +26,7 @@ record-layout-edit-remediation/06 ──► 02 布局迁移残留清理
 10 journal 主色政策 + PRD 坞条款 + 死组件 ─┘
 ```
 
-**可立即开工（frontier）：** 01 · 03 · 04 · 09 · 10
+**可立即开工（frontier）：** 01 · 04 · 09 · 10
 
 **建议顺序（冲突面）：** 先 01、03–04 / 09–10 中小票；02 等布局整改 06 完成；07 避免与 09 同 PR 改时间条色；08 已完成。
 
@@ -36,7 +36,7 @@ record-layout-edit-remediation/06 ──► 02 布局迁移残留清理
 |----|------|------|------------|------|------|
 | [01](./issues/01-unify-nursing-confirm-surface.md) | 统一母乳确认面（Composer + 计时完成） | A | — | L | ready-for-agent |
 | [02](./issues/02-layout-migration-residue-cleanup.md) | 布局迁移残留与自定义管理单表面 | B | record-layout-edit-remediation/06 | M | ready-for-agent |
-| [03](./issues/03-shared-photo-preview-dialog.md) | 全屏照片预览单源 | C | — | M | ready-for-agent |
+| [03](./issues/03-shared-photo-preview-dialog.md) | 全屏照片预览单源 | C | — | M | complete |
 | [04](./issues/04-atomic-media-pack-and-custom-uuid-helper.md) | 原子包媒体机械与 customItemUuid 单 helper | C | — | M | ready-for-agent |
 | [05](./issues/05-parameterized-photo-reconcile.md) | 照片 reconcile/tombstone 按所有者参数化 | C | — | M | complete |
 | [06](./issues/06-clear-scope-and-committed-failure-single-source.md) | 本机清理 scope 与 committed 失败单源 | D | — | M | complete |

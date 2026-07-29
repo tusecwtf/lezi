@@ -1,5 +1,6 @@
 package com.lezi.babylog.designsystem
 
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
@@ -16,10 +17,25 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+
+/**
+ * Decodes a local preview image without letting an invalid or oversized file crash the preview.
+ */
+fun decodePhotoPreviewBitmap(
+    path: String,
+    decodeFile: (String) -> Bitmap? = BitmapFactory::decodeFile,
+): ImageBitmap? = try {
+    decodeFile(path)?.asImageBitmap()
+} catch (_: OutOfMemoryError) {
+    null
+} catch (_: Exception) {
+    null
+}
 
 /**
  * Full-screen black-pager photo preview shared by composer and conflict audit.
@@ -55,7 +71,7 @@ fun LeziPhotoPreviewDialog(
                 ) { page ->
                     val path = photos[page]
                     val bitmap = remember(path) {
-                        BitmapFactory.decodeFile(path)?.asImageBitmap()
+                        decodePhotoPreviewBitmap(path)
                     }
                     Box(
                         modifier = Modifier.fillMaxSize(),
