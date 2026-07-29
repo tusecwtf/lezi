@@ -129,12 +129,45 @@ interface FamilyWizardGateway {
     suspend fun retryReclaimedDataRecovery(): Result<Unit>
 }
 
+internal interface FamilyWizardLocalStore {
+    suspend fun ensureScaffold()
+
+    suspend fun cacheDisplayName(displayName: String)
+}
+
+private class CareLogFamilyWizardLocalStore(
+    private val careLog: CareLog,
+) : FamilyWizardLocalStore {
+    override suspend fun ensureScaffold() {
+        careLog.ensureFamilyScaffold()
+    }
+
+    override suspend fun cacheDisplayName(displayName: String) {
+        careLog.updateLocalDisplayName(displayName)
+    }
+}
+
+private class CreateFamilyPreparationException(cause: Throwable) :
+    IllegalStateException("准备本机家庭失败", cause)
+
 /** Production adapter shared by the onboarding and account ViewModels. */
-class SyncFamilyWizardGateway(
+class SyncFamilyWizardGateway private constructor(
     private val sync: SyncPort,
     private val joinFamily: JoinFamilyUseCase,
-    private val careLog: CareLog,
+    private val localStore: FamilyWizardLocalStore,
 ) : FamilyWizardGateway {
+    constructor(
+        sync: SyncPort,
+        joinFamily: JoinFamilyUseCase,
+        careLog: CareLog,
+    ) : this(sync, joinFamily, CareLogFamilyWizardLocalStore(careLog))
+
+    internal constructor(
+        localStore: FamilyWizardLocalStore,
+        sync: SyncPort,
+        joinFamily: JoinFamilyUseCase,
+    ) : this(sync, joinFamily, localStore)
+
     override suspend fun saveHomeLanConfig(config: HomeLanServerConfig): Result<Unit> =
         sync.saveHomeLanConfig(config)
 
@@ -144,6 +177,16 @@ class SyncFamilyWizardGateway(
         bootstrapSecret: String,
         familyName: String?,
     ): Result<CreateFamilyResult> {
+        try {
+            // A reclaimed full pull may contain Baby rows immediately. Their
+            // local FK parent must exist before create commits the server session
+            // and synchronously applies that cursor-zero snapshot.
+            localStore.ensureScaffold()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            return Result.failure(CreateFamilyPreparationException(error))
+        }
         val result = sync.createFamily(
             displayName = displayName,
             bootstrapSecret = bootstrapSecret,
@@ -151,7 +194,7 @@ class SyncFamilyWizardGateway(
         )
         if (result.isSuccess) {
             try {
-                careLog.updateLocalDisplayName(displayName)
+                localStore.cacheDisplayName(displayName)
             } catch (_: Exception) {
                 // The server session is already committed; a display cache must not undo it.
             }
