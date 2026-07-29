@@ -11,6 +11,7 @@ import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.OutboxDao
 import com.lezi.babylog.core.database.PendingReplicaCleanupStore
 import com.lezi.babylog.core.database.RecordDao
+import com.lezi.babylog.core.model.RootPublicationState
 import com.lezi.babylog.core.model.SyncStatus
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
@@ -389,7 +390,7 @@ internal class HomeNetworkBlockedException(
  * atomic package commit (or failed to publish). Never shown for remote-applied
  * (syncDirty=false) rows.
  *
- * [hasPriorFamilyRevision] distinguishes first publish (create) from a mutation
+ * [publicationState] distinguishes first publish (create) from a mutation
  * re-publish: receivers keep the prior complete version until the new package
  * commits, so mutation copy must not say "暂不可见" as if the row never existed.
  */
@@ -397,30 +398,38 @@ fun localRecordPublishLabel(
     syncDirty: Boolean,
     familyJoined: Boolean,
     lastSyncFailed: Boolean,
-    hasPriorFamilyRevision: Boolean = false,
+    publicationState: RootPublicationState,
 ): String? {
-    if (!familyJoined || !syncDirty) return null
+    if (
+        !familyJoined ||
+        !syncDirty ||
+        publicationState == RootPublicationState.CURRENT_VERSION_PUBLISHED
+    ) return null
+    val hasPriorFamilyRevision =
+        publicationState == RootPublicationState.PREVIOUS_VERSION_PUBLISHED
     return when {
         lastSyncFailed && hasPriorFamilyRevision -> "仅本机 · 更新同步失败"
         lastSyncFailed -> "仅本机 · 同步失败"
         hasPriorFamilyRevision -> "仅本机 · 等待更新同步"
-        else -> "仅本机 · 等待照片同步"
+        else -> "仅本机 · 等待家庭同步"
     }
 }
 
 /** Detail copy when the user taps the local-only chrome. */
 fun localRecordPublishDetail(
     lastSyncFailed: Boolean,
-    hasPriorFamilyRevision: Boolean,
+    publicationState: RootPublicationState,
 ): String = when {
-    hasPriorFamilyRevision && lastSyncFailed ->
+    publicationState == RootPublicationState.PREVIOUS_VERSION_PUBLISHED && lastSyncFailed ->
         "其他成员仍看到上一完整版本；可手动重试，或下次前台同步时自动重试。"
-    hasPriorFamilyRevision ->
+    publicationState == RootPublicationState.PREVIOUS_VERSION_PUBLISHED ->
         "其他成员仍看到上一完整版本，更新发布成功后才会替换。"
+    publicationState == RootPublicationState.CURRENT_VERSION_PUBLISHED ->
+        "当前版本已完成家庭同步。"
     lastSyncFailed ->
         "其他成员暂不可见；可手动重试，或下次前台同步时自动重试。"
     else ->
-        "其他成员暂不可见，照片与记录发布成功后才会出现。"
+        "其他成员暂不可见，记录发布成功后才会出现。"
 }
 
 /**
@@ -431,28 +440,36 @@ fun localCarePlanPublishLabel(
     syncDirty: Boolean,
     familyJoined: Boolean,
     lastSyncFailed: Boolean,
-    hasPriorFamilyRevision: Boolean = false,
+    publicationState: RootPublicationState,
 ): String? {
-    if (!familyJoined || !syncDirty) return null
+    if (
+        !familyJoined ||
+        !syncDirty ||
+        publicationState == RootPublicationState.CURRENT_VERSION_PUBLISHED
+    ) return null
+    val hasPriorFamilyRevision =
+        publicationState == RootPublicationState.PREVIOUS_VERSION_PUBLISHED
     return when {
         lastSyncFailed && hasPriorFamilyRevision -> "仅本机 · 更新同步失败"
         lastSyncFailed -> "仅本机 · 同步失败"
         hasPriorFamilyRevision -> "仅本机 · 等待更新同步"
-        else -> "仅本机 · 等待照片同步"
+        else -> "仅本机 · 等待家庭同步"
     }
 }
 
 /** Detail copy for plan local-only chrome (visibility + family reminders). */
 fun localCarePlanPublishDetail(
     lastSyncFailed: Boolean,
-    hasPriorFamilyRevision: Boolean,
+    publicationState: RootPublicationState,
 ): String = when {
-    hasPriorFamilyRevision && lastSyncFailed ->
+    publicationState == RootPublicationState.PREVIOUS_VERSION_PUBLISHED && lastSyncFailed ->
         "其他成员仍看到上一完整版本且不会收到新提醒；可手动重试，或下次前台同步时自动重试。"
-    hasPriorFamilyRevision ->
+    publicationState == RootPublicationState.PREVIOUS_VERSION_PUBLISHED ->
         "其他成员仍看到上一完整版本，更新发布成功后才会替换并安排提醒。"
+    publicationState == RootPublicationState.CURRENT_VERSION_PUBLISHED ->
+        "当前版本已完成家庭同步。"
     lastSyncFailed ->
         "其他成员暂不可见、不会提醒；可手动重试，或下次前台同步时自动重试。"
     else ->
-        "其他成员暂不可见、不会提醒，计划与照片发布成功后才会出现。"
+        "其他成员暂不可见、不会提醒，护理计划发布成功后才会出现。"
 }

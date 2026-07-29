@@ -8,11 +8,11 @@ Current validation HEAD: `d7b3bea3483367d663fa330eb6596aba3ed73e50`
 ## Current audit disposition
 
 - Findings: **26**
-- Fixed: **2（05、15）**
-- Active tickets in this tracker: **22**
+- Fixed: **3（05、15、16）**
+- Active tickets in this tracker: **21**
 - Canonical layout tickets: **2**
 - Partial findings: **02、04、06、09、10、14、17、19**
-- Still-valid findings: **01、03、07、08、11、12、13、16、18、20、21、22、23、24、25、26**
+- Still-valid findings: **01、03、07、08、11、12、13、18、20、21、22、23、24、25、26**
 
 `partial` 只描述审计时已有部分结构，不改变未完成票状态。
 
@@ -38,7 +38,7 @@ layout/05 已删除分区 ────┘
 
 ## Frontier
 
-当前 audit frontier：**01、03、06、07、10、14、16、17、18、20、21、23、24**。
+当前 audit frontier：**01、03、06、07、10、14、17、18、20、21、23、24**。
 
 建议并行：**01、06、07**。其余 frontier 同样可领取，但不得把“frontier”误解为必须同时开工。
 
@@ -61,7 +61,7 @@ layout/05 已删除分区 ────┘
 | [13](../record-layout-edit-remediation/issues/06-accessible-layout-actions-truthful-empty-slot.md) | 无障碍布局编辑与真实空槽文案 | layout/02、layout/04、layout/05 | M | still-valid · canonical layout/06 | ready-for-agent |
 | [14](./issues/14-accessible-record-plan-actions-and-feedback.md) | 无障碍记录/计划管理与结果反馈 | — | M | partial | ready-for-agent |
 | [15](./issues/15-serialize-growth-measurement-writes.md) | 串行化成长记录写入 | — | S–M | still-valid | complete |
-| [16](./issues/16-root-publication-receipt-and-truthful-copy.md) | 记录根发布回执与真实同步文案 | — | M | still-valid | ready-for-agent |
+| [16](./issues/16-root-publication-receipt-and-truthful-copy.md) | 记录根发布回执与真实同步文案 | — | M | still-valid | complete |
 | [17](./issues/17-canonical-user-visible-record-labels.md) | 统一用户可见记录类型标签 | — | S–M | partial | ready-for-agent |
 | [18](./issues/18-minute-driven-record-screen-clock.md) | 记录页分钟级时钟刷新 | — | S–M | still-valid | ready-for-agent |
 | [19](./issues/19-dst-safe-three-day-timeline.md) | 夏令时安全的三日时间轴 | 18 | M | partial | ready-for-agent |

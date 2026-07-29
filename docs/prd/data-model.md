@@ -131,6 +131,7 @@ CustomItemDef 仍使用 creator-or-owner 管理规则。不做保育只读角色
 | `end_timestamp` | 睡眠等区间 |
 | `note` | |
 | `created_by_membership_id` | NAS 认证 principal 在首次接受 Record 时盖章的不可变作者；尚未加入家庭的本机记录可空 |
+| `family_published_updated_at?` | 仅本机保存的根发布回执；等于 `updated_at` 表示当前根已发布，小于它表示家庭仍看到上一版本；不进入 wire |
 | `payload_json` | 类型扩展 |
 | `schema_version` | 当前固定为 v2 |
 | `updated_at` / `deleted_at` | 软删 / LWW |
@@ -291,7 +292,9 @@ tombstone 不可复活。删除目录项不级联删除或改写已存在的 `cu
 `baby_id`, `type`, `custom_item_id?`, `scheduled_at`, `scheduled_zone_id`,
 `note`, `payload_json`, `schema_version`, `status`,
 `created_by_membership_id`, `fulfilled_record_client_uuid?`, `fulfilled_at?`,
-`source_record_client_uuid?`, `updated_at`, `deleted_at`, `sync_dirty`。此外保留
+`source_record_client_uuid?`, `updated_at`, `deleted_at`, `sync_dirty`,
+`family_published_updated_at?`。根回执只在 atomic commit 成功或 pull 到已提交根后写入，
+不进入家庭 wire，也不由媒体 `remote_uri` 推断。此外保留
 `system_calendar_projection_enabled`, `system_calendar_event_id?`,
 `system_calendar_reminder_ready` 与 `system_calendar_projection_pending` 等当前设备
 副作用状态；这些字段不进入家庭 wire。
@@ -478,6 +481,11 @@ interface SyncPort {
 当前 Room schema 强制 `MediaAsset` 只有一个归属：`log` 在 `record_id` 与 `plan_id`
 中恰选一个，`avatar` 只使用 `baby_id`。
 
+Record/CarePlan 的 `family_published_updated_at` 是独立的设备本机根回执。仅当它与根
+`updated_at` 相等时才表示当前版本已发布；较小正值表示家庭仍看到上一完整版本，缺失、
+零值或未来值均按从未发布 fail closed。媒体 `remote_uri` 只说明某个媒体上传步骤已有
+回执，不能证明根已 commit。跨家庭或失效重建同步凭据时须清空根回执。
+
 ### 6.5 本地备份（可选，不依赖 SyncPort）
 
 当前产品可提供「导出数据库/JSON 到文件」便于换机；与家庭实时同步分开。
@@ -497,7 +505,7 @@ interface SyncPort {
 
 ## 8. 当前数据层
 
-当前 Android fresh Room schema 为 v23，包含 LocalUser、Family、Membership、Baby、Record、MediaAsset、
+当前 Android fresh Room schema 为 v24，包含 LocalUser、Family、Membership、Baby、Record、MediaAsset、
 SettingsLocal、ShareInvite、Outbox、CustomItemDef、CarePlan 与 FulfillmentCandidate，
 并使用真实 `SyncPort` 和 Record/计划媒体原子包。非 current Room schema 不属于支持输入；
 当前数据库在进程重启后必须完整保留业务数据、Outbox、计时与提醒恢复状态。

@@ -20,6 +20,7 @@ import com.lezi.babylog.core.database.OutboxEntity
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.model.SyncStatus
+import com.lezi.babylog.core.model.RootPublicationState
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -605,6 +606,7 @@ class RealSyncPortTest {
         rig.records.seed(
             localRecord(babyId).copy(
                 clientUuid = recordUuid,
+                familyPublishedUpdatedAt = 100,
                 syncDirty = false,
             ),
         )
@@ -618,6 +620,7 @@ class RealSyncPortTest {
                 fulfilledRecordClientUuid = recordUuid,
                 fulfilledAt = 120,
                 status = "completed",
+                familyPublishedUpdatedAt = 100,
                 syncDirty = false,
             ),
         )
@@ -633,6 +636,8 @@ class RealSyncPortTest {
         )
 
         assertThat(rig.port.deleteFamily().isSuccess).isTrue()
+        assertThat(rig.records.getByClientUuid(recordUuid)?.familyPublishedUpdatedAt).isNull()
+        assertThat(rig.carePlans.getByClientUuid(planUuid)?.familyPublishedUpdatedAt).isNull()
         rig.preferences.saveSession(joinedSession("family-new"))
         val result = rig.port.sync(SyncTrigger.LocalWrite)
 
@@ -2969,19 +2974,21 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun localRecordPublishLabelShowsAmberWaitingOrFailure() {
+    fun localRecordPublishLabelUsesRootReceiptAndTruthfulZeroPhotoCopy() {
         assertThat(
             localRecordPublishLabel(
                 syncDirty = true,
                 familyJoined = true,
                 lastSyncFailed = false,
+                publicationState = RootPublicationState.NEVER_PUBLISHED,
             ),
-        ).isEqualTo("仅本机 · 等待照片同步")
+        ).isEqualTo("仅本机 · 等待家庭同步")
         assertThat(
             localRecordPublishLabel(
                 syncDirty = true,
                 familyJoined = true,
                 lastSyncFailed = true,
+                publicationState = RootPublicationState.NEVER_PUBLISHED,
             ),
         ).isEqualTo("仅本机 · 同步失败")
         assertThat(
@@ -2989,7 +2996,7 @@ class RealSyncPortTest {
                 syncDirty = true,
                 familyJoined = true,
                 lastSyncFailed = false,
-                hasPriorFamilyRevision = true,
+                publicationState = RootPublicationState.PREVIOUS_VERSION_PUBLISHED,
             ),
         ).isEqualTo("仅本机 · 等待更新同步")
         assertThat(
@@ -2997,20 +3004,27 @@ class RealSyncPortTest {
                 syncDirty = true,
                 familyJoined = true,
                 lastSyncFailed = true,
-                hasPriorFamilyRevision = true,
+                publicationState = RootPublicationState.PREVIOUS_VERSION_PUBLISHED,
             ),
         ).isEqualTo("仅本机 · 更新同步失败")
         assertThat(
             localRecordPublishDetail(
                 lastSyncFailed = true,
-                hasPriorFamilyRevision = true,
+                publicationState = RootPublicationState.PREVIOUS_VERSION_PUBLISHED,
             ),
         ).contains("上一完整版本")
+        assertThat(
+            localRecordPublishDetail(
+                lastSyncFailed = false,
+                publicationState = RootPublicationState.NEVER_PUBLISHED,
+            ),
+        ).isEqualTo("其他成员暂不可见，记录发布成功后才会出现。")
         assertThat(
             localRecordPublishLabel(
                 syncDirty = false,
                 familyJoined = true,
                 lastSyncFailed = false,
+                publicationState = RootPublicationState.NEVER_PUBLISHED,
             ),
         ).isNull()
         assertThat(
@@ -3018,6 +3032,15 @@ class RealSyncPortTest {
                 syncDirty = true,
                 familyJoined = false,
                 lastSyncFailed = false,
+                publicationState = RootPublicationState.NEVER_PUBLISHED,
+            ),
+        ).isNull()
+        assertThat(
+            localRecordPublishLabel(
+                syncDirty = true,
+                familyJoined = true,
+                lastSyncFailed = false,
+                publicationState = RootPublicationState.CURRENT_VERSION_PUBLISHED,
             ),
         ).isNull()
     }
@@ -3406,6 +3429,168 @@ class RealSyncPortTest {
         assertThat(rig.records.getByClientUuid(recordUuid)).isNull()
         assertThat(rig.media.getByClientUuid(mediaUuid)).isNull()
         assertThat(rig.preferences.current().pullCursor).isEqualTo(5)
+    }
+
+    @Test
+    fun zeroPhotoRecordReceiptWritesOnlyAfterCommitAndSurvivesRetryAndRestart() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "record-root-receipt",
+                updatedAt = 777,
+                syncDirty = true,
+            ),
+        )
+        rig.backend.commitBundleFailure = IllegalStateException("commit offline")
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isFailure).isTrue()
+        assertThat(rig.records.getByClientUuid("record-root-receipt")?.familyPublishedUpdatedAt)
+            .isNull()
+
+        rig.backend.commitBundleFailure = null
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val published = requireNotNull(rig.records.getByClientUuid("record-root-receipt"))
+        assertThat(published.familyPublishedUpdatedAt).isEqualTo(777)
+        assertThat(published.syncDirty).isFalse()
+
+        val reopened = MemoryRecordDao().apply { seed(published) }
+        assertThat(reopened.getByClientUuid("record-root-receipt")?.familyPublishedUpdatedAt)
+            .isEqualTo(777)
+    }
+
+    @Test
+    fun uploadedPhotoCannotStandInForFailedRootCommitReceipt() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val recordId = rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "record-photo-root-fail",
+                updatedAt = 800,
+                syncDirty = true,
+            ),
+        )
+        val mediaUuid = testMediaUuid("media-photo-root-fail")
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = mediaUuid,
+                kind = "log",
+                localUri = "photos/root-fail.jpg",
+                mime = "image/jpeg",
+                byteSize = 4,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = true,
+            ),
+        )
+        rig.backend.commitBundleFailure = IllegalStateException("commit timeout")
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isFailure).isTrue()
+
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.remoteUri).isNotNull()
+        assertThat(rig.records.getByClientUuid("record-photo-root-fail")?.familyPublishedUpdatedAt)
+            .isNull()
+    }
+
+    @Test
+    fun cancelledOrTimedOutCommitCannotWriteRootReceipt() = runTest {
+        listOf(
+            CancellationException("commit cancelled"),
+            java.net.SocketTimeoutException("commit timed out"),
+        ).forEachIndexed { index, failure ->
+            val rig = SyncRig(session = joinedSession("family-a"))
+            assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+            val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+            val recordUuid = "record-commit-interrupted-$index"
+            rig.records.seed(
+                localRecord(babyId).copy(
+                    clientUuid = recordUuid,
+                    updatedAt = 850L + index,
+                    syncDirty = true,
+                ),
+            )
+            rig.backend.commitBundleFailure = failure
+
+            val result = rig.port.sync(SyncTrigger.LocalWrite)
+
+            assertThat(result.isFailure).isTrue()
+            assertThat(rig.records.getByClientUuid(recordUuid)?.familyPublishedUpdatedAt)
+                .isNull()
+            assertThat(rig.records.getByClientUuid(recordUuid)?.syncDirty).isTrue()
+            assertThat(rig.outbox.peek("family-a", 10).map(OutboxEntity::clientUuid))
+                .contains(recordUuid)
+        }
+    }
+
+    @Test
+    fun staleRecordReceiptPreservesNewerDirtyRevisionAndRejectsFutureReceipt() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        rig.records.seed(
+            localRecord(babyId).copy(
+                clientUuid = "record-stale-root-receipt",
+                updatedAt = 900,
+                syncDirty = true,
+            ),
+        )
+        rig.backend.afterCommit = {
+            val current = requireNotNull(
+                rig.records.getByClientUuid("record-stale-root-receipt"),
+            )
+            rig.records.update(current.copy(updatedAt = 901, syncDirty = true))
+        }
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        val edited = requireNotNull(rig.records.getByClientUuid("record-stale-root-receipt"))
+        assertThat(edited.updatedAt).isEqualTo(901)
+        assertThat(edited.familyPublishedUpdatedAt).isEqualTo(900)
+        assertThat(edited.syncDirty).isTrue()
+
+        assertThat(
+            rig.records.acknowledgeFamilyPublishedVersion(
+                clientUuid = "record-stale-root-receipt",
+                publishedUpdatedAt = 902,
+            ),
+        ).isFalse()
+        assertThat(
+            rig.records.getByClientUuid("record-stale-root-receipt")?.familyPublishedUpdatedAt,
+        ).isEqualTo(900)
+    }
+
+    @Test
+    fun zeroPhotoCarePlanEditKeepsPreviousReceiptUntilRetryCommitsCurrent() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        rig.carePlans.seed(
+            localCarePlan(babyId).copy(
+                clientUuid = "plan-root-receipt",
+                updatedAt = 1_000,
+                syncDirty = true,
+            ),
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val published = requireNotNull(rig.carePlans.getByClientUuid("plan-root-receipt"))
+        assertThat(published.familyPublishedUpdatedAt).isEqualTo(1_000)
+
+        rig.carePlans.update(published.copy(updatedAt = 1_001, syncDirty = true))
+        rig.backend.commitBundleFailure = IllegalStateException("offline edit")
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isFailure).isTrue()
+        val pendingEdit = requireNotNull(rig.carePlans.getByClientUuid("plan-root-receipt"))
+        assertThat(pendingEdit.familyPublishedUpdatedAt).isEqualTo(1_000)
+        assertThat(pendingEdit.syncDirty).isTrue()
+
+        rig.backend.commitBundleFailure = null
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        val current = requireNotNull(rig.carePlans.getByClientUuid("plan-root-receipt"))
+        assertThat(current.familyPublishedUpdatedAt).isEqualTo(1_001)
+        assertThat(current.syncDirty).isFalse()
     }
 
     @Test
@@ -4099,25 +4284,33 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun localCarePlanPublishLabelMentionsFamilyInvisibilityAndReminders() {
+    fun localCarePlanPublishLabelUsesRootReceiptAndTruthfulZeroPhotoCopy() {
         assertThat(
             localCarePlanPublishLabel(
                 syncDirty = true,
                 familyJoined = true,
                 lastSyncFailed = false,
+                publicationState = RootPublicationState.NEVER_PUBLISHED,
             ),
-        ).isEqualTo("仅本机 · 等待照片同步")
+        ).isEqualTo("仅本机 · 等待家庭同步")
         assertThat(
             localCarePlanPublishDetail(
                 lastSyncFailed = false,
-                hasPriorFamilyRevision = false,
+                publicationState = RootPublicationState.NEVER_PUBLISHED,
             ),
-        ).contains("不会提醒")
+        ).isEqualTo("其他成员暂不可见、不会提醒，护理计划发布成功后才会出现。")
+        assertThat(
+            localCarePlanPublishDetail(
+                lastSyncFailed = false,
+                publicationState = RootPublicationState.PREVIOUS_VERSION_PUBLISHED,
+            ),
+        ).contains("上一完整版本")
         assertThat(
             localCarePlanPublishLabel(
                 syncDirty = false,
                 familyJoined = true,
                 lastSyncFailed = false,
+                publicationState = RootPublicationState.NEVER_PUBLISHED,
             ),
         ).isNull()
     }
@@ -4339,9 +4532,14 @@ class RealSyncPortTest {
             hasMore = false,
         )
         assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
-        assertThat(rig.records.getByClientUuid("remote-fulfill-record")).isNotNull()
+        assertThat(
+            rig.records.getByClientUuid("remote-fulfill-record")?.familyPublishedUpdatedAt,
+        ).isEqualTo(800)
         assertThat(rig.carePlans.getByClientUuid("remote-fulfill-plan")?.status)
             .isEqualTo("completed")
+        assertThat(
+            rig.carePlans.getByClientUuid("remote-fulfill-plan")?.familyPublishedUpdatedAt,
+        ).isEqualTo(801)
         assertThat(rig.carePlans.getByClientUuid("remote-fulfill-plan")?.fulfilledRecordClientUuid)
             .isEqualTo("remote-fulfill-record")
         val cand = rig.fulfillmentCandidates.getByClientUuid("remote-fulfill-cand")!!
@@ -4938,7 +5136,7 @@ internal class RecordingSyncBackend : SyncBackend {
     val pushFailures = ArrayDeque<Throwable>()
     val pullCursors = mutableListOf<Long>()
     var afterPush: (() -> Unit)? = null
-    var afterCommit: (() -> Unit)? = null
+    var afterCommit: (suspend () -> Unit)? = null
     var pullStarted: CompletableDeferred<Unit>? = null
     var releasePull: CompletableDeferred<Unit>? = null
     var createStarted: CompletableDeferred<Unit>? = null

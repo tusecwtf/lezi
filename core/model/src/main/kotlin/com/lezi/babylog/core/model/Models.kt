@@ -64,6 +64,29 @@ data class Membership(
     val joinedAt: Long,
 )
 
+/**
+ * Device-local evidence for whether a family has atomically received a root revision.
+ * Media upload receipts are deliberately excluded from this state.
+ */
+enum class RootPublicationState {
+    NEVER_PUBLISHED,
+    PREVIOUS_VERSION_PUBLISHED,
+    CURRENT_VERSION_PUBLISHED,
+}
+
+fun rootPublicationState(
+    localUpdatedAt: Long,
+    familyPublishedUpdatedAt: Long?,
+): RootPublicationState = when {
+    familyPublishedUpdatedAt != null &&
+        familyPublishedUpdatedAt > 0L &&
+        familyPublishedUpdatedAt == localUpdatedAt -> RootPublicationState.CURRENT_VERSION_PUBLISHED
+    familyPublishedUpdatedAt != null &&
+        familyPublishedUpdatedAt > 0L &&
+        familyPublishedUpdatedAt < localUpdatedAt -> RootPublicationState.PREVIOUS_VERSION_PUBLISHED
+    else -> RootPublicationState.NEVER_PUBLISHED
+}
+
 data class Record(
     val id: Long = 0,
     val clientUuid: String,
@@ -83,6 +106,8 @@ data class Record(
     val syncDirty: Boolean = false,
     /** Server-minted membership that first created this record; empty before joining a family. */
     val createdByMembershipId: String = "",
+    /** Device-local receipt for the last atomically published root revision. */
+    val familyPublishedUpdatedAt: Long? = null,
 ) {
     val payload: RecordPayloadDocument
         get() = RecordPayloadCodec.decode(type, payloadJson, schemaVersion)
@@ -164,6 +189,8 @@ data class CarePlan(
     val syncDirty: Boolean = false,
     /** Device-local, per-plan desired calendar route; never family-synced. */
     val systemCalendarProjectionEnabled: Boolean = true,
+    /** Device-local receipt for the last atomically published root revision. */
+    val familyPublishedUpdatedAt: Long? = null,
 ) {
     /** Effective status for UI: pending past scheduledAt becomes missed. */
     fun effectiveStatus(nowMillis: Long = System.currentTimeMillis()): CarePlanStatus {

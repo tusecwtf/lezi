@@ -28,6 +28,9 @@ ADR-0002 对历史 `memo`、`other` 与裸 `custom` Record/快捷引用的保留
   `log` 只能作为 Record/CarePlan 包成员，`avatar` 只能作为 Baby 包成员。pull 发出 live
   Record/CarePlan 时须在同页共组其 live `log` 媒体。客户端不向旧 NAS 降级，服务端也不
   接受为旧客户端保留的字段、别名或 ordinary 发布旁路。
+- Android 为 Record/CarePlan 持久化独立于媒体的本机根发布回执。它只在 atomic commit
+  成功或 pull/apply 已提交根后前进；媒体上传 URI 不证明根已发布，过期回执也不能确认
+  较新的本地修订。跨家庭边界必须清空该回执。
 - 客户端只要求 `/health` 为 `ok` 且 capabilities 至少包含 `atomic_bundle` 与
   `record_membership_author`；允许服务端增加能力，展示用 `version` 不参与兼容门闩。
 - `membership_id` 是记录作者与 ACL 的唯一家庭身份。`device_id` 只用于当前建家、加入与

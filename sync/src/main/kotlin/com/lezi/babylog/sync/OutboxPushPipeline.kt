@@ -440,7 +440,7 @@ internal class OutboxPushPipeline(
             authors = commit.recordAuthors,
             expectedUpdatedAt = mapOf(record.clientUuid to recordRow.updatedAt),
         )
-        recordDao.markSynced(record.clientUuid, recordRow.updatedAt)
+        recordDao.acknowledgeFamilyPublishedVersion(record.clientUuid, recordRow.updatedAt)
         mediaRows.forEach { mediaDao.markSynced(it.clientUuid, it.updatedAt) }
         outboxDao.deleteIds((listOf(recordRow) + mediaRows).map { it.id })
     }
@@ -505,7 +505,7 @@ internal class OutboxPushPipeline(
         }
         requireRemoteAllowed(session)
         backend.commitBundle(session, bundleId)
-        carePlanDao.markSynced(plan.clientUuid, planRow.updatedAt)
+        carePlanDao.acknowledgeFamilyPublishedVersion(plan.clientUuid, planRow.updatedAt)
         mediaRows.forEach { mediaDao.markSynced(it.clientUuid, it.updatedAt) }
         outboxDao.deleteIds((listOf(planRow) + mediaRows).map { it.id })
     }

@@ -92,6 +92,9 @@ data class RecordEntity(
     val syncDirty: Boolean = true,
     @ColumnInfo(defaultValue = "''")
     val createdByMembershipId: String = "",
+    /** Last root revision atomically committed by the family server; never a media receipt. */
+    @ColumnInfo(defaultValue = "NULL")
+    val familyPublishedUpdatedAt: Long? = null,
 )
 
 /**
@@ -149,6 +152,9 @@ data class CarePlanEntity(
     /** Durable hand-off set before external provider I/O; closes insert-before-id crashes. */
     @ColumnInfo(defaultValue = "0")
     val systemCalendarProjectionPending: Boolean = false,
+    /** Last root revision atomically committed by the family server; never a media receipt. */
+    @ColumnInfo(defaultValue = "NULL")
+    val familyPublishedUpdatedAt: Long? = null,
 )
 
 /**

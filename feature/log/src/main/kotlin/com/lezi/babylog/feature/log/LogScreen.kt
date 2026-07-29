@@ -64,6 +64,7 @@ import com.lezi.babylog.core.model.MilkPayload
 import com.lezi.babylog.core.model.NursingPayload
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordItemIdentity
+import com.lezi.babylog.core.model.RootPublicationState
 import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SettingsLocal
@@ -72,6 +73,7 @@ import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.core.model.availableForNewEntry
 import com.lezi.babylog.core.model.deviceLayoutSnapshot
 import com.lezi.babylog.core.model.displayLabel
+import com.lezi.babylog.core.model.rootPublicationState
 import com.lezi.babylog.core.ui.RecordSection
 import com.lezi.babylog.core.ui.RecordSummaryStrip
 import com.lezi.babylog.core.ui.RecordSummaryValue
@@ -160,16 +162,6 @@ data class LogUiState(
     val pendingPlans: List<CarePlan> = emptyList(),
     /** Plan ids the current actor may edit/skip/delete (UI ACL). */
     val manageablePlanIds: Set<Long> = emptySet(),
-    /**
-     * recordId → true when a prior family-complete package exists (media receipt),
-     * so mutation chrome says "上一完整版本" rather than first-publish copy.
-     */
-    val recordPriorFamilyRevision: Map<Long, Boolean> = emptyMap(),
-    /**
-     * carePlanId → true when a prior family-complete plan package exists,
-     * for amber “仅本机” mutation chrome on creator devices.
-     */
-    val planPriorFamilyRevision: Map<Long, Boolean> = emptyMap(),
     val familyJoined: Boolean = false,
     val lastSyncFailed: Boolean = false,
     /**
@@ -286,30 +278,6 @@ class LogViewModel @Inject constructor(
                     members = members,
                     selfMembershipId = selfIdentity.membershipId,
                 )
-                val priorRevisions = buildMap {
-                    if (joined) {
-                        for (record in records) {
-                            if (record.syncDirty) {
-                                put(
-                                    record.id,
-                                    careLog.recordHasPriorFamilyRevision(record.id),
-                                )
-                            }
-                        }
-                    }
-                }
-                val planPriorRevisions = buildMap {
-                    if (joined) {
-                        for (plan in plans) {
-                            if (plan.syncDirty) {
-                                put(
-                                    plan.id,
-                                    careLog.carePlanHasPriorFamilyRevision(plan.id),
-                                )
-                            }
-                        }
-                    }
-                }
                 val manageablePlans = buildSet {
                     for (plan in plans) {
                         if (careLog.canManageCarePlan(plan)) add(plan.id)
@@ -331,8 +299,6 @@ class LogViewModel @Inject constructor(
                     customItems = customItems,
                     pendingPlans = plans,
                     manageablePlanIds = manageablePlans,
-                    recordPriorFamilyRevision = priorRevisions,
-                    planPriorFamilyRevision = planPriorRevisions,
                     familyJoined = joined,
                     showDayChart = showDayChart,
                 )
@@ -872,7 +838,7 @@ private fun formatDurationMinutes(minutes: Long): String =
 private data class PublishChromeTarget(
     val recordId: Long,
     val title: String,
-    val priorRevision: Boolean,
+    val publicationState: RootPublicationState,
 )
 
 /** List-level delete confirmation target (swipe path; Composer not opened first). */
@@ -1332,12 +1298,15 @@ fun LogRoute(
                                 ""
                             }
                             val canManagePlan = plan.id in state.manageablePlanIds
-                            val planPrior = state.planPriorFamilyRevision[plan.id] == true
+                            val planPublicationState = rootPublicationState(
+                                localUpdatedAt = plan.updatedAt,
+                                familyPublishedUpdatedAt = plan.familyPublishedUpdatedAt,
+                            )
                             val planPublishLabel = localCarePlanPublishLabel(
                                 syncDirty = plan.syncDirty,
                                 familyJoined = state.familyJoined,
                                 lastSyncFailed = state.lastSyncFailed,
-                                hasPriorFamilyRevision = planPrior,
+                                publicationState = planPublicationState,
                             )
                             val statusLine =
                                 (if (isMissed) "已错过 · 点此完成" else "待执行 · 点此完成") + zoneHint
@@ -1407,7 +1376,7 @@ fun LogRoute(
                                             val publishDetail = if (planPublishLabel != null) {
                                                 "。" + localCarePlanPublishDetail(
                                                     lastSyncFailed = state.lastSyncFailed,
-                                                    hasPriorFamilyRevision = planPrior,
+                                                    publicationState = planPublicationState,
                                                 )
                                             } else {
                                                 ""
@@ -1470,13 +1439,15 @@ fun LogRoute(
                         }
                         else -> items(filteredTimelineRecords, key = { it.id }) { r ->
                             val title = r.displayLabel()
-                            val priorRevision =
-                                state.recordPriorFamilyRevision[r.id] == true
+                            val publicationState = rootPublicationState(
+                                localUpdatedAt = r.updatedAt,
+                                familyPublishedUpdatedAt = r.familyPublishedUpdatedAt,
+                            )
                             val publishLabel = localRecordPublishLabel(
                                 syncDirty = r.syncDirty,
                                 familyJoined = state.familyJoined,
                                 lastSyncFailed = state.lastSyncFailed,
-                                hasPriorFamilyRevision = priorRevision,
+                                publicationState = publicationState,
                             )
                             val recordRowId = "record-${r.id}"
                             val recordRevealed = revealedSwipeRowId == recordRowId
@@ -1524,7 +1495,7 @@ fun LogRoute(
                                             publishChromeRecord = PublishChromeTarget(
                                                 recordId = r.id,
                                                 title = title,
-                                                priorRevision = priorRevision,
+                                                publicationState = publicationState,
                                             )
                                         } else {
                                             collapseSwipeRows()
@@ -1621,7 +1592,7 @@ fun LogRoute(
                 Text(
                     localRecordPublishDetail(
                         lastSyncFailed = state.lastSyncFailed,
-                        hasPriorFamilyRevision = target.priorRevision,
+                        publicationState = target.publicationState,
                     ),
                 )
             },

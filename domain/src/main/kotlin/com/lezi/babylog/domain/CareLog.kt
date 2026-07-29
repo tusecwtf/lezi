@@ -816,29 +816,6 @@ class CareLog @Inject constructor(
         return active
     }
 
-    /**
-     * True when this record already has family-published media receipts, so a
-     * local dirty re-publish is a mutation (receivers still see the prior version).
-     *
-     * Includes tombstoned media: a photo removed in the new draft still proves a
-     * prior complete package was family-visible until the mutation package commits.
-     */
-    suspend fun recordHasPriorFamilyRevision(recordId: Long): Boolean =
-        mediaAssetDao.listForRecord(recordId).any { asset ->
-            asset.kind == "log" && !asset.remoteUri.isNullOrBlank()
-        }
-
-    /**
-     * True when this plan already has family-published media receipts, so a
-     * local dirty re-publish is a mutation (receivers still see the prior version).
-     * Empty photo plans treat a prior non-dirty revision as proof via remoteUri
-     * on any plan media row (including tombstones).
-     */
-    suspend fun carePlanHasPriorFamilyRevision(carePlanId: Long): Boolean =
-        mediaAssetDao.listForCarePlan(carePlanId).any { asset ->
-            asset.kind == "log" && !asset.remoteUri.isNullOrBlank()
-        }
-
     suspend fun completeNursing(
         babyId: Long,
         leftMin: Int,
@@ -2715,6 +2692,7 @@ internal fun RecordEntity.toModel(): Record =
         updatedAt = updatedAt,
         deletedAt = deletedAt,
         syncDirty = syncDirty,
+        familyPublishedUpdatedAt = familyPublishedUpdatedAt,
     )
 
 internal fun CustomItemEntity.toModel(): CustomRecordItem =
@@ -2750,6 +2728,7 @@ internal fun CarePlanEntity.toModel(): CarePlan =
         deletedAt = deletedAt,
         syncDirty = syncDirty,
         systemCalendarProjectionEnabled = systemCalendarProjectionEnabled,
+        familyPublishedUpdatedAt = familyPublishedUpdatedAt,
     )
 
 private fun FulfillmentCandidateEntity.toModel(): FulfillmentCandidate =

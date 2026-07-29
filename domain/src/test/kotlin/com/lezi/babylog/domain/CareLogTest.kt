@@ -3026,28 +3026,27 @@ class CareLogTest {
     }
 
     @Test
-    fun recordHasPriorFamilyRevisionUsesMediaReceiptsIncludingTombstones() = runTest {
-        val fakes = Fakes()
-        val care = fakes.careLog()
-        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
-        val recordId = care.addRecord(
-            babyId = babyId,
-            type = RecordType.FORMULA,
-            timestamp = 1_000L,
-            payloadJson = """{"amount_ml":90}""",
-            photoLocalPaths = listOf("photos/old.jpg"),
-        )
-        assertThat(care.recordHasPriorFamilyRevision(recordId)).isFalse()
+    fun rootPublicationReceiptMapsToRecordAndCarePlanWithoutMediaEvidence() {
+        val record = RecordEntity(
+            clientUuid = "record-root-receipt",
+            babyId = 1,
+            type = "formula",
+            timestamp = 1_000,
+            updatedAt = 2_000,
+            familyPublishedUpdatedAt = 1_900,
+        ).toModel()
+        val plan = CarePlanEntity(
+            clientUuid = "plan-root-receipt",
+            babyId = 1,
+            type = "formula",
+            scheduledAt = 2_500,
+            scheduledZoneId = "UTC",
+            updatedAt = 3_000,
+            familyPublishedUpdatedAt = 2_900,
+        ).toModel()
 
-        // Family-published receipt on the active photo → mutation chrome path.
-        val active = fakes.media.listActiveForRecord(recordId).single()
-        fakes.media.update(active.copy(remoteUri = "lezi-sync:media-old", syncDirty = false))
-        assertThat(care.recordHasPriorFamilyRevision(recordId)).isTrue()
-
-        // Even after the photo is tombstoned (user removed it in a new edit), the
-        // prior package receipt still proves family still sees the old complete version.
-        fakes.media.update(active.copy(remoteUri = "lezi-sync:media-old", deletedAt = 2_000L, syncDirty = false))
-        assertThat(care.recordHasPriorFamilyRevision(recordId)).isTrue()
+        assertThat(record.familyPublishedUpdatedAt).isEqualTo(1_900)
+        assertThat(plan.familyPublishedUpdatedAt).isEqualTo(2_900)
     }
 
     @Test

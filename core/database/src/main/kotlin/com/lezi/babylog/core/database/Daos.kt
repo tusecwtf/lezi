@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 
@@ -269,6 +270,32 @@ interface RecordDao {
     )
     suspend fun markSynced(clientUuid: String, updatedAt: Long)
 
+    /**
+     * Persist a successful atomic root commit without letting an old acknowledgement
+     * clear a newer local edit. Future/invalid acknowledgements are rejected.
+     */
+    @Transaction
+    suspend fun acknowledgeFamilyPublishedVersion(
+        clientUuid: String,
+        publishedUpdatedAt: Long,
+    ): Boolean {
+        val current = getByClientUuid(clientUuid) ?: return false
+        if (publishedUpdatedAt <= 0L || publishedUpdatedAt > current.updatedAt) return false
+        val validExisting = current.familyPublishedUpdatedAt
+            ?.takeIf { it > 0L && it <= current.updatedAt }
+        val mergedReceipt = maxOf(validExisting ?: 0L, publishedUpdatedAt)
+        val confirmsCurrent = publishedUpdatedAt == current.updatedAt
+        if (validExisting != mergedReceipt || (confirmsCurrent && current.syncDirty)) {
+            update(
+                current.copy(
+                    familyPublishedUpdatedAt = mergedReceipt,
+                    syncDirty = if (confirmsCurrent) false else current.syncDirty,
+                ),
+            )
+        }
+        return confirmsCurrent
+    }
+
     /** Merge server-owned metadata without changing content, revision, dirty state, or outbox. */
     @Query(
         """
@@ -532,6 +559,29 @@ interface CarePlanDao {
         """,
     )
     suspend fun markSynced(clientUuid: String, updatedAt: Long)
+
+    /** Record only successful atomic root commits; stale receipts never clean a newer edit. */
+    @Transaction
+    suspend fun acknowledgeFamilyPublishedVersion(
+        clientUuid: String,
+        publishedUpdatedAt: Long,
+    ): Boolean {
+        val current = getByClientUuid(clientUuid) ?: return false
+        if (publishedUpdatedAt <= 0L || publishedUpdatedAt > current.updatedAt) return false
+        val validExisting = current.familyPublishedUpdatedAt
+            ?.takeIf { it > 0L && it <= current.updatedAt }
+        val mergedReceipt = maxOf(validExisting ?: 0L, publishedUpdatedAt)
+        val confirmsCurrent = publishedUpdatedAt == current.updatedAt
+        if (validExisting != mergedReceipt || (confirmsCurrent && current.syncDirty)) {
+            update(
+                current.copy(
+                    familyPublishedUpdatedAt = mergedReceipt,
+                    syncDirty = if (confirmsCurrent) false else current.syncDirty,
+                ),
+            )
+        }
+        return confirmsCurrent
+    }
 
     @Query("UPDATE care_plans SET syncDirty = 1")
     suspend fun markAllPendingSync()

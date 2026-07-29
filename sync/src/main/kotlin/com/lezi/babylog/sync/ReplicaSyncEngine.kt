@@ -363,7 +363,13 @@ internal class ReplicaSyncEngine(
         if (!concurrentNextFeedCreate) {
             // Match server LWW for business fields. Equal revisions may still carry
             // the NAS-owned immutable creator acknowledgement after a push.
-            if (existing != null && existing.updatedAt > entity.updatedAt) return true
+            if (existing != null && existing.updatedAt > entity.updatedAt) {
+                carePlanDao.acknowledgeFamilyPublishedVersion(
+                    entity.clientUuid,
+                    entity.updatedAt,
+                )
+                return true
+            }
             if (existing != null && existing.updatedAt == entity.updatedAt) {
                 acknowledgedEqualRevisionCreator(
                     session = session,
@@ -372,6 +378,10 @@ internal class ReplicaSyncEngine(
                 )?.let { creator ->
                     carePlanDao.update(existing.copy(createdByMembershipId = creator))
                 }
+                carePlanDao.acknowledgeFamilyPublishedVersion(
+                    entity.clientUuid,
+                    entity.updatedAt,
+                )
                 return true
             }
             // Keep in-flight local create/edit until push commits.
@@ -455,6 +465,7 @@ internal class ReplicaSyncEngine(
                 updatedAt = entity.updatedAt,
                 deletedAt = entity.deletedAt,
                 syncDirty = false,
+                familyPublishedUpdatedAt = entity.updatedAt,
                 systemCalendarProjectionEnabled =
                     existing?.systemCalendarProjectionEnabled ?: true,
                 systemCalendarEventId = existing?.systemCalendarEventId,
@@ -719,13 +730,17 @@ internal class ReplicaSyncEngine(
         }
         // Match server LWW for business fields. Equal revisions may still carry
         // a server-owned author metadata acknowledgement from the current server.
-        if (existing != null && existing.updatedAt > entity.updatedAt) return true
+        if (existing != null && existing.updatedAt > entity.updatedAt) {
+            recordDao.acknowledgeFamilyPublishedVersion(entity.clientUuid, entity.updatedAt)
+            return true
+        }
         if (existing != null && existing.updatedAt == entity.updatedAt) {
             recordDao.mergeCanonicalAuthor(
                 clientUuid = entity.clientUuid,
                 expectedUpdatedAt = entity.updatedAt,
                 membershipId = wire.createdByMembershipId,
             )
+            recordDao.acknowledgeFamilyPublishedVersion(entity.clientUuid, entity.updatedAt)
             return true
         }
         // Concurrent local dirty mutation: never clobber the in-flight package or
@@ -752,6 +767,7 @@ internal class ReplicaSyncEngine(
                 updatedAt = entity.updatedAt,
                 deletedAt = entity.deletedAt,
                 syncDirty = false,
+                familyPublishedUpdatedAt = entity.updatedAt,
             ),
         )
         return true
@@ -985,12 +1001,24 @@ internal class ReplicaSyncEngine(
             if (crossingFamilyBoundary || previous.role == FamilyRole.Member) {
                 babyDao.clearFamilyAuthority()
             }
-            recordDao.markAllPendingSync()
+            if (crossingFamilyBoundary || invalidateCurrentReceipts) {
+                recordDao.listAllIncludingDeleted().forEach { record ->
+                    recordDao.update(
+                        record.copy(
+                            familyPublishedUpdatedAt = null,
+                            syncDirty = true,
+                        ),
+                    )
+                }
+            } else {
+                recordDao.markAllPendingSync()
+            }
             if (crossingFamilyBoundary) {
                 carePlanDao.listAllIncludingDeleted().forEach { plan ->
                     carePlanDao.update(
                         plan.copy(
                             createdByMembershipId = "",
+                            familyPublishedUpdatedAt = null,
                             syncDirty = true,
                         ),
                     )
@@ -1012,6 +1040,17 @@ internal class ReplicaSyncEngine(
                         ),
                     )
                 }
+            } else if (invalidateCurrentReceipts) {
+                carePlanDao.listAllIncludingDeleted().forEach { plan ->
+                    carePlanDao.update(
+                        plan.copy(
+                            familyPublishedUpdatedAt = null,
+                            syncDirty = true,
+                        ),
+                    )
+                }
+                customItemDao.markAllPendingSync()
+                fulfillmentCandidateDao.markAllPendingSync()
             } else {
                 carePlanDao.markAllPendingSync()
                 customItemDao.markAllPendingSync()

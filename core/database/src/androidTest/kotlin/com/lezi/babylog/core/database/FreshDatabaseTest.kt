@@ -29,7 +29,7 @@ class FreshDatabaseTest {
         val db = openDatabase("fresh-schema")
         val sqlite = db.openHelper.writableDatabase
 
-        assertEquals(23, sqlite.version)
+        assertEquals(24, sqlite.version)
         val tables = buildSet {
             sqlite.query("SELECT name FROM sqlite_master WHERE type = 'table'").use { cursor ->
                 while (cursor.moveToNext()) add(cursor.getString(0))
@@ -64,6 +64,14 @@ class FreshDatabaseTest {
         assertFalse(recordColumns.contains("createdByUserId"))
         assertFalse(recordColumns.contains("createdByDeviceId"))
         assertTrue(recordColumns.contains("createdByMembershipId"))
+        assertTrue(recordColumns.contains("familyPublishedUpdatedAt"))
+        val carePlanColumns = buildSet {
+            sqlite.query("PRAGMA table_info(care_plans)").use { cursor ->
+                val nameIndex = cursor.getColumnIndexOrThrow("name")
+                while (cursor.moveToNext()) add(cursor.getString(nameIndex))
+            }
+        }
+        assertTrue(carePlanColumns.contains("familyPublishedUpdatedAt"))
         val babyColumns = buildSet {
             sqlite.query("PRAGMA table_info(babies)").use { cursor ->
                 val nameIndex = cursor.getColumnIndexOrThrow("name")
@@ -130,7 +138,7 @@ class FreshDatabaseTest {
     fun sameVersionReopenPreservesData() = runBlocking {
         val name = uniqueName("same-version-reopen")
         database = buildLeziDatabase(context, name)
-        database!!.babyDao().upsert(
+        val babyId = database!!.babyDao().upsert(
             BabyEntity(
                 familyId = 1,
                 nickname = "年年",
@@ -138,6 +146,29 @@ class FreshDatabaseTest {
                 themeColorArgb = 0,
                 clientUuid = "baby-fresh-reopen",
                 updatedAt = 100,
+            ),
+        )
+        database!!.recordDao().upsert(
+            RecordEntity(
+                clientUuid = "record-root-receipt-reopen",
+                babyId = babyId,
+                type = "formula",
+                timestamp = 100,
+                updatedAt = 110,
+                familyPublishedUpdatedAt = 110,
+                syncDirty = false,
+            ),
+        )
+        database!!.carePlanDao().upsert(
+            CarePlanEntity(
+                clientUuid = "plan-root-receipt-reopen",
+                babyId = babyId,
+                type = "formula",
+                scheduledAt = 200,
+                scheduledZoneId = "UTC",
+                updatedAt = 210,
+                familyPublishedUpdatedAt = 200,
+                syncDirty = true,
             ),
         )
         database!!.close()
@@ -148,13 +179,25 @@ class FreshDatabaseTest {
             "年年",
             database!!.babyDao().getByClientUuid("baby-fresh-reopen")?.nickname,
         )
+        assertEquals(
+            110,
+            database!!.recordDao()
+                .getByClientUuid("record-root-receipt-reopen")
+                ?.familyPublishedUpdatedAt,
+        )
+        assertEquals(
+            200,
+            database!!.carePlanDao()
+                .getByClientUuid("plan-root-receipt-reopen")
+                ?.familyPublishedUpdatedAt,
+        )
     }
 
     @Test
     fun nonCurrentSchemaFailsWithoutMutation() {
         val name = uniqueName("non-current-rejected")
         context.openOrCreateDatabase(name, Context.MODE_PRIVATE, null).use { sqlite ->
-            sqlite.version = 22
+            sqlite.version = 23
         }
         database = buildLeziDatabase(context, name)
 
@@ -163,11 +206,11 @@ class FreshDatabaseTest {
         }.exceptionOrNull()
 
         assertNotNull(failure)
-        assertTrue(failure!!.message.orEmpty().contains("migration from 22 to 23"))
+        assertTrue(failure!!.message.orEmpty().contains("migration from 23 to 24"))
         database!!.close()
         database = null
         context.openOrCreateDatabase(name, Context.MODE_PRIVATE, null).use { sqlite ->
-            assertEquals(22, sqlite.version)
+            assertEquals(23, sqlite.version)
         }
     }
 

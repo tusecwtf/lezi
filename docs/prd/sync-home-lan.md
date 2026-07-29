@@ -593,6 +593,10 @@ fulfillment_candidate`：Record/CarePlan 的媒体成员只能是 `log`，Baby �
   commit，从而保证 server-owned Record/CarePlan 作者、内容 hash 与幂等重试一致
 - **稳定 UUID**：Android 以命名空间、根类型、根实体 `client_uuid` 与 `updated_at` 确定性生成合法 UUID；同一版本重试复用同一 `bundle_id`，Record 与 CarePlan 不共享身份
 - **已发布版本保留**：新编辑在 commit 前不覆盖当前已发布完整版本；根 `updated_at` 落后于已发布 → commit `409`
+- **客户端根回执**：Android 只在 commit 成功响应后把该根 `updated_at` 写入 Record/CarePlan
+  的本机 `familyPublishedUpdatedAt`；pull/apply 的已提交根同样写入当前回执。媒体
+  `remoteUri` 不能替代根回执。过期响应可留下“上一版本已发布”证据但不得清除较新本地
+  `syncDirty`，未来响应必须拒绝；失败、取消或超时均保留 Outbox 供同一 bundle 幂等重试。
 - **LWW**：commit 在同一实体键上执行 LWW；不得用 ordinary 写穿破原子可见性
 - **根类型与媒体约束**：`record`/`care_plan` 只允许 `log`，`baby` 只允许 `avatar`，
   `custom_item`/`fulfillment_candidate` 只允许空媒体清单；所有根共享同一 HTTP/Store 契约
