@@ -2561,6 +2561,10 @@ fn collect_pull_entity_with_dependencies(
     if included_keys.contains(&key) || group_keys.contains(&key) {
         return Ok(());
     }
+    // Mark before traversing dependencies: record/care_plan now include live
+    // log media, while each log media includes its parent. Early marking makes
+    // that bidirectional graph finite without changing dependency-first order.
+    group_keys.insert(key);
     if entity.deleted_at.is_none() {
         match entity.entity_type.as_str() {
             "record" => {
@@ -2590,6 +2594,16 @@ fn collect_pull_entity_with_dependencies(
                         group,
                     )?;
                 }
+                append_log_media_for_parent(
+                    connection,
+                    family_id,
+                    cursor,
+                    "record",
+                    &entity.client_uuid,
+                    included_keys,
+                    group_keys,
+                    group,
+                )?;
             }
             "care_plan" => {
                 append_pull_dependency(
@@ -2639,6 +2653,16 @@ fn collect_pull_entity_with_dependencies(
                         )?;
                     }
                 }
+                append_log_media_for_parent(
+                    connection,
+                    family_id,
+                    cursor,
+                    "care_plan",
+                    &entity.client_uuid,
+                    included_keys,
+                    group_keys,
+                    group,
+                )?;
             }
             "media" => match entity.payload.get("kind").and_then(Value::as_str) {
                 Some("avatar") => append_pull_dependency(
@@ -2685,8 +2709,59 @@ fn collect_pull_entity_with_dependencies(
             _ => {}
         }
     }
-    group_keys.insert(key);
     group.push(entity);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_log_media_for_parent(
+    connection: &Connection,
+    family_id: &str,
+    cursor: i64,
+    parent_type: &str,
+    parent_client_uuid: &str,
+    included_keys: &BTreeSet<EntityKey>,
+    group_keys: &mut BTreeSet<EntityKey>,
+    group: &mut Vec<PulledEntity>,
+) -> Result<(), StoreError> {
+    let reference_field = match parent_type {
+        "record" => "record_client_uuid",
+        "care_plan" => "care_plan_client_uuid",
+        _ => return Err(StoreError::InvalidStoredPayload),
+    };
+    let sql = format!(
+        "
+        SELECT client_uuid
+        FROM entities
+        WHERE family_id = ?1
+          AND entity_type = 'media'
+          AND deleted_at IS NULL
+          AND json_extract(payload_json, '$.kind') = 'log'
+          AND json_extract(payload_json, '$.{reference_field}') = ?2
+        ORDER BY rev ASC, client_uuid ASC
+        "
+    );
+    let media_ids = {
+        let mut statement = connection.prepare(&sql)?;
+        let ids = statement
+            .query_map(params![family_id, parent_client_uuid], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids
+    };
+    for media_id in media_ids {
+        append_pull_dependency(
+            connection,
+            family_id,
+            cursor,
+            "media",
+            &media_id,
+            included_keys,
+            group_keys,
+            group,
+        )?;
+    }
     Ok(())
 }
 
@@ -3783,6 +3858,111 @@ mod tests {
                 ("record".to_owned(), record_id.to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn pull_parent_co_groups_later_log_media_at_page_boundary() {
+        for parent_type in ["record", "care_plan"] {
+            let directory = TempDir::new().unwrap();
+            let store = Store::open(directory.path().join("lezi.db")).unwrap();
+            let family_id = family(&store);
+            let principal = owner_principal(&family_id);
+            let baby_id = Uuid::new_v4();
+            let parent_id = Uuid::new_v4();
+            let media_id = Uuid::new_v4();
+            store
+                .push(
+                    &principal,
+                    vec![entity(
+                        "baby",
+                        baby_id,
+                        1,
+                        json!({
+                            "nickname":"年年","sex":"female","birthday":"2025-01-02",
+                            "avatar_media_uuid":null,"birth_weight_grams":3200
+                        }),
+                    )],
+                    10,
+                    1_700_000_000_000,
+                )
+                .unwrap();
+            let parent_payload = if parent_type == "record" {
+                json!({
+                    "baby_client_uuid":baby_id,"type":"formula","timestamp":100,
+                    "end_timestamp":null,"note":null,"payload_json":{"amount_ml":120},
+                    "schema_version":2
+                })
+            } else {
+                json!({
+                    "baby_client_uuid":baby_id,"type":"formula",
+                    "custom_item_client_uuid":null,
+                    "scheduled_at":1_700_000_000_000i64,
+                    "scheduled_zone_id":"Asia/Shanghai","status":"pending",
+                    "payload_json":{"amount_ml":120},"schema_version":2,"note":null,
+                    "fulfilled_record_client_uuid":null,"fulfilled_at":null
+                })
+            };
+            store
+                .push(
+                    &principal,
+                    vec![entity(parent_type, parent_id, 2, parent_payload)],
+                    10,
+                    1_700_000_000_000,
+                )
+                .unwrap();
+
+            let filler = (0..199)
+                .map(|index| {
+                    entity(
+                        "baby",
+                        Uuid::new_v4(),
+                        3,
+                        json!({
+                            "nickname":format!("填充{index}"),"sex":"female",
+                            "birthday":"2025-01-02","avatar_media_uuid":null,
+                            "birth_weight_grams":3200
+                        }),
+                    )
+                })
+                .collect();
+            store
+                .push(&principal, filler, 10, 1_700_000_000_000)
+                .unwrap();
+            let media_payload = if parent_type == "record" {
+                json!({
+                    "kind":"log","record_client_uuid":parent_id,
+                    "mime":"image/jpeg","byte_size":3
+                })
+            } else {
+                json!({
+                    "kind":"log","care_plan_client_uuid":parent_id,
+                    "mime":"image/jpeg","byte_size":3
+                })
+            };
+            store
+                .push(
+                    &principal,
+                    vec![entity("media", media_id, 4, media_payload)],
+                    10,
+                    1_700_000_000_000,
+                )
+                .unwrap();
+
+            let first_page = store.pull(&family_id, 1).unwrap();
+            assert!(first_page.has_more, "{parent_type}");
+            assert_eq!(first_page.entities.len(), PULL_PAGE_ENTITY_LIMIT);
+            let parent_index = first_page
+                .entities
+                .iter()
+                .position(|entity| entity.client_uuid == parent_id.to_string())
+                .unwrap();
+            let media_index = first_page
+                .entities
+                .iter()
+                .position(|entity| entity.client_uuid == media_id.to_string())
+                .unwrap();
+            assert_eq!(media_index + 1, parent_index, "{parent_type}");
+        }
     }
 
     #[test]

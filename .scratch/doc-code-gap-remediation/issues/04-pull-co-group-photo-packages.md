@@ -4,9 +4,9 @@
 
 **Blocked by:** None — can start immediately（与 02 可并行，但宜同 PR 或紧接合并）。
 
-**Status:** ready-for-agent
+**Status:** complete
 
-- [ ] `collect_pull_entity_with_dependencies`：record/care_plan 分支 `append_log_media_for_parent`
-- [ ] 提前 visit-mark，避免循环
-- [ ] API/store 测试：根实体与照片不同 rev 时同页出现
-- [ ] 不改变客户端 cursor 语义（仍按页完整 apply）
+- [x] `collect_pull_entity_with_dependencies`：record/care_plan 分支 `append_log_media_for_parent`
+- [x] 提前 visit-mark，避免循环
+- [x] API/store 测试：根实体与照片不同 rev 时同页出现
+- [x] 不改变客户端 cursor 语义（仍按页完整 apply）
