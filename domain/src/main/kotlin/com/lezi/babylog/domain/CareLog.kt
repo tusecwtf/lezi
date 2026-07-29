@@ -50,7 +50,6 @@ import com.lezi.babylog.core.model.normalizeBabyNickname
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
-import java.time.temporal.ChronoUnit
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 import javax.inject.Inject
@@ -2816,69 +2815,4 @@ private fun withAnomaly(payloadJson: String, schemaVersion: Int): Pair<String, I
         schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
     )
     return RecordPayloadCodec.encode(normalized) to CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
-}
-
-fun babyAgeLabel(birthdayEpochDay: Long, today: LocalDate = LocalDate.now()): String {
-    val birth = LocalDate.ofEpochDay(birthdayEpochDay)
-    if (birth.isAfter(today)) return "未出生"
-
-    if (today.isBefore(birth.plusYears(1))) {
-        val months = completedCalendarMonthsBetween(birth, today)
-        val days = ChronoUnit.DAYS.between(birth.plusMonths(months.toLong()), today).toInt()
-        return "${months}个月${days}天"
-    }
-
-    var years = today.year - birth.year
-    var yearAnchor = birth.plusYears(years.toLong())
-    if (today.isBefore(yearAnchor)) {
-        years -= 1
-        yearAnchor = birth.plusYears(years.toLong())
-    }
-    val months = completedCalendarMonthsBetween(yearAnchor, today)
-    return "${years}岁${months}个月"
-}
-
-private fun completedCalendarMonthsBetween(start: LocalDate, end: LocalDate): Int {
-    var months = (end.year - start.year) * 12 + end.monthValue - start.monthValue
-    if (end.isBefore(start.plusMonths(months.toLong()))) months -= 1
-    return months
-}
-
-fun relativeTimeLabel(timestamp: Long, now: Long = System.currentTimeMillis()): String {
-    val delta = (now - timestamp).coerceAtLeast(0L)
-    val min = delta / 60_000L
-    return when {
-        min < 1 -> "刚刚"
-        min < 60 -> "${min} 分钟前"
-        min < 60 * 24 -> "${min / 60} 小时前"
-        else -> "${min / (60 * 24)} 天前"
-    }
-}
-
-fun formatClock(timestamp: Long, zone: ZoneId = ZoneId.systemDefault()): String {
-    val t = Instant.ofEpochMilli(timestamp).atZone(zone).toLocalTime()
-    return "%02d:%02d".format(t.hour, t.minute)
-}
-
-/**
- * Formula/pumped UI values from 30 through 300 at step-sized intervals, plus a
- * missing positive last value.
- */
-fun amountCandidates(step: Int, lastMl: Int?): List<Int> {
-    val s = step.coerceAtLeast(1)
-    val base = (30..300 step s).toMutableList()
-    if (lastMl != null && lastMl > 0 && lastMl !in base) {
-        base.add(lastMl)
-        base.sort()
-    }
-    return base
-}
-
-fun amountCenterIndex(candidates: List<Int>, lastMl: Int?): Int {
-    if (candidates.isEmpty()) return 0
-    if (lastMl == null) return candidates.indexOf(120).takeIf { it >= 0 }
-        ?: candidates.indexOfFirst { it >= 120 }.coerceAtLeast(0)
-    val exact = candidates.indexOf(lastMl)
-    if (exact >= 0) return exact
-    return candidates.indices.minByOrNull { kotlin.math.abs(candidates[it] - lastMl) } ?: 0
 }
