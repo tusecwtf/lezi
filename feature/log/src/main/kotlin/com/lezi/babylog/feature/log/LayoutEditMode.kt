@@ -25,7 +25,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -45,7 +44,6 @@ import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -54,12 +52,9 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import com.lezi.babylog.core.model.RecordItemIdentity
 import com.lezi.babylog.core.model.RecordType
@@ -100,11 +95,7 @@ private data class LayoutItemVisual(
     val colorRole: LeziRecordColorRole,
 )
 
-/**
- * Full-screen Android home-screen style layout editor:
- * icon grid + floating drag avatar + bottom dock slots.
- * No text lists / ↑↓ rows — only icons (with short labels under).
- */
+/** Full-screen layout editor continuing the 添加记录 categorized-card visual language. */
 @Composable
 internal fun LayoutEditCanvas(
     prefs: DeviceLayoutPrefs,
@@ -228,14 +219,21 @@ internal fun LayoutEditCanvas(
             .semantics { contentDescription = "编辑布局，拖动图标替换常用" },
     ) {
         Column(Modifier.fillMaxSize()) {
-            // Minimal chrome — only Done (launcher style)
+            // Editor-owned chrome. Root date chrome and primary tabs are hidden.
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                    .heightIn(min = LeziSpacing.Touch)
+                    .padding(horizontal = LeziSpacing.Page, vertical = LeziSpacing.Xs),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.End,
             ) {
+                Text(
+                    text = LayoutEditPresentation.title,
+                    style = LeziTypography.Title,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag("layout_edit_title"),
+                )
                 TextButton(
                     onClick = onDone,
                     modifier = Modifier.testTag("layout_edit_done"),
@@ -244,27 +242,28 @@ internal fun LayoutEditCanvas(
                 }
             }
 
-            // Icon wall (catalog)
+            // Same categorized four-column card catalog as 添加记录.
             Column(
                 Modifier
                     .weight(1f)
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 12.dp),
+                    .padding(horizontal = LeziSpacing.Page),
             ) {
                 sections.forEach { section ->
                     val keys = layoutEditVisibleKeys(prefs, section, known)
-                    // Subtle section pin — not a settings list header
                     if (keys.isNotEmpty() || section == RecordSection.Custom) {
-                        Spacer(Modifier.height(10.dp))
+                        Spacer(Modifier.height(LeziSpacing.SectionGap))
                     }
                     Column(
                         Modifier
                             .fillMaxWidth()
                             .testTag("layout_edit_section_${section.storageKey}"),
                     ) {
+                        RecordCatalogSectionHeading(section.title)
+                        Spacer(Modifier.height(LeziSpacing.Xs))
                         val showAdd = section == RecordSection.Custom
-                        IconGrid(
+                        LayoutCatalogGrid(
                             keys = keys,
                             labels = labels,
                             visualByKey = visualByKey,
@@ -299,19 +298,19 @@ internal fun LayoutEditCanvas(
                         )
                     }
                 }
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(LeziSpacing.Md))
             }
 
-            // Remove / 本机已删除 tray (icon drop zone, not a text form)
+            // Local-only deleted section remains a clear, bounded drop zone.
             val trashHot = drag != null &&
                 trashBounds?.contains(drag!!.pointerWindow) == true
             Column(
                 Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp)
+                    .padding(horizontal = LeziSpacing.Page)
                     .heightIn(min = 72.dp)
                     .onGloballyPositioned { trashBounds = it.boundsInWindow() }
-                    .clip(RoundedCornerShape(16.dp))
+                    .clip(com.lezi.babylog.designsystem.LeziThemeExt.cardShape)
                     .background(
                         MaterialTheme.colorScheme.errorContainer.copy(
                             alpha = if (trashHot) 0.65f else 0.28f,
@@ -322,21 +321,27 @@ internal fun LayoutEditCanvas(
                             Modifier.border(
                                 2.dp,
                                 MaterialTheme.colorScheme.error,
-                                RoundedCornerShape(16.dp),
+                                com.lezi.babylog.designsystem.LeziThemeExt.cardShape,
                             )
                         } else {
                             Modifier
                         },
                     )
-                    .padding(horizontal = 8.dp, vertical = 8.dp)
+                    .padding(horizontal = LeziSpacing.Xs, vertical = LeziSpacing.Xs)
                     .testTag("layout_edit_local_deleted"),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
+                RecordCatalogSectionHeading(
+                    title = "本机已删除",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("layout_edit_local_deleted_heading"),
+                )
+                Spacer(Modifier.height(LeziSpacing.Xs))
                 if (deleted.isEmpty()) {
-                    // Pure glyph placeholder — no long copy
                     Box(
                         Modifier
-                            .size(40.dp)
+                            .size(LeziSpacing.Touch)
                             .clip(CircleShape)
                             .background(
                                 MaterialTheme.colorScheme.error.copy(alpha = 0.12f),
@@ -350,7 +355,7 @@ internal fun LayoutEditCanvas(
                         )
                     }
                 } else {
-                    IconGrid(
+                    LayoutCatalogGrid(
                         keys = deleted,
                         labels = labels,
                         visualByKey = visualByKey,
@@ -384,7 +389,7 @@ internal fun LayoutEditCanvas(
                 }
             }
 
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(LeziSpacing.Xxs))
 
             // Bottom dock — drop targets for quick slots (Android dock metaphor)
             LauncherEditDock(
@@ -409,35 +414,30 @@ internal fun LayoutEditCanvas(
             )
         }
 
-        // Floating launcher icon under finger
+        // Floating card under finger; static and dragged items keep one visual language.
         drag?.let { d ->
             val localX = d.pointerWindow.x - rootWindowOrigin.x
             val localY = d.pointerWindow.y - rootWindowOrigin.y
-            val sizePx = with(density) { 72.dp.toPx() }
-            val tint = d.colorRole?.let { leziRecordColor(it) }
-                ?: MaterialTheme.colorScheme.primary
-            Box(
-                Modifier
+            val widthPx = with(density) { 80.dp.toPx() }
+            RecordCatalogCard(
+                label = d.label,
+                recordType = d.recordType,
+                customIconSlot = d.customIconSlot,
+                colorRole = d.colorRole ?: LeziRecordColorRole.Care,
+                contentDescription = "正在拖动${d.label}",
+                modifier = Modifier
                     .zIndex(20f)
                     .offset {
                         IntOffset(
-                            (localX - sizePx / 2f).roundToInt(),
-                            (localY - sizePx / 2f - with(density) { 8.dp.toPx() }).roundToInt(),
+                            (localX - widthPx / 2f).roundToInt(),
+                            (localY - widthPx / 2f - with(density) { LeziSpacing.Xs.toPx() })
+                                .roundToInt(),
                         )
                     }
-                    .size(72.dp)
-                    .scale(1.12f)
+                    .width(80.dp)
+                    .scale(1.08f)
                     .testTag("layout_edit_drag_avatar"),
-                contentAlignment = Alignment.Center,
-            ) {
-                LauncherIconBadge(
-                    recordType = d.recordType,
-                    customIconSlot = d.customIconSlot,
-                    tint = tint,
-                    badgeSize = 56.dp,
-                    elevated = true,
-                )
-            }
+            )
         }
     }
 }
@@ -462,7 +462,7 @@ internal fun LayoutEditModeDialog(
 }
 
 @Composable
-private fun IconGrid(
+private fun LayoutCatalogGrid(
     keys: List<String>,
     labels: Map<String, String>,
     visualByKey: Map<String, LayoutItemVisual>,
@@ -474,21 +474,22 @@ private fun IconGrid(
     data class Cell(val key: String?, val isAdd: Boolean = false)
     val cells = keys.map { Cell(it) } +
         if (showAddCell) listOf(Cell(key = null, isAdd = true)) else emptyList()
-    cells.chunked(4).forEach { row ->
+    recordCatalogRows(cells).forEach { row ->
         Row(
             Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(
+                RecordCatalogVisualSpec.columnSpacing,
+            ),
         ) {
             row.forEach { cell ->
                 if (cell.isAdd) {
-                    LauncherIconCell(
+                    RecordCatalogCard(
                         label = "添加",
                         recordType = null,
                         customIconSlot = null,
-                        colorRole = null,
-                        dimmed = false,
-                        wiggleDegrees = 0f,
-                        emptyPlus = true,
+                        colorRole = LeziRecordColorRole.Care,
+                        contentDescription = "管理自定义记录项目",
+                        isAdd = true,
                         modifier = Modifier
                             .weight(1f)
                             .clickable(onClick = onAddClick)
@@ -497,124 +498,24 @@ private fun IconGrid(
                 } else {
                     val key = cell.key!!
                     val visual = visualByKey[key]
-                    LauncherIconCell(
+                    RecordCatalogCard(
                         label = labels[key] ?: key,
                         recordType = visual?.recordType,
                         customIconSlot = visual?.customIconSlot,
-                        colorRole = visual?.colorRole,
-                        dimmed = false,
-                        wiggleDegrees = wiggleDegrees,
+                        colorRole = visual?.colorRole ?: LeziRecordColorRole.Care,
+                        contentDescription = labels[key] ?: key,
                         modifier = Modifier
                             .weight(1f)
+                            .rotate(wiggleDegrees)
                             .then(itemModifier(key)),
                     )
                 }
             }
-            repeat(4 - row.size) {
+            repeat(RecordCatalogVisualSpec.columnCount - row.size) {
                 Spacer(Modifier.weight(1f))
             }
         }
-        Spacer(Modifier.height(10.dp))
-    }
-}
-
-@Composable
-private fun LauncherIconCell(
-    label: String,
-    recordType: RecordType?,
-    customIconSlot: Int?,
-    colorRole: LeziRecordColorRole?,
-    dimmed: Boolean,
-    wiggleDegrees: Float,
-    emptyPlus: Boolean = false,
-    modifier: Modifier = Modifier,
-) {
-    val tint = when {
-        emptyPlus -> MaterialTheme.colorScheme.onSurfaceVariant
-        colorRole != null -> leziRecordColor(colorRole)
-        else -> MaterialTheme.colorScheme.primary
-    }
-    Column(
-        modifier
-            .heightIn(min = 84.dp)
-            .padding(vertical = 4.dp)
-            .alpha(if (dimmed) 0.3f else 1f)
-            .rotate(wiggleDegrees)
-            .semantics { contentDescription = label },
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Top,
-    ) {
-        LauncherIconBadge(
-            recordType = if (emptyPlus) null else recordType,
-            customIconSlot = customIconSlot,
-            tint = tint,
-            badgeSize = 52.dp,
-            emptyPlus = emptyPlus,
-        )
-        Spacer(Modifier.height(6.dp))
-        Text(
-            label,
-            style = LeziTypography.Meta.copy(fontSize = 12.sp, lineHeight = 14.sp),
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            textAlign = TextAlign.Center,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 2.dp),
-        )
-    }
-}
-
-@Composable
-private fun LauncherIconBadge(
-    recordType: RecordType?,
-    customIconSlot: Int?,
-    tint: Color,
-    badgeSize: Dp,
-    elevated: Boolean = false,
-    emptyPlus: Boolean = false,
-) {
-    val shape = RoundedCornerShape(14.dp)
-    // Opaque surface base + soft tint wash so page 底色 never peeks through the
-    // launcher tile around the foreground glyph (Android-home style solid plate).
-    val wash = tint.copy(alpha = if (emptyPlus) 0.12f else 0.22f)
-    Box(
-        Modifier
-            .size(badgeSize)
-            .clip(shape)
-            .background(MaterialTheme.colorScheme.surface)
-            .background(wash)
-            .then(
-                if (elevated) {
-                    Modifier.border(1.5.dp, tint.copy(alpha = 0.55f), shape)
-                } else {
-                    Modifier
-                },
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        when {
-            emptyPlus -> Text(
-                "＋",
-                style = LeziTypography.TitleSm,
-                color = tint,
-            )
-            recordType == RecordType.CUSTOM ||
-                (recordType == null && customIconSlot != null) -> {
-                Text(
-                    CustomGlyphs[(customIconSlot ?: 0).coerceIn(0, 7)],
-                    style = LeziTypography.TitleSm,
-                    color = tint,
-                )
-            }
-            recordType != null -> RecordTypeIcon(
-                recordType,
-                size = badgeSize * 0.48f,
-                tint = tint,
-            )
-            else -> Text("＋", style = LeziTypography.TitleSm, color = tint)
-        }
+        Spacer(Modifier.height(RecordCatalogVisualSpec.rowSpacing))
     }
 }
 
@@ -634,20 +535,31 @@ private fun LauncherEditDock(
     onSlotDragEnd: (Int, String, Offset) -> Unit,
     onSlotDragCancel: () -> Unit,
 ) {
+    val journal = com.lezi.babylog.designsystem.LeziThemeExt.isJournal
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 10.dp, vertical = 6.dp)
+            .padding(
+                horizontal = if (journal) 0.dp else QuickDockVisualSpec.outerHorizontalWarm,
+                vertical = QuickDockVisualSpec.outerVertical,
+            )
             .testTag("layout_edit_dock"),
-        shape = RoundedCornerShape(22.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
-        shadowElevation = 3.dp,
+        shape = com.lezi.babylog.designsystem.LeziThemeExt.dockShape,
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp,
+            MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
+        ),
+        shadowElevation = com.lezi.babylog.designsystem.LeziThemeExt.dockElevation,
     ) {
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 6.dp, vertical = 10.dp),
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
+                .padding(
+                    horizontal = QuickDockVisualSpec.rowHorizontal,
+                    vertical = QuickDockVisualSpec.rowVertical,
+                ),
+            horizontalArrangement = Arrangement.spacedBy(QuickDockVisualSpec.cellSpacing),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             slots.forEachIndexed { index, key ->
@@ -659,29 +571,13 @@ private fun LauncherEditDock(
                     else -> labels[key] ?: key
                 }
                 val dimmed = dragKey == key && dragFromSlot == index
-                Column(
-                    Modifier
+                Surface(
+                    modifier = Modifier
                         .weight(1f)
+                        .heightIn(min = QuickDockVisualSpec.cellMinHeight)
                         .onGloballyPositioned { coords ->
                             onSlotBounds(index, coords.boundsInWindow())
                         }
-                        .then(
-                            if (hot) {
-                                Modifier
-                                    .clip(RoundedCornerShape(16.dp))
-                                    .background(
-                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
-                                    )
-                                    .border(
-                                        2.dp,
-                                        MaterialTheme.colorScheme.primary,
-                                        RoundedCornerShape(16.dp),
-                                    )
-                            } else {
-                                Modifier
-                            },
-                        )
-                        .padding(vertical = 4.dp)
                         .testTag("layout_edit_slot_$index")
                         .semantics {
                             contentDescription = if (key.isBlank()) {
@@ -690,7 +586,19 @@ private fun LauncherEditDock(
                                 "常用${index + 1}，$label，长按拖动替换"
                             }
                         },
-                    horizontalAlignment = Alignment.CenterHorizontally,
+                    shape = com.lezi.babylog.designsystem.LeziThemeExt.controlShape,
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(
+                        alpha = if (hot) 0.92f else 0.72f,
+                    ),
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    border = if (hot) {
+                        androidx.compose.foundation.BorderStroke(
+                            2.dp,
+                            MaterialTheme.colorScheme.primary,
+                        )
+                    } else {
+                        null
+                    },
                 ) {
                     val bodyMod = if (key.isNotBlank()) {
                         Modifier
@@ -707,85 +615,89 @@ private fun LauncherEditDock(
                         Modifier
                     }
                     Column(
-                        bodyMod,
+                        bodyMod
+                            .fillMaxWidth()
+                            .padding(vertical = QuickDockVisualSpec.rowVertical),
                         horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
                     ) {
-                        if (key.isBlank()) {
-                            Box(
-                                Modifier
-                                    .size(48.dp)
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .background(MaterialTheme.colorScheme.surface)
-                                    .border(
-                                        1.5.dp,
-                                        MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
-                                        RoundedCornerShape(14.dp),
-                                    ),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Text(
+                        val tint = visual?.let { leziRecordColor(it.colorRole) }
+                            ?: MaterialTheme.colorScheme.onSurfaceVariant
+                        Box(
+                            Modifier
+                                .size(QuickDockVisualSpec.iconSize)
+                                .clip(CircleShape)
+                                .background(tint.copy(alpha = 0.14f)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            when {
+                                key.isBlank() -> Text(
                                     "＋",
-                                    style = LeziTypography.TitleSm,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    style = LeziTypography.BodyStrong,
+                                    color = tint,
+                                )
+                                visual?.recordType == RecordType.CUSTOM -> Text(
+                                    CustomGlyphs[(visual.customIconSlot ?: 0).coerceIn(0, 7)],
+                                    style = LeziTypography.Meta,
+                                    color = tint,
+                                )
+                                visual?.recordType != null -> RecordTypeIcon(
+                                    visual.recordType,
+                                    tint = tint,
                                 )
                             }
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                " ",
-                                style = LeziTypography.Meta.copy(fontSize = 12.sp),
-                            )
+                        }
+                        if (key.isBlank()) {
+                            Text(" ", style = LeziTypography.Meta)
                         } else {
-                            val tint = visual?.let { leziRecordColor(it.colorRole) }
-                                ?: MaterialTheme.colorScheme.primary
-                            LauncherIconBadge(
-                                recordType = visual?.recordType,
-                                customIconSlot = visual?.customIconSlot,
-                                tint = tint,
-                                badgeSize = 48.dp,
-                            )
-                            Spacer(Modifier.height(6.dp))
                             Text(
                                 label,
-                                style = LeziTypography.Meta.copy(
-                                    fontSize = 12.sp,
-                                    lineHeight = 14.sp,
-                                ),
+                                style = LeziTypography.Meta,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier.width(64.dp),
                             )
                         }
                     }
                 }
             }
             // Locked 更多 — not a drop target
-            Column(
-                Modifier
+            Surface(
+                modifier = Modifier
                     .weight(1f)
-                    .alpha(0.45f)
-                    .padding(vertical = 4.dp)
-                    .testTag("layout_edit_more_locked"),
-                horizontalAlignment = Alignment.CenterHorizontally,
+                    .heightIn(min = QuickDockVisualSpec.cellMinHeight)
+                    .alpha(0.55f)
+                    .testTag("layout_edit_more_locked")
+                    .semantics { contentDescription = "更多，编辑布局时已锁定" },
+                shape = com.lezi.babylog.designsystem.LeziThemeExt.controlShape,
+                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f),
+                contentColor = MaterialTheme.colorScheme.onSurface,
             ) {
-                Box(
+                Column(
                     Modifier
-                        .size(48.dp)
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
-                    contentAlignment = Alignment.Center,
+                        .fillMaxWidth()
+                        .padding(vertical = QuickDockVisualSpec.rowVertical),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
                 ) {
-                    LeziRecordGlyphIcon(
-                        glyph = LeziRecordGlyph.Other,
-                        tint = MaterialTheme.colorScheme.primary,
-                        size = 22.dp,
+                    Box(
+                        Modifier
+                            .size(QuickDockVisualSpec.iconSize)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        LeziRecordGlyphIcon(
+                            glyph = LeziRecordGlyph.Other,
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    Text(
+                        "更多·锁",
+                        style = LeziTypography.Meta,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    "更多",
-                    style = LeziTypography.Meta.copy(fontSize = 12.sp),
-                )
             }
         }
     }

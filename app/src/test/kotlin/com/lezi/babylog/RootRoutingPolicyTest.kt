@@ -16,4 +16,29 @@ class RootRoutingPolicyTest {
         assertTrue(shouldShowOnboarding(hasBaby = false, familyRole = FamilyRole.None))
         assertFalse(shouldShowOnboarding(hasBaby = true, familyRole = FamilyRole.None))
     }
+
+    @Test
+    fun layoutEditorReplacesDateAndPrimaryNavigationChrome() {
+        val normal = rootChromeVisibility(route = "log", logLayoutEditActive = false)
+        assertTrue(normal.showTopBar)
+        assertTrue(normal.showBottomBar)
+        assertFalse(normal.preserveBottomBarExtent)
+
+        val editing = rootChromeVisibility(route = "log", logLayoutEditActive = true)
+        assertFalse(editing.showTopBar)
+        assertFalse(editing.showBottomBar)
+        assertTrue(editing.preserveBottomBarExtent)
+    }
+
+    @Test
+    fun staleEditorSignalCannotHideChromeOutsideLogRoute() {
+        val settings = rootChromeVisibility(
+            route = "settings",
+            logLayoutEditActive = true,
+        )
+
+        assertTrue(settings.showTopBar)
+        assertTrue(settings.showBottomBar)
+        assertFalse(settings.preserveBottomBarExtent)
+    }
 }

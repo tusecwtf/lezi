@@ -489,6 +489,34 @@ private enum class TopDest(
     Settings("settings", "菜单", Icons.Filled.MoreHoriz, Icons.Outlined.MoreHoriz),
 }
 
+internal data class RootChromeVisibility(
+    val showTopBar: Boolean,
+    val showBottomBar: Boolean,
+    val preserveBottomBarExtent: Boolean,
+)
+
+internal fun rootChromeVisibility(
+    route: String?,
+    logLayoutEditActive: Boolean,
+): RootChromeVisibility {
+    val routeOwnsFullScreen = route?.startsWith("timer") == true ||
+        route == "search" ||
+        route == "export" ||
+        route == "calendar"
+    val editorOwnsFullScreen = route == TopDest.Log.route && logLayoutEditActive
+    val hideChrome = routeOwnsFullScreen || editorOwnsFullScreen
+    val hasTopBar = route in setOf(
+        TopDest.Log.route,
+        TopDest.Summary.route,
+        TopDest.Growth.route,
+    ) || route == TopDest.Family.route || route?.startsWith(TopDest.Settings.route) == true
+    return RootChromeVisibility(
+        showTopBar = !hideChrome && hasTopBar,
+        showBottomBar = !hideChrome,
+        preserveBottomBarExtent = editorOwnsFullScreen,
+    )
+}
+
 @Composable
 fun LeziRoot(
     vm: RootViewModel = hiltViewModel(),
@@ -516,6 +544,7 @@ fun LeziRoot(
     var showHeaderCalendar by remember { mutableStateOf(false) }
     var showSystemCalendarSetup by remember { mutableStateOf(false) }
     var displayedMonth by remember { mutableStateOf(YearMonth.from(ui.selectedDate)) }
+    var logLayoutEditActive by remember { mutableStateOf(false) }
 
     LaunchedEffect(widgetComposerTarget) {
         val target = widgetComposerTarget ?: return@LaunchedEffect
@@ -555,10 +584,7 @@ fun LeziRoot(
         }
         onFulfillPlanConsumed()
     }
-    val hideChrome = current?.startsWith("timer") == true ||
-        current == "search" ||
-        current == "export" ||
-        current == "calendar"
+    val chrome = rootChromeVisibility(current, logLayoutEditActive)
     val showContextHeader = current in setOf(
         TopDest.Log.route,
         TopDest.Summary.route,
@@ -584,7 +610,7 @@ fun LeziRoot(
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             when {
-                !hideChrome && showContextHeader -> {
+                chrome.showTopBar && showContextHeader -> {
                     Column(
                         Modifier
                             .fillMaxWidth()
@@ -620,7 +646,7 @@ fun LeziRoot(
                         )
                     }
                 }
-                !hideChrome && showBrandHeader -> {
+                chrome.showTopBar && showBrandHeader -> {
                     Column(
                         Modifier
                             .fillMaxWidth()
@@ -642,7 +668,7 @@ fun LeziRoot(
             }
         },
         bottomBar = {
-            if (!hideChrome) {
+            if (chrome.showBottomBar) {
                 val sky = com.lezi.babylog.designsystem.LeziThemeExt.colors.skySoft
                 NavigationBar(
                     containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
@@ -692,6 +718,14 @@ fun LeziRoot(
                         )
                     }
                 }
+            } else if (chrome.preserveBottomBarExtent) {
+                // Keep the editor Dock aligned with its everyday position without
+                // exposing a second copy of the primary navigation tabs.
+                NavigationBar(
+                    modifier = Modifier.testTag("layout_edit_primary_nav_reserved"),
+                    containerColor = MaterialTheme.colorScheme.background,
+                    tonalElevation = 0.dp,
+                ) {}
             }
         },
     ) { padding ->
@@ -717,6 +751,9 @@ fun LeziRoot(
                     onOpenComposer = vm::openComposer,
                     onOpenQuickSlotSettings = { nav.navigate("settings/quick-records") },
                     onGoToday = { vm.setDay(today) },
+                    onLayoutEditModeChanged = { active ->
+                        logLayoutEditActive = active
+                    },
                     onMessage = { message ->
                         scope.launch { snackbar.showSnackbar(message) }
                     },

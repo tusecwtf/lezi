@@ -31,6 +31,7 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -81,11 +82,9 @@ import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.core.ui.presentationSummary
 import com.lezi.babylog.core.ui.presentationTone
 import com.lezi.babylog.core.ui.sortCatalogByLocalOrder
-import com.lezi.babylog.designsystem.LeziCard
 import com.lezi.babylog.designsystem.LeziRecordGlyph
 import com.lezi.babylog.designsystem.LeziRecordGlyphIcon
 import com.lezi.babylog.designsystem.LeziSecondaryButton
-import com.lezi.babylog.designsystem.LeziShapes
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziThemeExt
 import com.lezi.babylog.designsystem.LeziTone
@@ -888,6 +887,7 @@ fun LogRoute(
     onOpenQuickSlotSettings: () -> Unit = {},
     onGoToday: () -> Unit,
     onMessage: (String) -> Unit = {},
+    onLayoutEditModeChanged: (Boolean) -> Unit = {},
     externalDay: LocalDate? = null,
     vm: LogViewModel = hiltViewModel(),
 ) {
@@ -1066,6 +1066,12 @@ fun LogRoute(
 
     val editingPrefs = layoutPrefs
     val inLayoutEdit = showLayoutEdit && editingPrefs != null
+    DisposableEffect(inLayoutEdit) {
+        onLayoutEditModeChanged(inLayoutEdit)
+        onDispose {
+            if (inLayoutEdit) onLayoutEditModeChanged(false)
+        }
+    }
     fun closeLayoutEditor() {
         showLayoutEdit = false
         layoutPrefs = null
@@ -1768,7 +1774,10 @@ private fun OneHandQuickDock(
     Surface(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = if (journal) 0.dp else 8.dp, vertical = 4.dp)
+            .padding(
+                horizontal = if (journal) 0.dp else QuickDockVisualSpec.outerHorizontalWarm,
+                vertical = QuickDockVisualSpec.outerVertical,
+            )
             .testTag("one_hand_quick_dock_fixed"),
         shape = LeziThemeExt.dockShape,
         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
@@ -1778,8 +1787,11 @@ private fun OneHandQuickDock(
         Row(
             Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 5.dp),
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
+                .padding(
+                    horizontal = QuickDockVisualSpec.rowHorizontal,
+                    vertical = QuickDockVisualSpec.rowVertical,
+                ),
+            horizontalArrangement = Arrangement.spacedBy(QuickDockVisualSpec.cellSpacing),
         ) {
             cells.forEachIndexed { index, cell ->
                 val presentation = quickDockPresentation(cell, sleepRunning)
@@ -1801,7 +1813,7 @@ private fun OneHandQuickDock(
                 Surface(
                     modifier = Modifier
                         .weight(1f)
-                        .heightIn(min = 64.dp)
+                        .heightIn(min = QuickDockVisualSpec.cellMinHeight)
                         .testTag(tag)
                         .combinedClickable(
                             onClick = {
@@ -1836,7 +1848,7 @@ private fun OneHandQuickDock(
                     ) {
                         Box(
                             Modifier
-                                .size(30.dp)
+                                .size(QuickDockVisualSpec.iconSize)
                                 .clip(CircleShape)
                                 .background(tint.copy(alpha = 0.14f)),
                             contentAlignment = Alignment.Center,
@@ -1993,7 +2005,9 @@ private fun MoreSheet(
             Spacer(Modifier.height(LeziSpacing.Xs))
             Row(
                 Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(
+                    RecordCatalogVisualSpec.columnSpacing,
+                ),
             ) {
                 suggestions.forEach { entry ->
                     MoreCatalogCard(
@@ -2003,7 +2017,9 @@ private fun MoreSheet(
                         modifier = Modifier.weight(1f),
                     )
                 }
-                repeat((4 - suggestions.size).coerceAtLeast(0)) {
+                repeat(
+                    (RecordCatalogVisualSpec.columnCount - suggestions.size).coerceAtLeast(0),
+                ) {
                     Spacer(Modifier.weight(1f))
                 }
             }
@@ -2013,16 +2029,14 @@ private fun MoreSheet(
             if (items.isEmpty()) return@forEach
             item {
                 Column {
-                    Text(
-                        section.title,
-                        style = LeziTypography.Label,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    RecordCatalogSectionHeading(section.title)
                     Spacer(Modifier.height(LeziSpacing.Xs))
-                    items.chunked(4).forEach { rowItems ->
+                    recordCatalogRows(items).forEach { rowItems ->
                         Row(
                             Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(
+                                RecordCatalogVisualSpec.columnSpacing,
+                            ),
                         ) {
                             rowItems.forEach { entry ->
                                 MoreCatalogCard(
@@ -2032,22 +2046,19 @@ private fun MoreSheet(
                                     modifier = Modifier.weight(1f),
                                 )
                             }
-                            repeat(4 - rowItems.size) {
+                            repeat(RecordCatalogVisualSpec.columnCount - rowItems.size) {
                                 Spacer(Modifier.weight(1f))
                             }
                         }
-                        Spacer(Modifier.height(8.dp))
+                        Spacer(Modifier.height(RecordCatalogVisualSpec.rowSpacing))
                     }
-                    Spacer(Modifier.height(4.dp))
+                    Spacer(Modifier.height(LeziSpacing.Xxs))
                 }
             }
         }
     }
 }
 
-private val CustomItemIconGlyphs = com.lezi.babylog.core.ui.CUSTOM_ITEM_ICON_GLYPHS
-
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MoreCatalogCard(
     entry: MoreCatalogEntry,
@@ -2055,52 +2066,25 @@ private fun MoreCatalogCard(
     onLongClick: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
+    val recordType = when (entry) {
+        is MoreCatalogEntry.BuiltIn -> entry.type
+        is MoreCatalogEntry.Custom -> RecordType.CUSTOM
+    }
+    val customIconSlot = (entry as? MoreCatalogEntry.Custom)?.item?.iconSlot
     val colorRole = when (entry) {
         is MoreCatalogEntry.BuiltIn -> entry.type.presentation.colorRole
         is MoreCatalogEntry.Custom -> RecordType.CUSTOM.presentation.colorRole
     }
-    val color = leziRecordColor(colorRole)
-    LeziCard(
-        modifier = modifier
-            .heightIn(min = 64.dp)
-            .combinedClickable(onClick = onClick, onLongClick = onLongClick),
-        onClick = null,
-        contentPadding = PaddingValues(horizontal = 3.dp, vertical = 5.dp),
-    ) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .clearAndSetSemantics {
-                    contentDescription = moreRecordContentDescription(entry)
-                },
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Box(
-                Modifier
-                    .size(32.dp)
-                    .clip(LeziShapes.JournalCard)
-                    .background(color.copy(alpha = 0.14f)),
-                contentAlignment = Alignment.Center,
-            ) {
-                when (entry) {
-                    is MoreCatalogEntry.BuiltIn ->
-                        RecordTypeIcon(entry.type, size = 18.dp, tint = color)
-                    is MoreCatalogEntry.Custom ->
-                        Text(
-                            CustomItemIconGlyphs[entry.item.iconSlot.coerceIn(0, 7)],
-                            style = LeziTypography.BodyStrong,
-                            color = color,
-                        )
-                }
-            }
-            Spacer(Modifier.height(3.dp))
-            Text(
-                entry.label,
-                style = LeziTypography.Label.copy(fontSize = 14.sp, lineHeight = 18.sp),
-                maxLines = 1,
-            )
-        }
-    }
+    RecordCatalogCard(
+        label = entry.label,
+        recordType = recordType,
+        customIconSlot = customIconSlot,
+        colorRole = colorRole,
+        contentDescription = moreRecordContentDescription(entry),
+        modifier = modifier,
+        onClick = onClick,
+        onLongClick = onLongClick,
+    )
 }
 
 private fun formatMinutes(min: Long): String {
