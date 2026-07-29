@@ -138,6 +138,13 @@ CustomItemDef 仍使用 creator-or-owner 管理规则。不做保育只读角色
 
 **索引**：`(baby_id, timestamp)`、`(client_uuid)`、`(baby_id, type, timestamp)`。
 
+每个宝宝最多只有一条 `end_timestamp = null` 的开放睡眠。若本地维护或家庭 pull 发现多条，
+两条路径必须调用同一个纯决策：按 `timestamp` 升序排列，时间相同时按跨设备稳定的
+`client_uuid` 排列并保留最后一条；其余条目依次关闭在下一条的开始时刻。相同/异常开始时刻
+使用注入的修复时钟与饱和的一分钟兜底，两者取较晚值，绝不产生负区间或 `Long` 溢出。
+规则本身不读数据库和系统时间。本地适配仍在原事务中走本地更新、dirty 与 Outbox 语义；
+pull 适配仍保留远端作者，沿用 replica repair 的 revision/dirty 语义，不伪造本地 Outbox。
+
 已加入家庭时，本机新建 Record 立即带当前 session membership；NAS 对 atomic commit
 与 atomic bundle 仍从已认证 principal 重新盖章。后续编辑、删除或恢复不得改写首次
 作者。Android 与 NAS 都要求 current `record_membership_author` capability，缺失时停止

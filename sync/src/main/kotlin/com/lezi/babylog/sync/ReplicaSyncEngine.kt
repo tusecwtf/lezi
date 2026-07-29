@@ -21,10 +21,12 @@ import com.lezi.babylog.core.database.OutboxEntity
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
+import com.lezi.babylog.core.model.OpenSleepCandidate
 import com.lezi.babylog.core.model.RecordPayloadCodec
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SleepPayload
 import com.lezi.babylog.core.model.limitBabyNicknameInput
+import com.lezi.babylog.core.model.normalizeOpenSleeps
 import java.time.ZoneId
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
@@ -782,21 +784,19 @@ internal class ReplicaSyncEngine(
     private suspend fun healDuplicateOpenSleeps(babyId: Long) {
         val opens = recordDao.listOpenSleeps(babyId)
         if (opens.size <= 1) return
-        // listOpenSleeps is newest-first; keep the latest open, close the rest.
-        val keep = opens.first()
-        val stale = opens.drop(1).sortedWith(
-            compareBy<RecordEntity> { it.timestamp }.thenBy { it.id },
-        )
-        val chain = stale + keep
         val now = clock.nowMillis()
-        for (index in 0 until chain.lastIndex) {
-            val current = chain[index]
-            val nextStart = chain[index + 1].timestamp
-            val end = if (nextStart > current.timestamp) {
-                nextStart
-            } else {
-                current.timestamp + 60_000L
-            }
+        val decision = normalizeOpenSleeps(
+            candidates = opens.map { open ->
+                OpenSleepCandidate(
+                    stableKey = open.clientUuid,
+                    startedAtMillis = open.timestamp,
+                )
+            },
+            repairAtMillis = now,
+        )
+        val byClientUuid = opens.associateBy(RecordEntity::clientUuid)
+        for (closure in decision.closures) {
+            val current = byClientUuid.getValue(closure.candidate.stableKey)
             val flagged = withSleepAnomaly(current.payloadJson, current.schemaVersion)
             val updatedAt = if (current.updatedAt == Long.MAX_VALUE) {
                 Long.MAX_VALUE
@@ -805,7 +805,7 @@ internal class ReplicaSyncEngine(
             }
             recordDao.update(
                 current.copy(
-                    endTimestamp = end,
+                    endTimestamp = closure.closedAtMillis,
                     payloadJson = flagged.first,
                     schemaVersion = flagged.second,
                     updatedAt = updatedAt,

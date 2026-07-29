@@ -5163,6 +5163,51 @@ class RealSyncPortTest {
         assertThat(old.syncDirty).isTrue()
         assertThat(rig.preferences.current().pullCursor).isEqualTo(7)
     }
+
+    @Test
+    fun pullOpenSleepTieUsesStableUuidAndInjectedRepairClock() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        rig.clock.now = 400_000L
+        rig.babies.seed(localBaby().copy(syncDirty = false, clientUuid = "baby-remote"))
+        fun openSleep(clientUuid: String) = SyncEntity(
+            type = "record",
+            clientUuid = clientUuid,
+            payloadJson = """
+                {
+                  "baby_client_uuid":"baby-remote",
+                  "created_by_membership_id":"membership-b",
+                  "type":"sleep",
+                  "custom_item_client_uuid":null,
+                  "timestamp":1000,
+                  "end_timestamp":null,
+                  "note":null,
+                  "payload_json":{"is_nap":false,"anomaly_flag":false},
+                  "schema_version":2
+                }
+            """.trimIndent(),
+            updatedAt = 1_000L,
+        )
+        // `z` is applied first and receives the smaller local id. Every replica
+        // must still keep it because equal starts use the family-stable UUID.
+        rig.backend.nextPull = PullResult(
+            entities = listOf(openSleep("z-sleep"), openSleep("a-sleep")),
+            cursor = 8,
+            generation = "current-generation",
+            hasMore = false,
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+
+        val babyId = requireNotNull(rig.babies.getByClientUuid("baby-remote")).id
+        assertThat(rig.records.listOpenSleeps(babyId).map(RecordEntity::clientUuid))
+            .containsExactly("z-sleep")
+        val stale = requireNotNull(rig.records.getByClientUuid("a-sleep"))
+        assertThat(stale.endTimestamp).isEqualTo(400_000L)
+        assertThat(stale.createdByMembershipId).isEqualTo("membership-b")
+        assertThat(stale.payloadJson).contains("\"anomaly_flag\":true")
+        assertThat(stale.syncDirty).isTrue()
+        assertThat(rig.preferences.current().pullCursor).isEqualTo(8)
+    }
 }
 
 internal data class PushedBatch(

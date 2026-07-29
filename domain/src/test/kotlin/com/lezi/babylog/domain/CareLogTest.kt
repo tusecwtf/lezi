@@ -1377,6 +1377,37 @@ class CareLogTest {
     }
 
     @Test
+    fun localOpenSleepRepairUsesStableUuidAndInjectedClock() = runTest {
+        val fakes = Fakes()
+        fakes.clock.now = 400_000L
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1))
+        val start = 1_000L
+        // Give lexical winner `z` the smaller local row id. A local-id tie-break
+        // would keep `a` and diverge from another replica.
+        fakes.records.upsert(openSleep("z-sleep", babyId, start))
+        fakes.records.upsert(openSleep("a-sleep", babyId, start))
+
+        care.sleepUp(babyId, at = 500_000L)
+
+        val repaired = fakes.records.listForBaby(babyId).associateBy(RecordEntity::clientUuid)
+        assertThat(repaired.getValue("a-sleep").endTimestamp).isEqualTo(400_000L)
+        assertThat(repaired.getValue("a-sleep").payloadJson).contains("\"anomaly_flag\":true")
+        assertThat(repaired.getValue("z-sleep").endTimestamp).isEqualTo(500_000L)
+    }
+
+    private fun openSleep(clientUuid: String, babyId: Long, timestamp: Long) = RecordEntity(
+        clientUuid = clientUuid,
+        babyId = babyId,
+        type = RecordType.SLEEP.key,
+        timestamp = timestamp,
+        endTimestamp = null,
+        note = null,
+        payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
+        updatedAt = timestamp,
+    )
+
+    @Test
     fun completeNursing_payload() = runTest {
         val care = Fakes().careLog()
         val babyId = care.createBaby(
@@ -2852,6 +2883,7 @@ class CareLogTest {
             memberFakes.systemCalendar,
             memberFakes.fulfillmentCandidates,
             memberFakes.calendarReminderMutationGuard,
+            memberFakes.clock,
         )
         val audits = adminCare.listConflictNotAdoptedAudits(carePlanClientUuid = planUuid)
         assertThat(audits).hasSize(1)
@@ -5178,6 +5210,7 @@ private class Fakes(
     val systemCalendar = FakeSystemCalendarPort()
     val transactions = RecordingTransactionRunner()
     val calendarReminderMutationGuard = CalendarReminderMutationGuard()
+    val clock = FakePolicyClock()
 
     fun wireTransactionalSnapshots() {
         transactions.onBegin += {
@@ -5239,7 +5272,12 @@ private class Fakes(
         systemCalendar,
         fulfillmentCandidates,
         calendarReminderMutationGuard,
+        clock,
     )
+}
+
+private class FakePolicyClock(var now: Long = 1_000L) : com.lezi.babylog.sync.PolicyClock {
+    override fun nowMillis(): Long = now
 }
 
 private class FakeSystemCalendarPort : SystemCalendarPort {

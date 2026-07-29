@@ -21,6 +21,7 @@ import com.lezi.babylog.core.database.MembershipEntity
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.datastore.SettingsStore
+import com.lezi.babylog.sync.PolicyClock
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.core.model.Baby
@@ -32,9 +33,10 @@ import com.lezi.babylog.core.model.FulfillmentAdoptionStatus
 import com.lezi.babylog.core.model.FulfillmentAuthority
 import com.lezi.babylog.core.model.FulfillmentCandidate
 import com.lezi.babylog.core.model.FulfillmentCandidateEvidence
-import com.lezi.babylog.core.model.NursingPayload
 import com.lezi.babylog.core.model.MilkPayload
 import com.lezi.babylog.core.model.NEXT_FEED_PLAN_MARKER
+import com.lezi.babylog.core.model.NursingPayload
+import com.lezi.babylog.core.model.OpenSleepCandidate
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordPayloadCodec
 import com.lezi.babylog.core.model.RecordPayloadDocument
@@ -47,6 +49,7 @@ import com.lezi.babylog.core.model.isPlanableCarePlanType
 import com.lezi.babylog.core.model.Sex
 import com.lezi.babylog.core.model.SleepPayload
 import com.lezi.babylog.core.model.normalizeBabyNickname
+import com.lezi.babylog.core.model.normalizeOpenSleeps
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -199,6 +202,7 @@ class CareLog @Inject constructor(
     private val systemCalendar: SystemCalendarPort = NoOpSystemCalendarPort(),
     private val fulfillmentCandidateDao: FulfillmentCandidateDao,
     private val calendarReminderMutationGuard: CalendarReminderMutationGuard,
+    private val clock: PolicyClock,
 ) {
     private val fulfillmentSurface = FulfillmentSurface(fulfillmentCandidateDao)
     private val photoAttachmentReconciler = PhotoAttachmentReconciler(mediaAssetDao)
@@ -2541,24 +2545,23 @@ class CareLog @Inject constructor(
     private suspend fun healDuplicateOpenSleeps(babyId: Long) {
         val opens = recordDao.listOpenSleeps(babyId)
         if (opens.size <= 1) return
-        val keep = opens.first()
-        val stale = opens.drop(1).sortedWith(
-            compareBy<RecordEntity> { it.timestamp }.thenBy { it.id },
+        val now = clock.nowMillis()
+        val decision = normalizeOpenSleeps(
+            candidates = opens.map { open ->
+                OpenSleepCandidate(
+                    stableKey = open.clientUuid,
+                    startedAtMillis = open.timestamp,
+                )
+            },
+            repairAtMillis = now,
         )
-        val chain = stale + keep
-        val now = System.currentTimeMillis()
-        for (index in 0 until chain.lastIndex) {
-            val current = chain[index]
-            val nextStart = chain[index + 1].timestamp
-            val end = if (nextStart > current.timestamp) {
-                nextStart
-            } else {
-                current.timestamp + 60_000L
-            }
+        val byClientUuid = opens.associateBy(RecordEntity::clientUuid)
+        for (closure in decision.closures) {
+            val current = byClientUuid.getValue(closure.candidate.stableKey)
             val flagged = withAnomaly(current.payloadJson, current.schemaVersion)
             updateRecordEntity(
                 current.copy(
-                    endTimestamp = end,
+                    endTimestamp = closure.closedAtMillis,
                     payloadJson = flagged.first,
                     schemaVersion = flagged.second,
                     updatedAt = now,
