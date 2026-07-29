@@ -2,9 +2,10 @@
 
 ## Current disposition
 
-Implementation and non-device gates are complete. The ticket remains
-`implemented-awaiting-device-smoke` because `emulator-5554` is a shared API 35
-device currently reserved by another acceptance run.
+Ticket 04 is `complete`. Its implementation commit
+`0791eb73c621a9bd47414e478fecd91aebebcaf5` is an ancestor of the validation
+HEAD, all non-device gates passed, the API 35 production-canvas suite passed
+4/4, and the actual-app persistence loop passed.
 
 ## TDD receipts
 
@@ -13,7 +14,7 @@ device currently reserved by another acceptance run.
   `MoveCategoryToIndex(section, toIndex)` reducer path made them GREEN.
 - RED: API 35 Compose tests found no production
   `layout_edit_category_*` drag surfaces; the shared heading registration and
-  long-press path made first/middle/last gestures GREEN (3/3).
+  long-press path made first/middle/last plus held-avatar gestures GREEN (4/4).
 - Pure hit tests cover self/outside no-op, category/item domain separation and
   removed-heading target cleanup.
 - Literal reducer tests assert exact first/middle/last JSON and preserve every
@@ -29,19 +30,38 @@ device currently reserved by another acceptance run.
 - `:feature:log:lintDebug`
 - `:app:assembleDebug`
 - `:feature:log:compileDebugAndroidTestKotlin`
-- API 35 isolated Compose first/middle/last long-press matrix: 3/3
+- API 35 isolated Compose first/middle/last plus held-avatar long-press matrix:
+  4 tests, 0 failures, 0 errors, 0 skipped
 - `git diff --check`
 
-The added held-drag avatar case is compiled but has not been executed since the
-shared device reservation began.
+The connected report names these four passing cases:
 
-## Pending closeout
+- `categoryHeadingCanBeDraggedToFirst`
+- `categoryHeadingCanBeDraggedToMiddle`
+- `categoryHeadingCanBeDraggedToLast`
+- `categoryHeadingShowsTheSharedDragAvatarWhileHeldOverATarget`
 
-After the shared device is released:
+## Actual-app persistence smoke
 
-1. Run the full `LayoutCategoryDragDeviceTest`, including the held-avatar case.
-2. In the actual app, drag a visible category to first, tap Done, open More and
-   confirm the new category order.
-3. Force-stop and cold-launch, then confirm the same order in both the editor
-   and More.
-4. Record the final APK hash and close the ticket/tracker in a follow-up commit.
+- Source: isolated archive of
+  `0791eb73c621a9bd47414e478fecd91aebebcaf5`
+- Device: `emulator-5554`, API 35, `lezi_api35(AVD) - 15`, 1080×2400,
+  420 dpi
+- APK: isolated `app-debug.apk`, SHA-256
+  `bb96dd5bc440b3a43be2781c591cf82d635ad7941cbdd88a14b23b72865615d9`
+- Install: `adb install -r` succeeded without clearing the prepared app data.
+
+Observed loop:
+
+1. Long-pressed the visible `排泄` heading, held for 900 ms, dragged it onto
+   `喂养`, then released. The editor immediately showed
+   `排泄 → 喂养 → 日常`.
+2. Tapped Done and opened More. Its first two category headings were
+   `排泄 → 喂养` without page re-entry or foreground switching.
+3. Force-stopped `com.lezi.babylog.debug` and started `MainActivity`; adb
+   reported `LaunchState: COLD`.
+4. Reopened the editor: it still showed `排泄 → 喂养 → 日常`. Tapped Done and
+   reopened More: it still began `排泄 → 喂养`.
+
+This closes the remaining snapshot/Done/force-stop persistence Must. No version
+file was changed.

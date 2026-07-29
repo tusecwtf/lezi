@@ -1,7 +1,7 @@
 # 记录页布局编辑整改 · 票索引
 
 Parent spec: [spec.md](./spec.md)
-Validation HEAD: `d8873c45311820b7b23c35bcaa138d5de9caa046`
+Ticket 04 validation commit: `0791eb73c621a9bd47414e478fecd91aebebcaf5`
 
 ```text
 01 ──→ 03 ──┬──→ 04 ──→ 08 边缘滚动 ──────────────┐
@@ -14,14 +14,14 @@ Validation HEAD: `d8873c45311820b7b23c35bcaa138d5de9caa046`
                        └──→ P1/02 清理 ─────────────┘
 ```
 
-Frontier: **04（awaiting device smoke）、05、10、11**
+Frontier: **05、08、10、11**
 
 | # | Ticket | Blocked by | Status |
 |---|--------|------------|--------|
 | 01 | [延续“添加记录”的四列分类卡片视觉](./issues/01-align-editor-with-add-record-visuals.md) | — | complete |
 | 02 | [原子持久化 DeviceLayoutSnapshot](./issues/02-atomic-device-layout-snapshot.md) | — | complete |
 | 03 | [当前可见且互斥的拖放目标](./issues/03-exclusive-current-drop-targets.md) | 01 | complete |
-| 04 | [分类标题拖动与可靠类别排序](./issues/04-drag-category-headings-durably.md) | 02, 03 | implemented-awaiting-device-smoke |
+| 04 | [分类标题拖动与可靠类别排序](./issues/04-drag-category-headings-durably.md) | 02, 03 | complete |
 | 05 | [有界、可读的本机已删除分区](./issues/05-bounded-readable-local-deleted.md) | 02, 03 | ready-for-agent |
 | 06 | [无障碍布局动作与真实空槽文案](./issues/06-accessible-layout-actions-truthful-empty-slot.md) | 04, 05 | ready-for-agent |
 | 07 | [删除重复与旧布局表面（canonical P1/02）](../p1-redundancy-ui-debt/issues/02-layout-migration-residue-cleanup.md) | 06 | ready-for-agent |
