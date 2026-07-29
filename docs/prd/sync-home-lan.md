@@ -436,8 +436,18 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
   4. `family_name` **仅非空时覆盖**；空/省略则保留 NAS 现名
   5. 用本请求的 `create_request_id` 派生并写入新 owner token；`reclaimed=true`
   6. **不**删除 entities/media，**不**新建第二户或第二 owner membership
-- 客户端接回成功后以 cursor `0` + 当前 `generation` 走标准 full pull（按
-  `client_uuid` 幂等合入）；无独立导入 API
+- 客户端接回成功后的前台恢复是同一个可观察流程，无独立导入 API：
+  1. **身份成功**：先原子持久化新 owner token、原 membership 与 cursor `0`；此后同步
+     失败也不得撤销已合法接回的身份。
+  2. **同步中**：在当前建家动作内先发布待处理本地写入，再以 cursor `0` + 当前
+     `generation` 标准 full pull；账户页显示「正在同步…」，不得提前显示完成。
+  3. **数据恢复完成**：full pull 按 `client_uuid` 幂等合入宝宝、记录、计划、媒体、
+     自定义项目与成员数据并提交新 cursor 后，建家动作才返回「已接回家庭，数据恢复完成」。
+  4. **可重试失败**：保留 owner 身份和 cursor `0`，显示「已接回家庭，但数据同步失败，
+     请点“同步”重试」；立即同步或下一次前台同步仍从零游标恢复。
+- 接回恢复不得读写四槽、记录项目显隐、项目序或类别序；这些布局字段只属于当前设备。
+  重复点击、网络配置变化与同步使用同一会话屏障；若进程在 full pull 完成前退出，持久化的
+  cursor `0` 使重启后的前台同步继续恢复，不创建第二会话。
 - 仅 owner 可通过本接口接回；成员卸载后仍用邀请码加入（新 membership）
 - 同一 `create_request_id` 被另一 device/称呼复用 → 仍可 `409`（冲突重试，不是第二户）
 

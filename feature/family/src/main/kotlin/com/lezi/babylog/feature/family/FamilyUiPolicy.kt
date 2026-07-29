@@ -3,8 +3,10 @@ package com.lezi.babylog.feature.family
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.domain.BabyMergePreview
+import com.lezi.babylog.sync.CreateFamilyResult
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.FamilyRole
+import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.LOCAL_DEVICE_DISPLAY_NAME
 
 /**
@@ -27,6 +29,15 @@ internal inline fun deliverNetworkSaveResult(
 ) {
     onMessage(result.message)
     if (result is NetworkSaveResult.Saved) onSaved()
+}
+
+internal fun createFamilyResultCopy(result: CreateFamilyResult): String = when {
+    !result.reclaimed -> "家庭已创建"
+    result.dataRecovery == InitialFamilyDataRecovery.Complete ->
+        "已接回家庭，数据恢复完成"
+    result.dataRecovery == InitialFamilyDataRecovery.RetryRequired ->
+        "已接回家庭，但数据同步失败，请点“同步”重试"
+    else -> "已接回家庭，正在同步数据"
 }
 
 /** Create vs join path inside the multi-step family wizard (ticket 04). */

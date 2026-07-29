@@ -3,6 +3,9 @@ package com.lezi.babylog.feature.family
 import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.FamilyRole
+import com.lezi.babylog.sync.CreateFamilyResult
+import com.lezi.babylog.sync.InitialFamilyDataRecovery
+import com.lezi.babylog.sync.SyncSession
 import com.lezi.babylog.sync.SyncNotEnabledException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -17,6 +20,38 @@ import org.junit.Test
  * asserted here.
  */
 class FamilyErrorCopyTest {
+    @Test
+    fun reclaimedFamilyCopyDistinguishesRecoveredAndRetryableData() {
+        val session = SyncSession(
+            familyId = "family-a",
+            familyToken = "owner-token",
+            deviceId = "device-a",
+            role = FamilyRole.Owner,
+            membershipId = "owner-membership",
+        )
+
+        assertEquals(
+            "已接回家庭，数据恢复完成",
+            createFamilyResultCopy(
+                CreateFamilyResult(
+                    session = session,
+                    reclaimed = true,
+                    dataRecovery = InitialFamilyDataRecovery.Complete,
+                ),
+            ),
+        )
+        assertEquals(
+            "已接回家庭，但数据同步失败，请点“同步”重试",
+            createFamilyResultCopy(
+                CreateFamilyResult(
+                    session = session,
+                    reclaimed = true,
+                    dataRecovery = InitialFamilyDataRecovery.RetryRequired,
+                ),
+            ),
+        )
+    }
+
     @Test
     fun networkSaveContinuationUsesExplicitOutcomeInsteadOfMessageCopy() {
         val messages = mutableListOf<String>()

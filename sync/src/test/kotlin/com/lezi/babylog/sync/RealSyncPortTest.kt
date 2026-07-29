@@ -282,6 +282,145 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun reclaimedCreatePushesPendingLocalDataThenFullPullsFromZeroBeforeReturning() = runTest {
+        val configured = SyncSession(
+            serverHost = "192.168.1.20",
+            serverPort = 8787,
+            allowedSsids = listOf("Home"),
+        )
+        val rig = SyncRig(session = configured)
+        rig.awaitStartupRecovery()
+        rig.backend.nextCreateReclaimed = true
+        rig.backend.nextPull = PullResult(
+            entities = emptyList(),
+            cursor = 7,
+            generation = "current-generation",
+            hasMore = false,
+        )
+        rig.backend.pullStarted = CompletableDeferred()
+        rig.backend.releasePull = CompletableDeferred()
+        rig.babies.seed(localBaby())
+
+        val creating = async {
+            rig.port.createFamily(
+                displayName = "妈妈",
+                bootstrapSecret = "bootstrap",
+                familyName = "乐乐家",
+            ).getOrThrow()
+        }
+        rig.backend.pullStarted!!.await()
+
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Syncing)
+        assertThat(rig.port.session().first().familyToken).isEqualTo("owner-token-reclaimed")
+
+        rig.backend.releasePull!!.complete(Unit)
+        val created = creating.await()
+
+        assertThat(created.reclaimed).isTrue()
+        assertThat(created.dataRecovery).isEqualTo(InitialFamilyDataRecovery.Complete)
+        assertThat(rig.port.session().first().familyToken).isEqualTo("owner-token-reclaimed")
+        assertThat(rig.backend.pullCursors).containsExactly(0L)
+        assertThat(rig.backend.syncOrder)
+            .containsExactly("push:baby", "pull:0")
+            .inOrder()
+        assertThat(rig.port.session().first().pullCursor).isEqualTo(7L)
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+    }
+
+    @Test
+    fun failedReclaimPullKeepsOwnerSessionAndReturnsRetryableRecoveryState() = runTest {
+        val configured = SyncSession(
+            serverHost = "192.168.1.20",
+            serverPort = 8787,
+            allowedSsids = listOf("Home"),
+        )
+        val rig = SyncRig(session = configured)
+        rig.awaitStartupRecovery()
+        rig.backend.nextCreateReclaimed = true
+        rig.backend.pullFailures += SyncHttpException(503)
+        rig.babies.seed(localBaby())
+
+        val result = rig.port.createFamily(
+            displayName = "妈妈",
+            bootstrapSecret = "bootstrap",
+            familyName = "乐乐家",
+        )
+
+        assertThat(result.isSuccess).isTrue()
+        assertThat(result.getOrThrow().dataRecovery)
+            .isEqualTo(InitialFamilyDataRecovery.RetryRequired)
+        assertThat(rig.port.session().first().familyToken).isEqualTo("owner-token-reclaimed")
+        assertThat(rig.port.session().first().pullCursor).isEqualTo(0L)
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Error)
+        assertThat(rig.backend.pullCursors).containsExactly(0L)
+
+        rig.backend.nextPull = PullResult(
+            entities = emptyList(),
+            cursor = 9,
+            generation = "current-generation",
+            hasMore = false,
+        )
+        val restarted = SyncRig(
+            session = SyncSession(),
+            syncPreferences = rig.preferences,
+        )
+        restarted.awaitStartupRecovery()
+        restarted.backend.nextPull = rig.backend.nextPull
+
+        assertThat(restarted.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+        assertThat(restarted.backend.pullCursors).containsExactly(0L)
+        assertThat(restarted.port.session().first().pullCursor).isEqualTo(9L)
+        assertThat(restarted.port.status().first()).isEqualTo(SyncStatus.Idle)
+    }
+
+    @Test
+    fun queuedNetworkChangeCannotSkipReclaimFullPull() = runTest {
+        val configured = SyncSession(
+            serverHost = "192.168.1.20",
+            serverPort = 8787,
+            allowedSsids = listOf("Home"),
+        )
+        val rig = SyncRig(session = configured)
+        rig.awaitStartupRecovery()
+        rig.backend.nextCreateReclaimed = true
+        rig.backend.createStarted = CompletableDeferred()
+        rig.backend.releaseCreate = CompletableDeferred()
+        rig.backend.nextPull = PullResult(
+            entities = emptyList(),
+            cursor = 7,
+            generation = "current-generation",
+            hasMore = false,
+        )
+
+        val creating = async {
+            rig.port.createFamily(
+                displayName = "妈妈",
+                bootstrapSecret = "bootstrap",
+                familyName = "乐乐家",
+            ).getOrThrow()
+        }
+        rig.backend.createStarted!!.await()
+        val changingNetwork = async {
+            rig.port.saveHomeLanConfig(
+                HomeLanServerConfig(
+                    host = "192.168.1.99",
+                    port = 8787,
+                    allowedSsids = listOf("Home"),
+                ),
+            ).getOrThrow()
+        }
+        runCurrent()
+
+        rig.backend.releaseCreate!!.complete(Unit)
+        val created = creating.await()
+        changingNetwork.await()
+
+        assertThat(created.dataRecovery).isEqualTo(InitialFamilyDataRecovery.Complete)
+        assertThat(rig.backend.pullCursors).containsExactly(0L)
+        assertThat(rig.backend.syncOrder).contains("pull:0")
+    }
+
+    @Test
     fun failedReplicaRecoveryBlocksEndpointMutationInsideSharedBarrier() = runTest {
         val configured = SyncSession(
             serverHost = "192.168.1.20",
@@ -4582,6 +4721,7 @@ internal class RecordingSyncBackend : SyncBackend {
     val pushes = mutableListOf<PushedBatch>()
     val pushAttempts = mutableListOf<SyncSession>()
     val operationOrder = mutableListOf<String>()
+    val syncOrder = mutableListOf<String>()
     val mediaUploads = mutableListOf<String>()
     var pullCount = 0
     var nextPull: PullResult? = null
@@ -4695,7 +4835,9 @@ internal class RecordingSyncBackend : SyncBackend {
                 }
             }
         }
-        operationOrder += "push:${entities.joinToString(",") { it.type }}"
+        val pushOperation = "push:${entities.joinToString(",") { it.type }}"
+        operationOrder += pushOperation
+        syncOrder += pushOperation
         pushes += PushedBatch(session, entities)
         knownEntities += entities.map { it.type to it.clientUuid }
         afterPush?.invoke()
@@ -4720,6 +4862,7 @@ internal class RecordingSyncBackend : SyncBackend {
     override suspend fun pull(session: SyncSession): PullResult {
         pullCount++
         pullCursors += session.pullCursor
+        syncOrder += "pull:${session.pullCursor}"
         pullStarted?.complete(Unit)
         releasePull?.await()
         pullFailures.removeFirstOrNull()?.let { throw it }

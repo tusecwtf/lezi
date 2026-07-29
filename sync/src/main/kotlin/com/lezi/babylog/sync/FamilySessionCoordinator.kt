@@ -31,6 +31,7 @@ internal sealed interface FamilySessionOutcome {
         val session: SyncSession,
         /** True when create reclaimed an existing owner membership (not first create). */
         val reclaimed: Boolean = false,
+        val dataRecovery: InitialFamilyDataRecovery = InitialFamilyDataRecovery.NotRequired,
     ) : FamilySessionOutcome
     data class InviteCreated(val invite: Invite) : FamilySessionOutcome
     data class MembersListed(val members: List<FamilyMember>) : FamilySessionOutcome
@@ -76,6 +77,7 @@ internal class FamilySessionCoordinator(
     private val onSessionChanged: (SyncSession) -> Unit,
     private val onSessionObserved: (SyncSession) -> Unit,
     private val requestSync: (SyncTrigger) -> Unit,
+    private val recoverReclaimedSession: suspend (SyncSession) -> InitialFamilyDataRecovery,
     private val beforeOperation: suspend () -> Unit = {},
 ) {
     suspend fun execute(command: FamilySessionCommand): Result<FamilySessionOutcome> =
@@ -178,19 +180,26 @@ internal class FamilySessionCoordinator(
             val session = persistJoin(
                 baseUrl = current.homeLanConfig.baseUrl,
                 deviceId = deviceId,
-                joined = joined,
+                joined = if (joined.reclaimed) joined.copy(cursor = 0L) else joined,
             )
-            // saveSession atomically retires the create request id. Scheduling is
-            // post-commit notification: a closed signal must not turn a durable
-            // owner session into a user-visible create failure.
-            // Reclaim and first create both start at cursor 0 (JoinResult default)
-            // so the following sync full-pulls NAS entities by client_uuid.
-            try {
-                requestSync(SyncTrigger.LocalWrite)
-            } catch (_: Exception) {
-                // A later foreground transition retries from the durable outbox.
+            // saveSession atomically retires the create request id. Reclaim recovery
+            // stays inside this barrier so a queued endpoint mutation cannot clear
+            // the new credential before its required cursor-zero full pull.
+            val dataRecovery = if (joined.reclaimed) {
+                recoverReclaimedSession(session)
+            } else {
+                try {
+                    requestSync(SyncTrigger.LocalWrite)
+                } catch (_: Exception) {
+                    // A later foreground transition retries from the durable outbox.
+                }
+                InitialFamilyDataRecovery.NotRequired
             }
-            FamilySessionOutcome.Joined(session, reclaimed = joined.reclaimed)
+            FamilySessionOutcome.Joined(
+                session = session,
+                reclaimed = joined.reclaimed,
+                dataRecovery = dataRecovery,
+            )
         }
     }
 

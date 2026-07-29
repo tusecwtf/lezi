@@ -106,6 +106,7 @@ class RealSyncPort @Inject constructor(
         onSessionChanged = ::publishSession,
         onSessionObserved = { session -> cachedSession = session },
         requestSync = ::requestSync,
+        recoverReclaimedSession = ::recoverReclaimedSessionLocked,
         beforeOperation = ::recoverPendingLocalClearLocked,
     )
     private val syncSignal = Channel<Unit>(Channel.CONFLATED)
@@ -173,7 +174,11 @@ class RealSyncPort @Inject constructor(
             ),
         ).map {
             val joined = it as FamilySessionOutcome.Joined
-            CreateFamilyResult(session = joined.session, reclaimed = joined.reclaimed)
+            CreateFamilyResult(
+                session = joined.session,
+                reclaimed = joined.reclaimed,
+                dataRecovery = joined.dataRecovery,
+            )
         }
 
     override suspend fun renameFamily(familyName: String?): Result<Unit> =
@@ -205,12 +210,7 @@ class RealSyncPort @Inject constructor(
                 currentStatus.value = SyncStatus.Disabled
                 return@withLock
             }
-            val outcome = replicaSyncEngine.synchronize(session, trigger)
-            preferences.markSuccess(clock.nowMillis())
-            cachedSession = preferences.session.first()
-            currentStatus.value = when (outcome) {
-                ReplicaSyncOutcome.Synchronized -> SyncStatus.Idle
-            }
+            synchronizeJoinedSessionLocked(session, trigger)
         }
     }.onFailure(::updateFailureStatus)
 
@@ -243,6 +243,32 @@ class RealSyncPort @Inject constructor(
         val resumedDomain = localClearRecoveryGate.recoverPendingLocalClear()
         val resumedReplica = localReplicaClearCoordinator.recoverPendingLocked()
         return LocalDataClearScope.widest(resumedDomain, resumedReplica)
+    }
+
+    /** Caller owns [syncMutex]; identity remains committed when recovery is retryable. */
+    private suspend fun recoverReclaimedSessionLocked(
+        session: SyncSession,
+    ): InitialFamilyDataRecovery = try {
+        currentStatus.value = SyncStatus.Syncing
+        synchronizeJoinedSessionLocked(session, SyncTrigger.PullToRefresh)
+        InitialFamilyDataRecovery.Complete
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: Throwable) {
+        updateFailureStatus(error)
+        InitialFamilyDataRecovery.RetryRequired
+    }
+
+    private suspend fun synchronizeJoinedSessionLocked(
+        session: SyncSession,
+        trigger: SyncTrigger,
+    ) {
+        val outcome = replicaSyncEngine.synchronize(session, trigger)
+        preferences.markSuccess(clock.nowMillis())
+        cachedSession = preferences.session.first()
+        currentStatus.value = when (outcome) {
+            ReplicaSyncOutcome.Synchronized -> SyncStatus.Idle
+        }
     }
 
     private suspend fun executeFamily(

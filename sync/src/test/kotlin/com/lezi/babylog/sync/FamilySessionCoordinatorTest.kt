@@ -40,6 +40,7 @@ class FamilySessionCoordinatorTest {
             },
             onSessionObserved = {},
             requestSync = {},
+            recoverReclaimedSession = { InitialFamilyDataRecovery.NotRequired },
         )
 
         val result = coordinator.execute(
@@ -220,7 +221,7 @@ class FamilySessionCoordinatorTest {
     }
 
     @Test
-    fun createFamilyReclaimPublishesOwnerSessionAtCursorZeroAndRequestsSync() = runTest {
+    fun createFamilyReclaimPublishesOwnerSessionAtCursorZeroForPortRecovery() = runTest {
         val previous = SyncSession(
             serverHost = "192.168.1.20",
             serverPort = 8787,
@@ -237,9 +238,11 @@ class FamilySessionCoordinatorTest {
             backend = backend,
             requireRemoteAllowed = { events += "gate" },
             onSessionChanged = { events += "session-published" },
-            requestSync = { trigger ->
-                assertThat(trigger).isEqualTo(SyncTrigger.LocalWrite)
-                events += "sync-requested"
+            requestSync = { error("reclaim sync is owned by the public SyncPort flow") },
+            recoverReclaimedSession = { session ->
+                assertThat(session).isEqualTo(preferences.current())
+                events += "recovery"
+                InitialFamilyDataRecovery.Complete
             },
         )
 
@@ -253,6 +256,7 @@ class FamilySessionCoordinatorTest {
 
         val joined = outcome as FamilySessionOutcome.Joined
         assertThat(joined.reclaimed).isTrue()
+        assertThat(joined.dataRecovery).isEqualTo(InitialFamilyDataRecovery.Complete)
         assertThat(joined.session.familyId).isEqualTo("family-created")
         assertThat(joined.session.familyToken).isEqualTo("owner-token-reclaimed")
         assertThat(joined.session.membershipId).isEqualTo("membership-created")
@@ -261,7 +265,7 @@ class FamilySessionCoordinatorTest {
         assertThat(joined.session.pullGeneration).isEqualTo("current-generation")
         assertThat(joined.session.familyName).isEqualTo("乐乐一家")
         assertThat(events)
-            .containsExactly("gate", "session-published", "sync-requested")
+            .containsExactly("gate", "session-published", "recovery")
             .inOrder()
     }
 
@@ -974,6 +978,9 @@ private fun coordinator(
     onSessionChanged: (SyncSession) -> Unit = {},
     onSessionObserved: (SyncSession) -> Unit = {},
     requestSync: (SyncTrigger) -> Unit = {},
+    recoverReclaimedSession: suspend (SyncSession) -> InitialFamilyDataRecovery = {
+        InitialFamilyDataRecovery.NotRequired
+    },
 ): FamilySessionCoordinator = FamilySessionCoordinator(
     backend = backend,
     preferences = preferences,
@@ -984,6 +991,7 @@ private fun coordinator(
     onSessionChanged = onSessionChanged,
     onSessionObserved = onSessionObserved,
     requestSync = requestSync,
+    recoverReclaimedSession = recoverReclaimedSession,
 )
 
 private class RecordingFamilySessionReplica(
