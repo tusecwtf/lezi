@@ -32,6 +32,7 @@ android {
 
 dependencies {
 
+    implementation(project(":core:common"))
     implementation(project(":core:model"))
     implementation(project(":core:datastore"))
     implementation(project(":designsystem"))
@@ -51,6 +52,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     debugImplementation(libs.androidx.compose.ui.tooling)
     testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(libs.androidx.test.runner)
 
 }

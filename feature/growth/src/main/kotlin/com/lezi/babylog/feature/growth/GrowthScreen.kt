@@ -31,13 +31,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -67,9 +70,7 @@ import com.lezi.babylog.designsystem.StateKind
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.GrowthMeasurementLifecycle
-import com.lezi.babylog.domain.GrowthMeasurementSaveResult
 import com.lezi.babylog.domain.ObserveGrowthMeasurements
-import com.lezi.babylog.domain.SaveGrowthMeasurement
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate
@@ -85,7 +86,6 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.launch
 
 enum class GrowthMetric { WEIGHT, HEIGHT, HEAD }
 
@@ -98,13 +98,6 @@ data class MeasurePoint(
     val measuredAt: Long,
     val note: String?,
     val referenceWarning: String?,
-)
-
-private data class MeasurementDraft(
-    val recordId: Long? = null,
-    val valueText: String = "",
-    val note: String = "",
-    val measuredAt: Long,
 )
 
 data class GrowthUi(
@@ -120,6 +113,14 @@ class GrowthViewModel @Inject constructor(
     private val measurements: GrowthMeasurementLifecycle,
 ) : ViewModel() {
     private val metric = MutableStateFlow(GrowthMetric.WEIGHT)
+    private val writes = GrowthMeasurementWriteCoordinator(
+        scope = viewModelScope,
+        measurements = measurements,
+        currentBabyId = { careLog.getCurrentBaby()?.id },
+        nowMillis = RecordTime::currentTimeMillis,
+    )
+
+    val editor = writes.state
 
     val timeStepMin = settingsStore.settings
         .map { it.timeStepMin }
@@ -177,73 +178,23 @@ class GrowthViewModel @Inject constructor(
         metric.value = m
     }
 
-    fun validationError(value: Double): String? =
-        measurements.validationError(metric.value.recordType, value)
+    fun openMeasurementDraft(draft: GrowthMeasurementDraft): Boolean = writes.openDraft(draft)
 
-    fun addMeasurement(
-        value: Double,
-        timestamp: Long,
-        note: String,
-        onResult: (String?) -> Unit,
-    ) {
-        viewModelScope.launch {
-            val baby = careLog.getCurrentBaby()
-            if (baby == null) {
-                onResult("请先添加宝宝")
-                return@launch
-            }
-            val result = measurements.save(
-                SaveGrowthMeasurement(
-                    babyId = baby.id,
-                    type = metric.value.recordType,
-                    displayValue = value,
-                    measuredAt = timestamp,
-                    note = note.ifBlank { null },
-                ),
-            )
-            onResult(result.errorOrNull())
-        }
-    }
+    fun updateMeasurementDraft(draft: GrowthMeasurementDraft): Boolean =
+        writes.updateDraft(draft)
 
-    fun updateMeasurement(
-        recordId: Long,
-        value: Double,
-        timestamp: Long,
-        note: String,
-        onResult: (String?) -> Unit,
-    ) {
-        viewModelScope.launch {
-            val baby = careLog.getCurrentBaby()
-            if (baby == null) {
-                onResult("请先添加宝宝")
-                return@launch
-            }
-            val result = measurements.save(
-                SaveGrowthMeasurement(
-                    babyId = baby.id,
-                    type = metric.value.recordType,
-                    displayValue = value,
-                    measuredAt = timestamp,
-                    note = note.ifBlank { null },
-                    existingRecordId = recordId,
-                ),
-            )
-            onResult(result.errorOrNull())
-        }
-    }
+    fun closeMeasurementDraft(): Boolean = writes.closeDraft()
 
-    fun deleteMeasurement(recordId: Long, onDone: () -> Unit) {
-        viewModelScope.launch {
-            val baby = careLog.getCurrentBaby() ?: return@launch
-            if (measurements.delete(baby.id, recordId)) onDone()
-        }
-    }
+    fun reportMeasurementMessage(message: String?) = writes.reportEditorMessage(message)
 
-}
+    fun saveMeasurement(): Boolean = writes.submitSave(metric.value.recordType)
 
-private fun GrowthMeasurementSaveResult.errorOrNull(): String? = when (this) {
-    is GrowthMeasurementSaveResult.Rejected -> message
-    is GrowthMeasurementSaveResult.Saved -> null
+    fun requestMeasurementDelete(): Boolean = writes.requestDelete()
+
+    fun cancelMeasurementDelete(): Boolean = writes.cancelDelete()
+
+    fun deleteMeasurement(): Boolean = writes.submitDelete()
+
 }
 
 private val GrowthMetric.recordType: RecordType
@@ -263,25 +214,27 @@ fun GrowthRoute(
     val timeStepMin by vm.timeStepMin.collectAsStateWithLifecycle()
     val timePickerStyle by vm.timePickerStyle.collectAsStateWithLifecycle()
     val preferredHand by vm.preferredHand.collectAsStateWithLifecycle()
+    val editor by vm.editor.collectAsStateWithLifecycle()
     val bands = ui.bands
-    var draft by remember { mutableStateOf<MeasurementDraft?>(null) }
-    var showMeasureDate by remember { mutableStateOf(false) }
-    var showMeasureClock by remember { mutableStateOf(false) }
-    var measurementError by remember { mutableStateOf<String?>(null) }
-    var confirmDelete by remember { mutableStateOf(false) }
+    val draft = editor.draft
+    val busy = editor.operation != null
+    val saving = editor.operation is GrowthMeasurementWriteOperation.Saving
+    val deleting = editor.operation is GrowthMeasurementWriteOperation.Deleting
+    var showMeasureDate by rememberSaveable { mutableStateOf(false) }
+    var showMeasureClock by rememberSaveable { mutableStateOf(false) }
     val zone = ZoneId.systemDefault()
     val history = remember(ui.points) {
         ui.points.sortedByDescending(MeasurePoint::measuredAt)
     }
 
     fun openNewMeasurement() {
-        draft = MeasurementDraft(
-            measuredAt = RecordTime.newDraftTimestamp(initialDate, zone),
+        vm.openMeasurementDraft(
+            GrowthMeasurementDraft(
+                measuredAt = RecordTime.newDraftTimestamp(initialDate, zone),
+            ),
         )
-        measurementError = null
         showMeasureDate = false
         showMeasureClock = false
-        confirmDelete = false
     }
 
     fun openEditMeasurement(point: MeasurePoint) {
@@ -290,24 +243,23 @@ fun GrowthRoute(
         } else {
             "%.1f".format(point.value)
         }
-        draft = MeasurementDraft(
-            recordId = point.recordId,
-            valueText = valueText.trimEnd('0').trimEnd('.').ifEmpty { valueText },
-            note = point.note.orEmpty(),
-            measuredAt = point.measuredAt,
+        vm.openMeasurementDraft(
+            GrowthMeasurementDraft(
+                recordId = point.recordId,
+                valueText = valueText.trimEnd('0').trimEnd('.').ifEmpty { valueText },
+                note = point.note.orEmpty(),
+                measuredAt = point.measuredAt,
+            ),
         )
-        measurementError = null
         showMeasureDate = false
         showMeasureClock = false
-        confirmDelete = false
     }
 
     fun closeMeasurementDraft() {
-        draft = null
-        showMeasureDate = false
-        showMeasureClock = false
-        measurementError = null
-        confirmDelete = false
+        if (vm.closeMeasurementDraft()) {
+            showMeasureDate = false
+            showMeasureClock = false
+        }
     }
 
     PageScaffoldBackground {
@@ -432,7 +384,7 @@ fun GrowthRoute(
     if (activeDraft != null) {
         val isEditing = activeDraft.recordId != null
         AlertDialog(
-            onDismissRequest = { closeMeasurementDraft() },
+            onDismissRequest = { if (!busy) closeMeasurementDraft() },
             modifier = Modifier.imePadding(),
             properties = DialogProperties(decorFitsSystemWindows = false),
             title = {
@@ -460,18 +412,23 @@ fun GrowthRoute(
                     OutlinedTextField(
                         value = activeDraft.valueText,
                         onValueChange = { text ->
-                            draft = activeDraft.copy(valueText = text)
-                            measurementError = null
+                            vm.updateMeasurementDraft(activeDraft.copy(valueText = text))
                         },
+                        enabled = !busy,
+                        isError = editor.fieldError != null,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         singleLine = true,
                         label = { Text(if (ui.metric == GrowthMetric.WEIGHT) "公斤" else "厘米") },
+                        supportingText = editor.fieldError?.let { error ->
+                            { Text(error) }
+                        },
                     )
                     OutlinedTextField(
                         value = activeDraft.note,
                         onValueChange = { text ->
-                            draft = activeDraft.copy(note = text.take(200))
+                            vm.updateMeasurementDraft(activeDraft.copy(note = text.take(200)))
                         },
+                        enabled = !busy,
                         label = { Text("备注（可选）") },
                         modifier = Modifier.fillMaxWidth(),
                         minLines = 2,
@@ -483,110 +440,103 @@ fun GrowthRoute(
                         style = LeziTypography.BodyStrong,
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = { showMeasureDate = true }) {
+                        OutlinedButton(
+                            enabled = !busy,
+                            onClick = { showMeasureDate = true },
+                        ) {
                             Text("修改日期")
                         }
-                        OutlinedButton(onClick = { showMeasureClock = true }) {
+                        OutlinedButton(
+                            enabled = !busy,
+                            onClick = { showMeasureClock = true },
+                        ) {
                             Text("选择时间")
                         }
                     }
                     if (isEditing) {
                         LeziSecondaryButton(
                             label = "删除这条测量",
-                            onClick = { confirmDelete = true },
+                            onClick = { vm.requestMeasurementDelete() },
                             modifier = Modifier.fillMaxWidth(),
+                            enabled = !busy,
                         )
                     }
-                    measurementError?.let {
+                    editor.operationError?.let {
                         Text(
                             it,
-                            style = LeziTypography.Meta,
+                            modifier = Modifier.semantics {
+                                liveRegion = LiveRegionMode.Polite
+                            },
                             color = MaterialTheme.colorScheme.error,
+                            style = LeziTypography.Meta,
                         )
                     }
                 }
             },
             confirmButton = {
                 TextButton(
-                    onClick = {
-                        val value = activeDraft.valueText.toDoubleOrNull()
-                        if (value == null) {
-                            measurementError = "请填写有效数值"
-                            return@TextButton
-                        }
-                        vm.validationError(value)?.let { error ->
-                            measurementError = error
-                            return@TextButton
-                        }
-                        if (
-                            RecordTime.pointError(
-                                activeDraft.measuredAt,
-                                RecordTime.currentTimeMillis(),
-                            ) != null
-                        ) {
-                            measurementError = "测量时刻不能晚于现在"
-                            return@TextButton
-                        }
-                        val note = activeDraft.note
-                        val at = activeDraft.measuredAt
-                        val recordId = activeDraft.recordId
-                        if (recordId != null) {
-                            vm.updateMeasurement(recordId, value, at, note) { error ->
-                                if (error == null) {
-                                    closeMeasurementDraft()
-                                } else {
-                                    measurementError = error
-                                }
-                            }
-                        } else {
-                            vm.addMeasurement(value, at, note) { error ->
-                                if (error == null) {
-                                    closeMeasurementDraft()
-                                } else {
-                                    measurementError = error
-                                }
-                            }
-                        }
-                    },
-                ) { Text(if (isEditing) "保存修改" else "保存") }
+                    enabled = !busy,
+                    onClick = { vm.saveMeasurement() },
+                ) {
+                    Text(
+                        when {
+                            saving -> "保存中…"
+                            isEditing -> "保存修改"
+                            else -> "保存"
+                        },
+                    )
+                }
             },
             dismissButton = {
-                TextButton(onClick = { closeMeasurementDraft() }) { Text("取消") }
+                TextButton(
+                    enabled = !busy,
+                    onClick = { closeMeasurementDraft() },
+                ) { Text("取消") }
             },
         )
     }
 
-    if (confirmDelete) {
-        val deletingId = draft?.recordId
+    if (editor.deleteConfirmationOpen) {
         AlertDialog(
-            onDismissRequest = { confirmDelete = false },
+            onDismissRequest = { if (!busy) vm.cancelMeasurementDelete() },
             title = { Text("删除这条测量？") },
             text = {
-                Text(
-                    when (ui.metric) {
-                        GrowthMetric.WEIGHT -> "删除后会从体重曲线与记录列表中移除，无法撤销。"
-                        GrowthMetric.HEIGHT -> "删除后会从身高曲线与记录列表中移除，无法撤销。"
-                        GrowthMetric.HEAD -> "删除后会从头围曲线与记录列表中移除，无法撤销。"
-                    },
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
+                    Text(
+                        when (ui.metric) {
+                            GrowthMetric.WEIGHT -> "删除后会从体重曲线与记录列表中移除，无法撤销。"
+                            GrowthMetric.HEIGHT -> "删除后会从身高曲线与记录列表中移除，无法撤销。"
+                            GrowthMetric.HEAD -> "删除后会从头围曲线与记录列表中移除，无法撤销。"
+                        },
+                    )
+                    editor.operationError?.let { error ->
+                        Text(
+                            text = error,
+                            modifier = Modifier.semantics {
+                                liveRegion = LiveRegionMode.Polite
+                            },
+                            color = MaterialTheme.colorScheme.error,
+                            style = LeziTypography.Meta,
+                        )
+                    }
+                }
             },
             confirmButton = {
                 TextButton(
-                    onClick = {
-                        if (deletingId != null) {
-                            vm.deleteMeasurement(deletingId) {
-                                closeMeasurementDraft()
-                            }
-                        } else {
-                            confirmDelete = false
-                        }
-                    },
+                    enabled = !busy,
+                    onClick = { vm.deleteMeasurement() },
                 ) {
-                    Text("确认删除", color = MaterialTheme.colorScheme.error)
+                    Text(
+                        if (deleting) "删除中…" else "确认删除",
+                        color = MaterialTheme.colorScheme.error,
+                    )
                 }
             },
             dismissButton = {
-                TextButton(onClick = { confirmDelete = false }) { Text("取消") }
+                TextButton(
+                    enabled = !busy,
+                    onClick = { vm.cancelMeasurementDelete() },
+                ) { Text("取消") }
             },
         )
     }
@@ -600,9 +550,10 @@ fun GrowthRoute(
             .toEpochMilli()
         val dateState = rememberDatePickerState(initialSelectedDateMillis = initialUtc)
         DatePickerDialog(
-            onDismissRequest = { showMeasureDate = false },
+            onDismissRequest = { if (!busy) showMeasureDate = false },
             confirmButton = {
                 TextButton(
+                    enabled = !busy,
                     onClick = {
                         dateState.selectedDateMillis?.let { millis ->
                             val selectedDate = Instant.ofEpochMilli(millis)
@@ -621,20 +572,23 @@ fun GrowthRoute(
                             )
                             when (decision) {
                                 RecordTimeDecision.RejectedGap -> {
-                                    measurementError =
-                                        "所选日期不存在当前时刻，请改用其他时刻"
+                                    vm.reportMeasurementMessage(
+                                        "所选日期不存在当前时刻，请改用其他时刻",
+                                    )
                                 }
                                 is RecordTimeDecision.Accepted -> {
-                                    draft = draftForPickers.copy(
-                                        measuredAt = decision.value.toInstant().toEpochMilli(),
+                                    vm.updateMeasurementDraft(
+                                        draftForPickers.copy(
+                                            measuredAt = decision.value.toInstant().toEpochMilli(),
+                                        ),
                                     )
-                                    measurementError = if (
-                                        dateDecision is RecordDateDecision.ClampedToToday
-                                    ) {
-                                        "测量日期不能晚于今天，已保留为今天"
-                                    } else {
-                                        null
-                                    }
+                                    vm.reportMeasurementMessage(
+                                        if (dateDecision is RecordDateDecision.ClampedToToday) {
+                                            "测量日期不能晚于今天，已保留为今天"
+                                        } else {
+                                            null
+                                        },
+                                    )
                                 }
                             }
                         }
@@ -643,7 +597,10 @@ fun GrowthRoute(
                 ) { Text("确定") }
             },
             dismissButton = {
-                TextButton(onClick = { showMeasureDate = false }) { Text("取消") }
+                TextButton(
+                    enabled = !busy,
+                    onClick = { showMeasureDate = false },
+                ) { Text("取消") }
             },
         ) {
             LeziDatePicker(state = dateState)
@@ -663,10 +620,11 @@ fun GrowthRoute(
                     RecordTime.currentTimeMillis(),
                 )
                 if (error != null) {
-                    measurementError = error
+                    vm.reportMeasurementMessage(error)
                 } else {
-                    draft = draftForPickers.copy(measuredAt = picked.toInstant().toEpochMilli())
-                    measurementError = null
+                    vm.updateMeasurementDraft(
+                        draftForPickers.copy(measuredAt = picked.toInstant().toEpochMilli()),
+                    )
                 }
                 showMeasureClock = false
             },
