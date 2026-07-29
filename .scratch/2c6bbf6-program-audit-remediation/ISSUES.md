@@ -8,11 +8,11 @@ Current validation HEAD: `d7b3bea3483367d663fa330eb6596aba3ed73e50`
 ## Current audit disposition
 
 - Findings: **26**
-- Fixed: **3（05、15、16）**
-- Active tickets in this tracker: **21**
+- Fixed: **4（05、15、16、22）**
+- Active tickets in this tracker: **20**
 - Canonical layout tickets: **2**
 - Partial findings: **02、04、06、09、10、14、17、19**
-- Still-valid findings: **01、03、07、08、11、12、13、18、20、21、22、23、24、25、26**
+- Still-valid findings: **01、03、07、08、11、12、13、18、20、21、23、24、25、26**
 
 `partial` 只描述审计时已有部分结构，不改变未完成票状态。
 
@@ -67,7 +67,7 @@ layout/05 已删除分区 ────┘
 | [19](./issues/19-dst-safe-three-day-timeline.md) | 夏令时安全的三日时间轴 | 18 | M | partial | ready-for-agent |
 | [20](./issues/20-move-system-calendar-provider-io-off-main.md) | 系统日历 Provider I/O 后台化 | — | M | still-valid | complete |
 | [21](./issues/21-recover-from-nursing-timer-service-start-failure.md) | 计时前台服务启动失败可恢复 | — | S–M | still-valid | complete |
-| [22](./issues/22-batch-timeline-publication-and-permission-metadata.md) | 批量生成时间轴发布与权限元数据 | 16 | M | still-valid | ready-for-agent |
+| [22](./issues/22-batch-timeline-publication-and-permission-metadata.md) | 批量生成时间轴发布与权限元数据 | 16 | M | still-valid | complete |
 | [23](./issues/23-off-main-single-pass-summary-aggregation.md) | 汇总聚合移出主线程并降低重复扫描 | — | M | still-valid | complete |
 | [24](./issues/24-share-open-sleep-normalization-rule.md) | 共享开放睡眠修复决策 | — | M | still-valid | ready-for-agent |
 | [25](./issues/25-contract-superseded-compatibility-surfaces.md) | 收缩已迁移的兼容与重复表面 | 09、10、P1/02、17、24 | M | still-valid | ready-for-agent |

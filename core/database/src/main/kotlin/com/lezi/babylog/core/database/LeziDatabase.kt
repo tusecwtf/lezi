@@ -30,6 +30,7 @@ abstract class LeziDatabase : RoomDatabase() {
     abstract fun carePlanDao(): CarePlanDao
     abstract fun fulfillmentCandidateDao(): FulfillmentCandidateDao
     abstract fun mediaAssetDao(): MediaAssetDao
+    abstract fun timelineWindowDao(): TimelineWindowDao
     abstract fun outboxDao(): OutboxDao
     abstract fun customItemDao(): CustomItemDao
     abstract fun pendingReminderCleanupDao(): PendingReminderCleanupDao

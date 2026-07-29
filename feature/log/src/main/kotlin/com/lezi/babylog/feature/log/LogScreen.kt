@@ -73,7 +73,6 @@ import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.core.model.availableForNewEntry
 import com.lezi.babylog.core.model.deviceLayoutSnapshot
 import com.lezi.babylog.core.model.displayLabel
-import com.lezi.babylog.core.model.rootPublicationState
 import com.lezi.babylog.core.ui.RecordSection
 import com.lezi.babylog.core.ui.RecordSummaryStrip
 import com.lezi.babylog.core.ui.RecordSummaryValue
@@ -110,17 +109,18 @@ import com.lezi.babylog.domain.CustomRecordItem
 import com.lezi.babylog.domain.DailySummary
 import com.lezi.babylog.domain.DayChartCategories
 import com.lezi.babylog.domain.DayChartCategory
+import com.lezi.babylog.domain.TimelineCarePlanRow
+import com.lezi.babylog.domain.TimelineRecordRow
+import com.lezi.babylog.domain.TimelineWindowRepository
+import com.lezi.babylog.domain.TimelineWindowRequest
 import com.lezi.babylog.domain.formatClock
 import com.lezi.babylog.domain.relativeTimeLabel
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
-import com.lezi.babylog.sync.UploaderMemberRef
 import com.lezi.babylog.sync.localCarePlanPublishDetail
 import com.lezi.babylog.sync.localCarePlanPublishLabel
 import com.lezi.babylog.sync.localRecordPublishDetail
 import com.lezi.babylog.sync.localRecordPublishLabel
-import com.lezi.babylog.sync.resolveRecordUploaderLabel
-import com.lezi.babylog.sync.toUploaderRef
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate
@@ -131,7 +131,6 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -160,8 +159,10 @@ data class LogUiState(
      * Rendered above the fact record list; never mixed into records/summary.
      */
     val pendingPlans: List<CarePlan> = emptyList(),
-    /** Plan ids the current actor may edit/skip/delete (UI ACL). */
-    val manageablePlanIds: Set<Long> = emptySet(),
+    /** One-revision metadata backing every record row action and publication label. */
+    val recordMetadata: Map<Long, TimelineRecordRow> = emptyMap(),
+    /** One-revision metadata backing every care-plan row action and publication label. */
+    val planMetadata: Map<Long, TimelineCarePlanRow> = emptyMap(),
     val familyJoined: Boolean = false,
     val lastSyncFailed: Boolean = false,
     /**
@@ -176,45 +177,15 @@ class LogViewModel @Inject constructor(
     private val careLog: CareLog,
     private val settingsStore: SettingsStore,
     private val syncPort: SyncPort,
+    private val timelineWindowRepository: TimelineWindowRepository,
 ) : ViewModel() {
     private val zone = ZoneId.systemDefault()
     private val dayFlow = MutableStateFlow(LocalDate.now(zone))
     private val refreshing = MutableStateFlow(false)
-    private val uploaderMembers = MutableStateFlow<List<UploaderMemberRef>>(emptyList())
-    private val selfUploaderIdentity = MutableStateFlow(SelfUploaderIdentity())
-    private val familyJoined = MutableStateFlow(false)
     private val deviceLayoutWriter = DeviceLayoutSnapshotWriter(viewModelScope) { snapshot ->
         settingsStore.setDeviceLayoutSnapshot(snapshot)
     }
     internal val deviceLayoutWriteState = deviceLayoutWriter.state
-
-    init {
-        viewModelScope.launch {
-            syncPort.session()
-                .map {
-                    it.isJoined to SelfUploaderIdentity(
-                        membershipId = it.membershipId,
-                    )
-                }
-                .distinctUntilChanged()
-                .collect { (joined, identity) ->
-                    familyJoined.value = joined
-                    selfUploaderIdentity.value = identity
-                    if (!joined) {
-                        uploaderMembers.value = emptyList()
-                    } else {
-                        refreshUploaderMembers()
-                    }
-                }
-        }
-    }
-
-    private suspend fun refreshUploaderMembers() {
-        val result = syncPort.listFamilyMembers()
-        uploaderMembers.value = result.getOrNull()
-            ?.mapNotNull { it.toUploaderRef() }
-            .orEmpty()
-    }
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val uiState = combine(
@@ -238,30 +209,17 @@ class LogViewModel @Inject constructor(
                 ),
             )
         } else {
-            val today = LocalDate.now(zone)
-            val plansFlow = if (day == today) {
-                careLog.observeTodayPendingPlans(baby.id, zone)
-            } else {
-                careLog.observeDayPendingPlans(baby.id, day, zone)
-            }
-            // List / summary / legend / filter stay on selected day D only.
-            val dayRecordsFlow = careLog.observeDayRecords(baby.id, day, zone)
-            // Rail marks load D−1..D+1 on the continuous 72h content axis.
-            val railRecordsFlow = careLog.observeRecords(
-                babyId = baby.id,
-                startDayInclusive = day.minusDays(1),
-                endDayExclusive = day.plusDays(2),
-                zone = zone,
-            )
-            combine(
-                combine(dayRecordsFlow, railRecordsFlow, ::Pair),
-                careLog.observeOpenSleep(baby.id),
-                plansFlow,
-                uploaderMembers,
-                selfUploaderIdentity,
-            ) { dayAndRail, openSleep, plans, members, selfIdentity ->
-                val (records, railRecords) = dayAndRail
-                val joined = familyJoined.value
+            timelineWindowRepository.observe(
+                TimelineWindowRequest(
+                    babyId = baby.id,
+                    selectedDay = day,
+                    zoneId = zone,
+                    nowMillis = RecordTime.currentTimeMillis(),
+                ),
+            ).map { snapshot ->
+                val records = snapshot.recordRows.map(TimelineRecordRow::record)
+                val railRecords = snapshot.railRecordRows.map(TimelineRecordRow::record)
+                val plans = snapshot.planRows.map(TimelineCarePlanRow::carePlan)
                 val window = threeDayContentWindow(day, zone)
                 val summary = CareAggregation.day(records, day, zone).toDailySummary()
                 val lanes = buildTimelineLanes(
@@ -272,17 +230,8 @@ class LogViewModel @Inject constructor(
                 )
                 // Rail visibility uses the three-day union; list/summary stay on D.
                 val showDayChart = DayChartCategories.shouldShowDayChart(railRecords)
-                val labels = buildUploaderLabels(
-                    records = records,
-                    isFamilyJoined = joined,
-                    members = members,
-                    selfMembershipId = selfIdentity.membershipId,
-                )
-                val manageablePlans = buildSet {
-                    for (plan in plans) {
-                        if (careLog.canManageCarePlan(plan)) add(plan.id)
-                    }
-                }
+                val recordMetadata = snapshot.recordRows.associateBy { it.record.id }
+                val planMetadata = snapshot.planRows.associateBy { it.carePlan.id }
                 LogUiState(
                     loading = false,
                     baby = baby,
@@ -294,12 +243,15 @@ class LogViewModel @Inject constructor(
                     feedLanes = lanes.feed,
                     careLanes = lanes.care,
                     settings = settings,
-                    openSleep = openSleep,
-                    uploaderLabels = labels,
+                    openSleep = snapshot.openSleep,
+                    uploaderLabels = snapshot.recordRows.mapNotNull { row ->
+                        row.uploaderLabel?.let { row.record.id to it }
+                    }.toMap(),
                     customItems = customItems,
                     pendingPlans = plans,
-                    manageablePlanIds = manageablePlans,
-                    familyJoined = joined,
+                    recordMetadata = recordMetadata,
+                    planMetadata = planMetadata,
+                    familyJoined = snapshot.audience.isFamilyJoined,
                     showDayChart = showDayChart,
                 )
             }
@@ -308,7 +260,7 @@ class LogViewModel @Inject constructor(
         state.copy(refreshing = isRefreshing)
     }.combine(syncPort.status()) { state, status ->
         state.copy(lastSyncFailed = status == SyncStatus.Error)
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), LogUiState())
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(), LogUiState())
 
     fun setExternalDay(day: LocalDate) {
         dayFlow.value = day
@@ -360,7 +312,7 @@ class LogViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 syncPort.sync(SyncTrigger.PullToRefresh)
-                if (familyJoined.value) refreshUploaderMembers()
+                timelineWindowRepository.refreshMembers()
             } finally {
                 refreshing.value = false
             }
@@ -412,31 +364,6 @@ class LogViewModel @Inject constructor(
     }
 }
 
-/** Pure map of record id → uploader display label (S3 seam for timeline composition). */
-internal fun buildUploaderLabels(
-    records: List<Record>,
-    isFamilyJoined: Boolean,
-    members: List<UploaderMemberRef>,
-    selfMembershipId: String = "",
-): Map<Long, String> {
-    if (!isFamilyJoined || records.isEmpty()) return emptyMap()
-    val out = LinkedHashMap<Long, String>()
-    for (record in records) {
-        val label = resolveRecordUploaderLabel(
-            isFamilyJoined = true,
-            members = members,
-            createdByMembershipId = record.createdByMembershipId,
-            selfMembershipId = selfMembershipId,
-        )
-        if (label != null) out[record.id] = label
-    }
-    return out
-}
-
-private data class SelfUploaderIdentity(
-    val membershipId: String = "",
-)
-
 /** Compose payload summary with optional uploader 称呼 for the secondary line. */
 internal fun timelineRecordSummary(
     payloadSummary: String,
@@ -448,6 +375,32 @@ internal fun timelineRecordSummary(
         uploaderLabel?.takeIf { it.isNotBlank() },
         publishLabel?.takeIf { it.isNotBlank() },
     ).joinToString(" · ")
+
+/** Ticket 16 copy driven only by the row metadata from the current batch revision. */
+internal fun timelineRecordPublishLabel(
+    record: Record,
+    metadata: TimelineRecordRow?,
+    familyJoined: Boolean,
+    lastSyncFailed: Boolean,
+): String? = localRecordPublishLabel(
+    syncDirty = record.syncDirty,
+    familyJoined = familyJoined,
+    lastSyncFailed = lastSyncFailed,
+    publicationState = metadata?.publicationState ?: RootPublicationState.NEVER_PUBLISHED,
+)
+
+/** Missing metadata is fail-closed as never published; it never grants a row action. */
+internal fun timelineCarePlanPublishLabel(
+    plan: CarePlan,
+    metadata: TimelineCarePlanRow?,
+    familyJoined: Boolean,
+    lastSyncFailed: Boolean,
+): String? = localCarePlanPublishLabel(
+    syncDirty = plan.syncDirty,
+    familyJoined = familyJoined,
+    lastSyncFailed = lastSyncFailed,
+    publicationState = metadata?.publicationState ?: RootPublicationState.NEVER_PUBLISHED,
+)
 
 private data class LogCombine(
     val baby: Baby?,
@@ -1297,16 +1250,19 @@ fun LogRoute(
                             } else {
                                 ""
                             }
-                            val canManagePlan = plan.id in state.manageablePlanIds
-                            val planPublicationState = rootPublicationState(
-                                localUpdatedAt = plan.updatedAt,
-                                familyPublishedUpdatedAt = plan.familyPublishedUpdatedAt,
-                            )
-                            val planPublishLabel = localCarePlanPublishLabel(
-                                syncDirty = plan.syncDirty,
+                            val planMetadata = state.planMetadata[plan.id]
+                            val planCapabilities = planMetadata?.capabilities
+                            val canEditPlan = planCapabilities?.canEdit == true
+                            val canDeletePlan = planCapabilities?.canDelete == true
+                            val canFulfillPlan = planCapabilities?.canFulfill == true
+                            val canSkipPlan = planCapabilities?.canSkip == true
+                            val planPublicationState = planMetadata?.publicationState
+                                ?: RootPublicationState.NEVER_PUBLISHED
+                            val planPublishLabel = timelineCarePlanPublishLabel(
+                                plan = plan,
+                                metadata = planMetadata,
                                 familyJoined = state.familyJoined,
                                 lastSyncFailed = state.lastSyncFailed,
-                                publicationState = planPublicationState,
                             )
                             val statusLine =
                                 (if (isMissed) "已错过 · 点此完成" else "待执行 · 点此完成") + zoneHint
@@ -1331,8 +1287,8 @@ fun LogRoute(
                                             revealedSwipeRowId.takeUnless { it == planRowId }
                                         }
                                     },
-                                    editEnabled = canManagePlan,
-                                    deleteEnabled = canManagePlan,
+                                    editEnabled = canEditPlan,
+                                    deleteEnabled = canDeletePlan,
                                     onEdit = {
                                         openEditFromSwipe(
                                             RecordComposerRequest.EditPlan(plan.id),
@@ -1367,9 +1323,11 @@ fun LogRoute(
                                             } else {
                                                 // Collapse any other open swipe row before fulfill.
                                                 collapseSwipeRows()
-                                                onOpenComposer(
-                                                    RecordComposerRequest.Fulfill(plan.id),
-                                                )
+                                                if (canFulfillPlan) {
+                                                    onOpenComposer(
+                                                        RecordComposerRequest.Fulfill(plan.id),
+                                                    )
+                                                }
                                             }
                                         },
                                         modifier = Modifier.semantics {
@@ -1386,7 +1344,7 @@ fun LogRoute(
                                         },
                                     )
                                 }
-                                if (canManagePlan) {
+                                if (canSkipPlan) {
                                     Row(
                                         Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.End,
@@ -1439,15 +1397,17 @@ fun LogRoute(
                         }
                         else -> items(filteredTimelineRecords, key = { it.id }) { r ->
                             val title = r.displayLabel()
-                            val publicationState = rootPublicationState(
-                                localUpdatedAt = r.updatedAt,
-                                familyPublishedUpdatedAt = r.familyPublishedUpdatedAt,
-                            )
-                            val publishLabel = localRecordPublishLabel(
-                                syncDirty = r.syncDirty,
+                            val recordMetadata = state.recordMetadata[r.id]
+                            val recordCapabilities = recordMetadata?.capabilities
+                            val canEditRecord = recordCapabilities?.canEdit == true
+                            val canDeleteRecord = recordCapabilities?.canDelete == true
+                            val publicationState = recordMetadata?.publicationState
+                                ?: RootPublicationState.NEVER_PUBLISHED
+                            val publishLabel = timelineRecordPublishLabel(
+                                record = r,
+                                metadata = recordMetadata,
                                 familyJoined = state.familyJoined,
                                 lastSyncFailed = state.lastSyncFailed,
-                                publicationState = publicationState,
                             )
                             val recordRowId = "record-${r.id}"
                             val recordRevealed = revealedSwipeRowId == recordRowId
@@ -1458,6 +1418,8 @@ fun LogRoute(
                                         revealedSwipeRowId.takeUnless { it == recordRowId }
                                     }
                                 },
+                                editEnabled = canEditRecord,
+                                deleteEnabled = canDeleteRecord,
                                 onEdit = {
                                     // Amber publish chrome: tap prefers sync sheet; left-swipe still edits.
                                     openEditFromSwipe(RecordComposerRequest.Edit(r.id))
@@ -1497,7 +1459,7 @@ fun LogRoute(
                                                 title = title,
                                                 publicationState = publicationState,
                                             )
-                                        } else {
+                                        } else if (canEditRecord) {
                                             collapseSwipeRows()
                                             onOpenComposer(RecordComposerRequest.Edit(r.id))
                                         }

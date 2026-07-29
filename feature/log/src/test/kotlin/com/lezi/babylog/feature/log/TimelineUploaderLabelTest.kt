@@ -1,107 +1,17 @@
 package com.lezi.babylog.feature.log
 
+import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
-import com.lezi.babylog.sync.FamilyRole
-import com.lezi.babylog.sync.UploaderMemberRef
+import com.lezi.babylog.core.model.RootPublicationState
+import com.lezi.babylog.domain.TimelineCarePlanRow
+import com.lezi.babylog.domain.TimelineMediaSnapshot
+import com.lezi.babylog.domain.TimelineRecordRow
+import com.lezi.babylog.domain.TimelineRowCapabilities
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TimelineUploaderLabelTest {
-    private val members = listOf(
-        UploaderMemberRef(
-            displayName = "妈妈",
-            role = FamilyRole.Owner,
-            isSelf = true,
-            membershipId = "membership-a",
-        ),
-        UploaderMemberRef(
-            displayName = "爸爸",
-            role = FamilyRole.Member,
-            isSelf = false,
-            membershipId = "membership-b",
-        ),
-        UploaderMemberRef(
-            displayName = null,
-            role = FamilyRole.Member,
-            isSelf = false,
-            membershipId = "membership-c",
-        ),
-    )
-
-    @Test
-    fun membershipAuthorDrivesTimeline() {
-        val records = listOf(
-            record(
-                id = 1,
-                membershipId = "membership-a",
-            ),
-            record(
-                id = 2,
-                membershipId = "membership-b",
-            ),
-        )
-
-        val labels = buildUploaderLabels(
-            records = records,
-            isFamilyJoined = true,
-            members = members,
-            selfMembershipId = "membership-a",
-        )
-
-        assertFalse(labels.containsKey(1L))
-        assertEquals("爸爸", labels[2L])
-    }
-
-    @Test
-    fun hidesUploaderWhenNotJoinedOrSelf() {
-        val records = listOf(
-            record(1, "membership-a"),
-            record(2, "membership-b"),
-        )
-        assertTrue(
-            buildUploaderLabels(
-                records,
-                isFamilyJoined = false,
-                members = members,
-            ).isEmpty(),
-        )
-        val joinedSelf = buildUploaderLabels(
-            records,
-            isFamilyJoined = true,
-            members = members,
-            selfMembershipId = "membership-a",
-        )
-        assertFalse(joinedSelf.containsKey(1L))
-        assertEquals("爸爸", joinedSelf[2L])
-    }
-
-    @Test
-    fun mapsNonSelfToCurrentMembershipNameWithFallback() {
-        val records = listOf(
-            record(1, "membership-b"),
-            record(2, "membership-c"),
-            record(3, "unknown-membership"),
-            record(4, ""),
-        )
-        val labels = buildUploaderLabels(
-            records,
-            isFamilyJoined = true,
-            members = members,
-            selfMembershipId = "membership-a",
-        )
-        assertEquals("爸爸", labels[1L])
-        assertEquals("家庭成员", labels[2L])
-        assertEquals("家人", labels[3L])
-        assertEquals("家人", labels[4L])
-        labels.values.forEach { label ->
-            assertFalse(label.contains("device"))
-            assertFalse(label == "我（本机）")
-        }
-    }
-
     @Test
     fun timelineSummaryAppendsUploaderOnlyWhenPresent() {
         assertEquals("120ml", timelineRecordSummary("120ml", null))
@@ -124,21 +34,103 @@ class TimelineUploaderLabelTest {
             "仅本机 · 等待家庭同步",
             timelineRecordSummary("", null, "仅本机 · 等待家庭同步"),
         )
-        // Blank publish chrome does not pad the summary.
         assertEquals("120ml · 爸爸", timelineRecordSummary("120ml", "爸爸", "  "))
     }
 
-    private fun record(
-        id: Long,
-        membershipId: String,
-    ) = Record(
+    @Test
+    fun batchMetadataPreservesTicket16CopyForZeroAndPhotoRows() {
+        val cases = listOf(
+            Triple(RootPublicationState.NEVER_PUBLISHED, true, "仅本机 · 等待家庭同步"),
+            Triple(RootPublicationState.PREVIOUS_VERSION_PUBLISHED, true, "仅本机 · 等待更新同步"),
+            Triple(RootPublicationState.CURRENT_VERSION_PUBLISHED, false, null),
+        )
+        val mediaVariants = listOf(
+            TimelineMediaSnapshot.empty(revision = 7),
+            TimelineMediaSnapshot(
+                revision = 7,
+                photoPaths = listOf("photos/ready.jpg"),
+                photoCount = 1,
+                allLocalPhotosReady = true,
+            ),
+        )
+
+        for ((state, syncDirty, expected) in cases) {
+            for (media in mediaVariants) {
+                val record = record(id = 1).copy(syncDirty = syncDirty)
+                val plan = plan(id = 2).copy(syncDirty = syncDirty)
+                assertEquals(
+                    expected,
+                    timelineRecordPublishLabel(
+                        record = record,
+                        metadata = recordRow(record, state, media),
+                        familyJoined = true,
+                        lastSyncFailed = false,
+                    ),
+                )
+                assertEquals(
+                    expected,
+                    timelineCarePlanPublishLabel(
+                        plan = plan,
+                        metadata = planRow(plan, state, media),
+                        familyJoined = true,
+                        lastSyncFailed = false,
+                    ),
+                )
+            }
+        }
+    }
+
+    private fun record(id: Long) = Record(
         id = id,
         clientUuid = "uuid-$id",
         babyId = 1,
         type = RecordType.FORMULA,
         timestamp = id * 1_000,
-        createdByMembershipId = membershipId,
         payloadJson = """{"amount_ml":120}""",
         updatedAt = id * 1_000,
+    )
+
+    private fun plan(id: Long) = CarePlan(
+        id = id,
+        clientUuid = "plan-$id",
+        babyId = 1,
+        type = RecordType.FORMULA,
+        scheduledAt = id * 1_000,
+        scheduledZoneId = "UTC",
+        payloadJson = """{"amount_ml":120}""",
+        updatedAt = id * 1_000,
+    )
+
+    private fun recordRow(
+        record: Record,
+        state: RootPublicationState,
+        media: TimelineMediaSnapshot,
+    ) = TimelineRecordRow(
+        revision = 7,
+        record = record,
+        publicationState = state,
+        media = media,
+        uploaderLabel = null,
+        capabilities = capabilities(),
+    )
+
+    private fun planRow(
+        plan: CarePlan,
+        state: RootPublicationState,
+        media: TimelineMediaSnapshot,
+    ) = TimelineCarePlanRow(
+        revision = 7,
+        carePlan = plan,
+        publicationState = state,
+        media = media,
+        capabilities = capabilities(),
+    )
+
+    private fun capabilities() = TimelineRowCapabilities(
+        revision = 7,
+        canEdit = true,
+        canDelete = true,
+        canFulfill = true,
+        canSkip = true,
     )
 }
