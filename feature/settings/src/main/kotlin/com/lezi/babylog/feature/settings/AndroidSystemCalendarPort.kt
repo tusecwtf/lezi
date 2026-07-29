@@ -5,6 +5,7 @@ import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.CancellationSignal
 import android.provider.CalendarContract
 import androidx.core.content.ContextCompat
 import com.lezi.babylog.domain.SystemCalendarPort
@@ -23,6 +24,8 @@ import dagger.hilt.components.SingletonComponent
 import java.util.TimeZone
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 
 /**
  * CalendarContract projection of CarePlan. Device-local only; never family-synced.
@@ -33,6 +36,11 @@ import javax.inject.Singleton
 class AndroidSystemCalendarPort @Inject constructor(
     @ApplicationContext private val context: Context,
 ) : SystemCalendarPort {
+    private val providerIo = SystemCalendarProviderIo(
+        dispatcher = Dispatchers.IO,
+        hasPermission = ::hasCalendarPermission,
+    )
+
     override fun hasCalendarPermission(): Boolean {
         val write = ContextCompat.checkSelfPermission(
             context,
@@ -46,22 +54,22 @@ class AndroidSystemCalendarPort @Inject constructor(
     }
 
     override suspend fun listWritableCalendars(): List<SystemCalendarTarget> {
-        if (!hasCalendarPermission()) return emptyList()
-        return runCatching {
-            val out = mutableListOf<SystemCalendarTarget>()
+        val result = queryProvider<List<SystemCalendarTarget>> { cancellationSignal ->
             val projection = arrayOf(
                 CalendarContract.Calendars._ID,
                 CalendarContract.Calendars.CALENDAR_DISPLAY_NAME,
                 CalendarContract.Calendars.ACCOUNT_NAME,
                 CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL,
             )
-            context.contentResolver.query(
+            val cursor = context.contentResolver.query(
                 CalendarContract.Calendars.CONTENT_URI,
                 projection,
                 null,
                 null,
                 null,
-            )?.use { cursor ->
+                cancellationSignal,
+            ) ?: return@queryProvider null
+            cursor.use { cursor ->
                 val idIdx = cursor.getColumnIndexOrThrow(CalendarContract.Calendars._ID)
                 val nameIdx =
                     cursor.getColumnIndexOrThrow(CalendarContract.Calendars.CALENDAR_DISPLAY_NAME)
@@ -69,25 +77,43 @@ class AndroidSystemCalendarPort @Inject constructor(
                     cursor.getColumnIndexOrThrow(CalendarContract.Calendars.ACCOUNT_NAME)
                 val accessIdx =
                     cursor.getColumnIndexOrThrow(CalendarContract.Calendars.CALENDAR_ACCESS_LEVEL)
-                while (cursor.moveToNext()) {
-                    val access = cursor.getInt(accessIdx)
-                    if (!SystemCalendarProjectionContract.isWritableAccessLevel(
-                            access,
-                            CalendarContract.Calendars.CAL_ACCESS_CONTRIBUTOR,
+                buildList<SystemCalendarTarget> {
+                    while (cursor.moveToNext()) {
+                        val access = cursor.getInt(accessIdx)
+                        if (!SystemCalendarProjectionContract.isWritableAccessLevel(
+                                access,
+                                CalendarContract.Calendars.CAL_ACCESS_CONTRIBUTOR,
+                            )
+                        ) {
+                            continue
+                        }
+                        add(
+                            SystemCalendarTarget(
+                                calendarId = cursor.getLong(idIdx).toString(),
+                                displayName = cursor.getString(nameIdx).orEmpty().ifBlank { "日历" },
+                                accountName = cursor.getString(accountIdx).orEmpty(),
+                            ),
                         )
-                    ) {
-                        continue
                     }
-                    out += SystemCalendarTarget(
-                        calendarId = cursor.getLong(idIdx).toString(),
-                        displayName = cursor.getString(nameIdx).orEmpty().ifBlank { "日历" },
-                        accountName = cursor.getString(accountIdx).orEmpty(),
-                    )
                 }
             }
-            out
-        }.getOrDefault(emptyList())
+        }
+        return (result as? SystemCalendarProviderResult.Success)?.value.orEmpty()
     }
+
+    private suspend fun <T : Any> queryProvider(
+        block: suspend (CancellationSignal) -> T?,
+    ): SystemCalendarProviderResult<T> {
+        val cancellationSignal = CancellationSignal()
+        return providerIo.query(onCancel = cancellationSignal::cancel) {
+            block(cancellationSignal)
+        }
+    }
+
+    private suspend fun <T : Any> writeProvider(
+        successful: (T) -> Boolean = { true },
+        block: suspend () -> T?,
+    ): SystemCalendarProviderResult<T> = providerIo.write(successful, block)
 
     override suspend fun upsertEvent(
         request: SystemCalendarUpsert,
@@ -164,25 +190,39 @@ class AndroidSystemCalendarPort @Inject constructor(
 
     override suspend fun findOwnedEvent(
         carePlanClientUuid: String,
-    ): SystemCalendarOwnedEventLookup = strictOwnedSystemCalendarEventLookup(
-        hasPermission = hasCalendarPermission(),
-        carePlanClientUuid = carePlanClientUuid,
-        appPackage = context.packageName,
-    ) { uid, appPackage ->
-        val cursor = context.contentResolver.query(
-            CalendarContract.Events.CONTENT_URI,
-            arrayOf(CalendarContract.Events._ID),
-            "${CalendarContract.Events.UID_2445}=? AND " +
-                "${CalendarContract.Events.CUSTOM_APP_PACKAGE}=? AND " +
-                "${CalendarContract.Events.DELETED}=0",
-            arrayOf(uid, appPackage),
-            "${CalendarContract.Events._ID} ASC",
-        ) ?: return@strictOwnedSystemCalendarEventLookup null
-        cursor.use {
-            val idIndex = it.getColumnIndexOrThrow(CalendarContract.Events._ID)
-            buildList {
-                while (it.moveToNext()) add(it.getLong(idIndex).toString())
+    ): SystemCalendarOwnedEventLookup {
+        if (carePlanClientUuid.isBlank() || context.packageName.isBlank()) {
+            return SystemCalendarOwnedEventLookup.Unavailable
+        }
+        val result = queryProvider<List<String>> { cancellationSignal ->
+            val cursor = context.contentResolver.query(
+                CalendarContract.Events.CONTENT_URI,
+                arrayOf(CalendarContract.Events._ID),
+                "${CalendarContract.Events.UID_2445}=? AND " +
+                    "${CalendarContract.Events.CUSTOM_APP_PACKAGE}=? AND " +
+                    "${CalendarContract.Events.DELETED}=0",
+                arrayOf(
+                    SystemCalendarProjectionContract.eventUid(carePlanClientUuid),
+                    context.packageName,
+                ),
+                "${CalendarContract.Events._ID} ASC",
+                cancellationSignal,
+            ) ?: return@queryProvider null
+            cursor.use {
+                val idIndex = it.getColumnIndexOrThrow(CalendarContract.Events._ID)
+                buildList<String> {
+                    while (it.moveToNext()) add(it.getLong(idIndex).toString())
+                }
             }
+        }
+        val eventIds = (result as? SystemCalendarProviderResult.Success)
+            ?.value
+            ?.filterTo(linkedSetOf()) { it.toLongOrNull() != null }
+            ?: return SystemCalendarOwnedEventLookup.Unavailable
+        return if (eventIds.isEmpty()) {
+            SystemCalendarOwnedEventLookup.Absent
+        } else {
+            SystemCalendarOwnedEventLookup.Found(eventIds)
         }
     }
 
@@ -196,7 +236,7 @@ class AndroidSystemCalendarPort @Inject constructor(
             SystemCalendarEventState.PRESENT -> {
                 // Remove the notification source before the event row. Some OEM
                 // providers do not cascade an Events delete into Reminders.
-                runCatching {
+                writeProvider {
                     context.contentResolver.delete(
                         CalendarContract.Reminders.CONTENT_URI,
                         "${CalendarContract.Reminders.EVENT_ID}=?",
@@ -217,7 +257,7 @@ class AndroidSystemCalendarPort @Inject constructor(
             appPackage = context.packageName,
             carePlanClientUuid = carePlanClientUuid,
         )
-        runCatching {
+        writeProvider {
             context.contentResolver.delete(
                 CalendarContract.Events.CONTENT_URI,
                 ownership.selection,
@@ -234,10 +274,8 @@ class AndroidSystemCalendarPort @Inject constructor(
         eventId: String,
         carePlanClientUuid: String?,
     ): SystemCalendarEventState {
-        return strictSystemCalendarEventState(
-            hasPermission = hasCalendarPermission(),
-            eventId = eventId,
-        ) { id ->
+        val id = eventId.toLongOrNull() ?: return SystemCalendarEventState.UNAVAILABLE
+        val result = queryProvider<Boolean> { cancellationSignal ->
             val ownership = ownedEventSelection(
                 eventId = id,
                 appPackage = context.packageName,
@@ -249,8 +287,14 @@ class AndroidSystemCalendarPort @Inject constructor(
                 ownership.selection,
                 ownership.selectionArgs,
                 null,
-            ) ?: return@strictSystemCalendarEventState null
+                cancellationSignal,
+            ) ?: return@queryProvider null
             cursor.use { it.moveToFirst() }
+        }
+        return when ((result as? SystemCalendarProviderResult.Success)?.value) {
+            true -> SystemCalendarEventState.PRESENT
+            false -> SystemCalendarEventState.ABSENT
+            null -> SystemCalendarEventState.UNAVAILABLE
         }
     }
 
@@ -290,7 +334,7 @@ class AndroidSystemCalendarPort @Inject constructor(
         val reminderStates = eventIds.map { eventId ->
             when (eventState(eventId, request.carePlanClientUuid)) {
                 SystemCalendarEventState.PRESENT -> {
-                    runCatching {
+                    writeProvider {
                         context.contentResolver.delete(
                             CalendarContract.Reminders.CONTENT_URI,
                             "${CalendarContract.Reminders.EVENT_ID}=?",
@@ -356,14 +400,15 @@ class AndroidSystemCalendarPort @Inject constructor(
             appPackage = context.packageName,
             carePlanClientUuid = request.carePlanClientUuid,
         )
-        val updated = runCatching {
+        val updateResult = writeProvider {
             context.contentResolver.update(
                 CalendarContract.Events.CONTENT_URI,
                 values,
                 ownership.selection,
                 ownership.selectionArgs,
             )
-        }.getOrDefault(0)
+        }
+        val updated = (updateResult as? SystemCalendarProviderResult.Success)?.value ?: 0
         if (updated > 0) {
             ensureBeginReminder(id)
             return readRequestedUpsertResult(eventId, request)
@@ -388,9 +433,10 @@ class AndroidSystemCalendarPort @Inject constructor(
         request: SystemCalendarUpsert,
         values: ContentValues,
     ): SystemCalendarUpsertResult {
-        val uri = runCatching {
+        val insertResult = writeProvider {
             context.contentResolver.insert(CalendarContract.Events.CONTENT_URI, values)
-        }.getOrNull()
+        }
+        val uri = (insertResult as? SystemCalendarProviderResult.Success)?.value
         val id = uri?.let { runCatching { ContentUris.parseId(it) }.getOrNull() }
             ?: return recoverIndeterminateInsert(request)
         ensureBeginReminder(id)
@@ -413,28 +459,31 @@ class AndroidSystemCalendarPort @Inject constructor(
         )
     }
 
-    private fun ensureBeginReminder(eventId: Long) {
+    private suspend fun ensureBeginReminder(eventId: Long) {
         val resolver = context.contentResolver
-        runCatching {
-            // Drop prior reminders for this event then insert begin-time alert.
+        // Drop prior reminders for this event then insert begin-time alert.
+        val deleteResult = writeProvider {
             resolver.delete(
                 CalendarContract.Reminders.CONTENT_URI,
                 "${CalendarContract.Reminders.EVENT_ID}=?",
                 arrayOf(eventId.toString()),
             )
-            val values = ContentValues().apply {
-                put(CalendarContract.Reminders.EVENT_ID, eventId)
-                put(
-                    CalendarContract.Reminders.MINUTES,
-                    SystemCalendarProjectionContract.BEGIN_REMINDER_MINUTES,
-                )
-                put(CalendarContract.Reminders.METHOD, CalendarContract.Reminders.METHOD_ALERT)
-            }
+        }
+        if (deleteResult !is SystemCalendarProviderResult.Success) return
+        val values = ContentValues().apply {
+            put(CalendarContract.Reminders.EVENT_ID, eventId)
+            put(
+                CalendarContract.Reminders.MINUTES,
+                SystemCalendarProjectionContract.BEGIN_REMINDER_MINUTES,
+            )
+            put(CalendarContract.Reminders.METHOD, CalendarContract.Reminders.METHOD_ALERT)
+        }
+        writeProvider {
             resolver.insert(CalendarContract.Reminders.CONTENT_URI, values)
         }
     }
 
-    private fun readRequestedUpsertResult(
+    private suspend fun readRequestedUpsertResult(
         eventId: String,
         request: SystemCalendarUpsert,
     ): SystemCalendarUpsertResult {
@@ -447,7 +496,7 @@ class AndroidSystemCalendarPort @Inject constructor(
         )
     }
 
-    private fun queryRequestedEventState(
+    private suspend fun queryRequestedEventState(
         eventId: String,
         request: SystemCalendarUpsert,
     ): SystemCalendarRequestedEventState {
@@ -459,7 +508,7 @@ class AndroidSystemCalendarPort @Inject constructor(
             appPackage = context.packageName,
             carePlanClientUuid = request.carePlanClientUuid,
         )
-        return runCatching {
+        val result = queryProvider { cancellationSignal ->
             val cursor = context.contentResolver.query(
                 CalendarContract.Events.CONTENT_URI,
                 arrayOf(
@@ -469,67 +518,84 @@ class AndroidSystemCalendarPort @Inject constructor(
                 ownership.selection,
                 ownership.selectionArgs,
                 null,
-            ) ?: return@runCatching SystemCalendarRequestedEventState.UNAVAILABLE
+                cancellationSignal,
+            ) ?: return@queryProvider null
             cursor.use {
-                if (!it.moveToFirst()) return@use SystemCalendarRequestedEventState.ABSENT
-                val calendarMatches = it.getLong(0) == expectedCalendarId
-                val beginMatches = it.getLong(1) == request.beginAtMillis
-                if (calendarMatches && beginMatches) {
-                    SystemCalendarRequestedEventState.MATCH
+                if (!it.moveToFirst()) {
+                    SystemCalendarRequestedEventState.ABSENT
                 } else {
-                    SystemCalendarRequestedEventState.STALE
+                    val calendarMatches = it.getLong(0) == expectedCalendarId
+                    val beginMatches = it.getLong(1) == request.beginAtMillis
+                    if (calendarMatches && beginMatches) {
+                        SystemCalendarRequestedEventState.MATCH
+                    } else {
+                        SystemCalendarRequestedEventState.STALE
+                    }
                 }
             }
-        }.getOrDefault(SystemCalendarRequestedEventState.UNAVAILABLE)
+        }
+        return (result as? SystemCalendarProviderResult.Success)?.value
+            ?: SystemCalendarRequestedEventState.UNAVAILABLE
     }
 
-    private fun queryAnyReminderState(
+    private suspend fun queryAnyReminderState(
         eventId: Long,
-    ): SystemCalendarEventState = runCatching {
-        val cursor = context.contentResolver.query(
-            CalendarContract.Reminders.CONTENT_URI,
-            arrayOf(CalendarContract.Reminders._ID),
-            "${CalendarContract.Reminders.EVENT_ID}=?",
-            arrayOf(eventId.toString()),
-            null,
-        ) ?: return@runCatching SystemCalendarEventState.UNAVAILABLE
-        cursor.use {
-            if (it.moveToFirst()) {
-                SystemCalendarEventState.PRESENT
-            } else {
-                SystemCalendarEventState.ABSENT
-            }
-        }
-    }.getOrDefault(SystemCalendarEventState.UNAVAILABLE)
-
-    private fun queryReminderSetState(
-        eventId: Long,
-    ): SystemCalendarReminderSetState = strictSystemCalendarReminderSetState(
-        eventId = eventId.toString(),
-        alertMethod = CalendarContract.Reminders.METHOD_ALERT,
-    ) { id ->
-        val cursor = context.contentResolver.query(
-            CalendarContract.Reminders.CONTENT_URI,
-            arrayOf(
-                CalendarContract.Reminders.MINUTES,
-                CalendarContract.Reminders.METHOD,
-            ),
-            "${CalendarContract.Reminders.EVENT_ID}=?",
-            arrayOf(id.toString()),
-            null,
-        ) ?: return@strictSystemCalendarReminderSetState null
-        cursor.use {
-            buildList {
-                while (it.moveToNext()) {
-                    add(
-                        SystemCalendarReminderRow(
-                            minutes = it.getInt(0),
-                            method = it.getInt(1),
-                        ),
-                    )
+    ): SystemCalendarEventState {
+        val result = queryProvider { cancellationSignal ->
+            val cursor = context.contentResolver.query(
+                CalendarContract.Reminders.CONTENT_URI,
+                arrayOf(CalendarContract.Reminders._ID),
+                "${CalendarContract.Reminders.EVENT_ID}=?",
+                arrayOf(eventId.toString()),
+                null,
+                cancellationSignal,
+            ) ?: return@queryProvider null
+            cursor.use {
+                if (it.moveToFirst()) {
+                    SystemCalendarEventState.PRESENT
+                } else {
+                    SystemCalendarEventState.ABSENT
                 }
             }
         }
+        return (result as? SystemCalendarProviderResult.Success)?.value
+            ?: SystemCalendarEventState.UNAVAILABLE
+    }
+
+    private suspend fun queryReminderSetState(
+        eventId: Long,
+    ): SystemCalendarReminderSetState {
+        val result = queryProvider<List<SystemCalendarReminderRow>> { cancellationSignal ->
+            val cursor = context.contentResolver.query(
+                CalendarContract.Reminders.CONTENT_URI,
+                arrayOf(
+                    CalendarContract.Reminders.MINUTES,
+                    CalendarContract.Reminders.METHOD,
+                ),
+                "${CalendarContract.Reminders.EVENT_ID}=?",
+                arrayOf(eventId.toString()),
+                null,
+                cancellationSignal,
+            ) ?: return@queryProvider null
+            cursor.use {
+                buildList<SystemCalendarReminderRow> {
+                    while (it.moveToNext()) {
+                        add(
+                            SystemCalendarReminderRow(
+                                minutes = it.getInt(0),
+                                method = it.getInt(1),
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+        val rows = (result as? SystemCalendarProviderResult.Success)?.value
+            ?: return SystemCalendarReminderSetState.UNAVAILABLE
+        return strictSystemCalendarReminderSetState(
+            eventId = eventId.toString(),
+            alertMethod = CalendarContract.Reminders.METHOD_ALERT,
+        ) { rows }
     }
 
     private suspend fun convergeOwnedEvents(
@@ -544,7 +610,13 @@ class AndroidSystemCalendarPort @Inject constructor(
         val duplicateIds = before.eventIds - canonicalEventId
         if (duplicateIds.isEmpty()) return true
         for (duplicateId in duplicateIds) {
-            runCatching { deleteEvent(duplicateId, carePlanClientUuid) }
+            try {
+                deleteEvent(duplicateId, carePlanClientUuid)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                // Readback below decides whether convergence is safe to report.
+            }
         }
         val after = findOwnedEvent(carePlanClientUuid)
         return strictOwnedDuplicatesConverged(

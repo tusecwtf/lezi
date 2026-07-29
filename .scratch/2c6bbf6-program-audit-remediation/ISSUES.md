@@ -65,7 +65,7 @@ layout/05 已删除分区 ────┘
 | [17](./issues/17-canonical-user-visible-record-labels.md) | 统一用户可见记录类型标签 | — | S–M | partial | ready-for-agent |
 | [18](./issues/18-minute-driven-record-screen-clock.md) | 记录页分钟级时钟刷新 | — | S–M | still-valid | ready-for-agent |
 | [19](./issues/19-dst-safe-three-day-timeline.md) | 夏令时安全的三日时间轴 | 18 | M | partial | ready-for-agent |
-| [20](./issues/20-move-system-calendar-provider-io-off-main.md) | 系统日历 Provider I/O 后台化 | — | M | still-valid | ready-for-agent |
+| [20](./issues/20-move-system-calendar-provider-io-off-main.md) | 系统日历 Provider I/O 后台化 | — | M | still-valid | complete |
 | [21](./issues/21-recover-from-nursing-timer-service-start-failure.md) | 计时前台服务启动失败可恢复 | — | S–M | still-valid | ready-for-agent |
 | [22](./issues/22-batch-timeline-publication-and-permission-metadata.md) | 批量生成时间轴发布与权限元数据 | 16 | M | still-valid | ready-for-agent |
 | [23](./issues/23-off-main-single-pass-summary-aggregation.md) | 汇总聚合移出主线程并降低重复扫描 | — | M | still-valid | ready-for-agent |

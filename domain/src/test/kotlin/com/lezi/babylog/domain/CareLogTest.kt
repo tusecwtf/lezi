@@ -42,6 +42,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
@@ -3935,6 +3936,73 @@ class CareLogTest {
     }
 
     @Test
+    fun slowSystemCalendarNeverDelaysCommittedPlanOrFamilySyncRequest() = runTest {
+        val sync = RecordingSyncPort()
+        val fakes = Fakes(sync)
+        val providerStarted = CompletableDeferred<Unit>()
+        val allowProvider = CompletableDeferred<Unit>()
+        fakes.systemCalendar.permission = true
+        fakes.systemCalendar.beforeUpsert = {
+            providerStarted.complete(Unit)
+            allowProvider.await()
+        }
+        fakes.settings.setSystemCalendarEnabled(true)
+        fakes.settings.setSystemCalendarId("cal-1")
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val requestsBeforePlan = sync.requests
+        val now = System.currentTimeMillis()
+
+        val create = async {
+            care.createCarePlan(
+                babyId = babyId,
+                type = RecordType.BATH,
+                scheduledAt = now + 60_000L,
+                nowMillis = now,
+            )
+        }
+        providerStarted.await()
+
+        assertThat(fakes.carePlans.listAllIncludingDeleted()).hasSize(1)
+        assertThat(sync.requests).isGreaterThan(requestsBeforePlan)
+
+        allowProvider.complete(Unit)
+        assertThat(create.await()).isEqualTo(fakes.carePlans.listAllIncludingDeleted().single().id)
+    }
+
+    @Test
+    fun cancellingSlowProjectionPublishesNoLaterReminderState() = runTest {
+        val fakes = Fakes()
+        val providerStarted = CompletableDeferred<Unit>()
+        fakes.systemCalendar.permission = true
+        fakes.systemCalendar.beforeUpsert = {
+            providerStarted.complete(Unit)
+            kotlinx.coroutines.awaitCancellation()
+        }
+        fakes.settings.setSystemCalendarEnabled(true)
+        fakes.settings.setSystemCalendarId("cal-1")
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = System.currentTimeMillis()
+        val create = launch {
+            care.createCarePlan(
+                babyId = babyId,
+                type = RecordType.BATH,
+                scheduledAt = now + 60_000L,
+                nowMillis = now,
+            )
+        }
+        providerStarted.await()
+
+        create.cancelAndJoin()
+
+        val committed = fakes.carePlans.listAllIncludingDeleted().single()
+        assertThat(committed.systemCalendarProjectionPending).isTrue()
+        assertThat(fakes.systemCalendar.upserts).hasSize(1)
+        assertThat(fakes.reminders.carePlanOperations).isEmpty()
+    }
+
+    @Test
     fun alarmManagerFailureNeverRollsBackCommittedCarePlan() = runTest {
         val fakes = Fakes()
         fakes.reminders.carePlanScheduleFailure = IllegalStateException("alarm unavailable")
@@ -4898,6 +4966,7 @@ private class FakeSystemCalendarPort : SystemCalendarPort {
     var failUpsert = false
     var failReminder = false
     var providerStillOwnsStaleReminder = false
+    var beforeUpsert: suspend () -> Unit = {}
     /** When non-null, only these calendar ids are writable (simulates vanished target). */
     var writableCalendarIds: Set<String>? = null
     /** Event ids that no longer exist in the provider (external delete). */
@@ -4928,6 +4997,7 @@ private class FakeSystemCalendarPort : SystemCalendarPort {
         request: SystemCalendarUpsert,
     ): SystemCalendarUpsertResult {
         upserts += request
+        beforeUpsert()
         if (providerStillOwnsStaleReminder) {
             return SystemCalendarUpsertResult(
                 eventId = request.existingEventId,

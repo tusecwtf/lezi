@@ -778,14 +778,15 @@ class CareLog @Inject constructor(
         } else {
             writeConvert()
         }
-        // Creator keeps full local plan + projection immediately; family wait on package.
+        // The converted family data is publishable before optional device-local projection.
+        requestLocalSync()
+        // Creator keeps full local plan + projection immediately.
         carePlanDao.get(planId)?.toModel()?.let { plan ->
             reminderProjection.projectOrScheduleCarePlanReminder(
                 plan,
                 projectToSystemCalendar = projectToSystemCalendar,
             )
         }
-        requestLocalSync()
         return planId
     }
 
@@ -1229,6 +1230,8 @@ class CareLog @Inject constructor(
             reconcileCarePlanPhotos(planId, photos, now)
             planId
         }
+        // Shared CarePlan is committed and publishable before optional device-local projection.
+        requestLocalSync()
         // Creator: full local plan + own reminders/calendar immediately (amber until publish).
         carePlanDao.get(id)?.toModel()?.let { plan ->
             reminderProjection.projectOrScheduleCarePlanReminder(
@@ -1236,7 +1239,6 @@ class CareLog @Inject constructor(
                 projectToSystemCalendar = projectToSystemCalendar,
             )
         }
-        requestLocalSync()
         return id
     }
 
@@ -1344,13 +1346,14 @@ class CareLog @Inject constructor(
         } catch (_: Throwable) {
             // Legacy preference cleanup is intentionally best-effort.
         }
+        // Shared next-feed plan is publishable before optional device-local projection.
+        requestLocalSync()
         carePlanDao.get(id)?.toModel()?.let { plan ->
             reminderProjection.projectOrScheduleCarePlanReminder(
                 plan,
                 projectToSystemCalendar = true,
             )
         }
-        requestLocalSync()
         return id
     }
 
@@ -1934,6 +1937,8 @@ class CareLog @Inject constructor(
                 )
             }
         }
+        // Shared update is committed and publishable before optional local side effects.
+        requestLocalSync()
         calendarReminderMutationGuard.withLock {
             carePlanDao.get(carePlanId)?.toModel()?.let { plan ->
                 if (plan.scheduledAt <= nowMillis) {
@@ -1947,7 +1952,6 @@ class CareLog @Inject constructor(
                 }
             }
         }
-        requestLocalSync()
     }
 
     /**

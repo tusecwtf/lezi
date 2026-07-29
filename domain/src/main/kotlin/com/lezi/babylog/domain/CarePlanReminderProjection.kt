@@ -55,7 +55,9 @@ internal class CarePlanReminderProjection(
     }
 
     internal suspend fun scheduleCarePlanReminder(plan: CarePlan) {
-        val scheduled = runCatching { reminderCleanup.scheduleCarePlan(plan) }.getOrDefault(false)
+        val scheduled = runCarePlanReminderBestEffort {
+            reminderCleanup.scheduleCarePlan(plan)
+        }.getOrDefault(false)
         if (!scheduled) {
             cancelCarePlanReminderBestEffort(plan.id)
         }
@@ -169,7 +171,7 @@ internal class CarePlanReminderProjection(
         val providerHandoffMayExist = wasPending ||
             entity.systemCalendarReminderReady ||
             existingEventId != null
-        val handoffStored = runCatching {
+        val handoffStored = runCarePlanReminderBestEffort {
             carePlanDao.updateSystemCalendarProjection(
                 clientUuid = plan.clientUuid,
                 eventId = existingEventId,
@@ -185,7 +187,7 @@ internal class CarePlanReminderProjection(
             scheduleCarePlanReminder(plan)
             return false
         }
-        val result = runCatching {
+        val result = try {
             systemCalendar.upsertEvent(
                 SystemCalendarUpsert(
                     calendarId = calendarId!!,
@@ -198,7 +200,11 @@ internal class CarePlanReminderProjection(
                     customAppUri = content.deepLinkUri,
                 ),
             )
-        }.getOrNull()
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            null
+        }
         if (result == null) {
             // The hand-off was durably staged before the adapter call. An
             // unexpected adapter exception leaves ownership indeterminate, so
@@ -208,7 +214,7 @@ internal class CarePlanReminderProjection(
         }
         val projectionPending =
             result.outcome == SystemCalendarUpsertOutcome.ProviderStillOwnsStale
-        runCatching {
+        runCarePlanReminderBestEffort {
             carePlanDao.updateSystemCalendarProjection(
                 clientUuid = plan.clientUuid,
                 eventId = result.eventId,
@@ -217,9 +223,11 @@ internal class CarePlanReminderProjection(
             )
         }
         if (result.eventId != null) {
-            runCatching { putSystemCalendarEventMapping(plan.clientUuid, result.eventId) }
+            runCarePlanReminderBestEffort {
+                putSystemCalendarEventMapping(plan.clientUuid, result.eventId)
+            }
         } else if (result.outcome == SystemCalendarUpsertOutcome.ReleasedOrAbsent) {
-            runCatching {
+            runCarePlanReminderBestEffort {
                 removeSystemCalendarEventMapping(plan.clientUuid, existingEventId)
             }
         }
@@ -249,7 +257,7 @@ internal class CarePlanReminderProjection(
     ) = calendarReminderMutationGuard.withLock {
         reconcileTerminalSystemCalendarProjectionsLocked()
         carePlanDao.listAllOpenFuture(nowMillis).forEach { entity ->
-            runCatching {
+            runCarePlanReminderBestEffort {
                 projectOrScheduleCarePlanReminderLocked(
                     entity.toModel(),
                     projectToSystemCalendar = entity.systemCalendarProjectionEnabled,
@@ -324,30 +332,30 @@ internal class CarePlanReminderProjection(
             plan?.systemCalendarProjectionPending == true ||
             forceProviderLookup
         suspend fun deleteKnown(eventId: String): Boolean {
-            val deleted = runCatching {
+            val deleted = runCarePlanReminderBestEffort {
                 systemCalendar.deleteEvent(eventId, clientUuid)
             }.getOrDefault(false)
-            return deleted || runCatching {
+            return deleted || runCarePlanReminderBestEffort {
                 systemCalendar.eventState(eventId, clientUuid) == SystemCalendarEventState.ABSENT
             }.getOrDefault(false)
         }
         knownIds.forEach { deleteKnown(it) }
         var lookup = if (requiresProviderLookup) {
-            runCatching { systemCalendar.findOwnedEvent(clientUuid) }
+            runCarePlanReminderBestEffort { systemCalendar.findOwnedEvent(clientUuid) }
                 .getOrDefault(SystemCalendarOwnedEventLookup.Unavailable)
         } else {
             SystemCalendarOwnedEventLookup.Absent
         }
         if (lookup is SystemCalendarOwnedEventLookup.Found) {
             lookup.eventIds.forEach { deleteKnown(it) }
-            lookup = runCatching { systemCalendar.findOwnedEvent(clientUuid) }
+            lookup = runCarePlanReminderBestEffort { systemCalendar.findOwnedEvent(clientUuid) }
                 .getOrDefault(SystemCalendarOwnedEventLookup.Unavailable)
         }
         val confirmedAbsent = lookup == SystemCalendarOwnedEventLookup.Absent
         if (!confirmedAbsent) {
             val found = lookup as? SystemCalendarOwnedEventLookup.Found
             if (found != null && plan != null) {
-                runCatching {
+                runCarePlanReminderBestEffort {
                     carePlanDao.updateSystemCalendarProjection(
                         clientUuid = clientUuid,
                         eventId = found.canonicalEventId,
@@ -359,7 +367,7 @@ internal class CarePlanReminderProjection(
             return false
         }
         if (plan != null) {
-            runCatching {
+            runCarePlanReminderBestEffort {
                 carePlanDao.updateSystemCalendarProjection(
                     clientUuid = clientUuid,
                     eventId = null,
@@ -369,7 +377,7 @@ internal class CarePlanReminderProjection(
             }
         }
         map.remove(clientUuid)
-        runCatching {
+        runCarePlanReminderBestEffort {
             settings.setSystemCalendarEventMapJson(encodeSystemCalendarEventMap(map))
         }
         return true
@@ -590,4 +598,14 @@ internal class CarePlanReminderProjection(
             .map(MediaAssetEntity::localUri)
             .filter { it.isNotBlank() }
     }
+}
+
+private suspend fun <T> runCarePlanReminderBestEffort(
+    block: suspend () -> T,
+): Result<T> = try {
+    Result.success(block())
+} catch (cancellation: CancellationException) {
+    throw cancellation
+} catch (error: Throwable) {
+    Result.failure(error)
 }
