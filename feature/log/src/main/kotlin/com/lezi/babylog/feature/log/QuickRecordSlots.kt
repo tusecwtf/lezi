@@ -53,8 +53,8 @@ internal fun quickDockPresentation(
             }
         }
         QuickDockCell.Empty -> QuickDockPresentation(
-            visualLabel = "选择",
-            contentDescription = "＋ 选择常用记录",
+            visualLabel = "空槽",
+            contentDescription = "空槽，短按无操作；可使用编辑常用布局操作",
         )
         QuickDockCell.More -> QuickDockPresentation(
             visualLabel = "更多",

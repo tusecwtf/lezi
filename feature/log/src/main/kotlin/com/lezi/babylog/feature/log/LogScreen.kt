@@ -4,6 +4,9 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -44,10 +47,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -817,6 +828,7 @@ fun LogRoute(
     var showLayoutEdit by remember { mutableStateOf(false) }
     var showCustomManage by remember { mutableStateOf(false) }
     var layoutPrefs by remember { mutableStateOf<DeviceLayoutPrefs?>(null) }
+    var hasSubmittedLayoutIntent by remember { mutableStateOf(false) }
     var publishChromeRecord by remember { mutableStateOf<PublishChromeTarget?>(null) }
     /** At most one timeline/plan row may stay revealed. */
     var revealedSwipeRowId by remember { mutableStateOf<String?>(null) }
@@ -862,6 +874,7 @@ fun LogRoute(
             return
         }
         layoutPrefs = snapshot.toLayoutPrefs()
+        hasSubmittedLayoutIntent = false
         exitAfterLayoutRetry = false
         dismissedLayoutFailure = null
         showLayoutEdit = true
@@ -996,6 +1009,7 @@ fun LogRoute(
     fun closeLayoutEditor() {
         showLayoutEdit = false
         layoutPrefs = null
+        hasSubmittedLayoutIntent = false
         layoutExitInProgress = false
         exitAfterLayoutRetry = false
         dismissedLayoutFailure = null
@@ -1033,11 +1047,14 @@ fun LogRoute(
                         val next = reduceLayoutEdit(current, intent, known)
                         if (next != current) {
                             layoutPrefs = next
+                            hasSubmittedLayoutIntent = true
                             vm.applyDeviceLayoutPrefs(next)
                         }
                     },
                     onDone = ::requestLayoutExit,
                     onOpenCustomManage = { showCustomManage = true },
+                    writeState = layoutWriteState,
+                    hasSubmittedIntent = hasSubmittedLayoutIntent,
                     cancelDragSignal = layoutDragCancelSignal,
                     modifier = Modifier
                         .weight(1f)
@@ -1689,7 +1706,7 @@ private val CustomSlotIcons = com.lezi.babylog.core.ui.CUSTOM_ITEM_ICON_GLYPHS
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun OneHandQuickDock(
+internal fun OneHandQuickDock(
     preferredHand: String,
     storedSlots: List<String>,
     hiddenTypeKeys: Set<String>,
@@ -1747,24 +1764,53 @@ private fun OneHandQuickDock(
                     QuickDockCell.Empty -> "one_hand_action_empty_$index"
                     QuickDockCell.More -> "one_hand_action_more"
                 }
+                val cellInteraction = when (cell) {
+                    is QuickDockCell.Bound -> Modifier
+                        .combinedClickable(
+                            onClick = { onBound(cell.identity) },
+                            onLongClick = onLongPress,
+                        )
+                        .semantics(mergeDescendants = true) {
+                            contentDescription = presentation.contentDescription
+                        }
+                    QuickDockCell.Empty -> Modifier
+                        .pointerInput(onEmpty, onLongPress) {
+                            detectTapGestures(
+                                onTap = { onEmpty() },
+                                onLongPress = { onLongPress() },
+                            )
+                        }
+                        .onPreviewKeyEvent { event ->
+                            if (event.type == KeyEventType.KeyUp && event.key == Key.Enter) {
+                                onLongPress()
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        .focusable()
+                        .semantics(mergeDescendants = true) {
+                            contentDescription = presentation.contentDescription
+                            stateDescription = "短按无操作"
+                            customActions = listOf(
+                                CustomAccessibilityAction("编辑常用布局") {
+                                    onLongPress()
+                                    true
+                                },
+                            )
+                        }
+                    QuickDockCell.More -> Modifier
+                        .clickable(onClick = onMore)
+                        .semantics(mergeDescendants = true) {
+                            contentDescription = presentation.contentDescription
+                        }
+                }
                 Surface(
                     modifier = Modifier
                         .weight(1f)
                         .heightIn(min = QuickDockVisualSpec.cellMinHeight)
                         .testTag(tag)
-                        .combinedClickable(
-                            onClick = {
-                                when (val action = cell.toAction()) {
-                                    is QuickDockAction.OpenComposer -> onBound(action.identity)
-                                    QuickDockAction.None -> onEmpty()
-                                    QuickDockAction.OpenMore -> onMore()
-                                }
-                            },
-                            onLongClick = {
-                                // Long-press any dock cell (including empty/more) opens layout edit.
-                                if (cell !is QuickDockCell.More) onLongPress()
-                            },
-                        ),
+                        .then(cellInteraction),
                     shape = LeziThemeExt.controlShape,
                     color = if (quickDockIdleContainerIsEmphasized(cell)) {
                         MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f)
@@ -1776,10 +1822,7 @@ private fun OneHandQuickDock(
                     Column(
                         Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 5.dp)
-                            .clearAndSetSemantics {
-                                contentDescription = presentation.contentDescription
-                            },
+                            .padding(vertical = 5.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center,
                     ) {

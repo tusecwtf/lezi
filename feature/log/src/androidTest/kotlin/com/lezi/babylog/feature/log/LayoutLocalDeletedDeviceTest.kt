@@ -51,7 +51,7 @@ class LayoutLocalDeletedDeviceTest {
         composeRule.onNodeWithTag("layout_edit_local_deleted")
             .assertContentDescriptionEquals(
                 "本机已删除，0 项。这里只隐藏本机入口，不删除历史记录或自定义项目。" +
-                    "长按项目拖出此区域可恢复到所属类别末尾；不会自动回填常用槽。",
+                    "可对项目使用恢复操作或长按拖出，恢复到所属类别末尾；不会自动回填常用槽。",
             )
     }
 
@@ -88,7 +88,7 @@ class LayoutLocalDeletedDeviceTest {
         )
 
         composeRule.onNodeWithText("本机已删除 · ${known.size} 项").assertIsDisplayed()
-        composeRule.onNodeWithText("仅在本机隐藏 · 拖出恢复到类别末尾").assertIsDisplayed()
+        composeRule.onNodeWithText("仅在本机隐藏 · 使用操作或拖出恢复").assertIsDisplayed()
         composeRule.onNodeWithTag("layout_edit_deleted_${known.last()}")
             .performScrollTo()
             .assertIsDisplayed()

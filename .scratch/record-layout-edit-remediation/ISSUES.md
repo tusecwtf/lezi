@@ -14,7 +14,7 @@ Ticket 04 validation commit: `0791eb73c621a9bd47414e478fecd91aebebcaf5`
                        └──→ P1/02 清理 ─────────────┘
 ```
 
-Frontier: **06、08、09、10、11**
+Frontier: **07、08、09、10、11、12**
 
 | # | Ticket | Blocked by | Status |
 |---|--------|------------|--------|
@@ -23,7 +23,7 @@ Frontier: **06、08、09、10、11**
 | 03 | [当前可见且互斥的拖放目标](./issues/03-exclusive-current-drop-targets.md) | 01 | complete |
 | 04 | [分类标题拖动与可靠类别排序](./issues/04-drag-category-headings-durably.md) | 02, 03 | complete |
 | 05 | [有界、可读的本机已删除分区](./issues/05-bounded-readable-local-deleted.md) | 02, 03 | complete |
-| 06 | [无障碍布局动作与真实空槽文案](./issues/06-accessible-layout-actions-truthful-empty-slot.md) | 04, 05 | ready-for-agent |
+| 06 | [无障碍布局动作与真实空槽文案](./issues/06-accessible-layout-actions-truthful-empty-slot.md) | 04, 05 | complete |
 | 07 | [删除重复与旧布局表面（canonical P1/02）](../p1-redundancy-ui-debt/issues/02-layout-migration-residue-cleanup.md) | 06 | ready-for-agent |
 | 08 | [目录拖动边缘自动滚动](./issues/08-drag-edge-auto-scroll.md) | 04 | ready-for-agent |
 | 09 | [高风险布局操作一层撤销](./issues/09-one-level-layout-undo.md) | 05 | ready-for-agent |

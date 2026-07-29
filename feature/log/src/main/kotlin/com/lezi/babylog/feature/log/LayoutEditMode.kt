@@ -9,6 +9,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusGroup
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -46,7 +48,17 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEvent
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -54,7 +66,13 @@ import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.invisibleToUser
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
@@ -66,6 +84,7 @@ import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.availableForNewEntry
 import com.lezi.babylog.core.ui.RecordSection
 import com.lezi.babylog.core.ui.RecordTypeIcon
+import com.lezi.babylog.core.ui.catalogSectionForKey
 import com.lezi.babylog.core.ui.knownCatalogKeys
 import com.lezi.babylog.core.ui.orderedKeysInSection
 import com.lezi.babylog.core.ui.orderedRecordSections
@@ -109,6 +128,166 @@ private data class LayoutItemVisual(
     val colorRole: LeziRecordColorRole,
 )
 
+private data class LayoutAlternativeAction(
+    val label: String,
+    val intent: LayoutEditIntent,
+)
+
+/** One dispatch seam shared by TalkBack custom actions and hardware-key chords. */
+private fun Modifier.layoutAlternativeInput(
+    actions: List<LayoutAlternativeAction>,
+    keyIntent: (KeyEvent) -> LayoutEditIntent?,
+    onIntent: (LayoutEditIntent) -> Unit,
+): Modifier = this
+    .onPreviewKeyEvent { event ->
+        val intent = keyIntent(event) ?: return@onPreviewKeyEvent false
+        when (event.type) {
+            KeyEventType.KeyDown -> true
+            KeyEventType.KeyUp -> {
+                onIntent(intent)
+                true
+            }
+            else -> false
+        }
+    }
+    .focusable()
+    .semantics(mergeDescendants = true) {
+        customActions = actions.map { action ->
+            CustomAccessibilityAction(action.label) {
+                onIntent(action.intent)
+                true
+            }
+        }
+    }
+
+private fun catalogActions(
+    catalogKey: String,
+    visibleIndex: Int,
+    visibleCount: Int,
+): List<LayoutAlternativeAction> = buildList {
+    repeat(QuickDockVisualSpec.configurableSlotCount) { slotIndex ->
+        add(
+            LayoutAlternativeAction(
+                label = "设为常用槽${slotIndex + 1}",
+                intent = LayoutEditIntent.AssignToSlot(slotIndex, catalogKey),
+            ),
+        )
+    }
+    if (visibleIndex > 0) {
+        add(
+            LayoutAlternativeAction(
+                "在本类别前移",
+                LayoutEditIntent.MoveItemInSection(catalogKey, -1),
+            ),
+        )
+    }
+    if (visibleIndex in 0 until (visibleCount - 1)) {
+        add(
+            LayoutAlternativeAction(
+                "在本类别后移",
+                LayoutEditIntent.MoveItemInSection(catalogKey, 1),
+            ),
+        )
+    }
+    add(
+        LayoutAlternativeAction(
+            "仅在本机隐藏",
+            LayoutEditIntent.MoveToLocalDeleted(catalogKey),
+        ),
+    )
+}
+
+private fun catalogKeyIntent(
+    catalogKey: String,
+    visibleIndex: Int,
+    visibleCount: Int,
+    event: KeyEvent,
+): LayoutEditIntent? {
+    if (event.key == Key.Delete) return LayoutEditIntent.MoveToLocalDeleted(catalogKey)
+    if (!event.isCtrlPressed) return null
+    return when (event.key) {
+        Key.DirectionLeft -> if (visibleIndex > 0) {
+            LayoutEditIntent.MoveItemInSection(catalogKey, -1)
+        } else {
+            null
+        }
+        Key.DirectionRight -> if (visibleIndex in 0 until (visibleCount - 1)) {
+            LayoutEditIntent.MoveItemInSection(catalogKey, 1)
+        } else {
+            null
+        }
+        Key.One, Key.NumPad1 -> LayoutEditIntent.AssignToSlot(0, catalogKey)
+        Key.Two, Key.NumPad2 -> LayoutEditIntent.AssignToSlot(1, catalogKey)
+        Key.Three, Key.NumPad3 -> LayoutEditIntent.AssignToSlot(2, catalogKey)
+        Key.Four, Key.NumPad4 -> LayoutEditIntent.AssignToSlot(3, catalogKey)
+        else -> null
+    }
+}
+
+private fun categoryActions(
+    section: RecordSection,
+    index: Int,
+    count: Int,
+): List<LayoutAlternativeAction> = buildList {
+    if (index > 0) {
+        add(LayoutAlternativeAction("分类前移", LayoutEditIntent.MoveCategory(section, -1)))
+    }
+    if (index in 0 until (count - 1)) {
+        add(LayoutAlternativeAction("分类后移", LayoutEditIntent.MoveCategory(section, 1)))
+    }
+}
+
+private fun categoryKeyIntent(
+    section: RecordSection,
+    index: Int,
+    count: Int,
+    event: KeyEvent,
+): LayoutEditIntent? {
+    if (!event.isCtrlPressed) return null
+    return when (event.key) {
+        Key.DirectionUp -> if (index > 0) {
+            LayoutEditIntent.MoveCategory(section, -1)
+        } else {
+            null
+        }
+        Key.DirectionDown -> if (index in 0 until (count - 1)) {
+            LayoutEditIntent.MoveCategory(section, 1)
+        } else {
+            null
+        }
+        else -> null
+    }
+}
+
+private fun slotActions(index: Int, key: String): List<LayoutAlternativeAction> = buildList {
+    if (index > 0) {
+        add(LayoutAlternativeAction("向左移动", LayoutEditIntent.SwapSlots(index, index - 1)))
+    }
+    if (index < QuickDockVisualSpec.configurableSlotCount - 1) {
+        add(LayoutAlternativeAction("向右移动", LayoutEditIntent.SwapSlots(index, index + 1)))
+    }
+    add(LayoutAlternativeAction("清空常用槽", LayoutEditIntent.ClearSlot(index)))
+    add(
+        LayoutAlternativeAction(
+            "仅在本机隐藏该项目",
+            LayoutEditIntent.MoveToLocalDeleted(key),
+        ),
+    )
+}
+
+private fun slotKeyIntent(index: Int, event: KeyEvent): LayoutEditIntent? {
+    if (event.key == Key.Delete) return LayoutEditIntent.ClearSlot(index)
+    if (!event.isCtrlPressed) return null
+    return when (event.key) {
+        Key.DirectionLeft -> (index - 1).takeIf { it >= 0 }
+            ?.let { LayoutEditIntent.SwapSlots(index, it) }
+        Key.DirectionRight -> (index + 1)
+            .takeIf { it < QuickDockVisualSpec.configurableSlotCount }
+            ?.let { LayoutEditIntent.SwapSlots(index, it) }
+        else -> null
+    }
+}
+
 /** Full-screen layout editor continuing the 添加记录 categorized-card visual language. */
 @Composable
 internal fun LayoutEditCanvas(
@@ -117,6 +296,8 @@ internal fun LayoutEditCanvas(
     onIntent: (LayoutEditIntent) -> Unit,
     onDone: () -> Unit,
     onOpenCustomManage: () -> Unit,
+    writeState: DeviceLayoutWriteState = DeviceLayoutWriteState.Saved(),
+    hasSubmittedIntent: Boolean = false,
     cancelDragSignal: Long = 0L,
     modifier: Modifier = Modifier,
 ) {
@@ -164,6 +345,13 @@ internal fun LayoutEditCanvas(
     }
     val deleted = remember(prefs, known) { layoutEditDeletedKeys(prefs, known) }
     val localDeletedScrollState = rememberScrollState()
+    val doneFocusRequester = remember { FocusRequester() }
+    val categoryFocusRequesters = remember {
+        RecordSection.entries.associateWith { FocusRequester() }
+    }
+    val itemFocusRequesters = remember(known) {
+        known.associateWith { FocusRequester() }
+    }
 
     val targetRegistry = remember { LayoutVisibleTargetRegistry() }
     var targetRegistryEpoch by remember { mutableLongStateOf(0L) }
@@ -286,6 +474,9 @@ internal fun LayoutEditCanvas(
             activeSession?.cancel(lifecyclePolicy.disposeReason())
         }
     }
+    LaunchedEffect(Unit) {
+        doneFocusRequester.requestFocus()
+    }
 
     Box(
         modifier
@@ -296,7 +487,7 @@ internal fun LayoutEditCanvas(
                 val p = coords.positionInWindow()
                 rootWindowOrigin = Offset(p.x, p.y)
             }
-            .semantics { contentDescription = "编辑布局，拖动图标替换常用" },
+            .semantics { contentDescription = "编辑布局，可拖动或使用操作重新排列" },
     ) {
         Column(Modifier.fillMaxSize()) {
             // Editor-owned chrome. Root date chrome and primary tabs are hidden.
@@ -316,10 +507,30 @@ internal fun LayoutEditCanvas(
                 )
                 TextButton(
                     onClick = onDone,
-                    modifier = Modifier.testTag("layout_edit_done"),
+                    modifier = Modifier
+                        .heightIn(min = LeziSpacing.Touch)
+                        .testTag("layout_edit_done")
+                        .focusRequester(doneFocusRequester)
+                        .semantics {
+                            onClick(label = "完成并保存布局") {
+                                onDone()
+                                true
+                            }
+                        },
                 ) {
                     Text("完成")
                 }
+            }
+            layoutWriteAnnouncement(prefs, writeState, hasSubmittedIntent)?.let { announcement ->
+                Text(
+                    text = announcement,
+                    style = LeziTypography.Meta,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .padding(horizontal = LeziSpacing.Page)
+                        .testTag("layout_edit_save_feedback")
+                        .semantics { liveRegion = LiveRegionMode.Polite },
+                )
             }
 
             // Catalog and local-deleted are sibling scroll regions. Their shared viewport is
@@ -357,6 +568,7 @@ internal fun LayoutEditCanvas(
                         Modifier
                             .weight(1f)
                             .fillMaxWidth()
+                            .focusGroup()
                             .verticalScroll(rememberScrollState())
                             .padding(horizontal = LeziSpacing.Page),
                     ) {
@@ -414,9 +626,35 @@ internal fun LayoutEditCanvas(
                                                 )
                                             },
                                         )
+                                        .focusRequester(
+                                            checkNotNull(categoryFocusRequesters[section]),
+                                        )
+                                        .focusProperties {
+                                            keys.firstOrNull()
+                                                ?.let(itemFocusRequesters::get)
+                                                ?.let { down = it }
+                                        }
+                                        .layoutAlternativeInput(
+                                            actions = categoryActions(
+                                                section = section,
+                                                index = categoryIndex,
+                                                count = fullCategoryOrder.size,
+                                            ),
+                                            keyIntent = {
+                                                categoryKeyIntent(
+                                                    section = section,
+                                                    index = categoryIndex,
+                                                    count = fullCategoryOrder.size,
+                                                    event = it,
+                                                )
+                                            },
+                                            onIntent = onIntent,
+                                        )
                                         .testTag("layout_edit_category_${section.storageKey}")
-                                        .semantics {
-                                            contentDescription = "${section.title}分类，长按拖动排序"
+                                        .semantics(mergeDescendants = true) {
+                                            contentDescription = "${section.title}分类"
+                                            stateDescription =
+                                                "第${categoryIndex + 1}个分类，共${fullCategoryOrder.size}个"
                                         }
                                         .then(
                                             if (categoryHot) {
@@ -462,6 +700,8 @@ internal fun LayoutEditCanvas(
                                     onAddClick = onOpenCustomManage,
                                     itemModifier = { key ->
                                         val targetIndex = fullSectionOrder.indexOf(key)
+                                        val visibleIndex = keys.indexOf(key)
+                                        val boundSlot = slots.indexOf(key)
                                         val targetNode = LayoutTargetNode.CatalogItem(
                                             catalogKey = key,
                                             section = section,
@@ -499,7 +739,35 @@ internal fun LayoutEditCanvas(
                                                     )
                                                 },
                                             )
+                                            .focusRequester(
+                                                checkNotNull(itemFocusRequesters[key]),
+                                            )
+                                            .layoutAlternativeInput(
+                                                actions = catalogActions(
+                                                    catalogKey = key,
+                                                    visibleIndex = visibleIndex,
+                                                    visibleCount = keys.size,
+                                                ),
+                                                keyIntent = {
+                                                    catalogKeyIntent(
+                                                        catalogKey = key,
+                                                        visibleIndex = visibleIndex,
+                                                        visibleCount = keys.size,
+                                                        event = it,
+                                                    )
+                                                },
+                                                onIntent = onIntent,
+                                            )
                                             .testTag("layout_edit_item_$key")
+                                            .semantics(mergeDescendants = true) {
+                                                stateDescription = buildString {
+                                                    append(section.title)
+                                                    append("分类，第${visibleIndex + 1}项，共${keys.size}项")
+                                                    if (boundSlot >= 0) {
+                                                        append("，当前在常用槽${boundSlot + 1}")
+                                                    }
+                                                }
+                                            }
                                             .then(
                                                 if (hot) {
                                                     Modifier.border(
@@ -525,7 +793,7 @@ internal fun LayoutEditCanvas(
                     val trashHot = drag?.currentTarget == LayoutDropTarget.LocalDeleted
                     val localDeletedDescription =
                         "本机已删除，${deleted.size} 项。这里只隐藏本机入口，不删除历史记录或自定义项目。" +
-                            "长按项目拖出此区域可恢复到所属类别末尾；不会自动回填常用槽。"
+                            "可对项目使用恢复操作或长按拖出，恢复到所属类别末尾；不会自动回填常用槽。"
                     Column(
                         Modifier
                             .fillMaxWidth()
@@ -578,7 +846,7 @@ internal fun LayoutEditCanvas(
                             text = if (trashHot) {
                                 "松开后仅在本机隐藏，并清空常用槽引用"
                             } else {
-                                "仅在本机隐藏 · 拖出恢复到类别末尾"
+                                "仅在本机隐藏 · 使用操作或拖出恢复"
                             },
                             style = LeziTypography.Meta,
                             color = if (trashHot) {
@@ -617,10 +885,11 @@ internal fun LayoutEditCanvas(
                                     showAddCell = false,
                                     onAddClick = {},
                                     contentDescriptionForKey = { key ->
-                                        "${labels[key] ?: key}，本机已隐藏，长按拖出恢复"
+                                        "${labels[key] ?: key}，本机已隐藏"
                                     },
                                     itemModifier = { key ->
                                         val dragging = drag?.source == LayoutDragSource.LocalDeleted(key)
+                                        val sectionTitle = catalogSectionForKey(key)?.title ?: "所属类别"
                                         Modifier
                                             .draggableLayoutSource(
                                                 dragKey = key,
@@ -640,7 +909,27 @@ internal fun LayoutEditCanvas(
                                                     )
                                                 },
                                             )
+                                            .layoutAlternativeInput(
+                                                actions = listOf(
+                                                    LayoutAlternativeAction(
+                                                        "恢复到${sectionTitle}末尾",
+                                                        LayoutEditIntent.RestoreFromLocalDeleted(key),
+                                                    ),
+                                                ),
+                                                keyIntent = { event ->
+                                                    if (event.key == Key.Enter) {
+                                                        LayoutEditIntent.RestoreFromLocalDeleted(key)
+                                                    } else {
+                                                        null
+                                                    }
+                                                },
+                                                onIntent = onIntent,
+                                            )
                                             .testTag("layout_edit_deleted_$key")
+                                            .semantics(mergeDescendants = true) {
+                                                stateDescription =
+                                                    "本机已隐藏，可恢复到${sectionTitle}末尾"
+                                            }
                                             .then(
                                                 if (dragging) Modifier.alpha(0.25f) else Modifier,
                                             )
@@ -677,6 +966,7 @@ internal fun LayoutEditCanvas(
                 onSlotDragCancel = { token ->
                     cancelActiveDrag(LayoutDragCancelReason.Dispose, token)
                 },
+                onIntent = onIntent,
             )
         }
 
@@ -698,6 +988,7 @@ internal fun LayoutEditCanvas(
                 .width(avatarWidth)
                 .scale(1.08f)
                 .testTag("layout_edit_drag_avatar")
+                .semantics { invisibleToUser() }
             if (headingDrag) {
                 Surface(
                     modifier = avatarModifier.heightIn(min = LeziSpacing.Touch),
@@ -823,6 +1114,7 @@ private fun LauncherEditDock(
     onSlotDrag: (Long, Offset) -> Unit,
     onSlotDragEnd: (Long, Offset) -> Unit,
     onSlotDragCancel: (Long) -> Unit,
+    onIntent: (LayoutEditIntent) -> Unit,
 ) {
     val journal = com.lezi.babylog.designsystem.LeziThemeExt.isJournal
     Surface(
@@ -849,6 +1141,7 @@ private fun LauncherEditDock(
         Row(
             Modifier
                 .fillMaxWidth()
+                .focusGroup()
                 .padding(
                     horizontal = QuickDockVisualSpec.rowHorizontal,
                     vertical = QuickDockVisualSpec.rowVertical,
@@ -864,6 +1157,15 @@ private fun LauncherEditDock(
                     else -> labels[key] ?: key
                 }
                 val dimmed = dragKey == key && dragFromSlot == index
+                val slotInputModifier = if (key.isNotBlank()) {
+                    Modifier.layoutAlternativeInput(
+                        actions = slotActions(index, key),
+                        keyIntent = { slotKeyIntent(index, it) },
+                        onIntent = onIntent,
+                    )
+                } else {
+                    Modifier
+                }
                 Surface(
                     modifier = Modifier
                         .weight(1f)
@@ -873,12 +1175,18 @@ private fun LauncherEditDock(
                             registry = targetRegistry,
                             onRegistryChanged = onTargetRegistryChanged,
                         )
+                        .then(slotInputModifier)
                         .testTag("layout_edit_slot_$index")
-                        .semantics {
+                        .semantics(mergeDescendants = true) {
                             contentDescription = if (key.isBlank()) {
-                                "空槽${index + 1}，拖入图标设为常用"
+                                "常用槽${index + 1}，空，可从记录项目的操作中指派"
                             } else {
-                                "常用${index + 1}，$label，长按拖动替换"
+                                "常用槽${index + 1}，$label"
+                            }
+                            stateDescription = if (key.isBlank()) {
+                                "空槽"
+                            } else {
+                                "第${index + 1}槽，共${QuickDockVisualSpec.configurableSlotCount}槽"
                             }
                         },
                     shape = com.lezi.babylog.designsystem.LeziThemeExt.controlShape,
@@ -967,7 +1275,10 @@ private fun LauncherEditDock(
                         onRegistryChanged = onTargetRegistryChanged,
                     )
                     .testTag("layout_edit_more_locked")
-                    .semantics { contentDescription = "更多，编辑布局时已锁定" },
+                    .semantics(mergeDescendants = true) {
+                        contentDescription = "更多，固定在末位，编辑布局时已锁定"
+                        stateDescription = "固定且锁定，无可用编辑动作"
+                    },
                 shape = com.lezi.babylog.designsystem.LeziThemeExt.controlShape,
                 color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f),
                 contentColor = MaterialTheme.colorScheme.onSurface,

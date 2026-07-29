@@ -88,6 +88,20 @@ class QuickRecordSlotsTest {
     }
 
     @Test
+    fun emptySlotCopyStatesTruthWithoutPromisingSelection() {
+        val presentation = quickDockPresentation(
+            cell = QuickDockCell.Empty,
+            sleepRunning = false,
+        )
+
+        assertEquals("空槽", presentation.visualLabel)
+        assertEquals(
+            "空槽，短按无操作；可使用编辑常用布局操作",
+            presentation.contentDescription,
+        )
+    }
+
+    @Test
     fun boundAndMoreSlotsKeepTheirDedicatedActions() {
         val bound = resolveQuickSlot("sleep", emptySet(), emptyList()) as QuickDockCell.Bound
 

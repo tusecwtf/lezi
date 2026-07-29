@@ -24,6 +24,31 @@ internal sealed interface DeviceLayoutWriteState {
 }
 
 /**
+ * User-facing save feedback for the snapshot currently shown by the editor.
+ * A completion for an older snapshot is deliberately silent; the writer's
+ * sequence gate and this snapshot check together prevent stale success speech.
+ */
+internal fun layoutWriteAnnouncement(
+    prefs: DeviceLayoutPrefs,
+    state: DeviceLayoutWriteState,
+    hasSubmittedIntent: Boolean,
+): String? {
+    if (!hasSubmittedIntent) return null
+    val current = normalizeDeviceLayoutSnapshot(prefs.toSnapshot())
+    val stateSnapshot = when (state) {
+        is DeviceLayoutWriteState.Saved -> state.snapshot
+        is DeviceLayoutWriteState.Saving -> state.snapshot
+        is DeviceLayoutWriteState.Failed -> state.snapshot
+    } ?: return null
+    if (normalizeDeviceLayoutSnapshot(stateSnapshot) != current) return null
+    return when (state) {
+        is DeviceLayoutWriteState.Saving -> "正在保存布局"
+        is DeviceLayoutWriteState.Saved -> "布局已保存"
+        is DeviceLayoutWriteState.Failed -> "布局保存失败，可重试"
+    }
+}
+
+/**
  * Single FIFO writer for layout intents. Every submitted value is already a complete snapshot;
  * therefore a later successful write can safely include an earlier failed intent.
  */
