@@ -2324,6 +2324,87 @@ class CareLogTest {
     }
 
     @Test
+    fun carePlanPhotoOnlyUpdateCanReplaceAndExplicitlyClearAttachments() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 20_250_000L
+        val scheduledAt = now + 60_000L
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.PEE,
+            scheduledAt = scheduledAt,
+            photoLocalPaths = listOf("plans/a.jpg", "plans/b.jpg"),
+            nowMillis = now,
+        )
+        val beforeUpdate = fakes.carePlans.get(planId)!!
+
+        care.updateCarePlan(
+            carePlanId = planId,
+            scheduledAt = scheduledAt,
+            photoLocalPaths = listOf("plans/b.jpg", "plans/c.jpg"),
+            nowMillis = now + 1L,
+        )
+
+        assertThat(care.listCarePlanPhotoPaths(planId))
+            .containsExactly("plans/b.jpg", "plans/c.jpg").inOrder()
+        assertThat(fakes.carePlans.get(planId)!!.updatedAt).isGreaterThan(beforeUpdate.updatedAt)
+
+        care.updateCarePlan(
+            carePlanId = planId,
+            scheduledAt = scheduledAt,
+            photoLocalPaths = emptyList(),
+            nowMillis = now + 2L,
+        )
+
+        assertThat(care.listCarePlanPhotoPaths(planId)).isEmpty()
+        assertThat(fakes.media.listForCarePlan(planId).all { it.deletedAt != null }).isTrue()
+    }
+
+    @Test
+    fun carePlanPhotoReplaceFailureRollsBackMediaAndLeavesRootUnchanged() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 20_500_000L
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.PEE,
+            scheduledAt = now + 60_000L,
+            note = "原计划",
+            photoLocalPaths = listOf("plans/a.jpg", "plans/b.jpg"),
+            nowMillis = now,
+        )
+        care.updateCarePlan(
+            carePlanId = planId,
+            scheduledAt = now + 90_000L,
+            note = "原计划",
+            photoLocalPaths = listOf("plans/a.jpg"),
+            nowMillis = now + 1L,
+        )
+        val planBefore = fakes.carePlans.get(planId)
+        val mediaBefore = fakes.media.listForCarePlan(planId)
+        fakes.media.failUpdateAfterSuccessfulUpdates(1)
+
+        val error = runCatching {
+            care.updateCarePlan(
+                carePlanId = planId,
+                scheduledAt = now + 120_000L,
+                note = "不应提交",
+                photoLocalPaths = listOf("plans/b.jpg", "plans/c.jpg"),
+                nowMillis = now + 2L,
+            )
+        }.exceptionOrNull()
+
+        assertThat(error).isInstanceOf(IllegalStateException::class.java)
+        assertThat(error).hasMessageThat().contains("media update failed")
+        assertThat(fakes.carePlans.get(planId)).isEqualTo(planBefore)
+        assertThat(fakes.media.listForCarePlan(planId)).containsExactlyElementsIn(mediaBefore)
+        assertThat(care.listCarePlanPhotoPaths(planId)).containsExactly("plans/a.jpg")
+    }
+
+    @Test
     fun fulfillCarePlanKeepsOriginalPlanPhotosAndRecordsOnlyConfirmedDraftOrder() = runTest {
         val fakes = Fakes()
         fakes.wireTransactionalSnapshots()
@@ -5364,10 +5445,12 @@ private class RecordingSyncPort(
     }
 }
 
-private class FakeMediaAssetDao : MediaAssetDao {
+internal class FakeMediaAssetDao : MediaAssetDao {
     private val items = mutableListOf<MediaAssetEntity>()
     private val seq = AtomicLong(1)
     var failUpserts: Boolean = false
+    private var updateCount: Int = 0
+    private var failOnUpdateCount: Int? = null
     private var txSnapshot: List<MediaAssetEntity>? = null
     private var txSeq: Long? = null
 
@@ -5391,8 +5474,16 @@ private class FakeMediaAssetDao : MediaAssetDao {
         txSeq = null
     }
 
+    fun failUpdateAfterSuccessfulUpdates(count: Int) {
+        require(count >= 0)
+        failOnUpdateCount = updateCount + count + 1
+    }
+
     fun seed(entity: MediaAssetEntity): Long {
         val id = entity.id.takeIf { it != 0L } ?: seq.getAndIncrement()
+        if (entity.id > 0L) {
+            seq.updateAndGet { next -> maxOf(next, entity.id + 1L) }
+        }
         items.removeAll { it.id == id }
         items += entity.copy(id = id)
         return id
@@ -5446,6 +5537,10 @@ private class FakeMediaAssetDao : MediaAssetDao {
         items.find { it.clientUuid == uuid }
 
     override suspend fun update(asset: MediaAssetEntity) {
+        updateCount += 1
+        if (updateCount == failOnUpdateCount) {
+            throw IllegalStateException("media update failed")
+        }
         items.replaceAll { if (it.id == asset.id) asset else it }
     }
 

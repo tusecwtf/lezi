@@ -17,7 +17,7 @@ record-layout-edit-remediation/06 ──► 02 布局迁移残留清理
 
 04 原子包媒体机械 + customItemUuid 单 helper（frontier）
 
-05 照片 reconcile/tombstone 参数化（frontier） ──► 08 CareLog 第一刀切片
+05 照片 reconcile/tombstone 参数化（complete） ──► 08 CareLog 第一刀切片（frontier）
 
 06 清理 scope / committed 失败单源（complete）
 
@@ -26,9 +26,9 @@ record-layout-edit-remediation/06 ──► 02 布局迁移残留清理
 10 journal 主色政策 + PRD 坞条款 + 死组件 ─┘
 ```
 
-**可立即开工（frontier）：** 01 · 03 · 04 · 05 · 09 · 10
+**可立即开工（frontier）：** 01 · 03 · 04 · 08 · 09 · 10
 
-**建议顺序（冲突面）：** 先 01、03–06 / 09–10 中小票；02 等布局整改 06 完成；07 避免与 09 同 PR 改时间条色；08 在 05 之后。
+**建议顺序（冲突面）：** 先 01、03–04 / 08–10 中小票；02 等布局整改 06 完成；07 避免与 09 同 PR 改时间条色；08 已解除 05 blocker。
 
 ## 票列表
 
@@ -38,7 +38,7 @@ record-layout-edit-remediation/06 ──► 02 布局迁移残留清理
 | [02](./issues/02-layout-migration-residue-cleanup.md) | 布局迁移残留与自定义管理单表面 | B | record-layout-edit-remediation/06 | M | ready-for-agent |
 | [03](./issues/03-shared-photo-preview-dialog.md) | 全屏照片预览单源 | C | — | M | ready-for-agent |
 | [04](./issues/04-atomic-media-pack-and-custom-uuid-helper.md) | 原子包媒体机械与 customItemUuid 单 helper | C | — | M | ready-for-agent |
-| [05](./issues/05-parameterized-photo-reconcile.md) | 照片 reconcile/tombstone 按所有者参数化 | C | — | M | ready-for-agent |
+| [05](./issues/05-parameterized-photo-reconcile.md) | 照片 reconcile/tombstone 按所有者参数化 | C | — | M | complete |
 | [06](./issues/06-clear-scope-and-committed-failure-single-source.md) | 本机清理 scope 与 committed 失败单源 | D | — | M | complete |
 | [07](./issues/07-log-screen-structural-split.md) | LogScreen 结构拆分（轨 / 坞 / 宿主） | E | 建议 09 | L | ready-for-agent |
 | [08](./issues/08-carelog-first-slice.md) | CareLog 第一刀：展示 helper 与照片附件 | E | 05 | L | ready-for-agent |

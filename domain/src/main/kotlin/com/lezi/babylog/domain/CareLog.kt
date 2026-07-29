@@ -32,7 +32,6 @@ import com.lezi.babylog.core.model.FulfillmentAdoptionStatus
 import com.lezi.babylog.core.model.FulfillmentAuthority
 import com.lezi.babylog.core.model.FulfillmentCandidate
 import com.lezi.babylog.core.model.FulfillmentCandidateEvidence
-import com.lezi.babylog.core.model.MAX_RECORD_PHOTOS
 import com.lezi.babylog.core.model.NursingPayload
 import com.lezi.babylog.core.model.MilkPayload
 import com.lezi.babylog.core.model.NEXT_FEED_PLAN_MARKER
@@ -203,6 +202,7 @@ class CareLog @Inject constructor(
     private val calendarReminderMutationGuard: CalendarReminderMutationGuard,
 ) {
     private val fulfillmentSurface = FulfillmentSurface(fulfillmentCandidateDao)
+    private val photoAttachmentReconciler = PhotoAttachmentReconciler(mediaAssetDao)
     private val reminderProjection = CarePlanReminderProjection(
         carePlanDao = carePlanDao,
         babyDao = babyDao,
@@ -564,7 +564,7 @@ class CareLog @Inject constructor(
         photoLocalPaths: List<String> = emptyList(),
     ): Long {
         validateSleepInterval(type, timestamp, endTimestamp)
-        val photos = normalizePhotoPaths(photoLocalPaths)
+        val photos = photoLocalPaths
         val persistedPayload = requireCurrentPayloadJson(
             type = type,
             payloadJson = payloadJson,
@@ -592,7 +592,11 @@ class CareLog @Inject constructor(
                         throw SleepStateChangedException()
                     }
                     val inserted = insertRecord(record)
-                    reconcileRecordPhotos(inserted, photos, now)
+                    photoAttachmentReconciler.reconcile(
+                        PhotoAttachmentOwner.Record(inserted),
+                        photos,
+                        now,
+                    )
                     inserted
                 }
             }
@@ -600,7 +604,11 @@ class CareLog @Inject constructor(
             transactionRunner.run {
                 requireActiveBaby(babyId)
                 val inserted = insertRecord(record)
-                reconcileRecordPhotos(inserted, photos, now)
+                photoAttachmentReconciler.reconcile(
+                    PhotoAttachmentOwner.Record(inserted),
+                    photos,
+                    now,
+                )
                 inserted
             }
         }
@@ -623,7 +631,7 @@ class CareLog @Inject constructor(
         RecordTime.pointError(timestamp, nowMillis)?.let {
             throw IllegalArgumentException(it)
         }
-        val photos = photoLocalPaths?.let(::normalizePhotoPaths)
+        val photos = photoLocalPaths
         val now = System.currentTimeMillis()
         sleepMutationMutex.withLock {
             transactionRunner.run {
@@ -654,7 +662,13 @@ class CareLog @Inject constructor(
                         updatedAt = now,
                     ),
                 )
-                photos?.let { reconcileRecordPhotos(id, it, now) }
+                photos?.let {
+                    photoAttachmentReconciler.reconcile(
+                        PhotoAttachmentOwner.Record(id),
+                        it,
+                        now,
+                    )
+                }
             }
         }
         requestLocalSync()
@@ -685,7 +699,7 @@ class CareLog @Inject constructor(
         projectToSystemCalendar: Boolean = true,
     ): Long {
         require(scheduledAt > nowMillis) { "转为护理计划须选择未来时刻" }
-        val photos = normalizePhotoPaths(photoLocalPaths)
+        val photos = photoLocalPaths
         val peek = recordDao.get(recordId) ?: error("记录不存在")
         if (peek.deletedAt != null) error("记录已删除")
         val type = RecordType.fromKey(peek.type) ?: error("未知记录类型")
@@ -744,7 +758,7 @@ class CareLog @Inject constructor(
 
             val at = nextSyncUpdatedAt(existing.updatedAt, System.currentTimeMillis())
             recordDao.softDelete(recordId, at)
-            tombstoneRecordPhotos(recordId, at)
+            photoAttachmentReconciler.tombstone(PhotoAttachmentOwner.Record(recordId), at)
 
             // Plan media rows are new ownership (separate clientUuids); record media
             // remain tombstoned only. Same localUri may be referenced by both, but
@@ -768,7 +782,11 @@ class CareLog @Inject constructor(
                     systemCalendarProjectionEnabled = projectToSystemCalendar,
                 ),
             )
-            reconcileCarePlanPhotos(planId, photos, at)
+            photoAttachmentReconciler.reconcile(
+                PhotoAttachmentOwner.CarePlan(planId),
+                photos,
+                at,
+            )
             planId
         }
 
@@ -800,7 +818,10 @@ class CareLog @Inject constructor(
                         System.currentTimeMillis(),
                     )
                     recordDao.softDelete(id, deletedAt)
-                    tombstoneRecordPhotos(id, deletedAt)
+                    photoAttachmentReconciler.tombstone(
+                        PhotoAttachmentOwner.Record(id),
+                        deletedAt,
+                    )
                 }
                 existing
             }
@@ -928,7 +949,7 @@ class CareLog @Inject constructor(
         schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
         photoLocalPaths: List<String> = emptyList(),
     ): Long {
-        val photos = normalizePhotoPaths(photoLocalPaths)
+        val photos = photoLocalPaths
         val persistedPayload = requireCurrentPayloadJson(
             type = RecordType.SLEEP,
             payloadJson = payloadJson,
@@ -956,7 +977,11 @@ class CareLog @Inject constructor(
                             updatedAt = now,
                         ),
                     )
-                    reconcileRecordPhotos(inserted, photos, now)
+                    photoAttachmentReconciler.reconcile(
+                        PhotoAttachmentOwner.Record(inserted),
+                        photos,
+                        now,
+                    )
                     inserted
                 } else {
                     if (currentOpen?.id != expectedOpenSleepId) {
@@ -978,7 +1003,11 @@ class CareLog @Inject constructor(
                             updatedAt = now,
                         ),
                     )
-                    reconcileRecordPhotos(expectedOpenSleepId, photos, now)
+                    photoAttachmentReconciler.reconcile(
+                        PhotoAttachmentOwner.Record(expectedOpenSleepId),
+                        photos,
+                        now,
+                    )
                     expectedOpenSleepId
                 }
             }
@@ -1177,7 +1206,7 @@ class CareLog @Inject constructor(
             resolvedCustomItemId = null
             stampedPayload = payloadJson
         }
-        val photos = normalizePhotoPaths(photoLocalPaths)
+        val photos = photoLocalPaths
         val persistedPayload = requireCurrentPayloadJson(
             type = type,
             payloadJson = stampedPayload,
@@ -1204,7 +1233,11 @@ class CareLog @Inject constructor(
                     systemCalendarProjectionEnabled = projectToSystemCalendar,
                 ),
             )
-            reconcileCarePlanPhotos(planId, photos, now)
+            photoAttachmentReconciler.reconcile(
+                PhotoAttachmentOwner.CarePlan(planId),
+                photos,
+                now,
+            )
             planId
         }
         // Shared CarePlan is committed and publishable before optional device-local projection.
@@ -1359,7 +1392,7 @@ class CareLog @Inject constructor(
         nowMillis: Long = System.currentTimeMillis(),
     ): Long {
         RecordTime.pointError(actualTimestamp, nowMillis)?.let { throw IllegalArgumentException(it) }
-        val photos = normalizePhotoPaths(photoLocalPaths)
+        val photos = photoLocalPaths
         // Freeze confirm time once for the candidate; wall clock for writer bookkeeping.
         val confirmedAt = System.currentTimeMillis()
         val now = confirmedAt
@@ -1432,7 +1465,11 @@ class CareLog @Inject constructor(
                 updatedAt = now,
             )
             val inserted = insertRecord(record)
-            reconcileRecordPhotos(inserted, photos, now)
+            photoAttachmentReconciler.reconcile(
+                PhotoAttachmentOwner.Record(inserted),
+                photos,
+                now,
+            )
             // Manager (creator/owner) may LWW-push completed plan status. Non-managers
             // complete only locally — server forbids care_plan rewrites for them;
             // peers re-link via fulfillment_candidate + resolveFulfillmentAuthority.
@@ -1756,7 +1793,11 @@ class CareLog @Inject constructor(
                 syncDirty = true,
             )
             val inserted = insertRecord(newRecord)
-            reconcileRecordPhotos(inserted, photos, at)
+            photoAttachmentReconciler.reconcile(
+                PhotoAttachmentOwner.Record(inserted),
+                photos,
+                at,
+            )
 
             // Pointer only — never touch adoptionStatus or plan authority.
             if (candidate.convertedRecordClientUuid != targetUuid) {
@@ -1838,7 +1879,7 @@ class CareLog @Inject constructor(
         nowMillis: Long = System.currentTimeMillis(),
         projectToSystemCalendar: Boolean? = null,
     ) {
-        val photos = photoLocalPaths?.let { normalizePhotoPaths(it) }
+        val photos = photoLocalPaths
         transactionRunner.run {
             val plan = carePlanDao.get(carePlanId) ?: error("护理计划不存在")
             if (plan.deletedAt != null) error("护理计划已删除")
@@ -1890,7 +1931,16 @@ class CareLog @Inject constructor(
                     plan.payloadJson != nextPayload ||
                     plan.schemaVersion != nextSchemaVersion ||
                     plan.status != CarePlanStatus.PENDING.storageKey
-            if (sharedChanged) {
+            // Photo-only edits are still atomic CarePlan bundle mutations. Reconcile first so an
+            // identical explicit list remains a no-op; the enclosing transaction owns both writes.
+            val photosChanged = photos?.let {
+                photoAttachmentReconciler.reconcile(
+                    PhotoAttachmentOwner.CarePlan(carePlanId),
+                    it,
+                    at,
+                )
+            } == true
+            if (sharedChanged || photosChanged) {
                 // Persist stored status as pending; missed is always derived from clock.
                 carePlanDao.update(plan.copy(
                     scheduledAt = scheduledAt,
@@ -1904,9 +1954,6 @@ class CareLog @Inject constructor(
                     systemCalendarProjectionEnabled = desiredProjection,
                     systemCalendarReminderReady = false,
                 ))
-                if (photos != null) {
-                    reconcileCarePlanPhotos(carePlanId, photos, at)
-                }
             } else if (desiredProjection != plan.systemCalendarProjectionEnabled) {
                 carePlanDao.updateSystemCalendarProjectionEnabled(
                     clientUuid = plan.clientUuid,
@@ -1972,7 +2019,10 @@ class CareLog @Inject constructor(
             requireCanManageCarePlan(plan)
             val deletedAt = nowMillis.coerceAtLeast(plan.updatedAt + 1)
             carePlanDao.softDelete(carePlanId, deletedAt)
-            tombstoneCarePlanPhotos(carePlanId, deletedAt)
+            photoAttachmentReconciler.tombstone(
+                PhotoAttachmentOwner.CarePlan(carePlanId),
+                deletedAt,
+            )
         }
         reminderProjection.cancelCarePlanReminderBestEffort(carePlanId)
         reminderProjection.removeSystemCalendarProjection(carePlanId)
@@ -2471,129 +2521,6 @@ class CareLog @Inject constructor(
                 syncDirty = true,
             ),
         )
-    }
-
-    private fun normalizePhotoPaths(photoLocalPaths: List<String>): List<String> {
-        val normalized = photoLocalPaths.filter { it.isNotBlank() }.distinct()
-        require(normalized.size <= MAX_RECORD_PHOTOS) {
-            "每条记录最多 $MAX_RECORD_PHOTOS 张照片"
-        }
-        return normalized
-    }
-
-    /**
-     * Reconcile the authoritative MediaAsset rows for one record.
-     * Callers must already be inside a domain transaction.
-     */
-    private suspend fun reconcileRecordPhotos(
-        recordId: Long,
-        photoPaths: List<String>,
-        at: Long,
-    ) = reconcileLogPhotos(
-        ownerRecordId = recordId,
-        ownerCarePlanId = null,
-        photoPaths = photoPaths,
-        at = at,
-    )
-
-    private suspend fun tombstoneRecordPhotos(recordId: Long, deletedAt: Long) =
-        tombstoneLogPhotos(ownerRecordId = recordId, ownerCarePlanId = null, deletedAt = deletedAt)
-
-    /**
-     * Reconcile plan-owned MediaAsset rows. Plan and record photos never share ownership.
-     * Physical file cleanup is deferred until no active entity references the path.
-     */
-    private suspend fun reconcileCarePlanPhotos(
-        carePlanId: Long,
-        photoPaths: List<String>,
-        at: Long,
-    ) = reconcileLogPhotos(
-        ownerRecordId = null,
-        ownerCarePlanId = carePlanId,
-        photoPaths = photoPaths,
-        at = at,
-    )
-
-    private suspend fun tombstoneCarePlanPhotos(carePlanId: Long, deletedAt: Long) =
-        tombstoneLogPhotos(ownerRecordId = null, ownerCarePlanId = carePlanId, deletedAt = deletedAt)
-
-    /**
-     * Shared log-media reconcile for record **or** care-plan ownership (XOR).
-     * Domain roots stay separate; packaging algorithm is single-sourced.
-     */
-    private suspend fun reconcileLogPhotos(
-        ownerRecordId: Long?,
-        ownerCarePlanId: Long?,
-        photoPaths: List<String>,
-        at: Long,
-    ) {
-        require((ownerRecordId != null) xor (ownerCarePlanId != null)) {
-            "log media must belong to exactly one record or care plan"
-        }
-        val existing = when {
-            ownerRecordId != null -> mediaAssetDao.listForRecord(ownerRecordId)
-            else -> mediaAssetDao.listForCarePlan(ownerCarePlanId!!)
-        }.filter { it.kind == "log" }
-        val active = existing.filter { it.deletedAt == null }
-        val desired = photoPaths.toSet()
-        for (path in photoPaths) {
-            val live = active.firstOrNull { it.localUri == path }
-            if (live != null) continue
-            val tombstoned = existing.firstOrNull { it.localUri == path && it.deletedAt != null }
-            if (tombstoned != null) {
-                mediaAssetDao.update(
-                    tombstoned.copy(
-                        deletedAt = null,
-                        updatedAt = nextSyncUpdatedAt(tombstoned.updatedAt, at),
-                        syncDirty = true,
-                    ),
-                )
-            } else {
-                mediaAssetDao.upsert(
-                    MediaAssetEntity(
-                        recordId = ownerRecordId,
-                        carePlanId = ownerCarePlanId,
-                        clientUuid = newClientUuid(),
-                        kind = "log",
-                        babyId = null,
-                        localUri = path,
-                        createdAt = at,
-                        updatedAt = at,
-                        syncDirty = true,
-                    ),
-                )
-            }
-        }
-        active.filter { it.localUri !in desired }.forEach { asset ->
-            mediaAssetDao.update(
-                asset.copy(
-                    deletedAt = at,
-                    updatedAt = nextSyncUpdatedAt(asset.updatedAt, at),
-                    syncDirty = true,
-                ),
-            )
-        }
-    }
-
-    private suspend fun tombstoneLogPhotos(
-        ownerRecordId: Long?,
-        ownerCarePlanId: Long?,
-        deletedAt: Long,
-    ) {
-        require((ownerRecordId != null) xor (ownerCarePlanId != null))
-        val active = when {
-            ownerRecordId != null -> mediaAssetDao.listActiveForRecord(ownerRecordId)
-            else -> mediaAssetDao.listActiveForCarePlan(ownerCarePlanId!!)
-        }.filter { it.kind == "log" }
-        active.forEach { asset ->
-            mediaAssetDao.update(
-                asset.copy(
-                    deletedAt = deletedAt,
-                    updatedAt = nextSyncUpdatedAt(asset.updatedAt, deletedAt),
-                    syncDirty = true,
-                ),
-            )
-        }
     }
 
     /**
