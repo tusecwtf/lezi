@@ -2,6 +2,7 @@ package com.lezi.babylog.feature.settings
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -45,6 +46,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -387,12 +389,30 @@ fun SettingsRoute(
             )
 
             Text("查找与管理", style = LeziTypography.Eyebrow, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            MenuRow("搜索全部记录", "按类型、详情或备注查找", icon = "⌕", onClick = onOpenSearch)
-            MenuRow("导出数据", "TXT 文本预览与分享", icon = "⇪", onClick = onOpenExport)
-            MenuRow("日程", "本机提醒与日程列表", icon = "▦", onClick = onOpenCalendar)
+            SettingsMenuRow(
+                "搜索全部记录",
+                "按类型、详情或备注查找",
+                icon = "⌕",
+                actionLabel = "搜索全部记录",
+                onClick = onOpenSearch,
+            )
+            SettingsMenuRow(
+                "导出数据",
+                "TXT 文本预览与分享",
+                icon = "⇪",
+                actionLabel = "打开数据导出",
+                onClick = onOpenExport,
+            )
+            SettingsMenuRow(
+                "日程",
+                "本机提醒与日程列表",
+                icon = "▦",
+                actionLabel = "打开日程",
+                onClick = onOpenCalendar,
+            )
 
             Text("外观与偏好", style = LeziTypography.Eyebrow, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            MenuRow(
+            SettingsMenuRow(
                 title = "深色模式",
                 subtitle = "当前：${when (ui.settings.darkMode) {
                     "dark" -> "深色"
@@ -407,54 +427,50 @@ fun SettingsRoute(
                     )
                 },
             )
-            MenuRow(
+            SettingsMenuRow(
                 "记录设置",
                 "分项目参数、护理计划与系统日历",
                 icon = "☰",
+                actionLabel = "打开记录设置",
                 onClick = { showRecordSettings = true },
             )
-            MenuRow("显示设置", "界面模板与主题", icon = "◐", onClick = { showDisplay = true })
+            SettingsMenuRow(
+                "显示设置",
+                "界面模板与主题",
+                icon = "◐",
+                actionLabel = "打开显示设置",
+                onClick = { showDisplay = true },
+            )
 
             Text("宝宝", style = LeziTypography.Eyebrow, color = MaterialTheme.colorScheme.onSurfaceVariant)
             ui.babies.forEach { b ->
-                val birth = LocalDate.ofEpochDay(b.birthdayEpochDay)
-                    .format(DateTimeFormatter.ofPattern("yyyy-MM-dd"))
-                val weight = b.birthWeightGrams?.let { " · ${it}g" }.orEmpty()
-                MenuRow(
-                    title = b.nickname + if (ui.current?.id == b.id) "（当前）" else "",
-                    subtitle = "出生 $birth$weight · 点选切换",
-                    onClick = { vm.setCurrent(b.id) },
-                    leading = {
-                        BabyAvatar(
-                            nickname = b.nickname,
-                            avatarPath = b.avatarPath,
-                            fallbackBackground = Color(b.themeColorArgb),
-                            modifier = Modifier.size(40.dp),
-                            borderWidth = 2.dp,
-                            avatarContentDescription = "${b.nickname}的头像",
-                        )
-                    },
-                    trailing = {
-                        TextButton(
-                            onClick = {
-                                localPreferenceError = null
-                                localPreferenceBabyId = b.id
-                            },
-                        ) { Text("本机外观") }
+                SettingsBabyRow(
+                    baby = b,
+                    selected = ui.current?.id == b.id,
+                    onOpenLocalSettings = {
+                        localPreferenceError = null
+                        localPreferenceBabyId = b.id
                     },
                 )
             }
             if (ui.canManageBabyProfiles) {
-                MenuRow("添加宝宝", "新建本机宝宝档案", icon = "+", onClick = { showAdd = true })
+                SettingsMenuRow(
+                    "添加宝宝",
+                    "新建本机宝宝档案",
+                    icon = "+",
+                    actionLabel = "添加宝宝",
+                    onClick = { showAdd = true },
+                )
             } else {
-                MenuRow("宝宝档案", "宝宝档案由家庭管理员管理", icon = "·", onClick = {})
+                SettingsMenuRow("宝宝档案", "宝宝档案由家庭管理员管理", icon = "·")
             }
 
             Text("数据", style = LeziTypography.Eyebrow, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            MenuRow(
+            SettingsMenuRow(
                 title = "清除全部记录",
                 subtitle = "不删除宝宝档案",
                 icon = "!",
+                actionLabel = "清除全部记录",
                 onClick = {
                     clearRecordsError = null
                     clearStep = 1
@@ -666,10 +682,17 @@ fun SettingsRoute(
             val position = ui.babies.indexOfFirst { it.id == babyId }
             AlertDialog(
                 onDismissRequest = { localPreferenceBabyId = null },
-                title = { Text("${baby.nickname}的本机外观") },
+                title = { Text("${baby.nickname}的本机设置") },
                 text = {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("主题色与宝宝顺序只影响这台设备，不会修改家庭档案。")
+                        if (ui.current?.id == baby.id) {
+                            Text("当前宝宝", style = LeziTypography.Label)
+                        } else {
+                            OutlinedButton(onClick = { vm.setCurrent(baby.id) }) {
+                                Text("设为当前宝宝")
+                            }
+                        }
                         Text("主题色", style = LeziTypography.Label)
                         FlowRow(
                             horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -985,18 +1008,60 @@ private fun ScrollableDialogColumn(
 }
 
 @Composable
-private fun MenuRow(
+internal fun SettingsBabyRow(
+    baby: Baby,
+    selected: Boolean,
+    onOpenLocalSettings: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val birth = LocalDate.ofEpochDay(baby.birthdayEpochDay)
+        .format(DateTimeFormatter.ofPattern("yyyy-MM-dd"))
+    val weight = baby.birthWeightGrams?.let { " · ${it}g" }.orEmpty()
+    SettingsMenuRow(
+        title = baby.nickname + if (selected) "（当前）" else "",
+        subtitle = "出生 $birth$weight · 本机外观与顺序",
+        modifier = modifier,
+        actionLabel = "打开${baby.nickname}的本机设置",
+        onClick = onOpenLocalSettings,
+        leading = {
+            BabyAvatar(
+                nickname = baby.nickname,
+                avatarPath = baby.avatarPath,
+                fallbackBackground = Color(baby.themeColorArgb),
+                modifier = Modifier.size(40.dp),
+                borderWidth = 2.dp,
+                avatarContentDescription = "${baby.nickname}的头像",
+            )
+        },
+    )
+}
+
+@Composable
+internal fun SettingsMenuRow(
     title: String,
     subtitle: String,
+    modifier: Modifier = Modifier,
     icon: String = "·",
+    actionLabel: String? = null,
     onClick: (() -> Unit)? = null,
     danger: Boolean = false,
     leading: (@Composable () -> Unit)? = null,
     trailing: (@Composable () -> Unit)? = null,
 ) {
+    val interaction = if (onClick != null) {
+        Modifier.clickable(
+            onClickLabel = requireNotNull(actionLabel),
+            role = Role.Button,
+            onClick = onClick,
+        )
+    } else {
+        Modifier
+    }
     LeziSurfacePanel(
-        modifier = Modifier.fillMaxWidth(),
-        onClick = onClick,
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = LeziSpacing.Touch)
+            .then(interaction),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 10.dp),
         bottomBand = true,
     ) {
@@ -1038,7 +1103,7 @@ private fun MenuRow(
             }
             if (trailing != null) {
                 trailing()
-            } else {
+            } else if (onClick != null) {
                 Text("›", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }

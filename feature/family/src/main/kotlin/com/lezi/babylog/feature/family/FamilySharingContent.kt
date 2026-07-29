@@ -14,8 +14,10 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.traversalIndex
 import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziPrimaryButton
 import com.lezi.babylog.designsystem.LeziSecondaryButton
@@ -113,16 +115,9 @@ internal fun FamilySharingContent(
                 TextButton(onClick = onEditMyDisplayName) { Text("改称呼") }
             }
             Spacer(Modifier.height(LeziSpacing.Sm))
-            Text(
-                card.memberCountLabel,
-                style = LeziTypography.BodyStrong,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(onClick = onOpenMembers)
-                    .heightIn(min = familyMemberRosterMinimumTouchHeight())
-                    .padding(vertical = LeziSpacing.Xs)
-                    .semantics { contentDescription = "打开家人名单" },
+            FamilyMemberRosterEntry(
+                label = card.memberCountLabel,
+                onOpenMembers = onOpenMembers,
             )
             Spacer(Modifier.height(LeziSpacing.Xs))
         } else {
@@ -139,20 +134,10 @@ internal fun FamilySharingContent(
             Spacer(Modifier.height(LeziSpacing.Sm))
         }
 
-        Text(
-            card.syncStatusLabel,
-            style = LeziTypography.BodyStrong,
-            color = when {
-                !ui.enabled -> MaterialTheme.colorScheme.onSurfaceVariant
-                ui.status == com.lezi.babylog.core.model.SyncStatus.Error ->
-                    MaterialTheme.colorScheme.error
-                else -> MaterialTheme.colorScheme.onSurface
-            },
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(onClick = onOpenNetwork)
-                .padding(vertical = LeziSpacing.Xs)
-                .semantics { contentDescription = "打开网络设置" },
+        FamilySyncStatusEntry(
+            statusLabel = card.syncStatusLabel,
+            isError = ui.status == com.lezi.babylog.core.model.SyncStatus.Error,
+            onOpenNetwork = onOpenNetwork,
         )
         Text(
             "点同步状态查看网络设置",
@@ -192,4 +177,61 @@ internal fun FamilySharingContent(
         )
     }
     Spacer(Modifier.height(LeziSpacing.Xxl))
+}
+
+@Composable
+internal fun FamilyMemberRosterEntry(
+    label: String,
+    onOpenMembers: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Text(
+        label,
+        style = LeziTypography.BodyStrong,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = familyMemberRosterMinimumTouchHeight())
+            .clickable(
+                onClickLabel = "打开家人名单",
+                role = Role.Button,
+                onClick = onOpenMembers,
+            )
+            .padding(vertical = LeziSpacing.Xs)
+            .semantics {
+                contentDescription = "家人名单：$label"
+                traversalIndex = 0f
+            },
+    )
+}
+
+@Composable
+internal fun FamilySyncStatusEntry(
+    statusLabel: String,
+    isError: Boolean,
+    onOpenNetwork: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Text(
+        statusLabel,
+        style = LeziTypography.BodyStrong,
+        color = if (isError) {
+            MaterialTheme.colorScheme.error
+        } else {
+            MaterialTheme.colorScheme.onSurface
+        },
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = LeziSpacing.Touch)
+            .clickable(
+                onClickLabel = "打开网络设置",
+                role = Role.Button,
+                onClick = onOpenNetwork,
+            )
+            .padding(vertical = LeziSpacing.Xs)
+            .semantics {
+                contentDescription = "同步状态：$statusLabel"
+                traversalIndex = 1f
+            },
+    )
 }
