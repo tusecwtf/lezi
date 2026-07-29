@@ -202,6 +202,28 @@ class HomeNetworkPolicyTest {
     }
 
     @Test
+    fun currentServerContractAllowsDifferentVersionAndAdditiveCapabilities() {
+        val status = HealthStatus(
+            ok = true,
+            version = "99.7.3",
+            capabilities = REQUIRED_SYNC_SERVER_CAPABILITIES + "future_optional_feature",
+        )
+
+        assertThat(status.isCurrentServerContract()).isTrue()
+    }
+
+    @Test
+    fun currentServerContractRejectsMissingRequiredCapability() {
+        val status = HealthStatus(
+            ok = true,
+            version = "99.7.3",
+            capabilities = setOf(CAPABILITY_ATOMIC_BUNDLE, "future_optional_feature"),
+        )
+
+        assertThat(status.isCurrentServerContract()).isFalse()
+    }
+
+    @Test
     fun emptyAddressAndNonWifiNeverProbeServer() = runTest {
         val probe = RecordingHealthProbe(result = true)
         val policy = HomeNetworkPolicy(
@@ -427,7 +449,7 @@ private class RecordingHealthProbe(
         calls += baseUrl
         return HealthStatus(
             ok = result,
-            version = if (result) CURRENT_SYNC_SERVER_VERSION else null,
+            version = if (result) "test-version" else null,
             capabilities = if (result) capabilities else emptySet(),
         )
     }

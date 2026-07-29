@@ -5102,7 +5102,7 @@ private class SyncRig(
     wifi: Boolean = true,
     ssid: String? = "Home",
     healthCapabilities: Set<String> = REQUIRED_SYNC_SERVER_CAPABILITIES,
-    healthVersion: String = CURRENT_SYNC_SERVER_VERSION,
+    healthVersion: String = "test-version",
     healthCapabilitiesSequence: List<Set<String>> = emptyList(),
     carePlanApplied: suspend (List<String>) -> Unit = {},
     syncBackend: SyncBackend? = null,

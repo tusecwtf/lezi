@@ -26,7 +26,6 @@ private const val MAX_HEALTH_RESPONSE_BYTES = 64 * 1024
 /** Capability strings advertised by lezi-sync on `GET /health`. */
 const val CAPABILITY_ATOMIC_BUNDLE = "atomic_bundle"
 const val CAPABILITY_RECORD_MEMBERSHIP_AUTHOR = "record_membership_author"
-internal const val CURRENT_SYNC_SERVER_VERSION = "0.2.6"
 internal val REQUIRED_SYNC_SERVER_CAPABILITIES = setOf(
     CAPABILITY_ATOMIC_BUNDLE,
     CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
@@ -35,9 +34,10 @@ internal val REQUIRED_SYNC_SERVER_CAPABILITIES = setOf(
 internal class ServerContractMismatchException(
     status: HealthStatus,
 ) : IllegalStateException(
-    "家庭服务器协议不匹配：需要 lezi-sync $CURRENT_SYNC_SERVER_VERSION " +
-        "及能力 ${REQUIRED_SYNC_SERVER_CAPABILITIES.sorted().joinToString()}，" +
-        "实际版本 ${status.version ?: "缺失"}，能力 ${status.capabilities.sorted().joinToString()}",
+    "家庭服务器协议不匹配：需要能力 " +
+        "${REQUIRED_SYNC_SERVER_CAPABILITIES.sorted().joinToString()}，" +
+        "实际能力 ${status.capabilities.sorted().joinToString()}" +
+        (status.version?.let { "（服务器版本 $it）" } ?: ""),
 )
 
 enum class HomeNetworkDecision {
@@ -55,8 +55,9 @@ enum class HomeNetworkDecision {
 /**
  * Result of probing NAS `/health`.
  *
- * The Android client accepts only the exact current version and capability set;
- * missing, extra, or malformed contract fields fail before any sync API call.
+ * The Android client requires the current capabilities, while allowing additive
+ * capabilities and any reported server version. Missing or malformed contract
+ * fields fail before any sync API call.
  */
 data class HealthStatus(
     val ok: Boolean,
@@ -65,8 +66,7 @@ data class HealthStatus(
 )
 
 internal fun HealthStatus.isCurrentServerContract(): Boolean =
-    ok && version == CURRENT_SYNC_SERVER_VERSION &&
-        capabilities == REQUIRED_SYNC_SERVER_CAPABILITIES
+    ok && capabilities.containsAll(REQUIRED_SYNC_SERVER_CAPABILITIES)
 
 internal fun HealthStatus.requireCurrentServerContract() {
     if (!isCurrentServerContract()) {

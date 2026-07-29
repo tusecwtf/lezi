@@ -4,8 +4,8 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** complete
 
-- [ ] 修改 `HomeNetworkPolicy` 契约判定与 `ServerContractMismatchException` 文案
-- [ ] 单测：额外 capability 通过；缺必选失败；version 不同仍可通过
-- [ ] 与 01 文档 health 描述一致
+- [x] 修改 `HomeNetworkPolicy` 契约判定与 `ServerContractMismatchException` 文案
+- [x] 单测：额外 capability 通过；缺必选失败；version 不同仍可通过
+- [x] 与 01 文档 health 描述一致
