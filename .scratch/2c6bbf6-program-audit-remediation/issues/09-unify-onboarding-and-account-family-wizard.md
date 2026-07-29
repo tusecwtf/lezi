@@ -4,7 +4,7 @@
 
 **Blocked by:** 08 — 无宝宝状态直接接回 owner
 
-**Status:** implemented-awaiting-device-smoke
+**Status:** complete
 
 **Size:** M
 
@@ -52,5 +52,9 @@
 - `./gradlew --no-daemon -Pksp.incremental=false :domain:testDebugUnitTest --tests com.lezi.babylog.domain.FamilyWizardControllerTest :core:ui:testDebugUnitTest --tests com.lezi.babylog.core.ui.HomeWifiAccessGuideTest :feature:onboarding:testDebugUnitTest :feature:family:testDebugUnitTest` — PASS。
 - `./gradlew --no-daemon -Pksp.incremental=false :core:ui:lintDebug :domain:lintDebug :feature:onboarding:lintDebug :feature:family:lintDebug :app:testDebugUnitTest :app:compileDebugKotlin :app:assembleDebug` — PASS（607 tasks；Debug APK assembled）。
 - 仓库没有覆盖这两个入口的 Compose instrumentation/navigation 测试；`:app:testDebugUnitTest` 覆盖
-  root routing policy，但不冒充设备导航证据。首次使用与账户入口的真机 smoke 尚未执行，因此状态
-  保持 `implemented-awaiting-device-smoke`。
+  root routing policy，但不冒充设备导航证据。
+- API35 固定 APK 已分别完成两入口 smoke：首次使用入口在空 NAS 上走完 create-created，账户入口
+  在保留本机宝宝、清除隔离测试家庭会话后同时显示 `新建家庭` / `加入家庭`，两者均打开同一
+  `配置家庭网络` 步骤与相同 host/port/Wi-Fi 字段；join 仅按模式增加扫码邀请入口。固定 APK、
+  页面语义与隔离测试数据处置见
+  [`../evidence/09/shared-wizard-device-smoke.md`](../evidence/09/shared-wizard-device-smoke.md)。
