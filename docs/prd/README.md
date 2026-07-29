@@ -16,9 +16,13 @@
 Android 与服务端实现、自动化测试、本机 Docker 运行和双模拟器前台
 formula/pee UI 交叉可见均已验证；双模拟器还在严格使用
 `192.168.50.4:8765` 的服务端上完成建家、邀请码加入、双向协议记录和头像 ACL。
-相机扫码、日志图跨端 UI、蜂窝回家冲刷、伴侣通知和双端独立设置仍待目标环境执行，
-故 Ticket 09 保持 partial，且不宣称物理 NAS 生产部署。当前状态见
-[家庭局域网同步验收票](../../.scratch/home-lan-sync/issues/09-dual-device-foreground-acceptance.md)。
+相机扫码、日志图跨端 UI、蜂窝回家冲刷、伴侣通知和双端独立设置仍待目标环境执行；
+不宣称物理 NAS 生产部署或全部设备级 Must 通过。同步细节见
+[sync-home-lan.md](./sync-home-lan.md)。
+
+合入后的行为以本目录为准；进行中的票在 [`.scratch/`](../../.scratch/)（见
+[`docs/agents/issue-tracker.md`](../agents/issue-tracker.md)）。闭合票不长期归档，
+过程结论写回这里、[`docs/adr/`](../adr/) 或根 [`CONTEXT.md`](../../CONTEXT.md)。
 
 **子文档**
 
@@ -29,12 +33,6 @@ formula/pee UI 交叉可见均已验证；双模拟器还在严格使用
 | [sync-home-lan.md](./sync-home-lan.md) | **当前家庭局域网同步**：门闩、前台策略、NAS Docker（`lezi-sync`） |
 | [tech.md](./tech.md) | Android 技术栈、模块、权限、验收 |
 | [assets-notes.md](./assets-notes.md) | 排泄图标资源约定（尿尿量档 / 便便分档） |
-
-**工程跟进（执行权威在 scratch，结论写回本目录）**
-
-| 文件 | 内容 |
-|------|------|
-| [0.2.4 后跟进 spec](../../.scratch/post-0.2.4-followup/spec.md) | 止血 · 拆骨 · 契约瘦身三阶段；Status `complete` |
 
 ---
 

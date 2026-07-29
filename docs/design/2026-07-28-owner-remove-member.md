@@ -3,7 +3,7 @@
 | 字段 | 值 |
 |------|-----|
 | **Date** | 2026-07-28 |
-| **Status** | Implemented |
+| **Status** | Folded（规则已写回 `docs/prd/ui.md` §5.7） |
 | **Related** | `docs/prd/sync-home-lan.md` §4.3 / §9.11；`docs/prd/ui.md` §5.7 成员二级 |
 
 ## Overview

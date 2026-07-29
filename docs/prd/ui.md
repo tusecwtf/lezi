@@ -213,7 +213,7 @@
 
 ### 5.7 账户（当前默认行为）
 
-账户面向小白：**首屏只讲家庭与宝宝**；网络运维下沉。术语与决策见根目录 `CONTEXT.md`、[`docs/adr/0002-family-identity-and-account-overview.md`](../adr/0002-family-identity-and-account-overview.md)。
+账户面向小白：**首屏只讲家庭与宝宝**；网络运维下沉。术语与决策见根目录 `CONTEXT.md`、[`docs/adr/0009-family-identity-and-account-overview.md`](../adr/0009-family-identity-and-account-overview.md)。
 
 #### 账户概览（首屏）
 

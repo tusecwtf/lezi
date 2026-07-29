@@ -243,8 +243,9 @@ member 的前台/下拉同步先完成全部 pull 页并应用 NAS 权威 Baby�
 
 当前验收闭合了本机 Docker、双模拟器 formula/pee UI 交叉可见，以及严格 live
 服务端上的建家、邀请码加入、双向协议记录与头像 ACL。相机扫码、日志图 UI、
-蜂窝/回家冲刷、伴侣通知和双端独立设置仍未闭合；完整状态以
-[Ticket 09](../../.scratch/home-lan-sync/issues/09-dual-device-foreground-acceptance.md) 为准。
+蜂窝/回家冲刷、伴侣通知和双端独立设置仍未闭合；不宣称物理 NAS 生产部署。
+进行中的验收票若仍开放，见 [`.scratch/`](../../.scratch/)（见
+[`docs/agents/issue-tracker.md`](../agents/issue-tracker.md)）。
 
 ---
 
@@ -733,7 +734,7 @@ Record 与 CarePlan 共享以下 current-wire 约束：
 | 服务器 | host+端口（空态预填 192.168.50.4:8765）+ SSID 白名单≤2（预填当前 SSID）；扫码可填入 host+port+code 与可选 SSID≤2；账户加入向导 **Network 步即可扫码**，完整载荷预填后仅需家庭称呼即可 join；draft 存短码不存 JSON |
 | 建家 | 输入 NAS 部署时设置的一次性初始化口令；仅随本次请求发送，结束后立即清除 |
 | 引导 | 账户**首屏**为家庭概览（家庭名、成员人数、宝宝、一句结果向同步状态）；未加入用「新建/加入」家庭向导；网络/SSID/技术原因在**网络设置**二次界面；不用首屏三步条或独立 PRD 说明段落 |
-| 身份 | 建家/加入硬必填**家庭称呼**（自由文本，引导「我是宝宝的？」）；共享**家庭名**仅 owner 可改；成员列表管理员标 ★；见 ADR-0002 |
+| 身份 | 建家/加入硬必填**家庭称呼**（自由文本，引导「我是宝宝的？」）；共享**家庭名**仅 owner 可改；成员列表管理员标 ★；见 ADR-0009 |
 | 共享范围 | 加入前用结构化元素展示“育儿记录与日志图片会共享、个人设置留本机”；不用整段警示文字 |
 | 下拉 | 记录页下拉 → 若 allowSync 则 pull+push |
 | 错误 | health 失败 → 「无法连接家庭服务器，请确认在家中 Wi‑Fi」；禁止堆栈/IP 英文裸奔为主文案；首屏只用结果向短句，细节进网络设置 |
@@ -768,7 +769,8 @@ Record 与 CarePlan 共享以下 current-wire 约束：
 
 ## 14. 当前实现清单（工程）
 
-> **票单（issue tracker）：** [`.scratch/home-lan-sync/ISSUES.md`](../../.scratch/home-lan-sync/ISSUES.md)
+> 闭合票不在仓库长期归档；开放工作见 [`.scratch/`](../../.scratch/) 与
+> [`docs/agents/issue-tracker.md`](../agents/issue-tracker.md)。
 
 ### 14.1 NAS `lezi-sync`
 

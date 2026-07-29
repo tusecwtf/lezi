@@ -7,7 +7,7 @@
 ```
 .scratch/<feature>/spec.md + issues/NN-*.md   →  要做什么
 branch + GitHub PR                            →  怎么改、是否可合
-docs/prd/ + CONTEXT.md                        →  合入后产品/用语真源
+docs/prd/ + CONTEXT.md + docs/adr/            →  合入后产品/用语/决策真源
 ```
 
 PR 描述里用相对路径引用票单，例如：

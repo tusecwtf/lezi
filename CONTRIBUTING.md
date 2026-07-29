@@ -9,8 +9,11 @@
 | 功能票 / spec | [`.scratch/`](.scratch/)（见 [`docs/agents/issue-tracker.md`](docs/agents/issue-tracker.md)） | GitHub Issues |
 | 产品规格 | [`docs/prd/`](docs/prd/) | 聊天记录 alone |
 | 领域用语 | [`CONTEXT.md`](CONTEXT.md) | 临时命名 |
+| 架构决策 | [`docs/adr/`](docs/adr/) | 未记录的口头约定 |
 | 代码评审与合并 | **GitHub Pull Request** → `master` | 仅局域网 push 无 PR（紧急热修除外） |
 | 安全报告 | [`SECURITY.md`](SECURITY.md) | 公开 issue 贴 exploit |
+
+文档目录与 ask-matt 流向见 [`docs/README.md`](docs/README.md)。
 
 ## License
 

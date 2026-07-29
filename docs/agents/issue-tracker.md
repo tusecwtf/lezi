@@ -19,8 +19,12 @@ Create or update files under `.scratch/<feature-slug>/`.
 
 ## Labels
 
-See `docs/agents/triage-labels.md`. Those strings are for the `Status:` line in
+See [`triage-labels.md`](./triage-labels.md). Those strings are for the `Status:` line in
 Markdown tickets. They are **not** automatically mirrored as GitHub labels.
+
+## Domain docs
+
+Read glossary and ADRs before writing tickets: [`domain.md`](./domain.md).
 
 ## Pull requests
 

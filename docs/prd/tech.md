@@ -76,8 +76,8 @@
 
 **运行环境 / 验收状态**：本机 Docker `lezi-sync` 与双模拟器前台交叉可见路径已验证；
 严格 live 服务端路径还完成了建家、邀请码加入、双向协议和头像 ACL。物理 NAS 生产、
-双真机和相机扫码仍 open，详见
-[Ticket 09](../../.scratch/home-lan-sync/issues/09-dual-device-foreground-acceptance.md)。
+双真机和相机扫码仍 open；完整同步验收边界见
+[sync-home-lan.md](./sync-home-lan.md)。
 
 ---
 

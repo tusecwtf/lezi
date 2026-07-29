@@ -7,7 +7,7 @@
 | **Date** | 2026-07-28 |
 | **Status** | Draft（rev 3 — re-review minor/nit polish） |
 | **Related PRD** | `docs/prd/sync-home-lan.md` §9.3 / §11；`docs/prd/ui.md` §5.7 |
-| **Related ADR** | ADR-0002（账户概览与称呼）；ADR-0008（仅 fresh-current） |
+| **Related ADR** | ADR-0009（账户概览与称呼）；ADR-0008（仅 fresh-current） |
 
 ---
 
@@ -1070,5 +1070,5 @@ Must 范围采用此路径；概览扫码为 Should。
 - `feature/onboarding/.../OnboardingScreen.kt`
 - `docs/prd/sync-home-lan.md` §9.3、§9b、§11
 - `docs/prd/ui.md` §5.7
-- `docs/adr/0002-family-identity-and-account-overview.md`
+- `docs/adr/0009-family-identity-and-account-overview.md`
 - `docs/adr/0008-support-only-fresh-current-product-contracts.md`

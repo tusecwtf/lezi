@@ -45,7 +45,7 @@ Family 可选 Outbox                  # 上行队列
 | `created_at` | |
 
 无强制账号体系；身份展示以家庭 membership 的称呼为准，不引入跨设备照护者实体。
-见 [`docs/adr/0002-family-identity-and-account-overview.md`](../adr/0002-family-identity-and-account-overview.md)。
+见 [`docs/adr/0009-family-identity-and-account-overview.md`](../adr/0009-family-identity-and-account-overview.md)。
 
 ### 3.2 Family
 
