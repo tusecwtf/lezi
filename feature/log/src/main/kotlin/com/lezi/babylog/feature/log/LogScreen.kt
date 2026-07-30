@@ -154,7 +154,7 @@ data class LogUiState(
     val loading: Boolean = true,
     val baby: Baby? = null,
     val babies: List<Baby> = emptyList(),
-    val day: LocalDate = LocalDate.now(),
+    val day: LocalDate,
     val records: List<Record> = emptyList(),
     val summary: DailySummary = DailySummary(),
     val sleepLanes: List<TimelineLaneSegment> = emptyList(),
@@ -192,8 +192,9 @@ class LogViewModel @Inject constructor(
     private val syncPort: SyncPort,
     private val timelineWindowRepository: TimelineWindowRepository,
 ) : ViewModel() {
-    private val zone = ZoneId.systemDefault()
-    private val dayFlow = MutableStateFlow(LocalDate.now(zone))
+    private val initialScreenTime = SystemRecordScreenClock.snapshot()
+    private val screenTimeFlow = MutableStateFlow(initialScreenTime)
+    private val dayFlow = MutableStateFlow(initialScreenTime.localDate)
     private val refreshing = MutableStateFlow(false)
     private val deviceLayoutWriter = DeviceLayoutSnapshotWriter(viewModelScope) { snapshot ->
         settingsStore.setDeviceLayoutSnapshot(snapshot)
@@ -208,9 +209,19 @@ class LogViewModel @Inject constructor(
         settingsStore.settings,
         careLog.observeCustomItems(),
     ) { baby, babies, day, settings, customItems ->
-        LogCombine(baby, babies, day, settings, customItems)
+        LogCombine(
+            baby = baby,
+            babies = babies,
+            day = day,
+            settings = settings,
+            customItems = customItems,
+            screenTime = initialScreenTime,
+        )
+    }.combine(screenTimeFlow) { bundle, screenTime ->
+        bundle.copy(screenTime = screenTime)
     }.flatMapLatest { bundle ->
-        val (baby, babies, day, settings, customItems) = bundle
+        val (baby, babies, day, settings, customItems, screenTime) = bundle
+        val zone = screenTime.zoneId
         if (baby == null) {
             flowOf(
                 LogUiState(
@@ -227,7 +238,7 @@ class LogViewModel @Inject constructor(
                     babyId = baby.id,
                     selectedDay = day,
                     zoneId = zone,
-                    nowMillis = RecordTime.currentTimeMillis(),
+                    nowMillis = screenTime.epochMillis,
                 ),
             ).map { snapshot ->
                 val records = snapshot.recordRows.map(TimelineRecordRow::record)
@@ -240,6 +251,7 @@ class LogViewModel @Inject constructor(
                     windowStartMs = window.startMs,
                     windowEndMs = window.endMs,
                     zone = zone,
+                    nowMs = screenTime.epochMillis,
                 )
                 // Rail visibility uses the three-day union; list/summary stay on D.
                 val showDayChart = DayChartCategories.shouldShowDayChart(railRecords)
@@ -273,10 +285,18 @@ class LogViewModel @Inject constructor(
         state.copy(refreshing = isRefreshing)
     }.combine(syncPort.status()) { state, status ->
         state.copy(lastSyncFailed = status == SyncStatus.Error)
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(), LogUiState())
+    }.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(),
+        LogUiState(day = initialScreenTime.localDate),
+    )
 
     fun setExternalDay(day: LocalDate) {
         dayFlow.value = day
+    }
+
+    internal fun setScreenTime(snapshot: RecordScreenTimeSnapshot) {
+        screenTimeFlow.value = snapshot
     }
 
     /** Persist a full device-layout snapshot from 布局编辑态. */
@@ -420,6 +440,7 @@ private data class LogCombine(
     val day: LocalDate,
     val settings: SettingsLocal,
     val customItems: List<CustomRecordItem>,
+    val screenTime: RecordScreenTimeSnapshot,
 )
 
 internal data class TimelineLanes(
@@ -817,10 +838,12 @@ fun LogRoute(
     onMessage: (String) -> Unit = {},
     onLayoutEditModeChanged: (Boolean) -> Unit = {},
     externalDay: LocalDate? = null,
+    clock: RecordScreenClock = SystemRecordScreenClock,
     vm: LogViewModel = hiltViewModel(),
 ) {
     val state by vm.uiState.collectAsStateWithLifecycle()
     val layoutWriteState by vm.deviceLayoutWriteState.collectAsStateWithLifecycle()
+    val screenTime by rememberRecordScreenTime(clock)
     val layoutUndoScope = rememberCoroutineScope()
     var showMore by remember { mutableStateOf(false) }
     var showLayoutEdit by remember { mutableStateOf(false) }
@@ -886,8 +909,9 @@ fun LogRoute(
     var dayChartFilterState by remember {
         mutableStateOf(DayChartFilterState(context = dayChartContext))
     }
-    val today = LocalDate.now()
-    val zone = ZoneId.systemDefault()
+    val today = screenTime.localDate
+    val zone = screenTime.zoneId
+    val nowMs = screenTime.epochMillis
     val journal = LeziThemeExt.isJournal
     val contextualDayChartFilterState = remember(dayChartFilterState, dayChartContext) {
         reduceDayChartFilter(
@@ -949,6 +973,7 @@ fun LogRoute(
         val clickedAt = RecordTime.newDraftTimestamp(
             selectedDate = if (wakingCurrentSleep) today else state.day,
             zone = zone,
+            now = screenTime.zonedDateTime,
         )
         val lastAmount = state.records
             .firstOrNull { it.type == type }
@@ -976,22 +1001,24 @@ fun LogRoute(
             vm.setExternalDay(externalDay)
         }
     }
+    LaunchedEffect(screenTime) {
+        vm.setScreenTime(screenTime)
+    }
 
     // Now line: wall-clock absolute time on the 72h content axis; only when
     // now falls inside [D−1 00:00, D+1 24:00). Viewport start is day-keyed UI
     // state: init from today/now-centered or non-today D+peek defaults; pan
-    // clamps inside 72h and never mutates D / summary / list. Reset only on
-    // selected-day change (including 「返回今天」).
+    // clamps inside 72h and never mutates D / summary / list. Reset when the
+    // selected day, local date, or time zone changes.
     val threeDayWindow = remember(state.day, zone) { threeDayContentWindow(state.day, zone) }
-    val nowMs = System.currentTimeMillis()
     val nowContentMinute = nowContentMinuteInWindow(nowMs, threeDayWindow)
     val timelineViewportDuration = defaultThreeDayViewportDurationMinutes()
-    var timelineViewportStart by remember(state.day) {
+    var timelineViewportStart by remember(state.day, today, zone) {
         mutableIntStateOf(
             initialThreeDayViewportStartMinutes(
                 selectedDay = state.day,
                 today = today,
-                nowMs = System.currentTimeMillis(),
+                nowMs = nowMs,
                 zone = zone,
                 viewportDurationMinutes = timelineViewportDuration,
             ),
@@ -1330,14 +1357,12 @@ fun LogRoute(
                             }
                         }
                         items(state.pendingPlans, key = { "plan-${it.id}" }) { plan ->
-                            val now = RecordTime.currentTimeMillis()
-                            val effective = plan.effectiveStatus(now)
+                            val effective = plan.effectiveStatus(nowMs)
                             val isMissed = effective == CarePlanStatus.MISSED
                             val title = plan.displayLabel()
-                            val deviceZone = ZoneId.systemDefault()
                             val planZone = runCatching { ZoneId.of(plan.scheduledZoneId) }
-                                .getOrDefault(deviceZone)
-                            val zoneHint = if (planZone != deviceZone) {
+                                .getOrDefault(zone)
+                            val zoneHint = if (planZone != zone) {
                                 val original = Instant.ofEpochMilli(plan.scheduledAt)
                                     .atZone(planZone)
                                     .toLocalTime()
@@ -1397,10 +1422,10 @@ fun LogRoute(
                                     deleteTestTag = "timeline_swipe_delete_plan_${plan.id}",
                                 ) {
                                     RecordRow(
-                                        time = formatClock(plan.scheduledAt),
+                                        time = formatClock(plan.scheduledAt, zone),
                                         title = title,
                                         summary = planSummary,
-                                        relative = relativeTimeLabel(plan.scheduledAt),
+                                        relative = relativeTimeLabel(plan.scheduledAt, nowMs),
                                         // Amber (Yellow) for missed — never danger-red anomaly bang.
                                         // Dirty publish chrome also uses amber via Yellow tone when missed;
                                         // first-publish waiting still Blue for pending-to-do emphasis.
@@ -1530,14 +1555,14 @@ fun LogRoute(
                                 ),
                             ) {
                                 RecordRow(
-                                    time = formatClock(r.timestamp),
+                                    time = formatClock(r.timestamp, zone),
                                     title = title,
                                     summary = timelineRecordSummary(
                                         recordSummaryLine(r),
                                         state.uploaderLabels[r.id],
                                         publishLabel,
                                     ),
-                                    relative = relativeTimeLabel(r.timestamp),
+                                    relative = relativeTimeLabel(r.timestamp, nowMs),
                                     tone = toneOf(r.type),
                                     anomaly =
                                         (r.payload.payload as? SleepPayload)?.anomaly == true ||
