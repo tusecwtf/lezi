@@ -22,7 +22,11 @@ class RecordSettingsMenuTest {
     }
 
     @Test
-    fun legacyHubDestinationsAliasMatchesRecordSettingsOnly() {
-        assertEquals(recordSettingsSections(), recordShortcutHubDestinations())
+    fun legacyRecordShortcutHubSymbolIsAbsent() {
+        val methods = Class.forName(
+            "com.lezi.babylog.feature.settings.RecordAndShortcutSettingsKt",
+        ).declaredMethods.map { it.name }
+
+        assertFalse(methods.any { it.startsWith("recordShortcutHubDestinations") })
     }
 }

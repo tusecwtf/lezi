@@ -48,11 +48,6 @@ interface SettingsStore {
     suspend fun setDeviceLayoutSnapshot(snapshot: DeviceLayoutSnapshot) {
         error("This SettingsStore does not implement atomic device-layout snapshots")
     }
-    suspend fun setItemOrderJson(json: String)
-    suspend fun setCategoryOrderJson(json: String)
-    suspend fun setHiddenItems(items: Set<String>)
-    /** Exactly four catalog keys (or empty strings). Values are normalized on write. */
-    suspend fun setQuickRecordSlots(slots: List<String>)
     /** Monotonically complete the device-local first layout-drag guidance. */
     suspend fun markLayoutDragGuidanceCompleted() {
         error("This SettingsStore does not implement layout drag guidance completion")

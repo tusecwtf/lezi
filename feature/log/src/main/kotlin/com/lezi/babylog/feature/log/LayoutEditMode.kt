@@ -89,6 +89,7 @@ import androidx.compose.ui.zIndex
 import com.lezi.babylog.core.model.RecordItemIdentity
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.availableForNewEntry
+import com.lezi.babylog.core.model.normalizeQuickRecordSlots
 import com.lezi.babylog.core.ui.RecordSection
 import com.lezi.babylog.core.ui.RecordTypeIcon
 import com.lezi.babylog.core.ui.catalogSectionForKey
@@ -360,7 +361,7 @@ internal fun LayoutEditCanvas(
         }
     }
     val slots = remember(prefs.quickRecordSlots) {
-        normalizeStoredQuickSlots(prefs.quickRecordSlots)
+        normalizeQuickRecordSlots(prefs.quickRecordSlots)
     }
     val sections = remember(prefs, known) { layoutEditVisibleSections(prefs, known) }
     val fullCategoryOrder = remember(prefs.categoryOrderJson) {
@@ -1310,25 +1311,6 @@ internal fun LayoutEditCanvas(
                 .testTag("layout_edit_undo_snackbar"),
         )
     }
-}
-
-/** @deprecated Prefer [LayoutEditCanvas]. */
-@Composable
-internal fun LayoutEditModeDialog(
-    prefs: DeviceLayoutPrefs,
-    customItems: List<CustomRecordItem>,
-    onIntent: (LayoutEditIntent) -> Unit,
-    onDone: () -> Unit,
-    onOpenCustomManage: () -> Unit,
-) {
-    LayoutEditCanvas(
-        prefs = prefs,
-        customItems = customItems,
-        onIntent = onIntent,
-        onDone = onDone,
-        onOpenCustomManage = onOpenCustomManage,
-        modifier = Modifier.fillMaxSize(),
-    )
 }
 
 @Composable

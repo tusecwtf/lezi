@@ -27,6 +27,7 @@ import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
+import com.lezi.babylog.core.model.DeviceLayoutSnapshot
 import com.lezi.babylog.core.model.NEXT_FEED_PLAN_MARKER
 import com.lezi.babylog.core.model.RecordItemIdentity
 import com.lezi.babylog.core.model.RecordType
@@ -3978,7 +3979,9 @@ class CareLogTest {
             nowMillis = now,
         )
         // Local hide must not block fulfill of an already-created plan.
-        fakes.settings.setHiddenItems(setOf("custom:$customId"))
+        fakes.settings.setDeviceLayoutSnapshot(
+            DeviceLayoutSnapshot(hiddenItems = setOf("custom:$customId")),
+        )
         val recordId = care.fulfillCarePlan(
             carePlanId = planId,
             actualTimestamp = now,
@@ -6110,19 +6113,11 @@ private class FakeSettingsStore : SettingsStore {
         return true
     }
 
-    override suspend fun setItemOrderJson(json: String) {
-        order.value = json
+    override suspend fun setDeviceLayoutSnapshot(snapshot: DeviceLayoutSnapshot) {
+        order.value = snapshot.itemOrderJson
+        hidden.value = snapshot.hiddenItems
         publish()
     }
-
-    override suspend fun setCategoryOrderJson(json: String) = Unit
-
-    override suspend fun setHiddenItems(items: Set<String>) {
-        hidden.value = items
-        publish()
-    }
-
-    override suspend fun setQuickRecordSlots(slots: List<String>) = Unit
 
     override suspend fun setTimelineOrder(order: String) = Unit
 

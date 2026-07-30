@@ -749,7 +749,6 @@ fun LeziRoot(
                 LogRoute(
                     externalDay = ui.selectedDate,
                     onOpenComposer = vm::openComposer,
-                    onOpenQuickSlotSettings = { nav.navigate("settings/quick-records") },
                     onGoToday = { vm.setDay(today) },
                     onLayoutEditModeChanged = { active ->
                         logLayoutEditActive = active
@@ -778,15 +777,6 @@ fun LeziRoot(
                     onOpenCalendar = { nav.navigate("calendar") },
                     initiallyShowAddBaby = true,
                     onInitialAddBabyFinished = { nav.popBackStack() },
-                )
-            }
-            composable("settings/quick-records") {
-                SettingsRoute(
-                    onOpenExport = { nav.navigate("export") },
-                    onOpenSearch = { nav.navigate("search") },
-                    onOpenCalendar = { nav.navigate("calendar") },
-                    initiallyShowQuickSlots = true,
-                    onInitialQuickSlotsFinished = { nav.popBackStack() },
                 )
             }
             composable("search") {

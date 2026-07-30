@@ -58,7 +58,6 @@ class LayoutAccessibilityDeviceTest {
         composeRule.setContent {
             LeziTheme(visualStyle = "warm") {
                 OneHandQuickDock(
-                    preferredHand = "right",
                     storedSlots = listOf("", "", "", ""),
                     hiddenTypeKeys = emptySet(),
                     customItems = emptyList(),
@@ -106,7 +105,6 @@ class LayoutAccessibilityDeviceTest {
         composeRule.setContent {
             LeziTheme(visualStyle = "warm") {
                 OneHandQuickDock(
-                    preferredHand = "right",
                     storedSlots = listOf("", "", "", ""),
                     hiddenTypeKeys = emptySet(),
                     customItems = emptyList(),

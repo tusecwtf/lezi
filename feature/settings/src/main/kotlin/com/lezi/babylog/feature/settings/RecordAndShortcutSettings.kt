@@ -44,10 +44,6 @@ internal enum class RecordSettingsSection(val title: String, val subtitle: Strin
 internal fun recordSettingsSections(): List<RecordSettingsSection> =
     RecordSettingsSection.entries.toList()
 
-/** @deprecated Prefer [recordSettingsSections]; kept name for any external test refs. */
-internal fun recordShortcutHubDestinations(): List<RecordSettingsSection> =
-    recordSettingsSections()
-
 /**
  * Single-page 记录设置: 分项目 + 护理计划/日历 in one dialog.
  * Layout / quick slots / all-items order live only on the record-page 布局编辑态.

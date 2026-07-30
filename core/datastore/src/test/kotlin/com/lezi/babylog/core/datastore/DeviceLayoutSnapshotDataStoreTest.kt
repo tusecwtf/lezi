@@ -22,6 +22,24 @@ import org.junit.Test
 
 class DeviceLayoutSnapshotDataStoreTest {
     @Test
+    fun settingsStoreExposesOnlyAtomicDeviceLayoutWriter() {
+        val layoutWriterNames = SettingsStore::class.java.methods
+            .map { it.name }
+            .filter {
+                it in setOf(
+                    "setDeviceLayoutSnapshot",
+                    "setItemOrderJson",
+                    "setCategoryOrderJson",
+                    "setHiddenItems",
+                    "setQuickRecordSlots",
+                )
+            }
+            .toSet()
+
+        assertEquals(setOf("setDeviceLayoutSnapshot"), layoutWriterNames)
+    }
+
+    @Test
     fun dragGuidanceStartsIncompleteAndCompletionSurvivesRestart() = runBlocking {
         val store = RecordingPreferencesDataStore()
         val firstProcess = SettingsDataSource(store)
@@ -104,7 +122,7 @@ class DeviceLayoutSnapshotDataStoreTest {
     }
 
     @Test
-    fun futureSnapshotIsReadOnlyAndNeverOverwrittenByLegacySetters() = runBlocking {
+    fun futureSnapshotIsReadOnlyAndNeverOverwrittenByCurrentAtomicWriter() = runBlocking {
         val key = stringPreferencesKey("device_layout_snapshot_json")
         val raw = """{"version":${DEVICE_LAYOUT_SNAPSHOT_VERSION + 1},"quickRecordSlots":["sleep","","",""],"hiddenItems":["pee"],"itemOrderJson":"[]","categoryOrderJson":"[]","futureField":"kept"}"""
         val store = RecordingPreferencesDataStore(mutablePreferencesOf(key to raw))
@@ -114,9 +132,11 @@ class DeviceLayoutSnapshotDataStoreTest {
         assertEquals(DEVICE_LAYOUT_SNAPSHOT_VERSION + 1, read.version)
         assertEquals(listOf("sleep", "", "", ""), read.quickRecordSlots)
         assertEquals(setOf("pee"), read.hiddenItems)
-        assertSuspendFails<IllegalArgumentException> { source.setHiddenItems(emptySet()) }
+        assertSuspendFails<IllegalArgumentException> {
+            source.setDeviceLayoutSnapshot(read.copy(hiddenItems = emptySet()))
+        }
         assertEquals(raw, store.data.first()[key])
-        assertEquals(1, store.updateCount)
+        assertEquals(0, store.updateCount)
     }
 
     private class RecordingPreferencesDataStore(

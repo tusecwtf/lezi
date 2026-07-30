@@ -14,6 +14,7 @@ import com.lezi.babylog.core.model.DeviceLayoutSnapshot
 import com.lezi.babylog.core.model.QUICK_RECORD_SLOT_COUNT
 import com.lezi.babylog.core.model.SettingsLocal
 import com.lezi.babylog.core.model.normalizeDeviceLayoutSnapshot
+import com.lezi.babylog.core.model.normalizeQuickRecordSlots
 import com.lezi.babylog.core.model.requireCurrentDeviceLayoutVersion
 import java.util.UUID
 import javax.inject.Inject
@@ -165,42 +166,6 @@ class SettingsDataSource @Inject constructor(
         requireCurrentDeviceLayoutVersion(normalized)
         dataStore.edit { prefs ->
             writeDeviceLayoutSnapshot(prefs, normalized)
-        }
-    }
-
-    override suspend fun setItemOrderJson(json: String) {
-        dataStore.edit { prefs ->
-            writeDeviceLayoutSnapshot(
-                prefs,
-                readDeviceLayoutSnapshot(prefs).copy(itemOrderJson = json),
-            )
-        }
-    }
-
-    override suspend fun setCategoryOrderJson(json: String) {
-        dataStore.edit { prefs ->
-            writeDeviceLayoutSnapshot(
-                prefs,
-                readDeviceLayoutSnapshot(prefs).copy(categoryOrderJson = json),
-            )
-        }
-    }
-
-    override suspend fun setHiddenItems(items: Set<String>) {
-        dataStore.edit { prefs ->
-            writeDeviceLayoutSnapshot(
-                prefs,
-                readDeviceLayoutSnapshot(prefs).copy(hiddenItems = items),
-            )
-        }
-    }
-
-    override suspend fun setQuickRecordSlots(slots: List<String>) {
-        dataStore.edit { prefs ->
-            writeDeviceLayoutSnapshot(
-                prefs,
-                readDeviceLayoutSnapshot(prefs).copy(quickRecordSlots = slots),
-            )
         }
     }
 
@@ -494,8 +459,5 @@ internal fun parseQuickRecordSlots(raw: String?): List<String> {
 }
 
 // Canonical implementation lives on core.model so feature docks and store share one pad rule.
-internal fun normalizeQuickRecordSlots(slots: List<String>): List<String> =
-    com.lezi.babylog.core.model.normalizeQuickRecordSlots(slots)
-
 internal fun encodeQuickRecordSlots(slots: List<String>): String =
     normalizeQuickRecordSlots(slots).joinToString(",")

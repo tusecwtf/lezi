@@ -39,14 +39,6 @@ internal fun CustomItemSettingsDialog(
     )
 }
 
-/** @deprecated Prefer [com.lezi.babylog.core.ui.customItemDialogScopeGuidance]; tests may still call. */
-internal fun customItemDialogScopeGuidance(): String =
-    com.lezi.babylog.core.ui.customItemDialogScopeGuidance(CustomItemManageMode.Settings)
-
-/** @deprecated Prefer core.ui; kept for existing unit tests. */
-internal fun customItemLocalHideHint(manageable: Boolean, locallyHidden: Boolean): String =
-    com.lezi.babylog.core.ui.customItemLocalHideHint(manageable, locallyHidden)
-
 internal suspend fun executeCustomItemDelete(
     itemId: Long,
     deleteById: suspend (Long) -> Unit,

@@ -61,6 +61,7 @@ import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.RecordItemIdentity
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SettingsLocal
+import com.lezi.babylog.core.model.deviceLayoutSnapshot
 import com.lezi.babylog.core.model.limitBabyNicknameInput
 import com.lezi.babylog.core.model.birthWeightValidationError
 import com.lezi.babylog.core.ui.BabyAvatar
@@ -229,35 +230,17 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch { settingsStore.setShowAvgSleep(enabled) }
     fun setComparePrevWeek(enabled: Boolean) =
         viewModelScope.launch { settingsStore.setComparePrevWeek(enabled) }
-    fun moveRecordType(typeKey: String, delta: Int) = viewModelScope.launch {
-        val customs = ui.value.customItems.map { it.id }
-        val known = com.lezi.babylog.core.ui.knownCatalogKeys(customs)
-        val next = com.lezi.babylog.core.ui.moveCatalogKeyWithinSection(
-            itemOrderJson = ui.value.settings.itemOrderJson,
-            catalogKey = typeKey,
-            delta = delta,
-            allKnownKeys = known,
-        )
-        settingsStore.setItemOrderJson(next)
-    }
-
-    fun setItemOrderJson(json: String) = viewModelScope.launch {
-        settingsStore.setItemOrderJson(json)
-    }
-
-    fun setCategoryOrderJson(json: String) = viewModelScope.launch {
-        settingsStore.setCategoryOrderJson(json)
-    }
-
     fun toggleHiddenItem(typeKey: String) = viewModelScope.launch {
-        val current = ui.value.settings.hiddenItems
-        settingsStore.setHiddenItems(
-            if (typeKey in current) current - typeKey else current + typeKey,
+        val current = ui.value.settings.deviceLayoutSnapshot()
+        settingsStore.setDeviceLayoutSnapshot(
+            current.copy(
+                hiddenItems = if (typeKey in current.hiddenItems) {
+                    current.hiddenItems - typeKey
+                } else {
+                    current.hiddenItems + typeKey
+                },
+            ),
         )
-    }
-
-    fun setQuickRecordSlots(slots: List<String>) = viewModelScope.launch {
-        settingsStore.setQuickRecordSlots(slots)
     }
 
     fun addBaby(
@@ -336,8 +319,6 @@ fun SettingsRoute(
     onOpenCalendar: () -> Unit = {},
     initiallyShowAddBaby: Boolean = false,
     onInitialAddBabyFinished: () -> Unit = {},
-    initiallyShowQuickSlots: Boolean = false,
-    onInitialQuickSlotsFinished: () -> Unit = {},
     vm: SettingsViewModel = hiltViewModel(),
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
@@ -356,13 +337,6 @@ fun SettingsRoute(
     var showDisplay by remember { mutableStateOf(false) }
     var showRecordSettings by remember { mutableStateOf(false) }
     var showCustomItems by remember { mutableStateOf(false) }
-    // Legacy deep-link initiallyShowQuickSlots: open 记录设置 (layout moved to record page).
-    LaunchedEffect(initiallyShowQuickSlots) {
-        if (initiallyShowQuickSlots) {
-            showRecordSettings = true
-            onInitialQuickSlotsFinished()
-        }
-    }
     var showSystemCalendarSetup by remember { mutableStateOf(false) }
     var localPreferenceBabyId by remember { mutableStateOf<Long?>(null) }
     var localPreferenceError by remember { mutableStateOf<String?>(null) }
@@ -433,6 +407,13 @@ fun SettingsRoute(
                 icon = "☰",
                 actionLabel = "打开记录设置",
                 onClick = { showRecordSettings = true },
+            )
+            SettingsMenuRow(
+                "自定义项目",
+                "创建、重命名、图标与本机显示",
+                icon = "+",
+                actionLabel = "管理自定义项目",
+                onClick = { showCustomItems = true },
             )
             SettingsMenuRow(
                 "显示设置",

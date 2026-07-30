@@ -1,11 +1,10 @@
 package com.lezi.babylog.feature.log
 
-import com.lezi.babylog.core.model.DEFAULT_QUICK_RECORD_SLOTS
 import com.lezi.babylog.core.model.QUICK_RECORD_SLOT_COUNT
 import com.lezi.babylog.core.model.RecordItemIdentity
 import com.lezi.babylog.core.model.RecordType
-import com.lezi.babylog.core.model.availableForNewEntry
 import com.lezi.babylog.core.model.isAvailableForNewEntry
+import com.lezi.babylog.core.model.normalizeQuickRecordSlots
 import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.domain.CustomRecordItem
 
@@ -89,22 +88,6 @@ internal fun quickDockIdleContainerIsEmphasized(cell: QuickDockCell): Boolean =
     }
 
 /**
- * Candidate for binding a quick slot (enabled built-ins + concrete customs).
- */
-internal data class QuickSlotCandidate(
-    val identity: RecordItemIdentity,
-    val label: String,
-    val catalogKey: String = identity.catalogKey,
-)
-
-/**
- * Normalize stored slot keys to exactly [QUICK_RECORD_SLOT_COUNT] entries.
- * Delegates to [com.lezi.babylog.core.model.normalizeQuickRecordSlots] (single source).
- */
-internal fun normalizeStoredQuickSlots(slots: List<String>): List<String> =
-    com.lezi.babylog.core.model.normalizeQuickRecordSlots(slots)
-
-/**
  * Resolve one stored catalog key against enabled built-ins and concrete custom items.
  * Does **not** auto-fill replacements when the ref is missing, hidden, or deleted.
  */
@@ -151,21 +134,9 @@ internal fun resolveQuickSlots(
     hiddenItems: Set<String>,
     customItems: List<CustomRecordItem>,
 ): List<QuickDockCell> =
-    normalizeStoredQuickSlots(storedSlots).map { key ->
+    normalizeQuickRecordSlots(storedSlots).map { key ->
         resolveQuickSlot(key, hiddenItems, customItems)
     }
-
-/**
- * Everyday dock order: absolute left-to-right [slot0..slot3][更多].
- * Preferred hand no longer mirrors the dock (惯用手 remains for dial/form chrome only).
- *
- * @param preferredHand retained for call-site compatibility; ignored.
- */
-@Suppress("UNUSED_PARAMETER")
-internal fun oneHandQuickDockOrder(
-    preferredHand: String,
-    slots: List<QuickDockCell>,
-): List<QuickDockCell> = fixedQuickDockOrder(slots)
 
 /** Fixed everyday dock: four slots then 更多. */
 internal fun fixedQuickDockOrder(slots: List<QuickDockCell>): List<QuickDockCell> {
@@ -176,32 +147,8 @@ internal fun fixedQuickDockOrder(slots: List<QuickDockCell>): List<QuickDockCell
     return four + QuickDockCell.More
 }
 
-/** Enabled built-ins and concrete custom definitions available as slot candidates. */
-internal fun quickSlotCandidates(
-    hiddenItems: Set<String>,
-    customItems: List<CustomRecordItem>,
-): List<QuickSlotCandidate> {
-    val builtIns = RecordType.availableForNewEntry()
-        .filter { it.key !in hiddenItems }
-        .map {
-            QuickSlotCandidate(
-                identity = RecordItemIdentity.builtIn(it),
-                label = it.presentation.label,
-            )
-        }
-    val customs = customItems
-        .filter { RecordItemIdentity.customCatalogKey(it.id) !in hiddenItems }
-        .map {
-            QuickSlotCandidate(
-                identity = RecordItemIdentity.custom(it.id),
-                label = it.name,
-            )
-        }
-    return builtIns + customs
-}
-
 /**
- * Swap two slot indices (settings interim reorder without full drag).
+ * Swap two slot indices in layout edit mode.
  * Indices outside 0..3 are ignored.
  */
 internal fun swapQuickRecordSlots(
@@ -209,7 +156,7 @@ internal fun swapQuickRecordSlots(
     fromIndex: Int,
     toIndex: Int,
 ): List<String> {
-    val normalized = normalizeStoredQuickSlots(slots).toMutableList()
+    val normalized = normalizeQuickRecordSlots(slots).toMutableList()
     if (fromIndex !in normalized.indices || toIndex !in normalized.indices) return normalized
     if (fromIndex == toIndex) return normalized
     val tmp = normalized[fromIndex]
@@ -232,7 +179,7 @@ internal fun assignQuickRecordSlot(
     index: Int,
     catalogKey: String,
 ): List<String> {
-    val normalized = normalizeStoredQuickSlots(slots).toMutableList()
+    val normalized = normalizeQuickRecordSlots(slots).toMutableList()
     if (index !in normalized.indices) return normalized
     val key = catalogKey.trim()
     if (key.isEmpty()) return normalized
@@ -256,11 +203,8 @@ internal fun clearQuickRecordSlot(
     slots: List<String>,
     index: Int,
 ): List<String> {
-    val normalized = normalizeStoredQuickSlots(slots).toMutableList()
+    val normalized = normalizeQuickRecordSlots(slots).toMutableList()
     if (index !in normalized.indices) return normalized
     normalized[index] = ""
     return normalized
 }
-
-/** Default value for first-run / missing preference. */
-internal fun defaultQuickRecordSlots(): List<String> = DEFAULT_QUICK_RECORD_SLOTS

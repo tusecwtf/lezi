@@ -3,6 +3,7 @@ package com.lezi.babylog.feature.log
 import com.lezi.babylog.core.model.DEVICE_LAYOUT_SNAPSHOT_VERSION
 import com.lezi.babylog.core.model.DeviceLayoutSnapshot
 import com.lezi.babylog.core.model.QUICK_RECORD_SLOT_COUNT
+import com.lezi.babylog.core.model.normalizeQuickRecordSlots
 import com.lezi.babylog.core.ui.RecordSection
 import com.lezi.babylog.core.ui.addToLocalDeleted
 import com.lezi.babylog.core.ui.appendCatalogKeyToSectionEnd
@@ -94,7 +95,7 @@ internal fun reduceLayoutEdit(
             val key = intent.catalogKey.trim()
             if (key.isEmpty()) prefs
             else {
-                val clearedSlots = normalizeStoredQuickSlots(prefs.quickRecordSlots).map { slot ->
+                val clearedSlots = normalizeQuickRecordSlots(prefs.quickRecordSlots).map { slot ->
                     if (slot == key) "" else slot
                 }
                 prefs.copy(

@@ -113,6 +113,6 @@
 ## Implementation notes
 
 - 纯逻辑：`LocalLayoutEditPolicy` / `QuickRecordSlots` / `RecordCatalogOrder.moveCatalogKeyToIndexInSection`。
-- UI：`LayoutEditCanvas` 替换 `LayoutEditModeDialog`；`RecordCatalogCard`、`RecordCatalogVisualSpec` 同时服务“添加记录”和编辑目录；`QuickDockVisualSpec` 保持日常/编辑 Dock 几何连续。`LogScreen` 通知根容器隐藏日期与主 tabs，编辑页顶栏显示“编辑布局 / 帮助 / 完成”。
+- UI：生产与测试只使用 `LayoutEditCanvas`，不保留 dialog/全屏兼容包装；`RecordCatalogCard`、`RecordCatalogVisualSpec` 同时服务“添加记录”和编辑目录；`QuickDockVisualSpec` 保持日常/编辑 Dock 几何连续。`LogScreen` 通知根容器隐藏日期与主 tabs，编辑页顶栏显示“编辑布局 / 帮助 / 完成”。
 - 持久化：版本化 `DeviceLayoutSnapshot` 在一个 DataStore 事务内保存四槽、隐藏集合、类内序与类别序；FIFO writer 串行完整快照并让完成/返回等待最后写入。失败保留上一份耐久值并可重试，未来版本只读拒写；该状态永不进入家庭同步。
 - 测试：权威 `LayoutDragSession` 覆盖完整命中矩阵、互斥目标、陈旧 token/revision 与取消；`LayoutEdgeAutoScrollPolicy` 覆盖授权来源、上下边缘速度、边界、小视口与固定目标抢占；Compose 设备测试在 320×640、放大字体的 24 项目录中验证持续滚到末项、取消后稳定与无误提交。现有 Drop Matrix、类别拖动和本机已删除设备测试继续证明精确投放/no-op；reducer/writer 断言精确顺序、槽唯一与 latest-wins。

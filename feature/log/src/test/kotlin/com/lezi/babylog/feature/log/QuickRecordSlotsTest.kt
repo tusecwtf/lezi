@@ -5,6 +5,7 @@ import com.lezi.babylog.core.model.RecordItemIdentity
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.domain.CustomRecordItem
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -15,6 +16,26 @@ class QuickRecordSlotsTest {
         iconSlot = 2,
         sortOrder = 0,
     )
+
+    @Test
+    fun migrationCompatibilitySymbolsAreAbsent() {
+        val quickSlotMethods = Class.forName(
+            "com.lezi.babylog.feature.log.QuickRecordSlotsKt",
+        ).declaredMethods.map { it.name }
+        val layoutMethods = Class.forName(
+            "com.lezi.babylog.feature.log.LayoutEditModeKt",
+        ).declaredMethods.map { it.name }
+
+        assertFalse(
+            quickSlotMethods.any {
+                it.startsWith("normalizeStoredQuickSlots") ||
+                    it.startsWith("oneHandQuickDockOrder") ||
+                    it.startsWith("defaultQuickRecordSlots") ||
+                    it.startsWith("quickSlotCandidates")
+            },
+        )
+        assertFalse(layoutMethods.any { it.startsWith("LayoutEditModeDialog") })
+    }
 
     @Test
     fun emptyAndInvalidRefsBlankWithoutAutoFill() {
@@ -53,7 +74,7 @@ class QuickRecordSlotsTest {
             ),
             slots,
         )
-        val dock = oneHandQuickDockOrder("left", slots)
+        val dock = fixedQuickDockOrder(slots)
         assertEquals(5, dock.size)
         assertEquals(QuickDockCell.More, dock.last())
     }
@@ -119,18 +140,15 @@ class QuickRecordSlotsTest {
             hiddenItems = emptySet(),
             customItems = emptyList(),
         )
-        val left = oneHandQuickDockOrder("left", slots)
-        val right = oneHandQuickDockOrder("right", slots)
-        assertEquals(left, right)
-        assertEquals(5, left.size)
-        assertEquals(QuickDockCell.More, left.last())
-        assertTrue(left.first() is QuickDockCell.Bound)
-        assertEquals("pee", (left.first() as QuickDockCell.Bound).catalogKey)
+        val dock = fixedQuickDockOrder(slots)
+        assertEquals(5, dock.size)
+        assertEquals(QuickDockCell.More, dock.last())
+        assertTrue(dock.first() is QuickDockCell.Bound)
+        assertEquals("pee", (dock.first() as QuickDockCell.Bound).catalogKey)
         assertEquals(
             "formula",
-            (left[3] as QuickDockCell.Bound).catalogKey,
+            (dock[3] as QuickDockCell.Bound).catalogKey,
         )
-        assertEquals(fixedQuickDockOrder(slots), left)
     }
 
     @Test
@@ -245,17 +263,4 @@ class QuickRecordSlotsTest {
         assertEquals(listOf("pee", "", "", "sleep"), next)
     }
 
-    @Test
-    fun candidatesExcludeHiddenItemsAndBareCustom() {
-        val candidates = quickSlotCandidates(
-            hiddenItems = setOf("pee", "custom:12"),
-            customItems = listOf(customTouch, CustomRecordItem(3, "药", 0, 1)),
-        )
-        val keys = candidates.map { it.catalogKey }
-        assertTrue("pee" !in keys)
-        assertTrue("custom:12" !in keys)
-        assertTrue("custom" !in keys)
-        assertTrue("custom:3" in keys)
-        assertTrue("formula" in keys)
-    }
 }

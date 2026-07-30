@@ -870,7 +870,6 @@ private sealed interface ListDeleteTarget {
 @Composable
 fun LogRoute(
     onOpenComposer: (RecordComposerRequest) -> Unit,
-    onOpenQuickSlotSettings: () -> Unit = {},
     onGoToday: () -> Unit,
     onMessage: (String) -> Unit = {},
     onLayoutEditModeChanged: (Boolean) -> Unit = {},
@@ -1710,7 +1709,6 @@ fun LogRoute(
                 }
             }
             OneHandQuickDock(
-                preferredHand = state.settings.preferredHand,
                 storedSlots = state.settings.quickRecordSlots,
                 hiddenTypeKeys = state.settings.hiddenItems,
                 customItems = state.customItems,
@@ -1816,10 +1814,6 @@ fun LogRoute(
             },
         )
     }
-
-    // Keep parameter referenced so nav call sites still compile during migration.
-    @Suppress("UNUSED_EXPRESSION")
-    onOpenQuickSlotSettings
 
     publishChromeRecord?.let { target ->
         AlertDialog(
@@ -1965,7 +1959,6 @@ private val CustomSlotIcons = com.lezi.babylog.core.ui.CUSTOM_ITEM_ICON_GLYPHS
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun OneHandQuickDock(
-    preferredHand: String,
     storedSlots: List<String>,
     hiddenTypeKeys: Set<String>,
     customItems: List<CustomRecordItem>,
@@ -1980,8 +1973,8 @@ internal fun OneHandQuickDock(
     val resolved = remember(storedSlots, hiddenTypeKeys, customItems) {
         resolveQuickSlots(storedSlots, hiddenTypeKeys, customItems)
     }
-    val cells = remember(preferredHand, resolved) {
-        oneHandQuickDockOrder(preferredHand, resolved)
+    val cells = remember(resolved) {
+        fixedQuickDockOrder(resolved)
     }
     Surface(
         modifier = modifier
