@@ -14,7 +14,29 @@ import org.junit.Test
 class BuildTimelineLanesTest {
     private val zone: ZoneId = ZoneId.of("Asia/Shanghai")
     private val day: LocalDate = LocalDate.of(2026, 7, 22)
-    private val window = threeDayContentWindow(day, zone)
+    private val axis = ThreeDayTimelineAxis(day, zone)
+
+    @Test
+    fun springForwardRecordsAndSleepUseTheSameDynamicAxis() {
+        val dstZone = ZoneId.of("America/New_York")
+        val dstDay = LocalDate.of(2026, 3, 8)
+        val axis = ThreeDayTimelineAxis(dstDay, dstZone)
+        val sleepStart = dstDay.atTime(1, 30).atZone(dstZone).toInstant().toEpochMilli()
+        val sleepEnd = dstDay.atTime(3, 30).atZone(dstZone).toInstant().toEpochMilli()
+        val nextMidnight = dstDay.plusDays(1).atStartOfDay(dstZone).toInstant().toEpochMilli()
+
+        val lanes = buildTimelineLanes(
+            records = listOf(
+                record(100, RecordType.SLEEP, sleepStart, endTimestamp = sleepEnd),
+                record(101, RecordType.PEE, nextMidnight),
+            ),
+            axis = axis,
+        )
+
+        val sleep = lanes.sleep.single()
+        assertEquals(60, sleep.endMinOfDay - sleep.startMinOfDay)
+        assertEquals(axis.primaryEndExclusiveMinutes, lanes.care.single().startMinOfDay)
+    }
 
     @Test
     fun overnightSleepIsOneContinuousSegmentAcrossMidnight() {
@@ -31,9 +53,7 @@ class BuildTimelineLanesTest {
                     payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
                 ),
             ),
-            windowStartMs = window.startMs,
-            windowEndMs = window.endMs,
-            zone = zone,
+            axis = axis,
         )
 
         assertEquals(1, lanes.sleep.size)
@@ -63,9 +83,7 @@ class BuildTimelineLanesTest {
                     payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
                 ),
             ),
-            windowStartMs = window.startMs,
-            windowEndMs = window.endMs,
-            zone = zone,
+            axis = axis,
         )
 
         assertEquals(1, lanes.sleep.size)
@@ -85,9 +103,7 @@ class BuildTimelineLanesTest {
                 record(11, RecordType.FORMULA, dNoon, payloadJson = """{"amount_ml":120}"""),
                 record(12, RecordType.POOP, dPlus),
             ),
-            windowStartMs = window.startMs,
-            windowEndMs = window.endMs,
-            zone = zone,
+            axis = axis,
         )
 
         assertEquals(1, lanes.feed.size)
@@ -114,9 +130,7 @@ class BuildTimelineLanesTest {
                 record(22, RecordType.PEE, dPlus),
                 record(23, RecordType.FORMULA, dNoon, payloadJson = """{"amount_ml":90}"""),
             ),
-            windowStartMs = window.startMs,
-            windowEndMs = window.endMs,
-            zone = zone,
+            axis = axis,
         )
 
         assertEquals(3, lanes.care.size)
@@ -145,9 +159,7 @@ class BuildTimelineLanesTest {
         val outside = day.minusDays(2).atTime(12, 0).atZone(zone).toInstant().toEpochMilli()
         val lanes = buildTimelineLanes(
             records = listOf(record(99, RecordType.PEE, outside)),
-            windowStartMs = window.startMs,
-            windowEndMs = window.endMs,
-            zone = zone,
+            axis = axis,
         )
         assertTrue(lanes.care.isEmpty())
         assertTrue(lanes.feed.isEmpty())
@@ -171,9 +183,7 @@ class BuildTimelineLanesTest {
                 record(10, RecordType.TEMPERATURE, at),
                 record(11, RecordType.MEDICINE, at),
             ),
-            windowStartMs = window.startMs,
-            windowEndMs = window.endMs,
-            zone = zone,
+            axis = axis,
         )
 
         assertEquals(listOf(LeziRecordColorRole.Sleep), lanes.sleep.map { it.colorRole })

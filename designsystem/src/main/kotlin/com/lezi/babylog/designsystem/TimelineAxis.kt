@@ -3,6 +3,60 @@ package com.lezi.babylog.designsystem
 import kotlin.math.roundToInt
 
 /**
+ * Calendar-derived boundaries for one timeline content window.
+ *
+ * Minutes are elapsed minutes from the window start. Callers that cross a
+ * daylight-saving transition must supply the actual local-midnight offsets;
+ * the geometry never synthesizes a 24-hour day.
+ */
+data class TimelineWindowGeometry(
+    val contentDurationMinutes: Int,
+    val primaryStartMinutes: Int,
+    val primaryEndExclusiveMinutes: Int,
+    val dayBoundaryMinutes: List<Int>,
+) {
+    init {
+        require(contentDurationMinutes > 0) { "content duration must be positive" }
+        require(primaryStartMinutes in 0 until contentDurationMinutes) {
+            "primary start must be inside content"
+        }
+        require(primaryEndExclusiveMinutes in (primaryStartMinutes + 1)..contentDurationMinutes) {
+            "primary end must follow primary start and stay inside content"
+        }
+        require(dayBoundaryMinutes == dayBoundaryMinutes.distinct().sorted()) {
+            "day boundaries must be unique and sorted"
+        }
+        require(dayBoundaryMinutes.all { it in 1 until contentDurationMinutes }) {
+            "day boundaries must be interior content minutes"
+        }
+        require(
+            dayBoundaryMinutes.isEmpty() &&
+                primaryStartMinutes == 0 &&
+                primaryEndExclusiveMinutes == contentDurationMinutes ||
+                primaryStartMinutes in dayBoundaryMinutes &&
+                primaryEndExclusiveMinutes in dayBoundaryMinutes,
+        ) {
+            "primary range must be delimited by real day boundaries"
+        }
+    }
+
+    fun isPrimaryMinute(contentMinute: Int): Boolean =
+        contentMinute in primaryStartMinutes until primaryEndExclusiveMinutes
+
+    fun maxViewportStart(viewportDurationMinutes: Int): Int =
+        (contentDurationMinutes - viewportDurationMinutes.coerceAtLeast(1)).coerceAtLeast(0)
+
+    companion object {
+        val SingleDay = TimelineWindowGeometry(
+            contentDurationMinutes = TimelineAxis.MINUTES_PER_DAY,
+            primaryStartMinutes = 0,
+            primaryEndExclusiveMinutes = TimelineAxis.MINUTES_PER_DAY,
+            dayBoundaryMinutes = emptyList(),
+        )
+    }
+}
+
+/**
  * Shared geometry for the record-page day rail.
  *
  * Content is a continuous multi-day axis in **minutes from the window origin**
@@ -67,7 +121,7 @@ object TimelineAxis {
 
     /**
      * Unlabeled midnight day-boundary content minutes inside the content axis
-     * (D 00:00 and D+1 00:00 for the default 72h window). End-of-window
+     * (D 00:00 and D+1 00:00 for the legacy fixed-duration helper). End-of-window
      * midnights are omitted — they are edges, not interior separators.
      */
     fun dayBoundaryContentMinutes(
@@ -143,7 +197,7 @@ object TimelineAxis {
      * Viewport start after a horizontal finger pan of [deltaPx] (positive =
      * finger moved right). Content follows the finger: drag right reveals
      * earlier times (start decreases). Result is clamped so the full viewport
-     * stays inside the content window — never leaves the 72h span.
+     * stays inside the supplied content window.
      *
      * Prefer accumulating [deltaPx] from drag origin and calling this each
      * frame so clamp stays stable under recomposition.

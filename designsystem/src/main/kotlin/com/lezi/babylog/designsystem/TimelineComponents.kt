@@ -44,6 +44,7 @@ import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -121,6 +122,7 @@ fun TimelineLane(
     onCategorySelect: (String?) -> Unit = {},
     viewportStartMinutes: Int = 0,
     viewportDurationMinutes: Int = TimelineAxis.MINUTES_PER_DAY,
+    windowGeometry: TimelineWindowGeometry = TimelineWindowGeometry.SingleDay,
     /**
      * Shared horizontal pan for the rail. Invoked with cumulative finger delta
      * (px, positive = right) and axis width from the drag origin; caller owns
@@ -164,6 +166,7 @@ fun TimelineLane(
             Modifier
                 .weight(1f)
                 .height(laneHeight)
+                .testTag("timeline_lane_$label")
                 .semantics {
                     contentDescription = if (onHorizontalPan != null) {
                         "$label 轨道，点按可按类型筛选明细，横向拖动可窥视邻日"
@@ -227,7 +230,7 @@ fun TimelineLane(
                 drawLine(grid, Offset(x, 0f), Offset(x, h), strokeWidth = 1f)
             }
             // Unlabeled midnight day boundaries (D / D+1 00:00). Under marks; no date text.
-            for (boundaryMin in TimelineAxis.dayBoundaryContentMinutes()) {
+            for (boundaryMin in windowGeometry.dayBoundaryMinutes) {
                 if (boundaryMin !in viewportStartMinutes..viewportEnd) continue
                 val bx = TimelineAxis.contentMinuteToAxisPx(
                     contentMinute = boundaryMin,
@@ -271,7 +274,7 @@ fun TimelineLane(
                     seg.dayChartCategoryKey == selectedCategoryKey
                 // Selection dim wins when a filter is active; otherwise neighbor peeks soften.
                 val selectionDimmed = hasSelection && !highlighted
-                val neighborDimmed = !TimelineAxis.isPrimaryDayContentMinute(seg.startMinOfDay)
+                val neighborDimmed = !windowGeometry.isPrimaryMinute(seg.startMinOfDay)
                 val markerTarget = markerTargetsByIndex[index]
                 if (markerTarget != null) {
                     val x = markerTarget.centerPx
@@ -357,7 +360,11 @@ fun TimelineLane(
                     if (visEnd <= visStart) return@forEach
                     val barH = if (highlighted) h * 0.72f else h * 0.64f
                     val barTop = (h - barH) / 2f
-                    val slices = sleepPaintSlices(visStart, visEnd)
+                    val slices = sleepPaintSlices(
+                        visStart = visStart,
+                        visEnd = visEnd,
+                        dayBoundaryMinutes = windowGeometry.dayBoundaryMinutes,
+                    )
                     // Highlight ring once around the whole visible span.
                     if (highlighted) {
                         val fullX = TimelineAxis.contentMinuteToAxisPx(
@@ -391,7 +398,7 @@ fun TimelineLane(
                         )
                     }
                     slices.forEach { slice ->
-                        val sliceNeighbor = !TimelineAxis.isPrimaryDayContentMinute(slice.startMin)
+                        val sliceNeighbor = !windowGeometry.isPrimaryMinute(slice.startMin)
                         val fillAlpha = when {
                             highlighted -> 1f
                             selectionDimmed -> 0.28f
@@ -440,11 +447,12 @@ fun TimelineLane(
 internal fun sleepPaintSlices(
     visStart: Int,
     visEnd: Int,
+    dayBoundaryMinutes: List<Int> = TimelineAxis.dayBoundaryContentMinutes(),
 ): List<SleepPaintSlice> {
     if (visEnd <= visStart) return emptyList()
     val cuts = buildList {
         add(visStart)
-        for (boundary in TimelineAxis.dayBoundaryContentMinutes()) {
+        for (boundary in dayBoundaryMinutes) {
             if (boundary in (visStart + 1) until visEnd) add(boundary)
         }
         add(visEnd)
@@ -481,8 +489,9 @@ fun TimelineRailCard(
     legend: List<TimelineLegendEntry> = emptyList(),
     viewportStartMinutes: Int = 0,
     viewportDurationMinutes: Int = TimelineAxis.MINUTES_PER_DAY,
+    windowGeometry: TimelineWindowGeometry = TimelineWindowGeometry.SingleDay,
     /**
-     * When non-null, enables 72h horizontal pan. Caller owns day-keyed viewport
+     * When non-null, enables horizontal pan across [windowGeometry]. Caller owns day-keyed viewport
      * state and must clamp via [TimelineAxis.clampViewportStart] / pan helper.
      */
     onViewportStartChange: ((Int) -> Unit)? = null,
@@ -525,6 +534,7 @@ fun TimelineRailCard(
                     deltaPx = totalDeltaPx,
                     axisLengthPx = axisLengthPx,
                     viewportDurationMinutes = safeViewportDuration,
+                    contentDurationMinutes = windowGeometry.contentDurationMinutes,
                 )
                 onViewportChangeState?.invoke(next)
             }
@@ -610,6 +620,7 @@ fun TimelineRailCard(
             onCategorySelect = onCategorySelect,
             viewportStartMinutes = viewportStartMinutes,
             viewportDurationMinutes = safeViewportDuration,
+            windowGeometry = windowGeometry,
             onHorizontalPan = onHorizontalPan,
             onPanEnd = onPanEnd,
         )
@@ -623,6 +634,7 @@ fun TimelineRailCard(
             onCategorySelect = onCategorySelect,
             viewportStartMinutes = viewportStartMinutes,
             viewportDurationMinutes = safeViewportDuration,
+            windowGeometry = windowGeometry,
             onHorizontalPan = onHorizontalPan,
             onPanEnd = onPanEnd,
         )
@@ -636,6 +648,7 @@ fun TimelineRailCard(
             onCategorySelect = onCategorySelect,
             viewportStartMinutes = viewportStartMinutes,
             viewportDurationMinutes = safeViewportDuration,
+            windowGeometry = windowGeometry,
             onHorizontalPan = onHorizontalPan,
             onPanEnd = onPanEnd,
         )

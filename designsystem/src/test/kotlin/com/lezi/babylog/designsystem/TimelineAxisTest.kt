@@ -8,6 +8,33 @@ import org.junit.Test
 
 class TimelineAxisTest {
     @Test
+    fun dynamicWindowGeometryUsesDstMidnightsInsteadOfFixedDays() {
+        val springForward = TimelineWindowGeometry(
+            contentDurationMinutes = 4_260,
+            primaryStartMinutes = 1_440,
+            primaryEndExclusiveMinutes = 2_820,
+            dayBoundaryMinutes = listOf(1_440, 2_820),
+        )
+
+        assertFalse(springForward.isPrimaryMinute(1_439))
+        assertTrue(springForward.isPrimaryMinute(1_440))
+        assertTrue(springForward.isPrimaryMinute(2_819))
+        assertFalse(springForward.isPrimaryMinute(2_820))
+        assertEquals(listOf(1_440, 2_820), springForward.dayBoundaryMinutes)
+        assertEquals(2_700, springForward.maxViewportStart(viewportDurationMinutes = 1_560))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun dynamicWindowGeometryRejectsSyntheticTwentyFourHourBoundary() {
+        TimelineWindowGeometry(
+            contentDurationMinutes = 4_260,
+            primaryStartMinutes = 1_440,
+            primaryEndExclusiveMinutes = 2_820,
+            dayBoundaryMinutes = listOf(1_440, 2_880),
+        )
+    }
+
+    @Test
     fun threeDayContentIs72Hours() {
         assertEquals(24 * 60, TimelineAxis.MINUTES_PER_DAY)
         assertEquals(3, TimelineAxis.THREE_DAY_CONTENT_DAYS)
@@ -105,6 +132,23 @@ class TimelineAxisTest {
         assertEquals(d0 + 360, slices[1].endMin)
         assertFalse(TimelineAxis.isPrimaryDayContentMinute(slices[0].startMin))
         assertTrue(TimelineAxis.isPrimaryDayContentMinute(slices[1].startMin))
+    }
+
+    @Test
+    fun sleepPaintSlicesUseDynamicDstBoundaries() {
+        val slices = sleepPaintSlices(
+            visStart = 2_760,
+            visEnd = 2_900,
+            dayBoundaryMinutes = listOf(1_440, 2_820),
+        )
+
+        assertEquals(
+            listOf(
+                SleepPaintSlice(startMin = 2_760, endMin = 2_820),
+                SleepPaintSlice(startMin = 2_820, endMin = 2_900),
+            ),
+            slices,
+        )
     }
 
     @Test

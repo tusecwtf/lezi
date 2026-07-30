@@ -111,7 +111,6 @@ import com.lezi.babylog.designsystem.StateContainer
 import com.lezi.babylog.designsystem.StateKind
 import com.lezi.babylog.designsystem.SummaryMetric
 import com.lezi.babylog.designsystem.SwipeEditDeleteRow
-import com.lezi.babylog.designsystem.TimelineAxis
 import com.lezi.babylog.designsystem.TimelineLaneSegment
 import com.lezi.babylog.designsystem.TimelineLegendEntry
 import com.lezi.babylog.designsystem.TimelineRailCard
@@ -179,7 +178,7 @@ data class LogUiState(
     val familyJoined: Boolean = false,
     val lastSyncFailed: Boolean = false,
     /**
-     * Whether to render the 72h time bar: true when **any** of D−1 / D / D+1
+     * Whether to render the three-local-day time bar: true when **any** of D−1 / D / D+1
      * has a day-chart type. Summary / list / legend stay on [records] (day D only).
      */
     val showDayChart: Boolean = false,
@@ -246,13 +245,11 @@ class LogViewModel @Inject constructor(
                 val records = snapshot.recordRows.map(TimelineRecordRow::record)
                 val railRecords = snapshot.railRecordRows.map(TimelineRecordRow::record)
                 val plans = snapshot.planRows.map(TimelineCarePlanRow::carePlan)
-                val window = threeDayContentWindow(day, zone)
+                val timelineAxis = ThreeDayTimelineAxis(day, zone)
                 val summary = CareAggregation.day(records, day, zone).toDailySummary()
                 val lanes = buildTimelineLanes(
                     records = railRecords,
-                    windowStartMs = window.startMs,
-                    windowEndMs = window.endMs,
-                    zone = zone,
+                    axis = timelineAxis,
                     nowMs = screenTime.epochMillis,
                 )
                 // Rail visibility uses the three-day union; list/summary stay on D.
@@ -486,62 +483,6 @@ internal data class TimelineLanes(
     val care: List<TimelineLaneSegment>,
 )
 
-/** Half-open content window [startMs, endMs) for selected day D: D−1 00:00 .. D+2 00:00. */
-internal data class ThreeDayContentWindow(
-    val selectedDay: LocalDate,
-    val startMs: Long,
-    val endMs: Long,
-) {
-    val contentDurationMinutes: Int
-        get() = ((endMs - startMs) / 60_000L).toInt()
-}
-
-/** Re-anchors the 72h content axis whenever the date-bar selected day D changes. */
-internal fun threeDayContentWindow(
-    selectedDay: LocalDate,
-    zone: ZoneId,
-): ThreeDayContentWindow {
-    val start = selectedDay.minusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-    val end = selectedDay.plusDays(2).atStartOfDay(zone).toInstant().toEpochMilli()
-    return ThreeDayContentWindow(selectedDay = selectedDay, startMs = start, endMs = end)
-}
-
-/**
- * Default non-gesture viewport for **non-today** days: primary day D fills most
- * of the canvas with [TimelineAxis.NEIGHBOR_PEEK_MINUTES] of each neighbor on
- * the sides. Today uses [todayThreeDayViewportStartMinutes] instead.
- */
-internal fun defaultThreeDayViewportStartMinutes(): Int =
-    TimelineAxis.defaultViewportStartMinutes()
-
-internal fun defaultThreeDayViewportDurationMinutes(): Int =
-    TimelineAxis.defaultViewportDurationMinutes()
-
-/**
- * Content-axis minute for wall-clock [nowMs] inside [window], or null when
- * now falls outside the 72h window (caller hides the now line).
- */
-internal fun nowContentMinuteInWindow(
-    nowMs: Long,
-    window: ThreeDayContentWindow,
-): Int? = TimelineAxis.contentMinuteIfInWindow(
-    nowMs = nowMs,
-    windowStartMs = window.startMs,
-    windowEndMs = window.endMs,
-)
-
-/**
- * Initial viewport for **today**: center on [nowContentMinute], clamped so the
- * full span stays inside the 72h content (no blank outside).
- */
-internal fun todayThreeDayViewportStartMinutes(
-    nowContentMinute: Int,
-    viewportDurationMinutes: Int = defaultThreeDayViewportDurationMinutes(),
-): Int = TimelineAxis.todayCenteredViewportStartMinutes(
-    nowContentMinute = nowContentMinute,
-    viewportDurationMinutes = viewportDurationMinutes,
-)
-
 /**
  * Day-keyed **initial** viewport for the rail. Today centers on wall-clock now;
  * non-today uses D-primary peeks. Pan mutates a separate UI state that is only
@@ -551,70 +492,53 @@ internal fun initialThreeDayViewportStartMinutes(
     selectedDay: LocalDate,
     today: LocalDate,
     nowMs: Long,
-    zone: ZoneId,
-    viewportDurationMinutes: Int = defaultThreeDayViewportDurationMinutes(),
+    axis: ThreeDayTimelineAxis,
+    viewportDurationMinutes: Int = axis.defaultViewportDurationMinutes,
 ): Int {
+    require(axis.selectedDay == selectedDay) { "timeline axis must match selected day" }
     if (selectedDay == today) {
-        val window = threeDayContentWindow(selectedDay, zone)
-        val nowMin = nowContentMinuteInWindow(nowMs, window)
+        val nowMin = axis.instantToContentMinute(nowMs)
         if (nowMin != null) {
-            return todayThreeDayViewportStartMinutes(nowMin, viewportDurationMinutes)
+            return axis.centeredViewportStartMinutes(nowMin, viewportDurationMinutes)
         }
     }
-    return defaultThreeDayViewportStartMinutes()
+    return axis.defaultViewportStartMinutes
 }
 
 /**
- * Pure pan step for tests/UI: apply finger [deltaPx] to [currentStartMinutes]
- * and clamp inside the 72h content (never mutates selected day D).
- */
-internal fun threeDayViewportStartAfterPan(
-    currentStartMinutes: Int,
-    deltaPx: Float,
-    axisLengthPx: Float,
-    viewportDurationMinutes: Int = defaultThreeDayViewportDurationMinutes(),
-): Int = TimelineAxis.panViewportStart(
-    currentStartMinutes = currentStartMinutes,
-    deltaPx = deltaPx,
-    axisLengthPx = axisLengthPx,
-    viewportDurationMinutes = viewportDurationMinutes,
-)
-
-/**
- * Build rail segments on the continuous content axis (minutes from [windowStartMs]).
+ * Build rail segments on the calendar-derived continuous [axis].
  *
  * Overnight sleep is one unclipped-at-midnight interval clipped only to the
- * 72h window ends. List/summary ownership still uses natural-day aggregation
+ * three-local-day window ends. List/summary ownership still uses natural-day aggregation
  * elsewhere — this function only produces geometry.
  */
 internal fun buildTimelineLanes(
     records: List<Record>,
-    windowStartMs: Long,
-    windowEndMs: Long,
-    zone: ZoneId = ZoneId.systemDefault(),
+    axis: ThreeDayTimelineAxis,
     nowMs: Long = System.currentTimeMillis(),
 ): TimelineLanes {
     val sleep = mutableListOf<TimelineLaneSegment>()
     val feed = mutableListOf<TimelineLaneSegment>()
     val care = mutableListOf<TimelineLaneSegment>()
-    val contentMax = ((windowEndMs - windowStartMs) / 60_000L).toInt().coerceAtLeast(1)
+    fun offsetToStartMinute(offsetMs: Long): Int = (offsetMs / 60_000L).toInt()
 
-    fun contentMinutes(ms: Long): Int =
-        ((ms - windowStartMs) / 60_000L).toInt().coerceIn(0, contentMax)
+    fun offsetToEndExclusiveMinute(offsetMs: Long): Int =
+        ((offsetMs + 59_999L) / 60_000L).toInt()
+            .coerceAtMost(axis.contentDurationMinutes)
 
-    fun clock(ms: Long): String = formatClock(ms, zone)
+    fun clock(ms: Long): String = formatClock(ms, axis.zoneId)
 
     for (r in records) {
         when (r.type) {
             RecordType.SLEEP -> {
                 val open = r.endTimestamp == null
                 val rawEnd = r.endTimestamp ?: nowMs
-                // Clip only to the 72h window — do not split at midnight.
-                val clippedStart = maxOf(r.timestamp, windowStartMs)
-                val clippedEnd = minOf(rawEnd, windowEndMs)
-                if (clippedEnd > clippedStart) {
-                    val startMin = contentMinutes(clippedStart)
-                    val endMin = contentMinutes(clippedEnd).coerceAtLeast(startMin + 1)
+                // Clip only to the three-local-day window — do not split at midnight.
+                val clipped = axis.clipIntervalToOffsets(r.timestamp, rawEnd)
+                if (clipped != null) {
+                    val startMin = offsetToStartMinute(clipped.startOffsetMs)
+                    val endMin = offsetToEndExclusiveMinute(clipped.endExclusiveOffsetMs)
+                        .coerceAtLeast(startMin + 1)
                     val durationMin = ((rawEnd - r.timestamp) / 60_000L).coerceAtLeast(1)
                     val nap = (r.payload.payload as? SleepPayload)?.isNap == true
                     val title = if (nap) "午睡" else "睡眠"
@@ -640,8 +564,7 @@ internal fun buildTimelineLanes(
             RecordType.FORMULA, RecordType.NURSING, RecordType.PUMPED_FEED,
             RecordType.PUMP_EXPRESS,
             -> {
-                if (r.timestamp < windowStartMs || r.timestamp >= windowEndMs) continue
-                val startMin = contentMinutes(r.timestamp)
+                val startMin = axis.instantToContentMinute(r.timestamp) ?: continue
                 val title = r.type.presentation.label
                 val detail = buildString {
                     append(clock(r.timestamp))
@@ -674,8 +597,7 @@ internal fun buildTimelineLanes(
             RecordType.PEE, RecordType.POOP, RecordType.BOTH_DIAPER, RecordType.BATH,
             RecordType.TEMPERATURE, RecordType.MEDICINE,
             -> {
-                if (r.timestamp < windowStartMs || r.timestamp >= windowEndMs) continue
-                val startMin = contentMinutes(r.timestamp)
+                val startMin = axis.instantToContentMinute(r.timestamp) ?: continue
                 val notePart = r.note?.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()
                 when (r.type) {
                     RecordType.PEE -> care += TimelineLaneSegment(
@@ -800,7 +722,7 @@ internal sealed interface DayChartFilterAction {
 
     /**
      * Proposed filter key after designsystem toggle/clear.
-     * [dayRecords] must be selected-day **D** only (A2 gate); never the 72h rail union.
+     * [dayRecords] must be selected-day **D** only (A2 gate); never the three-day rail union.
      */
     data class Select(
         val categoryKey: String?,
@@ -1044,21 +966,21 @@ fun LogRoute(
         vm.setScreenTime(screenTime)
     }
 
-    // Now line: wall-clock absolute time on the 72h content axis; only when
+    // Now line: wall-clock absolute time on the three-local-day content axis; only when
     // now falls inside [D−1 00:00, D+1 24:00). Viewport start is day-keyed UI
     // state: init from today/now-centered or non-today D+peek defaults; pan
-    // clamps inside 72h and never mutates D / summary / list. Reset when the
+    // clamps inside the calendar-derived window and never mutates D / summary / list. Reset when the
     // selected day, local date, or time zone changes.
-    val threeDayWindow = remember(state.day, zone) { threeDayContentWindow(state.day, zone) }
-    val nowContentMinute = nowContentMinuteInWindow(nowMs, threeDayWindow)
-    val timelineViewportDuration = defaultThreeDayViewportDurationMinutes()
+    val timelineAxis = remember(state.day, zone) { ThreeDayTimelineAxis(state.day, zone) }
+    val nowContentMinute = timelineAxis.instantToContentMinute(nowMs)
+    val timelineViewportDuration = timelineAxis.defaultViewportDurationMinutes
     var timelineViewportStart by remember(state.day, today, zone) {
         mutableIntStateOf(
             initialThreeDayViewportStartMinutes(
                 selectedDay = state.day,
                 today = today,
                 nowMs = nowMs,
-                zone = zone,
+                axis = timelineAxis,
                 viewportDurationMinutes = timelineViewportDuration,
             ),
         )
@@ -1416,7 +1338,7 @@ fun LogRoute(
                                 nowContentMinute = nowContentMinute,
                                 selectedCategoryKey = dayChartFilter?.name,
                                 onCategorySelect = { key ->
-                                    // A2: gate on day-D records only; rail marks stay 72h union.
+                                    // A2: gate on day-D records only; rail marks stay three-day union.
                                     // Once committed, selectedCategoryKey highlights matching
                                     // marks across D−1|D|D+1 without re-drawing the rail.
                                     dayChartFilterState = reduceDayChartFilter(
@@ -1430,6 +1352,8 @@ fun LogRoute(
                                 legend = dayChartLegend,
                                 viewportStartMinutes = timelineViewportStart,
                                 viewportDurationMinutes = timelineViewportDuration,
+                                windowGeometry = timelineAxis.windowGeometry,
+                                hourLabels = timelineAxis.hourLabels(),
                                 onViewportStartChange = { timelineViewportStart = it },
                                 titleSecondary = "时间轴",
                                 modifier = Modifier.padding(

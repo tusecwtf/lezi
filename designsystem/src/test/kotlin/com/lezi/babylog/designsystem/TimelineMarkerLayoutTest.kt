@@ -227,6 +227,28 @@ class TimelineMarkerLayoutTest {
     }
 
     @Test
+    fun `dst viewport draws and hits a marker at the same dynamic coordinate`() {
+        // New York spring-forward window: primary D ends at minute 2820, not 2880.
+        val viewportStart = 1_350
+        val viewportDuration = 1_560
+        val markerMinute = 2_820
+        val layout = layoutTimelineEventMarkers(
+            segments = listOf(eventSegment(minute = markerMinute, category = "PEE")),
+            axisLengthPx = viewportDuration.toFloat(),
+            clusterWindowMinutes = 12,
+            slotSpacingPx = 10f,
+            edgeInsetPx = 20f,
+            hitRadiusPx = 8f,
+            viewportStartMinutes = viewportStart,
+            viewportDurationMinutes = viewportDuration,
+        )
+
+        val expectedPx = (markerMinute - viewportStart).toFloat()
+        assertEquals(expectedPx, layout.targets.single().centerPx, 0.001f)
+        assertEquals("PEE", layout.hitTest(expectedPx)?.dayChartCategoryKey)
+    }
+
+    @Test
     fun `events far outside the viewport are not laid out`() {
         val viewportStart = TimelineAxis.defaultViewportStartMinutes()
         val viewportDuration = TimelineAxis.defaultViewportDurationMinutes()
