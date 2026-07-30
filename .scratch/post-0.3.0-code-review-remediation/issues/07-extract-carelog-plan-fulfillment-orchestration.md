@@ -3,8 +3,9 @@
 **Parent:** [../spec.md](../spec.md)
 **Audit ID:** `CR-20260730-P1-02`
 **Severity:** P1 structural
-**Status:** planned
+**Status:** ready-for-agent
 **Blocked by:** 01、06
+**Activation:** satisfied — 01 and 06 complete; user requested all scratch issues
 **Size:** L
 
 ## What to build

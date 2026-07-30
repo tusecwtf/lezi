@@ -34,7 +34,6 @@ import com.lezi.babylog.core.model.MilkPayload
 import com.lezi.babylog.core.model.NEXT_FEED_PLAN_MARKER
 import com.lezi.babylog.core.model.NextFeedPlanReconciliation
 import com.lezi.babylog.core.model.NursingPayload
-import com.lezi.babylog.core.model.OpenSleepCandidate
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordPayloadCodec
 import com.lezi.babylog.core.model.RecordPayloadDocument
@@ -45,7 +44,6 @@ import com.lezi.babylog.core.model.displayLabel
 import com.lezi.babylog.core.model.isPlanableCarePlanType
 import com.lezi.babylog.core.model.Sex
 import com.lezi.babylog.core.model.SleepPayload
-import com.lezi.babylog.core.model.normalizeOpenSleeps
 import java.time.LocalDate
 import java.time.ZoneId
 import java.nio.charset.StandardCharsets
@@ -241,7 +239,38 @@ class CareLog @Inject constructor(
      * lock makes read-check-write sequences deterministic inside this process.
      */
     private val sleepMutationMutex = Mutex()
-    private val babyProfiles = BabyFamilyProfileCoordinator(
+    private val recordMutations: RecordMutationCoordinator = RecordMutationCoordinator(
+        recordDao = recordDao,
+        carePlanDao = carePlanDao,
+        customItemDao = customItemDao,
+        photoAttachmentReconciler = photoAttachmentReconciler,
+        transactionRunner = transactionRunner,
+        reminderProjection = reminderProjection,
+        syncPort = syncPort,
+        clock = clock,
+        sleepMutationMutex = sleepMutationMutex,
+        requireActiveBaby = { babyId -> babyProfiles.requireActiveBaby(babyId) },
+        currentMembershipActorId = ::currentMembershipActorId,
+        completeOpenCarePlanWithRecord = {
+            carePlanId,
+            babyId,
+            expectedType,
+            recordClientUuid,
+            now,
+            actualTimestamp,
+            ->
+            completeOpenCarePlanWithRecord(
+                carePlanId = carePlanId,
+                babyId = babyId,
+                expectedType = expectedType,
+                recordClientUuid = recordClientUuid,
+                now = now,
+                actualTimestamp = actualTimestamp,
+            )
+        },
+        requestLocalSync = ::requestLocalSync,
+    )
+    private val babyProfiles: BabyFamilyProfileCoordinator = BabyFamilyProfileCoordinator(
         babyDao = babyDao,
         recordDao = recordDao,
         carePlanDao = carePlanDao,
@@ -254,7 +283,7 @@ class CareLog @Inject constructor(
         transactionRunner = transactionRunner,
         reminderProjection = reminderProjection,
         sleepMutationMutex = sleepMutationMutex,
-        healDuplicateOpenSleeps = ::healDuplicateOpenSleeps,
+        healDuplicateOpenSleeps = recordMutations::healDuplicateOpenSleeps,
         requestLocalSync = ::requestLocalSync,
     )
 
@@ -379,59 +408,16 @@ class CareLog @Inject constructor(
         payloadJson: String = "{}",
         schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
         photoLocalPaths: List<String> = emptyList(),
-    ): Long {
-        validateSleepInterval(type, timestamp, endTimestamp)
-        val photos = photoLocalPaths
-        val persistedPayload = requireCurrentPayloadJson(
-            type = type,
-            payloadJson = payloadJson,
-            schemaVersion = schemaVersion,
-        )
-        val now = System.currentTimeMillis()
-        val clientUuid = newClientUuid()
-        val record = RecordEntity(
-            clientUuid = clientUuid,
-            babyId = babyId,
-            type = type.key,
-            timestamp = timestamp,
-            endTimestamp = endTimestamp,
-            note = note,
-            payloadJson = persistedPayload,
-            schemaVersion = schemaVersion,
-            updatedAt = now,
-        )
-        val id = if (type == RecordType.SLEEP && endTimestamp == null) {
-            sleepMutationMutex.withLock {
-                transactionRunner.run {
-                    babyProfiles.requireActiveBaby(babyId)
-                    healDuplicateOpenSleeps(babyId)
-                    if (recordDao.findOpenSleep(babyId) != null) {
-                        throw SleepStateChangedException()
-                    }
-                    val inserted = insertRecord(record)
-                    photoAttachmentReconciler.reconcile(
-                        PhotoAttachmentOwner.Record(inserted),
-                        photos,
-                        now,
-                    )
-                    inserted
-                }
-            }
-        } else {
-            transactionRunner.run {
-                babyProfiles.requireActiveBaby(babyId)
-                val inserted = insertRecord(record)
-                photoAttachmentReconciler.reconcile(
-                    PhotoAttachmentOwner.Record(inserted),
-                    photos,
-                    now,
-                )
-                inserted
-            }
-        }
-        requestLocalSync()
-        return id
-    }
+    ): Long = recordMutations.addRecord(
+        babyId,
+        type,
+        timestamp,
+        endTimestamp,
+        note,
+        payloadJson,
+        schemaVersion,
+        photoLocalPaths,
+    )
 
     suspend fun updateRecord(
         id: Long,
@@ -440,71 +426,19 @@ class CareLog @Inject constructor(
         note: String?,
         payloadJson: String,
         schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-        /** Null preserves current photos; an explicit empty list clears them. */
         photoLocalPaths: List<String>? = null,
         nowMillis: Long = System.currentTimeMillis(),
-    ) {
-        // Future time must use [convertRecordToCarePlan] after explicit UI confirm.
-        RecordTime.pointError(timestamp, nowMillis)?.let {
-            throw IllegalArgumentException(it)
-        }
-        val photos = photoLocalPaths
-        val now = System.currentTimeMillis()
-        val cleanupCandidates = sleepMutationMutex.withLock {
-            transactionRunner.run {
-                val existing = recordDao.get(id) ?: return@run emptySet<String>()
-                babyProfiles.requireActiveBaby(existing.babyId)
-                val type = RecordType.fromKey(existing.type) ?: error("未知记录类型")
-                requireCurrentPayloadDocument(type, existing.payloadJson, existing.schemaVersion)
-                val persistedPayload = requireCurrentPayloadJson(
-                    type = type,
-                    payloadJson = payloadJson,
-                    schemaVersion = schemaVersion,
-                )
-                if (
-                    type == RecordType.SLEEP &&
-                    existing.endTimestamp != null &&
-                    endTimestamp == null
-                ) {
-                    throw IllegalArgumentException("已完成的睡眠不可改为进行中")
-                }
-                validateSleepInterval(type, timestamp, endTimestamp)
-                updateRecordEntity(
-                    existing.copy(
-                        timestamp = timestamp,
-                        endTimestamp = endTimestamp,
-                        note = note,
-                        payloadJson = persistedPayload,
-                        schemaVersion = schemaVersion,
-                        updatedAt = now,
-                    ),
-                )
-                photos?.let {
-                    photoAttachmentReconciler.reconcile(
-                        PhotoAttachmentOwner.Record(id),
-                        it,
-                        now,
-                    )
-                }?.tombstonedClientUuids.orEmpty()
-            }
-        }
-        cleanupCommittedPhotoTombstones(cleanupCandidates)
-        requestLocalSync()
-    }
+    ) = recordMutations.updateRecord(
+        id,
+        timestamp,
+        endTimestamp,
+        note,
+        payloadJson,
+        schemaVersion,
+        photoLocalPaths,
+        nowMillis,
+    )
 
-    /**
-     * Explicit conversion of an existing fact Record whose time was edited to the future.
-     *
-     * Single local transaction: soft-delete the record (media tombstones), create a pending
-     * CarePlan transferring type/payload/note/photos, and store [CarePlan.sourceRecordClientUuid]
-     * for later family-sync provenance. Any failure rolls back fully so the original record and
-     * attachments stay visible with no dual-active media ownership.
-     *
-     * Does not start nursing timers or open sleep intervals. Post-commit reminder/projection
-     * reuses the same path as [createCarePlan].
-     *
-     * @return new care plan local id
-     */
     suspend fun convertRecordToCarePlan(
         recordId: Long,
         scheduledAt: Long,
@@ -515,146 +449,20 @@ class CareLog @Inject constructor(
         zone: ZoneId = ZoneId.systemDefault(),
         nowMillis: Long = System.currentTimeMillis(),
         projectToSystemCalendar: Boolean = true,
-    ): Long {
-        require(scheduledAt > nowMillis) { "转为护理计划须选择未来时刻" }
-        val photos = photoLocalPaths
-        val peek = recordDao.get(recordId) ?: error("记录不存在")
-        if (peek.deletedAt != null) error("记录已删除")
-        val type = RecordType.fromKey(peek.type) ?: error("未知记录类型")
-        requireCurrentPayloadDocument(type, peek.payloadJson, peek.schemaVersion)
-        require(type.isPlanableCarePlanType || type == RecordType.CUSTOM) {
-            "该项目不可转为护理计划"
-        }
+    ): Long = recordMutations.convertRecordToCarePlan(
+        recordId,
+        scheduledAt,
+        note,
+        payloadJson,
+        schemaVersion,
+        photoLocalPaths,
+        zone,
+        nowMillis,
+        projectToSystemCalendar,
+    )
 
-        suspend fun writeConvert(): Pair<Long, Set<String>> = transactionRunner.run {
-            val existing = recordDao.get(recordId) ?: error("记录不存在")
-            if (existing.deletedAt != null) error("记录已删除")
-            babyProfiles.requireActiveBaby(existing.babyId)
-            val resolvedType = RecordType.fromKey(existing.type) ?: error("未知记录类型")
-            requireCurrentPayloadDocument(
-                resolvedType,
-                existing.payloadJson,
-                existing.schemaVersion,
-            )
-            require(resolvedType.isPlanableCarePlanType || resolvedType == RecordType.CUSTOM) {
-                "该项目不可转为护理计划"
-            }
-            val nextPayload = payloadJson ?: existing.payloadJson
-            requireCurrentPayloadDocument(resolvedType, nextPayload, schemaVersion)
-            val resolvedCustomItemId: Long?
-            val stampedPayload: String
-            if (resolvedType == RecordType.CUSTOM) {
-                val decoded = RecordPayloadCodec.decode(
-                    RecordType.CUSTOM,
-                    nextPayload,
-                    schemaVersion,
-                ).payload as? CustomPayload
-                val id = decoded?.customItemId?.takeIf { it > 0L }
-                    ?: error("具体自定义项目才可转为护理计划")
-                resolvedCustomItemId = id
-                val def = customItemDao.getById(id)
-                stampedPayload = if (def != null && def.deletedAt == null) {
-                    stampCustomItemSnapshotIntoPayload(
-                        payloadJson = nextPayload,
-                        customItemId = id,
-                        titleSnapshot = def.name,
-                        iconSlot = def.iconSlot,
-                    )
-                } else {
-                    // Keep historical name/icon snapshot when definition is gone.
-                    nextPayload
-                }
-            } else {
-                resolvedCustomItemId = null
-                stampedPayload = nextPayload
-            }
-            val persistedPayload = requireCurrentPayloadJson(
-                type = resolvedType,
-                payloadJson = stampedPayload,
-                schemaVersion = schemaVersion,
-            )
+    suspend fun deleteRecord(id: Long): Boolean = recordMutations.deleteRecord(id)
 
-            val at = nextSyncUpdatedAt(existing.updatedAt, System.currentTimeMillis())
-            recordDao.softDelete(recordId, at)
-            val recordPhotoMutation = photoAttachmentReconciler.tombstone(
-                PhotoAttachmentOwner.Record(recordId),
-                at,
-            )
-
-            // Plan media rows are new ownership (separate clientUuids); record media
-            // remain tombstoned only. Same localUri may be referenced by both, but
-            // only plan rows stay active after commit.
-            val planId = carePlanDao.upsert(
-                CarePlanEntity(
-                    clientUuid = newClientUuid(),
-                    babyId = existing.babyId,
-                    type = resolvedType.key,
-                    customItemId = resolvedCustomItemId,
-                    scheduledAt = scheduledAt,
-                    scheduledZoneId = zone.id,
-                    note = note,
-                    payloadJson = persistedPayload,
-                    schemaVersion = schemaVersion,
-                    status = CarePlanStatus.PENDING.storageKey,
-                    createdByMembershipId = currentMembershipActorId(),
-                    sourceRecordClientUuid = existing.clientUuid,
-                    updatedAt = at,
-                    syncDirty = true,
-                    systemCalendarProjectionEnabled = projectToSystemCalendar,
-                ),
-            )
-            photoAttachmentReconciler.reconcile(
-                PhotoAttachmentOwner.CarePlan(planId),
-                photos,
-                at,
-            )
-            planId to recordPhotoMutation.tombstonedClientUuids
-        }
-
-        val (planId, cleanupCandidates) = if (type == RecordType.SLEEP) {
-            // Same mutex as soft-delete/open-sleep so convert cannot leave half-live intervals.
-            sleepMutationMutex.withLock { writeConvert() }
-        } else {
-            writeConvert()
-        }
-        // The converted family data is publishable before optional device-local projection.
-        cleanupCommittedPhotoTombstones(cleanupCandidates)
-        requestLocalSync()
-        // Creator keeps full local plan + projection immediately.
-        carePlanDao.get(planId)?.toModel()?.let { plan ->
-            reminderProjection.projectOrScheduleCarePlanReminder(
-                plan,
-                projectToSystemCalendar = projectToSystemCalendar,
-            )
-        }
-        return planId
-    }
-
-    suspend fun deleteRecord(id: Long): Boolean {
-        val (deleted, cleanupCandidates) = sleepMutationMutex.withLock {
-            transactionRunner.run {
-                val existing = recordDao.get(id)
-                if (existing != null && existing.deletedAt == null) {
-                    val deletedAt = nextSyncUpdatedAt(
-                        existing.updatedAt,
-                        System.currentTimeMillis(),
-                    )
-                    recordDao.softDelete(id, deletedAt)
-                    val tombstones = photoAttachmentReconciler.tombstone(
-                        PhotoAttachmentOwner.Record(id),
-                        deletedAt,
-                    ).tombstonedClientUuids
-                    true to tombstones
-                } else {
-                    false to emptySet()
-                }
-            }
-        }
-        if (!deleted) return false
-        cleanupCommittedPhotoTombstones(cleanupCandidates)
-        requestLocalSync()
-        return true
-    }
 
     /** Active record photo paths. MediaAsset is the sole current photo source. */
     suspend fun listRecordPhotoPaths(recordId: Long): List<String> {
@@ -675,97 +483,21 @@ class CareLog @Inject constructor(
         endedAt: Long,
         recordMode: String = "end",
         completionClientUuid: String = newClientUuid(),
-        /**
-         * When set, complete this open nursing CarePlan in the same transaction as
-         * the timer record. Cancel / save-failure leave the plan pending.
-         */
         carePlanId: Long? = null,
-    ): Long {
-        require(order in NURSING_ORDER_ALLOWLIST) {
-            "不支持的哺乳顺序"
-        }
-        require(recordMode in setOf("start", "end")) {
-            "不支持的记录时刻模式"
-        }
-        val payload = RecordPayloadCodec.encode(
-            RecordPayloadDocument(
-                type = RecordType.NURSING,
-                payload = NursingPayload(
-                    leftMinutes = leftMin,
-                    rightMinutes = rightMin,
-                    order = order,
-                    amountMl = amountMl,
-                    recordMode = recordMode,
-                ),
-                schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-            ),
-        )
-        require(completionClientUuid.isNotBlank()) { "计时完成标识不能为空" }
-        val now = System.currentTimeMillis()
-        val id = transactionRunner.run {
-            val existing = recordDao.getByClientUuid(completionClientUuid)
-            if (existing != null) {
-                check(existing.deletedAt == null) {
-                    "这次计时记录已删除，请重试或改记"
-                }
-                require(existing.babyId == babyId && existing.type == RecordType.NURSING.key) {
-                    "计时完成标识与既有记录冲突"
-                }
-                // Idempotent replay: if a plan was linked, ensure it is completed
-                // against this same record (no second session) and candidate identity.
-                if (carePlanId != null) {
-                    completeOpenCarePlanWithRecord(
-                        carePlanId = carePlanId,
-                        babyId = babyId,
-                        expectedType = RecordType.NURSING,
-                        recordClientUuid = existing.clientUuid,
-                        now = now,
-                        actualTimestamp = existing.timestamp,
-                    )
-                }
-                return@run existing.id
-            }
-            babyProfiles.requireActiveBaby(babyId)
-            val recordTimestamp = if (recordMode == "start") startedAt else endedAt
-            val inserted = insertRecord(
-                RecordEntity(
-                    clientUuid = completionClientUuid,
-                    babyId = babyId,
-                    type = RecordType.NURSING.key,
-                    timestamp = recordTimestamp,
-                    endTimestamp = endedAt.takeIf { recordMode == "start" },
-                    note = note,
-                    payloadJson = payload,
-                    schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-                    updatedAt = now,
-                ),
-            )
-            if (carePlanId != null) {
-                completeOpenCarePlanWithRecord(
-                    carePlanId = carePlanId,
-                    babyId = babyId,
-                    expectedType = RecordType.NURSING,
-                    recordClientUuid = completionClientUuid,
-                    now = now,
-                    actualTimestamp = recordTimestamp,
-                )
-            }
-            inserted
-        }
-        if (carePlanId != null) {
-            reminderProjection.cancelCarePlanReminderBestEffort(carePlanId)
-            reminderProjection.removeSystemCalendarProjection(carePlanId)
-        }
-        requestLocalSync()
-        return id
-    }
+    ): Long = recordMutations.completeNursing(
+        babyId,
+        leftMin,
+        rightMin,
+        order,
+        amountMl,
+        note,
+        startedAt,
+        endedAt,
+        recordMode,
+        completionClientUuid,
+        carePlanId,
+    )
 
-    /**
-     * Confirm a stateful sleep action against the latest open interval.
-     *
-     * The check and local write share one process-level critical section so
-     * two confirmations cannot both act on the same observed sleep state.
-     */
     suspend fun confirmSleep(
         babyId: Long,
         expectedOpenSleepId: Long?,
@@ -775,169 +507,27 @@ class CareLog @Inject constructor(
         payloadJson: String,
         schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
         photoLocalPaths: List<String> = emptyList(),
-    ): Long {
-        val photos = photoLocalPaths
-        val persistedPayload = requireCurrentPayloadJson(
-            type = RecordType.SLEEP,
-            payloadJson = payloadJson,
-            schemaVersion = schemaVersion,
-        )
-        val (id, cleanupCandidates) = sleepMutationMutex.withLock {
-            validateSleepInterval(RecordType.SLEEP, timestamp, endTimestamp)
-            transactionRunner.run {
-                babyProfiles.requireActiveBaby(babyId)
-                healDuplicateOpenSleeps(babyId)
-                val currentOpen = recordDao.findOpenSleep(babyId)
-                if (expectedOpenSleepId == null) {
-                    if (currentOpen != null) throw SleepStateChangedException()
-                    val now = System.currentTimeMillis()
-                    val inserted = insertRecord(
-                        RecordEntity(
-                            clientUuid = newClientUuid(),
-                            babyId = babyId,
-                            type = RecordType.SLEEP.key,
-                            timestamp = timestamp,
-                            endTimestamp = endTimestamp,
-                            note = note,
-                            payloadJson = persistedPayload,
-                            schemaVersion = schemaVersion,
-                            updatedAt = now,
-                        ),
-                    )
-                    val photoMutation = photoAttachmentReconciler.reconcile(
-                        PhotoAttachmentOwner.Record(inserted),
-                        photos,
-                        now,
-                    )
-                    inserted to photoMutation.tombstonedClientUuids
-                } else {
-                    if (currentOpen?.id != expectedOpenSleepId) {
-                        throw SleepStateChangedException()
-                    }
-                    requireCurrentPayloadDocument(
-                        RecordType.SLEEP,
-                        currentOpen.payloadJson,
-                        currentOpen.schemaVersion,
-                    )
-                    val now = System.currentTimeMillis()
-                    updateRecordEntity(
-                        currentOpen.copy(
-                            timestamp = timestamp,
-                            endTimestamp = endTimestamp,
-                            note = note,
-                            payloadJson = persistedPayload,
-                            schemaVersion = schemaVersion,
-                            updatedAt = now,
-                        ),
-                    )
-                    val photoMutation = photoAttachmentReconciler.reconcile(
-                        PhotoAttachmentOwner.Record(expectedOpenSleepId),
-                        photos,
-                        now,
-                    )
-                    expectedOpenSleepId to photoMutation.tombstonedClientUuids
-                }
-            }
-        }
-        cleanupCommittedPhotoTombstones(cleanupCandidates)
-        requestLocalSync()
-        return id
-    }
+    ): Long = recordMutations.confirmSleep(
+        babyId,
+        expectedOpenSleepId,
+        timestamp,
+        endTimestamp,
+        note,
+        payloadJson,
+        schemaVersion,
+        photoLocalPaths,
+    )
 
     suspend fun sleepDown(
         babyId: Long,
         at: Long = System.currentTimeMillis(),
-    ): Long {
-        val id = sleepMutationMutex.withLock {
-            transactionRunner.run {
-                babyProfiles.requireActiveBaby(babyId)
-                healDuplicateOpenSleeps(babyId)
-                val open = recordDao.findOpenSleep(babyId)
-                if (open != null) {
-                    val flagged = withAnomaly(open.payloadJson, open.schemaVersion)
-                    if (flagged.first != open.payloadJson) {
-                        updateRecordEntity(
-                            open.copy(
-                                payloadJson = flagged.first,
-                                schemaVersion = flagged.second,
-                                updatedAt = System.currentTimeMillis(),
-                            ),
-                        )
-                    }
-                    return@run open.id
-                }
-
-                val now = System.currentTimeMillis()
-                insertRecord(
-                    RecordEntity(
-                        clientUuid = newClientUuid(),
-                        babyId = babyId,
-                        type = RecordType.SLEEP.key,
-                        timestamp = at,
-                        endTimestamp = null,
-                        note = null,
-                        payloadJson = RecordPayloadCodec.encode(
-                            RecordPayloadDocument(
-                                type = RecordType.SLEEP,
-                                payload = SleepPayload(),
-                                schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-                            ),
-                        ),
-                        updatedAt = now,
-                    ),
-                )
-            }
-        }
-        requestLocalSync()
-        return id
-    }
+    ): Long = recordMutations.sleepDown(babyId, at)
 
     suspend fun sleepUp(
         babyId: Long,
         at: Long = System.currentTimeMillis(),
-    ): Long {
-        val id = sleepMutationMutex.withLock {
-            transactionRunner.run {
-                babyProfiles.requireActiveBaby(babyId)
-                healDuplicateOpenSleeps(babyId)
-                val open = recordDao.findOpenSleep(babyId)
-                if (open != null) {
-                    validateSleepInterval(RecordType.SLEEP, open.timestamp, at)
-                    updateRecordEntity(
-                        open.copy(
-                            endTimestamp = at,
-                            updatedAt = System.currentTimeMillis(),
-                        ),
-                    )
-                    return@run open.id
-                }
+    ): Long = recordMutations.sleepUp(babyId, at)
 
-                val now = System.currentTimeMillis()
-                val start = at - 60_000L
-                insertRecord(
-                    RecordEntity(
-                        clientUuid = newClientUuid(),
-                        babyId = babyId,
-                        type = RecordType.SLEEP.key,
-                        timestamp = start,
-                        endTimestamp = at,
-                        note = null,
-                        payloadJson = RecordPayloadCodec.encode(
-                            RecordPayloadDocument(
-                                type = RecordType.SLEEP,
-                                payload = SleepPayload(anomaly = true),
-                                schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-                            ),
-                        ),
-                        schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-                        updatedAt = now,
-                    ),
-                )
-            }
-        }
-        requestLocalSync()
-        return id
-    }
 
     suspend fun getRecord(id: Long): Record? = queries.getRecord(id)
 
@@ -1236,7 +826,7 @@ class CareLog @Inject constructor(
             val resolvedEnd = endTimestamp
             if (type == RecordType.SLEEP) {
                 validateSleepInterval(RecordType.SLEEP, actualTimestamp, resolvedEnd)
-                healDuplicateOpenSleeps(plan.babyId)
+                recordMutations.healDuplicateOpenSleeps(plan.babyId)
                 val currentOpen = recordDao.findOpenSleep(plan.babyId)
                 // Open-interval fulfill and closed-interval fulfill both require
                 // no competing open sleep for a different interval.
@@ -1271,7 +861,7 @@ class CareLog @Inject constructor(
                 schemaVersion = schemaVersion,
                 updatedAt = now,
             )
-            val inserted = insertRecord(record)
+            val inserted = recordMutations.insertRecord(record)
             photoAttachmentReconciler.reconcile(
                 PhotoAttachmentOwner.Record(inserted),
                 photos,
@@ -1579,7 +1169,7 @@ class CareLog @Inject constructor(
             babyProfiles.requireActiveBaby(source.babyId)
             if (type == RecordType.SLEEP && source.endTimestamp == null) {
                 // Open sleep from a fulfill is unexpected; still guard open-sleep invariants.
-                healDuplicateOpenSleeps(source.babyId)
+                recordMutations.healDuplicateOpenSleeps(source.babyId)
                 if (recordDao.findOpenSleep(source.babyId) != null) {
                     throw SleepStateChangedException()
                 }
@@ -1599,7 +1189,7 @@ class CareLog @Inject constructor(
                 deletedAt = null,
                 syncDirty = true,
             )
-            val inserted = insertRecord(newRecord)
+            val inserted = recordMutations.insertRecord(newRecord)
             photoAttachmentReconciler.reconcile(
                 PhotoAttachmentOwner.Record(inserted),
                 photos,
@@ -1771,7 +1361,7 @@ class CareLog @Inject constructor(
             photoMutation?.tombstonedClientUuids.orEmpty()
         }
         // Shared update is committed and publishable before optional local side effects.
-        cleanupCommittedPhotoTombstones(cleanupCandidates)
+        recordMutations.cleanupCommittedPhotoTombstones(cleanupCandidates)
         requestLocalSync()
         calendarReminderMutationGuard.withLock {
             carePlanDao.get(carePlanId)?.toModel()?.let { plan ->
@@ -1837,7 +1427,7 @@ class CareLog @Inject constructor(
             true to tombstones
         }
         if (!deleted) return false
-        cleanupCommittedPhotoTombstones(cleanupCandidates)
+        recordMutations.cleanupCommittedPhotoTombstones(cleanupCandidates)
         reminderProjection.cancelCarePlanReminderBestEffort(carePlanId)
         reminderProjection.removeSystemCalendarProjection(carePlanId)
         requestLocalSync()
@@ -1944,74 +1534,10 @@ class CareLog @Inject constructor(
         babyProfiles.reconcileMemberLocalBabiesAfterFamilyApply()
 
 
-    private suspend fun insertRecord(record: RecordEntity): Long {
-        val type = RecordType.fromKey(record.type) ?: error("未知记录类型")
-        requireCurrentPayloadDocument(type, record.payloadJson, record.schemaVersion)
-        val membershipId = currentMembershipActorId()
-        return recordDao.upsert(
-            if (record.createdByMembershipId.isBlank() && membershipId.isNotEmpty()) {
-                record.copy(createdByMembershipId = membershipId)
-            } else {
-                record
-            },
-        )
-    }
-
-    private suspend fun updateRecordEntity(record: RecordEntity) {
-        val type = RecordType.fromKey(record.type) ?: error("未知记录类型")
-        requireCurrentPayloadDocument(type, record.payloadJson, record.schemaVersion)
-        val previous = recordDao.getIncludingDeleted(record.id)?.updatedAt
-        recordDao.update(
-            record.copy(
-                updatedAt = previous
-                    ?.let { nextSyncUpdatedAt(it, record.updatedAt) }
-                    ?: record.updatedAt,
-                syncDirty = true,
-            ),
-        )
-    }
-
-    /**
-     * Keep at most one open sleep per baby. Older open intervals are closed at
-     * the next open's start and flagged anomaly (covers sync-introduced dups).
-     */
-    private suspend fun healDuplicateOpenSleeps(babyId: Long) {
-        val opens = recordDao.listOpenSleeps(babyId)
-        if (opens.size <= 1) return
-        val now = clock.nowMillis()
-        val decision = normalizeOpenSleeps(
-            candidates = opens.map { open ->
-                OpenSleepCandidate(
-                    stableKey = open.clientUuid,
-                    startedAtMillis = open.timestamp,
-                )
-            },
-            repairAtMillis = now,
-        )
-        val byClientUuid = opens.associateBy(RecordEntity::clientUuid)
-        for (closure in decision.closures) {
-            val current = byClientUuid.getValue(closure.candidate.stableKey)
-            val flagged = withAnomaly(current.payloadJson, current.schemaVersion)
-            updateRecordEntity(
-                current.copy(
-                    endTimestamp = closure.closedAtMillis,
-                    payloadJson = flagged.first,
-                    schemaVersion = flagged.second,
-                    updatedAt = now,
-                ),
-            )
-        }
-    }
-
     private fun requestLocalSync() {
         syncPort.requestSync(SyncTrigger.LocalWrite)
     }
 
-    /** Logical writes stay committed when best-effort physical GC must retry. */
-    private suspend fun cleanupCommittedPhotoTombstones(clientUuids: Set<String>) {
-        if (clientUuids.isEmpty()) return
-        syncPort.cleanupTombstonedMedia(clientUuids)
-    }
 
 }
 
@@ -2022,9 +1548,7 @@ internal fun nextSyncUpdatedAt(previous: Long, candidate: Long): Long =
         maxOf(candidate, previous + 1)
     }
 
-private val NURSING_ORDER_ALLOWLIST = setOf("L", "R", "LR", "RL")
-
-private fun validateSleepInterval(
+internal fun validateSleepInterval(
     type: RecordType?,
     timestamp: Long,
     endTimestamp: Long?,
@@ -2148,7 +1672,7 @@ fun canManageCreatorOwnedFamilyEntity(
     return creator == actor
 }
 
-private fun requireCurrentPayloadDocument(
+internal fun requireCurrentPayloadDocument(
     type: RecordType,
     payloadJson: String,
     schemaVersion: Int,
@@ -2167,7 +1691,7 @@ private fun requireCurrentPayloadDocument(
     return document
 }
 
-private fun requireCurrentPayloadJson(
+internal fun requireCurrentPayloadJson(
     type: RecordType,
     payloadJson: String,
     schemaVersion: Int,
@@ -2255,13 +1779,3 @@ private fun parseSex(raw: String): Sex = com.lezi.babylog.core.model.parseBabySe
  */
 internal fun normalizeBabySexForStorage(raw: String?): String? =
     com.lezi.babylog.core.model.normalizeBabySex(raw)
-
-private fun withAnomaly(payloadJson: String, schemaVersion: Int): Pair<String, Int> {
-    val document = RecordPayloadCodec.decode(RecordType.SLEEP, payloadJson, schemaVersion)
-    val sleep = document.payload as? SleepPayload ?: return payloadJson to schemaVersion
-    val normalized = document.copy(
-        payload = sleep.copy(anomaly = true),
-        schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-    )
-    return RecordPayloadCodec.encode(normalized) to CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
-}

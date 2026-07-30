@@ -3,7 +3,7 @@
 **Parent:** [../spec.md](../spec.md)
 **Audit ID:** `CR-20260730-P1-02`
 **Severity:** P1 structural
-**Status:** ready-for-agent
+**Status:** complete
 **Blocked by:** 05
 **Activation:** satisfied — 05 complete; user requested all scratch issues
 **Size:** L
@@ -16,11 +16,11 @@ payload codec、睡眠 mutex 与同步回执规则；CareLog 只保留 façade�
 
 ## Acceptance criteria
 
-- [ ] Record 与 sleep 写事务完整迁移且只有一个实现；开放睡眠互斥/修复规则不变。
-- [ ] 照片 ownership、tombstone cleanup、Outbox 捕获和 requestLocalSync 顺序不变。
-- [ ] Composer 仍确认后才写事实，转换计划不创建伪事实。
-- [ ] cancellation、失败回滚、重复提交和跨日睡眠回归保持绿色。
-- [ ] CareLog 行数继续下降，结构测试防止写算法回流。
+- [x] Record 与 sleep 写事务完整迁移且只有一个实现；开放睡眠互斥/修复规则不变。
+- [x] 照片 ownership、tombstone cleanup、Outbox 捕获和 requestLocalSync 顺序不变。
+- [x] Composer 仍确认后才写事实，转换计划不创建伪事实。
+- [x] cancellation、失败回滚、重复提交和跨日睡眠回归保持绿色。
+- [x] CareLog 行数继续下降，结构测试防止写算法回流。
 
 ## Validation
 
@@ -30,3 +30,7 @@ payload codec、睡眠 mutex 与同步回执规则；CareLog 只保留 façade�
 ## Documentation gate
 
 保持 Record=已发生事实、CarePlan=未来意图及 0–3 图原子可见契约；本票不改变行为文档。
+
+## Evidence
+
+- [validation.md](../evidence/06/validation.md)
