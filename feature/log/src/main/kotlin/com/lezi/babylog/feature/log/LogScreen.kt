@@ -199,7 +199,9 @@ class LogViewModel @Inject constructor(
     private val deviceLayoutWriter = DeviceLayoutSnapshotWriter(viewModelScope) { snapshot ->
         settingsStore.setDeviceLayoutSnapshot(snapshot)
     }
+    private val layoutEditSessions = LayoutEditSessionStore()
     internal val deviceLayoutWriteState = deviceLayoutWriter.state
+    internal val layoutEditSession = layoutEditSessions.state
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val uiState = combine(
@@ -313,6 +315,30 @@ class LogViewModel @Inject constructor(
         viewModelScope.launch {
             onDone(deviceLayoutWriter.retryLatest())
         }
+    }
+
+    internal fun openLayoutEditSession(
+        context: LayoutEditSessionContext,
+        prefs: DeviceLayoutPrefs,
+    ) {
+        layoutEditSessions.open(context, prefs)
+    }
+
+    internal fun currentLayoutEditSession(): LayoutEditSession? = layoutEditSessions.current
+
+    internal fun updateLayoutEditPrefs(
+        prefs: DeviceLayoutPrefs,
+        hasSubmittedIntent: Boolean,
+    ) {
+        layoutEditSessions.updatePrefs(prefs, hasSubmittedIntent)
+    }
+
+    internal fun updateLayoutCatalogScroll(position: LayoutCatalogScrollPosition) {
+        layoutEditSessions.updateCatalogScroll(position)
+    }
+
+    internal fun closeLayoutEditSession() {
+        layoutEditSessions.close()
     }
 
     fun addCustomItem(name: String, iconSlot: Int, onDone: (String?) -> Unit) {
@@ -843,13 +869,11 @@ fun LogRoute(
 ) {
     val state by vm.uiState.collectAsStateWithLifecycle()
     val layoutWriteState by vm.deviceLayoutWriteState.collectAsStateWithLifecycle()
+    val layoutSession by vm.layoutEditSession.collectAsStateWithLifecycle()
     val screenTime by rememberRecordScreenTime(clock)
     val layoutUndoScope = rememberCoroutineScope()
     var showMore by remember { mutableStateOf(false) }
-    var showLayoutEdit by remember { mutableStateOf(false) }
     var showCustomManage by remember { mutableStateOf(false) }
-    var layoutPrefs by remember { mutableStateOf<DeviceLayoutPrefs?>(null) }
-    var hasSubmittedLayoutIntent by remember { mutableStateOf(false) }
     var publishChromeRecord by remember { mutableStateOf<PublishChromeTarget?>(null) }
     /** At most one timeline/plan row may stay revealed. */
     var revealedSwipeRowId by remember { mutableStateOf<String?>(null) }
@@ -896,12 +920,16 @@ fun LogRoute(
             onMessage("布局由更新版本创建，当前版本不会覆盖它")
             return
         }
-        layoutPrefs = snapshot.toLayoutPrefs()
-        hasSubmittedLayoutIntent = false
+        vm.openLayoutEditSession(
+            context = LayoutEditSessionContext(
+                babyId = state.baby?.id,
+                day = state.day,
+            ),
+            prefs = snapshot.toLayoutPrefs(),
+        )
         exitAfterLayoutRetry = false
         dismissedLayoutFailure = null
         layoutUndoState = LayoutUndoState.Idle
-        showLayoutEdit = true
     }
     val dayChartContext = remember(state.baby?.id, state.day) {
         DayChartFilterContext(babyId = state.baby?.id, day = state.day)
@@ -1025,8 +1053,10 @@ fun LogRoute(
         )
     }
 
-    val editingPrefs = layoutPrefs
-    val inLayoutEdit = showLayoutEdit && editingPrefs != null
+    val layoutPresentation = layoutEditPresentation(layoutSession, layoutWriteState)
+    val editingSession = layoutPresentation?.session
+    val editingPrefs = editingSession?.prefs
+    val inLayoutEdit = layoutPresentation != null
     DisposableEffect(inLayoutEdit) {
         onLayoutEditModeChanged(inLayoutEdit)
         onDispose {
@@ -1034,7 +1064,7 @@ fun LogRoute(
         }
     }
     fun completeLayoutUndoWrite(token: Long, result: Result<Unit>) {
-        val currentSnapshot = layoutPrefs?.toSnapshot()
+        val currentSnapshot = vm.currentLayoutEditSession()?.prefs?.toSnapshot()
         if (currentSnapshot == null) {
             layoutUndoState = LayoutUndoState.Idle
             return
@@ -1049,7 +1079,10 @@ fun LogRoute(
         )
         layoutUndoState = reduction.state
         reduction.restoredSnapshot?.let { restored ->
-            layoutPrefs = restored.toLayoutPrefs()
+            vm.updateLayoutEditPrefs(
+                prefs = restored.toLayoutPrefs(),
+                hasSubmittedIntent = true,
+            )
             reduction.announcement?.let(onMessage)
         }
     }
@@ -1058,9 +1091,7 @@ fun LogRoute(
             layoutUndoState,
             LayoutUndoEvent.EditorExited,
         ).state
-        showLayoutEdit = false
-        layoutPrefs = null
-        hasSubmittedLayoutIntent = false
+        vm.closeLayoutEditSession()
         layoutExitInProgress = false
         exitAfterLayoutRetry = false
         dismissedLayoutFailure = null
@@ -1102,7 +1133,8 @@ fun LogRoute(
                     prefs = prefs,
                     customItems = state.customItems,
                     onIntent = { intent ->
-                        val current = layoutPrefs ?: return@LayoutEditCanvas
+                        val current = vm.currentLayoutEditSession()?.prefs
+                            ?: return@LayoutEditCanvas
                         val next = reduceLayoutEdit(current, intent, known)
                         nextLayoutUndoToken += 1L
                         val token = nextLayoutUndoToken
@@ -1125,13 +1157,16 @@ fun LogRoute(
                                 after = next.toSnapshot(),
                             )
                         ) {
-                            if (next != current) layoutPrefs = next
-                            hasSubmittedLayoutIntent = true
+                            vm.updateLayoutEditPrefs(
+                                prefs = next,
+                                hasSubmittedIntent = true,
+                            )
                             val receipt = vm.applyDeviceLayoutPrefs(next)
                             layoutUndoScope.launch {
                                 val result = receipt.result.await()
                                 val currentSnapshot =
-                                    layoutPrefs?.toSnapshot() ?: receipt.snapshot
+                                    vm.currentLayoutEditSession()?.prefs?.toSnapshot()
+                                        ?: receipt.snapshot
                                 layoutUndoState = reduceLayoutUndo(
                                     layoutUndoState,
                                     LayoutUndoEvent.OriginalWriteFinished(
@@ -1146,11 +1181,16 @@ fun LogRoute(
                     onDone = ::requestLayoutExit,
                     onOpenCustomManage = { showCustomManage = true },
                     writeState = layoutWriteState,
-                    hasSubmittedIntent = hasSubmittedLayoutIntent,
+                    hasSubmittedIntent = editingSession.hasSubmittedIntent,
                     cancelDragSignal = layoutDragCancelSignal,
                     undoCandidate = undoCandidate,
+                    initialCatalogScroll = editingSession.catalogScroll,
+                    onCatalogScrollChanged = vm::updateLayoutCatalogScroll,
+                    configurationSessionKey =
+                        state.settings.darkMode to state.settings.visualStyle,
                     onUndo = { token ->
-                        val current = layoutPrefs ?: return@LayoutEditCanvas
+                        val current = vm.currentLayoutEditSession()?.prefs
+                            ?: return@LayoutEditCanvas
                         val reduction = reduceLayoutUndo(
                             layoutUndoState,
                             LayoutUndoEvent.UndoRequested(
@@ -1161,7 +1201,10 @@ fun LogRoute(
                         layoutUndoState = reduction.state
                         val restoring = reduction.state as? LayoutUndoState.Restoring
                             ?: return@LayoutEditCanvas
-                        hasSubmittedLayoutIntent = true
+                        vm.updateLayoutEditPrefs(
+                            prefs = current,
+                            hasSubmittedIntent = true,
+                        )
                         val receipt = vm.applyDeviceLayoutPrefs(
                             restoring.candidate.before.toLayoutPrefs(),
                         )
@@ -1654,7 +1697,7 @@ fun LogRoute(
                     onClick = {
                         layoutExitInProgress = true
                         if (failedLayoutUndo != null) {
-                            val current = layoutPrefs
+                            val current = vm.currentLayoutEditSession()?.prefs
                             val reduction = current?.let {
                                 reduceLayoutUndo(
                                     layoutUndoState,

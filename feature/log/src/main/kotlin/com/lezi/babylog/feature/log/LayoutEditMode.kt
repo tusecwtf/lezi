@@ -41,6 +41,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -103,6 +104,7 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.leziRecordColor
 import com.lezi.babylog.domain.CustomRecordItem
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlin.coroutines.coroutineContext
 import kotlin.math.roundToInt
 
@@ -127,6 +129,7 @@ private data class LayoutConfigurationKey(
     val screenHeightDp: Int,
     val uiMode: Int,
     val fontScale: Float,
+    val themeIdentity: Any?,
 )
 
 private data class LayoutItemVisual(
@@ -310,6 +313,9 @@ internal fun LayoutEditCanvas(
     undoCandidate: LayoutUndoCandidate? = null,
     onUndo: (Long) -> Unit = {},
     onUndoExpired: (Long) -> Unit = {},
+    initialCatalogScroll: LayoutCatalogScrollPosition = LayoutCatalogScrollPosition(),
+    onCatalogScrollChanged: (LayoutCatalogScrollPosition) -> Unit = {},
+    configurationSessionKey: Any? = null,
     modifier: Modifier = Modifier,
 ) {
     val known = remember(customItems) { knownCatalogKeys(customItems.map { it.id }) }
@@ -355,7 +361,9 @@ internal fun LayoutEditCanvas(
         orderedRecordSections(prefs.categoryOrderJson)
     }
     val deleted = remember(prefs, known) { layoutEditDeletedKeys(prefs, known) }
-    val catalogScrollState = rememberScrollState()
+    val retainedInitialCatalogScroll = remember { initialCatalogScroll }
+    val catalogScrollState = rememberScrollState(retainedInitialCatalogScroll.value)
+    var catalogScrollRestored by remember { mutableStateOf(false) }
     val localDeletedScrollState = rememberScrollState()
     val doneFocusRequester = remember { FocusRequester() }
     val categoryFocusRequesters = remember {
@@ -365,6 +373,31 @@ internal fun LayoutEditCanvas(
         known.associateWith { FocusRequester() }
     }
     val undoSnackbarHostState = remember { SnackbarHostState() }
+
+    LaunchedEffect(catalogScrollState.maxValue) {
+        if (catalogScrollRestored) return@LaunchedEffect
+        if (
+            retainedInitialCatalogScroll.maxValue > 0 &&
+            catalogScrollState.maxValue == 0
+        ) {
+            return@LaunchedEffect
+        }
+        catalogScrollState.scrollTo(
+            retainedInitialCatalogScroll.valueFor(catalogScrollState.maxValue),
+        )
+        catalogScrollRestored = true
+    }
+    LaunchedEffect(catalogScrollState, catalogScrollRestored) {
+        if (!catalogScrollRestored) return@LaunchedEffect
+        snapshotFlow {
+            LayoutCatalogScrollPosition(
+                value = catalogScrollState.value,
+                maxValue = catalogScrollState.maxValue,
+            )
+        }.distinctUntilChanged().collect { position ->
+            onCatalogScrollChanged(position)
+        }
+    }
 
     val targetRegistry = remember { LayoutVisibleTargetRegistry() }
     var targetRegistryEpoch by remember { mutableLongStateOf(0L) }
@@ -552,6 +585,7 @@ internal fun LayoutEditCanvas(
         screenHeightDp = configuration.screenHeightDp,
         uiMode = configuration.uiMode,
         fontScale = configuration.fontScale,
+        themeIdentity = configurationSessionKey,
     )
     val lifecyclePolicy = remember {
         LayoutDragLifecyclePolicy(

@@ -1,0 +1,82 @@
+package com.lezi.babylog.feature.log
+
+import java.time.LocalDate
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlin.math.roundToInt
+
+internal data class LayoutEditSessionContext(
+    val babyId: Long?,
+    val day: LocalDate,
+)
+
+internal data class LayoutCatalogScrollPosition(
+    val value: Int = 0,
+    val maxValue: Int = 0,
+) {
+    init {
+        require(value >= 0)
+        require(maxValue >= 0)
+    }
+
+    fun valueFor(maxValue: Int): Int {
+        if (maxValue <= 0) return 0
+        if (this.maxValue <= 0) return value.coerceIn(0, maxValue)
+        val fraction = value.coerceIn(0, this.maxValue).toFloat() / this.maxValue
+        return (fraction * maxValue).roundToInt().coerceIn(0, maxValue)
+    }
+}
+
+internal data class LayoutEditSession(
+    val context: LayoutEditSessionContext,
+    val prefs: DeviceLayoutPrefs,
+    val catalogScroll: LayoutCatalogScrollPosition = LayoutCatalogScrollPosition(),
+    val hasSubmittedIntent: Boolean = false,
+)
+
+internal data class RetainedLayoutEditPresentation(
+    val session: LayoutEditSession,
+    val writeState: DeviceLayoutWriteState,
+)
+
+internal fun layoutEditPresentation(
+    session: LayoutEditSession?,
+    writeState: DeviceLayoutWriteState,
+): RetainedLayoutEditPresentation? = session?.let {
+    RetainedLayoutEditPresentation(it, writeState)
+}
+
+/**
+ * ViewModel-owned UI session state. Deliberately has no SavedStateHandle adapter:
+ * configuration recreation retains the store, while process restart starts idle.
+ */
+internal class LayoutEditSessionStore {
+    private val mutableState = MutableStateFlow<LayoutEditSession?>(null)
+    val state: StateFlow<LayoutEditSession?> = mutableState.asStateFlow()
+
+    val current: LayoutEditSession?
+        get() = mutableState.value
+
+    fun open(context: LayoutEditSessionContext, prefs: DeviceLayoutPrefs) {
+        mutableState.value = LayoutEditSession(context = context, prefs = prefs)
+    }
+
+    fun updateCatalogScroll(position: LayoutCatalogScrollPosition) {
+        mutableState.update { current -> current?.copy(catalogScroll = position) }
+    }
+
+    fun updatePrefs(prefs: DeviceLayoutPrefs, hasSubmittedIntent: Boolean) {
+        mutableState.update { current ->
+            current?.copy(
+                prefs = prefs,
+                hasSubmittedIntent = current.hasSubmittedIntent || hasSubmittedIntent,
+            )
+        }
+    }
+
+    fun close() {
+        mutableState.value = null
+    }
+}

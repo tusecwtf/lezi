@@ -88,6 +88,14 @@
 - 自动滚动循环仅在有效拖动 token 且速度非零时逐帧调用目录 `ScrollState`；速度、拖动 token、取消、放下或画布销毁变化都会取消旧协程，不保留后台任务。
 - 滚动后的目标继续由 `LayoutVisibleTargetRegistry` 当前窗口边界解析；源节点触摸点用 `LayoutCoordinates.localToWindow` 转换，兼容滚动、旋转和缩放，不使用会过期的“窗口原点 + 局部偏移”。
 
+## Configuration continuity
+
+- 布局编辑会话由 `LogViewModel` 内不接 `SavedStateHandle` 的 retained store 持有；Activity 配置重建保留进入时宝宝/日期上下文、当前完整布局草稿、是否已提交过 intent，以及目录 `value / maxValue` 滚动位置。
+- 重建后的目录按旧 `value / maxValue` 比例适配新几何，避免旋转、字体尺度或主题切换后跳回顶部；滚动状态只属于本机 UI session，不写入 `DeviceLayoutSnapshot`、数据库或家庭同步。
+- `DeviceLayoutSnapshotWriter` 本就属于同一个 `LogViewModel`，因此重建继续投影真实 `Saving / Saved / Failed`，不会因重新组合重复 submit。失败仍携带原完整快照重试，完成/返回仍等待 writer barrier。
+- drag session、当前目标、跟手浮层和动效/触觉脉冲保持 composable-local。系统配置或 warm/journal、浅色/深色身份变化会取消半途 drag 且不生成 intent；新主题只重绘 retained layout session。
+- 新进程创建新的 session store，默认没有编辑会话；force-stop、进程死亡恢复和冷启动只读取耐久布局并进入普通记录页，绝不从 Saved State 自动重开编辑器。
+
 ## A11y
 
 - 热区 ≥ 48dp；完成、分类、项目、槽、删除区以及固定“更多”的名称、位置/状态和可用动作可读。
