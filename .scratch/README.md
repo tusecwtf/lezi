@@ -12,6 +12,7 @@ post-0.3.0 独立审查残差另开 tracker；使用方式见
 | 当前程序综合审计整改 | [spec](./2c6bbf6-program-audit-remediation/spec.md) | [票索引](./2c6bbf6-program-audit-remediation/ISSUES.md) | complete · 26/26 · Release 0.3.0 |
 | Post-0.3.0 code-review 残差 | [spec](./post-0.3.0-code-review-remediation/spec.md) | [票索引](./post-0.3.0-code-review-remediation/ISSUES.md) | complete · 9/9 · fixed-point gates passed |
 | 0.3.0 APK 逐页验收整改 | [spec](./apk-0.3.0-page-acceptance-remediation/spec.md) | [票索引](./apk-0.3.0-page-acceptance-remediation/ISSUES.md) | complete · 1/1 · fixed-point gates passed |
+| 离线模式（先本机记账，账户再连家庭） | [spec](./offline-mode/spec.md) | [票索引](./offline-mode/ISSUES.md) | active · 0/6 · frontier 01 |
 
 产品契约已写回 [`docs/prd/`](../docs/prd/)；本轮最终构建、设备与 current-wire 结果见
 [`release-0.3.0/validation.md`](./2c6bbf6-program-audit-remediation/evidence/release-0.3.0/validation.md)。
