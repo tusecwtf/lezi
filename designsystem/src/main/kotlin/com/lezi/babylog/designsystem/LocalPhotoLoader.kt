@@ -1,5 +1,6 @@
 package com.lezi.babylog.designsystem
 
+import com.lezi.babylog.core.model.RecordPhotoResourcePolicy
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -170,9 +171,9 @@ private fun decodePlan(
     if (
         source.width <= 0 ||
         source.height <= 0 ||
-        source.width > MAX_SOURCE_EDGE ||
-        source.height > MAX_SOURCE_EDGE ||
-        source.width.toLong() * source.height > MAX_SOURCE_PIXELS
+        source.width > RecordPhotoResourcePolicy.maxSourceEdge ||
+        source.height > RecordPhotoResourcePolicy.maxSourceEdge ||
+        source.width.toLong() * source.height > RecordPhotoResourcePolicy.maxSourcePixels
     ) {
         return null
     }
@@ -210,6 +211,3 @@ private fun decodePlan(
 
 private fun ceilDiv(value: Int, divisor: Int): Int =
     (value.toLong() + divisor - 1L).div(divisor).toInt()
-
-private const val MAX_SOURCE_EDGE = 65_535
-private const val MAX_SOURCE_PIXELS = 268_435_456L

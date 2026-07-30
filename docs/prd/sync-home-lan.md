@@ -265,7 +265,19 @@ member 的前台/下拉同步先完成全部 pull 页并应用 NAS 权威 Baby�
 
 ### 6.2 客户端
 
-- 上传前压缩（长边约 1200–2000px，与 ui 规格一致）。
+- 记录照片资源预算统一来自 `core:model.RecordPhotoResourcePolicy`：源文件只接受
+  JPEG/PNG/WebP、最大 16 MiB、任一边最大 65,535 px、总像素最大 268,435,456；单批沿用
+  `MAX_RECORD_PHOTOS = 3`。
+- 上传前在后台按采样边界解码并统一输出 JPEG：长边最大 1,600 px、像素最大 2,560,000、
+  quality 85、输出最大 8 MiB。规范化结果写入 app cache 临时文件，不创建整文件
+  `ByteArray` 或 `ByteArrayOutputStream` 副本。
+- staged bundle 可持有 0–3 个小型 file handle，但 PUT 始终逐个执行：声明精确
+  `Content-Length`，以 64 KiB buffer 流式写入并在每块检查取消。所有成功、失败与取消路径
+  都在 `finally` 关闭并删除规范化临时文件；重试重新打开文件 source，不同时保留多份完整
+  内存副本。
+- 只有全部缺失媒体 PUT 且 bundle commit 成功后才写本机 remote receipt；中途失败或取消不写
+  部分 receipt，也不清理待重试 outbox。客户端 8 MiB 输出上限低于服务端默认
+  `LEZI_MAX_MEDIA_BYTES=10485760`。
 - 本地可先写 `local_uri`；同步后写 `remote` 标识（`client_uuid` / 相对路径）。
 - **禁止**把设备绝对路径当同步主键。
 - Record/CarePlan 的 MediaAsset 行是单一实体所有权；相同 `local_uri` 的本机字节可以被多个

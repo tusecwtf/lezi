@@ -3509,7 +3509,7 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun uploadedPhotoCannotStandInForFailedRootCommitReceipt() = runTest {
+    fun uploadedPhotoCannotCreatePartialReceiptBeforeFailedRootCommit() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
         val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
@@ -3538,9 +3538,16 @@ class RealSyncPortTest {
 
         assertThat(rig.port.sync(SyncTrigger.LocalWrite).isFailure).isTrue()
 
-        assertThat(rig.media.getByClientUuid(mediaUuid)?.remoteUri).isNotNull()
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.remoteUri).isNull()
         assertThat(rig.records.getByClientUuid("record-photo-root-fail")?.familyPublishedUpdatedAt)
             .isNull()
+
+        rig.backend.commitBundleFailure = null
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.remoteUri).isNotNull()
+        assertThat(rig.records.getByClientUuid("record-photo-root-fail")?.familyPublishedUpdatedAt)
+            .isEqualTo(800)
     }
 
     @Test
@@ -5581,8 +5588,7 @@ internal class RecordingSyncBackend : SyncBackend {
         session: SyncSession,
         bundleId: String,
         clientUuid: String,
-        bytes: ByteArray,
-        mime: String?,
+        source: SyncMediaUploadSource,
     ): BundleStageStatus {
         putBundleMediaFailure?.let { throw it }
         operationOrder += "put_bundle_media:$clientUuid"
@@ -5801,7 +5807,7 @@ internal open class TestMediaFileStore : SyncMediaFileStore {
     }
 
     override suspend fun prepareUpload(localUri: String) =
-        PreparedMedia(byteArrayOf(1), "image/jpeg")
+        testPreparedMedia(byteArrayOf(1))
 
     override suspend fun saveDownloaded(
         clientUuid: String,

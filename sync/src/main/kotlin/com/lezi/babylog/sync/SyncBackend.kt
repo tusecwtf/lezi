@@ -114,8 +114,7 @@ interface SyncBackend {
         session: SyncSession,
         bundleId: String,
         clientUuid: String,
-        bytes: ByteArray,
-        mime: String?,
+        source: SyncMediaUploadSource,
     ): BundleStageStatus
 
     /** Publish a complete package in one server transaction (idempotent). */

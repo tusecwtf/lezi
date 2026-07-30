@@ -251,8 +251,7 @@ class FakeSyncBackend : SyncBackend {
         session: SyncSession,
         bundleId: String,
         clientUuid: String,
-        bytes: ByteArray,
-        mime: String?,
+        source: SyncMediaUploadSource,
     ): BundleStageStatus {
         val staged = bundles[session.familyId]?.get(bundleId)
             ?: throw SyncHttpException(404, "Bundle not found")
@@ -263,8 +262,12 @@ class FakeSyncBackend : SyncBackend {
         val mediaEntity = staged.draft.media.first { it.clientUuid == clientUuid }
         require(mediaEntity.deletedAt == null) { "tombstone media does not accept bytes" }
         val declared = payloadLong(mediaEntity, "byte_size")
-        if (declared != null && declared != bytes.size.toLong()) {
+        if (declared != null && declared != source.contentLength) {
             throw SyncHttpException(422, "Media body size does not match declared byte_size")
+        }
+        val bytes = source.openStream().use { it.readBytes() }
+        require(bytes.size.toLong() == source.contentLength) {
+            "Media source length does not match contentLength"
         }
         bundleMediaBytes
             .getOrPut(session.familyId) { mutableMapOf() }

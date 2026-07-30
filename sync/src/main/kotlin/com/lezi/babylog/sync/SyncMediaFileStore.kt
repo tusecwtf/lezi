@@ -5,14 +5,20 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import androidx.exifinterface.media.ExifInterface
+import com.lezi.babylog.core.model.RecordPhotoResourcePolicy
 import dagger.hilt.android.qualifiers.ApplicationContext
-import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FilterOutputStream
+import java.io.InputStream
+import java.io.OutputStream
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.max
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 data class LocalMediaInfo(
@@ -22,12 +28,34 @@ data class LocalMediaInfo(
     val height: Int?,
 )
 
-data class PreparedMedia(
-    val bytes: ByteArray,
-    val mime: String,
+interface SyncMediaUploadSource {
+    val contentLength: Long
+    val mime: String?
+    fun openStream(): InputStream
+}
+
+class PreparedMedia(
+    val file: File,
+    override val mime: String,
     val width: Int? = null,
     val height: Int? = null,
-)
+) : SyncMediaUploadSource, AutoCloseable {
+    override val contentLength: Long = file.length()
+
+    init {
+        require(file.isFile && contentLength > 0L) { "待上传媒体文件为空" }
+        require(contentLength <= RecordPhotoResourcePolicy.maxUploadBytes) {
+            "待上传媒体不能超过 8 MiB"
+        }
+    }
+
+    override fun openStream(): InputStream =
+        file.inputStream().buffered(RecordPhotoResourcePolicy.streamBufferBytes)
+
+    override fun close() {
+        check(file.delete() || !file.exists()) { "无法清理待上传媒体临时文件" }
+    }
+}
 
 interface SyncMediaFileStore {
     suspend fun inspect(localUri: String): LocalMediaInfo?
@@ -61,14 +89,32 @@ class AndroidSyncMediaFileStore @Inject constructor(
         val file = requireNotNull(resolve(localUri)?.takeIf(File::isFile)) {
             "本地媒体文件不存在"
         }
+        require(file.length() in 1L..RecordPhotoResourcePolicy.maxSourceBytes) {
+            "本地媒体文件大小超出支持范围"
+        }
         val bounds = BitmapFactory.Options().also { it.inJustDecodeBounds = true }
         BitmapFactory.decodeFile(file.path, bounds)
-        val largest = max(bounds.outWidth, bounds.outHeight)
-        if (largest <= 0) {
-            return@withContext PreparedMedia(file.readBytes(), mimeFromName(file.name))
+        require(RecordPhotoResourcePolicy.isAllowedMime(bounds.outMimeType)) {
+            "本地媒体格式不受支持"
         }
+        require(
+            bounds.outWidth > 0 &&
+                bounds.outHeight > 0 &&
+                bounds.outWidth <= RecordPhotoResourcePolicy.maxSourceEdge &&
+                bounds.outHeight <= RecordPhotoResourcePolicy.maxSourceEdge &&
+                bounds.outWidth.toLong() * bounds.outHeight <=
+                RecordPhotoResourcePolicy.maxSourcePixels,
+        ) { "本地媒体尺寸超出支持范围" }
         var sample = 1
-        while (largest / sample > MEDIA_DECODE_MAX_EDGE * 2) sample *= 2
+        while (
+            ceilDiv(bounds.outWidth, sample) > RecordPhotoResourcePolicy.maxUploadEdge * 2 ||
+            ceilDiv(bounds.outHeight, sample) > RecordPhotoResourcePolicy.maxUploadEdge * 2 ||
+            ceilDiv(bounds.outWidth, sample).toLong() * ceilDiv(bounds.outHeight, sample) >
+            RecordPhotoResourcePolicy.maxUploadPixels * 4
+        ) {
+            sample *= 2
+        }
+        currentCoroutineContext().ensureActive()
         val source = requireNotNull(
             BitmapFactory.decodeFile(
                 file.path,
@@ -76,8 +122,9 @@ class AndroidSyncMediaFileStore @Inject constructor(
             ),
         ) { "无法读取本地媒体" }
         val oriented = applyExifOrientation(source, readExifOrientation(file))
-        val scaled = if (max(oriented.width, oriented.height) > MEDIA_UPLOAD_MAX_EDGE) {
-            val ratio = MEDIA_UPLOAD_MAX_EDGE.toDouble() / max(oriented.width, oriented.height)
+        val scaled = if (max(oriented.width, oriented.height) > RecordPhotoResourcePolicy.maxUploadEdge) {
+            val ratio = RecordPhotoResourcePolicy.maxUploadEdge.toDouble() /
+                max(oriented.width, oriented.height)
             Bitmap.createScaledBitmap(
                 oriented,
                 (oriented.width * ratio).toInt().coerceAtLeast(1),
@@ -87,19 +134,39 @@ class AndroidSyncMediaFileStore @Inject constructor(
         } else {
             oriented
         }
+        val temporaryDirectory = File(context.cacheDir, "sync-media-upload").apply {
+            check(exists() || mkdirs()) { "无法创建待上传媒体目录" }
+        }
+        val temporary = File.createTempFile("normalized_", ".jpg", temporaryDirectory)
         try {
-            val bytes = ByteArrayOutputStream().use { output ->
-                check(scaled.compress(Bitmap.CompressFormat.JPEG, MEDIA_JPEG_QUALITY, output)) {
+            currentCoroutineContext().ensureActive()
+            val job = currentCoroutineContext()[Job]
+            temporary.outputStream().buffered(RecordPhotoResourcePolicy.streamBufferBytes).use { output ->
+                val bounded = CancellableBoundedOutputStream(
+                    output = output,
+                    maxBytes = RecordPhotoResourcePolicy.maxUploadBytes,
+                    job = job,
+                )
+                check(
+                    scaled.compress(
+                        Bitmap.CompressFormat.JPEG,
+                        RecordPhotoResourcePolicy.jpegQuality,
+                        bounded,
+                    ),
+                ) {
                     "无法压缩本地媒体"
                 }
-                output.toByteArray()
             }
+            currentCoroutineContext().ensureActive()
             PreparedMedia(
-                bytes = bytes,
+                file = temporary,
                 mime = "image/jpeg",
                 width = scaled.width,
                 height = scaled.height,
             )
+        } catch (failure: Throwable) {
+            temporary.delete()
+            throw failure
         } finally {
             if (scaled !== oriented) scaled.recycle()
             if (oriented !== source) oriented.recycle()
@@ -185,13 +252,37 @@ class AndroidSyncMediaFileStore @Inject constructor(
     }
 
     private companion object {
-        const val MEDIA_DECODE_MAX_EDGE = 2_048
-        const val MEDIA_UPLOAD_MAX_EDGE = 1_600
-        const val MEDIA_JPEG_QUALITY = 86
         const val AVATAR_DIRECTORY = "baby_avatars"
         const val RECORD_MEDIA_DIRECTORY = "record-media"
     }
 }
+
+private class CancellableBoundedOutputStream(
+    output: OutputStream,
+    private val maxBytes: Long,
+    private val job: Job?,
+) : FilterOutputStream(output) {
+    private var written = 0L
+
+    override fun write(value: Int) {
+        beforeWrite(1)
+        out.write(value)
+    }
+
+    override fun write(buffer: ByteArray, offset: Int, length: Int) {
+        beforeWrite(length)
+        out.write(buffer, offset, length)
+    }
+
+    private fun beforeWrite(count: Int) {
+        job?.ensureActive()
+        written += count
+        require(written <= maxBytes) { "待上传媒体不能超过 8 MiB" }
+    }
+}
+
+private fun ceilDiv(value: Int, divisor: Int): Int =
+    (value.toLong() + divisor - 1L).div(divisor).toInt()
 
 internal fun deleteExistingSyncMediaFile(file: File?) {
     if (file?.isFile != true) return

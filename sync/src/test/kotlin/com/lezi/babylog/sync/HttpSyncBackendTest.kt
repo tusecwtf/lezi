@@ -59,7 +59,7 @@ class HttpSyncBackendTest {
                 runCatching {
                     server.accept().use { socket ->
                         val request = readRequest(socket)
-                        seen += request.lineSequence().first()
+                        seen += request
                         val body = when {
                             request.startsWith("POST /v1/bundles ") ->
                                 """{"bundle_id":"b1","status":"staging","missing_media":["m1"],"staged_media":[]}"""
@@ -110,8 +110,7 @@ class HttpSyncBackendTest {
                 session,
                 "b1",
                 "m1",
-                byteArrayOf(1, 2),
-                "image/jpeg",
+                TestMediaUploadSource(byteArrayOf(1, 2)),
             )
             assertThat(afterPut.missingMedia).isEmpty()
             val committed = backend.commitBundle(session, "b1")
@@ -120,9 +119,13 @@ class HttpSyncBackendTest {
             assertThat(committed.recordAuthors).containsExactly(
                 CanonicalRecordAuthor("r1", "membership-a"),
             )
-            assertThat(seen[0]).startsWith("POST /v1/bundles ")
-            assertThat(seen[1]).startsWith("PUT /v1/bundles/b1/media/m1 ")
-            assertThat(seen[2]).startsWith("POST /v1/bundles/b1/commit ")
+            assertThat(seen[0].lineSequence().first()).startsWith("POST /v1/bundles ")
+            assertThat(seen[1].lineSequence().first())
+                .startsWith("PUT /v1/bundles/b1/media/m1 ")
+            assertThat(seen[1]).contains("Content-Length: 2")
+            assertThat(seen[1].lowercase()).doesNotContain("transfer-encoding")
+            assertThat(seen[2].lineSequence().first())
+                .startsWith("POST /v1/bundles/b1/commit ")
         } finally {
             server.close()
             responder.join(2_000)

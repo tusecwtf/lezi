@@ -27,49 +27,64 @@ internal class AtomicMediaBundlePublisher(
         root: SyncEntity,
         mediaRows: List<OutboxEntity>,
     ): BundleCommitResult {
-        val prepared = prepare(mediaRows)
-        requireRemoteAllowed(session)
-        val stage = backend.stageBundle(
-            session,
-            AtomicBundleDraft(bundleId, root, prepared.entities),
-        )
-        val toUpload = stage.mediaUuidsToUpload(
-            prepared.bytes.map { it.first.clientUuid }.toSet(),
-        )
-        for ((media, bytes) in prepared.bytes) {
-            if (media.clientUuid in toUpload) {
-                requireRemoteAllowed(session)
-                backend.putBundleMedia(
-                    session,
-                    bundleId,
-                    media.clientUuid,
-                    bytes.bytes,
-                    bytes.mime,
-                )
+        val ownedSources = mutableListOf<PreparedMedia>()
+        var primaryFailure: Throwable? = null
+        try {
+            val prepared = prepare(mediaRows, ownedSources)
+            requireRemoteAllowed(session)
+            val stage = backend.stageBundle(
+                session,
+                AtomicBundleDraft(bundleId, root, prepared.entities),
+            )
+            val toUpload = stage.mediaUuidsToUpload(
+                prepared.sources.map { it.first.clientUuid }.toSet(),
+            )
+            for ((media, source) in prepared.sources) {
+                if (media.clientUuid in toUpload) {
+                    requireRemoteAllowed(session)
+                    backend.putBundleMedia(
+                        session,
+                        bundleId,
+                        media.clientUuid,
+                        source,
+                    )
+                }
             }
-            updateMedia(media.copy(remoteUri = session.receiptFor(media.clientUuid)))
+            requireRemoteAllowed(session)
+            val result = backend.commitBundle(session, bundleId)
+            for ((media, _) in prepared.sources) {
+                updateMedia(media.copy(remoteUri = session.receiptFor(media.clientUuid)))
+            }
+            return result
+        } catch (failure: Throwable) {
+            primaryFailure = failure
+            throw failure
+        } finally {
+            closePreparedSources(ownedSources, primaryFailure)
         }
-        requireRemoteAllowed(session)
-        return backend.commitBundle(session, bundleId)
     }
 
-    private suspend fun prepare(mediaRows: List<OutboxEntity>): AtomicMediaPackage {
+    private suspend fun prepare(
+        mediaRows: List<OutboxEntity>,
+        ownedSources: MutableList<PreparedMedia>,
+    ): AtomicMediaPackage {
         val mediaEntities = mutableListOf<SyncEntity>()
-        val mediaBytes = mutableListOf<Pair<MediaAssetEntity, PreparedMedia>>()
+        val mediaSources = mutableListOf<Pair<MediaAssetEntity, PreparedMedia>>()
         for (row in mediaRows) {
             var payload = row.payloadJson
             val media = loadMedia(row.clientUuid)
                 ?: error("本地媒体元数据不存在")
             if (row.deletedAt == null && media.localUri.isNotBlank()) {
                 val prepared = mediaFiles.prepareUpload(media.localUri)
+                ownedSources += prepared
                 val updated = media.copy(
                     mime = prepared.mime,
                     width = prepared.width ?: media.width,
                     height = prepared.height ?: media.height,
-                    byteSize = prepared.bytes.size.toLong(),
+                    byteSize = prepared.contentLength,
                 )
                 updateMedia(updated)
-                mediaBytes += updated to prepared
+                mediaSources += updated to prepared
                 val rawObject = Json.parseToJsonElement(payload).jsonObject
                 payload = JsonObject(
                     rawObject +
@@ -89,11 +104,33 @@ internal class AtomicMediaBundlePublisher(
                 deletedAt = row.deletedAt,
             )
         }
-        return AtomicMediaPackage(mediaEntities, mediaBytes)
+        return AtomicMediaPackage(mediaEntities, mediaSources)
     }
 }
 
 private data class AtomicMediaPackage(
     val entities: List<SyncEntity>,
-    val bytes: List<Pair<MediaAssetEntity, PreparedMedia>>,
+    val sources: List<Pair<MediaAssetEntity, PreparedMedia>>,
 )
+
+private fun closePreparedSources(
+    sources: List<PreparedMedia>,
+    primaryFailure: Throwable?,
+) {
+    var cleanupFailure: Throwable? = null
+    sources.forEach { source ->
+        try {
+            source.close()
+        } catch (failure: Throwable) {
+            val earlierCleanupFailure = cleanupFailure
+            if (earlierCleanupFailure == null) {
+                cleanupFailure = failure
+            } else {
+                earlierCleanupFailure.addSuppressed(failure)
+            }
+        }
+    }
+    cleanupFailure?.let { failure ->
+        if (primaryFailure == null) throw failure else primaryFailure.addSuppressed(failure)
+    }
+}

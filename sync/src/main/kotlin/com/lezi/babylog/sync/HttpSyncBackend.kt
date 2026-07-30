@@ -1,5 +1,6 @@
 package com.lezi.babylog.sync
 
+import com.lezi.babylog.core.model.RecordPhotoResourcePolicy
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStreamWriter
@@ -8,6 +9,8 @@ import java.net.URL
 import java.net.URLEncoder
 import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -216,16 +219,14 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
         session: SyncSession,
         bundleId: String,
         clientUuid: String,
-        bytes: ByteArray,
-        mime: String?,
+        source: SyncMediaUploadSource,
     ): BundleStageStatus {
-        val json = requestJsonBytes(
+        val json = requestJsonStream(
             session.baseUrl,
             "/v1/bundles/$bundleId/media/$clientUuid",
             "PUT",
             session.familyToken,
-            bytes,
-            mime,
+            source,
         )
         return json.toBundleStageStatus()
     }
@@ -317,19 +318,44 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
     }
 
     /** PUT binary body, parse JSON success response (bundle stage status). */
-    private suspend fun requestJsonBytes(
+    private suspend fun requestJsonStream(
         base: String,
         path: String,
         method: String,
         token: String,
-        body: ByteArray,
-        mime: String?,
+        source: SyncMediaUploadSource,
     ): JsonObject = withContext(Dispatchers.IO) {
+        require(source.contentLength in 1L..RecordPhotoResourcePolicy.maxUploadBytes) {
+            "待上传媒体大小超出支持范围"
+        }
         val connection = open(base, path, method, token)
         try {
             connection.doOutput = true
-            connection.setRequestProperty("Content-Type", mime ?: "application/octet-stream")
-            connection.outputStream.use { it.write(body) }
+            connection.setRequestProperty(
+                "Content-Type",
+                source.mime ?: "application/octet-stream",
+            )
+            connection.setFixedLengthStreamingMode(source.contentLength)
+            source.openStream().use { input ->
+                connection.outputStream.use { output ->
+                    val buffer = ByteArray(RecordPhotoResourcePolicy.streamBufferBytes)
+                    var written = 0L
+                    while (true) {
+                        currentCoroutineContext().ensureActive()
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        if (count == 0) continue
+                        written += count
+                        require(written <= source.contentLength) {
+                            "待上传媒体长度与声明不一致"
+                        }
+                        output.write(buffer, 0, count)
+                    }
+                    require(written == source.contentLength) {
+                        "待上传媒体长度与声明不一致"
+                    }
+                }
+            }
             val (code, bytes) = readBoundedBody(
                 connection = connection,
                 successLimitBytes = MAX_SYNC_JSON_RESPONSE_BYTES,

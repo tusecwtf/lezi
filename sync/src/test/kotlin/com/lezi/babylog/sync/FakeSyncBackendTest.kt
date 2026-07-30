@@ -112,7 +112,12 @@ class FakeSyncBackendTest {
         assertThat(staged.missingMedia).containsExactly(MEDIA_A)
         assertThat(backend.pull(session).entities.map { it.clientUuid }).containsExactly("baby-a")
 
-        backend.putBundleMedia(session, "bundle-1", MEDIA_A, byteArrayOf(1, 2, 3), "image/jpeg")
+        backend.putBundleMedia(
+            session,
+            "bundle-1",
+            MEDIA_A,
+            TestMediaUploadSource(byteArrayOf(1, 2, 3)),
+        )
         val committed = backend.commitBundle(session, "bundle-1")
         assertThat(committed.status).isEqualTo("committed")
         assertThat(committed.applied).isEqualTo(2)
@@ -213,8 +218,7 @@ class FakeSyncBackendTest {
             owner,
             "bundle-record-dual",
             MEDIA_RECORD_DUAL,
-            byteArrayOf(9, 9, 9, 9),
-            "image/jpeg",
+            TestMediaUploadSource(byteArrayOf(9, 9, 9, 9)),
         )
         assertPeerDoesNotSee("record-dual", MEDIA_RECORD_DUAL)
         backend.commitBundle(owner, "bundle-record-dual")
@@ -249,8 +253,7 @@ class FakeSyncBackendTest {
             owner,
             "bundle-plan-dual",
             MEDIA_PLAN_DUAL,
-            byteArrayOf(1, 2),
-            "image/jpeg",
+            TestMediaUploadSource(byteArrayOf(1, 2)),
         )
         assertPeerDoesNotSee("plan-dual", MEDIA_PLAN_DUAL)
         backend.commitBundle(owner, "bundle-plan-dual")
