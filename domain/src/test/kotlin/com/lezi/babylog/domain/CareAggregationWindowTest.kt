@@ -32,6 +32,32 @@ class CareAggregationWindowTest {
         assertThat(source.readCount).isEqualTo(source.size)
     }
 
+    @Test
+    fun widgetLatestLabelPreservesTheSavedCustomSnapshot() {
+        val timestamp = start.atTime(10, 0).toInstant(zone).toEpochMilli()
+        val custom = Record(
+            id = 9,
+            clientUuid = "custom-9",
+            babyId = 1,
+            type = RecordType.CUSTOM,
+            timestamp = timestamp,
+            payloadJson =
+                """{"title":"抚触","detail":"晚间","custom_item_id":9,"icon_slot":2}""",
+            updatedAt = timestamp,
+        )
+
+        val summary = CareAggregation.widget(
+            records = listOf(custom),
+            babyName = "年年",
+            date = start,
+            zone = zone,
+            now = timestamp + 1,
+        )
+
+        assertThat(summary.lastLabel).startsWith("抚触 ·")
+        assertThat(summary.lastLabel).doesNotContain("custom")
+    }
+
     private fun record(id: Long, date: LocalDate): Record {
         val timestamp = date.atTime(10, 0).toInstant(zone).toEpochMilli()
         return Record(

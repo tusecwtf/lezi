@@ -8,7 +8,7 @@ import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.TemperaturePayload
 import com.lezi.babylog.core.model.UnknownPayload
-import com.lezi.babylog.core.model.businessLabel
+import com.lezi.babylog.core.model.displayLabel
 import com.lezi.babylog.core.model.payloadSummary
 import java.time.DayOfWeek
 import java.time.Instant
@@ -143,7 +143,7 @@ object CareAggregation {
             poop = day.bucket.poop,
             lastLabel = latest?.let {
                 listOf(
-                    it.type.businessLabel(),
+                    it.displayLabel(),
                     it.payloadSummary(),
                     formatClock(it.timestamp, zone),
                 ).filter(String::isNotBlank).joinToString(" · ")

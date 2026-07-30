@@ -1,7 +1,8 @@
 package com.lezi.babylog.feature.widget
 
 import com.lezi.babylog.core.model.RecordType
-import com.lezi.babylog.core.ui.presentation
+import com.lezi.babylog.core.model.businessLabel
+import com.lezi.babylog.core.model.recordTypeLabel
 
 const val MAX_WIDGET_QUICK_TYPES: Int = 4
 
@@ -64,6 +65,7 @@ data class WidgetSummarySnapshot(
     val poopCount: Int,
     val lastLabel: String?,
     val updatedAtEpochMillis: Long,
+    val lastLabelIsCanonical: Boolean = false,
 )
 
 data class WidgetQuickAction(
@@ -100,7 +102,9 @@ internal fun configuredWidgetDisplayModel(
     val poop = matchingSnapshot?.poopCount?.coerceAtLeast(0) ?: 0
     val latest = matchingSnapshot?.lastLabel
         ?.takeIf(String::isNotBlank)
-        ?.let(::localizeLastLabel)
+        ?.let { label ->
+            if (matchingSnapshot.lastLabelIsCanonical) label else localizeLegacyLastLabel(label)
+        }
         ?: "暂无记录"
     return WidgetDisplayModel(
         widgetId = configuration.widgetId,
@@ -109,7 +113,7 @@ internal fun configuredWidgetDisplayModel(
         primarySummary = "喂养 ${feedMl}ml · 睡眠 $sleepText",
         secondarySummary = "排泄 尿$pee/便$poop · 最近 $latest",
         quickActions = configuration.quickTypes.map { type ->
-            WidgetQuickAction(type, type.presentation.label)
+            WidgetQuickAction(type, type.businessLabel())
         },
         isConfigured = true,
         isStale = isStale || matchingSnapshot == null,
@@ -128,10 +132,20 @@ internal fun unconfiguredWidgetDisplayModel(widgetId: Int): WidgetDisplayModel =
         isStale = false,
     )
 
-private fun localizeLastLabel(raw: String): String {
+private fun localizeLegacyLastLabel(raw: String): String {
     val separator = " · "
     val typeKey = raw.substringBefore(separator)
     val suffix = raw.substringAfter(separator, missingDelimiterValue = "")
-    val label = RecordType.fromKey(typeKey)?.presentation?.label ?: typeKey
+    val label = when (val type = RecordType.fromKey(typeKey)) {
+        null -> if (typeKey.isLikelyInternalRecordTypeKey()) {
+            recordTypeLabel(typeKey)
+        } else {
+            typeKey.ifBlank { recordTypeLabel(typeKey) }
+        }
+        else -> type.businessLabel()
+    }
     return if (suffix.isBlank()) label else "$label$separator$suffix"
 }
+
+private fun String.isLikelyInternalRecordTypeKey(): Boolean =
+    isNotEmpty() && first() in 'a'..'z' && all { it in 'a'..'z' || it in '0'..'9' || it == '_' }

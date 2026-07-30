@@ -38,6 +38,7 @@ internal class WidgetRefreshEngine(
                 poopCount = data.poopCount,
                 lastLabel = data.lastLabel,
                 updatedAtEpochMillis = now(),
+                lastLabelIsCanonical = true,
             )
             store.saveSnapshot(snapshot)
             configuredWidgetDisplayModel(configuration, snapshot)

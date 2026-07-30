@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.businessLabel
 import com.lezi.babylog.core.model.payloadSummary
 import com.lezi.babylog.designsystem.LeziCard
 import com.lezi.babylog.designsystem.LeziRecordColorRole
@@ -80,122 +81,137 @@ data class RecordTypePresentation(
     val chartMark: RecordChartMark,
 )
 
+private fun RecordType.recordTypePresentation(
+    tip: String,
+    glyph: LeziRecordGlyph,
+    colorRole: LeziRecordColorRole,
+    section: RecordSection,
+    chartMark: RecordChartMark,
+): RecordTypePresentation = RecordTypePresentation(
+    label = businessLabel(),
+    tip = tip,
+    glyph = glyph,
+    colorRole = colorRole,
+    section = section,
+    chartMark = chartMark,
+)
+
 /**
  * The single record presentation seam. It is intentionally exhaustive so a
  * newly-added RecordType cannot silently fall back to a placeholder icon.
  */
 val RecordType.presentation: RecordTypePresentation
     get() = when (this) {
-        RecordType.NURSING -> RecordTypePresentation(
-            "母乳", "左右计时", LeziRecordGlyph.Nursing,
+        RecordType.NURSING -> recordTypePresentation(
+            "左右计时", LeziRecordGlyph.Nursing,
             LeziRecordColorRole.Nursing, RecordSection.Feeding, RecordChartMark.Circle,
         )
-        RecordType.FORMULA -> RecordTypePresentation(
-            "配方奶", "奶量", LeziRecordGlyph.Bottle,
+        RecordType.FORMULA -> recordTypePresentation(
+            "奶量", LeziRecordGlyph.Bottle,
             LeziRecordColorRole.Milk, RecordSection.Feeding, RecordChartMark.Circle,
         )
-        RecordType.PUMPED_FEED -> RecordTypePresentation(
-            "母乳瓶喂", "奶量", LeziRecordGlyph.Bottle,
+        RecordType.PUMPED_FEED -> recordTypePresentation(
+            "奶量", LeziRecordGlyph.Bottle,
             LeziRecordColorRole.Nursing, RecordSection.Feeding, RecordChartMark.Circle,
         )
-        RecordType.PUMP_EXPRESS -> RecordTypePresentation(
-            "挤奶", "奶量", LeziRecordGlyph.Pump,
+        RecordType.PUMP_EXPRESS -> recordTypePresentation(
+            "奶量", LeziRecordGlyph.Pump,
             LeziRecordColorRole.Nursing, RecordSection.Feeding, RecordChartMark.Circle,
         )
-        RecordType.PEE -> RecordTypePresentation(
-            "尿尿", "小中大", LeziRecordGlyph.Pee,
+        RecordType.PEE -> recordTypePresentation(
+            "小中大", LeziRecordGlyph.Pee,
             LeziRecordColorRole.Pee, RecordSection.Excretion, RecordChartMark.Square,
         )
-        RecordType.POOP -> RecordTypePresentation(
-            "便便", "三组分档", LeziRecordGlyph.Poop,
+        RecordType.POOP -> recordTypePresentation(
+            "三组分档", LeziRecordGlyph.Poop,
             LeziRecordColorRole.Poop, RecordSection.Excretion, RecordChartMark.Square,
         )
-        RecordType.BOTH_DIAPER -> RecordTypePresentation(
-            "尿+便", "完整分档", LeziRecordGlyph.Poop,
+        RecordType.BOTH_DIAPER -> recordTypePresentation(
+            "完整分档", LeziRecordGlyph.Poop,
             LeziRecordColorRole.Poop, RecordSection.Excretion, RecordChartMark.Square,
         )
-        RecordType.SLEEP -> RecordTypePresentation(
-            "睡眠", "计时/手动", LeziRecordGlyph.Sleep,
+        RecordType.SLEEP -> recordTypePresentation(
+            "计时/手动", LeziRecordGlyph.Sleep,
             LeziRecordColorRole.Sleep, RecordSection.Routine, RecordChartMark.SleepBlock,
         )
-        RecordType.TEMPERATURE -> RecordTypePresentation(
-            "体温", "℃/℉", LeziRecordGlyph.Temperature,
+        RecordType.TEMPERATURE -> recordTypePresentation(
+            "℃/℉", LeziRecordGlyph.Temperature,
             LeziRecordColorRole.Temperature, RecordSection.Routine, RecordChartMark.Triangle,
         )
-        RecordType.DIARY -> RecordTypePresentation(
-            "日记", "正文/照片", LeziRecordGlyph.Note,
+        RecordType.DIARY -> recordTypePresentation(
+            "正文/照片", LeziRecordGlyph.Note,
             LeziRecordColorRole.Care, RecordSection.Routine, RecordChartMark.Circle,
         )
-        RecordType.BATH -> RecordTypePresentation(
-            "洗澡", "一键记录", LeziRecordGlyph.Bath,
+        RecordType.BATH -> recordTypePresentation(
+            "一键记录", LeziRecordGlyph.Bath,
             LeziRecordColorRole.Wake, RecordSection.Routine, RecordChartMark.Circle,
         )
-        RecordType.WALK -> RecordTypePresentation(
-            "散步", "时刻/备注", LeziRecordGlyph.Walk,
+        RecordType.WALK -> recordTypePresentation(
+            "时刻/备注", LeziRecordGlyph.Walk,
             LeziRecordColorRole.Growth, RecordSection.Routine, RecordChartMark.Circle,
         )
-        RecordType.COUGH -> RecordTypePresentation(
-            "咳嗽", "程度/备注", LeziRecordGlyph.Health,
+        RecordType.COUGH -> recordTypePresentation(
+            "程度/备注", LeziRecordGlyph.Health,
             LeziRecordColorRole.Temperature, RecordSection.Health, RecordChartMark.Circle,
         )
-        RecordType.RASH -> RecordTypePresentation(
-            "发疹", "程度/备注", LeziRecordGlyph.Health,
+        RecordType.RASH -> recordTypePresentation(
+            "程度/备注", LeziRecordGlyph.Health,
             LeziRecordColorRole.Temperature, RecordSection.Health, RecordChartMark.Circle,
         )
-        RecordType.VOMIT -> RecordTypePresentation(
-            "呕吐", "程度/备注", LeziRecordGlyph.Health,
+        RecordType.VOMIT -> recordTypePresentation(
+            "程度/备注", LeziRecordGlyph.Health,
             LeziRecordColorRole.Temperature, RecordSection.Health, RecordChartMark.Circle,
         )
-        RecordType.INJURY -> RecordTypePresentation(
-            "受伤", "程度/备注", LeziRecordGlyph.Health,
+        RecordType.INJURY -> recordTypePresentation(
+            "程度/备注", LeziRecordGlyph.Health,
             LeziRecordColorRole.Temperature, RecordSection.Health, RecordChartMark.Circle,
         )
-        RecordType.MEDICINE -> RecordTypePresentation(
-            "用药", "名称/剂量", LeziRecordGlyph.Medicine,
+        RecordType.MEDICINE -> recordTypePresentation(
+            "名称/剂量", LeziRecordGlyph.Medicine,
             LeziRecordColorRole.Care, RecordSection.Health, RecordChartMark.Circle,
         )
-        RecordType.HOSPITAL -> RecordTypePresentation(
-            "就医", "原因/医嘱", LeziRecordGlyph.Hospital,
+        RecordType.HOSPITAL -> recordTypePresentation(
+            "原因/医嘱", LeziRecordGlyph.Hospital,
             LeziRecordColorRole.Wake, RecordSection.Health, RecordChartMark.Circle,
         )
-        RecordType.HEIGHT -> RecordTypePresentation(
-            "身高", "成长测量", LeziRecordGlyph.Growth,
+        RecordType.HEIGHT -> recordTypePresentation(
+            "成长测量", LeziRecordGlyph.Growth,
             LeziRecordColorRole.Growth, RecordSection.Growth, RecordChartMark.Circle,
         )
-        RecordType.WEIGHT -> RecordTypePresentation(
-            "体重", "成长测量", LeziRecordGlyph.Growth,
+        RecordType.WEIGHT -> recordTypePresentation(
+            "成长测量", LeziRecordGlyph.Growth,
             LeziRecordColorRole.Growth, RecordSection.Growth, RecordChartMark.Circle,
         )
-        RecordType.BABY_FOOD -> RecordTypePresentation(
-            "辅食", "内容/备注", LeziRecordGlyph.Food,
+        RecordType.BABY_FOOD -> recordTypePresentation(
+            "内容/备注", LeziRecordGlyph.Food,
             LeziRecordColorRole.Milk, RecordSection.Feeding, RecordChartMark.Circle,
         )
-        RecordType.SNACK -> RecordTypePresentation(
-            "点心", "内容/备注", LeziRecordGlyph.Food,
+        RecordType.SNACK -> recordTypePresentation(
+            "内容/备注", LeziRecordGlyph.Food,
             LeziRecordColorRole.Milk, RecordSection.Feeding, RecordChartMark.Circle,
         )
-        RecordType.DRINK -> RecordTypePresentation(
-            "饮料", "内容/量", LeziRecordGlyph.Bottle,
+        RecordType.DRINK -> recordTypePresentation(
+            "内容/量", LeziRecordGlyph.Bottle,
             LeziRecordColorRole.Milk, RecordSection.Feeding, RecordChartMark.Circle,
         )
-        RecordType.HEAD -> RecordTypePresentation(
-            "头围", "成长测量", LeziRecordGlyph.Growth,
+        RecordType.HEAD -> recordTypePresentation(
+            "成长测量", LeziRecordGlyph.Growth,
             LeziRecordColorRole.Growth, RecordSection.Growth, RecordChartMark.Circle,
         )
-        RecordType.CHEST -> RecordTypePresentation(
-            "胸围", "成长测量", LeziRecordGlyph.Growth,
+        RecordType.CHEST -> recordTypePresentation(
+            "成长测量", LeziRecordGlyph.Growth,
             LeziRecordColorRole.Growth, RecordSection.Growth, RecordChartMark.Circle,
         )
-        RecordType.FOOT_SIZE -> RecordTypePresentation(
-            "足长", "成长测量", LeziRecordGlyph.Growth,
+        RecordType.FOOT_SIZE -> recordTypePresentation(
+            "成长测量", LeziRecordGlyph.Growth,
             LeziRecordColorRole.Growth, RecordSection.Growth, RecordChartMark.Circle,
         )
-        RecordType.VACCINE -> RecordTypePresentation(
-            "疫苗", "手记", LeziRecordGlyph.Vaccine,
+        RecordType.VACCINE -> recordTypePresentation(
+            "手记", LeziRecordGlyph.Vaccine,
             LeziRecordColorRole.Wake, RecordSection.Health, RecordChartMark.Circle,
         )
-        RecordType.CUSTOM -> RecordTypePresentation(
-            "自定义", "最多10项", LeziRecordGlyph.Other,
+        RecordType.CUSTOM -> recordTypePresentation(
+            "最多10项", LeziRecordGlyph.Other,
             LeziRecordColorRole.Care, RecordSection.Custom, RecordChartMark.Circle,
         )
     }

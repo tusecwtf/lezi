@@ -2,6 +2,8 @@ package com.lezi.babylog.core.model
 
 import java.util.Locale
 
+const val UNKNOWN_RECORD_TYPE_LABEL: String = "未知记录"
+
 /**
  * The storage-independent Chinese business summary shared by timeline,
  * search, export, and widgets. Notes are deliberately left to the caller.
@@ -36,6 +38,10 @@ fun RecordType.businessLabel(): String = when (this) {
     RecordType.VACCINE -> "疫苗"
     RecordType.CUSTOM -> "自定义"
 }
+
+/** User-visible label for a persisted/wire type key; never exposes an unknown internal key. */
+fun recordTypeLabel(typeKey: String): String =
+    RecordType.fromKey(typeKey)?.businessLabel() ?: UNKNOWN_RECORD_TYPE_LABEL
 
 /**
  * User-visible project title for timeline, search, and export.

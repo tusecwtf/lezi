@@ -2,11 +2,19 @@ package com.lezi.babylog.core.ui
 
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.businessLabel
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class RecordPresentationTest {
+    @Test
+    fun presentationLabelsDelegateToTheModelAuthority() {
+        RecordType.entries.forEach { type ->
+            assertEquals(type.businessLabel(), type.presentation.label)
+        }
+    }
+
     @Test
     fun sectionsContainEveryRecordTypeExactlyOnce() {
         val grouped = RecordType.entries.groupBy { it.presentation.section }

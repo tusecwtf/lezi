@@ -1,6 +1,8 @@
 package com.lezi.babylog.domain
 
 import com.google.common.truth.Truth.assertThat
+import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.businessLabel
 import org.junit.Test
 
 /**
@@ -9,6 +11,14 @@ import org.junit.Test
  * real DAO semantics without requiring instrumented Room.
  */
 class RecordSearchTest {
+
+    @Test
+    fun everyTypeSearchesByTheCanonicalUserVisibleLabel() {
+        RecordType.entries.forEach { type ->
+            assertThat(type.candidateSearchTerms().first()).isEqualTo(type.businessLabel())
+            assertThat(type.candidateSearchTerms()).contains(type.businessLabel())
+        }
+    }
 
     @Test
     fun toSqlLikePattern_wrapsAndEscapesMetacharacters() {

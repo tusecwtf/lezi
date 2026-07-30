@@ -38,7 +38,7 @@ layout/05 已删除分区 ────┘
 
 ## Frontier
 
-当前 audit frontier：**01、03、06、07、10、14、17、18、20、21、23、24**。
+当前 audit frontier：**01、03、06、07、10、14、18、20、21、23、24**。
 
 建议并行：**01、06、07**。其余 frontier 同样可领取，但不得把“frontier”误解为必须同时开工。
 
@@ -62,7 +62,7 @@ layout/05 已删除分区 ────┘
 | [14](./issues/14-accessible-record-plan-actions-and-feedback.md) | 无障碍记录/计划管理与结果反馈 | — | M | partial | ready-for-agent |
 | [15](./issues/15-serialize-growth-measurement-writes.md) | 串行化成长记录写入 | — | S–M | still-valid | complete |
 | [16](./issues/16-root-publication-receipt-and-truthful-copy.md) | 记录根发布回执与真实同步文案 | — | M | still-valid | complete |
-| [17](./issues/17-canonical-user-visible-record-labels.md) | 统一用户可见记录类型标签 | — | S–M | partial | ready-for-agent |
+| [17](./issues/17-canonical-user-visible-record-labels.md) | 统一用户可见记录类型标签 | — | S–M | partial | complete |
 | [18](./issues/18-minute-driven-record-screen-clock.md) | 记录页分钟级时钟刷新 | — | S–M | still-valid | ready-for-agent |
 | [19](./issues/19-dst-safe-three-day-timeline.md) | 夏令时安全的三日时间轴 | 18 | M | partial | ready-for-agent |
 | [20](./issues/20-move-system-calendar-provider-io-off-main.md) | 系统日历 Provider I/O 后台化 | — | M | still-valid | complete |

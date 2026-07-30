@@ -18,7 +18,7 @@ class WidgetRefreshEngineTest {
             store = store,
             summarySource = WidgetSummarySource { babyId ->
                 requestedBabyIds += babyId
-                WidgetSummaryData("年年", 90, 60, 3, 1, "pee · 09:30")
+                WidgetSummaryData("年年", 90, 60, 3, 1, "尿尿 · 09:30")
             },
             now = { 1234L },
         )
@@ -30,6 +30,8 @@ class WidgetRefreshEngineTest {
         assertEquals("年年", fresh.title)
         assertEquals(fresh, cached)
         assertEquals(1234L, store.snapshot(7)?.updatedAtEpochMillis)
+        assertTrue(store.snapshot(7)?.lastLabelIsCanonical == true)
+        assertTrue(fresh.secondarySummary.endsWith("尿尿 · 09:30"))
         assertFalse(fresh.isStale)
     }
 

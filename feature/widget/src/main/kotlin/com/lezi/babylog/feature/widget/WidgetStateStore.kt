@@ -15,6 +15,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
@@ -144,6 +145,7 @@ internal object WidgetStateCodec {
             put("poopCount", snapshot.poopCount)
             snapshot.lastLabel?.let { put("lastLabel", it) }
             put("updatedAtEpochMillis", snapshot.updatedAtEpochMillis)
+            put("lastLabelIsCanonical", snapshot.lastLabelIsCanonical)
         }.toString()
 
     fun decodeSnapshot(encoded: String): WidgetSummarySnapshot? = runCatching {
@@ -158,12 +160,16 @@ internal object WidgetStateCodec {
             poopCount = document.int("poopCount") ?: return null,
             lastLabel = document.string("lastLabel"),
             updatedAtEpochMillis = document.long("updatedAtEpochMillis") ?: return null,
+            lastLabelIsCanonical = document.boolean("lastLabelIsCanonical") ?: false,
         )
     }.getOrNull()
 
     private fun JsonObject.int(key: String): Int? = this[key]?.jsonPrimitive?.intOrNull
 
     private fun JsonObject.long(key: String): Long? = this[key]?.jsonPrimitive?.longOrNull
+
+    private fun JsonObject.boolean(key: String): Boolean? =
+        this[key]?.jsonPrimitive?.booleanOrNull
 
     private fun JsonObject.string(key: String): String? =
         this[key]?.jsonPrimitive?.contentOrNull

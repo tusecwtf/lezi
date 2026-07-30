@@ -59,6 +59,69 @@ class WidgetModelsTest {
     }
 
     @Test
+    fun labelsUseTheCanonicalMappingAndUnknownStoredKeysDoNotLeak() {
+        val configuration = WidgetConfiguration(7, 11, listOf(RecordType.PEE, RecordType.FORMULA))
+        val unknown = WidgetSummarySnapshot(
+            widgetId = 7,
+            babyId = 11,
+            babyName = "年年",
+            feedMl = 0,
+            sleepMinutes = 0,
+            peeCount = 0,
+            poopCount = 0,
+            lastLabel = "future_record_type · 12:30",
+            updatedAtEpochMillis = 100,
+        )
+
+        val model = configuredWidgetDisplayModel(configuration, unknown)
+
+        assertEquals(listOf("尿尿", "配方奶"), model.quickActions.map { it.label })
+        assertEquals("排泄 尿0/便0 · 最近 未知记录 · 12:30", model.secondarySummary)
+    }
+
+    @Test
+    fun alreadyLocalizedCustomSnapshotRemainsVisible() {
+        val configuration = WidgetConfiguration(7, 11, listOf(RecordType.PEE))
+        val custom = WidgetSummarySnapshot(
+            widgetId = 7,
+            babyId = 11,
+            babyName = "年年",
+            feedMl = 0,
+            sleepMinutes = 0,
+            peeCount = 0,
+            poopCount = 0,
+            lastLabel = "抚触 · 晚间 · 12:30",
+            updatedAtEpochMillis = 100,
+            lastLabelIsCanonical = true,
+        )
+
+        val model = configuredWidgetDisplayModel(configuration, custom)
+
+        assertEquals("排泄 尿0/便0 · 最近 抚触 · 晚间 · 12:30", model.secondarySummary)
+    }
+
+    @Test
+    fun canonicalCustomSnapshotThatLooksLikeAStorageKeyIsNeverRelocalized() {
+        val configuration = WidgetConfiguration(7, 11, listOf(RecordType.PEE))
+        val custom = WidgetSummarySnapshot(
+            widgetId = 7,
+            babyId = 11,
+            babyName = "年年",
+            feedMl = 0,
+            sleepMinutes = 0,
+            peeCount = 0,
+            poopCount = 0,
+            lastLabel = "bath · 晚间 · 12:30",
+            updatedAtEpochMillis = 100,
+            lastLabelIsCanonical = true,
+        )
+
+        val model = configuredWidgetDisplayModel(configuration, custom)
+
+        assertEquals("排泄 尿0/便0 · 最近 bath · 晚间 · 12:30", model.secondarySummary)
+    }
+
+    @Test
     fun configurationRejectsDuplicateEmptyAndOversizedQuickLists() {
         assertThrows(IllegalArgumentException::class.java) {
             WidgetConfiguration(7, 11, emptyList())

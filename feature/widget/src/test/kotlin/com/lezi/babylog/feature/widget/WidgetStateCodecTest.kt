@@ -48,6 +48,7 @@ class WidgetStateCodecTest {
             poopCount = 1,
             lastLabel = null,
             updatedAtEpochMillis = 123456,
+            lastLabelIsCanonical = true,
         )
 
         val actual = WidgetStateCodec.decodeSnapshot(
@@ -55,5 +56,14 @@ class WidgetStateCodecTest {
         )
 
         assertEquals(expected, actual)
+    }
+
+    @Test
+    fun legacySnapshotWithoutCanonicalMarkerDefaultsToMigrationMode() {
+        val actual = WidgetStateCodec.decodeSnapshot(
+            """{"widgetId":17,"babyId":42,"babyName":"年年","feedMl":0,"sleepMinutes":0,"peeCount":0,"poopCount":0,"lastLabel":"formula · 12:30","updatedAtEpochMillis":123}""",
+        )
+
+        assertEquals(false, actual?.lastLabelIsCanonical)
     }
 }

@@ -1,7 +1,8 @@
 package com.lezi.babylog.domain
 
 import com.lezi.babylog.core.database.RecordDao
-import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.Record
+import com.lezi.babylog.core.model.displayLabel
 import com.lezi.babylog.core.model.visibleBusinessText
 import java.time.Instant
 import java.time.LocalDate
@@ -54,7 +55,7 @@ class TxtExportPort @Inject constructor(
         val photoPaths = mutableListOf<String>()
         for (r in rows) {
             val model = surface[r.clientUuid] ?: continue
-            val type = RecordType.fromKey(r.type)?.let { labelType(it) } ?: r.type
+            val type = exportRecordLabel(model)
             val whenStr = dt.format(Instant.ofEpochMilli(r.timestamp))
             val summary = model.visibleBusinessText().ifBlank { "-" }
             sb.appendLine("$whenStr\t$type\t$summary")
@@ -63,16 +64,7 @@ class TxtExportPort @Inject constructor(
         return ExportDocument(sb.toString(), photoPaths.distinct())
     }
 
-    private fun labelType(t: RecordType): String = when (t) {
-        RecordType.FORMULA -> "配方奶"
-        RecordType.NURSING -> "母乳"
-        RecordType.PEE -> "尿尿"
-        RecordType.POOP -> "便便"
-        RecordType.SLEEP -> "睡眠"
-        RecordType.TEMPERATURE -> "体温"
-        RecordType.DIARY -> "日记"
-        RecordType.HEIGHT -> "身高"
-        RecordType.WEIGHT -> "体重"
-        else -> t.key
-    }
 }
+
+/** Export shares the same built-in authority and custom title snapshot as UI/search. */
+internal fun exportRecordLabel(record: Record): String = record.displayLabel()
