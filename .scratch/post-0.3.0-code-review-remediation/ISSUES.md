@@ -8,7 +8,7 @@ Audit HEAD: `766d30ae7e6094c4c5d82061f2ad916c8895488d`
 - Executable tickets: **9**
 - Immediate ready-for-agent: **0**
 - Ready structural frontier: **4**
-- Planned structural tickets: **3**
+- Planned structural tickets: **2**
 - Accepted residuals without implementation ticket: **2**
 
 ## Dependency and activation graph
@@ -21,16 +21,16 @@ Audit HEAD: `766d30ae7e6094c4c5d82061f2ad916c8895488d`
 
 03 LayoutEditMode 拆分（ready）
 
-04 CareLog 查询 seam（ready）
-  └──► 05 宝宝/家庭档案 seam（planned）
+04 CareLog 查询 seam（complete）
+  └──► 05 宝宝/家庭档案 seam（ready）
         └──► 06 Record/睡眠写 seam（planned）
               └──► 07 CarePlan/履行 seam（planned）
 
 08 LogScreen 剩余宿主拆分（ready）
 ```
 
-**Current frontier:** 03、04、08、09。01/02 correctness lane 已闭合，当前“实现所有 scratch
-问题”的目标满足 user activation；05–07 仍按 04 → 05 → 06 → 07 依赖串行激活。
+**Current frontier:** 03、05、08、09。01/02 correctness lane 与 04 查询 seam 已闭合，当前“实现
+所有 scratch 问题”的目标满足 user activation；06–07 仍按 05 → 06 → 07 依赖串行激活。
 
 结构票默认不自动实施；正确性门闭合后由用户激活。04–07 因共享 `CareLog.kt` 必须串行。
 
@@ -41,8 +41,8 @@ Audit HEAD: `766d30ae7e6094c4c5d82061f2ad916c8895488d`
 | [01](./issues/01-reconcile-next-feed-after-interrupted-commit.md) | 中断恢复后对齐下次喂养持久化真相 | P0-01 | — | L | complete |
 | [02](./issues/02-freeze-completed-plan-fulfillment-binding.md) | 冻结已完成计划的 fulfillment 绑定 | P1-01 | — | M | complete |
 | [03](./issues/03-split-layout-edit-mode-host.md) | 拆分 LayoutEditMode 目录/坞/替代输入宿主 | P1-02 | — | L | ready-for-agent |
-| [04](./issues/04-extract-carelog-query-surface.md) | 抽离 CareLog 查询与摘要 seam | P1-02 | — | L | ready-for-agent |
-| [05](./issues/05-extract-carelog-baby-family-profile.md) | 抽离 CareLog 宝宝与家庭档案 seam | P1-02 | 04 | L | planned |
+| [04](./issues/04-extract-carelog-query-surface.md) | 抽离 CareLog 查询与摘要 seam | P1-02 | — | L | complete |
+| [05](./issues/05-extract-carelog-baby-family-profile.md) | 抽离 CareLog 宝宝与家庭档案 seam | P1-02 | 04 | L | ready-for-agent |
 | [06](./issues/06-extract-carelog-record-sleep-mutations.md) | 抽离 CareLog Record 与睡眠写 seam | P1-02 | 05 | L | planned |
 | [07](./issues/07-extract-carelog-plan-fulfillment-orchestration.md) | 抽离 CareLog 计划与履行协调 seam | P1-02 | 01、06 | L | planned |
 | [08](./issues/08-split-log-screen-list-dialog-host.md) | 拆分 LogScreen 列表与弹窗宿主 | P1-02 | — | M–L | ready-for-agent |

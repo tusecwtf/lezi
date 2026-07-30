@@ -51,7 +51,6 @@ import com.lezi.babylog.core.model.Sex
 import com.lezi.babylog.core.model.SleepPayload
 import com.lezi.babylog.core.model.normalizeBabyNickname
 import com.lezi.babylog.core.model.normalizeOpenSleeps
-import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.nio.charset.StandardCharsets
@@ -220,7 +219,12 @@ class CareLog @Inject constructor(
     private val calendarReminderMutationGuard: CalendarReminderMutationGuard,
     private val clock: PolicyClock,
 ) {
-    private val fulfillmentSurface = FulfillmentSurface(fulfillmentCandidateDao)
+    private val queries = CareLogQueries(
+        babyDao = babyDao,
+        recordDao = recordDao,
+        carePlanDao = carePlanDao,
+        fulfillmentCandidateDao = fulfillmentCandidateDao,
+    )
     private val photoAttachmentReconciler = PhotoAttachmentReconciler(mediaAssetDao)
     private val reminderProjection = CarePlanReminderProjection(
         carePlanDao = carePlanDao,
@@ -488,25 +492,17 @@ class CareLog @Inject constructor(
         startDayInclusive: LocalDate,
         endDayExclusive: LocalDate,
         zone: ZoneId = ZoneId.systemDefault(),
-    ): Flow<List<Record>> {
-        require(startDayInclusive.isBefore(endDayExclusive)) {
-            "startDayInclusive must be before endDayExclusive"
-        }
-        val start = startDayInclusive.atStartOfDay(zone).toInstant().toEpochMilli()
-        val end = endDayExclusive.atStartOfDay(zone).toInstant().toEpochMilli()
-        // DAO ordinary queries already exclude conflict-not-adopted fulfillment records.
-        return recordDao.observeRange(babyId, start, end).map { list -> list.map { it.toModel() } }
-    }
+    ): Flow<List<Record>> = queries.observeRecords(babyId, startDayInclusive, endDayExclusive, zone)
 
     fun observeDayRecords(
         babyId: Long,
         day: LocalDate,
         zone: ZoneId = ZoneId.systemDefault(),
-    ): Flow<List<Record>> = observeRecords(babyId, day, day.plusDays(1), zone)
+    ): Flow<List<Record>> = queries.observeDayRecords(babyId, day, zone)
 
     /** Observe the baby's single active sleep independently of the viewed date. */
     fun observeOpenSleep(babyId: Long): Flow<Record?> =
-        recordDao.observeOpenSleep(babyId).map { it?.toModel() }
+        queries.observeOpenSleep(babyId)
 
     /**
      * All non-deleted care plans in an absolute window for the lezi calendar.
@@ -516,13 +512,7 @@ class CareLog @Inject constructor(
         babyId: Long,
         startInclusive: Long,
         endExclusive: Long,
-    ): Flow<List<CarePlan>> {
-        require(startInclusive < endExclusive) {
-            "startInclusive must be before endExclusive"
-        }
-        return carePlanDao.observeRange(babyId, startInclusive, endExclusive)
-            .map { rows -> rows.map { it.toModel() } }
-    }
+    ): Flow<List<CarePlan>> = queries.observeCarePlansInRange(babyId, startInclusive, endExclusive)
 
     fun observeCustomItems(): Flow<List<CustomRecordItem>> =
         customItemCatalog.observeCustomItems()
@@ -555,23 +545,14 @@ class CareLog @Inject constructor(
         babyId: Long,
         day: LocalDate,
         zone: ZoneId = ZoneId.systemDefault(),
-    ): List<Record> {
-        val start = day.atStartOfDay(zone).toInstant().toEpochMilli()
-        val end = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-        return recordDao.listDay(babyId, start, end).map { it.toModel() }
-    }
+    ): List<Record> = queries.dayRecords(babyId, day, zone)
 
     suspend fun daySummary(
         babyId: Long,
         day: LocalDate,
         zone: ZoneId = ZoneId.systemDefault(),
         now: Long = System.currentTimeMillis(),
-    ): DailySummary {
-        val start = day.atStartOfDay(zone).toInstant().toEpochMilli()
-        val end = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-        val records = recordDao.listDay(babyId, start, end).map { it.toModel() }
-        return CareAggregation.day(records, day, zone, now).toDailySummary()
-    }
+    ): DailySummary = queries.daySummary(babyId, day, zone, now)
 
     suspend fun addRecord(
         babyId: Long,
@@ -1142,9 +1123,9 @@ class CareLog @Inject constructor(
         return id
     }
 
-    suspend fun getRecord(id: Long): Record? = recordDao.get(id)?.toModel()
+    suspend fun getRecord(id: Long): Record? = queries.getRecord(id)
 
-    suspend fun getCarePlan(id: Long): CarePlan? = carePlanDao.get(id)?.toModel()
+    suspend fun getCarePlan(id: Long): CarePlan? = queries.getCarePlan(id)
 
     /**
      * Pending/missed plans for the selected local day (non-today views).
@@ -1154,13 +1135,7 @@ class CareLog @Inject constructor(
         babyId: Long,
         day: LocalDate,
         zone: ZoneId = ZoneId.systemDefault(),
-    ): Flow<List<CarePlan>> {
-        val start = day.atStartOfDay(zone).toInstant().toEpochMilli()
-        val end = day.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-        return carePlanDao.observeDayPending(babyId, start, end).map { rows ->
-            rows.map { it.toModel() }
-        }
-    }
+    ): Flow<List<CarePlan>> = queries.observeDayPendingPlans(babyId, day, zone)
 
     /**
      * Today: all overdue open plans plus today's not-yet-due plans, by scheduledAt ASC.
@@ -1169,23 +1144,7 @@ class CareLog @Inject constructor(
         babyId: Long,
         zone: ZoneId = ZoneId.systemDefault(),
         nowMillis: Long = System.currentTimeMillis(),
-    ): Flow<List<CarePlan>> {
-        val today = Instant.ofEpochMilli(nowMillis).atZone(zone).toLocalDate()
-        val start = today.atStartOfDay(zone).toInstant().toEpochMilli()
-        val end = today.plusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
-        return carePlanDao.observeTodayPending(babyId, start, end, nowMillis).map { rows ->
-            rows.map { it.toModel() }
-                .sortedWith(
-                    compareBy<CarePlan> {
-                        // Missed first, then still-pending for today.
-                        when (it.effectiveStatus(nowMillis)) {
-                            CarePlanStatus.MISSED -> 0
-                            else -> 1
-                        }
-                    }.thenBy { it.scheduledAt },
-                )
-        }
-    }
+    ): Flow<List<CarePlan>> = queries.observeTodayPendingPlans(babyId, zone, nowMillis)
 
     /**
      * Create a local care plan for a concrete built-in (including intent-only
@@ -1726,11 +1685,11 @@ class CareLog @Inject constructor(
      * Not related to ordinary `/v1/push` transport.
      */
     suspend fun filterSurfaceRecords(records: List<Record>): List<Record> =
-        fulfillmentSurface.filterSurfaceRecords(records)
+        queries.filterSurfaceRecords(records)
 
     /** True when the record is visible on normal care surfaces (not a conflict loser). */
     suspend fun isSurfaceRecord(clientUuid: String): Boolean =
-        fulfillmentSurface.isSurfaceRecord(clientUuid)
+        queries.isSurfaceRecord(clientUuid)
 
     /** True when the joined session is family owner/admin. */
     suspend fun isFamilyAdmin(): Boolean {
@@ -2113,7 +2072,7 @@ class CareLog @Inject constructor(
     )
 
     suspend fun getCarePlanByClientUuid(clientUuid: String): CarePlan? =
-        carePlanDao.getByClientUuid(clientUuid)?.toModel()
+        queries.getCarePlanByClientUuid(clientUuid)
 
     /** Active plan photo paths. MediaAsset is authoritative. */
     suspend fun listCarePlanPhotoPaths(carePlanId: Long): List<String> {
@@ -2128,94 +2087,30 @@ class CareLog @Inject constructor(
         weekStart: LocalDate,
         zone: ZoneId = ZoneId.systemDefault(),
         now: Long = System.currentTimeMillis(),
-    ): WeekSummary {
-        val start = weekStart.atStartOfDay(zone).toInstant().toEpochMilli()
-        val end = weekStart.plusDays(7).atStartOfDay(zone).toInstant().toEpochMilli()
-        val rows = recordDao.listRange(babyId, start, end).map { it.toModel() }
-        return CareAggregation.week(rows, weekStart, zone, now)
-    }
+    ): WeekSummary = queries.weekSummary(babyId, weekStart, zone, now)
 
-    suspend fun search(babyId: Long, query: String): List<Record> {
-        val normalizedQuery = query.trim().lowercase()
-        if (normalizedQuery.isEmpty()) return emptyList()
-        val queryNeedsConvertedWeightCandidate =
-            normalizedQuery.toDoubleOrNull()?.isFinite() == true
-        val matchingTypeKeys = RecordType.entries
-            .filter { type ->
-                (
-                    type == RecordType.WEIGHT &&
-                        queryNeedsConvertedWeightCandidate
-                    ) ||
-                    type.candidateSearchTerms().any { term ->
-                        typeTermMatchesQuery(term, normalizedQuery)
-                    }
-            }
-            .map { it.key }
-            .ifEmpty { listOf(NO_MATCHING_RECORD_TYPE) }
-        return recordDao.searchCandidates(
-            babyId = babyId,
-            escapedPattern = normalizedQuery.payloadSearchNeedle().toSqlLikePattern(),
-            matchingTypeKeys = matchingTypeKeys,
-        ).asSequence()
-            .map { it.toModel() }
-            .filter { it.matchesVisibleSearchText(normalizedQuery) }
-            .toList()
-    }
+    suspend fun search(babyId: Long, query: String): List<Record> =
+        queries.search(babyId, query)
 
-    suspend fun recentCareSummary(babyId: Long, zone: ZoneId = ZoneId.systemDefault()): WidgetSummaryDto {
-        val baby = babyDao.get(babyId)?.toModel()
-        val day = LocalDate.now(zone)
-        // The daily totals are windowed inside CareAggregation, while "last"
-        // intentionally spans prior days. Supplying the complete baby-scoped
-        // set keeps both facts behind the same interface.
-        val records = recordDao.listForBaby(babyId).map { it.toModel() }
-        return CareAggregation.widget(
-            records = records,
-            babyName = baby?.nickname ?: "乐记",
-            date = day,
-            zone = zone,
-        )
-    }
+    suspend fun recentCareSummary(
+        babyId: Long,
+        zone: ZoneId = ZoneId.systemDefault(),
+    ): WidgetSummaryDto = queries.recentCareSummary(babyId, zone)
 
     fun observeMeasurements(babyId: Long, type: RecordType): Flow<List<Record>> =
-        recordDao.observeRange(
-            babyId = babyId,
-            startInclusive = Long.MIN_VALUE,
-            endExclusive = Long.MAX_VALUE,
-        ).map { records ->
-            records.asSequence()
-                .filter { it.type == type.key }
-                .map { it.toModel() }
-                .toList()
-        }
+        queries.observeMeasurements(babyId, type)
 
     suspend fun recentMilkAmounts(
         babyId: Long,
         type: RecordType,
         limit: Int = 3,
-    ): List<Int> {
-        require(type in setOf(RecordType.FORMULA, RecordType.PUMPED_FEED, RecordType.PUMP_EXPRESS))
-        return recordDao.listByType(babyId, type.key)
-            .asReversed()
-            .asSequence()
-            .mapNotNull { (it.toModel().payload.payload as? MilkPayload)?.amountMl }
-            .filter { it in 1..999 }
-            .distinct()
-            .take(limit)
-            .toList()
-    }
+    ): List<Int> = queries.recentMilkAmounts(babyId, type, limit)
 
     suspend fun recentNotes(
         babyId: Long,
         type: RecordType,
         limit: Int = 5,
-    ): List<String> = recordDao.listByType(babyId, type.key)
-        .asReversed()
-        .asSequence()
-        .mapNotNull { it.note?.trim()?.takeIf(String::isNotBlank) }
-        .distinct()
-        .take(limit)
-        .toList()
+    ): List<String> = queries.recentNotes(babyId, type, limit)
 
     suspend fun renameBaby(babyId: Long, nickname: String) {
         requireCanManageBabyProfiles()
