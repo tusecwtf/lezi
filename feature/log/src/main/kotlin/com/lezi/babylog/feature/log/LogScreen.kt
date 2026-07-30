@@ -55,9 +55,11 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
@@ -385,9 +387,18 @@ class LogViewModel @Inject constructor(
         }
     }
 
-    fun skipCarePlan(planId: Long) {
+    fun skipCarePlan(planId: Long, onResult: (Result<String>) -> Unit) {
         viewModelScope.launch {
-            runCatching { careLog.skipCarePlan(planId) }
+            val result = runCatching {
+                careLog.skipCarePlan(planId)
+                "已跳过护理计划"
+            }.fold(
+                onSuccess = { Result.success(it) },
+                onFailure = {
+                    Result.failure(Exception(productUiError(it, "跳过失败，请重试")))
+                },
+            )
+            onResult(result)
         }
     }
 
@@ -398,7 +409,7 @@ class LogViewModel @Inject constructor(
     fun deleteCarePlanFromList(planId: Long, onResult: (Result<String>) -> Unit) {
         viewModelScope.launch {
             val result = runCatching {
-                careLog.deleteCarePlan(planId)
+                check(careLog.deleteCarePlan(planId)) { "护理计划不存在或已删除" }
                 "已删除护理计划"
             }.fold(
                 onSuccess = { Result.success(it) },
@@ -417,7 +428,7 @@ class LogViewModel @Inject constructor(
     fun deleteRecordFromList(recordId: Long, onResult: (Result<String>) -> Unit) {
         viewModelScope.launch {
             val result = runCatching {
-                careLog.deleteRecord(recordId)
+                check(careLog.deleteRecord(recordId)) { "记录不存在或已删除" }
                 "已删除记录"
             }.fold(
                 onSuccess = { Result.success(it) },
@@ -810,8 +821,12 @@ fun LogRoute(
     /** At most one timeline/plan row may stay revealed. */
     var revealedSwipeRowId by remember { mutableStateOf<String?>(null) }
     var listDeleteTarget by remember { mutableStateOf<ListDeleteTarget?>(null) }
-    var listDeleteError by remember { mutableStateOf<String?>(null) }
-    var listDeleting by remember { mutableStateOf(false) }
+    var deleteActionState by remember {
+        mutableStateOf<ManagementActionState>(ManagementActionState.Idle)
+    }
+    var skipActionState by remember {
+        mutableStateOf<ManagementActionState>(ManagementActionState.Idle)
+    }
     var layoutExitInProgress by remember { mutableStateOf(false) }
     var layoutDragCancelSignal by remember { mutableLongStateOf(0L) }
     var exitAfterLayoutRetry by remember { mutableStateOf(false) }
@@ -831,9 +846,24 @@ fun LogRoute(
 
     fun requestListDelete(target: ListDeleteTarget) {
         collapseSwipeRows()
-        listDeleteError = null
-        listDeleting = false
+        deleteActionState = ManagementActionState.Idle
         listDeleteTarget = target
+    }
+
+    fun requestSkip(planId: Long): Boolean {
+        val request = ManagementActionRequest(ManagementActionKind.SkipPlan, planId)
+        val started = beginManagementAction(skipActionState, request)
+        skipActionState = started.state
+        if (!started.accepted) return false
+
+        vm.skipCarePlan(planId) { result ->
+            val finished = finishManagementAction(skipActionState, request, result)
+            if (finished.accepted) {
+                skipActionState = finished.state
+                if (result.isSuccess) finished.announcement?.let(onMessage)
+            }
+        }
+        return true
     }
 
     LaunchedEffect(listState) {
@@ -1427,6 +1457,27 @@ fun LogRoute(
                             }
                             val planRowId = "plan-${plan.id}"
                             val planRevealed = revealedSwipeRowId == planRowId
+                            val planSkipRequest = ManagementActionRequest(
+                                ManagementActionKind.SkipPlan,
+                                plan.id,
+                            )
+                            val skipFeedback = managementActionFeedback(
+                                skipActionState,
+                                planSkipRequest,
+                            )
+                            val skipRunning =
+                                skipActionState == ManagementActionState.Running(planSkipRequest)
+                            val skipBlocked = skipActionState is ManagementActionState.Running
+                            val skipFailed =
+                                (skipActionState as? ManagementActionState.Failed)?.request ==
+                                    planSkipRequest
+                            val editPlanAction = {
+                                openEditFromSwipe(RecordComposerRequest.EditPlan(plan.id))
+                            }
+                            val deletePlanAction = {
+                                requestListDelete(ListDeleteTarget.Plan(plan))
+                            }
+                            val skipPlanAction: () -> Boolean = { requestSkip(plan.id) }
                             Column(
                                 Modifier
                                     .padding(
@@ -1443,14 +1494,8 @@ fun LogRoute(
                                     },
                                     editEnabled = canEditPlan,
                                     deleteEnabled = canDeletePlan,
-                                    onEdit = {
-                                        openEditFromSwipe(
-                                            RecordComposerRequest.EditPlan(plan.id),
-                                        )
-                                    },
-                                    onDelete = {
-                                        requestListDelete(ListDeleteTarget.Plan(plan))
-                                    },
+                                    onEdit = editPlanAction,
+                                    onDelete = deletePlanAction,
                                     editTestTag = "timeline_swipe_edit_plan_${plan.id}",
                                     deleteTestTag = "timeline_swipe_delete_plan_${plan.id}",
                                 ) {
@@ -1484,18 +1529,34 @@ fun LogRoute(
                                                 }
                                             }
                                         },
-                                        modifier = Modifier.semantics {
-                                            val publishDetail = if (planPublishLabel != null) {
-                                                "。" + localCarePlanPublishDetail(
-                                                    lastSyncFailed = state.lastSyncFailed,
-                                                    publicationState = planPublicationState,
-                                                )
-                                            } else {
-                                                ""
-                                            }
-                                            contentDescription =
-                                                "完成${title}护理计划$publishDetail"
-                                        },
+                                        modifier = Modifier
+                                            .managementActions(
+                                                rowManagementCustomActions(
+                                                    targetLabel = "${title}护理计划",
+                                                    canEdit = canEditPlan,
+                                                    canDelete = canDeletePlan,
+                                                    canSkip = canSkipPlan,
+                                                    skipEnabled = !skipBlocked,
+                                                    onEdit = editPlanAction,
+                                                    onDelete = deletePlanAction,
+                                                    onSkip = skipPlanAction,
+                                                ),
+                                            )
+                                            .semantics {
+                                                val publishDetail = if (planPublishLabel != null) {
+                                                    "。" + localCarePlanPublishDetail(
+                                                        lastSyncFailed = state.lastSyncFailed,
+                                                        publicationState = planPublicationState,
+                                                    )
+                                                } else {
+                                                    ""
+                                                }
+                                                contentDescription =
+                                                    "完成${title}护理计划$publishDetail"
+                                                if (skipFeedback != null) {
+                                                    stateDescription = skipFeedback
+                                                }
+                                            },
                                     )
                                 }
                                 if (canSkipPlan) {
@@ -1505,11 +1566,29 @@ fun LogRoute(
                                     ) {
                                         // 编辑 is left-swipe only (absolute screen direction).
                                         TextButton(
-                                            onClick = { vm.skipCarePlan(plan.id) },
+                                            onClick = { skipPlanAction() },
+                                            enabled = !skipBlocked,
                                             modifier = Modifier.testTag(
                                                 "care_plan_skip_${plan.id}",
                                             ),
-                                        ) { Text("跳过") }
+                                        ) {
+                                            Text(
+                                                when {
+                                                    skipRunning -> "跳过中…"
+                                                    skipFeedback != null -> "重试跳过"
+                                                    else -> "跳过"
+                                                },
+                                            )
+                                        }
+                                    }
+                                    if (skipFeedback != null) {
+                                        ManagementActionFeedback(
+                                            message = skipFeedback,
+                                            isError = skipFailed,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .testTag("care_plan_skip_feedback_${plan.id}"),
+                                        )
                                     }
                                 }
                             }
@@ -1565,6 +1644,13 @@ fun LogRoute(
                             )
                             val recordRowId = "record-${r.id}"
                             val recordRevealed = revealedSwipeRowId == recordRowId
+                            val editRecordAction = {
+                                // Amber publish chrome: tap prefers sync sheet; left-swipe still edits.
+                                openEditFromSwipe(RecordComposerRequest.Edit(r.id))
+                            }
+                            val deleteRecordAction = {
+                                requestListDelete(ListDeleteTarget.RecordItem(r))
+                            }
                             SwipeEditDeleteRow(
                                 open = recordRevealed,
                                 onOpenChange = { open ->
@@ -1574,13 +1660,8 @@ fun LogRoute(
                                 },
                                 editEnabled = canEditRecord,
                                 deleteEnabled = canDeleteRecord,
-                                onEdit = {
-                                    // Amber publish chrome: tap prefers sync sheet; left-swipe still edits.
-                                    openEditFromSwipe(RecordComposerRequest.Edit(r.id))
-                                },
-                                onDelete = {
-                                    requestListDelete(ListDeleteTarget.RecordItem(r))
-                                },
+                                onEdit = editRecordAction,
+                                onDelete = deleteRecordAction,
                                 editTestTag = "timeline_swipe_edit_record_${r.id}",
                                 deleteTestTag = "timeline_swipe_delete_record_${r.id}",
                                 modifier = Modifier.padding(
@@ -1618,13 +1699,23 @@ fun LogRoute(
                                             onOpenComposer(RecordComposerRequest.Edit(r.id))
                                         }
                                     },
-                                    modifier = Modifier.semantics {
-                                        contentDescription = if (publishLabel != null) {
-                                            "同步状态$title"
-                                        } else {
-                                            "编辑$title"
-                                        }
-                                    },
+                                    modifier = Modifier
+                                        .managementActions(
+                                            rowManagementCustomActions(
+                                                targetLabel = "${title}记录",
+                                                canEdit = canEditRecord,
+                                                canDelete = canDeleteRecord,
+                                                onEdit = editRecordAction,
+                                                onDelete = deleteRecordAction,
+                                            ),
+                                        )
+                                        .semantics {
+                                            contentDescription = if (publishLabel != null) {
+                                                "同步状态$title"
+                                            } else {
+                                                "编辑$title"
+                                            }
+                                        },
                                 )
                             }
                         }
@@ -1778,11 +1869,23 @@ fun LogRoute(
         val planConfirmation = (target as? ListDeleteTarget.Plan)?.let {
             carePlanDeleteConfirmation(it.plan)
         }
+        val deleteRequest = when (target) {
+            is ListDeleteTarget.Plan -> ManagementActionRequest(
+                ManagementActionKind.DeletePlan,
+                target.plan.id,
+            )
+            is ListDeleteTarget.RecordItem -> ManagementActionRequest(
+                ManagementActionKind.DeleteRecord,
+                target.record.id,
+            )
+        }
+        val deleteRunning = deleteActionState == ManagementActionState.Running(deleteRequest)
+        val deleteFeedback = managementActionFeedback(deleteActionState, deleteRequest)
         AlertDialog(
             onDismissRequest = {
-                if (!listDeleting) {
+                if (!deleteRunning) {
                     listDeleteTarget = null
-                    listDeleteError = null
+                    deleteActionState = ManagementActionState.Idle
                     collapseSwipeRows()
                 }
             },
@@ -1793,58 +1896,64 @@ fun LogRoute(
                 Text(
                     deleteConfirmationMessage(
                         impact = planConfirmation?.message ?: RECORD_DELETE_IMPACT,
-                        error = listDeleteError,
+                        error = deleteFeedback,
                     ),
+                    modifier = Modifier
+                        .testTag("list_delete_feedback")
+                        .semantics {
+                            if (deleteFeedback != null) {
+                                liveRegion = LiveRegionMode.Polite
+                                stateDescription = deleteFeedback
+                            }
+                        },
                 )
             },
             confirmButton = {
                 TextButton(
-                    enabled = !listDeleting,
+                    enabled = !deleteRunning,
                     onClick = {
-                        listDeleting = true
-                        listDeleteError = null
+                        val started = beginManagementAction(deleteActionState, deleteRequest)
+                        deleteActionState = started.state
+                        if (!started.accepted) return@TextButton
+
+                        fun finishDelete(result: Result<String>) {
+                            val finished = finishManagementAction(
+                                state = deleteActionState,
+                                request = deleteRequest,
+                                result = result,
+                            )
+                            if (!finished.accepted) return
+                            deleteActionState = finished.state
+                            if (result.isSuccess) {
+                                listDeleteTarget = null
+                                collapseSwipeRows()
+                                finished.announcement?.let(onMessage)
+                            }
+                        }
                         when (target) {
-                            is ListDeleteTarget.Plan -> vm.deleteCarePlanFromList(target.plan.id) { result ->
-                                listDeleting = false
-                                result.fold(
-                                    onSuccess = { message ->
-                                        listDeleteTarget = null
-                                        listDeleteError = null
-                                        onMessage(message)
-                                    },
-                                    onFailure = { err ->
-                                        listDeleteError = err.message ?: "删除失败，请重试"
-                                    },
-                                )
-                            }
-                            is ListDeleteTarget.RecordItem -> vm.deleteRecordFromList(target.record.id) { result ->
-                                listDeleting = false
-                                result.fold(
-                                    onSuccess = { message ->
-                                        listDeleteTarget = null
-                                        listDeleteError = null
-                                        onMessage(message)
-                                    },
-                                    onFailure = { err ->
-                                        listDeleteError = err.message ?: "删除失败，请重试"
-                                    },
-                                )
-                            }
+                            is ListDeleteTarget.Plan -> vm.deleteCarePlanFromList(
+                                target.plan.id,
+                                ::finishDelete,
+                            )
+                            is ListDeleteTarget.RecordItem -> vm.deleteRecordFromList(
+                                target.record.id,
+                                ::finishDelete,
+                            )
                         }
                     },
                 ) {
                     Text(
-                        if (listDeleting) "删除中…" else "确认删除",
+                        if (deleteRunning) "删除中…" else "确认删除",
                         color = MaterialTheme.colorScheme.error,
                     )
                 }
             },
             dismissButton = {
                 TextButton(
-                    enabled = !listDeleting,
+                    enabled = !deleteRunning,
                     onClick = {
                         listDeleteTarget = null
-                        listDeleteError = null
+                        deleteActionState = ManagementActionState.Idle
                         collapseSwipeRows()
                     },
                 ) { Text("取消") }

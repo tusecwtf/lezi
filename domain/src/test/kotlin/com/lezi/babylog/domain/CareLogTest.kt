@@ -1017,6 +1017,29 @@ class CareLogTest {
     }
 
     @Test
+    fun deleteOperationsReportMissingOrAlreadyDeletedTargets() = runTest {
+        val care = Fakes().careLog()
+        val babyId = care.createBaby(
+            CreateBabyInput(nickname = "豆豆", birthdayEpochDay = 1),
+        )
+        val recordId = care.addRecord(babyId, RecordType.PEE, timestamp = 1_000L)
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.PEE,
+            scheduledAt = 10_000L,
+            nowMillis = 1_000L,
+            projectToSystemCalendar = false,
+        )
+
+        assertThat(care.deleteRecord(recordId)).isTrue()
+        assertThat(care.deleteRecord(recordId)).isFalse()
+        assertThat(care.deleteRecord(Long.MAX_VALUE)).isFalse()
+        assertThat(care.deleteCarePlan(planId, nowMillis = 2_000L)).isTrue()
+        assertThat(care.deleteCarePlan(planId, nowMillis = 3_000L)).isFalse()
+        assertThat(care.deleteCarePlan(Long.MAX_VALUE, nowMillis = 3_000L)).isFalse()
+    }
+
+    @Test
     fun sleepDownUp_pairsDuration() = runTest {
         val care = Fakes().careLog()
         val babyId = care.createBaby(

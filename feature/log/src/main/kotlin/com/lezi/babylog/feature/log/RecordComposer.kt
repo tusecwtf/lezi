@@ -762,10 +762,13 @@ class RecordComposerViewModel @Inject constructor(
         _state.update { it.copy(deleting = true, error = null) }
         actionJob = viewModelScope.launch {
             try {
-                if (editPlanId != null) {
+                val deleted = if (editPlanId != null) {
                     careLog.deleteCarePlan(editPlanId)
                 } else {
                     careLog.deleteRecord(recordId!!)
+                }
+                check(deleted) {
+                    if (editPlanId != null) "护理计划不存在或已删除" else "记录不存在或已删除"
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled

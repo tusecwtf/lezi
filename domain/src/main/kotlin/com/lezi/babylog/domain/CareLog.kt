@@ -816,27 +816,30 @@ class CareLog @Inject constructor(
         return planId
     }
 
-    suspend fun deleteRecord(id: Long) {
-        val cleanupCandidates = sleepMutationMutex.withLock {
+    suspend fun deleteRecord(id: Long): Boolean {
+        val (deleted, cleanupCandidates) = sleepMutationMutex.withLock {
             transactionRunner.run {
                 val existing = recordDao.get(id)
-                if (existing != null) {
+                if (existing != null && existing.deletedAt == null) {
                     val deletedAt = nextSyncUpdatedAt(
                         existing.updatedAt,
                         System.currentTimeMillis(),
                     )
                     recordDao.softDelete(id, deletedAt)
-                    photoAttachmentReconciler.tombstone(
+                    val tombstones = photoAttachmentReconciler.tombstone(
                         PhotoAttachmentOwner.Record(id),
                         deletedAt,
                     ).tombstonedClientUuids
+                    true to tombstones
                 } else {
-                    emptySet()
+                    false to emptySet()
                 }
             }
         }
+        if (!deleted) return false
         cleanupCommittedPhotoTombstones(cleanupCandidates)
         requestLocalSync()
+        return true
     }
 
     /** Active record photo paths. MediaAsset is the sole current photo source. */
@@ -2026,22 +2029,26 @@ class CareLog @Inject constructor(
     suspend fun deleteCarePlan(
         carePlanId: Long,
         nowMillis: Long = System.currentTimeMillis(),
-    ) {
-        val cleanupCandidates = transactionRunner.run {
-            val plan = carePlanDao.get(carePlanId) ?: return@run emptySet<String>()
-            if (plan.deletedAt != null) return@run emptySet<String>()
+    ): Boolean {
+        val (deleted, cleanupCandidates) = transactionRunner.run {
+            val plan = carePlanDao.get(carePlanId)
+                ?: return@run false to emptySet<String>()
+            if (plan.deletedAt != null) return@run false to emptySet<String>()
             requireCanManageCarePlan(plan)
             val deletedAt = nowMillis.coerceAtLeast(plan.updatedAt + 1)
             carePlanDao.softDelete(carePlanId, deletedAt)
-            photoAttachmentReconciler.tombstone(
+            val tombstones = photoAttachmentReconciler.tombstone(
                 PhotoAttachmentOwner.CarePlan(carePlanId),
                 deletedAt,
             ).tombstonedClientUuids
+            true to tombstones
         }
+        if (!deleted) return false
         cleanupCommittedPhotoTombstones(cleanupCandidates)
         reminderProjection.cancelCarePlanReminderBestEffort(carePlanId)
         reminderProjection.removeSystemCalendarProjection(carePlanId)
         requestLocalSync()
+        return true
     }
 
 

@@ -59,7 +59,7 @@ layout/05 已删除分区 ────┘
 | [11](./issues/11-confirm-discard-dirty-composer.md) | 脏 Composer 草稿放弃确认 | 01 | M | still-valid | complete |
 | [12](../record-layout-edit-remediation/issues/02-atomic-device-layout-snapshot.md) | 原子保存设备布局快照 | — | M | still-valid · canonical layout/02 | ready-for-agent |
 | [13](../record-layout-edit-remediation/issues/06-accessible-layout-actions-truthful-empty-slot.md) | 无障碍布局编辑与真实空槽文案 | layout/02、layout/04、layout/05 | M | still-valid · canonical layout/06 | ready-for-agent |
-| [14](./issues/14-accessible-record-plan-actions-and-feedback.md) | 无障碍记录/计划管理与结果反馈 | — | M | partial | ready-for-agent |
+| [14](./issues/14-accessible-record-plan-actions-and-feedback.md) | 无障碍记录/计划管理与结果反馈 | — | M | partial | complete |
 | [15](./issues/15-serialize-growth-measurement-writes.md) | 串行化成长记录写入 | — | S–M | still-valid | complete |
 | [16](./issues/16-root-publication-receipt-and-truthful-copy.md) | 记录根发布回执与真实同步文案 | — | M | still-valid | complete |
 | [17](./issues/17-canonical-user-visible-record-labels.md) | 统一用户可见记录类型标签 | — | S–M | partial | complete |
