@@ -1,6 +1,9 @@
 package com.lezi.babylog
 
+import androidx.compose.ui.unit.dp
+import com.lezi.babylog.feature.log.quickDockSnackbarBottomInset
 import com.lezi.babylog.sync.FamilyRole
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -40,5 +43,26 @@ class RootRoutingPolicyTest {
         assertTrue(settings.showTopBar)
         assertTrue(settings.showBottomBar)
         assertFalse(settings.preserveBottomBarExtent)
+    }
+
+    @Test
+    fun snackbarClearsQuickDockOnlyWhileEverydayLogDockIsVisible() {
+        assertEquals(
+            quickDockSnackbarBottomInset,
+            rootSnackbarBottomInset(route = "log", logLayoutEditActive = false),
+        )
+        assertEquals(
+            0.dp,
+            rootSnackbarBottomInset(route = "log", logLayoutEditActive = true),
+        )
+
+        listOf("summary", "growth", "family", "settings", "timer", "search", "export", "calendar")
+            .forEach { route ->
+                assertEquals(
+                    "$route must not reserve quick-dock space",
+                    0.dp,
+                    rootSnackbarBottomInset(route = route, logLayoutEditActive = false),
+                )
+            }
     }
 }

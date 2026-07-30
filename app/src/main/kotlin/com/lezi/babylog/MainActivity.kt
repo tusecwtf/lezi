@@ -80,6 +80,7 @@ import com.lezi.babylog.feature.log.ComposerCreateIntent
 import com.lezi.babylog.feature.log.LogRoute
 import com.lezi.babylog.feature.log.RecordComposerHost
 import com.lezi.babylog.feature.log.RecordComposerRequest
+import com.lezi.babylog.feature.log.quickDockSnackbarBottomInset
 import com.lezi.babylog.feature.onboarding.OnboardingRoute
 import com.lezi.babylog.feature.search.SearchRoute
 import com.lezi.babylog.feature.settings.CalendarRoute
@@ -517,6 +518,15 @@ internal fun rootChromeVisibility(
     )
 }
 
+internal fun rootSnackbarBottomInset(
+    route: String?,
+    logLayoutEditActive: Boolean,
+) = if (route == TopDest.Log.route && !logLayoutEditActive) {
+    quickDockSnackbarBottomInset
+} else {
+    0.dp
+}
+
 @Composable
 fun LeziRoot(
     vm: RootViewModel = hiltViewModel(),
@@ -592,6 +602,7 @@ fun LeziRoot(
     )
     val showBrandHeader = current == TopDest.Family.route ||
         current?.startsWith(TopDest.Settings.route) == true
+    val snackbarBottomInset = rootSnackbarBottomInset(current, logLayoutEditActive)
 
     LaunchedEffect(today) {
         vm.refreshToday()
@@ -607,7 +618,14 @@ fun LeziRoot(
     Scaffold(
         modifier = Modifier.testTag(UiTags.ROOT),
         containerColor = MaterialTheme.colorScheme.background,
-        snackbarHost = { SnackbarHost(snackbar) },
+        snackbarHost = {
+            SnackbarHost(
+                hostState = snackbar,
+                modifier = Modifier
+                    .padding(bottom = snackbarBottomInset)
+                    .testTag("root_snackbar_host"),
+            )
+        },
         topBar = {
             when {
                 chrome.showTopBar && showContextHeader -> {

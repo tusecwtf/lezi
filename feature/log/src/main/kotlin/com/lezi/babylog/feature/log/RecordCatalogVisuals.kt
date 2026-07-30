@@ -58,7 +58,14 @@ internal object QuickDockVisualSpec {
     val cellSpacing: Dp = 2.dp
     val cellMinHeight: Dp = 64.dp
     val iconSize: Dp = 30.dp
+    val occupiedHeight: Dp = outerVertical + outerVertical +
+        rowVertical + rowVertical + cellMinHeight
+    val snackbarSafetySpacing: Dp = LeziSpacing.Xs
+    val snackbarBottomInset: Dp = occupiedHeight + snackbarSafetySpacing
 }
+
+/** Root Snackbar clearance while the everyday fixed quick dock is visible. */
+val quickDockSnackbarBottomInset: Dp = QuickDockVisualSpec.snackbarBottomInset
 
 internal fun <T> recordCatalogRows(items: List<T>): List<List<T>> =
     items.chunked(RecordCatalogVisualSpec.columnCount)
