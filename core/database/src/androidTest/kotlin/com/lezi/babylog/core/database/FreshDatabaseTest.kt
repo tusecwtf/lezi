@@ -180,13 +180,13 @@ class FreshDatabaseTest {
             database!!.babyDao().getByClientUuid("baby-fresh-reopen")?.nickname,
         )
         assertEquals(
-            110,
+            110L,
             database!!.recordDao()
                 .getByClientUuid("record-root-receipt-reopen")
                 ?.familyPublishedUpdatedAt,
         )
         assertEquals(
-            200,
+            200L,
             database!!.carePlanDao()
                 .getByClientUuid("plan-root-receipt-reopen")
                 ?.familyPublishedUpdatedAt,
