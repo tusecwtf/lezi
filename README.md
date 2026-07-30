@@ -55,40 +55,81 @@ CI（GitHub Actions）：push/PR 上跑 unit test；`tools/lezi-sync` 变更另�
 [`tools/lezi-sync`](tools/lezi-sync/)（Rust、Axum、Tokio、SQLite、Docker
 单卷）。客户端不内置服务器地址；须在账户页填写家中 NAS 地址或扫描邀请 QR。
 
+### 本机开发与测试
+
 ```bash
-# 本机运行 API 与自动化测试
 cd tools/lezi-sync
 cargo test --locked
 cargo clippy --all-targets --all-features -- -D warnings
-
-# 在有 Docker 的 NAS/主机上构建并启动
-./build-image.sh
-export LEZI_DATA_HOST_PATH=/volume1/docker/lezi
-# Compose 必填；openssl rand -hex 24 生成 48 字符，满足 >=16 字符要求。
-export LEZI_BOOTSTRAP_SECRET="$(openssl rand -hex 24)"
-
-# 手机访问必须二选一：
-# A. 仅在可信家庭 LAN 直连（同时用 NAS 防火墙禁止公网访问 8765）：
-export LEZI_SYNC_PUBLISH=192.168.1.10:8765 # 替换为 NAS 的真实 LAN IP
-# B. 或不设置 LEZI_SYNC_PUBLISH，保持默认 127.0.0.1:8765，
-#    在 NAS 配置 HTTPS 反代：https://你的家庭域名 -> http://127.0.0.1:8765
-
-docker compose up -d
-curl -fsS http://127.0.0.1:8765/health
-curl -fsS http://127.0.0.1:8765/ready
+# 可选：本机起 API（非生产）
+# LEZI_DATA_DIR=/tmp/lezi-sync-data cargo run --release
 ```
 
-选择 A 时，账户页填写 `http://<NAS-LAN-IP>:8765`；选择 B 时填写 NAS 反代的
-`https://` 地址。手机直连场景不能保留默认 loopback 后仍期待手机访问服务，且
-不要把 8765 映射到公网。
+### 服务端发版（生产 NAS）
+
+**权威步骤与脚本**：[`tools/lezi-sync/deploy/DEPLOY.md`](tools/lezi-sync/deploy/DEPLOY.md)
+
+约定：
+
+| 项 | 选择 |
+|---|---|
+| 构建位置 | 开发机（`linux/amd64` 镜像），**不在 NAS 上 cargo/docker build** |
+| 编排引擎 | 极空间 **zdocker** 自带 Compose v2（`/zspace/.../zdocker/bin/docker-compose`）；不要求系统安装 `docker compose` |
+| 发布触发 | 本机一键：`package` → `scp` → SSH `remote-deploy` |
+| Bootstrap | 从现网 `lezi-sync` 容器 env **继承**；secret **不进 git** |
+| 数据卷 | 宿主 bind（默认路径见下），stop/rm 容器不删数据 |
+
+```bash
+cd tools/lezi-sync
+
+# 1) 质量门
+cargo test --locked
+cargo clippy --all-targets --all-features -- -D warnings
+
+# 2) 构建镜像（版本默认读 Cargo.toml）
+./build-image.sh
+# → lezi-sync:<version>
+
+# 3) 打包 + 推 NAS + 替换现网容器
+./deploy/push-and-deploy.sh
+# 产出：dist/lezi-sync-<version>-nas/（gitignored）
+# 远端默认：/tmp/lezi-sync-releases/lezi-sync-<version>-nas
+# （Zspace SSH 用户 HOME 常为 /home/ 不可写，故不用 ~）
+
+# 4) 验收（本机或 NAS）
+curl -fsS http://192.168.50.4:8765/health   # 期望 version 与发版一致
+curl -fsS http://192.168.50.4:8765/ready
+```
+
+常用环境变量：
+
+| 变量 | 默认 / 含义 |
+|---|---|
+| `NAS_SSH` | `13096920600@192.168.50.4` |
+| `NAS_SSH_PORT` | `10000` |
+| `NAS_REMOTE_DIR` | `/tmp/lezi-sync-releases/lezi-sync-<ver>-nas` |
+| `LEZI_DATA_HOST_PATH` | `/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/data` |
+| `LEZI_FORCE_PACKAGE=1` | 强制重打包 |
+| `LEZI_SKIP_PACKAGE=1` | 仅 scp+部署已有 `dist/` 包 |
+| `LEZI_BOOTSTRAP_SECRET` | 仅无现网容器可继承时手动提供 |
+
+**手机访问**：账户页填 `http://<NAS-LAN-IP>:8765`（当前生产映射 `0.0.0.0:8765`）；须用 NAS 防火墙禁止公网访问 8765。需要 HTTPS 时在 NAS 反代到本机 8765。
+
+**首次空部署**（无现网容器）须自行设置 `LEZI_BOOTSTRAP_SECRET`（≥16 字符）后再 `push-and-deploy`，并在 App 建家时填同一口令。
+
+仅打包不部署：`./deploy/package-nas.sh`。回滚：在 NAS 上进入旧版包目录再跑 `./remote-deploy.sh`。
+
+开发机通用 Compose（变量/build，非 zdocker 专用）仍见
+[`tools/lezi-sync/docker-compose.yml`](tools/lezi-sync/docker-compose.yml) 与
+[`tools/lezi-sync/README.md`](tools/lezi-sync/README.md)。
 
 Android 模拟器调试本机服务时，在账户页手动填写
 `http://10.0.2.2:8765`；该地址只用于调试，不是任何 build type 的默认值。
 
 ## 已知限制
 
-- **同步**：Rust 服务端、Android 实现与自动化已完成；本机 Docker 与双模拟器
-  已有支撑验收，物理双设备与 NAS 生产部署仍待目标环境执行；未宣称已部署
+- **同步**：Rust 服务端、Android 实现与自动化已完成；发版路径为开发机构建镜像 +
+  SSH/zdocker 部署（见上节）。物理双设备长期验收与备份策略仍按运维需要执行
 - **同步策略**：仅家 Wi‑Fi + NAS 可达 + App 前台；无后台轮询和伴侣记录通知；
   设置/深色**不同步**
 - **家网权限**：首次使用家庭同步时请求位置权限；Android 把当前 SSID 视为

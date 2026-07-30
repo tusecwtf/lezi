@@ -28,6 +28,15 @@ $LEZI_DATA_DIR/
 
 ## NAS / Docker Compose
 
+SSH 自动部署（打包 + scp + 极空间 **zdocker 自带 compose**，secret 从现网容器继承）见
+[`deploy/DEPLOY.md`](deploy/DEPLOY.md)：
+
+```bash
+# 可选：先构建镜像
+LEZI_SYNC_VERSION=0.3.0 ./build-image.sh
+./deploy/push-and-deploy.sh
+```
+
 默认镜像为 `lezi-sync:0.3.0`。**默认安全基线：**
 
 | 项 | 默认 | 说明 |
