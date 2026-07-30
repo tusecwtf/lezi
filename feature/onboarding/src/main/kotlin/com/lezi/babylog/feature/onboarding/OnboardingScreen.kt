@@ -119,8 +119,38 @@ internal enum class OnboardingStep {
     RecoveryComplete,
 }
 
+/** How the user reached CreateBaby: after family create/reclaim, or offline mode. */
+internal enum class OnboardingCreateBabySource {
+    AfterFamilyCreate,
+    AfterFamilyReclaim,
+    OfflineMode,
+}
+
 internal fun onboardingFamilyActions(): List<FamilyWizardMode> =
     listOf(FamilyWizardMode.Create, FamilyWizardMode.Join)
+
+internal fun onboardingChooseFamilyBody(): String =
+    "可新建或加入家庭，也可先用离线模式在本机记录；连家庭之后再到账户里完成。"
+
+internal fun onboardingCreateBabyBody(source: OnboardingCreateBabySource): String = when (source) {
+    OnboardingCreateBabySource.AfterFamilyReclaim ->
+        "家庭已接回；家庭中还没有宝宝，请创建第一个家庭宝宝。"
+    OnboardingCreateBabySource.AfterFamilyCreate ->
+        "家庭已建立，请创建第一个家庭宝宝。"
+    OnboardingCreateBabySource.OfflineMode ->
+        "离线模式：先在本机创建宝宝并记录。之后可在账户里新建或加入家庭再同步。"
+}
+
+internal fun onboardingCreateBabySource(
+    familyWizardState: FamilyWizardState,
+): OnboardingCreateBabySource {
+    val completed = familyWizardState as? FamilyWizardState.Completed
+    return when (completed?.outcome) {
+        is FamilyWizardOutcome.Reclaimed -> OnboardingCreateBabySource.AfterFamilyReclaim
+        is FamilyWizardOutcome.Created -> OnboardingCreateBabySource.AfterFamilyCreate
+        else -> OnboardingCreateBabySource.OfflineMode
+    }
+}
 
 internal fun onboardingFamilyWizardSnapshot(
     mode: FamilyWizardMode,
@@ -490,7 +520,7 @@ fun OnboardingRoute(
         when (step) {
             OnboardingStep.ChooseFamily -> {
                 Text(
-                    "先建立家庭连接；已有家庭也从“新建家庭”接回管理员身份。",
+                    onboardingChooseFamilyBody(),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -517,6 +547,16 @@ fun OnboardingRoute(
                         ) { Text("加入家庭") }
                     }
                 }
+                OutlinedButton(
+                    onClick = {
+                        formError = null
+                        step = OnboardingStep.CreateBaby
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp)
+                        .testTag(UiTags.ONBOARDING_OFFLINE_MODE),
+                ) { Text("离线模式") }
             }
             OnboardingStep.CreateFamily -> {
                 Text(
@@ -622,14 +662,9 @@ fun OnboardingRoute(
                 ) { Text("返回") }
             }
             OnboardingStep.CreateBaby -> {
+                val createBabySource = onboardingCreateBabySource(familyWizardState)
                 Text(
-                    if ((familyWizardState as? FamilyWizardState.Completed)?.outcome
-                            is FamilyWizardOutcome.Reclaimed
-                    ) {
-                        "家庭已接回；家庭中还没有宝宝，请创建第一个家庭宝宝。"
-                    } else {
-                        "家庭已建立，请创建第一个家庭宝宝。"
-                    },
+                    onboardingCreateBabyBody(createBabySource),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -738,6 +773,12 @@ fun OnboardingRoute(
                         .fillMaxWidth()
                         .height(52.dp),
                 ) { Text("开始记录") }
+                if (createBabySource == OnboardingCreateBabySource.OfflineMode) {
+                    TextButton(
+                        onClick = { step = OnboardingStep.ChooseFamily },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("返回") }
+                }
             }
             OnboardingStep.RecoveryPending -> {
                 val recoveryFailure = familyWizardState as? FamilyWizardState.RetryableFailure

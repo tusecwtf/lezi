@@ -1,6 +1,6 @@
 # 离线模式 · Spec
 
-**Status:** ready-for-agent  
+**Status:** complete  
 **Tracker:** [ISSUES.md](./ISSUES.md)
 
 ## Intent

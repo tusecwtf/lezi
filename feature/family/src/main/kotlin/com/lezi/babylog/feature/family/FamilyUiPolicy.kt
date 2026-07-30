@@ -171,13 +171,18 @@ internal fun overviewSyncStatusLabel(
     status: SyncStatus,
     isJoined: Boolean,
 ): String = when {
-    !isJoined || status == SyncStatus.Disabled -> "还没和家人一起记"
+    // Offline-mode and other unjoined states: local Room is usable; family path is on account.
+    !isJoined || status == SyncStatus.Disabled -> "本机可记，连上家庭后再同步"
     status == SyncStatus.Syncing -> "正在同步…"
     status == SyncStatus.BlockedOfflineHome -> "连上家里 Wi‑Fi 后才能同步"
     status == SyncStatus.Idle -> "家人记录已对齐"
     status == SyncStatus.Error -> "同步遇到问题"
     else -> "同步遇到问题"
 }
+
+/** Unjoined family-card subtitle (overview only; not network ops). */
+internal fun unjoinedFamilyCardSubtitle(): String =
+    "本机可先记；新建或加入家庭后同步给家人"
 
 /**
  * Detailed labels for the **network settings** sheet only (ops / troubleshooting).

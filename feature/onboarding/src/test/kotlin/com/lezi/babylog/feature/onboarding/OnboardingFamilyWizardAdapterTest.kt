@@ -11,6 +11,7 @@ import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.JoinFamilyDraft
 import com.lezi.babylog.sync.SyncSession
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class OnboardingFamilyWizardAdapterTest {
@@ -32,6 +33,35 @@ class OnboardingFamilyWizardAdapterTest {
         assertEquals(listOf(FamilyWizardMode.Create, FamilyWizardMode.Join), onboardingFamilyActions())
         assertEquals(draft, snapshot.toJoinDraft())
         assertEquals("妈妈", snapshot.displayName)
+        assertTrue(onboardingChooseFamilyBody().contains("离线模式"))
+    }
+
+    @Test
+    fun offlineModeCreateBabyCopyDoesNotRequireFamilySession() {
+        assertEquals(
+            OnboardingCreateBabySource.OfflineMode,
+            onboardingCreateBabySource(FamilyWizardState.Editing(emptySnapshot())),
+        )
+        assertTrue(onboardingCreateBabyBody(OnboardingCreateBabySource.OfflineMode).contains("离线模式"))
+        assertTrue(onboardingCreateBabyBody(OnboardingCreateBabySource.OfflineMode).contains("账户"))
+        assertEquals(
+            OnboardingCreateBabySource.AfterFamilyCreate,
+            onboardingCreateBabySource(
+                completed(emptySnapshot(), FamilyWizardOutcome.Created(ownerSession())),
+            ),
+        )
+        assertEquals(
+            OnboardingCreateBabySource.AfterFamilyReclaim,
+            onboardingCreateBabySource(
+                completed(
+                    emptySnapshot(),
+                    FamilyWizardOutcome.Reclaimed(
+                        ownerSession(),
+                        InitialFamilyDataRecovery.Complete,
+                    ),
+                ),
+            ),
+        )
     }
 
     @Test
@@ -108,6 +138,15 @@ class OnboardingFamilyWizardAdapterTest {
         snapshot: com.lezi.babylog.domain.FamilyWizardSnapshot,
         outcome: FamilyWizardOutcome,
     ) = FamilyWizardState.Completed(snapshot, outcome)
+
+    private fun emptySnapshot() = onboardingFamilyWizardSnapshot(
+        mode = FamilyWizardMode.Create,
+        step = FamilyWizardStep.Identity,
+        draft = JoinFamilyDraft.fromConfig(
+            HomeLanServerConfig(host = "nas.home", allowedSsids = listOf("Home")),
+        ),
+        displayName = "妈妈",
+    )
 }
 
 private fun ownerSession() = SyncSession(

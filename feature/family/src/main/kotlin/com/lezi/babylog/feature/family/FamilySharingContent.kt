@@ -127,7 +127,7 @@ internal fun FamilySharingContent(
             )
             Spacer(Modifier.height(LeziSpacing.Xs))
             Text(
-                "和家人一起记宝宝的日常",
+                unjoinedFamilyCardSubtitle(),
                 style = LeziTypography.Meta,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

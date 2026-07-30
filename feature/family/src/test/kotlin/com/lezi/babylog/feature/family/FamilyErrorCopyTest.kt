@@ -215,6 +215,33 @@ class FamilyErrorCopyTest {
     }
 
     @Test
+    fun unjoinedOverviewCopyAllowsLocalUseWithoutRequiringSyncFirst() {
+        val label = overviewSyncStatusLabel(
+            status = com.lezi.babylog.core.model.SyncStatus.Disabled,
+            isJoined = false,
+        )
+        assertTrue(label.contains("本机"))
+        assertFalse(label.contains("必须"))
+        assertFalse(label.contains("先同步"))
+        assertTrue(unjoinedFamilyCardSubtitle().contains("新建或加入"))
+
+        val card = buildFamilyOverviewCard(
+            isJoined = false,
+            role = FamilyRole.None,
+            networkConfigured = false,
+            familyName = null,
+            babyNickname = "年年",
+            localDisplayName = "",
+            memberCount = 0,
+            membersLoaded = false,
+            status = com.lezi.babylog.core.model.SyncStatus.Disabled,
+        )
+        assertTrue(card.showCreateJoin)
+        assertFalse(card.showInvite)
+        assertEquals(label, card.syncStatusLabel)
+    }
+
+    @Test
     fun familyControlVisibilityByJoinAndRole() {
         val ownerJoined = familyControlVisibility(isJoined = true, role = FamilyRole.Owner)
         assertFalse(ownerJoined.showJoin)
