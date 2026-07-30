@@ -98,6 +98,7 @@ import com.lezi.babylog.core.ui.presentationTone
 import com.lezi.babylog.core.ui.sortCatalogByLocalOrder
 import com.lezi.babylog.designsystem.LeziRecordGlyph
 import com.lezi.babylog.designsystem.LeziRecordGlyphIcon
+import com.lezi.babylog.designsystem.LeziRecordColorRole
 import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziThemeExt
@@ -570,8 +571,7 @@ internal fun buildTimelineLanes(
                     sleep += TimelineLaneSegment(
                         startMinOfDay = startMin,
                         endMinOfDay = endMin,
-                        // Color filled at draw from LeziThemeExt (token single-source).
-                        color = Color.Unspecified,
+                        colorRole = LeziRecordColorRole.Sleep,
                         title = title,
                         detail = detail,
                         isEvent = false,
@@ -605,7 +605,7 @@ internal fun buildTimelineLanes(
                 feed += TimelineLaneSegment(
                     startMinOfDay = startMin,
                     endMinOfDay = startMin,
-                    color = Color.Unspecified,
+                    colorRole = r.type.presentation.colorRole,
                     title = title,
                     detail = detail,
                     isEvent = true,
@@ -623,7 +623,7 @@ internal fun buildTimelineLanes(
                     RecordType.PEE -> care += TimelineLaneSegment(
                         startMinOfDay = startMin,
                         endMinOfDay = startMin,
-                        color = Color.Unspecified,
+                        colorRole = LeziRecordColorRole.Pee,
                         title = "尿尿",
                         detail = "${clock(r.timestamp)}$notePart · 护理",
                         isEvent = true,
@@ -632,7 +632,7 @@ internal fun buildTimelineLanes(
                     RecordType.POOP -> care += TimelineLaneSegment(
                         startMinOfDay = startMin,
                         endMinOfDay = startMin,
-                        color = Color.Unspecified,
+                        colorRole = LeziRecordColorRole.Poop,
                         title = "便便",
                         detail = "${clock(r.timestamp)}$notePart · 护理",
                         isEvent = true,
@@ -643,7 +643,7 @@ internal fun buildTimelineLanes(
                         care += TimelineLaneSegment(
                             startMinOfDay = startMin,
                             endMinOfDay = startMin,
-                            color = Color.Unspecified,
+                            colorRole = LeziRecordColorRole.Pee,
                             title = "尿尿",
                             detail = "${clock(r.timestamp)}$notePart · 尿+便（尿）",
                             isEvent = true,
@@ -652,7 +652,7 @@ internal fun buildTimelineLanes(
                         care += TimelineLaneSegment(
                             startMinOfDay = startMin,
                             endMinOfDay = startMin,
-                            color = Color.Unspecified,
+                            colorRole = LeziRecordColorRole.Poop,
                             title = "便便",
                             detail = "${clock(r.timestamp)}$notePart · 尿+便（便）",
                             isEvent = true,
@@ -662,7 +662,7 @@ internal fun buildTimelineLanes(
                     else -> care += TimelineLaneSegment(
                         startMinOfDay = startMin,
                         endMinOfDay = startMin,
-                        color = Color.Unspecified,
+                        colorRole = r.type.presentation.colorRole,
                         title = r.type.presentation.label,
                         detail = "${clock(r.timestamp)}$notePart · 护理",
                         isEvent = true,
@@ -783,17 +783,14 @@ internal fun reduceDayChartFilter(
 }
 
 /** Legend swatch colors for day-chart categories (feature owns labels/keys; designsystem stays free of domain). */
-internal fun dayChartLegendColor(
+internal fun dayChartLegendColorRole(
     category: DayChartCategory,
-    sleep: Color,
-    feed: Color,
-    care: Color,
-    poop: Color,
-): Color = when (category) {
-    DayChartCategory.SLEEP -> sleep
-    DayChartCategory.MILK, DayChartCategory.NURSING -> feed
-    DayChartCategory.PEE -> care
-    DayChartCategory.POOP -> poop
+): LeziRecordColorRole = when (category) {
+    DayChartCategory.SLEEP -> LeziRecordColorRole.Sleep
+    DayChartCategory.MILK -> LeziRecordColorRole.Milk
+    DayChartCategory.NURSING -> LeziRecordColorRole.Nursing
+    DayChartCategory.PEE -> LeziRecordColorRole.Pee
+    DayChartCategory.POOP -> LeziRecordColorRole.Poop
 }
 
 private fun formatDurationMinutes(minutes: Long): String =
@@ -891,7 +888,6 @@ fun LogRoute(
     }
     val today = LocalDate.now()
     val zone = ZoneId.systemDefault()
-    val ext = LeziThemeExt.colors
     val journal = LeziThemeExt.isJournal
     val contextualDayChartFilterState = remember(dayChartFilterState, dayChartContext) {
         reduceDayChartFilter(
@@ -935,12 +931,12 @@ fun LogRoute(
     val filteredTimelineRecords = remember(timelineRecords, dayChartFilter) {
         DayChartCategories.filterRecords(timelineRecords, dayChartFilter)
     }
-    val dayChartLegend = remember(state.records, ext.laneSleep, ext.laneFeed, ext.laneCare, ext.sun) {
+    val dayChartLegend = remember(state.records) {
         DayChartCategories.legendCategories(state.records).map { cat ->
             TimelineLegendEntry(
                 key = cat.name,
                 label = cat.label,
-                color = dayChartLegendColor(cat, ext.laneSleep, ext.laneFeed, ext.laneCare, ext.sun),
+                colorRole = dayChartLegendColorRole(cat),
                 isBar = cat == DayChartCategory.SLEEP,
             )
         }
@@ -1277,22 +1273,9 @@ fun LogRoute(
                     if (state.showDayChart) {
                         item {
                             TimelineRailCard(
-                                sleep = state.sleepLanes.map { it.copy(color = ext.laneSleep) },
-                                feed = state.feedLanes.map { it.copy(color = ext.laneFeed) },
-                                // Preserve distinct pee and poop colors instead of one care-lane color.
-                                care = state.careLanes.map { seg ->
-                                    seg.copy(
-                                        color = when (seg.dayChartCategoryKey) {
-                                            DayChartCategory.POOP.name -> ext.sun
-                                            DayChartCategory.PEE.name -> ext.laneCare
-                                            else -> when (seg.title) {
-                                                "便便" -> ext.sun
-                                                "尿尿" -> ext.laneCare
-                                                else -> ext.laneCare.copy(alpha = 0.75f)
-                                            }
-                                        },
-                                    )
-                                },
+                                sleep = state.sleepLanes,
+                                feed = state.feedLanes,
+                                care = state.careLanes,
                                 recordCount = state.records.size,
                                 nowContentMinute = nowContentMinute,
                                 selectedCategoryKey = dayChartFilter?.name,

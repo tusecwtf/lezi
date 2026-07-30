@@ -58,16 +58,23 @@ enum class LeziRecordColorRole {
 @Composable
 fun leziRecordColor(role: LeziRecordColorRole): Color {
     val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    return resolveLeziRecordColor(role, darkTheme = dark)
+}
+
+internal fun resolveLeziRecordColor(
+    role: LeziRecordColorRole,
+    darkTheme: Boolean,
+): Color {
     return when (role) {
-        LeziRecordColorRole.Nursing -> if (dark) Color(0xFFEF8798) else Color(0xFFDE6F83)
-        LeziRecordColorRole.Milk -> if (dark) Color(0xFFF3BD6B) else Color(0xFFD99534)
-        LeziRecordColorRole.Sleep -> if (dark) Color(0xFFAA9BE4) else Color(0xFF806FC4)
-        LeziRecordColorRole.Wake -> if (dark) Color(0xFF82C7E2) else Color(0xFF55A8C7)
-        LeziRecordColorRole.Pee -> if (dark) Color(0xFF79D4BA) else Color(0xFF45AD8F)
-        LeziRecordColorRole.Poop -> if (dark) Color(0xFFD9AF66) else Color(0xFFA87832)
-        LeziRecordColorRole.Temperature -> if (dark) Color(0xFFFF897E) else Color(0xFFC85A4A)
-        LeziRecordColorRole.Care -> if (dark) Color(0xFFA8B8CD) else Color(0xFF667C98)
-        LeziRecordColorRole.Growth -> if (dark) Color(0xFF7CD6A1) else Color(0xFF3F9B6A)
+        LeziRecordColorRole.Nursing -> if (darkTheme) Color(0xFFEF8798) else Color(0xFFDE6F83)
+        LeziRecordColorRole.Milk -> if (darkTheme) Color(0xFFF3BD6B) else Color(0xFFD99534)
+        LeziRecordColorRole.Sleep -> if (darkTheme) Color(0xFFAA9BE4) else Color(0xFF806FC4)
+        LeziRecordColorRole.Wake -> if (darkTheme) Color(0xFF82C7E2) else Color(0xFF55A8C7)
+        LeziRecordColorRole.Pee -> if (darkTheme) Color(0xFF79D4BA) else Color(0xFF45AD8F)
+        LeziRecordColorRole.Poop -> if (darkTheme) Color(0xFFD9AF66) else Color(0xFFA87832)
+        LeziRecordColorRole.Temperature -> if (darkTheme) Color(0xFFFF897E) else Color(0xFFC85A4A)
+        LeziRecordColorRole.Care -> if (darkTheme) Color(0xFFA8B8CD) else Color(0xFF667C98)
+        LeziRecordColorRole.Growth -> if (darkTheme) Color(0xFF7CD6A1) else Color(0xFF3F9B6A)
     }
 }
 

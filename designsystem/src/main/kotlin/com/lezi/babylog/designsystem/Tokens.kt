@@ -46,11 +46,6 @@ object LeziColors {
     val DarkSunSoft = Color(0xFF3A3420)
     val DarkCreamDeep = Color(0xFF2A2418)
 
-    // Semantic lane colors (time rail)
-    val LaneSleep = Color(0xFFE09F3E)
-    val LaneFeed = Accent
-    val LaneCare = Color(0xFF7A9E7E)
-
     // Sleep-in-progress moon cap (header avatar + sleep composer accents)
     val SleepMoonCap = Color(0xFF7965BE)
     val SleepMoonCapEdge = Color(0xFF4B3E7A)
@@ -66,7 +61,6 @@ object LeziColors {
     val JournalAccent = Color(0xFFEA7C8F)
     val JournalAccentSoft = Color(0xFFFFE6EB)
     val JournalSleep = Color(0xFF8B78D1)
-    val JournalFeed = Color(0xFFEC7186)
     val JournalCare = Color(0xFF59C6A5)
     val JournalSun = Color(0xFFF3B84B)
     val JournalChartGrid = Color(0xFFC9CBD2)

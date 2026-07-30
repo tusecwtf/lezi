@@ -40,14 +40,14 @@ fun PreviewJournalOverview() {
         TimelineRailCard(
             sleep = listOf(
                 TimelineLaneSegment(
-                    30, 330, LeziColors.JournalSleep,
+                    30, 330, LeziRecordColorRole.Sleep,
                     title = "睡眠",
                     dayChartCategoryKey = "SLEEP",
                 ),
             ),
             feed = listOf(
                 TimelineLaneSegment(
-                    360, 390, LeziColors.JournalFeed,
+                    360, 390, LeziRecordColorRole.Milk,
                     title = "配方奶",
                     isEvent = true,
                     dayChartCategoryKey = "MILK",
@@ -55,7 +55,7 @@ fun PreviewJournalOverview() {
             ),
             care = listOf(
                 TimelineLaneSegment(
-                    430, 450, LeziColors.JournalCare,
+                    430, 450, LeziRecordColorRole.Pee,
                     title = "尿尿",
                     isEvent = true,
                     dayChartCategoryKey = "PEE",
@@ -64,9 +64,9 @@ fun PreviewJournalOverview() {
             recordCount = 8,
             nowContentMinute = 600,
             legend = listOf(
-                TimelineLegendEntry("SLEEP", "睡眠", LeziColors.JournalSleep, isBar = true),
-                TimelineLegendEntry("MILK", "奶", LeziColors.JournalFeed),
-                TimelineLegendEntry("PEE", "尿", LeziColors.JournalCare),
+                TimelineLegendEntry("SLEEP", "睡眠", LeziRecordColorRole.Sleep, isBar = true),
+                TimelineLegendEntry("MILK", "奶", LeziRecordColorRole.Milk),
+                TimelineLegendEntry("PEE", "尿", LeziRecordColorRole.Pee),
             ),
         )
     }
@@ -124,20 +124,20 @@ fun PreviewTimelineNormal() {
         TimelineRailCard(
             sleep = listOf(
                 TimelineLaneSegment(
-                    60, 180, LeziColors.LaneSleep,
+                    60, 180, LeziRecordColorRole.Sleep,
                     title = "睡眠",
                     dayChartCategoryKey = "SLEEP",
                 ),
             ),
             feed = listOf(
                 TimelineLaneSegment(
-                    200, 220, LeziColors.LaneFeed,
+                    200, 220, LeziRecordColorRole.Milk,
                     title = "配方奶",
                     isEvent = true,
                     dayChartCategoryKey = "MILK",
                 ),
                 TimelineLaneSegment(
-                    480, 500, LeziColors.LaneFeed,
+                    480, 500, LeziRecordColorRole.Nursing,
                     title = "母乳",
                     isEvent = true,
                     dayChartCategoryKey = "NURSING",
@@ -145,7 +145,7 @@ fun PreviewTimelineNormal() {
             ),
             care = listOf(
                 TimelineLaneSegment(
-                    300, 310, LeziColors.LaneCare,
+                    300, 310, LeziRecordColorRole.Pee,
                     title = "尿尿",
                     isEvent = true,
                     dayChartCategoryKey = "PEE",
@@ -155,10 +155,10 @@ fun PreviewTimelineNormal() {
             nowContentMinute = 560,
             selectedCategoryKey = "MILK",
             legend = listOf(
-                TimelineLegendEntry("SLEEP", "睡眠", LeziColors.LaneSleep, isBar = true),
-                TimelineLegendEntry("MILK", "奶", LeziColors.LaneFeed),
-                TimelineLegendEntry("NURSING", "母乳", LeziColors.LaneFeed),
-                TimelineLegendEntry("PEE", "尿", LeziColors.LaneCare),
+                TimelineLegendEntry("SLEEP", "睡眠", LeziRecordColorRole.Sleep, isBar = true),
+                TimelineLegendEntry("MILK", "奶", LeziRecordColorRole.Milk),
+                TimelineLegendEntry("NURSING", "母乳", LeziRecordColorRole.Nursing),
+                TimelineLegendEntry("PEE", "尿", LeziRecordColorRole.Pee),
             ),
         )
     }
@@ -175,7 +175,7 @@ fun PreviewTimelineThreeDay() {
                 // Overnight sleep spanning D−1 → D as one continuous bar
                 // (neighbor peek dims; D portion full-strength).
                 TimelineLaneSegment(
-                    d0 - 120, d0 + 360, LeziColors.LaneSleep,
+                    d0 - 120, d0 + 360, LeziRecordColorRole.Sleep,
                     title = "睡眠",
                     dayChartCategoryKey = "SLEEP",
                 ),
@@ -183,13 +183,13 @@ fun PreviewTimelineThreeDay() {
             feed = listOf(
                 // Neighbor D−1 feed (dimmed).
                 TimelineLaneSegment(
-                    d0 - 60, d0 - 60, LeziColors.LaneFeed,
+                    d0 - 60, d0 - 60, LeziRecordColorRole.Milk,
                     title = "配方奶",
                     isEvent = true,
                     dayChartCategoryKey = "MILK",
                 ),
                 TimelineLaneSegment(
-                    d0 + 480, d0 + 480, LeziColors.LaneFeed,
+                    d0 + 480, d0 + 480, LeziRecordColorRole.Milk,
                     title = "配方奶",
                     isEvent = true,
                     dayChartCategoryKey = "MILK",
@@ -197,7 +197,7 @@ fun PreviewTimelineThreeDay() {
             ),
             care = listOf(
                 TimelineLaneSegment(
-                    d0 + 600, d0 + 600, LeziColors.LaneCare,
+                    d0 + 600, d0 + 600, LeziRecordColorRole.Pee,
                     title = "尿尿",
                     isEvent = true,
                     dayChartCategoryKey = "PEE",
@@ -208,9 +208,9 @@ fun PreviewTimelineThreeDay() {
             viewportStartMinutes = TimelineAxis.todayCenteredViewportStartMinutes(nowMin),
             viewportDurationMinutes = TimelineAxis.defaultViewportDurationMinutes(),
             legend = listOf(
-                TimelineLegendEntry("SLEEP", "睡眠", LeziColors.LaneSleep, isBar = true),
-                TimelineLegendEntry("MILK", "奶", LeziColors.LaneFeed),
-                TimelineLegendEntry("PEE", "尿", LeziColors.LaneCare),
+                TimelineLegendEntry("SLEEP", "睡眠", LeziRecordColorRole.Sleep, isBar = true),
+                TimelineLegendEntry("MILK", "奶", LeziRecordColorRole.Milk),
+                TimelineLegendEntry("PEE", "尿", LeziRecordColorRole.Pee),
             ),
         )
     }

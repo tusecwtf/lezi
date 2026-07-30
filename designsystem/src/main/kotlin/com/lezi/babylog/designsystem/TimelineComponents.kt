@@ -38,6 +38,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
@@ -67,7 +68,7 @@ enum class LeziGlyph { Bottle, Drop, Moon, Toilet, Pin, Plus, Dot }
 data class TimelineLaneSegment(
     val startMinOfDay: Int,
     val endMinOfDay: Int,
-    val color: Color,
+    val colorRole: LeziRecordColorRole,
     /** Short record-type name, e.g. 睡眠 / 配方奶. */
     val title: String = "",
     /** Human-readable explanation, e.g. 22:00–06:00 · 8小时. */
@@ -85,7 +86,7 @@ data class TimelineLaneSegment(
 data class TimelineLegendEntry(
     val key: String,
     val label: String,
-    val color: Color,
+    val colorRole: LeziRecordColorRole,
     /** Sleep uses a short bar swatch; feed/care use dots. */
     val isBar: Boolean = false,
 )
@@ -135,6 +136,7 @@ fun TimelineLane(
     val dayBoundaryColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.48f)
     val nowColor = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.62f)
     val focusRing = MaterialTheme.colorScheme.primary
+    val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val density = LocalDensity.current
     // Taller lanes for event markers so dots + touch targets are comfortable.
     val laneHeight = trackHeight.coerceAtLeast(48.dp)
@@ -263,6 +265,7 @@ fun TimelineLane(
             )
             drawingIndices.forEach { index ->
                 val seg = segments[index]
+                val segmentColor = resolveLeziRecordColor(seg.colorRole, darkTheme)
                 val highlighted = hasSelection &&
                     seg.dayChartCategoryKey != null &&
                     seg.dayChartCategoryKey == selectedCategoryKey
@@ -301,7 +304,7 @@ fun TimelineLane(
                         else -> 0.9f
                     }
                     drawLine(
-                        color = seg.color.copy(alpha = stemAlpha),
+                        color = segmentColor.copy(alpha = stemAlpha),
                         start = Offset(x, h * 0.18f),
                         end = Offset(x, h / 2f),
                         strokeWidth = if (highlighted) 3f else 2.2f,
@@ -319,7 +322,7 @@ fun TimelineLane(
                         )
                     }
                     drawCircle(
-                        color = seg.color.copy(alpha = fillAlpha),
+                        color = segmentColor.copy(alpha = fillAlpha),
                         radius = radius,
                         center = center,
                     )
@@ -406,7 +409,7 @@ fun TimelineLane(
                                 safeViewportDuration.toFloat())
                         val barW = w.coerceAtLeast(if (slices.size == 1) 4f else 2f)
                         drawRoundRect(
-                            color = seg.color.copy(alpha = fillAlpha),
+                            color = segmentColor.copy(alpha = fillAlpha),
                             topLeft = Offset(x, barTop),
                             size = Size(barW, barH),
                             cornerRadius = CornerRadius(6f, 6f),
@@ -810,12 +813,14 @@ private fun TimelineLegendRow(
     onCategorySelect: (String?) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val darkTheme = MaterialTheme.colorScheme.background.luminance() < 0.5f
     FlowRow(
         modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
         items.forEach { item ->
+            val itemColor = resolveLeziRecordColor(item.colorRole, darkTheme)
             val selected = item.key == selectedCategoryKey
             val description = if (selected) {
                 "已选${item.label}，再点取消筛选"
@@ -858,14 +863,14 @@ private fun TimelineLegendRow(
                             .width(12.dp)
                             .height(7.dp)
                             .clip(RoundedCornerShape(2.dp))
-                            .background(item.color),
+                            .background(itemColor),
                     )
                 } else {
                     Box(
                         Modifier
                             .size(9.dp)
                             .clip(CircleShape)
-                            .background(item.color),
+                            .background(itemColor),
                     )
                 }
                 Spacer(Modifier.width(5.dp))
@@ -882,4 +887,3 @@ private fun TimelineLegendRow(
         }
     }
 }
-

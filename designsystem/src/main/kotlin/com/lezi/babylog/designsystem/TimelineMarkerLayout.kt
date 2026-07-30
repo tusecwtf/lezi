@@ -68,7 +68,7 @@ fun layoutTimelineEventMarkers(
             compareBy<IndexedSegment>(
                 { it.segment.startMinOfDay },
                 { it.segment.dayChartCategoryKey.orEmpty() },
-                { it.segment.color.value },
+                { it.segment.colorRole.ordinal },
                 IndexedSegment::sourceIndex,
             ),
         )

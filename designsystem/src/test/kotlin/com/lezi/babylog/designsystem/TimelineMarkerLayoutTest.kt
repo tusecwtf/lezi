@@ -1,6 +1,5 @@
 package com.lezi.babylog.designsystem
 
-import androidx.compose.ui.graphics.Color
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -66,22 +65,30 @@ class TimelineMarkerLayoutTest {
 
     @Test
     fun `near cluster order spacing and tie break ignore traversal and copy`() {
-        val milk = eventSegment(minute = 700, category = "MILK", color = Color.Green)
+        val milk = eventSegment(
+            minute = 700,
+            category = "MILK",
+            colorRole = LeziRecordColorRole.Milk,
+        )
         val peeRed = eventSegment(
             minute = 705,
             category = "PEE",
             title = "same",
             detail = "same",
-            color = Color.Red,
+            colorRole = LeziRecordColorRole.Nursing,
         )
         val peeBlue = eventSegment(
             minute = 705,
             category = "PEE",
             title = "same",
             detail = "same",
-            color = Color.Blue,
+            colorRole = LeziRecordColorRole.Pee,
         )
-        val poop = eventSegment(minute = 711, category = "POOP", color = Color.Yellow)
+        val poop = eventSegment(
+            minute = 711,
+            category = "POOP",
+            colorRole = LeziRecordColorRole.Poop,
+        )
 
         val first = layout(
             listOf(peeRed, poop, milk, peeBlue),
@@ -98,9 +105,9 @@ class TimelineMarkerLayoutTest {
         )
 
         assertEquals(
-            first.targets.associate { it.segment.color.value to (it.centerPx to it.zOrder) },
+            first.targets.associate { it.segment.colorRole to (it.centerPx to it.zOrder) },
             reorderedAndRecopied.targets.associate {
-                it.segment.color.value to (it.centerPx to it.zOrder)
+                it.segment.colorRole to (it.centerPx to it.zOrder)
             },
         )
         assertEquals(listOf(700, 705, 705, 711), first.targets.map { it.segment.startMinOfDay })
@@ -140,7 +147,7 @@ class TimelineMarkerLayoutTest {
         val interval = TimelineLaneSegment(
             startMinOfDay = 150,
             endMinOfDay = 200,
-            color = Color.Magenta,
+            colorRole = LeziRecordColorRole.Sleep,
             isEvent = false,
             dayChartCategoryKey = "SLEEP",
         )
@@ -256,11 +263,11 @@ class TimelineMarkerLayoutTest {
         category: String?,
         title: String = "",
         detail: String = "",
-        color: Color = Color.Unspecified,
+        colorRole: LeziRecordColorRole = LeziRecordColorRole.Care,
     ) = TimelineLaneSegment(
         startMinOfDay = minute,
         endMinOfDay = minute,
-        color = color,
+        colorRole = colorRole,
         title = title,
         detail = detail,
         isEvent = true,

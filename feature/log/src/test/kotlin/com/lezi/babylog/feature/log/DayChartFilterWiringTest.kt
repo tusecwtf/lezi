@@ -1,6 +1,7 @@
 package com.lezi.babylog.feature.log
 
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.designsystem.LeziRecordColorRole
 import com.lezi.babylog.domain.DayChartCategories
 import com.lezi.babylog.domain.DayChartCategory
 import java.time.LocalDate
@@ -107,6 +108,24 @@ class DayChartFilterWiringTest {
         assertEquals(DayChartCategory.PEE, summaryDayChartCategory(RecordType.PEE))
         assertEquals(DayChartCategory.POOP, summaryDayChartCategory(RecordType.POOP))
         assertNull(summaryDayChartCategory(RecordType.TEMPERATURE))
+    }
+
+    @Test
+    fun legendCategoriesUseRecordSemanticRoles() {
+        assertEquals(
+            LeziRecordColorRole.Milk,
+            dayChartLegendColorRole(DayChartCategory.MILK),
+        )
+        assertEquals(
+            LeziRecordColorRole.Nursing,
+            dayChartLegendColorRole(DayChartCategory.NURSING),
+        )
+        assertEquals(
+            LeziRecordColorRole.Sleep,
+            dayChartLegendColorRole(DayChartCategory.SLEEP),
+        )
+        assertEquals(LeziRecordColorRole.Pee, dayChartLegendColorRole(DayChartCategory.PEE))
+        assertEquals(LeziRecordColorRole.Poop, dayChartLegendColorRole(DayChartCategory.POOP))
     }
 
     @Test

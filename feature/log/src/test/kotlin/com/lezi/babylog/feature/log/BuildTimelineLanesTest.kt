@@ -2,6 +2,7 @@ package com.lezi.babylog.feature.log
 
 import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.designsystem.LeziRecordColorRole
 import com.lezi.babylog.designsystem.TimelineAxis
 import com.lezi.babylog.domain.DayChartCategory
 import java.time.LocalDate
@@ -151,6 +152,52 @@ class BuildTimelineLanesTest {
         assertTrue(lanes.care.isEmpty())
         assertTrue(lanes.feed.isEmpty())
         assertTrue(lanes.sleep.isEmpty())
+    }
+
+    @Test
+    fun laneSegmentsCarryRecordSemanticRoles() {
+        val at = day.atTime(12, 0).atZone(zone).toInstant().toEpochMilli()
+        val lanes = buildTimelineLanes(
+            records = listOf(
+                record(1, RecordType.SLEEP, at, endTimestamp = at + 30 * 60_000L),
+                record(2, RecordType.FORMULA, at),
+                record(3, RecordType.NURSING, at),
+                record(4, RecordType.PUMPED_FEED, at),
+                record(5, RecordType.PUMP_EXPRESS, at),
+                record(6, RecordType.PEE, at),
+                record(7, RecordType.POOP, at),
+                record(8, RecordType.BOTH_DIAPER, at),
+                record(9, RecordType.BATH, at),
+                record(10, RecordType.TEMPERATURE, at),
+                record(11, RecordType.MEDICINE, at),
+            ),
+            windowStartMs = window.startMs,
+            windowEndMs = window.endMs,
+            zone = zone,
+        )
+
+        assertEquals(listOf(LeziRecordColorRole.Sleep), lanes.sleep.map { it.colorRole })
+        assertEquals(
+            listOf(
+                LeziRecordColorRole.Milk,
+                LeziRecordColorRole.Nursing,
+                LeziRecordColorRole.Nursing,
+                LeziRecordColorRole.Nursing,
+            ),
+            lanes.feed.map { it.colorRole },
+        )
+        assertEquals(
+            listOf(
+                LeziRecordColorRole.Pee,
+                LeziRecordColorRole.Poop,
+                LeziRecordColorRole.Pee,
+                LeziRecordColorRole.Poop,
+                LeziRecordColorRole.Wake,
+                LeziRecordColorRole.Temperature,
+                LeziRecordColorRole.Care,
+            ),
+            lanes.care.map { it.colorRole },
+        )
     }
 
     private fun record(
