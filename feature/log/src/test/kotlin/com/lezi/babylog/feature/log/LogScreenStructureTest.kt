@@ -12,27 +12,43 @@ class LogScreenStructureTest {
     }
 
     @Test
-    fun routeTimelineDockAndStateHaveDedicatedUnits() {
+    fun routeTimelineDockListDialogsAndStateHaveDedicatedUnits() {
         val host = source("LogScreen.kt")
         val timeline = source("LogTimeline.kt")
         val dock = source("LogQuickDock.kt")
+        val list = source("LogTimelineList.kt")
+        val dialogs = source("LogDialogHost.kt")
         val state = source("LogViewModel.kt")
 
-        assertTrue(host.lineSequence().count() < 1_500)
+        assertTrue(host.lineSequence().count() < 1_000)
         assertTrue("fun LogRoute(" in host)
         assertFalse("class LogViewModel" in host)
         assertFalse("fun buildTimelineLanes(" in host)
         assertFalse("fun OneHandQuickDock(" in host)
+        assertFalse("fun LogTimelineList(" in host)
+        assertFalse("fun LogDialogHost(" in host)
+        assertFalse("LazyColumn(" in host)
+        assertFalse("SwipeEditDeleteRow(" in host)
+        assertFalse("AlertDialog(" in host)
+        assertFalse("ModalBottomSheet(" in host)
 
         assertTrue("class LogViewModel" in state)
         assertTrue("fun buildTimelineLanes(" in timeline)
         assertTrue("fun OneHandQuickDock(" in dock)
+        assertTrue("fun LogTimelineList(" in list)
+        assertTrue("LazyColumn(" in list)
+        assertTrue("SwipeEditDeleteRow(" in list)
+        assertTrue("fun LogDialogHost(" in dialogs)
+        assertTrue("AlertDialog(" in dialogs)
+        assertTrue("ModalBottomSheet(" in dialogs)
 
-        val splitSources = listOf(host, timeline, dock, state).joinToString("\n")
+        val splitSources = listOf(host, timeline, dock, list, dialogs, state).joinToString("\n")
         assertEquals(1, splitSources.occurrences("fun LogRoute("))
         assertEquals(1, splitSources.occurrences("class LogViewModel"))
         assertEquals(1, splitSources.occurrences("fun buildTimelineLanes("))
         assertEquals(1, splitSources.occurrences("fun OneHandQuickDock("))
+        assertEquals(1, splitSources.occurrences("fun LogTimelineList("))
+        assertEquals(1, splitSources.occurrences("fun LogDialogHost("))
     }
 
     private fun source(name: String): String = sourceDir.resolve(name).readText()
