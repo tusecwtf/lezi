@@ -1,5 +1,7 @@
 # 记录页布局编辑整改 · 票索引
 
+Status: **complete**
+
 Parent spec: [spec.md](./spec.md)
 Ticket 04 validation commit: `0791eb73c621a9bd47414e478fecd91aebebcaf5`
 
@@ -14,7 +16,7 @@ Ticket 04 validation commit: `0791eb73c621a9bd47414e478fecd91aebebcaf5`
                        └──→ P1/02 清理 ─────────────┘
 ```
 
-Frontier: **13**
+Frontier: **none**
 
 | # | Ticket | Blocked by | Status |
 |---|--------|------------|--------|
@@ -30,7 +32,7 @@ Frontier: **13**
 | 10 | [克制的编辑动效与限频触觉反馈](./issues/10-bounded-motion-and-haptics.md) | 03 | complete |
 | 11 | [配置变更保持布局编辑会话](./issues/11-preserve-editor-across-configuration.md) | 02 | complete |
 | 12 | [首次拖放引导与可重访帮助](./issues/12-first-use-drag-guidance.md) | 06 | complete |
-| 13 | [完整手势、重进与设备回归](./issues/13-full-layout-edit-regression.md) | P1/02, 08–12 | ready-for-agent |
+| 13 | [完整手势、重进与设备回归](./issues/13-full-layout-edit-regression.md) | P1/02, 08–12 | complete |
 
 ## 执行说明
 

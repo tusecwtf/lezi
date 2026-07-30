@@ -1,12 +1,10 @@
 # Spec: 记录页布局编辑整改
 
-**Status:** ready-for-agent
+**Status:** complete
 
-**Validation HEAD:** `d8873c45311820b7b23c35bcaa138d5de9caa046`
+**Validated production HEAD:** `84fa96cc4fd5065344fecdfb3f1de0908a558713`
 
-该 HEAD 相对完成生产代码审计的 `f447bc9` 只增加 tracker 与文档整理；生产代码无变化。
-
-本 tracker 是当前代码基线上的自包含整改范围。实施时必须从上述 HEAD 重新核对代码；若分支已经前进，先确认差异没有替代本规格，再在新 HEAD 上重新运行对应验证。历史草稿、未进入当前分支的实现或已删除票据都不能作为完成证据。
+本 tracker 已在上述生产 HEAD 完成。最终固定点通过完整 JVM/lint/app 构建、42/42 feature connected 测试、生产 APK 双入口与重进 smoke、四种视觉/设备条件、官方 TalkBack/硬件键盘焦点检查以及同步边界静态复核。精确命令、APK 哈希、设备、截图和证据限制见 [`evidence/13/validation.md`](./evidence/13/validation.md)。
 
 ## 目标
 
