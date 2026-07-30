@@ -10,7 +10,7 @@ post-0.3.0 独立审查残差另开 tracker；使用方式见
 | 2026-07-29 P1 冗余与 UI 还债（A–F） | [spec.md](./p1-redundancy-ui-debt/spec.md) | [ISSUES.md](./p1-redundancy-ui-debt/ISSUES.md)（10 票） | complete · 10/10 |
 | 记录页布局编辑整改 | [spec](./record-layout-edit-remediation/spec.md) | [票索引](./record-layout-edit-remediation/ISSUES.md) | complete · 12 本地票 + P1/02 |
 | 当前程序综合审计整改 | [spec](./2c6bbf6-program-audit-remediation/spec.md) | [票索引](./2c6bbf6-program-audit-remediation/ISSUES.md) | complete · 26/26 · Release 0.3.0 |
-| Post-0.3.0 code-review 残差 | [spec](./post-0.3.0-code-review-remediation/spec.md) | [票索引](./post-0.3.0-code-review-remediation/ISSUES.md) | ready-for-agent · complete 01/02/03/04/08/09 · frontier 05 |
+| Post-0.3.0 code-review 残差 | [spec](./post-0.3.0-code-review-remediation/spec.md) | [票索引](./post-0.3.0-code-review-remediation/ISSUES.md) | ready-for-agent · complete 01/02/03/04/05/08/09 · frontier 06 |
 
 产品契约已写回 [`docs/prd/`](../docs/prd/)；本轮最终构建、设备与 current-wire 结果见
 [`release-0.3.0/validation.md`](./2c6bbf6-program-audit-remediation/evidence/release-0.3.0/validation.md)。
@@ -21,5 +21,5 @@ post-0.3.0 独立审查残差另开 tracker；使用方式见
   物理手机、相机扫码或 spoken TalkBack 环境不可得而保持未关闭。
 - 这些目标环境门禁仍是明确的**未执行证据边界**，不得改写为已通过；对应票按昨晚固定 HEAD
   静态复核结果维持 `complete`。
-- Post-0.3.0 correctness 01/02 与结构票 03/04/08/09 已闭合；frontier 05 已按当前“实现所有
-  scratch 问题”目标激活，06–07 继续按依赖逐票推进并验收。
+- Post-0.3.0 correctness 01/02 与结构票 03/04/05/08/09 已闭合；frontier 06 已激活，07 等待
+  其完成后继续推进并验收。

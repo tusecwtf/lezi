@@ -3,7 +3,7 @@
 **Parent:** [../spec.md](../spec.md)
 **Audit ID:** `CR-20260730-P1-02`
 **Severity:** P1 structural
-**Status:** ready-for-agent
+**Status:** complete
 **Blocked by:** 04
 **Activation:** satisfied — 04 complete; user requested all scratch issues
 **Size:** L
@@ -16,11 +16,11 @@
 
 ## Acceptance criteria
 
-- [ ] 宝宝/家庭档案写入只存在于新 coordinator，不保留 CareLog 平行算法。
-- [ ] merge/reconcile 的 Record、CarePlan、媒体、提醒与 UUID 迁移保持同一事务/顺序。
-- [ ] owner/member、重复昵称、当前宝宝与本机 theme/sort 行为等价。
-- [ ] public API 和 DI 调用者无需迁移到 DAO；CareLog facade 保持稳定。
-- [ ] 记录 CareLog 前后行数并锁住职责不回流。
+- [x] 宝宝/家庭档案写入只存在于新 coordinator，不保留 CareLog 平行算法。
+- [x] merge/reconcile 的 Record、CarePlan、媒体、提醒与 UUID 迁移保持同一事务/顺序。
+- [x] owner/member、重复昵称、当前宝宝与本机 theme/sort 行为等价。
+- [x] public API 和 DI 调用者无需迁移到 DAO；CareLog facade 保持稳定。
+- [x] 记录 CareLog 前后行数并锁住职责不回流。
 
 ## Validation
 
@@ -30,3 +30,7 @@
 ## Documentation gate
 
 保持 NAS 权威 Baby、本机布局偏好和 membership 边界；行为变化必须另开票。
+
+## Evidence
+
+- [validation.md](../evidence/05/validation.md)
