@@ -28,7 +28,7 @@ $LEZI_DATA_DIR/
 
 ## NAS / Docker Compose
 
-默认镜像为 `lezi-sync:0.2.6`。**默认安全基线：**
+默认镜像为 `lezi-sync:0.3.0`。**默认安全基线：**
 
 | 项 | 默认 | 说明 |
 |---|---|---|
@@ -98,9 +98,9 @@ Synology、QNAP 或其它 NAS 的数据路径不同，只需把 `LEZI_DATA_HOST_
 如果 NAS 不适合本机编译，可在开发机导出镜像：
 
 ```bash
-docker save lezi-sync:0.2.6 | gzip > lezi-sync-0.2.6.tar.gz
+docker save lezi-sync:0.3.0 | gzip > lezi-sync-0.3.0.tar.gz
 # 把 tar.gz 复制到 NAS 后：
-gzip -dc lezi-sync-0.2.6.tar.gz | docker load
+gzip -dc lezi-sync-0.3.0.tar.gz | docker load
 ```
 
 构建脚本只把 Cargo 清单、锁文件、Dockerfile 与 `src/` 放进临时构建上下文，
@@ -113,8 +113,8 @@ gzip -dc lezi-sync-0.2.6.tar.gz | docker load
 ```bash
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  --build-arg LEZI_SYNC_VERSION=0.2.6 \
-  -t your-registry/lezi-sync:0.2.6 \
+  --build-arg LEZI_SYNC_VERSION=0.3.0 \
+  -t your-registry/lezi-sync:0.3.0 \
   --push .
 ```
 
@@ -128,7 +128,7 @@ docker buildx build \
 | `LEZI_DATA_DIR` | `/data` | SQLite、密钥和媒体的唯一数据根 |
 | `LEZI_HOST` | `0.0.0.0` | 容器内监听地址（宿主暴露面由 compose 端口映射控制） |
 | `LEZI_PORT` | `8765` | 监听端口 |
-| `LEZI_SYNC_VERSION` | `0.2.6` | `/health` 返回的版本 |
+| `LEZI_SYNC_VERSION` | `0.3.0` | `/health` 返回的版本 |
 | `LEZI_INVITE_TTL_HOURS` | `24` | 邀请有效期，范围 1–168 |
 | `LEZI_MAX_MEDIA_BYTES` | `10485760` | 单个媒体最大字节数 |
 | `LEZI_BOOTSTRAP_SECRET` | Compose 必填；`cargo run` 可空 | `POST /v1/family/create` 要求同值 `X-Lezi-Bootstrap-Secret`；Compose 缺失或空值时拒绝启动 |

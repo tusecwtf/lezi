@@ -32,8 +32,8 @@
 | minSdk | 26 |
 | compileSdk | 35 |
 | targetSdk | 35 |
-| versionName | `0.2.6` |
-| versionCode | `5`（Play/安装分发要求单调；不是跨 Room schema 支持信号） |
+| versionName | `0.3.0` |
+| versionCode | `6`（Play/安装分发要求单调；不是跨 Room schema 支持信号） |
 | 应用名 | 乐记 |
 
 ---
