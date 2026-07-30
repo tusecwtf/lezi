@@ -65,6 +65,7 @@ class SettingsDataSource @Inject constructor(
             systemCalendarDisclosureLevel = (prefs[Keys.SYSTEM_CALENDAR_DISCLOSURE] ?: 2)
                 .coerceIn(1, 3),
             systemCalendarEventMapJson = prefs[Keys.SYSTEM_CALENDAR_EVENT_MAP] ?: "{}",
+            layoutDragGuidanceCompleted = prefs[Keys.LAYOUT_DRAG_GUIDANCE_COMPLETED] ?: false,
         )
     }
 
@@ -200,6 +201,14 @@ class SettingsDataSource @Inject constructor(
                 prefs,
                 readDeviceLayoutSnapshot(prefs).copy(quickRecordSlots = slots),
             )
+        }
+    }
+
+    override suspend fun markLayoutDragGuidanceCompleted() {
+        dataStore.edit { prefs ->
+            if (prefs[Keys.LAYOUT_DRAG_GUIDANCE_COMPLETED] != true) {
+                prefs[Keys.LAYOUT_DRAG_GUIDANCE_COMPLETED] = true
+            }
         }
     }
 
@@ -353,6 +362,8 @@ class SettingsDataSource @Inject constructor(
         val SYSTEM_CALENDAR_ID = stringPreferencesKey("system_calendar_id")
         val SYSTEM_CALENDAR_DISCLOSURE = intPreferencesKey("system_calendar_disclosure")
         val SYSTEM_CALENDAR_EVENT_MAP = stringPreferencesKey("system_calendar_event_map")
+        val LAYOUT_DRAG_GUIDANCE_COMPLETED =
+            booleanPreferencesKey("layout_drag_guidance_completed")
     }
 
     private fun readDeviceLayoutSnapshot(prefs: Preferences): DeviceLayoutSnapshot {

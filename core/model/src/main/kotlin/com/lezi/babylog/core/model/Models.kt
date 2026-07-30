@@ -335,6 +335,11 @@ data class SettingsLocal(
      * Device-local only; not shared with family.
      */
     val systemCalendarEventMapJson: String = "{}",
+    /**
+     * Monotonic device-local receipt that the first layout drag guidance was completed.
+     * Kept outside [DeviceLayoutSnapshot], so layout, catalog, and theme edits cannot reset it.
+     */
+    val layoutDragGuidanceCompleted: Boolean = false,
 )
 
 /** First-run / missing-key default for [SettingsLocal.quickRecordSlots]. */

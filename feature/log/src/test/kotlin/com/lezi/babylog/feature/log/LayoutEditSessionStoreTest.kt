@@ -2,6 +2,7 @@ package com.lezi.babylog.feature.log
 
 import java.time.LocalDate
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -79,6 +80,53 @@ class LayoutEditSessionStoreTest {
 
         store.close()
         assertNull(layoutEditPresentation(store.current, failedState))
+    }
+
+    @Test
+    fun configurationRecreationRetainsCurrentGuidanceVisibility() {
+        val store = LayoutEditSessionStore()
+        store.open(
+            context = LayoutEditSessionContext(
+                babyId = 42L,
+                day = LocalDate.of(2026, 7, 30),
+            ),
+            prefs = emptyPrefs(),
+            guidanceCompleted = false,
+        )
+        assertEquals(
+            LayoutDragGuidanceVisibility.Auto,
+            store.current?.dragGuidance?.visibility,
+        )
+
+        store.reduceDragGuidance(LayoutDragGuidanceEvent.HelpRequested)
+
+        assertEquals(
+            LayoutDragGuidanceVisibility.Manual,
+            store.current?.dragGuidance?.visibility,
+        )
+        assertFalse(store.current?.dragGuidance?.completed ?: true)
+    }
+
+    @Test
+    fun completedDeviceMarkerStartsANewSessionHidden() {
+        val store = LayoutEditSessionStore()
+
+        store.open(
+            context = LayoutEditSessionContext(
+                babyId = 42L,
+                day = LocalDate.of(2026, 7, 30),
+            ),
+            prefs = emptyPrefs(),
+            guidanceCompleted = true,
+        )
+
+        assertEquals(
+            LayoutDragGuidanceState(
+                completed = true,
+                visibility = LayoutDragGuidanceVisibility.Hidden,
+            ),
+            store.current?.dragGuidance,
+        )
     }
 
     private fun emptyPrefs(): DeviceLayoutPrefs = DeviceLayoutPrefs(

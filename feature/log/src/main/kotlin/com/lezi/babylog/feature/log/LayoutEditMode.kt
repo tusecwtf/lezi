@@ -305,6 +305,7 @@ internal fun LayoutEditCanvas(
     prefs: DeviceLayoutPrefs,
     customItems: List<CustomRecordItem>,
     onIntent: (LayoutEditIntent) -> Unit,
+    onTouchDragIntent: ((LayoutEditIntent) -> Unit)? = null,
     onDone: () -> Unit,
     onOpenCustomManage: () -> Unit,
     writeState: DeviceLayoutWriteState = DeviceLayoutWriteState.Saved(),
@@ -316,6 +317,11 @@ internal fun LayoutEditCanvas(
     initialCatalogScroll: LayoutCatalogScrollPosition = LayoutCatalogScrollPosition(),
     onCatalogScrollChanged: (LayoutCatalogScrollPosition) -> Unit = {},
     configurationSessionKey: Any? = null,
+    dragGuidance: LayoutDragGuidanceState = initialLayoutDragGuidanceState(
+        completed = true,
+    ),
+    onDragGuidanceHelp: () -> Unit = {},
+    onDragGuidanceClose: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val known = remember(customItems) { knownCatalogKeys(customItems.map { it.id }) }
@@ -532,7 +538,9 @@ internal fun LayoutEditCanvas(
         )
         activeSession = null
         drag = null
-        if (intent != null) onIntent(intent)
+        if (intent != null) {
+            onTouchDragIntent?.invoke(intent) ?: onIntent(intent)
+        }
     }
 
     fun cancelActiveDrag(reason: LayoutDragCancelReason, token: Long? = null) {
@@ -674,6 +682,20 @@ internal fun LayoutEditCanvas(
                         .testTag("layout_edit_title"),
                 )
                 TextButton(
+                    onClick = onDragGuidanceHelp,
+                    modifier = Modifier
+                        .heightIn(min = LeziSpacing.Touch)
+                        .testTag("layout_edit_guidance_help")
+                        .semantics {
+                            onClick(label = "查看布局拖放帮助") {
+                                onDragGuidanceHelp()
+                                true
+                            }
+                        },
+                ) {
+                    Text("帮助")
+                }
+                TextButton(
                     onClick = onDone,
                     modifier = Modifier
                         .heightIn(min = LeziSpacing.Touch)
@@ -699,6 +721,49 @@ internal fun LayoutEditCanvas(
                         .testTag("layout_edit_save_feedback")
                         .semantics { liveRegion = LiveRegionMode.Polite },
                 )
+            }
+            if (dragGuidance.visibility != LayoutDragGuidanceVisibility.Hidden) {
+                Surface(
+                    color = MaterialTheme.colorScheme.secondaryContainer,
+                    shape = com.lezi.babylog.designsystem.LeziThemeExt.controlShape,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = LeziSpacing.Page, vertical = LeziSpacing.Xxs)
+                        .testTag("layout_edit_guidance"),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(
+                            start = LeziSpacing.Md,
+                            end = LeziSpacing.Xs,
+                            top = LeziSpacing.Xs,
+                            bottom = LeziSpacing.Xs,
+                        ),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = "长按卡片拖到常用槽；拖出槽位可清空。",
+                            style = LeziTypography.Meta,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("layout_edit_guidance_text"),
+                        )
+                        TextButton(
+                            onClick = onDragGuidanceClose,
+                            modifier = Modifier
+                                .heightIn(min = LeziSpacing.Touch)
+                                .testTag("layout_edit_guidance_close")
+                                .semantics {
+                                    onClick(label = "关闭布局拖放帮助") {
+                                        onDragGuidanceClose()
+                                        true
+                                    }
+                                },
+                        ) {
+                            Text("关闭")
+                        }
+                    }
+                }
             }
 
             // Catalog and local-deleted are sibling scroll regions. Their shared viewport is

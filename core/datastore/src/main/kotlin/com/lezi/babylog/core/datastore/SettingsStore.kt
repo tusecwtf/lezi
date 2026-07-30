@@ -53,6 +53,10 @@ interface SettingsStore {
     suspend fun setHiddenItems(items: Set<String>)
     /** Exactly four catalog keys (or empty strings). Values are normalized on write. */
     suspend fun setQuickRecordSlots(slots: List<String>)
+    /** Monotonically complete the device-local first layout-drag guidance. */
+    suspend fun markLayoutDragGuidanceCompleted() {
+        error("This SettingsStore does not implement layout drag guidance completion")
+    }
     suspend fun setTimelineOrder(order: String)
     suspend fun setNursingTimerJson(json: String?)
     suspend fun setShowAvgSleep(enabled: Boolean)

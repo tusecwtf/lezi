@@ -34,6 +34,7 @@ internal data class LayoutEditSession(
     val prefs: DeviceLayoutPrefs,
     val catalogScroll: LayoutCatalogScrollPosition = LayoutCatalogScrollPosition(),
     val hasSubmittedIntent: Boolean = false,
+    val dragGuidance: LayoutDragGuidanceState,
 )
 
 internal data class RetainedLayoutEditPresentation(
@@ -59,8 +60,16 @@ internal class LayoutEditSessionStore {
     val current: LayoutEditSession?
         get() = mutableState.value
 
-    fun open(context: LayoutEditSessionContext, prefs: DeviceLayoutPrefs) {
-        mutableState.value = LayoutEditSession(context = context, prefs = prefs)
+    fun open(
+        context: LayoutEditSessionContext,
+        prefs: DeviceLayoutPrefs,
+        guidanceCompleted: Boolean = false,
+    ) {
+        mutableState.value = LayoutEditSession(
+            context = context,
+            prefs = prefs,
+            dragGuidance = initialLayoutDragGuidanceState(guidanceCompleted),
+        )
     }
 
     fun updateCatalogScroll(position: LayoutCatalogScrollPosition) {
@@ -74,6 +83,21 @@ internal class LayoutEditSessionStore {
                 hasSubmittedIntent = current.hasSubmittedIntent || hasSubmittedIntent,
             )
         }
+    }
+
+    fun reduceDragGuidance(
+        event: LayoutDragGuidanceEvent,
+    ): LayoutDragGuidanceReduction? {
+        var applied: LayoutDragGuidanceReduction? = null
+        mutableState.update { current ->
+            current?.let { session ->
+                reduceLayoutDragGuidance(session.dragGuidance, event).let { reduction ->
+                    applied = reduction
+                    session.copy(dragGuidance = reduction.state)
+                }
+            }
+        }
+        return applied
     }
 
     fun close() {

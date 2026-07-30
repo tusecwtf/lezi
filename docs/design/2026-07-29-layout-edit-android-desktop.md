@@ -96,6 +96,13 @@
 - drag session、当前目标、跟手浮层和动效/触觉脉冲保持 composable-local。系统配置或 warm/journal、浅色/深色身份变化会取消半途 drag 且不生成 intent；新主题只重绘 retained layout session。
 - 新进程创建新的 session store，默认没有编辑会话；force-stop、进程死亡恢复和冷启动只读取耐久布局并进入普通记录页，绝不从 Saved State 自动重开编辑器。
 
+## First-use drag guidance
+
+- 本机尚未完成引导时，编辑器在顶栏下方自动显示非模态短提示“长按卡片拖到常用槽；拖出槽位可清空。”；它参与正常纵向测量，不覆盖目录、本机已删除或固定 Dock。顶栏“帮助”永久存在并重访同一文案。
+- 主动关闭会立即隐藏本次 session 的提示，并单调写入设备本地 `layoutDragGuidanceCompleted`；写失败不伪装耐久完成，下次进程重启仍可再次自动显示。手动帮助重访不清除此标记。
+- 只有确实改变完整布局的触摸拖放在 `DeviceLayoutSnapshot` 写入成功后才请求完成标记，且标记写入也成功后才自动关闭提示。no-op、取消、布局写失败、键盘或 TalkBack 替代动作都不算“首次拖放完成”。
+- 当前 `Auto / Manual / Hidden` 可见性属于 retained layout session，随配置重建保留；完成标记独立于布局快照、主题和自定义目录，永不进入家庭同步。
+
 ## A11y
 
 - 热区 ≥ 48dp；完成、分类、项目、槽、删除区以及固定“更多”的名称、位置/状态和可用动作可读。
@@ -106,6 +113,6 @@
 ## Implementation notes
 
 - 纯逻辑：`LocalLayoutEditPolicy` / `QuickRecordSlots` / `RecordCatalogOrder.moveCatalogKeyToIndexInSection`。
-- UI：`LayoutEditCanvas` 替换 `LayoutEditModeDialog`；`RecordCatalogCard`、`RecordCatalogVisualSpec` 同时服务“添加记录”和编辑目录；`QuickDockVisualSpec` 保持日常/编辑 Dock 几何连续。`LogScreen` 通知根容器隐藏日期与主 tabs，编辑页只显示“编辑布局 / 完成”。
+- UI：`LayoutEditCanvas` 替换 `LayoutEditModeDialog`；`RecordCatalogCard`、`RecordCatalogVisualSpec` 同时服务“添加记录”和编辑目录；`QuickDockVisualSpec` 保持日常/编辑 Dock 几何连续。`LogScreen` 通知根容器隐藏日期与主 tabs，编辑页顶栏显示“编辑布局 / 帮助 / 完成”。
 - 持久化：版本化 `DeviceLayoutSnapshot` 在一个 DataStore 事务内保存四槽、隐藏集合、类内序与类别序；FIFO writer 串行完整快照并让完成/返回等待最后写入。失败保留上一份耐久值并可重试，未来版本只读拒写；该状态永不进入家庭同步。
 - 测试：权威 `LayoutDragSession` 覆盖完整命中矩阵、互斥目标、陈旧 token/revision 与取消；`LayoutEdgeAutoScrollPolicy` 覆盖授权来源、上下边缘速度、边界、小视口与固定目标抢占；Compose 设备测试在 320×640、放大字体的 24 项目录中验证持续滚到末项、取消后稳定与无误提交。现有 Drop Matrix、类别拖动和本机已删除设备测试继续证明精确投放/no-op；reducer/writer 断言精确顺序、槽唯一与 latest-wins。

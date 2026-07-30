@@ -320,8 +320,9 @@ class LogViewModel @Inject constructor(
     internal fun openLayoutEditSession(
         context: LayoutEditSessionContext,
         prefs: DeviceLayoutPrefs,
+        guidanceCompleted: Boolean,
     ) {
-        layoutEditSessions.open(context, prefs)
+        layoutEditSessions.open(context, prefs, guidanceCompleted)
     }
 
     internal fun currentLayoutEditSession(): LayoutEditSession? = layoutEditSessions.current
@@ -335,6 +336,16 @@ class LogViewModel @Inject constructor(
 
     internal fun updateLayoutCatalogScroll(position: LayoutCatalogScrollPosition) {
         layoutEditSessions.updateCatalogScroll(position)
+    }
+
+    internal fun reduceLayoutDragGuidance(
+        event: LayoutDragGuidanceEvent,
+    ): LayoutDragGuidanceReduction? = layoutEditSessions.reduceDragGuidance(event)
+
+    internal fun markLayoutDragGuidanceCompleted(onDone: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            onDone(runCatching { settingsStore.markLayoutDragGuidanceCompleted() }.isSuccess)
+        }
     }
 
     internal fun closeLayoutEditSession() {
@@ -926,6 +937,7 @@ fun LogRoute(
                 day = state.day,
             ),
             prefs = snapshot.toLayoutPrefs(),
+            guidanceCompleted = state.settings.layoutDragGuidanceCompleted,
         )
         exitAfterLayoutRetry = false
         dismissedLayoutFailure = null
@@ -1129,54 +1141,104 @@ fun LogRoute(
                 }
                 val undoCandidate =
                     (layoutUndoState as? LayoutUndoState.Available)?.candidate
+                fun applyLayoutIntent(
+                    intent: LayoutEditIntent,
+                    inputOrigin: LayoutGuidanceInputOrigin,
+                ) {
+                    val current = vm.currentLayoutEditSession()?.prefs ?: return
+                    val next = reduceLayoutEdit(current, intent, known)
+                    nextLayoutUndoToken += 1L
+                    val token = nextLayoutUndoToken
+                    val undoStateBeforeIntent = layoutUndoState
+                    val undoReduction = reduceLayoutUndo(
+                        undoStateBeforeIntent,
+                        LayoutUndoEvent.IntentApplied(
+                            token = token,
+                            intent = intent,
+                            before = current.toSnapshot(),
+                            after = next.toSnapshot(),
+                        ),
+                    )
+                    layoutUndoState = undoReduction.state
+                    if (
+                        !shouldWriteLayoutIntentResult(
+                            undoStateBeforeIntent = undoStateBeforeIntent,
+                            undoStateAfterIntent = undoReduction.state,
+                            before = current.toSnapshot(),
+                            after = next.toSnapshot(),
+                        )
+                    ) {
+                        return
+                    }
+                    vm.updateLayoutEditPrefs(
+                        prefs = next,
+                        hasSubmittedIntent = true,
+                    )
+                    val receipt = vm.applyDeviceLayoutPrefs(next)
+                    layoutUndoScope.launch {
+                        val result = receipt.result.await()
+                        val currentSnapshot =
+                            vm.currentLayoutEditSession()?.prefs?.toSnapshot()
+                                ?: receipt.snapshot
+                        layoutUndoState = reduceLayoutUndo(
+                            layoutUndoState,
+                            LayoutUndoEvent.OriginalWriteFinished(
+                                token = token,
+                                succeeded = result.isSuccess,
+                                currentSnapshot = currentSnapshot,
+                            ),
+                        ).state
+                        val guidance = vm.currentLayoutEditSession()?.dragGuidance
+                        if (
+                            guidance != null &&
+                            shouldRequestLayoutDragGuidanceCompletion(
+                                state = guidance,
+                                changed = next != current,
+                                inputOrigin = inputOrigin,
+                                layoutReceiptSucceeded = result.isSuccess,
+                            )
+                        ) {
+                            vm.markLayoutDragGuidanceCompleted { markerSucceeded ->
+                                vm.reduceLayoutDragGuidance(
+                                    LayoutDragGuidanceEvent.DragCompletionFinished(
+                                        changed = true,
+                                        inputOrigin = LayoutGuidanceInputOrigin.TouchDrag,
+                                        layoutReceiptSucceeded = true,
+                                        markerReceiptSucceeded = markerSucceeded,
+                                    ),
+                                )
+                            }
+                        }
+                    }
+                }
+                fun closeLayoutDragGuidance() {
+                    val reduction = vm.reduceLayoutDragGuidance(
+                        LayoutDragGuidanceEvent.CloseRequested,
+                    ) ?: return
+                    if (!reduction.markCompleted) return
+                    vm.markLayoutDragGuidanceCompleted { succeeded ->
+                        vm.reduceLayoutDragGuidance(
+                            LayoutDragGuidanceEvent.CompletionMarkerFinished(succeeded),
+                        )
+                        if (!succeeded) {
+                            onMessage("帮助状态保存失败，下次进入时仍会显示")
+                        }
+                    }
+                }
                 LayoutEditCanvas(
                     prefs = prefs,
                     customItems = state.customItems,
                     onIntent = { intent ->
-                        val current = vm.currentLayoutEditSession()?.prefs
-                            ?: return@LayoutEditCanvas
-                        val next = reduceLayoutEdit(current, intent, known)
-                        nextLayoutUndoToken += 1L
-                        val token = nextLayoutUndoToken
-                        val undoStateBeforeIntent = layoutUndoState
-                        val undoReduction = reduceLayoutUndo(
-                            undoStateBeforeIntent,
-                            LayoutUndoEvent.IntentApplied(
-                                token = token,
-                                intent = intent,
-                                before = current.toSnapshot(),
-                                after = next.toSnapshot(),
-                            ),
+                        applyLayoutIntent(
+                            intent = intent,
+                            inputOrigin = LayoutGuidanceInputOrigin.AlternativeAction,
                         )
-                        layoutUndoState = undoReduction.state
-                        if (
-                            shouldWriteLayoutIntentResult(
-                                undoStateBeforeIntent = undoStateBeforeIntent,
-                                undoStateAfterIntent = undoReduction.state,
-                                before = current.toSnapshot(),
-                                after = next.toSnapshot(),
-                            )
-                        ) {
-                            vm.updateLayoutEditPrefs(
-                                prefs = next,
-                                hasSubmittedIntent = true,
-                            )
-                            val receipt = vm.applyDeviceLayoutPrefs(next)
-                            layoutUndoScope.launch {
-                                val result = receipt.result.await()
-                                val currentSnapshot =
-                                    vm.currentLayoutEditSession()?.prefs?.toSnapshot()
-                                        ?: receipt.snapshot
-                                layoutUndoState = reduceLayoutUndo(
-                                    layoutUndoState,
-                                    LayoutUndoEvent.OriginalWriteFinished(
-                                        token = token,
-                                        succeeded = result.isSuccess,
-                                        currentSnapshot = currentSnapshot,
-                                    ),
-                                ).state
-                            }
-                        }
+                    },
+                    onTouchDragIntent = { intent ->
+                        applyLayoutIntent(
+                            intent = intent,
+                            inputOrigin = LayoutGuidanceInputOrigin.TouchDrag,
+                        )
                     },
                     onDone = ::requestLayoutExit,
                     onOpenCustomManage = { showCustomManage = true },
@@ -1188,6 +1250,11 @@ fun LogRoute(
                     onCatalogScrollChanged = vm::updateLayoutCatalogScroll,
                     configurationSessionKey =
                         state.settings.darkMode to state.settings.visualStyle,
+                    dragGuidance = editingSession.dragGuidance,
+                    onDragGuidanceHelp = {
+                        vm.reduceLayoutDragGuidance(LayoutDragGuidanceEvent.HelpRequested)
+                    },
+                    onDragGuidanceClose = ::closeLayoutDragGuidance,
                     onUndo = { token ->
                         val current = vm.currentLayoutEditSession()?.prefs
                             ?: return@LayoutEditCanvas

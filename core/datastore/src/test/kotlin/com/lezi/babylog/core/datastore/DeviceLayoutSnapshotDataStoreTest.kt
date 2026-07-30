@@ -15,10 +15,30 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 
 class DeviceLayoutSnapshotDataStoreTest {
+    @Test
+    fun dragGuidanceStartsIncompleteAndCompletionSurvivesRestart() = runBlocking {
+        val store = RecordingPreferencesDataStore()
+        val firstProcess = SettingsDataSource(store)
+
+        assertFalse(firstProcess.settings.first().layoutDragGuidanceCompleted)
+
+        firstProcess.markLayoutDragGuidanceCompleted()
+        firstProcess.markLayoutDragGuidanceCompleted()
+        firstProcess.setDarkMode("dark")
+        firstProcess.setDeviceLayoutSnapshot(
+            DeviceLayoutSnapshot(quickRecordSlots = listOf("sleep", "", "", "")),
+        )
+
+        val restartedProcess = SettingsDataSource(store)
+        assertTrue(restartedProcess.settings.first().layoutDragGuidanceCompleted)
+    }
+
     @Test
     fun completeSnapshotUsesOneAtomicUpdateAndOneSettingsEmission() = runBlocking {
         val store = RecordingPreferencesDataStore()
