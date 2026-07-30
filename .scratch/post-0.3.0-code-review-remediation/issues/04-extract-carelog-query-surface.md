@@ -3,8 +3,8 @@
 **Parent:** [../spec.md](../spec.md)
 **Audit ID:** `CR-20260730-P1-02`
 **Severity:** P1 structural
-**Status:** planned
-**Activation gate:** correctness lane 01/02 complete and user activation
+**Status:** ready-for-agent
+**Activation:** satisfied — correctness 01/02 complete; user requested all scratch issues
 **Size:** L
 
 ## What to build

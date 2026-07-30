@@ -28,6 +28,7 @@ import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
 import com.lezi.babylog.core.model.DeviceLayoutSnapshot
 import com.lezi.babylog.core.model.NEXT_FEED_PLAN_MARKER
+import com.lezi.babylog.core.model.NextFeedPlanReconciliation
 import com.lezi.babylog.core.model.RecordItemIdentity
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.Sex
@@ -207,6 +208,33 @@ class CareLogTest {
     }
 
     @Test
+    fun nextFeedReconciliationReadsCommittedOpenMarkerTruth() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 1_800_000_000_000L
+
+        assertThat(care.reconcileNextFeedPlan(babyId))
+            .isEqualTo(NextFeedPlanReconciliation.Absent)
+
+        val planId = care.scheduleNextFeedCarePlan(
+            babyId = babyId,
+            feedType = RecordType.NURSING,
+            scheduledAt = now + 60_000L,
+            zone = zone,
+            nowMillis = now,
+        )
+        val persisted = requireNotNull(fakes.carePlans.get(planId))
+
+        assertThat(care.reconcileNextFeedPlan(babyId)).isEqualTo(
+            NextFeedPlanReconciliation.Found(
+                clientUuid = persisted.clientUuid,
+                scheduledAtMillis = persisted.scheduledAt,
+            ),
+        )
+    }
+
+    @Test
     fun nextFeedCarePlan_rejectsUnsupportedTypeAndNonFutureTime() = runTest {
         val care = Fakes().careLog()
         val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
@@ -270,6 +298,82 @@ class CareLogTest {
 
         assertThat(error).isInstanceOf(CarePlanPermissionException::class.java)
         assertThat(fakes.carePlans.get(planId)!!.scheduledAt).isEqualTo(10_000)
+        assertThat(fakes.careLog().reconcileNextFeedPlan(babyId)).isEqualTo(
+            NextFeedPlanReconciliation.Found(
+                clientUuid = nextFeedPlanClientUuid("baby-authority", "initial"),
+                scheduledAtMillis = 10_000,
+            ),
+        )
+    }
+
+    @Test
+    fun nextFeedReconciliationTreatsMissedAsOpenAndTerminalOrDeletedAsAbsent() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val planId = fakes.carePlans.upsert(
+            CarePlanEntity(
+                clientUuid = "next-feed-plan",
+                babyId = babyId,
+                type = RecordType.NURSING.key,
+                scheduledAt = 10_000,
+                scheduledZoneId = "UTC",
+                note = NEXT_FEED_PLAN_MARKER,
+                payloadJson = """{"left_min":0,"right_min":0}""",
+                status = CarePlanStatus.MISSED.storageKey,
+                updatedAt = 1,
+                syncDirty = false,
+            ),
+        )
+
+        assertThat(care.reconcileNextFeedPlan(babyId)).isInstanceOf(
+            NextFeedPlanReconciliation.Found::class.java,
+        )
+
+        val missed = requireNotNull(fakes.carePlans.get(planId))
+        fakes.carePlans.update(missed.copy(status = CarePlanStatus.COMPLETED.storageKey))
+        assertThat(care.reconcileNextFeedPlan(babyId))
+            .isEqualTo(NextFeedPlanReconciliation.Absent)
+
+        fakes.carePlans.update(missed.copy(status = CarePlanStatus.SKIPPED.storageKey))
+        assertThat(care.reconcileNextFeedPlan(babyId))
+            .isEqualTo(NextFeedPlanReconciliation.Absent)
+
+        fakes.carePlans.update(missed.copy(deletedAt = 2L))
+        assertThat(care.reconcileNextFeedPlan(babyId))
+            .isEqualTo(NextFeedPlanReconciliation.Absent)
+    }
+
+    @Test
+    fun nextFeedReconciliationWaitsForInFlightPersistenceBeforeReportingTruth() = runTest {
+        val fakes = Fakes()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val transactionEntered = CompletableDeferred<Unit>()
+        val allowCommit = CompletableDeferred<Unit>()
+        fakes.transactions.beforeNextRun = {
+            transactionEntered.complete(Unit)
+            allowCommit.await()
+        }
+
+        val schedule = async(start = CoroutineStart.UNDISPATCHED) {
+            care.scheduleNextFeedCarePlan(
+                babyId = babyId,
+                feedType = RecordType.NURSING,
+                scheduledAt = 20_000,
+                nowMillis = 10_000,
+            )
+        }
+        transactionEntered.await()
+        val reconciliation = async { care.reconcileNextFeedPlan(babyId) }
+        yield()
+
+        assertThat(reconciliation.isCompleted).isFalse()
+        allowCommit.complete(Unit)
+        schedule.await()
+        assertThat(reconciliation.await()).isInstanceOf(
+            NextFeedPlanReconciliation.Found::class.java,
+        )
     }
 
     @Test
@@ -5479,6 +5583,7 @@ private class FakePendingReminderCleanupStore : PendingReminderCleanupStore {
 private class RecordingTransactionRunner :
     com.lezi.babylog.core.database.DatabaseTransactionRunner {
     var runCount = 0
+    var beforeNextRun: (suspend () -> Unit)? = null
     val onBegin = mutableListOf<() -> Unit>()
     val onCommit = mutableListOf<() -> Unit>()
     val onRollback = mutableListOf<() -> Unit>()
@@ -5486,6 +5591,7 @@ private class RecordingTransactionRunner :
     override suspend fun <T> run(block: suspend () -> T): T {
         runCount += 1
         onBegin.forEach { it() }
+        beforeNextRun?.also { beforeNextRun = null }?.invoke()
         return try {
             val result = block()
             onCommit.forEach { it() }

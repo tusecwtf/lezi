@@ -10,7 +10,9 @@ import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.NextFeedPlanReconciliation
 import com.lezi.babylog.core.model.nextFeedSuggestedAt
+import com.lezi.babylog.core.model.runNextFeedPlanReconciliation
 import com.lezi.babylog.core.model.shouldOfferNextFeedPlanForFact
 import com.lezi.babylog.domain.CareLog
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -295,6 +297,21 @@ class TimerViewModel @Inject constructor(
                 false
             }
             onResult(success)
+        }
+    }
+
+    internal fun reconcileNextFeedPlan(
+        onResult: (NextFeedPlanReconciliation) -> Unit,
+    ) {
+        viewModelScope.launch {
+            onResult(
+                runNextFeedPlanReconciliation {
+                    val babyId = requireNotNull(
+                        savedStateHandle.get<Long>(PENDING_NEXT_FEED_BABY_KEY),
+                    ) { "待核对的喂养记录已失效" }
+                    careLog.reconcileNextFeedPlan(babyId)
+                },
+            )
         }
     }
 

@@ -4,10 +4,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.lezi.babylog.core.model.NextFeedPlanOrigin
+import com.lezi.babylog.core.model.NextFeedPlanReconciliation
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
@@ -41,7 +43,7 @@ class NextFeedPlanFlowDeviceTest {
     }
 
     @Test
-    fun failedPlanKeepsTheFactVisibleAndRetriesTheSameSelectedTime() {
+    fun confirmedAbsentPlanKeepsTheFactVisibleAndRetriesTheSameSelectedTime() {
         val attempts = mutableListOf<Long>()
         val finishedScheduled = AtomicBoolean()
         setFlow(
@@ -53,7 +55,7 @@ class NextFeedPlanFlowDeviceTest {
         )
 
         compose.onNodeWithText("确认安排").performClick()
-        compose.onNodeWithText("记录已保存；下次喂养安排失败，请重试或选择不安排")
+        compose.onNodeWithText("记录已保存；未发现已保存的下次喂养安排，请重试或选择不安排")
             .assertIsDisplayed()
         compose.onNodeWithText("确认安排").performClick()
         compose.onNodeWithText("已安排下次喂养").assertIsDisplayed()
@@ -85,8 +87,104 @@ class NextFeedPlanFlowDeviceTest {
         compose.onNodeWithText("确认安排").assertIsDisplayed()
     }
 
+    @Test
+    fun restoredInFlightScheduleBlocksSkipUntilDurableTruthIsKnown() {
+        val restoration = StateRestorationTester(compose)
+        var scheduleResult: ((Boolean) -> Unit)? = null
+        var reconciliationResult: ((NextFeedPlanReconciliation) -> Unit)? = null
+        val finishedWithoutPlan = AtomicBoolean()
+        restoration.setContent {
+            MaterialTheme {
+                LeziNextFeedPlanFlow(
+                    flowKey = "restored-device-test",
+                    origin = NextFeedPlanOrigin.RecordComposer,
+                    factMessage = "记录已保存",
+                    suggestedAtMillis = suggestedAt,
+                    scheduledMessage = "护理计划已加入乐记日程",
+                    minuteStep = 1,
+                    timePickerStyle = "dropdown",
+                    preferredHand = "right",
+                    nowMillis = { now },
+                    onSchedule = { _, callback -> scheduleResult = callback },
+                    onReconcile = { callback -> reconciliationResult = callback },
+                    onFinishedScheduled = {},
+                    onFinishedWithoutPlan = { finishedWithoutPlan.set(true) },
+                )
+            }
+        }
+
+        compose.onNodeWithText("确认安排").performClick()
+        assertTrue(scheduleResult != null)
+        restoration.emulateSavedInstanceStateRestore()
+
+        compose.waitUntil(5_000) { reconciliationResult != null }
+        compose.onNodeWithText("正在核对下次喂养").assertIsDisplayed()
+        compose.onNodeWithText("不安排").assertDoesNotExist()
+        assertTrue(!finishedWithoutPlan.get())
+
+        compose.runOnUiThread {
+            reconciliationResult?.invoke(
+                NextFeedPlanReconciliation.Found(
+                    clientUuid = "next-feed-plan",
+                    scheduledAtMillis = suggestedAt + 60_000L,
+                ),
+            )
+        }
+        compose.onNodeWithText("已安排下次喂养").assertIsDisplayed()
+        assertTrue(!finishedWithoutPlan.get())
+    }
+
+    @Test
+    fun reconciliationFailureOnlyOffersTruthQueryRetry() {
+        val restoration = StateRestorationTester(compose)
+        var reconciliationAttempts = 0
+        restoration.setContent {
+            MaterialTheme {
+                LeziNextFeedPlanFlow(
+                    flowKey = "reconciliation-retry-test",
+                    origin = NextFeedPlanOrigin.NursingTimer,
+                    factMessage = "记录已保存",
+                    suggestedAtMillis = suggestedAt,
+                    scheduledMessage = "护理计划已加入乐记日程",
+                    minuteStep = 1,
+                    timePickerStyle = "dropdown",
+                    preferredHand = "right",
+                    nowMillis = { now },
+                    onSchedule = { _, _ -> },
+                    onReconcile = { callback ->
+                        reconciliationAttempts += 1
+                        callback(
+                            if (reconciliationAttempts == 1) {
+                                NextFeedPlanReconciliation.Failed("持久化查询失败")
+                            } else {
+                                NextFeedPlanReconciliation.Found(
+                                    clientUuid = "next-feed-plan",
+                                    scheduledAtMillis = suggestedAt,
+                                )
+                            },
+                        )
+                    },
+                    onFinishedScheduled = {},
+                    onFinishedWithoutPlan = {},
+                )
+            }
+        }
+
+        compose.onNodeWithText("确认安排").performClick()
+        restoration.emulateSavedInstanceStateRestore()
+
+        compose.onNodeWithText("持久化查询失败").assertIsDisplayed()
+        compose.onNodeWithText("不安排").assertDoesNotExist()
+        compose.onNodeWithText("重新核对").performClick()
+        compose.onNodeWithText("已安排下次喂养").assertIsDisplayed()
+        assertEquals(2, reconciliationAttempts)
+    }
+
     private fun setFlow(
         onSchedule: (Long, (Boolean) -> Unit) -> Unit = { _, result -> result(true) },
+        onReconcile: ((NextFeedPlanReconciliation) -> Unit) -> Unit = { result ->
+            result(NextFeedPlanReconciliation.Absent)
+        },
         onFinishedScheduled: () -> Unit = {},
         onFinishedWithoutPlan: () -> Unit = {},
     ) {
@@ -103,6 +201,7 @@ class NextFeedPlanFlowDeviceTest {
                     preferredHand = "right",
                     nowMillis = { now },
                     onSchedule = onSchedule,
+                    onReconcile = onReconcile,
                     onFinishedScheduled = onFinishedScheduled,
                     onFinishedWithoutPlan = onFinishedWithoutPlan,
                 )

@@ -344,6 +344,14 @@ CarePlan → 关联 Record（含 0–3 张照片）→ FulfillmentCandidate，�
 唯一权威记录，并在不置脏、不回写 NAS immutable pair 的前提下本地重链
 `fulfilled_record_client_uuid`（不依赖计划 LWW 到达序）。
 
+下次喂养 marker 的计划写入回调不是持久化回执。若 callback 丢失、返回失败或 UI 从
+`Scheduling`/持久化查询中恢复，Composer 与 Nursing Timer 必须经同一 domain seam 读取当前
+宝宝所有未删除且状态为 `pending`/`missed` 的 marker（包括已经到点的开放计划）。查询与
+本机 marker 写事务串行：Found 返回持久化 `client_uuid` 与 `scheduled_at` 并收敛为已安排；
+只有 Absent 才开放同稳定身份重试或“不安排”；查询错误保持歧义并只能重试查询。不可管理的
+家庭 winner 仍属于 Found，读取真相不得借 creator ACL 隐藏它；`completed`、`skipped` 与
+tombstone marker 不属于开放计划。
+
 ### 3.11.1 FulfillmentCandidate（NAS 契约 + 本机）
 
 `entity_type = fulfillment_candidate`：`care_plan_client_uuid`,

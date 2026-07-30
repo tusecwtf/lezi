@@ -50,11 +50,13 @@ import androidx.lifecycle.viewModelScope
 import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.NextFeedPlanOrigin
+import com.lezi.babylog.core.model.NextFeedPlanReconciliation
 import com.lezi.babylog.core.model.RecordItemIdentity
 import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.nextFeedSuggestedAt
 import com.lezi.babylog.core.model.shouldOfferNextFeedPlanForFact
+import com.lezi.babylog.core.model.runNextFeedPlanReconciliation
 import com.lezi.babylog.core.ui.presentation
 import com.lezi.babylog.designsystem.LeziNextFeedPlanFlow
 import com.lezi.babylog.designsystem.LeziSpacing
@@ -749,6 +751,21 @@ class RecordComposerViewModel @Inject constructor(
         }
     }
 
+    internal fun reconcileNextFeedPlan(
+        onResult: (NextFeedPlanReconciliation) -> Unit,
+    ) {
+        viewModelScope.launch {
+            onResult(
+                runNextFeedPlanReconciliation {
+                    val pending = requireNotNull(savedState.pendingNextFeed()) {
+                        "待核对的喂养记录已失效"
+                    }
+                    careLog.reconcileNextFeedPlan(pending.babyId)
+                },
+            )
+        }
+    }
+
     internal fun dismissNextFeedPlan() = savedState.clearPendingNextFeed()
 
     internal fun delete(onDeleted: (String) -> Unit) {
@@ -1210,6 +1227,7 @@ fun RecordComposerHost(
             timePickerStyle = state.timePickerStyle,
             preferredHand = state.preferredHand,
             onSchedule = vm::scheduleNextFeedPlan,
+            onReconcile = vm::reconcileNextFeedPlan,
             onFinishedScheduled = {
                 vm.dismissNextFeedPlan()
                 finishSaved(scheduledMessage)

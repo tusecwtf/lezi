@@ -35,6 +35,7 @@ import com.lezi.babylog.core.model.FulfillmentCandidate
 import com.lezi.babylog.core.model.FulfillmentCandidateEvidence
 import com.lezi.babylog.core.model.MilkPayload
 import com.lezi.babylog.core.model.NEXT_FEED_PLAN_MARKER
+import com.lezi.babylog.core.model.NextFeedPlanReconciliation
 import com.lezi.babylog.core.model.NursingPayload
 import com.lezi.babylog.core.model.OpenSleepCandidate
 import com.lezi.babylog.core.model.Record
@@ -155,6 +156,21 @@ private fun nextFeedPlanGenerationSeed(plans: List<CarePlanEntity>): String =
         ?.let { "${it.clientUuid}:${it.updatedAt}:${it.status}:${it.deletedAt ?: 0L}" }
         ?: "initial"
 
+private fun openNextFeedPlans(
+    plans: List<CarePlanEntity>,
+    babyId: Long,
+): List<CarePlanEntity> = plans
+    .filter {
+        it.babyId == babyId &&
+            it.deletedAt == null &&
+            it.status in setOf(
+                CarePlanStatus.PENDING.storageKey,
+                CarePlanStatus.MISSED.storageKey,
+            ) &&
+            isNextFeedPlanNote(it.note)
+    }
+    .sortedWith(compareBy<CarePlanEntity> { it.updatedAt }.thenBy { it.id })
+
 data class LocalFamilyIdentity(
     val deviceId: String,
     val displayName: String,
@@ -223,6 +239,7 @@ class CareLog @Inject constructor(
         syncPort = syncPort,
         listRecordPhotoPaths = ::listRecordPhotoPaths,
     )
+    private val nextFeedPlanMutationMutex = Mutex()
     private val customItemCatalog = CustomItemCatalog(
         customItemDao = customItemDao,
         transactionRunner = transactionRunner,
@@ -1271,6 +1288,20 @@ class CareLog @Inject constructor(
      * The marker is stable sync data but is stripped from every model/UI surface.
      * Intent-only feed payloads deliberately contain no fabricated amount/duration.
      */
+    suspend fun reconcileNextFeedPlan(babyId: Long): NextFeedPlanReconciliation =
+        nextFeedPlanMutationMutex.withLock {
+            requireActiveBaby(babyId)
+            openNextFeedPlans(carePlanDao.listAllIncludingDeleted(), babyId)
+                .firstOrNull()
+                ?.let {
+                    NextFeedPlanReconciliation.Found(
+                        clientUuid = it.clientUuid,
+                        scheduledAtMillis = it.scheduledAt,
+                    )
+                }
+                ?: NextFeedPlanReconciliation.Absent
+        }
+
     suspend fun scheduleNextFeedCarePlan(
         babyId: Long,
         feedType: RecordType,
@@ -1293,69 +1324,65 @@ class CareLog @Inject constructor(
                 schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
             ),
         )
-        val (id, duplicateIds) = transactionRunner.run {
-            val open = carePlanDao.listAllIncludingDeleted()
-                .filter {
-                    it.babyId == babyId &&
-                        it.deletedAt == null &&
-                        it.status in setOf(
-                            CarePlanStatus.PENDING.storageKey,
-                            CarePlanStatus.MISSED.storageKey,
-                        ) &&
-                        isNextFeedPlanNote(it.note)
+        val (id, duplicateIds) = nextFeedPlanMutationMutex.withLock {
+            transactionRunner.run {
+                val allPlans = carePlanDao.listAllIncludingDeleted()
+                val open = openNextFeedPlans(allPlans, babyId)
+                val existing = open.firstOrNull()
+                if (existing != null) {
+                    requireCanManageCarePlan(existing)
+                    open.drop(1).forEach { requireCanManageCarePlan(it) }
                 }
-                .sortedWith(compareBy<CarePlanEntity> { it.updatedAt }.thenBy { it.id })
-            val existing = open.firstOrNull()
-            if (existing != null) {
-                requireCanManageCarePlan(existing)
-                open.drop(1).forEach { requireCanManageCarePlan(it) }
+                val at = nowMillis.coerceAtLeast((existing?.updatedAt ?: 0L) + 1L)
+                val plan = if (existing == null) {
+                    val generationSeed = nextFeedPlanGenerationSeed(
+                        allPlans.filter {
+                            it.babyId == babyId && isNextFeedPlanNote(it.note)
+                        },
+                    )
+                    CarePlanEntity(
+                        clientUuid = nextFeedPlanClientUuid(baby.clientUuid, generationSeed),
+                        babyId = babyId,
+                        type = feedType.key,
+                        scheduledAt = scheduledAt,
+                        scheduledZoneId = zone.id,
+                        note = nextFeedPlanNote(null),
+                        payloadJson = payloadJson,
+                        schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+                        status = CarePlanStatus.PENDING.storageKey,
+                        createdByMembershipId = currentMembershipActorId(),
+                        updatedAt = at,
+                        syncDirty = true,
+                        systemCalendarProjectionEnabled = true,
+                    )
+                } else {
+                    existing.copy(
+                        type = feedType.key,
+                        scheduledAt = scheduledAt,
+                        scheduledZoneId = zone.id,
+                        note = nextFeedPlanNote(visibleCarePlanNote(existing.note)),
+                        payloadJson = payloadJson,
+                        schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
+                        status = CarePlanStatus.PENDING.storageKey,
+                        fulfilledRecordClientUuid = null,
+                        fulfilledAt = null,
+                        updatedAt = at,
+                        syncDirty = true,
+                        systemCalendarProjectionEnabled = true,
+                        systemCalendarReminderReady = false,
+                    )
+                }
+                val planId = carePlanDao.upsert(plan)
+                // Defensive healing for old concurrent duplicates: preserve the oldest
+                // stable identity and tombstone every other open marker row.
+                open.drop(1).forEach { duplicate ->
+                    carePlanDao.softDelete(
+                        duplicate.id,
+                        at.coerceAtLeast(duplicate.updatedAt + 1L),
+                    )
+                }
+                planId to open.drop(1).map(CarePlanEntity::id)
             }
-            val at = nowMillis.coerceAtLeast((existing?.updatedAt ?: 0L) + 1L)
-            val plan = if (existing == null) {
-                val generationSeed = nextFeedPlanGenerationSeed(
-                    carePlanDao.listAllIncludingDeleted().filter {
-                        it.babyId == babyId && isNextFeedPlanNote(it.note)
-                    },
-                )
-                CarePlanEntity(
-                    clientUuid = nextFeedPlanClientUuid(baby.clientUuid, generationSeed),
-                    babyId = babyId,
-                    type = feedType.key,
-                    scheduledAt = scheduledAt,
-                    scheduledZoneId = zone.id,
-                    note = nextFeedPlanNote(null),
-                    payloadJson = payloadJson,
-                    schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-                    status = CarePlanStatus.PENDING.storageKey,
-                    createdByMembershipId = currentMembershipActorId(),
-                    updatedAt = at,
-                    syncDirty = true,
-                    systemCalendarProjectionEnabled = true,
-                )
-            } else {
-                existing.copy(
-                    type = feedType.key,
-                    scheduledAt = scheduledAt,
-                    scheduledZoneId = zone.id,
-                    note = nextFeedPlanNote(visibleCarePlanNote(existing.note)),
-                    payloadJson = payloadJson,
-                    schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
-                    status = CarePlanStatus.PENDING.storageKey,
-                    fulfilledRecordClientUuid = null,
-                    fulfilledAt = null,
-                    updatedAt = at,
-                    syncDirty = true,
-                    systemCalendarProjectionEnabled = true,
-                    systemCalendarReminderReady = false,
-                )
-            }
-            val planId = carePlanDao.upsert(plan)
-            // Defensive healing for old concurrent duplicates: preserve the oldest
-            // stable identity and tombstone every other open marker row.
-            open.drop(1).forEach { duplicate ->
-                carePlanDao.softDelete(duplicate.id, at.coerceAtLeast(duplicate.updatedAt + 1L))
-            }
-            planId to open.drop(1).map(CarePlanEntity::id)
         }
         duplicateIds.forEach { duplicateId ->
             reminderProjection.cancelCarePlanReminderBestEffort(duplicateId)

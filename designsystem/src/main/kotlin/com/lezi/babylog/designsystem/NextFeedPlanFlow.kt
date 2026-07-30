@@ -9,6 +9,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.listSaver
@@ -16,11 +17,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.lezi.babylog.core.model.NEXT_FEED_SCHEDULE_ERROR
 import com.lezi.babylog.core.model.NextFeedPlanEffect
 import com.lezi.babylog.core.model.NextFeedPlanEvent
 import com.lezi.babylog.core.model.NextFeedPlanOrigin
 import com.lezi.babylog.core.model.NextFeedPlanPhase
+import com.lezi.babylog.core.model.NextFeedPlanReconciliation
 import com.lezi.babylog.core.model.NextFeedPlanState
 import com.lezi.babylog.core.model.reduceNextFeedPlan
 import com.lezi.babylog.core.model.restoreNextFeedPlanState
@@ -44,6 +45,7 @@ fun LeziNextFeedPlanFlow(
     preferredHand: String,
     nowMillis: () -> Long = System::currentTimeMillis,
     onSchedule: (atMillis: Long, onResult: (Boolean) -> Unit) -> Unit,
+    onReconcile: (onResult: (NextFeedPlanReconciliation) -> Unit) -> Unit,
     onFinishedScheduled: () -> Unit,
     onFinishedWithoutPlan: () -> Unit,
 ) {
@@ -62,13 +64,22 @@ fun LeziNextFeedPlanFlow(
                     if (success) {
                         NextFeedPlanEvent.ScheduleSucceeded
                     } else {
-                        NextFeedPlanEvent.ScheduleFailed(NEXT_FEED_SCHEDULE_ERROR)
+                        NextFeedPlanEvent.ScheduleOutcomeUnknown
                     },
                 )
+            }
+            NextFeedPlanEffect.Reconcile -> onReconcile { result ->
+                dispatch(NextFeedPlanEvent.ReconciliationCompleted(result))
             }
             NextFeedPlanEffect.FinishScheduled -> onFinishedScheduled()
             NextFeedPlanEffect.FinishWithoutPlan -> onFinishedWithoutPlan()
             null -> Unit
+        }
+    }
+
+    LaunchedEffect(flowKey, state.phase) {
+        if (state.phase == NextFeedPlanPhase.ReconciliationRequired) {
+            dispatch(NextFeedPlanEvent.Reconcile)
         }
     }
 
@@ -101,6 +112,30 @@ fun LeziNextFeedPlanFlow(
             },
         )
         NextFeedPlanPhase.Skipped -> Unit
+        NextFeedPlanPhase.ReconciliationRequired,
+        NextFeedPlanPhase.Reconciling,
+        -> AlertDialog(
+            onDismissRequest = {},
+            title = { Text("正在核对下次喂养") },
+            text = { Text("记录已保存；正在确认护理计划是否已经写入。") },
+            confirmButton = {
+                TextButton(onClick = {}, enabled = false) {
+                    Text("正在核对…")
+                }
+            },
+        )
+        NextFeedPlanPhase.ReconciliationFailed -> AlertDialog(
+            onDismissRequest = {},
+            title = { Text("无法确认下次喂养") },
+            text = {
+                Text(state.scheduleError ?: "持久化状态暂时不可用，请重新核对。")
+            },
+            confirmButton = {
+                TextButton(onClick = { dispatch(NextFeedPlanEvent.Reconcile) }) {
+                    Text("重新核对")
+                }
+            },
+        )
         else -> {
             val scheduling = state.phase == NextFeedPlanPhase.Scheduling
             AlertDialog(

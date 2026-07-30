@@ -3,8 +3,9 @@
 **Parent:** [../spec.md](../spec.md)
 **Audit ID:** `CR-20260730-P1-02`
 **Severity:** P1 structural
-**Status:** planned
-**Blocked by:** 01、correctness lane activation gate
+**Status:** ready-for-agent
+**Blocked by:** none
+**Activation:** satisfied — 01 complete; user requested all scratch issues
 **Size:** L
 
 ## What to build

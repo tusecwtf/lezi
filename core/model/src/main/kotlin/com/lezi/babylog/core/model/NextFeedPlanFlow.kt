@@ -1,15 +1,32 @@
 package com.lezi.babylog.core.model
 
+import kotlinx.coroutines.CancellationException
+
 /** The two fact-entry adapters that deliberately share this reducer. */
 enum class NextFeedPlanOrigin {
     RecordComposer,
     NursingTimer,
 }
 
+/** Durable truth returned by the shared next-feed persistence reconciliation seam. */
+sealed interface NextFeedPlanReconciliation {
+    data class Found(
+        val clientUuid: String,
+        val scheduledAtMillis: Long,
+    ) : NextFeedPlanReconciliation
+
+    data object Absent : NextFeedPlanReconciliation
+
+    data class Failed(val message: String) : NextFeedPlanReconciliation
+}
+
 enum class NextFeedPlanPhase {
     Choosing,
     EditingTime,
     Scheduling,
+    ReconciliationRequired,
+    Reconciling,
+    ReconciliationFailed,
     Failed,
     Scheduled,
     Skipped,
@@ -52,13 +69,18 @@ sealed interface NextFeedPlanEvent {
     data object TimeEditCancelled : NextFeedPlanEvent
     data class Schedule(val nowMillis: Long) : NextFeedPlanEvent
     data object ScheduleSucceeded : NextFeedPlanEvent
-    data class ScheduleFailed(val message: String) : NextFeedPlanEvent
+    data object ScheduleOutcomeUnknown : NextFeedPlanEvent
+    data object Reconcile : NextFeedPlanEvent
+    data class ReconciliationCompleted(
+        val result: NextFeedPlanReconciliation,
+    ) : NextFeedPlanEvent
     data object AcknowledgeScheduled : NextFeedPlanEvent
     data object Skip : NextFeedPlanEvent
 }
 
 sealed interface NextFeedPlanEffect {
     data class Schedule(val atMillis: Long) : NextFeedPlanEffect
+    data object Reconcile : NextFeedPlanEffect
     data object FinishScheduled : NextFeedPlanEffect
     data object FinishWithoutPlan : NextFeedPlanEffect
 }
@@ -84,6 +106,16 @@ fun shouldOfferNextFeedPlanForFact(
     RecordType.PUMPED_FEED,
 )
 
+suspend fun runNextFeedPlanReconciliation(
+    query: suspend () -> NextFeedPlanReconciliation,
+): NextFeedPlanReconciliation = try {
+    query()
+} catch (cancelled: CancellationException) {
+    throw cancelled
+} catch (_: Throwable) {
+    NextFeedPlanReconciliation.Failed(NEXT_FEED_RECONCILIATION_ERROR)
+}
+
 fun reduceNextFeedPlan(
     state: NextFeedPlanState,
     event: NextFeedPlanEvent,
@@ -102,7 +134,13 @@ fun reduceNextFeedPlan(
             else -> NextFeedPlanTransition(state)
         }
         is NextFeedPlanEvent.TimeSelected -> {
-            if (state.phase == NextFeedPlanPhase.Scheduling) {
+            if (state.phase in setOf(
+                    NextFeedPlanPhase.Scheduling,
+                    NextFeedPlanPhase.ReconciliationRequired,
+                    NextFeedPlanPhase.Reconciling,
+                    NextFeedPlanPhase.ReconciliationFailed,
+                )
+            ) {
                 NextFeedPlanTransition(state)
             } else if (event.atMillis <= event.nowMillis) {
                 NextFeedPlanTransition(
@@ -130,8 +168,10 @@ fun reduceNextFeedPlan(
             else -> NextFeedPlanTransition(state)
         }
         is NextFeedPlanEvent.Schedule -> when {
-            state.phase == NextFeedPlanPhase.Scheduling -> NextFeedPlanTransition(state)
-            state.phase == NextFeedPlanPhase.EditingTime -> NextFeedPlanTransition(state)
+            state.phase !in setOf(
+                NextFeedPlanPhase.Choosing,
+                NextFeedPlanPhase.Failed,
+            ) -> NextFeedPlanTransition(state)
             state.selectedAtMillis <= event.nowMillis -> NextFeedPlanTransition(
                 state.copy(
                     phase = NextFeedPlanPhase.Choosing,
@@ -158,11 +198,49 @@ fun reduceNextFeedPlan(
             )
             else -> NextFeedPlanTransition(state)
         }
-        is NextFeedPlanEvent.ScheduleFailed -> when (state.phase) {
+        NextFeedPlanEvent.ScheduleOutcomeUnknown -> when (state.phase) {
             NextFeedPlanPhase.Scheduling -> NextFeedPlanTransition(
                 state.copy(
+                    phase = NextFeedPlanPhase.ReconciliationRequired,
+                    scheduleError = null,
+                ),
+            )
+            else -> NextFeedPlanTransition(state)
+        }
+        NextFeedPlanEvent.Reconcile -> when (state.phase) {
+            NextFeedPlanPhase.ReconciliationRequired,
+            NextFeedPlanPhase.ReconciliationFailed,
+            -> NextFeedPlanTransition(
+                state.copy(
+                    phase = NextFeedPlanPhase.Reconciling,
+                    scheduleError = null,
+                ),
+                NextFeedPlanEffect.Reconcile,
+            )
+            else -> NextFeedPlanTransition(state)
+        }
+        is NextFeedPlanEvent.ReconciliationCompleted -> when {
+            state.phase != NextFeedPlanPhase.Reconciling -> NextFeedPlanTransition(state)
+            event.result is NextFeedPlanReconciliation.Found -> NextFeedPlanTransition(
+                state.copy(
+                    selectedAtMillis = event.result.scheduledAtMillis,
+                    phase = NextFeedPlanPhase.Scheduled,
+                    validationError = null,
+                    scheduleError = null,
+                ),
+            )
+            event.result == NextFeedPlanReconciliation.Absent -> NextFeedPlanTransition(
+                state.copy(
                     phase = NextFeedPlanPhase.Failed,
-                    scheduleError = event.message.ifBlank { NEXT_FEED_SCHEDULE_ERROR },
+                    scheduleError = NEXT_FEED_CONFIRMED_ABSENT_ERROR,
+                ),
+            )
+            event.result is NextFeedPlanReconciliation.Failed -> NextFeedPlanTransition(
+                state.copy(
+                    phase = NextFeedPlanPhase.ReconciliationFailed,
+                    scheduleError = event.result.message.ifBlank {
+                        NEXT_FEED_RECONCILIATION_ERROR
+                    },
                 ),
             )
             else -> NextFeedPlanTransition(state)
@@ -175,7 +253,12 @@ fun reduceNextFeedPlan(
             else -> NextFeedPlanTransition(state)
         }
         NextFeedPlanEvent.Skip -> when (state.phase) {
-            NextFeedPlanPhase.Scheduling, NextFeedPlanPhase.Scheduled ->
+            NextFeedPlanPhase.Scheduling,
+            NextFeedPlanPhase.ReconciliationRequired,
+            NextFeedPlanPhase.Reconciling,
+            NextFeedPlanPhase.ReconciliationFailed,
+            NextFeedPlanPhase.Scheduled,
+            ->
                 NextFeedPlanTransition(state)
             else -> NextFeedPlanTransition(
                 state.copy(
@@ -190,14 +273,18 @@ fun reduceNextFeedPlan(
 }
 
 const val NEXT_FEED_FUTURE_ERROR = "下次喂养须选择未来时刻"
-const val NEXT_FEED_SCHEDULE_ERROR = "下次喂养安排失败，请重试或选择不安排"
-const val NEXT_FEED_RESTORE_ERROR = "上次安排被中断，请重试或选择不安排"
+const val NEXT_FEED_CONFIRMED_ABSENT_ERROR = "未发现已保存的下次喂养安排，请重试或选择不安排"
+const val NEXT_FEED_RECONCILIATION_ERROR = "无法确认下次喂养是否已安排，请重新核对"
 
 fun restoreNextFeedPlanState(state: NextFeedPlanState): NextFeedPlanState =
-    if (state.phase == NextFeedPlanPhase.Scheduling) {
+    if (state.phase in setOf(
+            NextFeedPlanPhase.Scheduling,
+            NextFeedPlanPhase.Reconciling,
+        )
+    ) {
         state.copy(
-            phase = NextFeedPlanPhase.Failed,
-            scheduleError = NEXT_FEED_RESTORE_ERROR,
+            phase = NextFeedPlanPhase.ReconciliationRequired,
+            scheduleError = null,
         )
     } else {
         state

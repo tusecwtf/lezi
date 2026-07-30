@@ -329,6 +329,7 @@ fun TimerRoute(
             timePickerStyle = timePickerStyle,
             preferredHand = preferredHand,
             onSchedule = vm::scheduleNextFeedPlan,
+            onReconcile = vm::reconcileNextFeedPlan,
             onFinishedScheduled = {
                 vm.dismissNextFeedPlan()
                 suggestedNextFeedAt = null
