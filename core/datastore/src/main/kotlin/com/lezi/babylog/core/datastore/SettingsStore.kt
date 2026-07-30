@@ -7,16 +7,8 @@ import kotlinx.coroutines.flow.Flow
 /** Exact device-local settings epoch captured before a durable Room clear commits. */
 data class LocalClearSettingsSnapshot(
     val currentBabyId: Long?,
-    val nextFeedAt: Long?,
     /** Exact provider identity captured for each plan UUID; IDs alone are ABA-prone. */
     val systemCalendarProjections: Map<String, String> = emptyMap(),
-    /** Stable identity of the next-feed write, so equal timestamps cannot form an ABA. */
-    val nextFeedEpoch: String = "",
-)
-
-data class LocalClearSettingsFinish(
-    /** Safe to cancel the shared PendingIntent because no newer feed epoch exists. */
-    val cancelNextFeedAlarm: Boolean,
 )
 
 /**
@@ -39,11 +31,6 @@ interface SettingsStore {
     suspend fun setInfantFeverAdviceEnabled(enabled: Boolean)
     suspend fun setNursingIntervalMin(min: Int)
     suspend fun setRecordAt(startOrEnd: String)
-    /** Stores the time as a new alarm epoch and returns that stable epoch identity. */
-    suspend fun setNextFeedAt(epochMs: Long?): String
-    suspend fun clearNextFeedAt()
-    /** Atomically consumes only the alarm epoch carried by a delivered PendingIntent. */
-    suspend fun clearNextFeedAtIfEpoch(expectedEpoch: String): Boolean
     /** Persist one complete device-local layout in one atomic store transaction. */
     suspend fun setDeviceLayoutSnapshot(snapshot: DeviceLayoutSnapshot) {
         error("This SettingsStore does not implement atomic device-layout snapshots")
@@ -90,5 +77,5 @@ interface SettingsStore {
     suspend fun finishLocalClearSettings(
         snapshot: LocalClearSettingsSnapshot,
         clearCurrentBabyId: Boolean,
-    ): LocalClearSettingsFinish
+    )
 }

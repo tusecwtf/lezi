@@ -291,9 +291,6 @@ data class SettingsLocal(
     val timerEnabled: Boolean = true,
     val recordAtStartOrEnd: String = "end",
     val nursingIntervalMin: Int = 180,
-    val nextFeedAt: Long? = null,
-    /** Device-local identity of the write that owns [nextFeedAt]. */
-    val nextFeedEpoch: String = "",
     val darkMode: String = "system",
     /** "warm" = card template; "journal" = compact logbook template. */
     val visualStyle: String = "warm",

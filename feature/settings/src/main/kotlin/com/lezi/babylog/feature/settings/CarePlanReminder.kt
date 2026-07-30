@@ -53,7 +53,7 @@ fun carePlanReminderPermissionDeniedStatus(): String =
 
 /**
  * Device-local non-exact AlarmManager reminders for open care plans.
- * Request codes are namespaced away from calendar/next-feed alarms.
+ * Request codes are namespaced away from calendar projection identities.
  */
 @Singleton
 class CarePlanReminderAlarm @Inject constructor(
@@ -229,5 +229,28 @@ class CarePlanReminderReceiver : BroadcastReceiver() {
         private const val TAG = "CarePlanReminder"
         const val EXTRA_FULFILL_PLAN_ID = "lezi_fulfill_care_plan_id"
         const val EXTRA_FULFILL_PLAN_UUID = "lezi_fulfill_care_plan_uuid"
+    }
+}
+
+@AndroidEntryPoint
+class BootReceiver : BroadcastReceiver() {
+    @Inject lateinit var carePlanScheduler: CarePlanReminderScheduler
+
+    override fun onReceive(context: Context, intent: Intent?) {
+        if (intent?.action != Intent.ACTION_BOOT_COMPLETED) return
+        val pending = goAsync()
+        CoroutineScope(Dispatchers.IO).launch {
+            runBroadcastWork(
+                finish = pending::finish,
+                reportFailure = { failure ->
+                    Log.e(TAG, "Care-plan reminder reschedule after boot failed", failure)
+                },
+                work = carePlanScheduler::rescheduleAll,
+            )
+        }
+    }
+
+    private companion object {
+        const val TAG = "ReminderBoot"
     }
 }

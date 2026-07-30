@@ -53,8 +53,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlin.math.abs
 
-enum class LeziGlyph { Bottle, Drop, Moon, Toilet, Pin, Plus, Dot }
-
 /**
  * A day-lane mark. Sleep is an [isEvent]=false interval; feed/care are
  * moment events so they render as large tappable dots rather than thin bars.

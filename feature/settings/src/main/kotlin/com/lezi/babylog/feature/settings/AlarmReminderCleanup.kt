@@ -12,7 +12,6 @@ import javax.inject.Singleton
 /** Android adapter for the domain reminder-cleanup seam. */
 @Singleton
 class AlarmReminderCleanup @Inject constructor(
-    private val nextFeedScheduler: NextFeedScheduler,
     private val carePlanAlarm: CarePlanReminderAlarm,
 ) : ReminderCleanupPort {
     override suspend fun scheduleCarePlan(plan: CarePlan): Boolean =
@@ -20,10 +19,6 @@ class AlarmReminderCleanup @Inject constructor(
 
     override suspend fun cancelCarePlan(carePlanId: Long) {
         carePlanAlarm.cancel(carePlanId)
-    }
-
-    override suspend fun cancelForRecordsClear(cancelNextFeed: Boolean) {
-        if (cancelNextFeed) nextFeedScheduler.cancelCapturedAlarmUnderGuard()
     }
 }
 

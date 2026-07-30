@@ -11,7 +11,7 @@ import androidx.room.Query
  * Durable hand-off from the Room clear transaction to Android alarm cleanup.
  *
  * One row per local-clear scope survives process death until settings, app
- * alarms, and captured Android system-calendar events have all been cleaned.
+ * care-plan alarms and captured Android system-calendar events have all been cleaned.
  * This storage entity is private to [RoomPendingReminderCleanupStore]; callers
  * use typed snapshots.
  */
@@ -24,6 +24,7 @@ data class PendingReminderCleanupEntity(
     val systemCalendarProjectionsJson: String = "{}",
     @androidx.room.ColumnInfo(defaultValue = "NULL")
     val currentBabyId: Long? = null,
+    /** Frozen columns from the retired independent next-feed alarm; always empty and unconsumed. */
     @androidx.room.ColumnInfo(defaultValue = "NULL")
     val nextFeedAt: Long? = null,
     @androidx.room.ColumnInfo(defaultValue = "''")

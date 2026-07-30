@@ -3,7 +3,6 @@ package com.lezi.babylog.domain
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.core.database.PendingReminderCleanup
 import com.lezi.babylog.core.database.PendingReminderCleanupStore
-import com.lezi.babylog.core.datastore.LocalClearSettingsFinish
 import com.lezi.babylog.core.datastore.LocalClearSettingsSnapshot
 import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.sync.LocalClearWorkflow
@@ -35,9 +34,6 @@ class LocalDataClearCoordinatorTest {
         assertThat(rig.settings.scopes)
             .containsExactly(LocalDataClearScope.RecordsOnly, LocalDataClearScope.AllLocalData)
             .inOrder()
-        assertThat(rig.reminders.recordClearBatches)
-            .containsExactly(true, true)
-            .inOrder()
         assertThat(rig.reminders.cancelledCarePlanIds)
             .containsExactly(21L, 22L, 21L, 22L)
             .inOrder()
@@ -57,7 +53,6 @@ class LocalDataClearCoordinatorTest {
 
         assertThat(actual).isSameInstanceAs(failure)
         assertThat(rig.settings.scopes).isEmpty()
-        assertThat(rig.reminders.recordClearBatches).isEmpty()
         assertThat(rig.reminders.cancelledCarePlanIds).isEmpty()
         assertThat(rig.pending.pending).isNull()
     }
@@ -65,7 +60,7 @@ class LocalDataClearCoordinatorTest {
     @Test
     fun reminderFailureAfterCommitIsClassifiedAndRecoveryFinishesPendingWork() = runTest {
         val rig = ClearCoordinatorRig(familyServerRetained = true)
-        rig.reminders.recordClearFailuresRemaining = 1
+        rig.reminders.carePlanFailuresRemaining = 1
 
         val failure = runCatching {
             rig.coordinator.clear(LocalDataClearScope.RecordsOnly)
@@ -80,8 +75,8 @@ class LocalDataClearCoordinatorTest {
 
         assertThat(rig.pending.pending).isNull()
         assertThat(rig.pending.deleteCount).isEqualTo(1)
-        assertThat(rig.reminders.recordClearBatches)
-            .containsExactly(true, true)
+        assertThat(rig.reminders.cancelledCarePlanIds)
+            .containsExactly(21L, 22L, 21L, 22L)
             .inOrder()
     }
 
@@ -99,7 +94,6 @@ class LocalDataClearCoordinatorTest {
         assertThat(actual).isInstanceOf(LocalRecordsClearCommittedException::class.java)
         assertThat(actual!!.cause).isSameInstanceAs(replicaFailure)
         assertThat(rig.settings.scopes).containsExactly(LocalDataClearScope.RecordsOnly)
-        assertThat(rig.reminders.recordClearBatches).containsExactly(true)
         assertThat(rig.reminders.cancelledCarePlanIds).containsExactly(21L, 22L).inOrder()
         assertThat(rig.pending.pending).isNull()
     }
@@ -139,7 +133,6 @@ class LocalDataClearCoordinatorTest {
             assertThat(rig.pending.pending?.systemCalendarProjections)
                 .containsExactly("plan-21", "evt-21", "plan-22", "evt-22")
             assertThat(rig.settings.scopes).containsExactly(scope)
-            assertThat(rig.reminders.recordClearBatches).containsExactly(true)
             assertThat(rig.reminders.cancelledCarePlanIds).containsExactly(21L, 22L).inOrder()
 
             rig.newCoordinator().recoverPendingReminderCleanup()
@@ -165,7 +158,6 @@ class LocalDataClearCoordinatorTest {
         assertThat(rig.pending.pending?.systemCalendarProjections)
             .containsExactly("plan-21", "evt-21", "plan-22", "evt-22")
         assertThat(rig.settings.scopes).containsExactly(LocalDataClearScope.RecordsOnly)
-        assertThat(rig.reminders.recordClearBatches).containsExactly(true)
         assertThat(rig.reminders.cancelledCarePlanIds).containsExactly(21L, 22L).inOrder()
 
         rig.systemCalendar.permission = true
@@ -191,7 +183,6 @@ class LocalDataClearCoordinatorTest {
         assertThat(rig.pending.pending?.systemCalendarProjections)
             .containsExactly("plan-21", "evt-21", "plan-22", "evt-22")
         assertThat(rig.settings.scopes).containsExactly(LocalDataClearScope.RecordsOnly)
-        assertThat(rig.reminders.recordClearBatches).containsExactly(true)
         assertThat(rig.reminders.cancelledCarePlanIds).containsExactly(21L, 22L).inOrder()
     }
 
@@ -200,7 +191,7 @@ class LocalDataClearCoordinatorTest {
         val rig = ClearCoordinatorRig()
         rig.settings.removeAllSystemCalendarEvents()
         rig.systemCalendar.liveEventIds.clear()
-        rig.reminders.recordClearFailuresRemaining = 1
+        rig.reminders.carePlanFailuresRemaining = 1
 
         val failure = runCatching {
             rig.coordinator.clear(LocalDataClearScope.RecordsOnly)
@@ -221,7 +212,7 @@ class LocalDataClearCoordinatorTest {
     @Test
     fun retainedNonEmptySnapshotRemovesOnlyTheCapturedProjectionEpoch() = runTest {
         val rig = ClearCoordinatorRig()
-        rig.reminders.recordClearFailuresRemaining = 1
+        rig.reminders.carePlanFailuresRemaining = 1
 
         val failure = runCatching {
             rig.coordinator.clear(LocalDataClearScope.RecordsOnly)
@@ -267,27 +258,6 @@ class LocalDataClearCoordinatorTest {
     }
 
     @Test
-    fun retainedCleanupDoesNotCancelANewerNextFeedEpoch() = runTest {
-        val rig = ClearCoordinatorRig()
-        rig.reminders.scheduleNextFeed()
-        rig.reminders.recordClearFailuresRemaining = 1
-
-        val failure = runCatching {
-            rig.coordinator.clear(LocalDataClearScope.RecordsOnly)
-        }.exceptionOrNull()
-        assertThat(failure).isInstanceOf(LocalRecordsClearCommittedException::class.java)
-        assertThat(rig.reminders.nextFeedScheduled).isFalse()
-
-        rig.settings.setNextFeedAt(8L)
-        rig.reminders.scheduleNextFeed()
-        rig.newCoordinator().recoverPendingReminderCleanup()
-
-        assertThat(rig.settings.nextFeedAt()).isEqualTo(8L)
-        assertThat(rig.reminders.nextFeedScheduled).isTrue()
-        assertThat(rig.pending.pending).isNull()
-    }
-
-    @Test
     fun syncBarrierContainsSnapshotAndFinishWithoutErasingLaterProjection() = runTest {
         val rig = ClearCoordinatorRig()
         rig.sync.beforeLocalClear = {
@@ -320,7 +290,6 @@ class LocalDataClearCoordinatorTest {
 
         assertThat(actual).isSameInstanceAs(cancellation)
         assertThat(rig.pending.pending).isNotNull()
-        assertThat(rig.reminders.recordClearBatches).containsExactly(false)
         assertThat(rig.reminders.cancelledCarePlanIds).containsExactly(21L, 22L).inOrder()
     }
 
@@ -336,7 +305,6 @@ class LocalDataClearCoordinatorTest {
         assertThat(failure).isInstanceOf(LocalRecordsClearCommittedException::class.java)
         assertThat(rig.pending.pending?.scope)
             .isEqualTo(LocalDataClearScope.AllLocalData)
-        assertThat(rig.reminders.recordClearBatches).containsExactly(false)
         assertThat(rig.reminders.cancelledCarePlanIds).containsExactly(21L, 22L).inOrder()
 
         rig.settings.failure = null
@@ -348,9 +316,6 @@ class LocalDataClearCoordinatorTest {
                 LocalDataClearScope.AllLocalData,
                 LocalDataClearScope.AllLocalData,
             ).inOrder()
-        assertThat(rig.reminders.recordClearBatches)
-            .containsExactly(false, true)
-            .inOrder()
     }
 
     @Test
@@ -373,7 +338,6 @@ class LocalDataClearCoordinatorTest {
         assertThat(failure).isInstanceOf(LocalRecordsClearCommittedException::class.java)
         assertThat(rig.persistence.scopes).isEmpty()
         assertThat(rig.settings.scopes).containsExactly(LocalDataClearScope.AllLocalData)
-        assertThat(rig.reminders.recordClearBatches).containsExactly(false)
         assertThat(rig.reminders.cancelledCarePlanIds).containsExactly(41L)
         assertThat(rig.pending.pending).isNull()
     }
@@ -390,7 +354,6 @@ class LocalDataClearCoordinatorTest {
 
         assertThat(actual).isInstanceOf(IllegalStateException::class.java)
         assertThat(actual).hasMessageThat().isEqualTo(corruption.message)
-        assertThat(rig.reminders.recordClearBatches).isEmpty()
         assertThat(rig.pending.deleteCount).isEqualTo(0)
     }
 
@@ -469,8 +432,6 @@ private class RecordingLocalDataClearPersistence(
                 carePlanIds = setOf(21L, 22L),
                 systemCalendarProjections = settingsSnapshot.systemCalendarProjections,
                 currentBabyId = settingsSnapshot.currentBabyId,
-                nextFeedAt = settingsSnapshot.nextFeedAt,
-                nextFeedEpoch = settingsSnapshot.nextFeedEpoch,
                 familyServerRetained = familyServerRetained,
             ),
         )
@@ -485,8 +446,6 @@ private class RecordingLocalDataClearSettings : LocalDataClearSettings {
         "plan-22" to "evt-22",
     )
     private var currentBabyId: Long? = 7L
-    private var nextFeedAt: Long? = 8L
-    private var nextFeedEpoch: Long = 0L
     var failure: Throwable? = null
 
     fun addSystemCalendarEvent(eventId: String) {
@@ -502,42 +461,30 @@ private class RecordingLocalDataClearSettings : LocalDataClearSettings {
         projections.putAll(values)
     }
 
-    fun setNextFeedAt(value: Long?) {
-        nextFeedAt = value
-        nextFeedEpoch += 1L
-    }
-
-    fun nextFeedAt(): Long? = nextFeedAt
-
     suspend fun systemCalendarEventIds(): Set<String> = projections.values.toSet()
 
     suspend fun systemCalendarProjections(): Map<String, String> = projections.toMap()
 
     override suspend fun capture(): LocalClearSettingsSnapshot = LocalClearSettingsSnapshot(
         currentBabyId = currentBabyId,
-        nextFeedAt = nextFeedAt,
         systemCalendarProjections = projections.toMap(),
-        nextFeedEpoch = nextFeedEpoch.toString(),
     )
 
     override suspend fun finish(
         scope: LocalDataClearScope,
         snapshot: LocalClearSettingsSnapshot,
-    ): LocalClearSettingsFinish {
+    ) {
         scopes += scope
         failure?.let { throw it }
-        val cancelNextFeedAlarm = nextFeedEpoch.toString() == snapshot.nextFeedEpoch
         projections.entries.removeAll { (clientUuid, eventId) ->
             snapshot.systemCalendarProjections[clientUuid] == eventId
         }
-        if (cancelNextFeedAlarm) nextFeedAt = null
         if (
             scope == LocalDataClearScope.AllLocalData &&
             currentBabyId == snapshot.currentBabyId
         ) {
             currentBabyId = null
         }
-        return LocalClearSettingsFinish(cancelNextFeedAlarm)
     }
 }
 
@@ -560,8 +507,6 @@ private class RecordingPendingReminderCleanupStore : PendingReminderCleanupStore
             systemCalendarProjections =
                 existing?.systemCalendarProjections.orEmpty() + pending.systemCalendarProjections,
             currentBabyId = pending.currentBabyId,
-            nextFeedAt = pending.nextFeedAt,
-            nextFeedEpoch = pending.nextFeedEpoch,
             familyServerRetained =
                 existing?.familyServerRetained == true || pending.familyServerRetained,
         )
@@ -725,15 +670,8 @@ private class RecordingClearSyncPort(
 }
 
 private class RecordingClearReminderPort : ReminderCleanupPort {
-    val recordClearBatches = mutableListOf<Boolean>()
     val cancelledCarePlanIds = mutableListOf<Long>()
-    var recordClearFailuresRemaining = 0
     var carePlanFailuresRemaining = 0
-    var nextFeedScheduled = false
-
-    fun scheduleNextFeed() {
-        nextFeedScheduled = true
-    }
 
     override suspend fun scheduleCarePlan(plan: CarePlan): Boolean = true
     override suspend fun cancelCarePlan(carePlanId: Long) {
@@ -741,14 +679,6 @@ private class RecordingClearReminderPort : ReminderCleanupPort {
         if (carePlanFailuresRemaining > 0) {
             carePlanFailuresRemaining -= 1
             throw IllegalStateException("care-plan reminder cleanup failed")
-        }
-    }
-    override suspend fun cancelForRecordsClear(cancelNextFeed: Boolean) {
-        recordClearBatches += cancelNextFeed
-        if (cancelNextFeed) nextFeedScheduled = false
-        if (recordClearFailuresRemaining > 0) {
-            recordClearFailuresRemaining -= 1
-            throw IllegalStateException("reminder cleanup failed")
         }
     }
 }

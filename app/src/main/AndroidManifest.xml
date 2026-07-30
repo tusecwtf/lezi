@@ -84,9 +84,6 @@
         </service>
 
         <receiver
-            android:name="com.lezi.babylog.feature.settings.NextFeedReceiver"
-            android:exported="false" />
-        <receiver
             android:name="com.lezi.babylog.feature.settings.BootReceiver"
             android:exported="false">
             <intent-filter>

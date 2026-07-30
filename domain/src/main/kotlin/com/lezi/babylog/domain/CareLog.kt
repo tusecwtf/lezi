@@ -1361,15 +1361,6 @@ class CareLog @Inject constructor(
             reminderProjection.cancelCarePlanReminderBestEffort(duplicateId)
             reminderProjection.removeSystemCalendarProjection(duplicateId)
         }
-        // The CarePlan is already committed at this point. Retiring legacy reminder state is
-        // best-effort and must never make the caller believe the plan write failed.
-        try {
-            settings.clearNextFeedAt()
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Throwable) {
-            // Legacy preference cleanup is intentionally best-effort.
-        }
         // Shared next-feed plan is publishable before optional device-local projection.
         requestLocalSync()
         carePlanDao.get(id)?.toModel()?.let { plan ->

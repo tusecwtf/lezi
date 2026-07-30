@@ -12,7 +12,6 @@ import com.lezi.babylog.core.database.PendingReminderCleanup
 import com.lezi.babylog.core.database.PendingReminderCleanupStore
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.datastore.LocalClearSettingsSnapshot
-import com.lezi.babylog.core.datastore.LocalClearSettingsFinish
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.sync.LocalClearWorkflow
 import com.lezi.babylog.sync.SyncPort
@@ -117,8 +116,6 @@ internal class DaoLocalDataClearPersistence @Inject constructor(
                 carePlanIds = carePlanIds,
                 systemCalendarProjections = systemCalendarProjections,
                 currentBabyId = settingsSnapshot.currentBabyId,
-                nextFeedAt = settingsSnapshot.nextFeedAt,
-                nextFeedEpoch = settingsSnapshot.nextFeedEpoch,
                 familyServerRetained = familyServerRetained,
             ),
         )
@@ -132,7 +129,7 @@ internal interface LocalDataClearSettings {
     suspend fun finish(
         scope: LocalDataClearScope,
         snapshot: LocalClearSettingsSnapshot,
-    ): LocalClearSettingsFinish
+    )
 }
 
 @Singleton
@@ -237,25 +234,17 @@ internal class DefaultLocalDataClearCoordinator @Inject constructor(
 
             val settingsSnapshot = LocalClearSettingsSnapshot(
                 currentBabyId = loaded.currentBabyId,
-                nextFeedAt = loaded.nextFeedAt,
                 systemCalendarProjections = loaded.systemCalendarProjections.mapNotNull {
                     (clientUuid, eventId) -> eventId?.let { clientUuid to it }
                 }.toMap(),
-                nextFeedEpoch = loaded.nextFeedEpoch,
             )
             loaded.systemCalendarProjections.forEach { (clientUuid, eventId) ->
                 attempt { deleteSystemCalendarProjection(clientUuid, eventId) }
             }
-            var settingsFinish: LocalClearSettingsFinish? = null
             attempt {
-                settingsFinish = settings.finish(
+                settings.finish(
                     loaded.scope,
                     settingsSnapshot,
-                )
-            }
-            attempt {
-                reminderCleanup.cancelForRecordsClear(
-                    cancelNextFeed = settingsFinish?.cancelNextFeedAlarm == true,
                 )
             }
             loaded.carePlanIds.forEach { carePlanId ->

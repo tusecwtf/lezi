@@ -17,6 +17,4 @@ interface ReminderCleanupPort {
     suspend fun scheduleCarePlan(plan: CarePlan): Boolean
 
     suspend fun cancelCarePlan(carePlanId: Long)
-
-    suspend fun cancelForRecordsClear(cancelNextFeed: Boolean = true)
 }

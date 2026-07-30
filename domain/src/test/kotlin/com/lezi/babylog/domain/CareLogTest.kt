@@ -21,7 +21,6 @@ import com.lezi.babylog.core.database.PendingReminderCleanup
 import com.lezi.babylog.core.database.PendingReminderCleanupStore
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
-import com.lezi.babylog.core.datastore.LocalClearSettingsFinish
 import com.lezi.babylog.core.datastore.LocalClearSettingsSnapshot
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.CarePlan
@@ -149,7 +148,6 @@ class CareLogTest {
         val fakes = Fakes()
         val care = fakes.careLog()
         val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
-        fakes.settings.setNextFeedAt(123L)
         val now = 1_800_000_000_000L
 
         val firstId = care.scheduleNextFeedCarePlan(
@@ -166,7 +164,6 @@ class CareLogTest {
         assertThat(care.getCarePlan(firstId)!!.note).isNull()
         assertThat(first.payloadJson).contains("\"left_min\":0")
         assertThat(first.payloadJson).contains("\"right_min\":0")
-        assertThat(fakes.settings.settings.first().nextFeedAt).isNull()
 
         val duplicateId = fakes.carePlans.upsert(
             first.copy(
@@ -3306,18 +3303,6 @@ class CareLogTest {
     }
 
     @Test
-    fun clearRecordsOnlyCancelsCapturedNextFeedReminder() = runTest {
-        val fakes = Fakes()
-        val care = fakes.careLog()
-        care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
-        fakes.reminders.scheduleNextFeed()
-
-        fakes.localDataClearCoordinator().clear(LocalDataClearScope.RecordsOnly)
-
-        assertThat(fakes.reminders.nextFeedScheduled).isFalse()
-    }
-
-    @Test
     fun clearAllLocalDataWipesBabiesCustomItemsAndUsesSyncBarrier() = runTest {
         val sync = RecordingSyncPort()
         val fakes = Fakes(sync)
@@ -5430,14 +5415,6 @@ private class FakeSystemCalendarPort : SystemCalendarPort {
 
 
 private class FakeReminderCleanupPort : ReminderCleanupPort {
-    var nextFeedScheduled: Boolean = false
-        private set
-    val recordClearBatches = mutableListOf<Boolean>()
-
-    fun scheduleNextFeed() {
-        nextFeedScheduled = true
-    }
-
     val scheduledCarePlanIds = linkedSetOf<Long>()
     val cancelledCarePlanIds = mutableListOf<Long>()
     val carePlanOperations = mutableListOf<String>()
@@ -5467,10 +5444,6 @@ private class FakeReminderCleanupPort : ReminderCleanupPort {
         cancelledCarePlanIds += carePlanId
     }
 
-    override suspend fun cancelForRecordsClear(cancelNextFeed: Boolean) {
-        recordClearBatches += cancelNextFeed
-        if (cancelNextFeed) nextFeedScheduled = false
-    }
 }
 
 private class FakePendingReminderCleanupStore : PendingReminderCleanupStore {
@@ -6035,8 +6008,6 @@ private class FakeCustomItemDao : CustomItemDao {
 private class FakeSettingsStore : SettingsStore {
     private val babyId = MutableStateFlow<Long?>(null)
     private val timer = MutableStateFlow<String?>(null)
-    private val nextFeed = MutableStateFlow<Long?>(null)
-    private var nextFeedEpoch = 0L
     private val dark = MutableStateFlow("system")
     private val step = MutableStateFlow(5)
     private val timerEnabled = MutableStateFlow(true)
@@ -6059,8 +6030,6 @@ private class FakeSettingsStore : SettingsStore {
         timerEnabled = timerEnabled.value,
         nursingIntervalMin = interval.value,
         recordAtStartOrEnd = recordAt.value,
-        nextFeedAt = nextFeed.value,
-        nextFeedEpoch = nextFeedEpoch.toString(),
         itemOrderJson = order.value,
         hiddenItems = hidden.value,
         weekStart = weekStart.value,
@@ -6119,23 +6088,6 @@ private class FakeSettingsStore : SettingsStore {
         publish()
     }
 
-    override suspend fun setNextFeedAt(epochMs: Long?): String {
-        nextFeed.value = epochMs
-        nextFeedEpoch += 1L
-        publish()
-        return nextFeedEpoch.toString()
-    }
-
-    override suspend fun clearNextFeedAt() {
-        setNextFeedAt(null)
-    }
-
-    override suspend fun clearNextFeedAtIfEpoch(expectedEpoch: String): Boolean {
-        if (nextFeed.value == null || expectedEpoch != nextFeedEpoch.toString()) return false
-        clearNextFeedAt()
-        return true
-    }
-
     override suspend fun setDeviceLayoutSnapshot(snapshot: DeviceLayoutSnapshot) {
         order.value = snapshot.itemOrderJson
         hidden.value = snapshot.hiddenItems
@@ -6186,21 +6138,15 @@ private class FakeSettingsStore : SettingsStore {
     override suspend fun captureLocalClearSettings(): LocalClearSettingsSnapshot =
         LocalClearSettingsSnapshot(
             currentBabyId = babyId.value,
-            nextFeedAt = nextFeed.value,
             systemCalendarProjections = parseSystemCalendarEventMap(systemCalMap.value),
-            nextFeedEpoch = nextFeedEpoch.toString(),
         )
 
     override suspend fun finishLocalClearSettings(
         snapshot: LocalClearSettingsSnapshot,
         clearCurrentBabyId: Boolean,
-    ): LocalClearSettingsFinish {
+    ) {
         if (clearCurrentBabyId && babyId.value == snapshot.currentBabyId) {
             babyId.value = null
-        }
-        val cancelNextFeedAlarm = snapshot.nextFeedEpoch == nextFeedEpoch.toString()
-        if (cancelNextFeedAlarm) {
-            nextFeed.value = null
         }
         val retained = parseSystemCalendarEventMap(systemCalMap.value)
             .filter { (clientUuid, eventId) ->
@@ -6208,7 +6154,6 @@ private class FakeSettingsStore : SettingsStore {
             }
         systemCalMap.value = encodeSystemCalendarEventMap(retained)
         publish()
-        return LocalClearSettingsFinish(cancelNextFeedAlarm)
     }
 
     override suspend fun setComparePrevWeek(enabled: Boolean) {

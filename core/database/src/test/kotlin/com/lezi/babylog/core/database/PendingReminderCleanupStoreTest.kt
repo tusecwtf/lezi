@@ -61,7 +61,7 @@ class PendingReminderCleanupStoreTest {
     }
 
     @Test
-    fun currentSettingsAndProjectionSnapshotRoundTrips() = runBlocking {
+    fun currentProjectionSnapshotRoundTrips() = runBlocking {
         val dao = FakePendingReminderCleanupDao()
         val store = RoomPendingReminderCleanupStore(dao)
         val pending = PendingReminderCleanup(
@@ -71,8 +71,6 @@ class PendingReminderCleanupStoreTest {
                 "plan-with-id" to "evt-41",
                 "plan-needs-uid-lookup" to null,
             ),
-            nextFeedAt = 8L,
-            nextFeedEpoch = "feed-epoch-1",
             familyServerRetained = false,
         )
 

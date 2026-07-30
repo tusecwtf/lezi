@@ -12,8 +12,6 @@ data class PendingReminderCleanup(
     /** Exact stable plan UUID -> provider event ID; null means recover through UID lookup only. */
     val systemCalendarProjections: Map<String, String?> = emptyMap(),
     val currentBabyId: Long? = null,
-    val nextFeedAt: Long? = null,
-    val nextFeedEpoch: String = "",
     val familyServerRetained: Boolean,
 )
 
@@ -72,8 +70,9 @@ internal class RoomPendingReminderCleanupStore(
                         pending.systemCalendarProjections,
                 ),
                 currentBabyId = pending.currentBabyId,
-                nextFeedAt = pending.nextFeedAt,
-                nextFeedEpoch = pending.nextFeedEpoch,
+                // Frozen Room columns retained only to keep the current schema stable.
+                nextFeedAt = null,
+                nextFeedEpoch = "",
                 familyServerRetained =
                     existing?.familyServerRetained == true || pending.familyServerRetained,
             ),
@@ -101,8 +100,6 @@ internal class RoomPendingReminderCleanupStore(
                 familyServerRetained = familyServerRetained,
             ),
             currentBabyId = currentBabyId,
-            nextFeedAt = nextFeedAt,
-            nextFeedEpoch = nextFeedEpoch,
             familyServerRetained = familyServerRetained,
         )
 }

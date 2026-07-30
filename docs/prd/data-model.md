@@ -151,18 +151,18 @@ pull 适配仍保留远端作者，沿用 replica repair 的 revision/dirty 语�
 同步，不发送降级 payload。
 
 当前 Room schema 的 `pending_reminder_cleanup` 持久化 `carePlanIds`、
-`systemCalendarProjectionsJson`、可空的 `currentBabyId` / `nextFeedAt`、
-非空 `nextFeedEpoch`，以及 `familyServerRetained`。
+`systemCalendarProjectionsJson`、可空的 `currentBabyId`，以及 `familyServerRetained`。
+`nextFeedAt` / `nextFeedEpoch` 只作为冻结的旧 schema 列保留，生产代码始终写空且不读取；
+下次喂养已统一为普通 CarePlan，不再有独立提醒状态。
 `systemCalendarProjectionsJson` 是稳定护理计划 UUID 到 provider event ID（可空，表示只可按
 UID 查找）的精确映射。清除记录或全部本地数据时，领域事务按 scope 分别写入 pending 行，
-持久保存护理计划提醒 ID、系统日历投影身份、设置 epoch 与家庭服务器保留
+持久保存护理计划提醒 ID、系统日历投影身份、当前宝宝设置快照与家庭服务器保留
 标记。提交后必须依次确认系统日历副本已删除、scope 对应设置已清理、应用内提醒已取消，
 才可删除 pending 行并向界面返回成功；权限撤销或 provider 失败时保留该行，进程重启或用户
 重试后继续，不得遗失已删除护理计划的任一提醒身份。
 
-当前清除只删除仍与捕获 UUID + event ID 精确相等的系统日历映射，以及 epoch 仍相等的
-喂养提醒；清除
-提交后新写入的设置、映射及其 alarm 属于新 epoch，必须保留。
+当前清除只删除仍与捕获 UUID + event ID 精确相等的系统日历映射，以及已捕获 CarePlan
+对应的应用内提醒；清除提交后新写入的设置、映射及护理计划提醒必须保留。
 
 atomic commit 在 `record_authors` 回执中返回本次请求涉及的
 canonical Record membership 作者。Android 对同 `updatedAt` 的本地行只合并这一
@@ -257,8 +257,6 @@ tombstone 或 Outbox 元数据。删除失败或中断时保留该路径作为�
 | `timer_enabled` | |
 | `record_at_start_or_end` | 母乳记录时刻 |
 | `nursing_interval_min` | 提醒间隔 |
-| `next_feed_at` | 本机下次提醒 |
-| `next_feed_epoch` | 本机下次提醒写入身份；接收器与本地清除只消费匹配 epoch，防止同时间 ABA |
 | `dark_mode` | |
 | `day_count_mode` | 满日龄 / 计数日龄 |
 | `week_start` | |

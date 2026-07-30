@@ -16,7 +16,6 @@ import com.lezi.babylog.core.model.SettingsLocal
 import com.lezi.babylog.core.model.normalizeDeviceLayoutSnapshot
 import com.lezi.babylog.core.model.normalizeQuickRecordSlots
 import com.lezi.babylog.core.model.requireCurrentDeviceLayoutVersion
-import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.Flow
@@ -44,8 +43,6 @@ class SettingsDataSource @Inject constructor(
             timerEnabled = prefs[Keys.TIMER_ENABLED] ?: true,
             recordAtStartOrEnd = prefs[Keys.RECORD_AT] ?: "end",
             nursingIntervalMin = prefs[Keys.NURSING_INTERVAL] ?: 180,
-            nextFeedAt = prefs[Keys.NEXT_FEED_AT],
-            nextFeedEpoch = prefs[Keys.NEXT_FEED_EPOCH].orEmpty(),
             darkMode = prefs[Keys.DARK_MODE] ?: "system",
             visualStyle = prefs[Keys.VISUAL_STYLE] ?: "warm",
             preferredHand = prefs[Keys.PREFERRED_HAND] ?: "right",
@@ -129,36 +126,6 @@ class SettingsDataSource @Inject constructor(
 
     override suspend fun setRecordAt(startOrEnd: String) {
         dataStore.edit { it[Keys.RECORD_AT] = startOrEnd }
-    }
-
-    override suspend fun setNextFeedAt(epochMs: Long?): String {
-        val epoch = UUID.randomUUID().toString()
-        dataStore.edit { prefs ->
-            if (epochMs == null) prefs.remove(Keys.NEXT_FEED_AT)
-            else prefs[Keys.NEXT_FEED_AT] = epochMs
-            prefs[Keys.NEXT_FEED_EPOCH] = epoch
-        }
-        return epoch
-    }
-
-    override suspend fun clearNextFeedAt() {
-        setNextFeedAt(null)
-    }
-
-    override suspend fun clearNextFeedAtIfEpoch(expectedEpoch: String): Boolean {
-        if (expectedEpoch.isBlank()) return false
-        var cleared = false
-        dataStore.edit { prefs ->
-            if (
-                prefs[Keys.NEXT_FEED_AT] != null &&
-                prefs[Keys.NEXT_FEED_EPOCH].orEmpty() == expectedEpoch
-            ) {
-                prefs.remove(Keys.NEXT_FEED_AT)
-                prefs[Keys.NEXT_FEED_EPOCH] = UUID.randomUUID().toString()
-                cleared = true
-            }
-        }
-        return cleared
     }
 
     override suspend fun setDeviceLayoutSnapshot(snapshot: DeviceLayoutSnapshot) {
@@ -258,29 +225,20 @@ class SettingsDataSource @Inject constructor(
         )
         return LocalClearSettingsSnapshot(
             currentBabyId = prefs[Keys.CURRENT_BABY_ID],
-            nextFeedAt = prefs[Keys.NEXT_FEED_AT],
             systemCalendarProjections = systemCalendarProjections,
-            nextFeedEpoch = prefs[Keys.NEXT_FEED_EPOCH].orEmpty(),
         )
     }
 
     override suspend fun finishLocalClearSettings(
         snapshot: LocalClearSettingsSnapshot,
         clearCurrentBabyId: Boolean,
-    ): LocalClearSettingsFinish {
-        var cancelNextFeedAlarm = false
+    ) {
         dataStore.edit { prefs ->
             if (
                 clearCurrentBabyId &&
                 prefs[Keys.CURRENT_BABY_ID] == snapshot.currentBabyId
             ) {
                 prefs.remove(Keys.CURRENT_BABY_ID)
-            }
-            val sameNextFeedEpoch =
-                prefs[Keys.NEXT_FEED_EPOCH].orEmpty() == snapshot.nextFeedEpoch
-            cancelNextFeedAlarm = sameNextFeedEpoch
-            if (sameNextFeedEpoch) {
-                prefs.remove(Keys.NEXT_FEED_AT)
             }
             val currentMap = decodeSystemCalendarEventMap(
                 prefs[Keys.SYSTEM_CALENDAR_EVENT_MAP] ?: "{}",
@@ -290,7 +248,6 @@ class SettingsDataSource @Inject constructor(
             }
             prefs[Keys.SYSTEM_CALENDAR_EVENT_MAP] = encodeSystemCalendarEventMap(retainedMap)
         }
-        return LocalClearSettingsFinish(cancelNextFeedAlarm = cancelNextFeedAlarm)
     }
 
     private object Keys {
@@ -304,8 +261,6 @@ class SettingsDataSource @Inject constructor(
         val TIMER_ENABLED = booleanPreferencesKey("timer_enabled")
         val RECORD_AT = stringPreferencesKey("record_at")
         val NURSING_INTERVAL = intPreferencesKey("nursing_interval_min")
-        val NEXT_FEED_AT = longPreferencesKey("next_feed_at")
-        val NEXT_FEED_EPOCH = stringPreferencesKey("next_feed_epoch")
         val DARK_MODE = stringPreferencesKey("dark_mode")
         val VISUAL_STYLE = stringPreferencesKey("visual_style")
         val PREFERRED_HAND = stringPreferencesKey("preferred_hand")
