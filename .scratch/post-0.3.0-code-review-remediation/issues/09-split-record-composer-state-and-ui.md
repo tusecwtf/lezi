@@ -3,7 +3,7 @@
 **Parent:** [../spec.md](../spec.md)
 **Audit ID:** `CR-20260730-P1-02`
 **Severity:** P1 structural
-**Status:** ready-for-agent
+**Status:** complete
 **Blocked by:** none
 **Activation:** satisfied — 01 complete; user requested all scratch issues
 **Size:** L
@@ -16,11 +16,11 @@
 
 ## Acceptance criteria
 
-- [ ] 原文件与每个新职责文件均低于 1,000 行；ViewModel 与 Compose UI 不再同文件堆叠。
-- [ ] 01 的 next-feed durable reconciliation 完整保留，Composer 与 Timer 继续共用策略。
-- [ ] add/edit/fulfill/convert、照片生命周期、脏草稿放弃和 stale async session gate 行为不变。
-- [ ] `RecordComposerRequest`、`RecordComposerHost` 等现有 seam 的调用语义不变。
-- [ ] 新增结构测试防止 ViewModel、saved state 或 UI 主体回流单文件。
+- [x] 原文件与每个新职责文件均低于 1,000 行；ViewModel 与 Compose UI 不再同文件堆叠。
+- [x] 01 的 next-feed durable reconciliation 完整保留，Composer 与 Timer 继续共用策略。
+- [x] add/edit/fulfill/convert、照片生命周期、脏草稿放弃和 stale async session gate 行为不变。
+- [x] `RecordComposerRequest`、`RecordComposerHost` 等现有 seam 的调用语义不变。
+- [x] 新增结构测试防止 ViewModel、saved state 或 UI 主体回流单文件。
 
 ## Validation
 
@@ -31,3 +31,7 @@
 
 保持统一 Composer、confirm-before-persist、CarePlan/Record 事实边界和共享 ClockDial；结构票不改
 交互或文案契约。
+
+## Evidence
+
+- [validation.md](../evidence/09/validation.md)

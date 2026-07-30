@@ -7,7 +7,7 @@ Audit HEAD: `766d30ae7e6094c4c5d82061f2ad916c8895488d`
 - Audit OPEN findings: **5**
 - Executable tickets: **9**
 - Immediate ready-for-agent: **0**
-- Ready structural frontier: **2**
+- Ready structural frontier: **1**
 - Planned structural tickets: **2**
 - Accepted residuals without implementation ticket: **2**
 
@@ -15,7 +15,7 @@ Audit HEAD: `766d30ae7e6094c4c5d82061f2ad916c8895488d`
 
 ```text
 01 next-feed 恢复真相（complete） ───────────────┬──► 07 CareLog 计划/履行协调器（planned）
-                                                 └──► 09 RecordComposer UI/VM 拆分（ready）
+                                                 └──► 09 RecordComposer UI/VM 拆分（complete）
 
 02 冻结 fulfillment 绑定（complete）
 
@@ -29,7 +29,7 @@ Audit HEAD: `766d30ae7e6094c4c5d82061f2ad916c8895488d`
 08 LogScreen 剩余宿主拆分（complete）
 ```
 
-**Current frontier:** 05、09。01/02 correctness lane 与结构票 03/04/08 已闭合，当前“实现所有
+**Current frontier:** 05。01/02 correctness lane 与结构票 03/04/08/09 已闭合，当前“实现所有
 scratch 问题”的目标满足 user activation；06–07 仍按 05 → 06 → 07 依赖串行激活。
 
 结构票默认不自动实施；正确性门闭合后由用户激活。04–07 因共享 `CareLog.kt` 必须串行。
@@ -46,7 +46,7 @@ scratch 问题”的目标满足 user activation；06–07 仍按 05 → 06 → 
 | [06](./issues/06-extract-carelog-record-sleep-mutations.md) | 抽离 CareLog Record 与睡眠写 seam | P1-02 | 05 | L | planned |
 | [07](./issues/07-extract-carelog-plan-fulfillment-orchestration.md) | 抽离 CareLog 计划与履行协调 seam | P1-02 | 01、06 | L | planned |
 | [08](./issues/08-split-log-screen-list-dialog-host.md) | 拆分 LogScreen 列表与弹窗宿主 | P1-02 | — | M–L | complete |
-| [09](./issues/09-split-record-composer-state-and-ui.md) | 拆分 RecordComposer state/VM/UI | P1-02 | — | L | ready-for-agent |
+| [09](./issues/09-split-record-composer-state-and-ui.md) | 拆分 RecordComposer state/VM/UI | P1-02 | — | L | complete |
 
 ## Accepted residuals
 
