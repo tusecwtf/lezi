@@ -3,7 +3,7 @@
 **Parent:** [../spec.md](../spec.md)
 **Audit ID:** `CR-20260730-P1-02`
 **Severity:** P1 structural
-**Status:** ready-for-agent
+**Status:** complete
 **Activation:** satisfied — correctness 01/02 complete; user requested all scratch issues
 **Size:** L
 
@@ -15,11 +15,11 @@
 
 ## Acceptance criteria
 
-- [ ] `LayoutEditMode.kt` 降到 1,000 行以内，新增单元均有单一职责且不复制 reducer/命中规则。
-- [ ] 触摸、TalkBack、键盘全部仍只发出既有 `LayoutEditIntent`。
-- [ ] 目录、类别标题、本机已删除、四槽与固定 More 的行为和语义不变。
-- [ ] 边缘滚动、撤销、动效/触觉、配置重建、首次帮助无回归。
-- [ ] 新增结构测试防止目录、Dock、替代输入重新回流宿主。
+- [x] `LayoutEditMode.kt` 降到 1,000 行以内，新增单元均有单一职责且不复制 reducer/命中规则。
+- [x] 触摸、TalkBack、键盘全部仍只发出既有 `LayoutEditIntent`。
+- [x] 目录、类别标题、本机已删除、四槽与固定 More 的行为和语义不变。
+- [x] 边缘滚动、撤销、动效/触觉、配置重建、首次帮助无回归。
+- [x] 新增结构测试防止目录、Dock、替代输入重新回流宿主。
 
 ## Validation
 
@@ -29,3 +29,7 @@
 ## Documentation gate
 
 行为零变更则无需改 PRD；如发现文档与 live 行为不符，先暂停并重新 grill，不在结构票内修产品。
+
+## Evidence
+
+- [validation.md](../evidence/03/validation.md)
