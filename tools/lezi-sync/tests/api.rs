@@ -6554,6 +6554,144 @@ async fn care_plan_member_acl_and_owner_override() {
 }
 
 #[tokio::test]
+async fn completed_care_plan_fulfillment_binding_is_frozen_for_creator_and_owner() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "fulfillment-binding-owner",
+        "fulfillment-binding-request-0000001",
+    )
+    .await;
+    let owner_token = owner["token"].as_str().unwrap();
+    let creator = invite_and_join(&rig.app, owner_token, "fulfillment-binding-creator").await;
+    let creator_token = creator["token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let plan_id = Uuid::new_v4().to_string();
+    let first_record_id = Uuid::new_v4().to_string();
+    let rebound_record_id = Uuid::new_v4().to_string();
+    let fulfilled_at = 1_700_000_100_000i64;
+
+    let pending_plan = care_plan_payload(&baby_id, "bath");
+    assert_eq!(
+        publish_root_bundle(
+            &rig.app,
+            creator_token,
+            entity_wire("care_plan", &plan_id, 1, pending_plan.clone(), None),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    let staged_rebind_bundle = Uuid::new_v4().to_string();
+    let mut staged_rebind = pending_plan.clone();
+    staged_rebind["status"] = json!("completed");
+    staged_rebind["fulfilled_record_client_uuid"] = json!(rebound_record_id);
+    staged_rebind["fulfilled_at"] = json!(fulfilled_at);
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/bundles",
+            Some(creator_token),
+            json!({
+                "bundle_id": staged_rebind_bundle,
+                "root": entity_wire("care_plan", &plan_id, 3, staged_rebind, None),
+                "media": [],
+            }),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    let mut first_completion = pending_plan.clone();
+    first_completion["status"] = json!("completed");
+    first_completion["fulfilled_record_client_uuid"] = json!(first_record_id);
+    first_completion["fulfilled_at"] = json!(fulfilled_at);
+    assert_eq!(
+        publish_root_bundle(
+            &rig.app,
+            creator_token,
+            entity_wire("care_plan", &plan_id, 2, first_completion.clone(), None,),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    seed_record_with_id(
+        &rig.app,
+        creator_token,
+        &first_record_id,
+        2,
+        record_payload(&baby_id),
+    )
+    .await;
+
+    let immutable_detail = "Completed care plan fulfillment binding is immutable";
+    let (raced_status, raced_body) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/bundles/{staged_rebind_bundle}/commit"),
+        Some(creator_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(raced_status, StatusCode::CONFLICT, "{raced_body}");
+    assert_eq!(raced_body["detail"], immutable_detail);
+
+    let mut exact_pair_update = first_completion.clone();
+    exact_pair_update["note"] = json!("binding preserved");
+    assert_eq!(
+        publish_root_bundle(
+            &rig.app,
+            creator_token,
+            entity_wire("care_plan", &plan_id, 4, exact_pair_update, None),
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    let mut rebound = first_completion.clone();
+    rebound["fulfilled_record_client_uuid"] = json!(rebound_record_id);
+    let mut cleared = first_completion.clone();
+    cleared["fulfilled_record_client_uuid"] = Value::Null;
+    let mut retimed = first_completion.clone();
+    retimed["fulfilled_at"] = json!(fulfilled_at + 1);
+    for (token, updated_at, payload) in [
+        (creator_token, 5, rebound),
+        (creator_token, 6, cleared),
+        (owner_token, 7, retimed),
+    ] {
+        let (status, body) = publish_root_bundle(
+            &rig.app,
+            token,
+            entity_wire("care_plan", &plan_id, updated_at, payload, None),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body, json!({"detail": immutable_detail}));
+    }
+
+    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
+    let entities = pull["entities"].as_array().unwrap();
+    let plan = entities
+        .iter()
+        .find(|entity| entity["type"] == "care_plan" && entity["client_uuid"] == plan_id)
+        .unwrap();
+    assert_eq!(
+        plan["payload"]["fulfilled_record_client_uuid"],
+        first_record_id
+    );
+    assert_eq!(plan["payload"]["fulfilled_at"], fulfilled_at);
+    assert_eq!(plan["payload"]["note"], "binding preserved");
+    assert!(entities
+        .iter()
+        .all(|entity| entity["client_uuid"] != rebound_record_id));
+}
+
+#[tokio::test]
 async fn concurrent_member_next_feed_create_keeps_nas_winner_without_forbidden() {
     let rig = Rig::new();
     let owner = create_family(
@@ -8100,6 +8238,7 @@ async fn tombstoned_custom_item_supports_history_and_fulfillment_but_not_new_roo
     let historical_record_id = Uuid::new_v4().to_string();
     let historical_plan_id = Uuid::new_v4().to_string();
     let fulfilled_record_id = Uuid::new_v4().to_string();
+    let rebound_record_id = Uuid::new_v4().to_string();
     let custom_record = |note: &str| {
         json!({
             "baby_client_uuid": baby_id,
@@ -8202,7 +8341,13 @@ async fn tombstoned_custom_item_supports_history_and_fulfillment_but_not_new_roo
     let (plan_status, plan_body) = publish_root_bundle(
         &rig.app,
         token,
-        entity_wire("care_plan", &historical_plan_id, 6, custom_plan, None),
+        entity_wire(
+            "care_plan",
+            &historical_plan_id,
+            6,
+            custom_plan.clone(),
+            None,
+        ),
     )
     .await;
     assert_eq!(plan_status, StatusCode::OK, "{plan_body}");
@@ -8238,6 +8383,37 @@ async fn tombstoned_custom_item_supports_history_and_fulfillment_but_not_new_roo
     .await;
     assert_eq!(candidate_status, StatusCode::OK, "{candidate_body}");
 
+    let mut rebound_plan = custom_plan.clone();
+    rebound_plan["fulfilled_record_client_uuid"] = json!(rebound_record_id);
+    let (rebind_status, rebind_body) = publish_root_bundle(
+        &rig.app,
+        token,
+        entity_wire("care_plan", &historical_plan_id, 9, rebound_plan, None),
+    )
+    .await;
+    assert_eq!(rebind_status, StatusCode::CONFLICT, "{rebind_body}");
+    assert_eq!(
+        rebind_body,
+        json!({"detail": "Completed care plan fulfillment binding is immutable"})
+    );
+    let (rebound_record_status, rebound_record_body) = publish_root_bundle(
+        &rig.app,
+        token,
+        entity_wire(
+            "record",
+            &rebound_record_id,
+            10,
+            custom_record("伪造改绑事实"),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(
+        rebound_record_status,
+        StatusCode::CONFLICT,
+        "{rebound_record_body}"
+    );
+
     let (record_delete_status, record_delete_body) = publish_root_bundle(
         &rig.app,
         token,
@@ -8264,6 +8440,16 @@ async fn tombstoned_custom_item_supports_history_and_fulfillment_but_not_new_roo
     assert!(entities
         .iter()
         .any(|entity| entity["client_uuid"] == fulfilled_record_id));
+    assert!(entities
+        .iter()
+        .all(|entity| entity["client_uuid"] != rebound_record_id));
+    assert_eq!(
+        entities
+            .iter()
+            .find(|entity| entity["client_uuid"] == historical_plan_id)
+            .unwrap()["payload"]["fulfilled_record_client_uuid"],
+        fulfilled_record_id
+    );
 }
 
 #[tokio::test]

@@ -326,6 +326,11 @@ NAS 原子包根类型 `care_plan` 的 wire payload 为：
 `status`（pending|missed|completed|skipped）,
 `created_by_membership_id`（服务端盖章）, `fulfilled_record_client_uuid?`,
 `fulfilled_at?`。计划媒体为 bundle 内 `media` 且 `care_plan_client_uuid` 指向根。
+NAS 一旦持久化同时具有非空 `fulfilled_record_client_uuid` 与 `fulfilled_at` 的 completed
+CarePlan，后续版本必须精确保留这两个值；清空、改绑其它 Record 或改变确认时间均返回
+`409`，creator 与 owner 遵循相同规则。其它计划字段仍可按原 ACL/LWW 更新。这个不可变 pair
+是服务端证明 tombstone 自定义定义只产生一次显式履行事实的 current-wire 门闩；设备根据
+FulfillmentCandidate 做的赢家重链仍是本机派生，不把 rebind 重新发布为 CarePlan LWW。
 `type` 使用与 Record 相同的当前类型集合；`type=custom` 时
 `custom_item_client_uuid` 新建时必须引用同家庭、未删除的 CustomItemDef；既有计划可继续
 引用同家庭 tombstone 定义并被编辑、删除或显式履行，其它类型必须省略或置空。
@@ -336,7 +341,8 @@ CarePlan → 关联 Record（含 0–3 张照片）→ FulfillmentCandidate，�
 当前状态为 `pending`, `missed`, `completed`, `skipped`，且只支持单次计划。
 `missed` 可由当前绝对时刻超过计划时刻且仍未完成/跳过派生。本机履行在同一事务
 中写入关联 Record 并将计划标为 `completed`。多候选时各设备用盖章证据稳定裁决
-唯一权威记录，并本地重链 `fulfilled_record_client_uuid`（不依赖计划 LWW 到达序）。
+唯一权威记录，并在不置脏、不回写 NAS immutable pair 的前提下本地重链
+`fulfilled_record_client_uuid`（不依赖计划 LWW 到达序）。
 
 ### 3.11.1 FulfillmentCandidate（NAS 契约 + 本机）
 

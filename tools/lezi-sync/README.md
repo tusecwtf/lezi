@@ -321,6 +321,9 @@ pull 响应包含当前字段 `has_more`。每页最多扫描 200 个实体，�
 - 零照片 Record/CarePlan 仍提交空媒体清单的包；所有根执行当前字段、引用与成员 ACL 校验
 - 活动 `custom_item` 才可用于新建 custom Record/CarePlan；同家庭 tombstone 仅保留历史
   引用完整性，允许既有根的编辑/删除和已完成计划明确关联的履行 Record，不会被任意新根选择
+- completed CarePlan 首次持久化的非空 `fulfilled_record_client_uuid` 与 `fulfilled_at`
+  组成不可变 pair；creator/owner 后续清空、改绑或改时间均返回固定 `409`，精确保留 pair
+  的其它合法更新与同 bundle retry 继续幂等
 - `/v1/push` 与普通媒体 PUT 固定 `422`；GET 媒体下载保留
 - pull 发出 live Record/CarePlan 时，同页共组其全部 live `log` 媒体；客户端仍逐页完整 apply
 

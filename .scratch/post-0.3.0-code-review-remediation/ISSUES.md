@@ -6,7 +6,7 @@ Audit HEAD: `766d30ae7e6094c4c5d82061f2ad916c8895488d`
 
 - Audit OPEN findings: **5**
 - Executable tickets: **9**
-- Immediate ready-for-agent: **2**
+- Immediate ready-for-agent: **1**
 - Planned structural tickets: **7**
 - Accepted residuals without implementation ticket: **2**
 
@@ -16,7 +16,7 @@ Audit HEAD: `766d30ae7e6094c4c5d82061f2ad916c8895488d`
 01 next-feed 恢复真相（frontier） ───────────────┬──► 07 CareLog 计划/履行协调器（planned）
                                                  └──► 09 RecordComposer UI/VM 拆分（planned）
 
-02 冻结 fulfillment 绑定（frontier）
+02 冻结 fulfillment 绑定（complete）
 
 03 LayoutEditMode 拆分（planned）
 
@@ -28,7 +28,7 @@ Audit HEAD: `766d30ae7e6094c4c5d82061f2ad916c8895488d`
 08 LogScreen 剩余宿主拆分（planned）
 ```
 
-**Immediate frontier:** 01、02。
+**Immediate frontier:** 01。
 
 结构票默认不自动实施；正确性门闭合后由用户激活。04–07 因共享 `CareLog.kt` 必须串行。
 
@@ -37,7 +37,7 @@ Audit HEAD: `766d30ae7e6094c4c5d82061f2ad916c8895488d`
 | ID | Title | Audit ID | Blocked by | Size | Status |
 |----|-------|----------|------------|------|--------|
 | [01](./issues/01-reconcile-next-feed-after-interrupted-commit.md) | 中断恢复后对齐下次喂养持久化真相 | P0-01 | — | L | ready-for-agent |
-| [02](./issues/02-freeze-completed-plan-fulfillment-binding.md) | 冻结已完成计划的 fulfillment 绑定 | P1-01 | — | M | ready-for-agent |
+| [02](./issues/02-freeze-completed-plan-fulfillment-binding.md) | 冻结已完成计划的 fulfillment 绑定 | P1-01 | — | M | complete |
 | [03](./issues/03-split-layout-edit-mode-host.md) | 拆分 LayoutEditMode 目录/坞/替代输入宿主 | P1-02 | activation gate | L | planned |
 | [04](./issues/04-extract-carelog-query-surface.md) | 抽离 CareLog 查询与摘要 seam | P1-02 | activation gate | L | planned |
 | [05](./issues/05-extract-carelog-baby-family-profile.md) | 抽离 CareLog 宝宝与家庭档案 seam | P1-02 | 04 | L | planned |

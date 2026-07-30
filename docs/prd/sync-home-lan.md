@@ -620,7 +620,7 @@ fulfillment_candidate`：Record/CarePlan 的媒体成员只能是 `log`，Baby �
 - **LWW**：commit 在同一实体键上执行 LWW；不得用 ordinary 写穿破原子可见性
 - **根类型与媒体约束**：`record`/`care_plan` 只允许 `log`，`baby` 只允许 `avatar`，
   `custom_item`/`fulfillment_candidate` 只允许空媒体清单；所有根共享同一 HTTP/Store 契约
-- **CarePlan ACL**：创建时服务端从认证 principal 盖章 `created_by_membership_id`（忽略客户端伪造）；任意成员可创建；普通成员仅可修改/跳过/删除自己创建的计划，管理员可管理全部；作者离开后管理员仍可管理。计划媒体引用、宝宝、具体项目与家庭必须一致，跨家庭引用以冲突错误拒绝
+- **CarePlan ACL 与履行绑定**：创建时服务端从认证 principal 盖章 `created_by_membership_id`（忽略客户端伪造）；任意成员可创建；普通成员仅可修改/跳过/删除自己创建的计划，管理员可管理全部；作者离开后管理员仍可管理。计划媒体引用、宝宝、具体项目与家庭必须一致，跨家庭引用以冲突错误拒绝。completed CarePlan 的非空 `fulfilled_record_client_uuid` + `fulfilled_at` pair 一经持久化即不可清空、改绑或改时间，creator/owner 均不能绕过，冲突固定返回不携带实体内容的 `409`；精确保留 pair 的其它合法更新和同 bundle replay 继续幂等
 - **下次喂养并发创建**：Android 按家庭权威 Baby 与计划代次生成确定性 CarePlan UUID。两个 member 离线创建同一 UUID 时，NAS 保留先发布的开放 next-feed 计划，并把后到 package（root 与全部 media）规范化为成功 no-op（不授予 winner 编辑权，也不允许给他人计划增删照片）；member 的本地写同步走 `pull → push → pull`，同轮采用 NAS winner、清理 losing plan/media/outbox 与本机副作用，并由普通 CarePlan apply 重挂唯一提醒。
 - **不经 ordinary push**：所有实体都不得走 `/v1/push`，必须经 atomic bundle
 - **pull 共组**：pull 发出 live Record/CarePlan 时，同页附带其全部 live `log` 媒体；
@@ -672,7 +672,9 @@ Record 与 CarePlan 共享以下 current-wire 约束：
   均返回 `422`。
 - `type=custom` 的新建根只能选择同家庭、未删除的 CustomItemDef。tombstone 定义不再进入
   可选目录，但仍证明既有同 UUID Record/CarePlan 的历史引用合法；这类历史根可继续编辑、
-  删除，既有计划完成后以 `fulfilled_record_client_uuid` 明确关联的新 Record 也可发布。
+  删除，既有计划首次完成后以 `fulfilled_record_client_uuid` 明确关联的新 Record 也可发布；
+  该已持久化 UUID 与 `fulfilled_at` 组成不可变 pair，不能通过后续 CarePlan LWW 改绑来为
+  第二条新事实取得 tombstone 例外。
   客户端履行这类计划时须先提交 `completed` CarePlan，再提交关联 Record，最后提交
   FulfillmentCandidate；接收端在关联 Record 到达前 co-gate completed plan，不暴露半套状态。
   未知、跨家庭或把 tombstone 用于任意新事实/计划的引用均以冲突拒绝。wire 内的

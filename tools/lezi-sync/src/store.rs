@@ -198,6 +198,8 @@ pub enum StoreError {
     CustomItemTombstoneResurrection,
     #[error("deleted care plan cannot be resurrected")]
     CarePlanTombstoneResurrection,
+    #[error("completed care plan fulfillment binding is immutable")]
+    ImmutableCarePlanFulfillmentBinding,
     #[error("media kind and association are immutable")]
     ImmutableMediaAssociation,
     #[error("entity updated_at is outside the accepted time range")]
@@ -2194,6 +2196,7 @@ fn stamp_and_authorize_care_plans(
                 }
                 return Err(StoreError::ForbiddenCarePlan);
             }
+            freeze_care_plan_fulfillment_binding(current, &entity.payload)?;
         } else {
             entity.payload.insert(
                 "created_by_membership_id".to_owned(),
@@ -2202,6 +2205,31 @@ fn stamp_and_authorize_care_plans(
         }
     }
     Ok(noop_care_plan_ids)
+}
+
+fn freeze_care_plan_fulfillment_binding(
+    current: &ExistingEntity,
+    incoming: &Map<String, Value>,
+) -> Result<(), StoreError> {
+    let current_record = current
+        .payload
+        .get("fulfilled_record_client_uuid")
+        .and_then(Value::as_str);
+    let current_fulfilled_at = current.payload.get("fulfilled_at").and_then(Value::as_i64);
+    let (Some(current_record), Some(current_fulfilled_at)) = (current_record, current_fulfilled_at)
+    else {
+        return Ok(());
+    };
+    let incoming_record = incoming
+        .get("fulfilled_record_client_uuid")
+        .and_then(Value::as_str);
+    let incoming_fulfilled_at = incoming.get("fulfilled_at").and_then(Value::as_i64);
+    if incoming_record != Some(current_record)
+        || incoming_fulfilled_at != Some(current_fulfilled_at)
+    {
+        return Err(StoreError::ImmutableCarePlanFulfillmentBinding);
+    }
+    Ok(())
 }
 
 fn discard_media_for_noop_care_plans(
@@ -3710,6 +3738,7 @@ mod tests {
         let historical_record_id = Uuid::new_v4();
         let historical_plan_id = Uuid::new_v4();
         let fulfilled_record_id = Uuid::new_v4();
+        let rebound_record_id = Uuid::new_v4();
         let record_payload = |note: &str| {
             json!({
                 "baby_client_uuid":baby_id,"type":"custom",
@@ -3840,6 +3869,323 @@ mod tests {
             .unwrap()
             .applied,
             1
+        );
+
+        let rebind_result = publish_root(
+            &restarted,
+            &principal,
+            entity(
+                "care_plan",
+                historical_plan_id,
+                6,
+                plan_payload("completed", Some(rebound_record_id)),
+            ),
+            10,
+        );
+        assert!(matches!(
+            rebind_result,
+            Err(StoreError::ImmutableCarePlanFulfillmentBinding)
+        ));
+        assert!(matches!(
+            publish_root(
+                &restarted,
+                &principal,
+                entity(
+                    "record",
+                    rebound_record_id,
+                    6,
+                    record_payload("伪造改绑事实"),
+                ),
+                10,
+            ),
+            Err(StoreError::UnresolvedReference(_))
+        ));
+        let pulled = restarted.pull(&family_id, 0).unwrap();
+        let persisted_plan = pulled
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.entity_type == "care_plan"
+                    && entity.client_uuid == historical_plan_id.to_string()
+            })
+            .unwrap();
+        assert_eq!(
+            persisted_plan.payload["fulfilled_record_client_uuid"],
+            json!(fulfilled_record_id)
+        );
+        assert!(pulled
+            .entities
+            .iter()
+            .all(|entity| entity.client_uuid != rebound_record_id.to_string()));
+    }
+
+    #[test]
+    fn completed_care_plan_fulfillment_pair_is_immutable_and_exact_replay_is_idempotent() {
+        let directory = TempDir::new().unwrap();
+        let store = Store::open(directory.path().join("lezi.db")).unwrap();
+        let family_id = family(&store);
+        let principal = owner_principal(&family_id);
+        let baby_id = Uuid::new_v4();
+        let plan_id = Uuid::new_v4();
+        let first_record_id = Uuid::new_v4();
+        let rebound_record_id = Uuid::new_v4();
+        let fulfilled_at = 1_700_000_100_000i64;
+        let plan_payload = |record_id: Option<Uuid>, at: Option<i64>, note: &str| {
+            json!({
+                "baby_client_uuid":baby_id,"type":"bath",
+                "custom_item_client_uuid":null,
+                "scheduled_at":1_700_000_000_000i64,
+                "scheduled_zone_id":"Asia/Shanghai",
+                "status":if record_id.is_some() { "completed" } else { "pending" },
+                "payload_json":{},"schema_version":2,"note":note,
+                "created_by_membership_id":"m-owner",
+                "fulfilled_record_client_uuid":record_id,"fulfilled_at":at
+            })
+        };
+        let record_payload = || {
+            json!({
+                "baby_client_uuid":baby_id,"type":"bath",
+                "custom_item_client_uuid":null,"timestamp":1_700_000_100_000i64,
+                "end_timestamp":null,"note":null,"payload_json":{},"schema_version":2
+            })
+        };
+        publish_root(
+            &store,
+            &principal,
+            entity(
+                "baby",
+                baby_id,
+                1,
+                json!({
+                    "nickname":"年年","sex":"female","birthday":"2025-01-02",
+                    "avatar_media_uuid":null,"birth_weight_grams":3200
+                }),
+            ),
+            10,
+        )
+        .unwrap();
+        publish_root(
+            &store,
+            &principal,
+            entity("care_plan", plan_id, 1, plan_payload(None, None, "pending")),
+            10,
+        )
+        .unwrap();
+
+        let first_bundle_id = Uuid::new_v4().to_string();
+        store
+            .stage_bundle(
+                &principal,
+                &first_bundle_id,
+                entity(
+                    "care_plan",
+                    plan_id,
+                    2,
+                    plan_payload(Some(first_record_id), Some(fulfilled_at), "first"),
+                ),
+                vec![],
+                1_700_000_000,
+            )
+            .unwrap();
+        let first_commit = store
+            .commit_bundle(
+                &principal,
+                &first_bundle_id,
+                &BTreeMap::new(),
+                10,
+                1_700_000_000,
+            )
+            .unwrap()
+            .0;
+        let exact_commit_retry = store
+            .commit_bundle(
+                &principal,
+                &first_bundle_id,
+                &BTreeMap::new(),
+                10,
+                1_700_000_001,
+            )
+            .unwrap()
+            .0;
+        assert_eq!(exact_commit_retry, first_commit);
+        publish_root(
+            &store,
+            &principal,
+            entity("record", first_record_id, 2, record_payload()),
+            10,
+        )
+        .unwrap();
+
+        assert_eq!(
+            publish_root(
+                &store,
+                &principal,
+                entity(
+                    "care_plan",
+                    plan_id,
+                    3,
+                    plan_payload(Some(first_record_id), Some(fulfilled_at), "edited"),
+                ),
+                10,
+            )
+            .unwrap()
+            .applied,
+            1
+        );
+        let baseline = store.pull(&family_id, 0).unwrap();
+
+        for payload in [
+            plan_payload(Some(rebound_record_id), Some(fulfilled_at), "rebound"),
+            plan_payload(None, Some(fulfilled_at), "cleared"),
+            plan_payload(Some(first_record_id), Some(fulfilled_at + 1), "retimed"),
+        ] {
+            assert!(matches!(
+                publish_root(
+                    &store,
+                    &principal,
+                    entity("care_plan", plan_id, 4, payload),
+                    10,
+                ),
+                Err(StoreError::ImmutableCarePlanFulfillmentBinding)
+            ));
+            assert_eq!(store.pull(&family_id, 0).unwrap().cursor, baseline.cursor);
+        }
+
+        let persisted_plan = store
+            .pull(&family_id, 0)
+            .unwrap()
+            .entities
+            .into_iter()
+            .find(|entity| {
+                entity.entity_type == "care_plan" && entity.client_uuid == plan_id.to_string()
+            })
+            .unwrap();
+        assert_eq!(persisted_plan.payload["note"], "edited");
+        assert_eq!(
+            persisted_plan.payload["fulfilled_record_client_uuid"],
+            json!(first_record_id)
+        );
+        assert_eq!(persisted_plan.payload["fulfilled_at"], fulfilled_at);
+    }
+
+    #[test]
+    fn staged_care_plan_rebind_cannot_commit_after_first_binding_wins() {
+        let directory = TempDir::new().unwrap();
+        let store = Store::open(directory.path().join("lezi.db")).unwrap();
+        let family_id = family(&store);
+        let principal = owner_principal(&family_id);
+        let baby_id = Uuid::new_v4();
+        let plan_id = Uuid::new_v4();
+        let first_record_id = Uuid::new_v4();
+        let staged_record_id = Uuid::new_v4();
+        let plan_payload = |record_id: Option<Uuid>| {
+            json!({
+                "baby_client_uuid":baby_id,"type":"bath",
+                "custom_item_client_uuid":null,
+                "scheduled_at":1_700_000_000_000i64,
+                "scheduled_zone_id":"Asia/Shanghai",
+                "status":if record_id.is_some() { "completed" } else { "pending" },
+                "payload_json":{},"schema_version":2,"note":null,
+                "created_by_membership_id":"m-owner",
+                "fulfilled_record_client_uuid":record_id,
+                "fulfilled_at":record_id.map(|_| 1_700_000_100_000i64)
+            })
+        };
+        let record_payload = || {
+            json!({
+                "baby_client_uuid":baby_id,"type":"bath",
+                "custom_item_client_uuid":null,"timestamp":1_700_000_100_000i64,
+                "end_timestamp":null,"note":null,"payload_json":{},"schema_version":2
+            })
+        };
+        publish_root(
+            &store,
+            &principal,
+            entity(
+                "baby",
+                baby_id,
+                1,
+                json!({
+                    "nickname":"年年","sex":"female","birthday":"2025-01-02",
+                    "avatar_media_uuid":null,"birth_weight_grams":3200
+                }),
+            ),
+            10,
+        )
+        .unwrap();
+        publish_root(
+            &store,
+            &principal,
+            entity("care_plan", plan_id, 1, plan_payload(None)),
+            10,
+        )
+        .unwrap();
+
+        let staged_bundle_id = Uuid::new_v4().to_string();
+        assert_eq!(
+            store
+                .stage_bundle(
+                    &principal,
+                    &staged_bundle_id,
+                    entity(
+                        "care_plan",
+                        plan_id,
+                        3,
+                        plan_payload(Some(staged_record_id))
+                    ),
+                    vec![],
+                    1_700_000_000,
+                )
+                .unwrap()
+                .status,
+            "staging"
+        );
+        publish_root(
+            &store,
+            &principal,
+            entity("care_plan", plan_id, 2, plan_payload(Some(first_record_id))),
+            10,
+        )
+        .unwrap();
+        publish_root(
+            &store,
+            &principal,
+            entity("record", first_record_id, 2, record_payload()),
+            10,
+        )
+        .unwrap();
+        let before_failed_commit = store.pull(&family_id, 0).unwrap();
+
+        assert!(matches!(
+            store.commit_bundle(
+                &principal,
+                &staged_bundle_id,
+                &BTreeMap::new(),
+                10,
+                1_700_000_001,
+            ),
+            Err(StoreError::ImmutableCarePlanFulfillmentBinding)
+        ));
+        let after_failed_commit = store.pull(&family_id, 0).unwrap();
+        assert_eq!(after_failed_commit.cursor, before_failed_commit.cursor);
+        let persisted_plan = after_failed_commit
+            .entities
+            .iter()
+            .find(|entity| {
+                entity.entity_type == "care_plan" && entity.client_uuid == plan_id.to_string()
+            })
+            .unwrap();
+        assert_eq!(
+            persisted_plan.payload["fulfilled_record_client_uuid"],
+            json!(first_record_id)
+        );
+        assert_eq!(
+            store
+                .bundle_status(&family_id, &staged_bundle_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            "staging"
         );
     }
 
