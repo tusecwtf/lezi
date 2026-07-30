@@ -14,7 +14,7 @@ Ticket 04 validation commit: `0791eb73c621a9bd47414e478fecd91aebebcaf5`
                        └──→ P1/02 清理 ─────────────┘
 ```
 
-Frontier: **07、10、11、12**
+Frontier: **07、11、12**
 
 | # | Ticket | Blocked by | Status |
 |---|--------|------------|--------|
@@ -27,7 +27,7 @@ Frontier: **07、10、11、12**
 | 07 | [删除重复与旧布局表面（canonical P1/02）](../p1-redundancy-ui-debt/issues/02-layout-migration-residue-cleanup.md) | 06 | ready-for-agent |
 | 08 | [目录拖动边缘自动滚动](./issues/08-drag-edge-auto-scroll.md) | 04 | complete |
 | 09 | [高风险布局操作一层撤销](./issues/09-one-level-layout-undo.md) | 05 | complete |
-| 10 | [克制的编辑动效与限频触觉反馈](./issues/10-bounded-motion-and-haptics.md) | 03 | ready-for-agent |
+| 10 | [克制的编辑动效与限频触觉反馈](./issues/10-bounded-motion-and-haptics.md) | 03 | complete |
 | 11 | [配置变更保持布局编辑会话](./issues/11-preserve-editor-across-configuration.md) | 02 | ready-for-agent |
 | 12 | [首次拖放引导与可重访帮助](./issues/12-first-use-drag-guidance.md) | 06 | ready-for-agent |
 | 13 | [完整手势、重进与设备回归](./issues/13-full-layout-edit-regression.md) | P1/02, 08–12 | ready-for-agent |

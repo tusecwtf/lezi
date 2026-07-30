@@ -1,10 +1,6 @@
 package com.lezi.babylog.feature.log
 
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -49,16 +45,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.MotionDurationScale
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.KeyEventType
@@ -73,6 +70,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.contentDescription
@@ -105,6 +103,7 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.leziRecordColor
 import com.lezi.babylog.domain.CustomRecordItem
+import kotlin.coroutines.coroutineContext
 import kotlin.math.roundToInt
 
 private val CustomGlyphs = com.lezi.babylog.core.ui.CUSTOM_ITEM_ICON_GLYPHS
@@ -374,21 +373,60 @@ internal fun LayoutEditCanvas(
     var drag by remember { mutableStateOf<LayoutDragState?>(null) }
     var activeSession by remember { mutableStateOf<LayoutDragSession?>(null) }
     var nextDragToken by remember { mutableLongStateOf(0L) }
+    var feedbackState by remember {
+        mutableStateOf<LayoutDragFeedbackState>(LayoutDragFeedbackState.Idle)
+    }
+    var feedbackPulse by remember { mutableStateOf<LayoutDragVisualPulse?>(null) }
+    var feedbackPulseWindow by remember { mutableStateOf<Offset?>(null) }
+    val feedbackProgress = remember { Animatable(0f) }
+    val hapticFeedback = LocalHapticFeedback.current
     val density = LocalDensity.current
-    val isDragging = drag != null
 
-    // Mild jiggle like Android home edit (paused while actively dragging).
-    val jiggle = rememberInfiniteTransition(label = "layout_jiggle")
-    val jiggleAngle by jiggle.animateFloat(
-        initialValue = -2.2f,
-        targetValue = 2.2f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(140, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "jiggle_angle",
-    )
-    val iconWiggle = if (isDragging) 0f else jiggleAngle
+    fun dispatchDragFeedback(
+        event: LayoutDragFeedbackEvent,
+        pointerWindow: Offset,
+    ) {
+        val reduction = reduceLayoutDragFeedback(feedbackState, event)
+        feedbackState = reduction.state
+        if (reduction.clearVisualPulse) {
+            feedbackPulse = null
+            feedbackPulseWindow = null
+        }
+        reduction.visualPulse?.let { pulse ->
+            feedbackPulse = pulse
+            feedbackPulseWindow = pointerWindow
+        }
+        reduction.haptic?.let { haptic ->
+            hapticFeedback.performHapticFeedback(
+                when (haptic) {
+                    LayoutDragHaptic.Target -> HapticFeedbackType.TextHandleMove
+                    LayoutDragHaptic.Pickup,
+                    LayoutDragHaptic.Drop,
+                    -> HapticFeedbackType.LongPress
+                },
+            )
+        }
+    }
+
+    LaunchedEffect(feedbackPulse) {
+        val activePulse = feedbackPulse ?: return@LaunchedEffect
+        feedbackProgress.snapTo(1f)
+        val durationMillis = layoutDragFeedbackDurationMillis(
+            coroutineContext[MotionDurationScale]?.scaleFactor ?: 1f,
+        )
+        if (durationMillis == 0) {
+            feedbackProgress.snapTo(0f)
+        } else {
+            feedbackProgress.animateTo(
+                targetValue = 0f,
+                animationSpec = tween(durationMillis = durationMillis),
+            )
+        }
+        if (feedbackPulse == activePulse) {
+            feedbackPulse = null
+            feedbackPulseWindow = null
+        }
+    }
 
     fun beginDrag(
         source: LayoutDragSource,
@@ -414,6 +452,13 @@ internal fun LayoutEditCanvas(
             recordType = visual?.recordType,
             customIconSlot = visual?.customIconSlot,
         )
+        dispatchDragFeedback(
+            event = LayoutDragFeedbackEvent.PickedUp(
+                token = token,
+                initialTarget = resolution.currentTarget,
+            ),
+            pointerWindow = windowPos,
+        )
         return token
     }
 
@@ -430,6 +475,13 @@ internal fun LayoutEditCanvas(
                 hitRegion = resolution.hitRegion,
                 currentTarget = resolution.currentTarget,
             )
+            dispatchDragFeedback(
+                event = LayoutDragFeedbackEvent.CurrentTargetChanged(
+                    token = token,
+                    target = resolution.currentTarget,
+                ),
+                pointerWindow = windowPos,
+            )
         }
     }
 
@@ -440,6 +492,11 @@ internal fun LayoutEditCanvas(
             pointerWindow = windowPos,
             targets = targetRegistry.snapshot(),
         )
+        val accepted = intent?.let { reduceLayoutEdit(prefs, it, known) != prefs } == true
+        dispatchDragFeedback(
+            event = LayoutDragFeedbackEvent.DropFinished(token, accepted),
+            pointerWindow = windowPos,
+        )
         activeSession = null
         drag = null
         if (intent != null) onIntent(intent)
@@ -449,6 +506,10 @@ internal fun LayoutEditCanvas(
         val current = drag ?: return
         if (token != null && token != current.token) return
         activeSession?.cancel(reason)
+        dispatchDragFeedback(
+            event = LayoutDragFeedbackEvent.Cancelled(current.token),
+            pointerWindow = current.pointerWindow,
+        )
         activeSession = null
         drag = null
     }
@@ -775,7 +836,6 @@ internal fun LayoutEditCanvas(
                                         keys = keys,
                                         labels = labels,
                                         visualByKey = visualByKey,
-                                        wiggleDegrees = iconWiggle,
                                         showAddCell = showAdd,
                                         onAddClick = onOpenCustomManage,
                                         itemModifier = { key ->
@@ -962,7 +1022,6 @@ internal fun LayoutEditCanvas(
                                     keys = deleted,
                                     labels = labels,
                                     visualByKey = visualByKey,
-                                    wiggleDegrees = iconWiggle,
                                     showAddCell = false,
                                     onAddClick = {},
                                     contentDescriptionForKey = { key ->
@@ -1032,7 +1091,6 @@ internal fun LayoutEditCanvas(
                 currentTarget = drag?.currentTarget,
                 dragKey = drag?.catalogKey,
                 dragFromSlot = (drag?.source as? LayoutDragSource.BoundSlot)?.slotIndex,
-                wiggleDegrees = iconWiggle,
                 targetRegistry = targetRegistry,
                 onTargetRegistryChanged = ::notifyTargetRegistryChanged,
                 onSlotDragStart = { index, key, pos ->
@@ -1048,6 +1106,37 @@ internal fun LayoutEditCanvas(
                     cancelActiveDrag(LayoutDragCancelReason.Dispose, token)
                 },
                 onIntent = onIntent,
+            )
+        }
+
+        val activePulse = feedbackPulse
+        val pulseWindow = feedbackPulseWindow
+        if (activePulse != null && pulseWindow != null && feedbackProgress.value > 0f) {
+            val pulseSize = 48.dp
+            val pulseRadiusPx = with(density) { pulseSize.toPx() / 2f }
+            Box(
+                Modifier
+                    .zIndex(19f)
+                    .offset {
+                        IntOffset(
+                            (pulseWindow.x - rootWindowOrigin.x - pulseRadiusPx).roundToInt(),
+                            (pulseWindow.y - rootWindowOrigin.y - pulseRadiusPx).roundToInt(),
+                        )
+                    }
+                    .size(pulseSize)
+                    .scale(0.82f + feedbackProgress.value * 0.18f)
+                    .alpha(feedbackProgress.value)
+                    .border(
+                        width = 2.dp,
+                        color = if (activePulse.kind == LayoutDragVisualPulseKind.Drop) {
+                            MaterialTheme.colorScheme.tertiary
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        },
+                        shape = CircleShape,
+                    )
+                    .testTag("layout_drag_feedback_pulse")
+                    .semantics { invisibleToUser() },
             )
         }
 
@@ -1067,7 +1156,16 @@ internal fun LayoutEditCanvas(
                     )
                 }
                 .width(avatarWidth)
-                .scale(1.08f)
+                .scale(
+                    if (
+                        activePulse?.kind == LayoutDragVisualPulseKind.Pickup &&
+                        activePulse.token == d.token
+                    ) {
+                        1.04f + feedbackProgress.value * 0.04f
+                    } else {
+                        1.08f
+                    },
+                )
                 .testTag("layout_edit_drag_avatar")
                 .semantics { invisibleToUser() }
             if (headingDrag) {
@@ -1139,7 +1237,6 @@ private fun LayoutCatalogGrid(
     keys: List<String>,
     labels: Map<String, String>,
     visualByKey: Map<String, LayoutItemVisual>,
-    wiggleDegrees: Float,
     showAddCell: Boolean,
     onAddClick: () -> Unit,
     contentDescriptionForKey: (String) -> String = { key -> labels[key] ?: key },
@@ -1180,7 +1277,6 @@ private fun LayoutCatalogGrid(
                         contentDescription = contentDescriptionForKey(key),
                         modifier = Modifier
                             .weight(1f)
-                            .rotate(wiggleDegrees)
                             .then(itemModifier(key)),
                     )
                 }
@@ -1201,7 +1297,6 @@ private fun LauncherEditDock(
     currentTarget: LayoutDropTarget?,
     dragKey: String?,
     dragFromSlot: Int?,
-    wiggleDegrees: Float,
     targetRegistry: LayoutVisibleTargetRegistry,
     onTargetRegistryChanged: () -> Unit,
     onSlotDragStart: (Int, String, Offset) -> Long,
@@ -1307,7 +1402,6 @@ private fun LauncherEditDock(
                                 onDragCancel = onSlotDragCancel,
                             )
                             .alpha(if (dimmed) 0.25f else 1f)
-                            .rotate(if (dimmed) 0f else wiggleDegrees)
                     } else {
                         Modifier
                     }
