@@ -1,8 +1,8 @@
 # Spec · 文档–代码 gap 整改（原子同步 / UI / 契约）
 
-**Status:** ready-for-agent  
+**Status:** complete
 **Source:** 四路只读审计（ADR·UI·Sync·Tech）+ grilling 共识（2026-07-30）  
-**Out of band:** 代码改动已回滚；本目录只留可执行票。
+**Validated product HEAD:** `eed73cdb9ce6a4c3184728a8dae1e6bd3d5a9247`
 
 ## Problem Statement
 
@@ -55,5 +55,6 @@
 
 ## Further Notes
 
-- Prior incomplete WIP was fully restored; implement from this spec only.
-- Coordinate with existing open scratch features if they touch the same modules (layout edit, program audit).
+- 7/7 票已完成；frontier 为空。
+- 最终跨模块、Release、设备与 current-wire 结果统一记录在
+  [`release-0.3.0/validation.md`](../2c6bbf6-program-audit-remediation/evidence/release-0.3.0/validation.md)。

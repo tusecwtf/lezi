@@ -1,20 +1,21 @@
 # 当前程序审计整改 · 票索引
 
 Spec: [spec.md](./spec.md)
-**Status:** ready-for-agent
+**Status:** complete
 Original audit baseline: `2c6bbf6787e33de77675cd45ba56518b50152b32`
-Current validation HEAD: `d7b3bea3483367d663fa330eb6596aba3ed73e50`
+Validated product HEAD: `eed73cdb9ce6a4c3184728a8dae1e6bd3d5a9247`
 
 ## Current audit disposition
 
 - Findings: **26**
-- Fixed: **6（02、03、05、15、16、22）**
-- Active tickets in this tracker: **20**
-- Canonical layout tickets: **2**
-- Partial findings: **04、06、09、10、14、17、19**
-- Still-valid findings: **01、07、08、11、12、13、18、20、21、23、24、25、26**
+- Fixed: **26**
+- Active tickets: **0**
+- Local tickets complete: **24**
+- Canonical layout tickets complete: **2**
+- Partial findings: **0**
+- Still-valid findings: **0**
 
-`partial` 只描述审计时已有部分结构，不改变未完成票状态。
+最终验收记录见 [`release-0.3.0/validation.md`](./evidence/release-0.3.0/validation.md)。
 
 ## Dependency graph
 
@@ -38,13 +39,13 @@ layout/05 已删除分区 ────┘
 
 ## Frontier
 
-当前 audit frontier：**01、03、06、07、10、14、20、21、23、24**。
-
-建议并行：**01、06、07**。其余 frontier 同样可领取，但不得把“frontier”误解为必须同时开工。
+当前 audit frontier：**无**；26/26 complete。
 
 ## Tickets
 
-| ID | Ticket | Blocked by | Size | Current audit | Status |
+`Baseline audit` 保留整改前分类用于溯源；当前 disposition 以上方 fixed=26 为准。
+
+| ID | Ticket | Blocked by | Size | Baseline audit | Status |
 |---|---|---|---|---|---|
 | [01](./issues/01-protect-plan-photos-in-fulfillment-draft.md) | 履行草稿保护计划原图 | — | M | still-valid | complete |
 | [02](./issues/02-reference-aware-photo-file-cleanup.md) | 按活跃引用回收共享照片文件 | 01 | M | partial | complete |
@@ -57,8 +58,8 @@ layout/05 已删除分区 ────┘
 | [09](./issues/09-unify-onboarding-and-account-family-wizard.md) | 统一 Onboarding 与账户家庭向导 | 08 | M | partial | complete |
 | [10](./issues/10-unify-next-feed-scheduling-state-machine.md) | 统一下次喂养安排状态机 | — | M | partial | complete |
 | [11](./issues/11-confirm-discard-dirty-composer.md) | 脏 Composer 草稿放弃确认 | 01 | M | still-valid | complete |
-| [12](../record-layout-edit-remediation/issues/02-atomic-device-layout-snapshot.md) | 原子保存设备布局快照 | — | M | still-valid · canonical layout/02 | ready-for-agent |
-| [13](../record-layout-edit-remediation/issues/06-accessible-layout-actions-truthful-empty-slot.md) | 无障碍布局编辑与真实空槽文案 | layout/02、layout/04、layout/05 | M | still-valid · canonical layout/06 | ready-for-agent |
+| [12](../record-layout-edit-remediation/issues/02-atomic-device-layout-snapshot.md) | 原子保存设备布局快照 | — | M | canonical layout/02 | complete |
+| [13](../record-layout-edit-remediation/issues/06-accessible-layout-actions-truthful-empty-slot.md) | 无障碍布局编辑与真实空槽文案 | layout/02、layout/04、layout/05 | M | canonical layout/06 | complete |
 | [14](./issues/14-accessible-record-plan-actions-and-feedback.md) | 无障碍记录/计划管理与结果反馈 | — | M | partial | complete |
 | [15](./issues/15-serialize-growth-measurement-writes.md) | 串行化成长记录写入 | — | S–M | still-valid | complete |
 | [16](./issues/16-root-publication-receipt-and-truthful-copy.md) | 记录根发布回执与真实同步文案 | — | M | still-valid | complete |

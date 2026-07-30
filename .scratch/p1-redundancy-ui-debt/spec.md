@@ -1,10 +1,10 @@
 # Spec: 2026-07-29 P1 冗余与 UI 还债（A–F）
 
-Status: ready-for-agent  
+Status: complete
 Feature: p1-redundancy-ui-debt  
 Source: `docs/reviews/2026-07-29-redundancy-and-ui-review.md` 主题 A–F  
 Ticket count: 10  
-Frontier count: 6
+Frontier count: 0
 
 Related:
 
@@ -43,21 +43,21 @@ Related:
 ## Dependency graph
 
 ```text
-01 统一母乳确认面（frontier）
+01 统一母乳确认面（complete）
 
-record-layout-edit-remediation/06 ──► 02 布局迁移残留清理
+record-layout-edit-remediation/06 ──► 02 布局迁移残留清理（complete）
 
-03 全屏照片预览单源（frontier）
+03 全屏照片预览单源（complete）
 
-04 原子包媒体机械 + customItemUuid 单 helper（frontier）
+04 原子包媒体机械 + customItemUuid 单 helper（complete）
 
-05 照片 reconcile/tombstone 参数化（frontier） ──► 08 CareLog 第一刀切片
+05 照片 reconcile/tombstone 参数化（complete） ──► 08 CareLog 第一刀切片（complete）
 
 06 清理 scope / committed 失败单源（complete）
 
-09 时间条与记录语义色单源（frontier） ──┐
-                                        ├──► 07 LogScreen 结构拆分（建议 09 后或可并行，忌同 PR 混改）
-10 journal 主色政策 + PRD 坞条款 + 死组件（frontier） ─┘
+09 时间条与记录语义色单源（complete） ──┐
+                                        ├──► 07 LogScreen 结构拆分（complete）
+10 journal 主色政策 + PRD 坞条款 + 死组件（complete） ─┘
 ```
 
 ## Process
@@ -70,3 +70,5 @@ record-layout-edit-remediation/06 ──► 02 布局迁移残留清理
 ## Comments
 
 - 2026-07-30：`/to-tickets` 自 A–F 发布；live 核对：槽 normalize 已在 `core.model` 单源、clear 双异常多为 typealias；死布局对话框可能已删，02 以「生产残留 + 双入口」为准。
+- 2026-07-30：10/10 complete；最终 0.3.0 跨模块与 Release 证据见
+  [`release-0.3.0/validation.md`](../2c6bbf6-program-audit-remediation/evidence/release-0.3.0/validation.md)。

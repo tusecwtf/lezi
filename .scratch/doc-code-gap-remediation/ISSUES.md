@@ -10,4 +10,4 @@
 | [06](./issues/06-long-press-nickname-same-day-age.md) | 长按昵称跳下一孩相同日龄 | None | complete |
 | [07](./issues/07-prd-hygiene-timeline-acl-design-status.md) | PRD/design hygiene（时间轴文本、Record ACL、Status） | None | complete |
 
-**Frontier（无阻塞可并行）：** 03。
+**Frontier（无阻塞可并行）：** 无；7/7 complete。

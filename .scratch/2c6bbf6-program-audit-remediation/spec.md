@@ -1,26 +1,23 @@
 # Spec: 当前程序审计整改
 
-**Status:** ready-for-agent
+**Status:** complete
 
 Feature: `2c6bbf6-program-audit-remediation`
 Original audit baseline: `2c6bbf6787e33de77675cd45ba56518b50152b32`
-Current validation HEAD: `d7b3bea3483367d663fa330eb6596aba3ed73e50`
+Validated product HEAD: `eed73cdb9ce6a4c3184728a8dae1e6bd3d5a9247`
 Source: 2026-07-29 审计发现，经 2026-07-30 current-HEAD 重新核对
-
-该 HEAD 相对完成生产代码审计的 `f447bc9` 只增加 tracker 与文档整理；生产代码无变化。
 
 ## Current audit result
 
-本轮按 current validation HEAD 重新判定全部 26 项审计发现：
+本轮在 validated product HEAD 上完成全部 26 项审计发现：
 
-- **fixed：0**。没有一项具备可在当前 HEAD 上闭票的完整证据。
-- **partial：02、04、06、09、10、14、17、19**。当前代码已出现部分结构或行为，但尚未满足原票全部验收条件。
-- **still-valid：01、03、05、07、08、11、12、13、15、16、18、20、21、22、23、24、25、26**。触发条件或缺失能力仍成立。
-- 本目录保留 **24 个 active issue 文件**；布局相关 Finding 12、13 迁入布局整改 tracker 的 canonical tickets，避免两处平行实现：
+- **fixed：26**；**partial：0**；**still-valid：0**；frontier 为空。
+- 本目录的 24 个本地 issue 与布局整改 tracker 的两个 canonical issue 均为 complete：
   - [layout/02 — 原子保存设备布局快照](../record-layout-edit-remediation/issues/02-atomic-device-layout-snapshot.md)
   - [layout/06 — 无障碍布局编辑与真实空槽文案](../record-layout-edit-remediation/issues/06-accessible-layout-actions-truthful-empty-slot.md)
 
-`partial` 不是完成状态。所有本地票和两个 canonical layout 票均保持 `ready-for-agent`，只有在当前 HEAD 上满足全部 Must、验证门和设备证据后才能闭票。
+逐票证据保留在各 issue/evidence；跨模块、Release、设备与 current-wire 总验收见
+[`release-0.3.0/validation.md`](./evidence/release-0.3.0/validation.md)。
 
 ## Problem statement
 
@@ -48,11 +45,11 @@ Source: 2026-07-29 审计发现，经 2026-07-30 current-HEAD 重新核对
 
 ## Delivery shape
 
-24 个本地 tracer 与 2 个 canonical layout tracer 共同覆盖 26 项发现。每票必须交付一条用户可验证的纵向行为、对应失败路径、自动化回归和必要文档；不得按数据层、UI 层或测试层横向拆票。
+24 个本地 tracer 与 2 个 canonical layout tracer 共同覆盖并完成 26 项发现。每票均交付用户可验证的纵向行为、对应失败路径、自动化回归和必要文档。
 
 涉及平行实现的收口采用 expand–migrate–contract：各行为票先证明新路径和旧调用者归零；布局旧表面由 canonical P1/02 清理，Ticket 25 最后只删除其余领域已经无调用者的兼容表面，不承担新的行为迁移或产品决策。
 
-当前 audit frontier：**01、03、05、07、10、14、15、16、17、18、20、21、23、24**。建议首轮并行 **01、05、07**；三者分别位于照片所有权、NAS 历史引用和家庭接回表面，文件与行为边界独立。
+当前 audit frontier：**无**。
 
 ## Global acceptance gates
 
@@ -73,4 +70,4 @@ Source: 2026-07-29 审计发现，经 2026-07-30 current-HEAD 重新核对
 
 ## Closure rule
 
-只有 24 个本地票与 2 个 canonical layout 票均在当前 HEAD 上满足全部 acceptance，且最终跨模块和 Release 门禁有证据，26 项发现才可从 fixed=0 收敛。悬空实现提交只可作为阅读参考，不携带完成状态。
+24 个本地票与 2 个 canonical layout 票已在 validated product HEAD 满足 acceptance；最终跨模块和 Release 门禁证据已归档，26 项发现收敛为 fixed=26。后续 tracker-only 提交不改变已验证产品树。
