@@ -29,8 +29,9 @@ Audit HEAD: `766d30ae7e6094c4c5d82061f2ad916c8895488d`
 08 LogScreen 剩余宿主拆分（complete）
 ```
 
-**Current frontier:** none。01–09 已全部闭合，且两个 accepted residual 未触发重开；等待最终
-固定点跨模块门禁回执后完成本轮总结。
+**Current frontier:** none。01–09 已全部闭合，两个 accepted residual 未触发重开；代码固定点
+`64be97da10618d080bfd3371561c9932e3afde00` 的跨模块门禁已通过，回执见
+[`evidence/final/validation.md`](./evidence/final/validation.md)。
 
 结构票默认不自动实施；正确性门闭合后由用户激活。04–07 因共享 `CareLog.kt` 必须串行。
 

@@ -1,6 +1,6 @@
 # Spec · Post-0.3.0 code-review 残差整改
 
-**Status:** ready-for-agent
+**Status:** complete
 
 Audit HEAD: `766d30ae7e6094c4c5d82061f2ad916c8895488d`
 Release anchor: `eed73cdb9ce6a4c3184728a8dae1e6bd3d5a9247`（0.3.0）
@@ -82,3 +82,6 @@ Grilling decision: 2026-07-30 live-code 复核后确认
 
 01–09 均 complete、两个 accepted residual 未触发重开，且最终固定点通过相应跨模块门禁后，
 本 tracker 才能标 complete。`planned` 不等于完成，也不因 immediate correctness 已修而消失。
+
+Closure receipt: [`evidence/final/validation.md`](./evidence/final/validation.md)（fixed code HEAD
+`64be97da10618d080bfd3371561c9932e3afde00`）。
