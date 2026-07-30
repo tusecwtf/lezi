@@ -4,7 +4,14 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.view.View
+import android.view.Window
+import androidx.activity.OnBackPressedCallback
+import androidx.activity.OnBackPressedDispatcherOwner
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -12,20 +19,28 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ModalBottomSheetProperties
+import androidx.compose.material3.SheetValue
+import androidx.compose.material3.SheetState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.SavedStateHandle
@@ -110,8 +125,18 @@ sealed interface RecordComposerRequest : java.io.Serializable {
 internal class RecordComposerSavedState(
     private val handle: SavedStateHandle,
 ) {
-    fun save(request: RecordComposerRequest, draft: QuickRecordDraft) {
+    fun initialize(
+        request: RecordComposerRequest,
+        initialDraft: QuickRecordDraft,
+        activeDraft: QuickRecordDraft = initialDraft,
+    ) {
         handle[REQUEST_KEY] = request
+        handle[INITIAL_DRAFT_KEY] = initialDraft
+        handle[DRAFT_KEY] = activeDraft
+    }
+
+    fun update(request: RecordComposerRequest, draft: QuickRecordDraft) {
+        if (handle.get<RecordComposerRequest>(REQUEST_KEY) != request) return
         handle[DRAFT_KEY] = draft
     }
 
@@ -119,6 +144,11 @@ internal class RecordComposerSavedState(
         handle.get<RecordComposerRequest>(REQUEST_KEY)
             ?.takeIf { it == request }
             ?.let { handle[DRAFT_KEY] }
+
+    fun restoreInitial(request: RecordComposerRequest): QuickRecordDraft? =
+        handle.get<RecordComposerRequest>(REQUEST_KEY)
+            ?.takeIf { it == request }
+            ?.let { handle[INITIAL_DRAFT_KEY] }
 
     fun draftForCleanup(): QuickRecordDraft? = handle[DRAFT_KEY]
 
@@ -145,11 +175,13 @@ internal class RecordComposerSavedState(
     fun clear() {
         handle.remove<RecordComposerRequest>(REQUEST_KEY)
         handle.remove<QuickRecordDraft>(DRAFT_KEY)
+        handle.remove<QuickRecordDraft>(INITIAL_DRAFT_KEY)
     }
 
     private companion object {
         const val REQUEST_KEY = "record_composer_saved_request"
         const val DRAFT_KEY = "record_composer_saved_draft"
+        const val INITIAL_DRAFT_KEY = "record_composer_saved_initial_draft"
         const val PENDING_NEXT_FEED_BABY_KEY = "pending_next_feed_baby"
         const val PENDING_NEXT_FEED_TYPE_KEY = "pending_next_feed_type"
         const val PENDING_NEXT_FEED_SUGGESTED_AT_KEY = "pending_next_feed_suggested_at"
@@ -166,6 +198,7 @@ internal data class RecordComposerUiState(
     val activeRequest: RecordComposerRequest? = null,
     val loading: Boolean = false,
     val draft: QuickRecordDraft? = null,
+    val initialDraft: QuickRecordDraft? = null,
     val babyId: Long? = null,
     /** Used for age-based tips (e.g. complementary food). */
     val birthdayEpochDay: Long? = null,
@@ -183,7 +216,12 @@ internal data class RecordComposerUiState(
     val saving: Boolean = false,
     val deleting: Boolean = false,
     val error: String? = null,
-)
+) {
+    val hasUserChanges: Boolean
+        get() = initialDraft?.let { baseline ->
+            draft?.let { current -> hasRecordComposerUserChanges(baseline, current) }
+        } ?: false
+}
 
 /** One immutable write decision for a confirm attempt; never resample wall-clock mode mid-save. */
 internal enum class ComposerWriteDecision {
@@ -229,6 +267,7 @@ class RecordComposerViewModel @Inject constructor(
         val current = _state.value
         if (current.activeRequest == request && (current.loading || current.draft != null)) return
         val restoredDraft = savedState.restore(request)
+        val restoredInitialDraft = savedState.restoreInitial(request)
         val session = sessionGate.open()
         loadJob?.cancel()
         actionJob?.cancel()
@@ -386,12 +425,14 @@ class RecordComposerViewModel @Inject constructor(
             currentCoroutineContext().ensureActive()
             val (babyId, birthdayEpochDay, draft) = loaded
             sessionGate.deliver(session) {
+                val initialDraft = restoredInitialDraft ?: draft
                 val activeDraft = restoredDraft ?: draft
                 val systemCalConfigured = settings.systemCalendarEnabled &&
                     !settings.systemCalendarId.isNullOrBlank()
                 _state.value = RecordComposerUiState(
                     activeRequest = request,
                     draft = activeDraft,
+                    initialDraft = initialDraft,
                     babyId = babyId,
                     birthdayEpochDay = birthdayEpochDay,
                     amountStepMl = settings.amountStepMl,
@@ -408,7 +449,7 @@ class RecordComposerViewModel @Inject constructor(
                     ),
                     systemCalendarConfigured = systemCalConfigured,
                 )
-                savedState.save(request, activeDraft)
+                savedState.initialize(request, initialDraft, activeDraft)
                 // Keep projection chrome in sync if user completes setup mid-sheet.
                 settingsObserveJob?.cancel()
                 settingsObserveJob = viewModelScope.launch {
@@ -454,7 +495,7 @@ class RecordComposerViewModel @Inject constructor(
             cur.copy(draft = draft, error = null, canStartNursingTimer = nextCan)
         }
         _state.value.activeRequest?.let { request ->
-            savedState.save(request, draft)
+            savedState.update(request, draft)
         }
     }
 
@@ -757,12 +798,85 @@ class RecordComposerViewModel @Inject constructor(
         val state = _state.value
         val request = state.activeRequest ?: return
         val draft = state.draft ?: return
-        savedState.save(request, draft)
+        savedState.update(request, draft)
     }
 
 }
 
 internal const val RECORD_COMPOSER_SKIP_PARTIALLY_EXPANDED = true
+
+@Composable
+private fun RecordComposerModalBackHandler(
+    enabled: Boolean,
+    onBack: () -> Unit,
+) {
+    val view = LocalView.current
+    val latestOnBack by rememberUpdatedState(onBack)
+    DisposableEffect(view, enabled) {
+        val owner = view.findDialogWindow()?.callback as? OnBackPressedDispatcherOwner
+        if (owner == null) {
+            onDispose { }
+        } else {
+            val callback = object : OnBackPressedCallback(enabled) {
+                override fun handleOnBackPressed() = latestOnBack()
+            }
+            owner.onBackPressedDispatcher.addCallback(callback)
+            onDispose { callback.remove() }
+        }
+    }
+}
+
+private fun View.findDialogWindow(): Window? {
+    var ancestor: Any? = this
+    while (ancestor != null) {
+        if (ancestor is DialogWindowProvider) {
+            return ancestor.window
+        }
+        ancestor = (ancestor as? View)?.parent
+    }
+    return null
+}
+
+/**
+ * Material3 owns a separate dialog window for a modal sheet. Its built-in back callback assumes
+ * [onDismissRequest] always removes that window, so using the callback to open a discard prompt
+ * leaves a retained sheet translated off-screen after predictive back. Keep system back inside the
+ * dialog content tree and let the Composer's shared dismiss gate decide whether the sheet closes.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun RecordComposerModalSheet(
+    sheetState: SheetState,
+    systemBackEnabled: Boolean,
+    modalOverlayVisible: Boolean,
+    onSystemBack: () -> Unit,
+    onDismissRequest: () -> Unit,
+    overlay: @Composable BoxScope.() -> Unit = {},
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismissRequest,
+        sheetState = sheetState,
+        properties = ModalBottomSheetProperties(shouldDismissOnBackPress = false),
+    ) {
+        RecordComposerModalBackHandler(enabled = systemBackEnabled, onBack = onSystemBack)
+        Box(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .then(
+                        if (modalOverlayVisible) {
+                            Modifier.clearAndSetSemantics { }
+                        } else {
+                            Modifier
+                        },
+                    ),
+                content = content,
+            )
+            overlay()
+        }
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -782,6 +896,7 @@ fun RecordComposerHost(
     var deleteAttempted by remember(request) { mutableStateOf(false) }
     /** Explicit convert confirm; cancel keeps the draft and original record untouched. */
     var confirmConvert by remember(request) { mutableStateOf(false) }
+    var confirmDiscard by rememberRecordComposerDiscardPrompt(request)
     // These outlive request=null so a saved fact can finish its optional next-plan flow after
     // the restorable root request has already been consumed. rememberSaveable also preserves the
     // prompt across process recreation without ever reopening the persisted New request.
@@ -793,8 +908,53 @@ fun RecordComposerHost(
         pendingSuggestedNextFeedAt = null
         onSaved(message)
     }
+
+    fun finishDismiss() {
+        confirmDiscard = false
+        vm.close()
+        onDismiss()
+    }
+
+    fun requestDismiss(source: ComposerDismissSource) {
+        when (
+            decideRecordComposerDismiss(
+                source = source,
+                hasUserChanges = state.hasUserChanges,
+                busy = state.saving || state.deleting,
+            )
+        ) {
+            ComposerDismissDecision.DismissNow -> finishDismiss()
+            ComposerDismissDecision.ConfirmDiscard -> confirmDiscard = true
+            ComposerDismissDecision.IgnoreWhileBusy -> Unit
+        }
+    }
+    val latestHasUserChanges by rememberUpdatedState(state.hasUserChanges)
+    val latestBusy by rememberUpdatedState(state.saving || state.deleting)
+    val sheetConfirmValueChange: (SheetValue) -> Boolean = remember(request) {
+        { target ->
+            if (target != SheetValue.Hidden) {
+                true
+            } else {
+                when (
+                    decideRecordComposerDismiss(
+                        source = ComposerDismissSource.SheetDismiss,
+                        hasUserChanges = latestHasUserChanges,
+                        busy = latestBusy,
+                    )
+                ) {
+                    ComposerDismissDecision.DismissNow -> true
+                    ComposerDismissDecision.ConfirmDiscard -> {
+                        confirmDiscard = true
+                        false
+                    }
+                    ComposerDismissDecision.IgnoreWhileBusy -> false
+                }
+            }
+        }
+    }
     val sheetState = rememberModalBottomSheetState(
         skipPartiallyExpanded = RECORD_COMPOSER_SKIP_PARTIALLY_EXPANDED,
+        confirmValueChange = sheetConfirmValueChange,
     )
 
     LaunchedEffect(request) {
@@ -806,14 +966,27 @@ fun RecordComposerHost(
     }
 
     if (request != null) {
-        ModalBottomSheet(
-            onDismissRequest = {
-                if (!state.saving && !state.deleting) {
-                    vm.close()
-                    onDismiss()
+        RecordComposerModalSheet(
+            onDismissRequest = { requestDismiss(ComposerDismissSource.SheetDismiss) },
+            sheetState = sheetState,
+            systemBackEnabled = !confirmDelete && !confirmConvert,
+            modalOverlayVisible = confirmDiscard,
+            onSystemBack = {
+                if (confirmDiscard) {
+                    confirmDiscard = false
+                } else {
+                    requestDismiss(ComposerDismissSource.SystemBack)
                 }
             },
-            sheetState = sheetState,
+            overlay = {
+                if (confirmDiscard) {
+                    RecordComposerDiscardDialog(
+                        busy = state.saving || state.deleting,
+                        onContinueEditing = { confirmDiscard = false },
+                        onDiscard = ::finishDismiss,
+                    )
+                }
+            },
         ) {
             val ready = state.activeRequest == request
             val draft = state.draft.takeIf { ready }
@@ -850,10 +1023,7 @@ fun RecordComposerHost(
                     systemCalendarConfigured = state.systemCalendarConfigured,
                     onConfigureSystemCalendar = onConfigureSystemCalendar,
                     onDraftChange = vm::updateDraft,
-                    onDismiss = {
-                        vm.close()
-                        onDismiss()
-                    },
+                    onDismiss = ::requestDismiss,
                     onDelete = if (draft.isEditing || draft.isEditingCarePlan) {
                         {
                             deleteAttempted = false

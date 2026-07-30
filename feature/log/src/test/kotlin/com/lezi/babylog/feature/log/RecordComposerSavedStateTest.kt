@@ -22,7 +22,7 @@ class RecordComposerSavedStateTest {
             body = "已输入的正文",
             photos = listOf("/data/user/0/com.lezi/files/record-media/draft.jpg"),
         )
-        RecordComposerSavedState(handle).save(request, draft)
+        RecordComposerSavedState(handle).initialize(request, draft)
 
         val recreated = RecordComposerSavedState(handle)
 
@@ -45,7 +45,7 @@ class RecordComposerSavedStateTest {
             timestamp = 2_000L,
             createIntent = ComposerCreateIntent.ScheduleCare,
         )
-        RecordComposerSavedState(handle).save(request, draft)
+        RecordComposerSavedState(handle).initialize(request, draft)
 
         val recreated = RecordComposerSavedState(handle)
 
@@ -62,11 +62,44 @@ class RecordComposerSavedStateTest {
         val handle = SavedStateHandle()
         val request = RecordComposerRequest.Edit(recordId = 9L)
         val saved = RecordComposerSavedState(handle)
-        saved.save(request, QuickRecordDraft.create(RecordType.DIARY, 1_000L))
+        saved.initialize(request, QuickRecordDraft.create(RecordType.DIARY, 1_000L))
 
         saved.clear()
 
         assertNull(RecordComposerSavedState(handle).restore(request))
+    }
+
+    @Test
+    fun recreatedStoreKeepsInitialAndEditedDraftForDirtyRecovery() {
+        val handle = SavedStateHandle()
+        val request = RecordComposerRequest.New(
+            babyId = 7L,
+            type = RecordType.DIARY,
+            timestamp = 1_000L,
+            historical = false,
+        )
+        val initial = QuickRecordDraft.create(RecordType.DIARY, 1_000L)
+        val edited = initial.copy(
+            body = "进程重建后仍未保存",
+            photos = listOf("/data/user/0/com.lezi/files/record-media/draft.jpg"),
+            ownedDraftPhotos = listOf(
+                "/data/user/0/com.lezi/files/record-media/draft.jpg",
+            ),
+        )
+        val saved = RecordComposerSavedState(handle)
+        saved.initialize(request, initial)
+        saved.update(request, edited)
+
+        val recreated = RecordComposerSavedState(handle)
+
+        assertEquals(initial, recreated.restoreInitial(request))
+        assertEquals(edited, recreated.restore(request))
+        assertTrue(
+            hasRecordComposerUserChanges(
+                requireNotNull(recreated.restoreInitial(request)),
+                requireNotNull(recreated.restore(request)),
+            ),
+        )
     }
 
     @Test
@@ -79,7 +112,7 @@ class RecordComposerSavedStateTest {
             timestamp = 1_000L,
             historical = false,
         )
-        saved.save(request, QuickRecordDraft.create(RecordType.FORMULA, 1_000L))
+        saved.initialize(request, QuickRecordDraft.create(RecordType.FORMULA, 1_000L))
         saved.savePendingNextFeed(7L, RecordType.FORMULA, suggestedAtMillis = 9_000L)
 
         saved.clear()

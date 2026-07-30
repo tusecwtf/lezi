@@ -151,7 +151,7 @@ class RecordComposerPhotoLifecycleTest {
             listOf(owned.absolutePath),
         )
         val handle = SavedStateHandle()
-        RecordComposerSavedState(handle).save(request, original)
+        RecordComposerSavedState(handle).initialize(request, original)
 
         // A failed write performs no cleanup. The recreated draft retains ordered ownership.
         val restored = RecordComposerSavedState(handle).restore(request)!!

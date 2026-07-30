@@ -98,7 +98,7 @@ internal fun QuickRecordSheet(
     systemCalendarConfigured: Boolean = false,
     onConfigureSystemCalendar: (() -> Unit)? = null,
     onDraftChange: (QuickRecordDraft) -> Unit,
-    onDismiss: () -> Unit,
+    onDismiss: (ComposerDismissSource) -> Unit,
     onDelete: (() -> Unit)?,
     onConfirm: (QuickRecordDraft) -> Unit,
     onStartNursingTimer: () -> Unit,
@@ -258,6 +258,12 @@ internal fun QuickRecordSheet(
                     },
                 )
                 Text(sheetTitle(draft, nowMillis), style = LeziTypography.Title)
+            }
+            TextButton(
+                onClick = { onDismiss(ComposerDismissSource.HeaderClose) },
+                enabled = actionsEnabled,
+            ) {
+                Text("关闭")
             }
             if (onDelete != null) {
                 TextButton(
@@ -514,7 +520,7 @@ internal fun QuickRecordSheet(
                             confirmChrome,
                             ComposerConfirmChromeEvent.Dismissed,
                         )
-                        onDismiss()
+                        onDismiss(ComposerDismissSource.FooterCancel)
                     },
                     enabled = actionsEnabled,
                     modifier = Modifier.weight(1f),
