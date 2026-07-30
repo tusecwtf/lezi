@@ -1,10 +1,10 @@
 # 2026-07-29 P1 冗余与 UI 还债（A–F）— 票索引
 
 Spec: [spec.md](./spec.md)  
-Status: ready-for-agent  
+Status: complete
 Source: `docs/reviews/2026-07-29-redundancy-and-ui-review.md`  
 Ticket count: 10  
-Frontier count: 1
+Frontier count: 0
 
 ## 依赖图
 
@@ -22,11 +22,11 @@ record-layout-edit-remediation/06 ──► 02 布局迁移残留清理
 06 清理 scope / committed 失败单源（complete）
 
 09 时间条与记录语义色单源（complete） ──┐
-                                        ├──► 07 LogScreen 结构拆分
+                                        ├──► 07 LogScreen 结构拆分（complete）
 10 journal 主色政策 + PRD 坞条款 + 死组件（complete） ─┘
 ```
 
-**可立即开工（frontier）：** 07
+**可立即开工（frontier）：** 无；10/10 complete
 
 **建议顺序（冲突面）：** 先 01、03–04 / 09–10 中小票；02 等布局整改 06 完成；07 避免与 09 同 PR 改时间条色；08 已完成。
 
@@ -40,7 +40,7 @@ record-layout-edit-remediation/06 ──► 02 布局迁移残留清理
 | [04](./issues/04-atomic-media-pack-and-custom-uuid-helper.md) | 原子包媒体机械与 customItemUuid 单 helper | C | — | M | complete |
 | [05](./issues/05-parameterized-photo-reconcile.md) | 照片 reconcile/tombstone 按所有者参数化 | C | — | M | complete |
 | [06](./issues/06-clear-scope-and-committed-failure-single-source.md) | 本机清理 scope 与 committed 失败单源 | D | — | M | complete |
-| [07](./issues/07-log-screen-structural-split.md) | LogScreen 结构拆分（轨 / 坞 / 宿主） | E | 建议 09 | L | ready-for-agent |
+| [07](./issues/07-log-screen-structural-split.md) | LogScreen 结构拆分（轨 / 坞 / 宿主） | E | 建议 09 | L | complete |
 | [08](./issues/08-carelog-first-slice.md) | CareLog 第一刀：展示 helper 与照片附件 | E | 05 | L | complete |
 | [09](./issues/09-timeline-record-color-single-source.md) | 时间条与记录语义色单源 | F | — | M | complete |
 | [10](./issues/10-journal-primary-and-prd-dock-contract.md) | journal 主色政策 + PRD 坞条款 + 死组件 | F | — | M | complete |
@@ -60,3 +60,6 @@ record-layout-edit-remediation/06 ──► 02 布局迁移残留清理
 - 2026-07-30：09 complete；时间线 segment、图例、类型图标统一消费记录语义色角色，移除 lane 二次染色与并行 token。
 - 2026-07-30：02 complete；删除旧布局 route/包装/测试假入口，布局只保留完整快照 writer 与
   `core.model` normalize，自定义项目两入口共享 `core.ui` CRUD 表面；布局回归 13 解锁。
+- 2026-07-30：07 complete；LogScreen 拆为 route/list host、ViewModel、timeline、quick dock
+  四个单元，搬迁主体逐段等价；全量 feature/log 单测、Lint、Debug APK 与 API 35 设备测试
+  45/45 通过，P1 frontier 清零。
