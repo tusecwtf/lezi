@@ -115,6 +115,9 @@ internal class RefreshingSyncBackend(
     override suspend fun getMedia(session: SyncSession, clientUuid: String): ByteArray =
         authenticated(session) { delegate.getMedia(it, clientUuid) }
 
+    override suspend fun getAppUpdateMetadata(session: SyncSession): AppUpdateMetadata =
+        authenticated(session, delegate::getAppUpdateMetadata)
+
     override suspend fun stageBundle(
         session: SyncSession,
         draft: AtomicBundleDraft,

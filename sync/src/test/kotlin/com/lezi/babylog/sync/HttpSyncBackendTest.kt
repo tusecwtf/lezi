@@ -857,6 +857,56 @@ class HttpSyncBackendTest {
     }
 
     @Test
+    fun getAppUpdateMetadataUsesAuthenticatedGetAndParsesWireFields() = runTest {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val captured = CompletableFuture<String>()
+        val responder = thread(name = "lezi-app-update-test-server") {
+            runCatching {
+                server.accept().use { socket ->
+                    captured.complete(readRequest(socket))
+                    val body =
+                        """{"package_name":"com.lezi.babylog","version_code":7,"version_name":"0.3.1","min_supported_version_code":6,"sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","release_notes":"修复同步"}"""
+                            .toByteArray(Charsets.UTF_8)
+                    socket.getOutputStream().use { output ->
+                        output.write(
+                            (
+                                "HTTP/1.1 200 OK\r\n" +
+                                    "Content-Type: application/json\r\n" +
+                                    "Content-Length: ${body.size}\r\n" +
+                                    "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                        )
+                        output.write(body)
+                    }
+                }
+            }.onFailure(captured::completeExceptionally)
+        }
+
+        try {
+            val metadata = loopbackBackend().getAppUpdateMetadata(
+                testSession(server).copy(serverScheme = "http"),
+            )
+            val request = captured.get(2, TimeUnit.SECONDS)
+
+            assertThat(request.lineSequence().first()).startsWith("GET /v1/app-update")
+            assertThat(request).contains("Authorization: Bearer family-token")
+            assertThat(metadata).isEqualTo(
+                AppUpdateMetadata(
+                    packageName = "com.lezi.babylog",
+                    versionCode = 7,
+                    versionName = "0.3.1",
+                    minSupportedVersionCode = 6,
+                    sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    releaseNotes = "修复同步",
+                ),
+            )
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
     fun membersUsesAuthenticatedPrivacyProjectionAndParsesRoles() = runTest {
         val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
         val captured = CompletableFuture<String>()

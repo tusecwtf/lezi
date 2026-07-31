@@ -1,6 +1,6 @@
 # Issues · self-hosted-app-update
 
-**Status:** ready-for-agent  
+**Status:** in-progress  
 **Spec:** [spec.md](./spec.md)  
 **Slice style:** vertical tracer bullets（to-tickets）
 
@@ -18,7 +18,7 @@
 
 | # | Ticket | Blocked by | Status |
 |---|--------|------------|--------|
-| [01](./issues/01-check-update-metadata-about.md) | 已加入设备能检查是否有新版本 | — | ready-for-agent |
+| [01](./issues/01-check-update-metadata-about.md) | 已加入设备能检查是否有新版本 | — | done |
 | [02](./issues/02-optional-download-install-no-residue.md) | 可选更新：下载安装与无残留 | 01 | ready-for-agent |
 | [03](./issues/03-force-update-min-supported.md) | 强制升级：minSupported 与全屏 | 02 | ready-for-agent |
 | [04](./issues/04-handshake-optional-banner.md) | 握手发现与可选横幅 | 01 | ready-for-agent |
@@ -26,8 +26,7 @@
 
 ## Frontier
 
-- **现在可领：** 01  
-- **01 完成后：** 02 与 04 可并行  
+- **现在可领：** 02 与 04（∥）  
 - **02 完成后：** 03  
 - **02+03+04 完成后：** 05  
 

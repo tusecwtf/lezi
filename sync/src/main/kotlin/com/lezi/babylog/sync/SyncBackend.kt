@@ -293,4 +293,11 @@ interface SyncBackend {
 
     /** Publish a complete package in one server transaction (idempotent). */
     suspend fun commitBundle(session: SyncSession, bundleId: String): BundleCommitResult
+
+    /**
+     * Authenticated GET of self-hosted app-update metadata.
+     * Requires a usable device session; no anonymous access.
+     */
+    suspend fun getAppUpdateMetadata(session: SyncSession): AppUpdateMetadata =
+        throw UnsupportedOperationException("App update metadata is not implemented")
 }

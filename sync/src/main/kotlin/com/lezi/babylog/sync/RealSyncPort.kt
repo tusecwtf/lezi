@@ -62,6 +62,7 @@ class RealSyncPort @Inject constructor(
     private val familyBabyAppliedListener: FamilyBabyAuthorityAppliedListener =
         NoOpFamilyBabyAuthorityAppliedListener(),
     private val fulfillmentCandidateDao: FulfillmentCandidateDao,
+    private val clientAppVersion: ClientAppVersion = ClientAppVersion.FALLBACK,
 ) : SyncPort {
     private val currentStatus = MutableStateFlow(SyncStatus.Disabled)
     private val memberLoginCheckEvents = MutableSharedFlow<MemberLoginCheckResult>(
@@ -516,6 +517,27 @@ class RealSyncPort @Inject constructor(
             recoverDomain = localClearRecoveryGate::recoverPendingLocalClear,
         )
         .onFailure(::updateFailureStatus)
+
+    override suspend fun checkAppUpdate(): Result<AppUpdateCheckResult> {
+        val session = preferences.session.first()
+        if (!session.isJoined) {
+            return Result.success(AppUpdateCheckResult.NotJoined)
+        }
+        return runCatching {
+            val decision = foregroundSyncGate.evaluate(
+                session.endpointConfig,
+                preferences.verifiedEndpoint.first(),
+                foregroundState.isForeground(),
+            )
+            requireAllowed(decision)
+            val metadata = backend.getAppUpdateMetadata(session)
+            if (clientAppVersion.versionCode >= metadata.versionCode) {
+                AppUpdateCheckResult.UpToDate
+            } else {
+                AppUpdateCheckResult.OptionalUpdate(metadata)
+            }
+        }.onFailure(::updateFailureStatus)
+    }
 
     /** Caller owns [syncMutex]; lock order is sync mutex then domain mutation guard. */
     private suspend fun recoverPendingLocalClearLocked(): LocalDataClearScope? {

@@ -202,6 +202,13 @@ class FakeSyncBackend : SyncBackend {
     override suspend fun getMedia(session: SyncSession, clientUuid: String): ByteArray =
         mediaBytes[session.familyId]?.get(clientUuid) ?: byteArrayOf()
 
+    /** When null, [getAppUpdateMetadata] fails as if the server has no package. */
+    var appUpdateMetadata: AppUpdateMetadata? = null
+
+    override suspend fun getAppUpdateMetadata(session: SyncSession): AppUpdateMetadata =
+        appUpdateMetadata
+            ?: throw SyncHttpException(404, """{"detail":"App update metadata is not available"}""")
+
     override suspend fun stageBundle(
         session: SyncSession,
         draft: AtomicBundleDraft,

@@ -619,6 +619,12 @@ class HttpSyncBackend internal constructor(
     override suspend fun getMedia(session: SyncSession, clientUuid: String): ByteArray =
         requestBytes(session.baseUrl, "/v1/media/$clientUuid", "GET", session.accessToken)
 
+    override suspend fun getAppUpdateMetadata(session: SyncSession): AppUpdateMetadata {
+        session.requireCurrentReplicaTransport()
+        val json = get(session.baseUrl, "/v1/app-update", session.accessToken)
+        return json.toAppUpdateMetadata()
+    }
+
     override suspend fun stageBundle(
         session: SyncSession,
         draft: AtomicBundleDraft,
@@ -1082,6 +1088,30 @@ private fun JsonObject.requiredNonBlankString(key: String, context: String): Str
 private fun JsonObject.requiredLong(key: String, context: String): Long =
     get(key)?.jsonPrimitive?.longOrNull
         ?: throw IllegalArgumentException("$context 响应缺少或无效 $key")
+
+private fun JsonObject.toAppUpdateMetadata(): AppUpdateMetadata {
+    val context = "app-update"
+    val versionCode = requiredLong("version_code", context)
+    require(versionCode in 1..Int.MAX_VALUE) { "$context version_code 无效" }
+    val minSupported = requiredLong("min_supported_version_code", context)
+    require(minSupported in 0..Int.MAX_VALUE) { "$context min_supported_version_code 无效" }
+    val releaseNotes = when (val raw = get("release_notes")) {
+        null, JsonNull -> null
+        is JsonPrimitive -> {
+            require(raw.isString) { "$context release_notes 必须是字符串" }
+            raw.content.trim().takeIf(String::isNotEmpty)
+        }
+        else -> throw IllegalArgumentException("$context release_notes 必须是字符串")
+    }
+    return AppUpdateMetadata(
+        packageName = requiredNonBlankString("package_name", context),
+        versionCode = versionCode.toInt(),
+        versionName = requiredNonBlankString("version_name", context),
+        minSupportedVersionCode = minSupported.toInt(),
+        sha256 = requiredNonBlankString("sha256", context),
+        releaseNotes = releaseNotes,
+    )
+}
 
 private fun JsonObject.requiredBoolean(key: String, context: String): Boolean =
     get(key)?.jsonPrimitive?.booleanOrNull

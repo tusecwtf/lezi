@@ -531,6 +531,67 @@ async fn setup_status_switches_to_configured_without_exposing_family_metadata() 
 }
 
 #[tokio::test]
+async fn app_update_metadata_requires_session_and_returns_deploy_file() {
+    let rig = Rig::new();
+    let metadata = json!({
+        "package_name": "com.lezi.babylog",
+        "version_code": 7,
+        "version_name": "0.3.1",
+        "min_supported_version_code": 6,
+        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "release_notes": "  修复同步  ",
+    });
+    fs::write(
+        rig.directory.path().join("app-update.json"),
+        metadata.to_string(),
+    )
+    .unwrap();
+
+    let (unauth_status, unauth_body) = get_json(&rig.app, "/v1/app-update", None).await;
+    assert_eq!(unauth_status, StatusCode::UNAUTHORIZED, "{unauth_body}");
+
+    let owner = create_family(
+        &rig.app,
+        "app-update-owner",
+        "app-update-owner-request-00000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let (status, body) = get_json(&rig.app, "/v1/app-update", Some(token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        json!({
+            "package_name": "com.lezi.babylog",
+            "version_code": 7,
+            "version_name": "0.3.1",
+            "min_supported_version_code": 6,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "release_notes": "修复同步",
+        })
+    );
+}
+
+#[tokio::test]
+async fn app_update_metadata_missing_file_is_not_found_for_authenticated_session() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "app-update-missing-owner",
+        "app-update-missing-request-000001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+
+    let (status, body) = get_json(&rig.app, "/v1/app-update", Some(token)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(
+        body["detail"],
+        json!("App update metadata is not available")
+    );
+}
+
+#[tokio::test]
 async fn legacy_invite_and_join_routes_are_absent() {
     let rig = Rig::new();
 

@@ -1,9 +1,13 @@
 package com.lezi.babylog.sync
 
+import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import dagger.Binds
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
+import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
 
@@ -28,5 +32,31 @@ abstract class SyncModule {
             preferences: SyncPreferences,
             clock: PolicyClock,
         ): SyncBackend = RefreshingSyncBackend(http, preferences, clock)
+
+        @Provides
+        @Singleton
+        fun clientAppVersion(@ApplicationContext context: Context): ClientAppVersion {
+            val packageInfo = if (Build.VERSION.SDK_INT >= 33) {
+                context.packageManager.getPackageInfo(
+                    context.packageName,
+                    PackageManager.PackageInfoFlags.of(0),
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                context.packageManager.getPackageInfo(context.packageName, 0)
+            }
+            val versionCode = if (Build.VERSION.SDK_INT >= 28) {
+                packageInfo.longVersionCode.toInt()
+            } else {
+                @Suppress("DEPRECATION")
+                packageInfo.versionCode
+            }
+            return ClientAppVersion(
+                versionCode = versionCode.coerceAtLeast(1),
+                versionName = packageInfo.versionName?.takeIf { it.isNotBlank() }
+                    ?: ClientAppVersion.FALLBACK.versionName,
+                packageName = context.packageName,
+            )
+        }
     }
 }

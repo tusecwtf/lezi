@@ -124,6 +124,59 @@ sealed interface MemberLoginCheckResult {
     ) : MemberLoginCheckResult
 }
 
+/** Local installed app identity used for app-update comparisons (versionCode only). */
+data class ClientAppVersion(
+    val versionCode: Int,
+    val versionName: String,
+    val packageName: String = "com.lezi.babylog",
+) {
+    init {
+        require(versionCode > 0) { "versionCode must be positive" }
+        require(versionName.isNotBlank()) { "versionName must not be blank" }
+        require(packageName.isNotBlank()) { "packageName must not be blank" }
+    }
+
+    companion object {
+        /** Matches current release identity from docs/prd/tech.md / app build.gradle.kts. */
+        val FALLBACK = ClientAppVersion(versionCode = 6, versionName = "0.3.0")
+    }
+}
+
+/** Server-published self-hosted app-update metadata (wire snake_case). */
+data class AppUpdateMetadata(
+    val packageName: String,
+    val versionCode: Int,
+    val versionName: String,
+    val minSupportedVersionCode: Int,
+    val sha256: String,
+    val releaseNotes: String? = null,
+) {
+    init {
+        require(packageName.isNotBlank()) { "packageName must not be blank" }
+        require(versionCode > 0) { "versionCode must be positive" }
+        require(versionName.isNotBlank()) { "versionName must not be blank" }
+        require(minSupportedVersionCode >= 0) { "minSupportedVersionCode must be non-negative" }
+        require(sha256.matches(Regex("^[0-9a-f]{64}$"))) {
+            "sha256 must be 64 lowercase hex characters"
+        }
+    }
+}
+
+/**
+ * High-level outcome of [SyncPort.checkAppUpdate].
+ *
+ * Forced-upgrade UX is ticket 03; this wave only surfaces optional updates when
+ * the server package is newer than the local [ClientAppVersion.versionCode].
+ */
+sealed interface AppUpdateCheckResult {
+    /** Device has no usable family session; no anonymous update request is made. */
+    data object NotJoined : AppUpdateCheckResult
+    /** Local versionCode is at least the server package versionCode. */
+    data object UpToDate : AppUpdateCheckResult
+    /** Server advertises a newer package; install is handled by a later ticket. */
+    data class OptionalUpdate(val metadata: AppUpdateMetadata) : AppUpdateCheckResult
+}
+
 interface SyncPort {
     fun status(): Flow<SyncStatus>
     fun session(): Flow<SyncSession>
@@ -226,6 +279,15 @@ interface SyncPort {
         scope: LocalDataClearScope,
         workflow: LocalClearWorkflow,
     ): Result<Unit>
+
+    /**
+     * Checks whether the trusted family server advertises a newer release APK.
+     *
+     * Not joined → [AppUpdateCheckResult.NotJoined] without network I/O.
+     * Joined → authenticated metadata fetch; compares integer versionCode only.
+     */
+    suspend fun checkAppUpdate(): Result<AppUpdateCheckResult> =
+        Result.success(AppUpdateCheckResult.NotJoined)
 }
 
 @Singleton
@@ -277,4 +339,7 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
             workflow.finishCommitted()
         }
     }
+
+    override suspend fun checkAppUpdate(): Result<AppUpdateCheckResult> =
+        Result.success(AppUpdateCheckResult.NotJoined)
 }

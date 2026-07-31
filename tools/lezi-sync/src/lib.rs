@@ -96,6 +96,9 @@ pub struct ServerConfig {
     pub member_request_rate_limit: RateLimitConfig,
     pub member_request_ttl_hours: u16,
     pub max_pending_member_requests: usize,
+    /// Deploy-readable app-update metadata JSON (`app-update.json` by default).
+    /// When unset, defaults to `{data_dir}/app-update.json`.
+    pub app_update_metadata_path: Option<PathBuf>,
     clock: Clock,
 }
 
@@ -118,6 +121,7 @@ impl ServerConfig {
             },
             member_request_ttl_hours: DEFAULT_MEMBER_REQUEST_TTL_HOURS,
             max_pending_member_requests: DEFAULT_MAX_PENDING_MEMBER_REQUESTS,
+            app_update_metadata_path: None,
             clock: Arc::new(system_epoch_seconds),
         }
     }
@@ -151,6 +155,9 @@ impl ServerConfig {
             "LEZI_MAX_PENDING_MEMBER_REQUESTS",
             DEFAULT_MAX_PENDING_MEMBER_REQUESTS,
         )?;
+        config.app_update_metadata_path = std::env::var_os("LEZI_APP_UPDATE_METADATA_PATH")
+            .map(PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty());
         let window = parse_env(
             "LEZI_RATE_LIMIT_WINDOW_SECONDS",
             DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
@@ -215,6 +222,7 @@ struct AppState {
     member_request_ttl_seconds: i64,
     max_pending_member_requests: usize,
     readiness_cache: Arc<Mutex<Option<CachedReadiness>>>,
+    app_update_metadata_path: PathBuf,
 }
 
 impl AppState {
@@ -381,6 +389,9 @@ pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
     store.reconcile_owner_root_fingerprint((config.clock)(), owner_root_fingerprint.as_deref())?;
     collect_orphan_family_media(&store, &media_root)?;
     retry_committed_pending_bundle_media_cleanup(&store, &media_root)?;
+    let app_update_metadata_path = config
+        .app_update_metadata_path
+        .unwrap_or_else(|| config.data_dir.join("app-update.json"));
     let state = AppState {
         store,
         data_root: config.data_dir,
@@ -399,12 +410,14 @@ pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
         member_request_ttl_seconds: i64::from(config.member_request_ttl_hours) * 60 * 60,
         max_pending_member_requests: config.max_pending_member_requests,
         readiness_cache: Arc::new(Mutex::new(None)),
+        app_update_metadata_path,
     };
     let body_limit = state.max_media_bytes.max(16 * 1024 * 1024);
     Ok(Router::new()
         .route("/health", get(health))
         .route("/ready", get(readiness))
         .route("/v1/setup-status", get(setup_status))
+        .route("/v1/app-update", get(get_app_update))
         .route("/v1/family/create", post(create_family))
         .route("/v1/owner/login", post(owner_login_device))
         .route("/v1/owner/takeover", post(owner_takeover))
@@ -509,6 +522,134 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
             CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
         ],
     }))
+}
+
+/// Authenticated app-update metadata for already-joined family devices.
+/// Loads deploy-readable JSON from [AppState::app_update_metadata_path]
+/// (default `{data_dir}/app-update.json`). Unauthenticated callers receive 401;
+/// missing or unreadable metadata is 404 so clients can fail honestly.
+async fn get_app_update(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let _principal = authenticate(&state, &headers)?;
+    Ok(Json(load_app_update_metadata(&state.app_update_metadata_path)?))
+}
+
+fn load_app_update_metadata(path: &Path) -> Result<Value, ApiError> {
+    let raw = match fs::read_to_string(path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ApiError::not_found("App update metadata is not available"));
+        }
+        Err(_) => {
+            return Err(ApiError::internal("Failed to read app update metadata"));
+        }
+    };
+    let parsed: Value = serde_json::from_str(&raw).map_err(|_| {
+        ApiError::internal("App update metadata is invalid JSON")
+    })?;
+    normalize_app_update_metadata(&parsed)
+}
+
+fn normalize_app_update_metadata(value: &Value) -> Result<Value, ApiError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| ApiError::internal("App update metadata must be a JSON object"))?;
+    let package_name = required_metadata_string(object, "package_name")?;
+    if package_name != "com.lezi.babylog" {
+        return Err(ApiError::internal(
+            "App update metadata package_name must be com.lezi.babylog",
+        ));
+    }
+    let version_code = required_metadata_u64(object, "version_code")?;
+    if version_code == 0 || version_code > i32::MAX as u64 {
+        return Err(ApiError::internal(
+            "App update metadata version_code must be a positive 32-bit integer",
+        ));
+    }
+    let version_name = required_metadata_string(object, "version_name")?;
+    let min_supported_version_code =
+        required_metadata_u64(object, "min_supported_version_code")?;
+    if min_supported_version_code > i32::MAX as u64 {
+        return Err(ApiError::internal(
+            "App update metadata min_supported_version_code is out of range",
+        ));
+    }
+    let sha256 = required_metadata_string(object, "sha256")?;
+    if !is_sha256_hex(&sha256) {
+        return Err(ApiError::internal(
+            "App update metadata sha256 must be 64 lowercase hex characters",
+        ));
+    }
+    let mut body = json!({
+        "package_name": package_name,
+        "version_code": version_code,
+        "version_name": version_name,
+        "min_supported_version_code": min_supported_version_code,
+        "sha256": sha256,
+    });
+    if let Some(notes) = object.get("release_notes") {
+        match notes {
+            Value::Null => {}
+            Value::String(text) => {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    body.as_object_mut()
+                        .expect("app update body is object")
+                        .insert("release_notes".to_owned(), Value::String(trimmed.to_owned()));
+                }
+            }
+            _ => {
+                return Err(ApiError::internal(
+                    "App update metadata release_notes must be a string when present",
+                ));
+            }
+        }
+    }
+    Ok(body)
+}
+
+fn required_metadata_string(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<String, ApiError> {
+    match object.get(key) {
+        Some(Value::String(value)) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                Err(ApiError::internal(format!(
+                    "App update metadata {key} must be a non-empty string"
+                )))
+            } else {
+                Ok(trimmed.to_owned())
+            }
+        }
+        _ => Err(ApiError::internal(format!(
+            "App update metadata {key} must be a non-empty string"
+        ))),
+    }
+}
+
+fn required_metadata_u64(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<u64, ApiError> {
+    match object.get(key) {
+        Some(Value::Number(number)) => number.as_u64().ok_or_else(|| {
+            ApiError::internal(format!("App update metadata {key} must be a non-negative integer"))
+        }),
+        _ => Err(ApiError::internal(format!(
+            "App update metadata {key} must be a non-negative integer"
+        ))),
+    }
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 async fn setup_status(State(state): State<Arc<AppState>>) -> Result<Response, ApiError> {

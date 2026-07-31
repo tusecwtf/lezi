@@ -80,6 +80,7 @@ import com.lezi.babylog.domain.LocalDataClearCoordinator
 import com.lezi.babylog.domain.LocalDataClearScope
 import com.lezi.babylog.domain.SystemCalendarConfigurationCoordinator
 import com.lezi.babylog.domain.SystemCalendarPort
+import com.lezi.babylog.sync.ClientAppVersion
 import com.lezi.babylog.sync.SyncPort
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
@@ -87,7 +88,10 @@ import java.time.LocalDate
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import javax.inject.Inject
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -116,9 +120,13 @@ data class SettingsUi(
     val isFamilyJoined: Boolean = false,
     val familyRole: com.lezi.babylog.sync.FamilyRole = com.lezi.babylog.sync.FamilyRole.None,
     val systemCalendarTargetSummary: String = "未配置",
+    val appVersionName: String = ClientAppVersion.FALLBACK.versionName,
 ) {
     val canManageBabyProfiles: Boolean
         get() = familyRole != com.lezi.babylog.sync.FamilyRole.Member
+
+    val appVersionLabel: String
+        get() = localAppVersionLabel(appVersionName)
 }
 
 private data class LocalSettingsUi(
@@ -136,6 +144,7 @@ class SettingsViewModel @Inject constructor(
     private val systemCalendarPort: SystemCalendarPort,
     private val systemCalendarConfiguration: SystemCalendarConfigurationCoordinator,
     private val localDataClearCoordinator: LocalDataClearCoordinator,
+    private val clientAppVersion: ClientAppVersion,
 ) : ViewModel() {
     private val settingsWithCalendarTarget = settingsStore.settings.map { settings ->
         val hasPermission = systemCalendarPort.hasCalendarPermission()
@@ -176,8 +185,48 @@ class SettingsViewModel @Inject constructor(
             isFamilyJoined = session.isJoined,
             familyRole = session.role,
             systemCalendarTargetSummary = local.systemCalendarTargetSummary,
+            appVersionName = clientAppVersion.versionName,
         )
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsUi())
+    }.stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5_000),
+        SettingsUi(appVersionName = clientAppVersion.versionName),
+    )
+
+    private val _appUpdateOutcome = MutableStateFlow<AppUpdateUiOutcome?>(null)
+    val appUpdateOutcome: StateFlow<AppUpdateUiOutcome?> = _appUpdateOutcome.asStateFlow()
+    private val _checkingAppUpdate = MutableStateFlow(false)
+    val checkingAppUpdate: StateFlow<Boolean> = _checkingAppUpdate.asStateFlow()
+
+    fun checkAppUpdate() {
+        if (_checkingAppUpdate.value) return
+        viewModelScope.launch {
+            _checkingAppUpdate.value = true
+            try {
+                val result = syncPort.checkAppUpdate()
+                _appUpdateOutcome.value = appUpdateUiOutcome(result) { error ->
+                    productUiError(error, "检查更新失败，请稍后重试")
+                }
+            } finally {
+                _checkingAppUpdate.value = false
+            }
+        }
+    }
+
+    fun dismissAppUpdateOutcome() {
+        _appUpdateOutcome.value = null
+    }
+
+    /**
+     * Ticket 01 only reaches optional confirmation. Download/install is ticket 02;
+     * acknowledge so the user is not stuck on a dead-end action.
+     */
+    fun acknowledgeOptionalUpdateInstallStub() {
+        _appUpdateOutcome.value = AppUpdateUiOutcome.Message(
+            title = "检查更新",
+            body = "下载安装即将推出，请稍后在关于中再试",
+        )
+    }
 
     fun setDark(mode: String) = viewModelScope.launch { settingsStore.setDarkMode(mode) }
     fun setTimer(enabled: Boolean) = viewModelScope.launch { settingsStore.setTimerEnabled(enabled) }
@@ -322,6 +371,8 @@ fun SettingsRoute(
     vm: SettingsViewModel = hiltViewModel(),
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
+    val appUpdateOutcome by vm.appUpdateOutcome.collectAsStateWithLifecycle()
+    val checkingAppUpdate by vm.checkingAppUpdate.collectAsStateWithLifecycle()
     val clearRecordsCopy = clearRecordsConfirmationCopy(ui.isFamilyJoined)
     var showAdd by remember(initiallyShowAddBaby) { mutableStateOf(initiallyShowAddBaby) }
     var clearStep by remember { mutableIntStateOf(0) }
@@ -460,16 +511,59 @@ fun SettingsRoute(
             )
 
             Text("关于", style = LeziTypography.Eyebrow, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            LeziSurfacePanel(Modifier.fillMaxWidth(), bottomBand = true) {
+            LeziSurfacePanel(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(
+                        enabled = !checkingAppUpdate,
+                        onClickLabel = "检查更新",
+                        role = Role.Button,
+                        onClick = vm::checkAppUpdate,
+                    ),
+                bottomBand = true,
+            ) {
                 Text("乐记", style = LeziTypography.TitleSm)
                 Text(
-                    "无广告 · 无内购 · 本地优先",
+                    if (checkingAppUpdate) "正在检查更新…" else ui.appVersionLabel,
                     style = LeziTypography.Meta,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             Spacer(Modifier.height(LeziSpacing.Xxl))
         }
+    }
+
+    when (val outcome = appUpdateOutcome) {
+        is AppUpdateUiOutcome.Message -> {
+            AlertDialog(
+                onDismissRequest = vm::dismissAppUpdateOutcome,
+                title = { Text(outcome.title) },
+                text = { Text(outcome.body) },
+                confirmButton = {
+                    TextButton(onClick = vm::dismissAppUpdateOutcome) {
+                        Text("知道了")
+                    }
+                },
+            )
+        }
+        is AppUpdateUiOutcome.OptionalUpdate -> {
+            AlertDialog(
+                onDismissRequest = vm::dismissAppUpdateOutcome,
+                title = { Text("发现新版本") },
+                text = { Text(optionalUpdateDialogBody(outcome.metadata)) },
+                confirmButton = {
+                    TextButton(onClick = vm::acknowledgeOptionalUpdateInstallStub) {
+                        Text("立即更新")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = vm::dismissAppUpdateOutcome) {
+                        Text("稍后")
+                    }
+                },
+            )
+        }
+        null -> Unit
     }
 
     if (showRecordSettings) {

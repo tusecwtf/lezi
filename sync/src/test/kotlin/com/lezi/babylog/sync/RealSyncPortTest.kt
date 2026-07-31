@@ -44,6 +44,50 @@ import org.junit.Test
 
 class RealSyncPortTest {
     @Test
+    fun checkAppUpdateReturnsNotJoinedWithoutCallingBackend() = runTest {
+        val rig = SyncRig(session = SyncSession())
+        rig.awaitStartupRecovery()
+
+        val result = rig.port.checkAppUpdate().getOrThrow()
+
+        assertThat(result).isEqualTo(AppUpdateCheckResult.NotJoined)
+        assertThat(rig.backend.getAppUpdateMetadataCalls).isEqualTo(0)
+    }
+
+    @Test
+    fun checkAppUpdateReturnsUpToDateWhenLocalVersionIsCurrentOrNewer() = runTest {
+        val metadata = sampleAppUpdateMetadata(versionCode = 6, versionName = "0.3.0")
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+        )
+        rig.awaitStartupRecovery()
+        rig.backend.appUpdateMetadata = metadata
+
+        assertThat(rig.port.checkAppUpdate().getOrThrow())
+            .isEqualTo(AppUpdateCheckResult.UpToDate)
+        assertThat(rig.backend.getAppUpdateMetadataCalls).isEqualTo(1)
+    }
+
+    @Test
+    fun checkAppUpdateReturnsOptionalUpdateWhenServerIsNewer() = runTest {
+        val metadata = sampleAppUpdateMetadata(
+            versionCode = 7,
+            versionName = "0.3.1",
+            releaseNotes = "修复同步",
+        )
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+        )
+        rig.awaitStartupRecovery()
+        rig.backend.appUpdateMetadata = metadata
+
+        assertThat(rig.port.checkAppUpdate().getOrThrow())
+            .isEqualTo(AppUpdateCheckResult.OptionalUpdate(metadata))
+    }
+
+    @Test
     fun confirmedFamilyDeleteStagesFullClearAndRetiresEveryLocalFamilyTrace() = runTest {
         val clearGate = TestRemovedDeviceLocalClearGate()
         val rig = SyncRig(
@@ -6075,6 +6119,17 @@ internal class RecordingSyncBackend : SyncBackend {
         return mediaBytes
     }
 
+    var appUpdateMetadata: AppUpdateMetadata? = null
+    var getAppUpdateMetadataFailure: Throwable? = null
+    var getAppUpdateMetadataCalls = 0
+
+    override suspend fun getAppUpdateMetadata(session: SyncSession): AppUpdateMetadata {
+        getAppUpdateMetadataCalls += 1
+        getAppUpdateMetadataFailure?.let { throw it }
+        return appUpdateMetadata
+            ?: throw SyncHttpException(404, """{"detail":"App update metadata is not available"}""")
+    }
+
     val stagedBundles = mutableListOf<AtomicBundleDraft>()
     val bundleMediaUploads = mutableListOf<Pair<String, String>>()
     val committedBundles = mutableListOf<String>()
@@ -6495,6 +6550,7 @@ private class SyncRig(
     syncPreferences: MemorySyncPreferences? = null,
     setupProbe: SetupProbe = SetupProbe { _, _ -> SetupProbeResult.Failed.Unreachable },
     removedDeviceLocalClearGate: RemovedDeviceLocalClearGate = NoOpRemovedDeviceLocalClearGate(),
+    clientAppVersion: ClientAppVersion = ClientAppVersion.FALLBACK,
 ) {
     val backend = RecordingSyncBackend()
     val preferences = (syncPreferences ?: MemorySyncPreferences(session)).also {
@@ -6543,6 +6599,7 @@ private class SyncRig(
         removedDeviceLocalClearGate = removedDeviceLocalClearGate,
         carePlanAppliedListener = CarePlanFamilyAppliedListener { carePlanApplied(it) },
         fulfillmentCandidateDao = fulfillmentCandidates,
+        clientAppVersion = clientAppVersion,
     )
 
     suspend fun awaitStartupRecovery() {
@@ -6913,6 +6970,19 @@ private fun joinedSession(familyId: String) = SyncSession(
     serverHost = "192.168.1.20",
     serverPort = 8787,
     familyName = "乐乐一家",
+)
+
+private fun sampleAppUpdateMetadata(
+    versionCode: Int,
+    versionName: String,
+    releaseNotes: String? = null,
+) = AppUpdateMetadata(
+    packageName = "com.lezi.babylog",
+    versionCode = versionCode,
+    versionName = versionName,
+    minSupportedVersionCode = 6,
+    sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    releaseNotes = releaseNotes,
 )
 
 private fun SyncSession.expectedMediaReceipt(clientUuid: String): String {
