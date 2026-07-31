@@ -107,6 +107,7 @@ class RealSyncPortTest {
         )
         resumedGate.firstCall.await()
         withTimeout(2_000) { preferences.session.filter { !it.isJoined }.first() }
+        withTimeout(2_000) { preferences.familyDeletionClearCompleted.await() }
         assertThat(preferences.current()).isEqualTo(SyncSession())
         assertThat(preferences.pendingFamilyDeletionClear).isFalse()
     }
@@ -6206,6 +6207,7 @@ internal class MemorySyncPreferences(
     var pendingDeviceRemovalClear = false
     var pendingMembershipDeletionClear = false
     var pendingFamilyDeletionClear = false
+    val familyDeletionClearCompleted = CompletableDeferred<Unit>()
     override val session: Flow<SyncSession> = state
     override val verifiedEndpoint: Flow<TrustedEndpointProfile?> = endpointState
     override val pendingMemberLogin: Flow<PendingMemberLogin?> = pendingMemberState
@@ -6417,6 +6419,7 @@ internal class MemorySyncPreferences(
 
     override suspend fun clearPendingFamilyDeletionClear() {
         pendingFamilyDeletionClear = false
+        familyDeletionClearCompleted.complete(Unit)
     }
 }
 
