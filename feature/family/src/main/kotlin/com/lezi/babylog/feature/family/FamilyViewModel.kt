@@ -32,6 +32,7 @@ import com.lezi.babylog.sync.PendingMemberRenameRequest
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.sync.appUpdateInstallUiOutcome
+import com.lezi.babylog.sync.appUpdateUiOutcome
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
@@ -207,6 +208,8 @@ class FamilyViewModel @Inject constructor(
 
     private val _appUpdateOutcome = MutableStateFlow<AppUpdateUiOutcome?>(null)
     val appUpdateOutcome: StateFlow<AppUpdateUiOutcome?> = _appUpdateOutcome.asStateFlow()
+    private val _checkingAppUpdate = MutableStateFlow(false)
+    val checkingAppUpdate: StateFlow<Boolean> = _checkingAppUpdate.asStateFlow()
     private val _installingAppUpdate = MutableStateFlow(false)
     val installingAppUpdate: StateFlow<Boolean> = _installingAppUpdate.asStateFlow()
 
@@ -229,12 +232,33 @@ class FamilyViewModel @Inject constructor(
 
     fun dismissAppUpdateOutcome() {
         val current = _appUpdateOutcome.value
-        // Forced updates cannot be dismissed ("稍后" is not allowed).
+        // Forced updates cannot be dismissed ("稍后" is not allowed). Root force shell
+        // remains authoritative; do not dismiss PackageUnknown either.
         if (current is AppUpdateUiOutcome.ForcedUpdate) return
+        if (current is AppUpdateUiOutcome.ForcedUpdatePackageUnknown) return
         if (current is AppUpdateUiOutcome.OptionalUpdate) {
             sync.dismissOptionalAppUpdate(current.metadata.versionCode)
         }
         _appUpdateOutcome.value = null
+    }
+
+    /**
+     * Manual / PackageUnknown-retry check — same busy + [SyncPort.checkAppUpdate] path as
+     * Settings so secondary force dialogs share one contract (root overlay stays authoritative).
+     */
+    fun checkAppUpdate() {
+        if (_checkingAppUpdate.value || _installingAppUpdate.value) return
+        viewModelScope.launch {
+            _checkingAppUpdate.value = true
+            try {
+                val result = sync.checkAppUpdate()
+                _appUpdateOutcome.value = appUpdateUiOutcome(result) { error ->
+                    productUiError(error, "检查更新失败，请稍后重试")
+                }
+            } finally {
+                _checkingAppUpdate.value = false
+            }
+        }
     }
 
     /** Download → sha256 verify → PackageInstaller (same path as settings). */

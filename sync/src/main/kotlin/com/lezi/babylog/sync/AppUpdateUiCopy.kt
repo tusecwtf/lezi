@@ -27,12 +27,21 @@ sealed interface AppUpdateUiOutcome {
     ) : AppUpdateUiOutcome
 
     /**
-     * Non-dismissible force upgrade. UI must not offer "稍后" and should block
-     * ordinary main features until install completes (or process dies after upgrade).
+     * Non-dismissible force upgrade with installable package metadata.
+     * UI must not offer "稍后". Root [ForcedAppUpdateState.WithPackage] is the
+     * authoritative full-screen gate; settings/family dialogs are secondary and
+     * must not dismiss or bypass that root shell.
      */
     data class ForcedUpdate(
         val metadata: AppUpdateMetadata,
     ) : AppUpdateUiOutcome
+
+    /**
+     * Force required (server `client_update_required`) but package metadata is not
+     * available yet. Maps to [ForcedAppUpdateState.PackageUnknown] on the root shell;
+     * dialogs may offer retry-check only — no "稍后", no install until metadata loads.
+     */
+    data object ForcedUpdatePackageUnknown : AppUpdateUiOutcome
 
     /** Prompt the user to grant install-unknown-apps for this package. */
     data object NeedsInstallPermission : AppUpdateUiOutcome
@@ -50,10 +59,9 @@ fun appUpdateUiOutcome(
             (error is SyncHttpException &&
                 syncHttpCodeOrNull(error.responseBody) == "client_update_required")
         ) {
-            return AppUpdateUiOutcome.Message(
-                title = "必须更新乐记",
-                body = "需要更新乐记后才能继续同步家庭数据。请从家庭服务器下载并安装最新版本。",
-            )
+            // Align with ForcedAppUpdateState.PackageUnknown: force shell, not a
+            // dismissible "network" Message. Root overlay remains authoritative.
+            return AppUpdateUiOutcome.ForcedUpdatePackageUnknown
         }
         return AppUpdateUiOutcome.Message(
             title = "检查更新",
@@ -98,6 +106,16 @@ fun forcedUpdateDialogBody(metadata: AppUpdateMetadata): String {
         }
     }
 }
+
+/**
+ * Full-screen force shell when the server already required a client update but
+ * package metadata could not be loaded yet (retry check, no install until known).
+ */
+fun forcedUpdatePackageUnknownBody(): String =
+    "当前版本过旧，须更新乐记后才能继续同步家庭数据。暂时无法从家庭服务器获取更新包，请点「重试检查更新」后再试。"
+
+/** Primary action label while forced package metadata is still unknown. */
+fun forcedUpdateRetryCheckLabel(): String = "重试检查更新"
 
 fun forcedUpdateTitle(): String = "必须更新乐记"
 

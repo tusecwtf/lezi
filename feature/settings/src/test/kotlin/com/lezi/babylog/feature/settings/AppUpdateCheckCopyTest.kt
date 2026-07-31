@@ -13,6 +13,8 @@ import com.lezi.babylog.sync.appUpdateInstallUiOutcome
 import com.lezi.babylog.sync.appUpdateUiOutcome
 import com.lezi.babylog.sync.familySyncError
 import com.lezi.babylog.sync.forcedUpdateDialogBody
+import com.lezi.babylog.sync.forcedUpdatePackageUnknownBody
+import com.lezi.babylog.sync.forcedUpdateRetryCheckLabel
 import com.lezi.babylog.sync.forcedUpdateTitle
 import com.lezi.babylog.sync.localAppVersionLabel
 import com.lezi.babylog.sync.optionalUpdateDialogBody
@@ -108,15 +110,24 @@ class AppUpdateCheckCopyTest {
     }
 
     @Test
-    fun clientUpdateRequiredFailureMapsToForceCopyNotNetworkFailure() {
+    fun clientUpdateRequiredFailureMapsToForcePackageUnknownNotNetworkFailure() {
         val outcome = appUpdateUiOutcome(
             Result.failure(ClientUpdateRequiredException()),
             failureCopy = { "网络错误" },
         )
 
-        assertTrue(outcome is AppUpdateUiOutcome.Message)
-        assertEquals("必须更新乐记", (outcome as AppUpdateUiOutcome.Message).title)
-        assertTrue(outcome.body.contains("需要更新乐记"))
+        assertEquals(AppUpdateUiOutcome.ForcedUpdatePackageUnknown, outcome)
+    }
+
+    @Test
+    fun forcedPackageUnknownShellCopyIsNotGenericSyncFailure() {
+        val body = forcedUpdatePackageUnknownBody()
+        assertTrue(body.contains("须更新乐记"))
+        assertTrue(body.contains("家庭服务器"))
+        assertTrue(body.contains("重试检查更新"))
+        assertFalse(body.contains("网络错误"))
+        assertFalse(body.contains("暂时无法连接"))
+        assertEquals("重试检查更新", forcedUpdateRetryCheckLabel())
     }
 
     @Test

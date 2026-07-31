@@ -112,7 +112,8 @@ class RealSyncPortTest {
             .isEqualTo(AppUpdateCheckResult.ForcedUpdate(metadata))
         // Forced wins: optional banner must not also fire.
         assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
-        assertThat(rig.port.availableForcedAppUpdate().first()).isEqualTo(metadata)
+        assertThat(rig.port.availableForcedAppUpdate().first())
+            .isEqualTo(ForcedAppUpdateState.WithPackage(metadata))
     }
 
     @Test
@@ -131,7 +132,8 @@ class RealSyncPortTest {
 
         assertThat(rig.port.checkAppUpdate().getOrThrow())
             .isEqualTo(AppUpdateCheckResult.ForcedUpdate(metadata))
-        assertThat(rig.port.availableForcedAppUpdate().first()).isEqualTo(metadata)
+        assertThat(rig.port.availableForcedAppUpdate().first())
+            .isEqualTo(ForcedAppUpdateState.WithPackage(metadata))
         assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
     }
 
@@ -158,9 +160,94 @@ class RealSyncPortTest {
         assertThat(result.isFailure).isTrue()
         assertThat(result.exceptionOrNull())
             .isInstanceOf(ClientUpdateRequiredException::class.java)
-        assertThat(rig.port.availableForcedAppUpdate().first()).isEqualTo(metadata)
+        assertThat(rig.port.availableForcedAppUpdate().first())
+            .isEqualTo(ForcedAppUpdateState.WithPackage(metadata))
         assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
         // Status stays Idle so UI leads with force-upgrade, not a generic sync error.
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+    }
+
+    @Test
+    fun syncClientUpdateRequiredWithMetadataFailurePublishesForceShellNotSilentIdle() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+        )
+        rig.awaitStartupRecovery()
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+        assertThat(rig.port.availableForcedAppUpdate().first()).isNull()
+
+        // Gate rejects authoritative sync; update metadata is temporarily unavailable.
+        rig.backend.getAppUpdateMetadataFailure =
+            SyncHttpException(500, """{"detail":"update store unavailable"}""")
+        rig.backend.pullFailures += ClientUpdateRequiredException()
+
+        val result = rig.port.sync(SyncTrigger.PullToRefresh)
+        assertThat(result.isFailure).isTrue()
+        assertThat(result.exceptionOrNull())
+            .isInstanceOf(ClientUpdateRequiredException::class.java)
+        // Must not look like "假正常": Idle status alone with no force surface.
+        assertThat(rig.port.availableForcedAppUpdate().first())
+            .isEqualTo(ForcedAppUpdateState.PackageUnknown)
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
+        // Still not a vague NAS/sync Error — force shell is the recovery path.
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+    }
+
+    @Test
+    fun checkAppUpdateClientUpdateRequiredWithMetadataFailurePublishesForceShell() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+        )
+        rig.awaitStartupRecovery()
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+
+        // Wire gate code on the metadata path (update routes normally skip min gate;
+        // recover still maps client_update_required and must leave a force shell).
+        rig.backend.getAppUpdateMetadataFailure = SyncHttpException(
+            statusCode = 403,
+            responseBody = """{"code":"client_update_required","detail":"too old"}""",
+        )
+
+        val result = rig.port.checkAppUpdate()
+        assertThat(result.isFailure).isTrue()
+        assertThat(result.exceptionOrNull())
+            .isInstanceOf(ClientUpdateRequiredException::class.java)
+        assertThat(rig.port.availableForcedAppUpdate().first())
+            .isEqualTo(ForcedAppUpdateState.PackageUnknown)
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
+        // Manual check must never mutate SyncStatus to Error.
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+    }
+
+    @Test
+    fun syncClientUpdateRequiredKeepsForceShellWhenMetadataClassifiesNonForced() = runTest {
+        // Server gate says CUR, but advertised minSupported is below local (divergence).
+        val metadata = sampleAppUpdateMetadata(
+            versionCode = 9,
+            versionName = "0.4.0",
+            minSupportedVersionCode = 6,
+        )
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 8, versionName = "0.3.5"),
+        )
+        rig.awaitStartupRecovery()
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+
+        rig.backend.appUpdateMetadata = metadata
+        rig.backend.pullFailures += ClientUpdateRequiredException()
+
+        val result = rig.port.sync(SyncTrigger.PullToRefresh)
+        assertThat(result.isFailure).isTrue()
+        assertThat(result.exceptionOrNull())
+            .isInstanceOf(ClientUpdateRequiredException::class.java)
+        // Must not clear to silent Idle: keep PackageUnknown (or prior package).
+        assertThat(rig.port.availableForcedAppUpdate().first())
+            .isEqualTo(ForcedAppUpdateState.PackageUnknown)
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
     }
 
@@ -199,7 +286,8 @@ class RealSyncPortTest {
         assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
 
         assertThat(rig.backend.getAppUpdateMetadataCalls).isEqualTo(1)
-        assertThat(rig.port.availableForcedAppUpdate().first()).isEqualTo(metadata)
+        assertThat(rig.port.availableForcedAppUpdate().first())
+            .isEqualTo(ForcedAppUpdateState.WithPackage(metadata))
         assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
     }

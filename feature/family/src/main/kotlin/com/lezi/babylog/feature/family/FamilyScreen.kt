@@ -43,6 +43,8 @@ import com.lezi.babylog.sync.SetupFamilyState
 import com.lezi.babylog.sync.SetupProbeResult
 import com.lezi.babylog.sync.defaultAndroidDeviceName
 import com.lezi.babylog.sync.forcedUpdateDialogBody
+import com.lezi.babylog.sync.forcedUpdatePackageUnknownBody
+import com.lezi.babylog.sync.forcedUpdateRetryCheckLabel
 import com.lezi.babylog.sync.forcedUpdateTitle
 import com.lezi.babylog.sync.optionalUpdateDialogBody
 import com.lezi.babylog.sync.requireDeviceName
@@ -68,6 +70,7 @@ fun FamilyRoute(
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
     val appUpdateOutcome by vm.appUpdateOutcome.collectAsStateWithLifecycle()
+    val checkingAppUpdate by vm.checkingAppUpdate.collectAsStateWithLifecycle()
     val installingAppUpdate by vm.installingAppUpdate.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var dialog by remember { mutableStateOf<FamilyDialog?>(null) }
@@ -458,6 +461,7 @@ fun FamilyRoute(
             )
         }
         is AppUpdateUiOutcome.ForcedUpdate -> {
+            // Secondary to root ForcedAppUpdateState full-screen shell.
             AlertDialog(
                 onDismissRequest = {},
                 properties = DialogProperties(
@@ -472,6 +476,32 @@ fun FamilyRoute(
                         enabled = !installingAppUpdate,
                     ) {
                         Text(if (installingAppUpdate) "安装中…" else "立即更新")
+                    }
+                },
+            )
+        }
+        AppUpdateUiOutcome.ForcedUpdatePackageUnknown -> {
+            // Align with Settings / ForcedAppUpdateState.PackageUnknown: retry check only.
+            AlertDialog(
+                onDismissRequest = {},
+                properties = DialogProperties(
+                    dismissOnBackPress = false,
+                    dismissOnClickOutside = false,
+                ),
+                title = { Text(forcedUpdateTitle()) },
+                text = { Text(forcedUpdatePackageUnknownBody()) },
+                confirmButton = {
+                    TextButton(
+                        onClick = vm::checkAppUpdate,
+                        enabled = !checkingAppUpdate && !installingAppUpdate,
+                    ) {
+                        Text(
+                            if (checkingAppUpdate) {
+                                "检查中…"
+                            } else {
+                                forcedUpdateRetryCheckLabel()
+                            },
+                        )
                     }
                 },
             )

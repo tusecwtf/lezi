@@ -8,12 +8,16 @@ import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -106,11 +110,16 @@ import com.lezi.babylog.feature.timer.TimerRoute
 import com.lezi.babylog.feature.widget.CareWidgetRefreshController
 import com.lezi.babylog.feature.widget.WidgetComposerContract
 import com.lezi.babylog.feature.widget.WidgetComposerTarget
+import com.lezi.babylog.sync.AppUpdateCheckResult
 import com.lezi.babylog.sync.AppUpdateInstallResult
 import com.lezi.babylog.sync.AppUpdateMetadata
+import com.lezi.babylog.sync.ClientUpdateRequiredException
 import com.lezi.babylog.sync.FamilyRole
+import com.lezi.babylog.sync.ForcedAppUpdateState
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.forcedUpdateDialogBody
+import com.lezi.babylog.sync.forcedUpdatePackageUnknownBody
+import com.lezi.babylog.sync.forcedUpdateRetryCheckLabel
 import com.lezi.babylog.sync.forcedUpdateTitle
 import dagger.hilt.android.AndroidEntryPoint
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -359,7 +368,7 @@ class RootViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 2)
 
     /** Root-level force-update surface; null when not forced. */
-    val forcedAppUpdate: StateFlow<AppUpdateMetadata?> =
+    val forcedAppUpdate: StateFlow<ForcedAppUpdateState?> =
         syncPort.availableForcedAppUpdate()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
@@ -367,26 +376,72 @@ class RootViewModel @Inject constructor(
     val forcedUpdateBusy: StateFlow<Boolean> = _forcedUpdateBusy.asStateFlow()
     private val _forcedUpdateMessage = MutableStateFlow<String?>(null)
     val forcedUpdateMessage: StateFlow<String?> = _forcedUpdateMessage.asStateFlow()
+    private val _forcedUpdateNeedsInstallPermission = MutableStateFlow(false)
+    val forcedUpdateNeedsInstallPermission: StateFlow<Boolean> =
+        _forcedUpdateNeedsInstallPermission.asStateFlow()
 
     fun installForcedAppUpdate(metadata: AppUpdateMetadata) {
         if (_forcedUpdateBusy.value) return
         viewModelScope.launch {
             _forcedUpdateBusy.value = true
+            _forcedUpdateNeedsInstallPermission.value = false
             _forcedUpdateMessage.value = "正在从家庭服务器下载更新包…"
             try {
                 val result = syncPort.installAvailableAppUpdate(metadata)
                 result.fold(
                     onSuccess = { install ->
-                        _forcedUpdateMessage.value = when (install) {
-                            AppUpdateInstallResult.SessionStarted ->
-                                "请在系统界面确认安装。安装结束后可删除通知；乐记不会在本机留下更新包。"
-                            AppUpdateInstallResult.RequiresInstallPermission ->
-                                "请允许乐记安装应用，然后再试一次立即更新。"
+                        when (install) {
+                            AppUpdateInstallResult.SessionStarted -> {
+                                _forcedUpdateNeedsInstallPermission.value = false
+                                _forcedUpdateMessage.value =
+                                    "请在系统界面确认安装。安装结束后可删除通知；乐记不会在本机留下更新包。"
+                            }
+                            AppUpdateInstallResult.RequiresInstallPermission -> {
+                                _forcedUpdateNeedsInstallPermission.value = true
+                                _forcedUpdateMessage.value =
+                                    "请允许乐记安装应用，然后再试一次立即更新。"
+                            }
                         }
                     },
                     onFailure = { error ->
+                        _forcedUpdateNeedsInstallPermission.value = false
                         _forcedUpdateMessage.value =
                             productUiError(error, "下载或安装失败，请稍后重试")
+                    },
+                )
+            } finally {
+                _forcedUpdateBusy.value = false
+            }
+        }
+    }
+
+    /**
+     * Re-check update metadata while under a force shell (especially [ForcedAppUpdateState.PackageUnknown]).
+     * Does not dismiss the force surface; successful metadata upgrades it via [forcedAppUpdate].
+     */
+    fun retryForcedAppUpdateCheck() {
+        if (_forcedUpdateBusy.value) return
+        viewModelScope.launch {
+            _forcedUpdateBusy.value = true
+            _forcedUpdateNeedsInstallPermission.value = false
+            _forcedUpdateMessage.value = "正在检查更新…"
+            try {
+                val result = syncPort.checkAppUpdate()
+                result.fold(
+                    onSuccess = { check ->
+                        _forcedUpdateMessage.value = when (check) {
+                            is AppUpdateCheckResult.ForcedUpdate -> null
+                            AppUpdateCheckResult.UpToDate -> "当前已是最新版本"
+                            is AppUpdateCheckResult.OptionalUpdate -> null
+                            AppUpdateCheckResult.NotJoined -> "请先连接家庭服务器后再检查更新"
+                        }
+                    },
+                    onFailure = { error ->
+                        _forcedUpdateMessage.value = when (error) {
+                            is ClientUpdateRequiredException ->
+                                "仍须更新乐记，但暂时无法从家庭服务器获取更新包，请再试「重试检查更新」。"
+                            else -> productUiError(error, "检查更新失败，请稍后重试")
+                        }
                     },
                 )
             } finally {
@@ -595,11 +650,55 @@ fun LeziRoot(
     onWidgetComposerConsumed: () -> Unit = {},
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
-    if (shouldShowOnboarding(ui.hasBaby, ui.familyRole)) {
-        // Baby creation updates this route through CareLog; no completion callback is needed.
-        OnboardingRoute(onFinished = {})
-        return
+    // Force shell is above onboarding so a joined device still under baby setup cannot
+    // silently miss PackageUnknown/WithPackage after client_update_required.
+    Box(Modifier.fillMaxSize()) {
+        if (shouldShowOnboarding(ui.hasBaby, ui.familyRole)) {
+            // Baby creation updates this route through CareLog; no completion callback is needed.
+            OnboardingRoute(onFinished = {})
+        } else {
+            LeziMainScaffold(
+                vm = vm,
+                ui = ui,
+                dark = dark,
+                widgetComposerTarget = widgetComposerTarget,
+                fulfillPlanTarget = fulfillPlanTarget,
+                onFulfillPlanConsumed = onFulfillPlanConsumed,
+                onWidgetComposerConsumed = onWidgetComposerConsumed,
+            )
+        }
+        RootForcedAppUpdateLayer(vm)
     }
+}
+
+@Composable
+private fun RootForcedAppUpdateLayer(vm: RootViewModel) {
+    val forcedUpdate by vm.forcedAppUpdate.collectAsStateWithLifecycle()
+    val forcedBusy by vm.forcedUpdateBusy.collectAsStateWithLifecycle()
+    val forcedMessage by vm.forcedUpdateMessage.collectAsStateWithLifecycle()
+    val needsInstallPermission by vm.forcedUpdateNeedsInstallPermission.collectAsStateWithLifecycle()
+    forcedUpdate?.let { forced ->
+        ForcedAppUpdateOverlay(
+            forced = forced,
+            busy = forcedBusy,
+            message = forcedMessage,
+            needsInstallPermission = needsInstallPermission,
+            onInstall = { metadata -> vm.installForcedAppUpdate(metadata) },
+            onRetryCheck = vm::retryForcedAppUpdateCheck,
+        )
+    }
+}
+
+@Composable
+private fun LeziMainScaffold(
+    vm: RootViewModel,
+    ui: RootUi,
+    dark: Boolean,
+    widgetComposerTarget: WidgetComposerTarget?,
+    fulfillPlanTarget: PendingFulfillPlan?,
+    onFulfillPlanConsumed: () -> Unit,
+    onWidgetComposerConsumed: () -> Unit,
+) {
     val nav = rememberNavController()
     val backStack by nav.currentBackStackEntryAsState()
     val current = backStack?.destination?.route
@@ -968,37 +1067,40 @@ fun LeziRoot(
             onDismiss = { showHeaderCalendar = false },
         )
     }
-
-    // Non-dismissible full-screen force update: blocks main tabs so old clients cannot
-    // keep writing after the server raised minSupported. Download/install reuses SyncPort.
-    val forcedUpdate by vm.forcedAppUpdate.collectAsStateWithLifecycle()
-    val forcedBusy by vm.forcedUpdateBusy.collectAsStateWithLifecycle()
-    val forcedMessage by vm.forcedUpdateMessage.collectAsStateWithLifecycle()
-    forcedUpdate?.let { metadata ->
-        ForcedAppUpdateOverlay(
-            metadata = metadata,
-            busy = forcedBusy,
-            message = forcedMessage,
-            onInstall = { vm.installForcedAppUpdate(metadata) },
-        )
-    }
 }
 
 /**
  * Full-screen, non-dismissible force-update gate (no "稍后").
  * Covers the whole activity content so log/summary/account cannot be used to bypass.
+ * System back is consumed and the surface sinks pointer events so taps cannot reach
+ * the scaffold or onboarding underneath.
  */
 @Composable
 private fun ForcedAppUpdateOverlay(
-    metadata: AppUpdateMetadata,
+    forced: ForcedAppUpdateState,
     busy: Boolean,
     message: String?,
-    onInstall: () -> Unit,
+    needsInstallPermission: Boolean,
+    onInstall: (AppUpdateMetadata) -> Unit,
+    onRetryCheck: () -> Unit,
 ) {
     val context = LocalContext.current
+    // Consume system back while forced — no "稍后" and no back-to-main bypass.
+    BackHandler(enabled = true) { }
+    val body = when (forced) {
+        is ForcedAppUpdateState.WithPackage -> forcedUpdateDialogBody(forced.metadata)
+        ForcedAppUpdateState.PackageUnknown -> forcedUpdatePackageUnknownBody()
+    }
+    val sinkInteraction = remember { MutableInteractionSource() }
     Surface(
         modifier = Modifier
             .fillMaxSize()
+            // Absorb taps so main tabs / onboarding under the mask cannot be used.
+            .clickable(
+                interactionSource = sinkInteraction,
+                indication = null,
+                onClick = {},
+            )
             .semantics { contentDescription = "强制更新乐记" }
             .testTag("forced_app_update_overlay"),
         color = MaterialTheme.colorScheme.background,
@@ -1018,7 +1120,7 @@ private fun ForcedAppUpdateOverlay(
             )
             Spacer(Modifier.height(LeziSpacing.Md))
             Text(
-                forcedUpdateDialogBody(metadata),
+                body,
                 style = LeziTypography.Body,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1031,13 +1133,32 @@ private fun ForcedAppUpdateOverlay(
                 )
             }
             Spacer(Modifier.height(LeziSpacing.Xl))
-            Button(
-                onClick = onInstall,
-                enabled = !busy,
-            ) {
-                Text(if (busy) "安装中…" else "立即更新")
+            when (forced) {
+                is ForcedAppUpdateState.WithPackage -> {
+                    Button(
+                        onClick = { onInstall(forced.metadata) },
+                        enabled = !busy,
+                    ) {
+                        Text(if (busy) "安装中…" else "立即更新")
+                    }
+                    Spacer(Modifier.height(LeziSpacing.Sm))
+                    TextButton(
+                        onClick = onRetryCheck,
+                        enabled = !busy,
+                    ) {
+                        Text(forcedUpdateRetryCheckLabel())
+                    }
+                }
+                ForcedAppUpdateState.PackageUnknown -> {
+                    Button(
+                        onClick = onRetryCheck,
+                        enabled = !busy,
+                    ) {
+                        Text(if (busy) "检查中…" else forcedUpdateRetryCheckLabel())
+                    }
+                }
             }
-            if (message?.contains("允许乐记安装") == true) {
+            if (needsInstallPermission) {
                 Spacer(Modifier.height(LeziSpacing.Sm))
                 TextButton(
                     onClick = {

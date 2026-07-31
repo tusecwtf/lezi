@@ -190,6 +190,25 @@ sealed interface AppUpdateCheckResult {
 }
 
 /**
+ * Non-dismissible force-update surface published by [SyncPort.availableForcedAppUpdate].
+ * Null on the flow means the client is not under a force gate.
+ *
+ * After a server `client_update_required` rejection, the client must still expose a
+ * non-silent shell even when package metadata cannot be loaded yet ([PackageUnknown]),
+ * so the UI is never "SyncStatus.Idle + no force layer + no error".
+ */
+sealed interface ForcedAppUpdateState {
+    /** Metadata available; user can download/install the package. */
+    data class WithPackage(val metadata: AppUpdateMetadata) : ForcedAppUpdateState
+
+    /**
+     * Server rejected authoritative sync as requiring a client update, but update
+     * package metadata is not available yet. UI shows a force shell with retry check.
+     */
+    data object PackageUnknown : ForcedAppUpdateState
+}
+
+/**
  * Outcome of [SyncPort.installAvailableAppUpdate] after download + sha256 verify.
  * Does not report final PackageInstaller success (system UI is async).
  */
@@ -337,9 +356,13 @@ interface SyncPort {
     /**
      * Forced update when local versionCode is below minSupported (from check, handshake,
      * or a server `client_update_required` rejection). Null when not forced.
-     * UI must not offer "稍后" for this state.
+     *
+     * [ForcedAppUpdateState.WithPackage] when installable metadata is known;
+     * [ForcedAppUpdateState.PackageUnknown] when the server already gated sync but
+     * metadata could not be loaded — still a non-silent force shell with retry.
+     * UI must not offer "稍后" for either state.
      */
-    fun availableForcedAppUpdate(): Flow<AppUpdateMetadata?> =
+    fun availableForcedAppUpdate(): Flow<ForcedAppUpdateState?> =
         kotlinx.coroutines.flow.flowOf(null)
 
     /**
@@ -430,7 +453,7 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
     override fun availableOptionalAppUpdate(): Flow<AppUpdateMetadata?> =
         kotlinx.coroutines.flow.flowOf(null)
 
-    override fun availableForcedAppUpdate(): Flow<AppUpdateMetadata?> =
+    override fun availableForcedAppUpdate(): Flow<ForcedAppUpdateState?> =
         kotlinx.coroutines.flow.flowOf(null)
 
     override fun dismissOptionalAppUpdate(versionCode: Int) = Unit

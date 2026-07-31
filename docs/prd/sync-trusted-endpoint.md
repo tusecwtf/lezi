@@ -262,7 +262,7 @@ session，不影响 membership 和其它设备。
 | `membership_deleted` | 清当前设备的全部本地家庭数据 |
 | `family_deleted` | 清当前设备的全部本地家庭数据 |
 | 非法 Outbox 操作 403 | 单项终止并解释；不阻断普通 pull |
-| `client_update_required` | 本机 versionCode 缺失或低于服务器 `min_supported_version_code`；**映射为强制升级 UI**，不得呈现为普通网络/NAS 故障；本地 Room 与会话保留；更新检查与 APK 下载仍可用 |
+| `client_update_required` | 本机 versionCode 缺失或低于服务器 `min_supported_version_code`；**映射为强制升级 UI**（有包 → 可安装强制态；元数据暂缺 → `PackageUnknown` 强制壳 + 重试检查），不得呈现为普通网络/NAS 故障或无强制层的「假正常」；本地 Room 与会话保留；更新检查与 APK 下载仍可用 |
 
 ## 7.4 客户端版本门槛与自托管更新
 
@@ -277,6 +277,7 @@ In-App Updates。完整产品合同见 [tech.md §4.2](./tech.md)。
 | 错误语义 | HTTP 失败 body 含稳定 `code=client_update_required`；客户端映射强制升级，不重试当普通网络错误 |
 | 放行 | 同一有效会话下 `GET /v1/app-update` 与 `GET /v1/app-update/apk` **不**走门槛拒绝，避免升级死锁 |
 | 缺元数据 | 未部署 `app-update.json` 时同步** fail-open**（不砖掉家庭）；元数据/APK 路由对已鉴权调用诚实 404 |
+| 客户端强制壳 | 权威路径已返回 `client_update_required` 时：拉到元数据且 local &lt; min → 可安装强制全屏；拉元数据失败或分类非强制 → 仍发布 **PackageUnknown** 强制壳（重试检查更新），`SyncStatus` 保持 Idle，文案区分于泛同步故障 |
 | 资格 | 仅已加入且会话有效；无匿名/未信任 endpoint 的 APK 通道 |
 | 发现 | 前台握手/同步顺带 best-effort 检查；菜单关于区手动检查；可选更新可横幅提示（会话内稍后抑制） |
 

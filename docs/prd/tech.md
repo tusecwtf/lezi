@@ -166,8 +166,9 @@ Google Play In-App Updates / Play Core；若未来上架 Play，须另 flavor，
 | 请求头 | 受保护同步请求携带 `X-Lezi-Client-Version-Code`（整数） |
 | 服务端 API | 鉴权 `GET /v1/app-update`（JSON）与 `GET /v1/app-update/apk`（APK 字节）；与同步共用会话与 TLS/信任 |
 | 门槛 | 头缺失或 `< minSupported` 时权威 sync 写/拉（pull / bundle / media 等）返回 `code=client_update_required`；**仍放行**更新元数据与 APK 下载 |
+| 强制壳兜底 | `client_update_required` 后：元数据成功且 local &lt; min → `ForcedAppUpdateState.WithPackage`（可安装）；元数据失败或与门槛分歧 → **`PackageUnknown` 强制壳**（说明 +「重试检查更新」），`SyncStatus` 保持 Idle，**不得**呈现为泛同步/NAS 故障或「假正常」无强制层 |
 | 部署 | `package-nas` **fail-closed**：须 release APK + 合法 `app-update.json` 且 sha256 一致；随包部署到数据卷由 lezi-sync 提供，不另开匿名静态站 |
-| 客户端缝 | `SyncPort`：`checkAppUpdate`、`availableOptionalAppUpdate` / `availableForcedAppUpdate`、`installAvailableAppUpdate`、会话内 dismiss；UI 不直连 PackageInstaller |
+| 客户端缝 | `SyncPort`：`checkAppUpdate`、`availableOptionalAppUpdate` / `availableForcedAppUpdate`（`ForcedAppUpdateState?`）、`installAvailableAppUpdate`、会话内 dismiss；UI 不直连 PackageInstaller |
 | 安装约束 | 同签名、更高 versionCode 原地替换；仅 release `applicationId = com.lezi.babylog`；本轮不承诺 debug 后缀包自更新 |
 | 无残留 | 流程结束后应用私有目录无 APK；**不**承诺清除系统 PackageInstaller 内部缓存 |
 
@@ -186,7 +187,8 @@ Google Play In-App Updates / Play Core；若未来上架 Play，须另 flavor，
 
 触发：① 已加入且前台对信任 endpoint 握手/同步时顺带检查；② 菜单关于区点击检查。
 可选更新：确认层 → 下载 → sha256 → 安装；账户区非阻塞横幅，同一 versionCode **进程会话内**
-「稍后」不再刷屏。强制更新：全屏，须仍能完成下载安装。详细同步门槛与错误语义见
+「稍后」不再刷屏。强制更新：根全屏（含 onboarding 之上）消费系统返回键并遮罩主功能；有包时
+立即安装，元数据暂缺时仅「重试检查更新」。详细同步门槛与错误语义见
 [sync-trusted-endpoint.md](./sync-trusted-endpoint.md)；部署 runbook 见
 [`tools/lezi-sync/deploy/DEPLOY.md`](../../tools/lezi-sync/deploy/DEPLOY.md)。调研笔记：
 [`docs/design/2026-07-31-android-apk-in-app-update-research.md`](../design/2026-07-31-android-apk-in-app-update-research.md)。

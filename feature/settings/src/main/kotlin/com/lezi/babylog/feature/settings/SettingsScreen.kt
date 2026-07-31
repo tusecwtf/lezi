@@ -91,6 +91,8 @@ import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.appUpdateInstallUiOutcome
 import com.lezi.babylog.sync.appUpdateUiOutcome
 import com.lezi.babylog.sync.forcedUpdateDialogBody
+import com.lezi.babylog.sync.forcedUpdatePackageUnknownBody
+import com.lezi.babylog.sync.forcedUpdateRetryCheckLabel
 import com.lezi.babylog.sync.forcedUpdateTitle
 import com.lezi.babylog.sync.localAppVersionLabel
 import com.lezi.babylog.sync.optionalUpdateDialogBody
@@ -229,8 +231,10 @@ class SettingsViewModel @Inject constructor(
 
     fun dismissAppUpdateOutcome() {
         val current = _appUpdateOutcome.value
-        // Forced updates cannot be dismissed ("稍后" is not allowed).
+        // Forced updates cannot be dismissed ("稍后" is not allowed). Root force shell
+        // remains authoritative; this dialog must not bypass PackageUnknown either.
         if (current is AppUpdateUiOutcome.ForcedUpdate) return
+        if (current is AppUpdateUiOutcome.ForcedUpdatePackageUnknown) return
         if (current is AppUpdateUiOutcome.OptionalUpdate) {
             // "稍后" / dismiss: process-session suppress for handshake banner.
             syncPort.dismissOptionalAppUpdate(current.metadata.versionCode)
@@ -610,6 +614,7 @@ fun SettingsRoute(
         }
         is AppUpdateUiOutcome.ForcedUpdate -> {
             // Non-dismissible: no "稍后", back/outside dismiss ignored.
+            // Secondary to root ForcedAppUpdateState full-screen shell.
             AlertDialog(
                 onDismissRequest = {},
                 properties = DialogProperties(
@@ -624,6 +629,32 @@ fun SettingsRoute(
                         enabled = !installingAppUpdate,
                     ) {
                         Text(if (installingAppUpdate) "安装中…" else "立即更新")
+                    }
+                },
+            )
+        }
+        AppUpdateUiOutcome.ForcedUpdatePackageUnknown -> {
+            // Align with ForcedAppUpdateState.PackageUnknown: retry check only.
+            AlertDialog(
+                onDismissRequest = {},
+                properties = DialogProperties(
+                    dismissOnBackPress = false,
+                    dismissOnClickOutside = false,
+                ),
+                title = { Text(forcedUpdateTitle()) },
+                text = { Text(forcedUpdatePackageUnknownBody()) },
+                confirmButton = {
+                    TextButton(
+                        onClick = vm::checkAppUpdate,
+                        enabled = !checkingAppUpdate && !installingAppUpdate,
+                    ) {
+                        Text(
+                            if (checkingAppUpdate) {
+                                "检查中…"
+                            } else {
+                                forcedUpdateRetryCheckLabel()
+                            },
+                        )
                     }
                 },
             )
