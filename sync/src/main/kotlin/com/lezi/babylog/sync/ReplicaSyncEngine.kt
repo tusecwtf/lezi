@@ -883,8 +883,22 @@ internal class ReplicaSyncEngine(
         val wire = parseMediaWire(payload)
         val existing = mediaDao.getByClientUuid(entity.clientUuid)
         if (existing != null && mediaEditGuard?.canReplace(existing) == false) return true
-        // Match server LWW: existing wins on equal updatedAt (>= skip).
-        if (existing != null && existing.updatedAt >= entity.updatedAt) return true
+        // A newer local version still wins LWW. An equal remote version is the
+        // authoritative receipt for the exact local bytes/metadata, including
+        // after full-resync deliberately invalidated only sync bookkeeping.
+        if (existing != null && existing.updatedAt > entity.updatedAt) return true
+        if (existing != null && existing.updatedAt == entity.updatedAt) {
+            val acknowledged = existing.copy(
+                remoteUri = session.receiptFor(entity.clientUuid),
+                syncDirty = false,
+            )
+            mediaDao.update(acknowledged)
+            mediaEditGuard?.mediaRefreshed(acknowledged)
+            if (entity.deletedAt != null && existing.localUri.isNotBlank()) {
+                deletedMediaClientUuids += entity.clientUuid
+            }
+            return true
+        }
         val recordId = wire.recordClientUuid?.let {
             recordDao.getByClientUuid(it)?.id ?: return false
         }
@@ -2004,8 +2018,13 @@ private class LocalMediaEditGuard(
     private val mediaSnapshots: MutableMap<String, MediaAssetEntity>,
     private val babyAvatarPaths: MutableMap<String, String?>,
 ) {
-    fun canReplace(media: MediaAssetEntity): Boolean =
-        media.clientUuid !in mediaSnapshots || mediaSnapshots[media.clientUuid] == media
+    fun canReplace(media: MediaAssetEntity): Boolean {
+        val snapshot = mediaSnapshots[media.clientUuid] ?: return true
+        return snapshot.copy(
+            remoteUri = media.remoteUri,
+            syncDirty = media.syncDirty,
+        ) == media
+    }
 
     fun canRefresh(baby: BabyEntity): Boolean =
         baby.clientUuid !in babyAvatarPaths ||

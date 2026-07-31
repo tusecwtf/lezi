@@ -2115,6 +2115,119 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun fullResyncAcknowledgesEqualPublishedMediaWithoutRepublishingItsBundle() = runTest {
+        val session = joinedSession("family-a").copy(
+            role = FamilyRole.Member,
+            membershipId = "member-local",
+            pullCursor = 3,
+            pullGeneration = "old-generation",
+        )
+        val rig = SyncRig(session = session)
+        val babyId = rig.babies.seed(localBaby().copy(syncDirty = false))
+        val recordId = rig.records.seed(
+            localRecord(babyId).copy(
+                createdByMembershipId = "member-local",
+                familyPublishedUpdatedAt = 120,
+                syncDirty = false,
+            ),
+        )
+        val mediaUuid = "12121212-1212-1212-1212-121212121212"
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = mediaUuid,
+                kind = "log",
+                localUri = "record-media/existing.jpg",
+                remoteUri = session.expectedMediaReceipt(mediaUuid),
+                mime = "image/jpeg",
+                byteSize = 3,
+                createdAt = 120,
+                updatedAt = 120,
+                syncDirty = false,
+            ),
+        )
+        rig.backend.pullFailures.add(
+            SyncHttpException(
+                statusCode = 409,
+                responseBody = """
+                    {
+                      "detail":{
+                        "code":"generation_changed",
+                        "action":"full_resync",
+                        "reset_cursor":0,
+                        "server_cursor":3,
+                        "server_generation":"new-generation"
+                      }
+                    }
+                """.trimIndent(),
+            ),
+        )
+        rig.backend.pullResults.add(
+            PullResult(
+                entities = listOf(
+                    remoteBaby().copy(
+                        clientUuid = "baby-local",
+                        updatedAt = 100,
+                    ),
+                    remoteRecord().copy(
+                        clientUuid = "record-local",
+                        updatedAt = 120,
+                        payloadJson = """
+                            {
+                              "baby_client_uuid":"baby-local",
+                              "created_by_membership_id":"member-local",
+                              "type":"formula",
+                              "custom_item_client_uuid":null,
+                              "timestamp":120,
+                              "end_timestamp":null,
+                              "note":null,
+                              "payload_json":{"amount_ml":120},
+                              "schema_version":2
+                            }
+                        """.trimIndent(),
+                    ),
+                    SyncEntity(
+                        type = "media",
+                        clientUuid = mediaUuid,
+                        payloadJson = """
+                            {
+                              "kind":"log",
+                              "record_client_uuid":"record-local",
+                              "care_plan_client_uuid":null,
+                              "baby_client_uuid":null,
+                              "mime":"image/jpeg",
+                              "width":null,
+                              "height":null,
+                              "byte_size":3
+                            }
+                        """.trimIndent(),
+                        updatedAt = 120,
+                    ),
+                ),
+                cursor = 3,
+                generation = "new-generation",
+                hasMore = false,
+            ),
+        )
+        rig.backend.pullResults.add(
+            PullResult(
+                entities = emptyList(),
+                cursor = 3,
+                generation = "new-generation",
+                hasMore = false,
+            ),
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+
+        assertThat(rig.backend.stagedBundles).isEmpty()
+        val media = requireNotNull(rig.media.getByClientUuid(mediaUuid))
+        assertThat(media.syncDirty).isFalse()
+        assertThat(media.remoteUri)
+            .isEqualTo(rig.preferences.current().expectedMediaReceipt(mediaUuid))
+    }
+
+    @Test
     fun nonzeroCursorWithoutGenerationFailsBeforePullOrPush() = runTest {
         val rig = SyncRig(
             session = joinedSession("family-a").copy(
