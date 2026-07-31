@@ -45,13 +45,23 @@ cd tools/lezi-sync
 cargo fmt --all -- --check
 cargo test --locked
 cargo clippy --all-targets --all-features -- -D warnings
+# after user confirms CD (see workflow below):
 ./build-image.sh
 ./deploy/push-and-deploy.sh
-# internal loopback health (not exposed to LAN):
-# curl -fsS http://127.0.0.1:8766/health
-# curl -fsS http://127.0.0.1:8766/ready
-# public endpoint uses HTTPS; trust the deployed certificate explicitly:
-# curl --cacert <data-bind>/tls/server.crt -fsS https://<host>:8765/health
+```
+
+**Probe the live protocol before trusting any single health URL** (measured 2026-07-31: family NAS was still plaintext HTTP on 8765; current tree/CD targets HTTPS 8765 + loopback HTTP 8766).
+
+```bash
+# Pre-TLS / still-HTTP live (worked on measured NAS):
+curl -fsS http://192.168.50.4:8765/health
+curl -fsS http://192.168.50.4:8765/ready
+ssh -p 10000 13096920600@192.168.50.4 'curl -fsS http://127.0.0.1:8765/health'
+
+# Post-TLS target after deploying current remote-deploy (may fail until cutover):
+# ssh -p 10000 13096920600@192.168.50.4 'curl -fsS http://127.0.0.1:8766/health'
+# curl --cacert <data-bind>/tls/server.crt -fsS https://192.168.50.4:8765/health
+# HTTPS against a plaintext 8765 yields TLS "wrong version number" — treat as drift, not success.
 ```
 
 | Variable | Role |
@@ -59,11 +69,50 @@ cargo clippy --all-targets --all-features -- -D warnings
 | `NAS_SSH` / `NAS_SSH_PORT` | SSH target (default `13096920600@192.168.50.4`, port `10000`) |
 | `NAS_REMOTE_DIR` | Unpack + deploy directory on NAS |
 | `LEZI_DATA_HOST_PATH` | Host bind for `/data` when packaging |
+| `LEZI_TLS_HOST` | Certificate SAN host (default `192.168.50.4`) |
 | `LEZI_FORCE_PACKAGE=1` | Rebuild package even if `dist/` exists |
 | `LEZI_SKIP_PACKAGE=1` | Deploy existing package only |
 | `LEZI_PACKAGE_BUILD_IMAGE=1` | `package-nas.sh` builds image if missing |
 
-Production replace stops/removes the existing `lezi-sync` container then `compose up` project `lezi`. Confirm maintenance window before running against a live family NAS. Rollback: re-run `remote-deploy.sh` from a previous package directory on the NAS (after that version’s image tar is still loadable).
+### Agent workflow: Rust gates → CD → 联调
+
+**Measure before you document or declare success.** When work touches `tools/lezi-sync/` **or** Android/sync wire that must be proven against a live server, **do not stop at unit tests**. After Rust gates pass, continue to NAS CD and a minimal frontend–backend smoke. Skip CD/联调 for pure docs or comments with no runtime effect.
+
+**1. Rust gates (dev machine)** — `cargo fmt --all -- --check`, `cargo test --locked`, and `cargo clippy --all-targets --all-features -- -D warnings` under `tools/lezi-sync/`.
+
+**2. Propose CD — wait for confirmation before deploy.**
+Explain that the next step will build a `linux/amd64` image, package (or reuse `dist/`), scp to the NAS, and **stop/rm + replace** container `lezi-sync` (compose project `lezi`). The data bind is kept; a live family may briefly lose sync during replace.
+
+Also state the **protocol cutover risk**: a measured family NAS ran **plaintext HTTP on 8765** (no `/data/tls`, no host `8766`). Deploying the current tree via `remote-deploy.sh` is expected to move the public surface to **HTTPS on 8765**, add loopback **HTTP readiness on 8766**, and create a persistent TLS identity under the data bind. Clients must switch endpoint scheme and may need TOFU/SPKI confirmation. **Do not** run `./deploy/push-and-deploy.sh` until the user confirms.
+
+Default control plane (override only via env):
+
+| Role | Address / value |
+|---|---|
+| SSH | `ssh -p 10000 13096920600@192.168.50.4` |
+| Remote package dir | `/tmp/lezi-sync-releases/lezi-sync-<ver>-nas` |
+| Pre-TLS live health (measured) | `http://192.168.50.4:8765/health` and `/ready` (SSH: `http://127.0.0.1:8765/...`) |
+| Post-TLS LAN endpoint / health | `https://192.168.50.4:8765` (cert under data-bind `tls/`) |
+| Post-TLS on-NAS loopback health | `http://127.0.0.1:8766/health` and `/ready` only (not published to LAN) |
+| TLS SAN host | `LEZI_TLS_HOST=192.168.50.4` |
+| Data bind | default `LEZI_DATA_HOST_PATH` → `/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/data` |
+
+After confirmation:
+
+```bash
+./build-image.sh
+./deploy/push-and-deploy.sh
+```
+
+Packaging is fail-closed: a signed `app/build/outputs/apk/release/app-release.apk` must match `tools/lezi-sync/deploy/app-update.json` `sha256` (or set `LEZI_RELEASE_APK` / `LEZI_APP_UPDATE_JSON`). Use `LEZI_SKIP_PACKAGE=1` only when an existing `dist/lezi-sync-<ver>-nas` already embeds the **current** server image; if server code changed, rebuild the image and force a new package (`LEZI_FORCE_PACKAGE=1`). Never invent `LEZI_BOOTSTRAP_SECRET` (inherit from the live container). Never print bootstrap secrets from `docker inspect`/logs in reports—redact them. Never commit secrets, NAS `.env`, or `dist/` tarballs.
+
+**3. 前后端联调 (minimal smoke after deploy)**
+
+1. **Server — probe actual protocol, do not assume.** Prefer post-TLS checks first (`http://127.0.0.1:8766/...` over SSH and/or `https://192.168.50.4:8765/...` with the data-bind cert). If HTTPS fails with TLS wrong-version and HTTP `8765` still answers, report **protocol drift** (live image not the TLS stack). Expect healthy/ready; when `/health` reports a version, it should match the deployed image.
+2. **Client**: device or emulator on the same LAN as the NAS. Emulator → NAS uses the real LAN IP, **not** `10.0.2.2` (`10.0.2.2` is only for host-local compose). Install the client if needed (`./gradlew :app:installDebug` or an existing APK). Point the endpoint at the **scheme that health proved** (`https://192.168.50.4:8765` after TLS CD; plaintext only if still on the pre-TLS image). Complete TOFU/SPKI when the trusted-HTTPS path applies. Smoke **only paths touched by the change** (e.g. setup-status, create/join, push-pull, app-update)—not a full dual-device matrix unless the ticket requires it.
+3. **Report** gates, deployed version/package, which health URLs worked, protocol (HTTP vs HTTPS), and client smoke result (or the blocker).
+
+Production replace stops/removes the existing `lezi-sync` container then `compose up` project `lezi`. That replace is the step gated by the propose-then-confirm rule above. Rollback: re-run `remote-deploy.sh` from a previous package directory on the NAS (after that version’s image tar is still loadable).
 
 Schema is fresh-only / current `user_version`; mismatched DBs fail closed—do not invent migrations in deploy scripts.
 
