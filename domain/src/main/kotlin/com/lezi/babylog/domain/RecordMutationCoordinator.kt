@@ -60,7 +60,12 @@ internal class RecordMutationCoordinator(
         payloadJson: String = "{}",
         schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
         photoLocalPaths: List<String> = emptyList(),
+        nowMillis: Long = System.currentTimeMillis(),
     ): Long {
+        // Create path: zero clock skew (same as updateRecord). Future → schedule plan.
+        RecordTime.intervalError(timestamp, endTimestamp, nowMillis)?.let {
+            throw IllegalArgumentException(it)
+        }
         validateSleepInterval(type, timestamp, endTimestamp)
         val photos = photoLocalPaths
         val persistedPayload = requireCurrentPayloadJson(
@@ -125,8 +130,9 @@ internal class RecordMutationCoordinator(
         photoLocalPaths: List<String>? = null,
         nowMillis: Long = System.currentTimeMillis(),
     ) {
-        // Future time must use [convertRecordToCarePlan] after explicit UI confirm.
-        RecordTime.pointError(timestamp, nowMillis)?.let {
+        // Future start must use [convertRecordToCarePlan] after explicit UI confirm.
+        // Closed-interval end also uses zero skew (invalid fact, not convert).
+        RecordTime.intervalError(timestamp, endTimestamp, nowMillis)?.let {
             throw IllegalArgumentException(it)
         }
         val photos = photoLocalPaths
@@ -401,12 +407,25 @@ internal class RecordMutationCoordinator(
          * the timer record. Cancel / save-failure leave the plan pending.
          */
         carePlanId: Long? = null,
+        nowMillis: Long = System.currentTimeMillis(),
     ): Long {
         require(order in NURSING_ORDER_ALLOWLIST) {
             "不支持的哺乳顺序"
         }
         require(recordMode in setOf("start", "end")) {
             "不支持的记录时刻模式"
+        }
+        // Create: 0 skew. Completing a linked plan reuses fulfill actual-time skew.
+        val actualSkew = if (carePlanId != null) {
+            RecordTime.FULFILLMENT_ACTUAL_TIME_SKEW_MILLIS
+        } else {
+            0L
+        }
+        RecordTime.pointError(startedAt, nowMillis, actualSkew)?.let {
+            throw IllegalArgumentException(it)
+        }
+        RecordTime.pointError(endedAt, nowMillis, actualSkew)?.let {
+            throw IllegalArgumentException(it)
         }
         val payload = RecordPayloadCodec.encode(
             RecordPayloadDocument(
@@ -496,7 +515,12 @@ internal class RecordMutationCoordinator(
         payloadJson: String,
         schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
         photoLocalPaths: List<String> = emptyList(),
+        nowMillis: Long = System.currentTimeMillis(),
     ): Long {
+        // Create/close path: zero clock skew on start and closed end.
+        RecordTime.intervalError(timestamp, endTimestamp, nowMillis)?.let {
+            throw IllegalArgumentException(it)
+        }
         val photos = photoLocalPaths
         val persistedPayload = requireCurrentPayloadJson(
             type = RecordType.SLEEP,
@@ -568,7 +592,9 @@ internal class RecordMutationCoordinator(
     suspend fun sleepDown(
         babyId: Long,
         at: Long = System.currentTimeMillis(),
+        nowMillis: Long = System.currentTimeMillis(),
     ): Long {
+        RecordTime.pointError(at, nowMillis)?.let { throw IllegalArgumentException(it) }
         val id = sleepMutationMutex.withLock {
             transactionRunner.run {
                 requireActiveBaby(babyId)
@@ -616,7 +642,10 @@ internal class RecordMutationCoordinator(
     suspend fun sleepUp(
         babyId: Long,
         at: Long = System.currentTimeMillis(),
+        nowMillis: Long = System.currentTimeMillis(),
     ): Long {
+        // Close/create path: wake time must not be in the future (0 skew).
+        RecordTime.pointError(at, nowMillis)?.let { throw IllegalArgumentException(it) }
         val id = sleepMutationMutex.withLock {
             transactionRunner.run {
                 requireActiveBaby(babyId)

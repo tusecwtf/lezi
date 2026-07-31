@@ -30,6 +30,7 @@ import com.lezi.babylog.core.model.DeviceLayoutSnapshot
 import com.lezi.babylog.core.model.NEXT_FEED_PLAN_MARKER
 import com.lezi.babylog.core.model.NextFeedPlanReconciliation
 import com.lezi.babylog.core.model.RecordItemIdentity
+import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.Sex
 import com.lezi.babylog.core.model.SettingsLocal
@@ -2326,15 +2327,16 @@ class CareLogTest {
             care.observeDayPendingPlans(babyId, day, java.time.ZoneOffset.UTC).first(),
         ).hasSize(1)
 
-        // Future actual time is rejected.
-        val futureFail = runCatching {
+        // Fulfill allows up to now + 5 minutes; beyond that is rejected.
+        val fiveMin = RecordTime.FULFILLMENT_ACTUAL_TIME_SKEW_MILLIS
+        val beyondSkewFail = runCatching {
             care.fulfillCarePlan(
                 carePlanId = planId,
-                actualTimestamp = now + 10_000L,
+                actualTimestamp = now + fiveMin + 1L,
                 nowMillis = now,
             )
         }.exceptionOrNull()
-        assertThat(futureFail).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(beyondSkewFail).isInstanceOf(IllegalArgumentException::class.java)
         assertThat(care.getCarePlan(planId)!!.status).isEqualTo(CarePlanStatus.PENDING)
 
         val recordId = care.fulfillCarePlan(
@@ -4472,7 +4474,7 @@ class CareLogTest {
         assertThat(care.getCarePlan(plan2)!!.status).isEqualTo(CarePlanStatus.PENDING)
 
         // Close the open sleep, then closed-interval fulfill of plan2 succeeds.
-        care.sleepUp(babyId, at = now + 30 * 60_000L)
+        care.sleepUp(babyId, at = now + 1_000L, nowMillis = now + 1_000L)
         val closedId = care.fulfillCarePlan(
             carePlanId = plan2,
             actualTimestamp = now - 40 * 60_000L,
@@ -5448,6 +5450,7 @@ class CareLogTest {
             type = RecordType.FORMULA,
             timestamp = now - 1_000L,
             payloadJson = """{"amount_ml":100}""",
+            nowMillis = now,
         )
         val futureUpdate = runCatching {
             care.updateRecord(
@@ -5461,6 +5464,252 @@ class CareLogTest {
         }.exceptionOrNull()
         assertThat(futureUpdate).isInstanceOf(IllegalArgumentException::class.java)
         assertThat(fakes.records.get(formulaId)!!.timestamp).isEqualTo(now - 1_000L)
+    }
+
+    @Test
+    fun factCreatePathsRejectFutureTimesWithZeroSkew() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 50_000_000L
+
+        val addFuture = runCatching {
+            care.addRecord(
+                babyId = babyId,
+                type = RecordType.PEE,
+                timestamp = now + 1L,
+                payloadJson = """{"pee_amount":2}""",
+                nowMillis = now,
+            )
+        }.exceptionOrNull()
+        assertThat(addFuture).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(addFuture!!.message).isEqualTo("不能选未来时刻")
+        assertThat(fakes.records.listForBaby(babyId)).isEmpty()
+
+        val sleepEndFuture = runCatching {
+            care.addRecord(
+                babyId = babyId,
+                type = RecordType.SLEEP,
+                timestamp = now - 60_000L,
+                endTimestamp = now + 1L,
+                payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
+                nowMillis = now,
+            )
+        }.exceptionOrNull()
+        assertThat(sleepEndFuture).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(sleepEndFuture!!.message).isEqualTo("不能选未来时刻")
+
+        val confirmFutureStart = runCatching {
+            care.confirmSleep(
+                babyId = babyId,
+                expectedOpenSleepId = null,
+                timestamp = now + 1L,
+                endTimestamp = null,
+                note = null,
+                payloadJson = """{"is_nap":true,"anomaly_flag":false}""",
+                nowMillis = now,
+            )
+        }.exceptionOrNull()
+        assertThat(confirmFutureStart).isInstanceOf(IllegalArgumentException::class.java)
+
+        val openId = care.confirmSleep(
+            babyId = babyId,
+            expectedOpenSleepId = null,
+            timestamp = now - 10_000L,
+            endTimestamp = null,
+            note = null,
+            payloadJson = """{"is_nap":true,"anomaly_flag":false}""",
+            nowMillis = now,
+        )
+        val confirmFutureEnd = runCatching {
+            care.confirmSleep(
+                babyId = babyId,
+                expectedOpenSleepId = openId,
+                timestamp = now - 10_000L,
+                endTimestamp = now + 1L,
+                note = null,
+                payloadJson = """{"is_nap":true,"anomaly_flag":false}""",
+                nowMillis = now,
+            )
+        }.exceptionOrNull()
+        assertThat(confirmFutureEnd).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(fakes.records.get(openId)!!.endTimestamp).isNull()
+
+        val nursingFuture = runCatching {
+            care.completeNursing(
+                babyId = babyId,
+                leftMin = 5,
+                rightMin = 0,
+                order = "L",
+                startedAt = now - 5_000L,
+                endedAt = now + 1L,
+                nowMillis = now,
+            )
+        }.exceptionOrNull()
+        assertThat(nursingFuture).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(
+            fakes.records.listForBaby(babyId).none { it.type == RecordType.NURSING.key },
+        ).isTrue()
+
+        val sleepDownFuture = runCatching {
+            care.sleepDown(babyId = babyId, at = now + 1L, nowMillis = now)
+        }.exceptionOrNull()
+        assertThat(sleepDownFuture).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(sleepDownFuture!!.message).isEqualTo("不能选未来时刻")
+        // Existing open sleep from confirm path still the only open interval.
+        assertThat(fakes.records.findOpenSleep(babyId)?.id).isEqualTo(openId)
+
+        // Close open interval first so sleepUp future gate is exercised on a clean close.
+        care.confirmSleep(
+            babyId = babyId,
+            expectedOpenSleepId = openId,
+            timestamp = now - 10_000L,
+            endTimestamp = now,
+            note = null,
+            payloadJson = """{"is_nap":true,"anomaly_flag":false}""",
+            nowMillis = now,
+        )
+        care.sleepDown(babyId = babyId, at = now - 1_000L, nowMillis = now)
+        val sleepUpFuture = runCatching {
+            care.sleepUp(babyId = babyId, at = now + 1L, nowMillis = now)
+        }.exceptionOrNull()
+        assertThat(sleepUpFuture).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(sleepUpFuture!!.message).isEqualTo("不能选未来时刻")
+        assertThat(fakes.records.findOpenSleep(babyId)?.endTimestamp).isNull()
+    }
+
+    @Test
+    fun completeNursingWithCarePlanIdAllowsFiveMinuteSkewOnActualTimes() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 70_000_000L
+        val fiveMin = RecordTime.FULFILLMENT_ACTUAL_TIME_SKEW_MILLIS
+        val planId = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.NURSING,
+            scheduledAt = now + 3_600_000L,
+            payloadJson =
+                """{"left_min":0,"right_min":0,"order":"LR","record_mode":"end"}""",
+            nowMillis = now,
+        )
+
+        val beyond = runCatching {
+            care.completeNursing(
+                babyId = babyId,
+                leftMin = 5,
+                rightMin = 0,
+                order = "L",
+                startedAt = now - 5_000L,
+                endedAt = now + fiveMin + 1L,
+                completionClientUuid = "nursing-skew-beyond",
+                carePlanId = planId,
+                nowMillis = now,
+            )
+        }.exceptionOrNull()
+        assertThat(beyond).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(beyond!!.message).isEqualTo("不能选未来时刻")
+        assertThat(care.getCarePlan(planId)!!.status).isEqualTo(CarePlanStatus.PENDING)
+        assertThat(
+            fakes.records.listForBaby(babyId).none { it.type == RecordType.NURSING.key },
+        ).isTrue()
+
+        val recordId = care.completeNursing(
+            babyId = babyId,
+            leftMin = 5,
+            rightMin = 0,
+            order = "L",
+            startedAt = now - 5_000L,
+            endedAt = now + fiveMin,
+            completionClientUuid = "nursing-skew-ok",
+            carePlanId = planId,
+            nowMillis = now,
+        )
+        assertThat(care.getRecord(recordId)!!.timestamp).isEqualTo(now + fiveMin)
+        assertThat(care.getCarePlan(planId)!!.status).isEqualTo(CarePlanStatus.COMPLETED)
+        assertThat(care.getCarePlan(planId)!!.fulfilledRecordClientUuid)
+            .isEqualTo("nursing-skew-ok")
+    }
+
+    @Test
+    fun fulfillCarePlanAllowsFiveMinuteSkewOnActualStartAndSleepEnd() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 60_000_000L
+        val fiveMin = RecordTime.FULFILLMENT_ACTUAL_TIME_SKEW_MILLIS
+        assertThat(fiveMin).isEqualTo(5 * 60_000L)
+
+        val peePlan = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.PEE,
+            scheduledAt = now + 3_600_000L,
+            payloadJson = """{"pee_amount":2}""",
+            nowMillis = now,
+        )
+        // Exactly +5 minutes passes.
+        val peeRecordId = care.fulfillCarePlan(
+            carePlanId = peePlan,
+            actualTimestamp = now + fiveMin,
+            nowMillis = now,
+        )
+        assertThat(care.getRecord(peeRecordId)!!.timestamp).isEqualTo(now + fiveMin)
+        assertThat(care.getCarePlan(peePlan)!!.status).isEqualTo(CarePlanStatus.COMPLETED)
+
+        val sleepPlan = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.SLEEP,
+            scheduledAt = now + 3_600_000L,
+            payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
+            nowMillis = now,
+        )
+        // Closed sleep end exactly at boundary passes.
+        val sleepRecordId = care.fulfillCarePlan(
+            carePlanId = sleepPlan,
+            actualTimestamp = now - 60_000L,
+            endTimestamp = now + fiveMin,
+            nowMillis = now,
+        )
+        assertThat(care.getRecord(sleepRecordId)!!.endTimestamp).isEqualTo(now + fiveMin)
+
+        val sleepPlan2 = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.SLEEP,
+            scheduledAt = now + 3_700_000L,
+            payloadJson = """{"is_nap":false,"anomaly_flag":false}""",
+            nowMillis = now,
+        )
+        val endBeyond = runCatching {
+            care.fulfillCarePlan(
+                carePlanId = sleepPlan2,
+                actualTimestamp = now - 60_000L,
+                endTimestamp = now + fiveMin + 1L,
+                nowMillis = now,
+            )
+        }.exceptionOrNull()
+        assertThat(endBeyond).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(endBeyond!!.message).isEqualTo("不能选未来时刻")
+        assertThat(care.getCarePlan(sleepPlan2)!!.status).isEqualTo(CarePlanStatus.PENDING)
+
+        val startBeyondPlan = care.createCarePlan(
+            babyId = babyId,
+            type = RecordType.FORMULA,
+            scheduledAt = now + 3_800_000L,
+            payloadJson = """{"amount_ml":100}""",
+            nowMillis = now,
+        )
+        val startBeyond = runCatching {
+            care.fulfillCarePlan(
+                carePlanId = startBeyondPlan,
+                actualTimestamp = now + fiveMin + 1L,
+                nowMillis = now,
+            )
+        }.exceptionOrNull()
+        assertThat(startBeyond).isInstanceOf(IllegalArgumentException::class.java)
+        assertThat(care.getCarePlan(startBeyondPlan)!!.status).isEqualTo(CarePlanStatus.PENDING)
     }
 
 }

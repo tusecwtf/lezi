@@ -45,6 +45,7 @@ import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.designsystem.leziConfirmAppearance
 import com.lezi.babylog.designsystem.reduceLeziConfirmChrome
 import com.lezi.babylog.designsystem.rememberDismissKeyboard
+import com.lezi.babylog.core.model.RecordTime
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -274,6 +275,8 @@ internal fun NursingCompletionSheet(
             onConfirm = { picked ->
                 val pickedAt = picked.toInstant().toEpochMilli()
                 val now = System.currentTimeMillis()
+                val skew = draft.actualTimeMaxFutureSkewMillis()
+                val futureError = RecordTime.pointError(pickedAt, now, skew)
                 when {
                     pickedAt < draft.startedAt -> {
                         confirmChrome = LeziConfirmChromeState(
@@ -281,10 +284,10 @@ internal fun NursingCompletionSheet(
                             shownReason = "结束时刻不能早于开始时刻",
                         )
                     }
-                    pickedAt > now -> {
+                    futureError != null -> {
                         confirmChrome = LeziConfirmChromeState(
                             reasonVisible = true,
-                            shownReason = "结束时刻不能晚于现在",
+                            shownReason = futureError,
                         )
                     }
                     else -> update(draft.copy(endedAt = pickedAt))

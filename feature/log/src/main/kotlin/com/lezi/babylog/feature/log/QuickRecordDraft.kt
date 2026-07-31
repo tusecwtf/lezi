@@ -209,7 +209,8 @@ internal data class QuickRecordDraft(
 
     /**
      * Derived work mode. Future timestamps on a brand-new draft schedule a plan;
-     * fulfill always rejects future actual times via [validationResult].
+     * fulfill allows actual times up to now + [RecordTime.FULFILLMENT_ACTUAL_TIME_SKEW_MILLIS]
+     * and rejects beyond that via [validationResult].
      * Editing an existing fact into the future stays [RecordFact] until the user
      * explicitly confirms convert ([needsConvertToCarePlan]).
      */
@@ -220,6 +221,15 @@ internal data class QuickRecordDraft(
         createIntent == ComposerCreateIntent.ScheduleCare -> ComposerWorkMode.ScheduleCare
         timestamp > nowMillis -> ComposerWorkMode.ScheduleCare
         else -> ComposerWorkMode.RecordFact
+    }
+
+    /** Zero for create/update facts; five minutes for plan fulfillment actual times. */
+    fun actualTimeMaxFutureSkewMillis(
+        nowMillis: Long = RecordTime.currentTimeMillis(),
+    ): Long = if (workMode(nowMillis) == ComposerWorkMode.FulfillPlan) {
+        RecordTime.FULFILLMENT_ACTUAL_TIME_SKEW_MILLIS
+    } else {
+        0L
     }
 
     /**
@@ -251,11 +261,16 @@ internal data class QuickRecordDraft(
             work == ComposerWorkMode.ScheduleCare ||
                 work == ComposerWorkMode.EditPlan ||
                 candidate.needsConvertToCarePlan(nowMillis)
+        val skew = candidate.actualTimeMaxFutureSkewMillis(nowMillis)
         return when {
             work == ComposerWorkMode.ScheduleCare && candidateStartTimestamp <= nowMillis ->
                 CARE_PLAN_TIME_NOT_FUTURE_WARNING
-            !planIntent && candidateStartTimestamp > nowMillis -> FUTURE_TIME_WARNING
-            !planIntent && candidateEndTimestamp != null && candidateEndTimestamp > nowMillis ->
+            !planIntent &&
+                RecordTime.pointError(candidateStartTimestamp, nowMillis, skew) != null ->
+                FUTURE_TIME_WARNING
+            !planIntent &&
+                candidateEndTimestamp != null &&
+                RecordTime.pointError(candidateEndTimestamp, nowMillis, skew) != null ->
                 FUTURE_TIME_WARNING
             else -> null
         }
@@ -291,7 +306,8 @@ internal data class QuickRecordDraft(
         ) {
             return null
         }
-        RecordTime.pointError(timestamp, nowMillis)?.let {
+        val skew = actualTimeMaxFutureSkewMillis(nowMillis)
+        RecordTime.pointError(timestamp, nowMillis, skew)?.let {
             return IntervalDurationPreview.Warning(it)
         }
         val end = endTimestamp
@@ -303,7 +319,7 @@ internal data class QuickRecordDraft(
                 SLEEP_END_MISSING_WARNING,
             )
         }
-        val decisionError = RecordTime.intervalError(timestamp, end, nowMillis)
+        val decisionError = RecordTime.intervalError(timestamp, end, nowMillis, skew)
         if (decisionError != null) {
             return IntervalDurationPreview.Warning(decisionError)
         }
@@ -388,13 +404,14 @@ internal data class QuickRecordDraft(
             )
         }
         // Schedule/edit plan (and explicit record→plan convert) allow future plan time.
-        // Fact + fulfill still reject future actual times — unless convert is the path.
+        // Fact writes: 0 skew. Fulfill: +5 minutes. Convert path skips this gate.
         if (
             work != ComposerWorkMode.ScheduleCare &&
             work != ComposerWorkMode.EditPlan &&
             !converting
         ) {
-            RecordTime.pointError(timestamp, nowMillis)?.let {
+            val skew = actualTimeMaxFutureSkewMillis(nowMillis)
+            RecordTime.pointError(timestamp, nowMillis, skew)?.let {
                 return ComposerValidationResult(it, ComposerInvalidField.StartTime)
             }
         }
@@ -504,10 +521,13 @@ internal data class QuickRecordDraft(
         val field = when (warning.text) {
             FUTURE_TIME_WARNING -> {
                 val end = endTimestamp
+                val skew = actualTimeMaxFutureSkewMillis(nowMillis)
                 when {
-                    RecordTime.pointError(timestamp, nowMillis) != null ->
+                    RecordTime.pointError(timestamp, nowMillis, skew) != null ->
                         ComposerInvalidField.StartTime
-                    end != null && end > nowMillis -> ComposerInvalidField.EndTime
+                    end != null &&
+                        RecordTime.pointError(end, nowMillis, skew) != null ->
+                        ComposerInvalidField.EndTime
                     else -> ComposerInvalidField.StartTime
                 }
             }

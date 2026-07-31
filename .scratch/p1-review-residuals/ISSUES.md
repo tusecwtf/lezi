@@ -26,7 +26,7 @@ Post-0.3.1 re-verify only (no implement before gate)
 | # | Ticket | Lane | Blocked by | Status |
 |---|--------|------|------------|--------|
 | [01](./issues/01-record-membership-acl.md) | 护理记录 membership ACL | immediate | — | done |
-| [02](./issues/02-close-future-fact-writes.md) | 事实写入关闭未来时间 | immediate | — | ready-for-agent |
+| [02](./issues/02-close-future-fact-writes.md) | 事实写入关闭未来时间 | immediate | — | done |
 | [03](./issues/03-strip-next-feed-marker-on-fulfill.md) | 履行时剥离 next-feed note marker | immediate | 02 | ready-for-agent |
 | [04](./issues/04-composer-import-save-serialization.md) | Composer 选图与保存串行 | immediate | — | ready-for-agent |
 | [05](./issues/05-join-session-durability-reverify.md) | Join 会话耐久顺序 | post-0.3.1 | 0.3.1 发布 | planned |
@@ -36,8 +36,7 @@ Post-0.3.1 re-verify only (no implement before gate)
 
 ## Frontier
 
-- **现在可领：** 02、04  
-- **02 完成后：** 03  
+- **现在可领：** 03、04  
 - **不要领：** 05–08（直至 0.3.1 复核）
 
 ## Explicitly deferred elsewhere

@@ -1,5 +1,6 @@
 package com.lezi.babylog.feature.timer
 
+import com.lezi.babylog.core.model.RecordTime
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -121,8 +122,9 @@ class NursingCompletionDraftTest {
             validDraft().copy(startedAt = start, endedAt = start - 1L)
                 .validationError(now),
         )
+        // Create path (no carePlanId): zero skew, shared fact copy.
         assertEquals(
-            "结束时刻不能晚于现在",
+            "不能选未来时刻",
             validDraft().copy(startedAt = start, endedAt = now + 1L)
                 .validationError(now),
         )
@@ -130,6 +132,27 @@ class NursingCompletionDraftTest {
             validDraft().copy(startedAt = start, endedAt = start)
                 .validationError(now),
         )
+    }
+
+    @Test
+    fun validation_fulfillCarePlanAllowsFiveMinuteSkewOnEndedAt() {
+        val start = 1_700_000_000_000L
+        val now = start + 60_000L
+        val fiveMin = RecordTime.FULFILLMENT_ACTUAL_TIME_SKEW_MILLIS
+        val fulfill = validDraft().copy(
+            startedAt = start,
+            carePlanId = 42L,
+        )
+
+        assertNull(
+            fulfill.copy(endedAt = now + fiveMin).validationError(now),
+        )
+        assertEquals(
+            "不能选未来时刻",
+            fulfill.copy(endedAt = now + fiveMin + 1L).validationError(now),
+        )
+        assertEquals(fiveMin, fulfill.actualTimeMaxFutureSkewMillis())
+        assertEquals(0L, validDraft().actualTimeMaxFutureSkewMillis())
     }
 
     @Test

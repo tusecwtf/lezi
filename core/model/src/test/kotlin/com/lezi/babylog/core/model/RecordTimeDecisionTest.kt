@@ -84,6 +84,49 @@ class RecordTimeDecisionTest {
     }
 
     @Test
+    fun factWritesUseZeroSkewAndFulfillmentAllowsFiveMinuteBoundary() {
+        val now = 1_000_000L
+        val fiveMin = RecordTime.FULFILLMENT_ACTUAL_TIME_SKEW_MILLIS
+        assertThat(fiveMin).isEqualTo(5 * 60_000L)
+
+        // Create / update (default 0 skew): any future fails.
+        assertThat(RecordTime.pointError(now, now)).isNull()
+        assertThat(RecordTime.pointError(now + 1L, now)).isEqualTo("不能选未来时刻")
+        assertThat(RecordTime.intervalError(now - 1L, now + 1L, now))
+            .isEqualTo("不能选未来时刻")
+        assertThat(RecordTime.intervalError(now - 10L, now, now)).isNull()
+
+        // Fulfill: exactly +5 minutes passes; +1 ms over fails (start and end).
+        assertThat(RecordTime.pointError(now + fiveMin, now, fiveMin)).isNull()
+        assertThat(RecordTime.pointError(now + fiveMin + 1L, now, fiveMin))
+            .isEqualTo("不能选未来时刻")
+        assertThat(
+            RecordTime.intervalError(
+                start = now - 60_000L,
+                end = now + fiveMin,
+                now = now,
+                maxFutureSkewMillis = fiveMin,
+            ),
+        ).isNull()
+        assertThat(
+            RecordTime.intervalError(
+                start = now - 60_000L,
+                end = now + fiveMin + 1L,
+                now = now,
+                maxFutureSkewMillis = fiveMin,
+            ),
+        ).isEqualTo("不能选未来时刻")
+        assertThat(
+            RecordTime.intervalError(
+                start = now + fiveMin + 1L,
+                end = now + fiveMin + 2L,
+                now = now,
+                maxFutureSkewMillis = fiveMin,
+            ),
+        ).isEqualTo("不能选未来时刻")
+    }
+
+    @Test
     fun futureEventAndReminderUseTheSameOrderingDecision() {
         val zone = ZoneId.of("Asia/Shanghai")
         val now = ZonedDateTime.of(

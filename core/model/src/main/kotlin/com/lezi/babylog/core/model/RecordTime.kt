@@ -102,15 +102,42 @@ object RecordTime {
         return duration?.let(newStartMillis::plus)
     }
 
-    fun pointError(timestamp: Long, now: Long): String? =
-        if (timestamp > now) "不能选未来时刻" else null
+    /**
+     * Max device-clock skew allowed when recording **actual occurrence** times on
+     * plan fulfillment (start and closed sleep end). Create/update fact writes use
+     * zero skew — future times must schedule a care plan or convert explicitly.
+     */
+    const val FULFILLMENT_ACTUAL_TIME_SKEW_MILLIS: Long = 5 * 60_000L
 
-    fun intervalError(start: Long, end: Long?, now: Long): String? = when {
-        start > now -> "不能选未来时刻"
-        end == null -> null
-        end <= start -> "醒来须晚于睡下"
-        end > now -> "不能选未来时刻"
-        else -> null
+    /**
+     * @param maxFutureSkewMillis allowed advance past [now] (0 = create/update fact;
+     *   [FULFILLMENT_ACTUAL_TIME_SKEW_MILLIS] = fulfill actual times).
+     */
+    fun pointError(
+        timestamp: Long,
+        now: Long,
+        maxFutureSkewMillis: Long = 0L,
+    ): String? {
+        val skew = maxFutureSkewMillis.coerceAtLeast(0L)
+        return if (timestamp > now + skew) "不能选未来时刻" else null
+    }
+
+    /**
+     * Closed-interval fact/fulfill time gate. Open intervals ([end] null) only
+     * check [start]. Ordering uses the sleep-facing copy when end ≤ start.
+     *
+     * @param maxFutureSkewMillis same contract as [pointError].
+     */
+    fun intervalError(
+        start: Long,
+        end: Long?,
+        now: Long,
+        maxFutureSkewMillis: Long = 0L,
+    ): String? {
+        pointError(start, now, maxFutureSkewMillis)?.let { return it }
+        if (end == null) return null
+        if (end <= start) return "醒来须晚于睡下"
+        return pointError(end, now, maxFutureSkewMillis)
     }
 
     fun defaultFutureEventTimestamp(

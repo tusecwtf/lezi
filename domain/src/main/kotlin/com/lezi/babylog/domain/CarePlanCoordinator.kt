@@ -336,7 +336,13 @@ internal class CarePlanCoordinator(
         photoLocalPaths: List<String> = emptyList(),
         nowMillis: Long = System.currentTimeMillis(),
     ): Long {
-        RecordTime.pointError(actualTimestamp, nowMillis)?.let { throw IllegalArgumentException(it) }
+        // Fulfill actual times (start + closed sleep end) allow device-now + 5 minutes.
+        RecordTime.intervalError(
+            start = actualTimestamp,
+            end = endTimestamp,
+            now = nowMillis,
+            maxFutureSkewMillis = RecordTime.FULFILLMENT_ACTUAL_TIME_SKEW_MILLIS,
+        )?.let { throw IllegalArgumentException(it) }
         val photos = photoLocalPaths
         // Freeze confirm time once for the candidate; wall clock for writer bookkeeping.
         val confirmedAt = System.currentTimeMillis()

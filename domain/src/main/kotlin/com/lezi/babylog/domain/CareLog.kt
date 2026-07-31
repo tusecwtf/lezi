@@ -370,6 +370,7 @@ class CareLog @Inject constructor(
         payloadJson: String = "{}",
         schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
         photoLocalPaths: List<String> = emptyList(),
+        nowMillis: Long = System.currentTimeMillis(),
     ): Long = recordMutations.addRecord(
         babyId,
         type,
@@ -379,6 +380,7 @@ class CareLog @Inject constructor(
         payloadJson,
         schemaVersion,
         photoLocalPaths,
+        nowMillis,
     )
 
     suspend fun updateRecord(
@@ -459,6 +461,7 @@ class CareLog @Inject constructor(
         recordMode: String = "end",
         completionClientUuid: String = newClientUuid(),
         carePlanId: Long? = null,
+        nowMillis: Long = System.currentTimeMillis(),
     ): Long = recordMutations.completeNursing(
         babyId,
         leftMin,
@@ -471,6 +474,7 @@ class CareLog @Inject constructor(
         recordMode,
         completionClientUuid,
         carePlanId,
+        nowMillis,
     )
 
     suspend fun confirmSleep(
@@ -482,6 +486,7 @@ class CareLog @Inject constructor(
         payloadJson: String,
         schemaVersion: Int = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
         photoLocalPaths: List<String> = emptyList(),
+        nowMillis: Long = System.currentTimeMillis(),
     ): Long = recordMutations.confirmSleep(
         babyId,
         expectedOpenSleepId,
@@ -491,17 +496,20 @@ class CareLog @Inject constructor(
         payloadJson,
         schemaVersion,
         photoLocalPaths,
+        nowMillis,
     )
 
     suspend fun sleepDown(
         babyId: Long,
         at: Long = System.currentTimeMillis(),
-    ): Long = recordMutations.sleepDown(babyId, at)
+        nowMillis: Long = System.currentTimeMillis(),
+    ): Long = recordMutations.sleepDown(babyId, at, nowMillis)
 
     suspend fun sleepUp(
         babyId: Long,
         at: Long = System.currentTimeMillis(),
-    ): Long = recordMutations.sleepUp(babyId, at)
+        nowMillis: Long = System.currentTimeMillis(),
+    ): Long = recordMutations.sleepUp(babyId, at, nowMillis)
 
 
     suspend fun getRecord(id: Long): Record? = queries.getRecord(id)

@@ -2,6 +2,7 @@ package com.lezi.babylog.feature.timer
 
 import com.lezi.babylog.core.model.NURSING_ORDERS
 import com.lezi.babylog.core.model.NursingConfirmInput
+import com.lezi.babylog.core.model.RecordTime
 
 /**
  * A snapshot taken when the user taps "完成并记录".
@@ -9,6 +10,9 @@ import com.lezi.babylog.core.model.NursingConfirmInput
  * Running timers may continue behind the confirmation sheet. Durations and the
  * default end time deliberately stay frozen so a delayed confirmation cannot
  * silently add time the user did not review.
+ *
+ * When [carePlanId] is set, actual times reuse fulfill skew
+ * ([RecordTime.FULFILLMENT_ACTUAL_TIME_SKEW_MILLIS]); otherwise create-path zero skew.
  */
 internal data class NursingCompletionDraft(
     val leftMinutes: String,
@@ -19,15 +23,24 @@ internal data class NursingCompletionDraft(
     val startedAt: Long,
     val endedAt: Long,
     val capturedAt: Long,
+    val carePlanId: Long? = null,
 ) {
+    fun actualTimeMaxFutureSkewMillis(): Long =
+        if (carePlanId != null) {
+            RecordTime.FULFILLMENT_ACTUAL_TIME_SKEW_MILLIS
+        } else {
+            0L
+        }
+
     fun validationError(nowMillis: Long): String? {
         confirmInput().validationIssue()?.let { return it.message }
-        return when {
-            note.length > 200 -> "备注最多 200 字"
-            endedAt < startedAt -> "结束时刻不能早于开始时刻"
-            endedAt > nowMillis -> "结束时刻不能晚于现在"
-            else -> null
-        }
+        if (note.length > 200) return "备注最多 200 字"
+        if (endedAt < startedAt) return "结束时刻不能早于开始时刻"
+        val skew = actualTimeMaxFutureSkewMillis()
+        // Shared fact/fulfill copy with domain [RecordTime.pointError].
+        RecordTime.pointError(startedAt, nowMillis, skew)?.let { return it }
+        RecordTime.pointError(endedAt, nowMillis, skew)?.let { return it }
+        return null
     }
 
     fun toCommand(): NursingCompletionCommand {
@@ -88,6 +101,7 @@ internal fun freezeNursingCompletion(
         startedAt = state.sessionStartedAt ?: clickedAt,
         endedAt = clickedAt,
         capturedAt = clickedAt,
+        carePlanId = state.carePlanId,
     )
 }
 

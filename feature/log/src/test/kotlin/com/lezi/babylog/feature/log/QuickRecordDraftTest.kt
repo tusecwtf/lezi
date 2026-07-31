@@ -4,6 +4,7 @@ import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.CarePlan
 import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.NursingPayload
+import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.shouldOfferNextFeedPlanForFact
 import org.junit.Assert.assertEquals
@@ -721,8 +722,15 @@ class QuickRecordDraftTest {
         assertEquals(ComposerWorkMode.FulfillPlan, fulfill.workMode(nowMillis = now))
         assertEquals("完成护理计划", sheetKicker(fulfill, nowMillis = now))
         assertEquals("确认完成", fulfill.confirmLabel(nowMillis = now))
-        assertEquals("不能选未来时刻", fulfill.validationError(nowMillis = now))
-        assertFalse(fulfill.canConfirm(nowMillis = now))
+        // Fulfill allows up to +5 minutes of clock skew on actual time.
+        val fiveMin = RecordTime.FULFILLMENT_ACTUAL_TIME_SKEW_MILLIS
+        assertNull(fulfill.copy(timestamp = now + fiveMin).validationError(nowMillis = now))
+        assertTrue(fulfill.copy(timestamp = now + fiveMin).canConfirm(nowMillis = now))
+        assertEquals(
+            "不能选未来时刻",
+            fulfill.copy(timestamp = now + fiveMin + 1L).validationError(nowMillis = now),
+        )
+        assertFalse(fulfill.copy(timestamp = now + fiveMin + 1L).canConfirm(nowMillis = now))
     }
 
     @Test
@@ -906,10 +914,19 @@ class QuickRecordDraftTest {
         )
 
         val fulfill = schedule.copy(carePlanId = 13L, editCarePlan = false)
+        // Exactly +5 minutes is allowed on fulfill; +1 ms over fails.
+        assertNull(
+            fulfill.startTimeRejectionMessage(
+                candidateStartTimestamp = tappedAt + RecordTime.FULFILLMENT_ACTUAL_TIME_SKEW_MILLIS,
+                candidateEndTimestamp = null,
+                nowMillis = tappedAt,
+            ),
+        )
         assertEquals(
             FUTURE_TIME_WARNING,
             fulfill.startTimeRejectionMessage(
-                candidateStartTimestamp = tappedAt + 300_000L,
+                candidateStartTimestamp =
+                    tappedAt + RecordTime.FULFILLMENT_ACTUAL_TIME_SKEW_MILLIS + 1L,
                 candidateEndTimestamp = null,
                 nowMillis = tappedAt,
             ),
@@ -989,8 +1006,12 @@ class QuickRecordDraftTest {
         assertEquals("保存计划", draft.confirmLabel(nowMillis = tappedAt))
         assertNull(draft.validationError(nowMillis = tappedAt))
         assertTrue(draft.canConfirm(nowMillis = tappedAt))
-        // Fulfill path still blocks future actual times.
-        val fulfill = draft.copy(editCarePlan = false, timestamp = tappedAt + 1L)
+        // Fulfill path allows +5 minutes, rejects beyond.
+        val fiveMin = RecordTime.FULFILLMENT_ACTUAL_TIME_SKEW_MILLIS
+        val fulfillOk = draft.copy(editCarePlan = false, timestamp = tappedAt + fiveMin)
+        assertEquals(ComposerWorkMode.FulfillPlan, fulfillOk.workMode(nowMillis = tappedAt))
+        assertNull(fulfillOk.validationError(nowMillis = tappedAt))
+        val fulfill = draft.copy(editCarePlan = false, timestamp = tappedAt + fiveMin + 1L)
         assertEquals(ComposerWorkMode.FulfillPlan, fulfill.workMode(nowMillis = tappedAt))
         assertEquals("不能选未来时刻", fulfill.validationError(nowMillis = tappedAt))
     }
