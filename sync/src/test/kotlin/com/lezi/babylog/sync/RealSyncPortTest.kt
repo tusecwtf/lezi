@@ -485,6 +485,142 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun installAvailableAppUpdateRejectsConcurrentSecondInstallWhileBusy() = runTest {
+        val apkBytes = "lezi-release-apk-bytes".toByteArray(Charsets.UTF_8)
+        val metadata = sampleAppUpdateMetadata(
+            versionCode = 7,
+            versionName = "0.3.1",
+            sha256 = sha256Hex(apkBytes),
+        )
+        val installer = RecordingAppUpdateInstaller()
+        val cacheDir = createTempDir(prefix = "lezi-app-update-busy")
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+            appUpdateInstaller = installer,
+            appUpdateCacheDir = cacheDir,
+        )
+        rig.awaitStartupRecovery()
+        rig.backend.appUpdateApkBytes = apkBytes
+        val downloadStarted = CompletableDeferred<Unit>()
+        val releaseDownload = CompletableDeferred<Unit>()
+        rig.backend.downloadAppUpdateApkStarted = downloadStarted
+        rig.backend.releaseDownloadAppUpdateApk = releaseDownload
+
+        val first = async { rig.port.installAvailableAppUpdate(metadata) }
+        downloadStarted.await()
+
+        val second = rig.port.installAvailableAppUpdate(metadata)
+        assertThat(second.isFailure).isTrue()
+        assertThat(second.exceptionOrNull())
+            .isInstanceOf(AppUpdateInstallInProgressException::class.java)
+        assertThat(second.exceptionOrNull()!!.message)
+            .isEqualTo(APP_UPDATE_INSTALL_IN_PROGRESS_MESSAGE)
+        assertThat(rig.backend.downloadAppUpdateApkCalls).isEqualTo(1)
+        assertThat(installer.installCalls).isEmpty()
+
+        releaseDownload.complete(Unit)
+        assertThat(first.await().getOrThrow()).isEqualTo(AppUpdateInstallResult.SessionStarted)
+        assertThat(installer.installCalls).hasSize(1)
+        assertThat(appUpdateStagingApk(cacheDir).exists()).isFalse()
+    }
+
+    @Test
+    fun installAvailableAppUpdateBusyRejectDoesNotDismissOptionalBanner() = runTest {
+        val apkBytes = "lezi-release-apk-bytes".toByteArray(Charsets.UTF_8)
+        val heldMetadata = sampleAppUpdateMetadata(
+            versionCode = 7,
+            versionName = "0.3.1",
+            sha256 = sha256Hex(apkBytes),
+        )
+        // Different package version so a busy second call would wrongly dismiss if it
+        // still ran dismissOptionalAppUpdate before tryLock.
+        val bannerMetadata = sampleAppUpdateMetadata(
+            versionCode = 8,
+            versionName = "0.4.0",
+            sha256 = sha256Hex(apkBytes),
+        )
+        val installer = RecordingAppUpdateInstaller()
+        val cacheDir = createTempDir(prefix = "lezi-app-update-busy-dismiss")
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+            appUpdateInstaller = installer,
+            appUpdateCacheDir = cacheDir,
+        )
+        rig.awaitStartupRecovery()
+        rig.backend.appUpdateApkBytes = apkBytes
+        rig.backend.appUpdateMetadata = bannerMetadata
+        assertThat(rig.port.checkAppUpdate().getOrThrow())
+            .isEqualTo(AppUpdateCheckResult.OptionalUpdate(bannerMetadata))
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isEqualTo(bannerMetadata)
+
+        val downloadStarted = CompletableDeferred<Unit>()
+        val releaseDownload = CompletableDeferred<Unit>()
+        rig.backend.downloadAppUpdateApkStarted = downloadStarted
+        rig.backend.releaseDownloadAppUpdateApk = releaseDownload
+
+        val first = async { rig.port.installAvailableAppUpdate(heldMetadata) }
+        downloadStarted.await()
+        // First install dismisses only its own versionCode (7); banner for 8 must remain
+        // until a successful install for 8 owns the pipeline.
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isEqualTo(bannerMetadata)
+
+        val busy = rig.port.installAvailableAppUpdate(bannerMetadata)
+        assertThat(busy.exceptionOrNull())
+            .isInstanceOf(AppUpdateInstallInProgressException::class.java)
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isEqualTo(bannerMetadata)
+
+        releaseDownload.complete(Unit)
+        assertThat(first.await().getOrThrow()).isEqualTo(AppUpdateInstallResult.SessionStarted)
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isEqualTo(bannerMetadata)
+    }
+
+    @Test
+    fun checkAppUpdateDoesNotClearStagingWhileInstallInProgress() = runTest {
+        val apkBytes = "lezi-release-apk-bytes".toByteArray(Charsets.UTF_8)
+        val metadata = sampleAppUpdateMetadata(
+            versionCode = 7,
+            versionName = "0.3.1",
+            sha256 = sha256Hex(apkBytes),
+        )
+        val installer = RecordingAppUpdateInstaller()
+        val cacheDir = createTempDir(prefix = "lezi-app-update-race")
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+            appUpdateInstaller = installer,
+            appUpdateCacheDir = cacheDir,
+        )
+        rig.awaitStartupRecovery()
+        rig.backend.appUpdateApkBytes = apkBytes
+        rig.backend.appUpdateMetadata = metadata
+        val downloadStarted = CompletableDeferred<Unit>()
+        val releaseDownload = CompletableDeferred<Unit>()
+        rig.backend.downloadAppUpdateApkStarted = downloadStarted
+        rig.backend.releaseDownloadAppUpdateApk = releaseDownload
+
+        val installing = async { rig.port.installAvailableAppUpdate(metadata) }
+        downloadStarted.await()
+        // Mid-install partial staging must survive opportunistic check cleanup.
+        appUpdateStagingDir(cacheDir).mkdirs()
+        appUpdateStagingApk(cacheDir).writeText("partial-apk")
+
+        val check = rig.port.checkAppUpdate()
+        assertThat(check.isSuccess).isTrue()
+        assertThat(appUpdateStagingApk(cacheDir).exists()).isTrue()
+        assertThat(appUpdateStagingApk(cacheDir).readText()).isEqualTo("partial-apk")
+
+        assertThat(rig.port.cleanupAppUpdateStaging().isSuccess).isTrue()
+        assertThat(appUpdateStagingApk(cacheDir).exists()).isTrue()
+
+        releaseDownload.complete(Unit)
+        assertThat(installing.await().getOrThrow())
+            .isEqualTo(AppUpdateInstallResult.SessionStarted)
+        assertThat(appUpdateStagingApk(cacheDir).exists()).isFalse()
+    }
+
+    @Test
     fun confirmedFamilyDeleteStagesFullClearAndRetiresEveryLocalFamilyTrace() = runTest {
         val clearGate = TestRemovedDeviceLocalClearGate()
         val rig = SyncRig(
@@ -6623,6 +6759,8 @@ internal class RecordingSyncBackend : SyncBackend {
     var appUpdateApkBytes: ByteArray? = null
     var downloadAppUpdateApkFailure: Throwable? = null
     var downloadAppUpdateApkCalls = 0
+    var downloadAppUpdateApkStarted: CompletableDeferred<Unit>? = null
+    var releaseDownloadAppUpdateApk: CompletableDeferred<Unit>? = null
 
     override suspend fun getAppUpdateMetadata(session: SyncSession): AppUpdateMetadata {
         getAppUpdateMetadataCalls += 1
@@ -6633,6 +6771,8 @@ internal class RecordingSyncBackend : SyncBackend {
 
     override suspend fun downloadAppUpdateApk(session: SyncSession): ByteArray {
         downloadAppUpdateApkCalls += 1
+        downloadAppUpdateApkStarted?.complete(Unit)
+        releaseDownloadAppUpdateApk?.await()
         downloadAppUpdateApkFailure?.let { throw it }
         return appUpdateApkBytes
             ?: throw SyncHttpException(404, """{"detail":"App update package is not available"}""")

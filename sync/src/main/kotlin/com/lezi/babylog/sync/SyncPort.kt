@@ -200,6 +200,19 @@ sealed interface AppUpdateInstallResult {
     data object RequiresInstallPermission : AppUpdateInstallResult
 }
 
+/** Product copy when a second install is rejected while another pipeline owns staging. */
+const val APP_UPDATE_INSTALL_IN_PROGRESS_MESSAGE = "更新正在进行中，请稍候"
+
+/** Dialog title for [AppUpdateInstallInProgressException] (busy, not hard failure). */
+const val APP_UPDATE_INSTALL_IN_PROGRESS_TITLE = "更新进行中"
+
+/**
+ * Concurrent [SyncPort.installAvailableAppUpdate] while another pipeline owns the
+ * private staging path. Surfaces as busy, not a corrupted package failure.
+ */
+class AppUpdateInstallInProgressException :
+    IllegalStateException(APP_UPDATE_INSTALL_IN_PROGRESS_MESSAGE)
+
 interface SyncPort {
     fun status(): Flow<SyncStatus>
     fun session(): Flow<SyncSession>
@@ -340,6 +353,11 @@ interface SyncPort {
      * Downloads the release APK for [metadata] from the trusted family server,
      * verifies sha256, then starts a [android.content.pm.PackageInstaller] session.
      *
+     * Download, digest, staging write, and session commit run on a background
+     * dispatcher (not the main thread). At most one install pipeline may own the
+     * private staging path at a time; a concurrent call fails with a product-facing
+     * "进行中" error instead of racing half-written APKs.
+     *
      * Staging is limited to app-private cache and is always cleaned up after the
      * attempt (success path after session commit, failure/cancel paths too).
      * Not joined or foreground/trust gate failures return [Result.failure].
@@ -349,7 +367,10 @@ interface SyncPort {
     ): Result<AppUpdateInstallResult> =
         Result.failure(SyncNotEnabledException())
 
-    /** Best-effort delete of private app-update staging APKs. */
+    /**
+     * Best-effort delete of private app-update staging APKs.
+     * No-op while [installAvailableAppUpdate] holds the staging path.
+     */
     suspend fun cleanupAppUpdateStaging(): Result<Unit> = Result.success(Unit)
 }
 

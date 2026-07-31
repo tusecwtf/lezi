@@ -106,6 +106,12 @@ fun appUpdateInstallUiOutcome(
     failureCopy: (Throwable) -> String,
 ): AppUpdateUiOutcome {
     val value = result.getOrElse { error ->
+        if (error is AppUpdateInstallInProgressException) {
+            return AppUpdateUiOutcome.Message(
+                title = APP_UPDATE_INSTALL_IN_PROGRESS_TITLE,
+                body = error.message ?: APP_UPDATE_INSTALL_IN_PROGRESS_MESSAGE,
+            )
+        }
         return AppUpdateUiOutcome.Message(
             title = "更新失败",
             body = failureCopy(error),

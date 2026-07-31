@@ -4,15 +4,18 @@
 
 **Blocked by:** None — can start immediately（与 01 独立；若同改 RealSyncPort 建议先 01）
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Acceptance criteria
 
-- [ ] 校验、落盘、`installFromFile` 全程在后台调度器（如 `Dispatchers.IO`）完成；UI 仅收结果
-- [ ] 检查入口的 opportunistic cleanup **不会**在另一安装进行中删除同一暂存路径（mutex 或等价串行）
-- [ ] 重叠安装被拒绝或排队，并有可理解错误/忙碌态（关于 + 强制 overlay 不双开互相拆台）
-- [ ] 单测或可测 seam：二次 install 在 busy 时失败/串行；不要求真 PackageInstaller
+- [x] 校验、落盘、`installFromFile` 全程在后台调度器（如 `Dispatchers.IO`）完成；UI 仅收结果
+- [x] 检查入口的 opportunistic cleanup **不会**在另一安装进行中删除同一暂存路径（mutex 或等价串行）
+- [x] 重叠安装被拒绝或排队，并有可理解错误/忙碌态（关于 + 强制 overlay 不双开互相拆台）
+- [x] 单测或可测 seam：二次 install 在 busy 时失败/串行；不要求真 PackageInstaller
 
 ## Comments
 
 - Review: B2（竞态）、B4（Main ANR）；correctness Issue 7 叠 UI 可一并收口
+- Fix: `appUpdateInstallMutex` 串行 install/cleanup；`tryLock` 重叠 install → `更新正在进行中，请稍候`；check/cleanup 在 busy 时跳过清暂存；download+sha256+write+`installFromFile` 包在 `withContext(Dispatchers.IO)`。
+- Fix round 1: dismiss only after lock; typed `AppUpdateInstallInProgressException` + UI busy title; `withAppUpdateInstallLockOrElse` helper; [evidence/02](../evidence/02/validation.md)
+

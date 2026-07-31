@@ -82,6 +82,11 @@ class RealSyncPort @Inject constructor(
     )
     private val processScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val syncMutex = Mutex()
+    /**
+     * Serializes app-update install + staging cleanup so about-check, banner install,
+     * and force overlay cannot race the same private staging path.
+     */
+    private val appUpdateInstallMutex = Mutex()
     private val replicaSyncEngine = ReplicaSyncEngine(
         backend = backend,
         preferences = preferences,
@@ -580,8 +585,12 @@ class RealSyncPort @Inject constructor(
         .onFailure(::updateFailureStatus)
 
     override suspend fun checkAppUpdate(): Result<AppUpdateCheckResult> {
-        // Opportunistic staging cleanup whenever the user opens the check path.
-        cleanupAppUpdateStaging()
+        // Opportunistic staging cleanup on the check path — never while an install
+        // pipeline holds [appUpdateInstallMutex] (would wipe a partial staging APK).
+        withAppUpdateInstallLockOrElse(
+            onBusy = { },
+            block = { cleanupAppUpdateStagingFiles(appUpdateCacheDir) },
+        )
         val session = preferences.session.first()
         if (!session.isJoined) {
             optionalAppUpdateState.value = null
@@ -647,47 +656,77 @@ class RealSyncPort @Inject constructor(
         if (clientAppVersion.versionCode >= metadata.versionCode) {
             return Result.failure(IllegalStateException("当前已是最新版本"))
         }
-        // Starting install hides the optional banner for this version for the rest of the process.
-        dismissOptionalAppUpdate(metadata.versionCode)
-        // Install/download/verify/gate failures surface only via Result — never mutate SyncStatus
-        // (mirror checkAppUpdate; do not call requireAllowed / updateFailureStatus).
-        return runCatching {
-            val decision = foregroundSyncGate.evaluate(
-                session.endpointConfig,
-                preferences.verifiedEndpoint.first(),
-                foregroundState.isForeground(),
-            )
-            if (decision != ForegroundSyncDecision.Allowed) {
-                throw ForegroundSyncBlockedException(decision)
-            }
-            if (!appUpdateInstaller.canRequestPackageInstalls()) {
-                return@runCatching AppUpdateInstallResult.RequiresInstallPermission
-            }
-            cleanupAppUpdateStagingFiles(appUpdateCacheDir)
-            val stagingDir = appUpdateStagingDir(appUpdateCacheDir)
-            require(stagingDir.mkdirs() || stagingDir.isDirectory) { "无法创建更新暂存目录" }
-            val stagingFile = appUpdateStagingApk(appUpdateCacheDir)
-            try {
-                val bytes = backend.downloadAppUpdateApk(session)
-                require(bytes.isNotEmpty()) { "更新包下载为空" }
-                val digest = sha256Hex(bytes)
-                if (digest != metadata.sha256) {
-                    throw IllegalStateException("更新包校验失败，请重试")
+        // About + banner + force overlay share one pipeline; second call fails closed while busy.
+        // Banner dismiss and other install-started mutations only run after the lock is held.
+        return withAppUpdateInstallLockOrElse(
+            onBusy = { Result.failure(AppUpdateInstallInProgressException()) },
+            block = {
+                dismissOptionalAppUpdate(metadata.versionCode)
+                // Download / sha256 / staging write / PackageInstaller stay off the main thread.
+                // Failures surface only via Result — never mutate SyncStatus
+                // (mirror checkAppUpdate; do not call requireAllowed / updateFailureStatus).
+                runCatching {
+                    withContext(Dispatchers.IO) {
+                        val decision = foregroundSyncGate.evaluate(
+                            session.endpointConfig,
+                            preferences.verifiedEndpoint.first(),
+                            foregroundState.isForeground(),
+                        )
+                        if (decision != ForegroundSyncDecision.Allowed) {
+                            throw ForegroundSyncBlockedException(decision)
+                        }
+                        if (!appUpdateInstaller.canRequestPackageInstalls()) {
+                            return@withContext AppUpdateInstallResult.RequiresInstallPermission
+                        }
+                        cleanupAppUpdateStagingFiles(appUpdateCacheDir)
+                        val stagingDir = appUpdateStagingDir(appUpdateCacheDir)
+                        require(stagingDir.mkdirs() || stagingDir.isDirectory) {
+                            "无法创建更新暂存目录"
+                        }
+                        val stagingFile = appUpdateStagingApk(appUpdateCacheDir)
+                        try {
+                            val bytes = backend.downloadAppUpdateApk(session)
+                            require(bytes.isNotEmpty()) { "更新包下载为空" }
+                            val digest = sha256Hex(bytes)
+                            if (digest != metadata.sha256) {
+                                throw IllegalStateException("更新包校验失败，请重试")
+                            }
+                            stagingFile.outputStream().use { it.write(bytes) }
+                            appUpdateInstaller.installFromFile(stagingFile, metadata.packageName)
+                            AppUpdateInstallResult.SessionStarted
+                        } finally {
+                            // Always remove private staging after the attempt so no shareable APK remains.
+                            cleanupAppUpdateStagingFiles(appUpdateCacheDir)
+                        }
+                    }
                 }
-                withContext(Dispatchers.IO) {
-                    stagingFile.outputStream().use { it.write(bytes) }
-                }
-                appUpdateInstaller.installFromFile(stagingFile, metadata.packageName)
-                AppUpdateInstallResult.SessionStarted
-            } finally {
-                // Always remove private staging after the attempt so no shareable APK remains.
-                cleanupAppUpdateStagingFiles(appUpdateCacheDir)
-            }
-        }
+            },
+        )
     }
 
     override suspend fun cleanupAppUpdateStaging(): Result<Unit> = runCatching {
-        cleanupAppUpdateStagingFiles(appUpdateCacheDir)
+        withAppUpdateInstallLockOrElse(
+            onBusy = { },
+            block = { cleanupAppUpdateStagingFiles(appUpdateCacheDir) },
+        )
+    }
+
+    /**
+     * Single owner of [appUpdateInstallMutex] try/finally so check cleanup, install,
+     * and explicit cleanup share one skip-vs-busy policy.
+     */
+    private suspend inline fun <T> withAppUpdateInstallLockOrElse(
+        onBusy: () -> T,
+        block: suspend () -> T,
+    ): T {
+        if (!appUpdateInstallMutex.tryLock()) {
+            return onBusy()
+        }
+        try {
+            return block()
+        } finally {
+            appUpdateInstallMutex.unlock()
+        }
     }
 
     /**
