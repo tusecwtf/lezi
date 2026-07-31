@@ -1,6 +1,10 @@
 package com.lezi.babylog.feature.onboarding
 
 import androidx.activity.compose.rememberLauncherForActivityResult
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.view.WindowManager
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -21,6 +25,7 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -41,6 +46,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -72,8 +78,6 @@ import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.model.limitBabyNicknameInput
 import com.lezi.babylog.core.model.birthWeightValidationError
 import com.lezi.babylog.core.ui.CameraCapture
-import com.lezi.babylog.core.ui.HomeWifiAccessGuideDialog
-import com.lezi.babylog.core.ui.HomeWifiSettingsAction
 import com.lezi.babylog.core.ui.UiTags
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.designsystem.LeziDatePicker
@@ -83,6 +87,7 @@ import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput
 import com.lezi.babylog.domain.FamilyWizardController
 import com.lezi.babylog.domain.FamilyWizardEntry
+import com.lezi.babylog.domain.FamilyWizardJoinRole
 import com.lezi.babylog.domain.FamilyWizardMode
 import com.lezi.babylog.domain.FamilyWizardOutcome
 import com.lezi.babylog.domain.FamilyWizardSnapshot
@@ -91,11 +96,17 @@ import com.lezi.babylog.domain.FamilyWizardStep
 import com.lezi.babylog.domain.JoinFamilyUseCase
 import com.lezi.babylog.domain.SyncFamilyWizardGateway
 import com.lezi.babylog.sync.HomeLanServerConfig
-import com.lezi.babylog.sync.HomeWifiPermission
+import com.lezi.babylog.sync.CertificateTrustCandidate
 import com.lezi.babylog.sync.JoinFamilyDraft
-import com.lezi.babylog.sync.HomeWifiSettingsTarget
-import com.lezi.babylog.sync.NetworkState
+import com.lezi.babylog.sync.MemberLoginQrPayload
+import com.lezi.babylog.sync.MemberLoginQrPayloadCodec
+import com.lezi.babylog.sync.MemberLoginQrTrustChangedException
+import com.lezi.babylog.sync.MemberLoginQrUnavailableException
+import com.lezi.babylog.sync.SetupFamilyState
+import com.lezi.babylog.sync.SetupProbeResult
 import com.lezi.babylog.sync.SyncPort
+import com.lezi.babylog.sync.defaultAndroidDeviceName
+import com.lezi.babylog.sync.requireDeviceName
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate
@@ -103,7 +114,11 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 private val ThemePalette = com.lezi.babylog.designsystem.LeziBabyTheme.PaletteArgb.map {
@@ -113,6 +128,7 @@ private val ThemePaletteLabels = com.lezi.babylog.designsystem.LeziBabyTheme.Lab
 
 internal enum class OnboardingStep {
     ChooseFamily,
+    ConnectServer,
     CreateFamily,
     CreateBaby,
     RecoveryPending,
@@ -126,8 +142,7 @@ internal enum class OnboardingCreateBabySource {
     OfflineMode,
 }
 
-internal fun onboardingFamilyActions(): List<FamilyWizardMode> =
-    listOf(FamilyWizardMode.Create, FamilyWizardMode.Join)
+internal fun onboardingFamilyActions(): List<String> = listOf("连接家庭服务器")
 
 internal fun onboardingChooseFamilyBody(): String =
     "可新建或加入家庭，也可先用离线模式在本机记录；连家庭之后再到账户里完成。"
@@ -147,6 +162,7 @@ internal fun onboardingCreateBabySource(
     val completed = familyWizardState as? FamilyWizardState.Completed
     return when (completed?.outcome) {
         is FamilyWizardOutcome.Reclaimed -> OnboardingCreateBabySource.AfterFamilyReclaim
+        is FamilyWizardOutcome.OwnerLoggedIn -> OnboardingCreateBabySource.AfterFamilyReclaim
         is FamilyWizardOutcome.Created -> OnboardingCreateBabySource.AfterFamilyCreate
         else -> OnboardingCreateBabySource.OfflineMode
     }
@@ -158,6 +174,8 @@ internal fun onboardingFamilyWizardSnapshot(
     draft: JoinFamilyDraft,
     displayName: String,
     familyName: String = "",
+    deviceName: String = "",
+    joinRole: FamilyWizardJoinRole? = null,
 ): FamilyWizardSnapshot = FamilyWizardSnapshot.fromDraft(
     entry = FamilyWizardEntry.Onboarding,
     mode = mode,
@@ -165,7 +183,8 @@ internal fun onboardingFamilyWizardSnapshot(
     draft = draft,
     displayName = displayName,
     familyName = familyName,
-)
+    deviceName = deviceName,
+).copy(joinRole = joinRole)
 
 internal data class OnboardingFamilyTransition(
     val finishRecovery: Boolean,
@@ -177,10 +196,18 @@ internal fun onboardingFamilyWizardTransition(
     reclaimedFamilyEmpty: Boolean?,
 ): OnboardingFamilyTransition? = when (state) {
     is FamilyWizardState.Completed -> when (val outcome = state.outcome) {
-        is FamilyWizardOutcome.Created -> OnboardingFamilyTransition(
-            finishRecovery = false,
-            nextStep = OnboardingStep.CreateBaby,
-        )
+        is FamilyWizardOutcome.Created -> when (outcome.dataRecovery) {
+            com.lezi.babylog.sync.InitialFamilyDataRecovery.Complete -> OnboardingFamilyTransition(
+                finishRecovery = false,
+                nextStep = OnboardingStep.CreateBaby,
+            )
+            com.lezi.babylog.sync.InitialFamilyDataRecovery.RetryRequired,
+            com.lezi.babylog.sync.InitialFamilyDataRecovery.NotRequired,
+            -> OnboardingFamilyTransition(
+                finishRecovery = false,
+                nextStep = OnboardingStep.RecoveryPending,
+            )
+        }
         is FamilyWizardOutcome.Joined -> OnboardingFamilyTransition(
             finishRecovery = true,
             nextStep = OnboardingStep.ChooseFamily,
@@ -204,6 +231,34 @@ internal fun onboardingFamilyWizardTransition(
                 nextStep = OnboardingStep.RecoveryPending,
             )
         }
+        is FamilyWizardOutcome.OwnerLoggedIn -> when (outcome.dataRecovery) {
+            com.lezi.babylog.sync.InitialFamilyDataRecovery.Complete ->
+                reclaimedFamilyEmpty?.let { empty ->
+                    OnboardingFamilyTransition(
+                        finishRecovery = true,
+                        nextStep = if (empty) OnboardingStep.CreateBaby else OnboardingStep.RecoveryComplete,
+                    )
+                }
+            com.lezi.babylog.sync.InitialFamilyDataRecovery.RetryRequired,
+            com.lezi.babylog.sync.InitialFamilyDataRecovery.NotRequired,
+            -> OnboardingFamilyTransition(
+                finishRecovery = false,
+                nextStep = OnboardingStep.RecoveryPending,
+            )
+        }
+        is FamilyWizardOutcome.MemberApproved -> when (outcome.dataRecovery) {
+            com.lezi.babylog.sync.InitialFamilyDataRecovery.Complete ->
+                OnboardingFamilyTransition(
+                    finishRecovery = true,
+                    nextStep = OnboardingStep.ChooseFamily,
+                )
+            com.lezi.babylog.sync.InitialFamilyDataRecovery.RetryRequired,
+            com.lezi.babylog.sync.InitialFamilyDataRecovery.NotRequired,
+            -> OnboardingFamilyTransition(
+                finishRecovery = false,
+                nextStep = OnboardingStep.RecoveryPending,
+            )
+        }
     }
     is FamilyWizardState.RetryableFailure -> if (state.committedOutcome != null) {
         OnboardingFamilyTransition(
@@ -214,7 +269,12 @@ internal fun onboardingFamilyWizardTransition(
         null
     }
     is FamilyWizardState.Editing,
+    is FamilyWizardState.CertificateApprovalRequired,
+    is FamilyWizardState.EndpointFailure,
+    is FamilyWizardState.EndpointReady,
+    is FamilyWizardState.ProbingEndpoint,
     is FamilyWizardState.Submitting,
+    is FamilyWizardState.WaitingForMemberApproval,
     -> null
 }
 
@@ -225,8 +285,6 @@ private val JoinFamilyDraftSaver = listSaver<JoinFamilyDraft, String>(
             it.host,
             it.portText,
             it.scheme,
-            it.ssid1,
-            it.ssid2,
         )
     },
     restore = {
@@ -235,8 +293,6 @@ private val JoinFamilyDraftSaver = listSaver<JoinFamilyDraft, String>(
             host = it[1],
             portText = it[2],
             scheme = it[3],
-            ssid1 = it[4],
-            ssid2 = it[5],
         )
     },
 )
@@ -245,8 +301,7 @@ private val JoinFamilyDraftSaver = listSaver<JoinFamilyDraft, String>(
 class OnboardingViewModel @Inject constructor(
     private val careLog: CareLog,
     private val joinFamily: JoinFamilyUseCase,
-    private val networkState: NetworkState,
-    sync: SyncPort,
+    private val sync: SyncPort,
 ) : ViewModel() {
     private val familyWizard = FamilyWizardController(
         gateway = SyncFamilyWizardGateway(sync, joinFamily, careLog),
@@ -255,15 +310,67 @@ class OnboardingViewModel @Inject constructor(
     private val mutableReclaimedFamilyEmpty = MutableStateFlow<Boolean?>(null)
     val familyWizardState = familyWizard.state
     val reclaimedFamilyEmpty = mutableReclaimedFamilyEmpty.asStateFlow()
+    val verifiedEndpoint = sync.verifiedEndpoint()
+    val pendingMemberLogin = sync.pendingMemberLogin().stateIn(
+        viewModelScope,
+        SharingStarted.Eagerly,
+        null,
+    )
 
-    fun currentWifiSsid(): String? = networkState.currentWifiSsid()
+    init {
+        viewModelScope.launch {
+            sync.memberLoginChecks().collect(familyWizard::observeMemberLoginCheck)
+        }
+        viewModelScope.launch {
+            combine(pendingMemberLogin, sync.session()) { pending, session -> pending to session }
+                .collect { (pending, session) ->
+                    if (pending != null) {
+                        familyWizard.restorePendingMemberApproval(
+                            FamilyWizardSnapshot.empty(FamilyWizardEntry.Onboarding).copy(
+                                mode = FamilyWizardMode.Join,
+                                step = FamilyWizardStep.Identity,
+                                host = session.serverHost,
+                                portText = session.serverPort.toString(),
+                                scheme = session.serverScheme,
+                                joinRole = FamilyWizardJoinRole.Member,
+                            ),
+                            pending,
+                        )
+                    }
+                }
+        }
+    }
 
-    fun submitFamilyWizard(snapshot: FamilyWizardSnapshot, bootstrapSecret: String = "") {
+    fun submitFamilyWizard(
+        snapshot: FamilyWizardSnapshot,
+        bootstrapSecret: String = "",
+        ownerTakeover: Boolean = false,
+    ) {
         viewModelScope.launch {
             mutableReclaimedFamilyEmpty.value = null
-            familyWizard.submit(snapshot, bootstrapSecret)
+            familyWizard.submit(snapshot, bootstrapSecret, ownerTakeover)
             updateRecoveredFamilyEmptiness()
         }
+    }
+
+    fun connectEndpoint(endpointDraft: String) {
+        viewModelScope.launch {
+            familyWizard.connectEndpoint(FamilyWizardEntry.Onboarding, endpointDraft)
+        }
+    }
+
+    fun trustCertificate(candidate: CertificateTrustCandidate) {
+        viewModelScope.launch {
+            familyWizard.trustCertificate(FamilyWizardEntry.Onboarding, candidate)
+        }
+    }
+
+    fun keepOffline() {
+        familyWizard.keepOffline(FamilyWizardEntry.Onboarding)
+    }
+
+    fun forgetEndpoint() {
+        viewModelScope.launch { familyWizard.forgetEndpoint(FamilyWizardEntry.Onboarding) }
     }
 
     fun retryOwnerRecovery() {
@@ -273,12 +380,51 @@ class OnboardingViewModel @Inject constructor(
         }
     }
 
+    fun checkMemberApproval() {
+        viewModelScope.launch { familyWizard.checkMemberApproval() }
+    }
+
+    fun cancelMemberApproval() {
+        viewModelScope.launch { familyWizard.cancelMemberApproval() }
+    }
+
+    fun verifyMemberLoginQr(
+        payload: MemberLoginQrPayload,
+        onResult: (SetupProbeResult) -> Unit,
+    ) {
+        viewModelScope.launch { onResult(sync.verifyEndpoint(payload.endpoint)) }
+    }
+
+    fun claimMemberLoginQr(
+        payload: MemberLoginQrPayload,
+        deviceName: String,
+        onDone: (String?) -> Unit,
+    ) {
+        viewModelScope.launch {
+            if (sync.rememberEndpoint(payload.endpoint).isFailure) {
+                onDone("无法保存家庭服务器信任信息，请重试")
+                return@launch
+            }
+            onDone(
+                sync.claimMemberLoginQr(payload, deviceName).exceptionOrNull()?.let { error ->
+                    when (error) {
+                        is MemberLoginQrUnavailableException,
+                        is MemberLoginQrTrustChangedException,
+                        -> error.message
+                        else -> productUiError(error, "登录失败，请稍后重试")
+                    }
+                },
+            )
+        }
+    }
+
     fun consumeFamilyWizardCompletion(): FamilyWizardOutcome? =
         familyWizard.consumeCompletion()
 
     private suspend fun updateRecoveredFamilyEmptiness() {
         val outcome = (familyWizard.state.value as? FamilyWizardState.Completed)?.outcome
-        if (outcome is FamilyWizardOutcome.Reclaimed &&
+        if ((outcome is FamilyWizardOutcome.Reclaimed ||
+                outcome is FamilyWizardOutcome.OwnerLoggedIn) &&
             outcome.dataRecovery == com.lezi.babylog.sync.InitialFamilyDataRecovery.Complete
         ) {
             mutableReclaimedFamilyEmpty.value = careLog.listBabies().isEmpty()
@@ -364,6 +510,7 @@ fun OnboardingRoute(
     onFinished: () -> Unit,
     vm: OnboardingViewModel = hiltViewModel(),
 ) {
+    val context = LocalContext.current
     var step by rememberSaveable { mutableStateOf(OnboardingStep.ChooseFamily) }
     var name by rememberSaveable { mutableStateOf("年年") }
     var sex by rememberSaveable { mutableStateOf<String?>(null) }
@@ -372,59 +519,91 @@ fun OnboardingRoute(
     var themeIdx by rememberSaveable { mutableIntStateOf(0) }
     var showDate by rememberSaveable { mutableStateOf(false) }
     var showJoin by rememberSaveable { mutableStateOf(false) }
+    var showMemberWaiting by rememberSaveable { mutableStateOf(false) }
+    var showJoinRole by rememberSaveable { mutableStateOf(false) }
+    var showOwnerLogin by rememberSaveable { mutableStateOf(false) }
+    var showOwnerTakeover by remember { mutableStateOf(false) }
     var joinDisplayName by rememberSaveable { mutableStateOf("") }
+    var memberDeviceName by remember { mutableStateOf(defaultAndroidDeviceName(context)) }
     var createDisplayName by rememberSaveable { mutableStateOf("") }
     var createFamilyName by rememberSaveable { mutableStateOf("") }
+    var createDeviceName by remember { mutableStateOf(defaultAndroidDeviceName(context)) }
     var bootstrapSecret by remember { mutableStateOf("") }
+    var ownerDeviceName by remember { mutableStateOf(defaultAndroidDeviceName(context)) }
+    var ownerRootPassword by remember { mutableStateOf("") }
     var nameError by rememberSaveable { mutableStateOf(false) }
     var formError by rememberSaveable { mutableStateOf<String?>(null) }
+    // The one-time grant must not survive process recreation.
+    var memberQrPayload by remember { mutableStateOf<MemberLoginQrPayload?>(null) }
+    var memberQrDeviceName by remember { mutableStateOf(defaultAndroidDeviceName(context)) }
+    var memberQrFeedback by remember { mutableStateOf<String?>(null) }
+    var memberQrVerifying by remember { mutableStateOf(false) }
+    var memberQrTrustReady by remember { mutableStateOf(false) }
+    var memberQrSubmitting by remember { mutableStateOf(false) }
     val familyWizardState by vm.familyWizardState.collectAsState()
-    val familyWizardBusy = familyWizardState is FamilyWizardState.Submitting
+    val pendingMemberLogin by vm.pendingMemberLogin.collectAsState()
+    val verifiedEndpoint by vm.verifiedEndpoint.collectAsState(initial = null)
+    val familyWizardBusy = familyWizardState is FamilyWizardState.Submitting ||
+        familyWizardState is FamilyWizardState.ProbingEndpoint
     val reclaimedFamilyEmpty by vm.reclaimedFamilyEmpty.collectAsState()
-    val context = LocalContext.current
-    // Prefill unsaved defaults, including the current Wi-Fi name when available.
-    val novice = remember {
-        HomeLanServerConfig.noviceUiDefaults(
-            if (HomeWifiPermission.hasRequiredPermissions(context)) vm.currentWifiSsid() else null,
-        )
-    }
+    val novice = remember { HomeLanServerConfig.noviceUiDefaults() }
     var joinDraft by rememberSaveable(stateSaver = JoinFamilyDraftSaver) {
         mutableStateOf(JoinFamilyDraft.fromConfig(novice))
     }
-    var pendingHomeWifiAction by remember { mutableStateOf<(() -> Unit)?>(null) }
-    var showHomeWifiAccessGuide by remember { mutableStateOf(false) }
-    val homeWifiPermission = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions(),
-    ) {
-        val action = pendingHomeWifiAction
-        pendingHomeWifiAction = null
-        if (HomeWifiPermission.isSsidAccessReady(context)) {
-            action?.invoke()
-        } else {
-            showHomeWifiAccessGuide = true
+    var endpointDraft by remember { mutableStateOf("") }
+    DisposableEffect(step, showOwnerLogin, showOwnerTakeover, context) {
+        val window = context.findActivity()?.window
+        if (step == OnboardingStep.CreateFamily || showOwnerLogin || showOwnerTakeover) {
+            window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+        onDispose {
+            if (step == OnboardingStep.CreateFamily || showOwnerLogin || showOwnerTakeover) {
+                window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            }
         }
     }
-    fun withHomeWifiAccess(action: () -> Unit) {
-        val missing = HomeWifiPermission.missingPermissions(context)
-        if (missing.isNotEmpty()) {
-            pendingHomeWifiAction = action
-            homeWifiPermission.launch(missing.toTypedArray())
-        } else if (HomeWifiPermission.isSsidAccessReady(context)) {
-            action()
-        } else {
-            showHomeWifiAccessGuide = true
-        }
+    LaunchedEffect(verifiedEndpoint) {
+        if (endpointDraft.isBlank()) endpointDraft = verifiedEndpoint?.origin.orEmpty()
     }
-    fun fillCurrentWifiIfBlank() {
-        val currentSsid = vm.currentWifiSsid()?.trim().orEmpty()
-        if (currentSsid.isNotEmpty() && joinDraft.ssid1.isBlank()) {
-            joinDraft = joinDraft.copy(ssid1 = currentSsid)
-        }
-    }
+    fun runForegroundAction(action: () -> Unit) = action()
     fun applyScannedInvite(raw: String) {
         val payload = raw.trim()
         if (payload.isEmpty()) return
-        // Prefill short code + host/port/optional SSIDs; persist only after join succeeds.
+        val memberLogin = runCatching { MemberLoginQrPayloadCodec.decode(payload) }.getOrNull()
+        if (memberLogin != null) {
+            if (System.currentTimeMillis() / 1_000 >= memberLogin.expiresAtEpochSeconds) {
+                formError = "这个二维码已失效，请让管理员重新生成"
+                return
+            }
+            memberQrPayload = memberLogin
+            memberQrDeviceName = defaultAndroidDeviceName(context)
+            memberQrFeedback = null
+            memberQrVerifying = true
+            memberQrTrustReady = false
+            vm.verifyMemberLoginQr(memberLogin) { result ->
+                if (memberQrPayload != memberLogin) return@verifyMemberLoginQr
+                memberQrVerifying = false
+                when (result) {
+                    is SetupProbeResult.Ready -> if (
+                        result.endpoint != memberLogin.endpoint ||
+                        result.familyState != SetupFamilyState.Configured
+                    ) {
+                        memberQrFeedback = "这个二维码对应的服务器尚未配置家庭"
+                    } else {
+                        memberQrTrustReady = true
+                    }
+                    SetupProbeResult.Failed.CertificateChanged ->
+                        memberQrFeedback = "家庭服务器安全信息不一致，登录已停止"
+                    else -> memberQrFeedback = "暂时无法确认二维码中的家庭服务器，请稍后重试"
+                }
+            }
+            return
+        }
+        if (payload.contains("member_login")) {
+            formError = "这个二维码已失效，请让管理员重新生成"
+            return
+        }
+        // Prefill the short code and endpoint; persist only after join succeeds.
         val result = joinDraft.applyInvitationInput(payload)
         joinDraft = result.draft
         formError = result.error
@@ -442,7 +621,7 @@ fun OnboardingRoute(
         scanInvite.launch(
             ScanOptions()
                 .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                .setPrompt("扫描家庭邀请二维码")
+                .setPrompt("扫描家庭邀请或成员登录二维码")
                 .setBeepEnabled(false)
                 .setOrientationLocked(false)
                 .setBarcodeImageEnabled(false),
@@ -466,14 +645,10 @@ fun OnboardingRoute(
             scanCameraPermission.launch(CameraCapture.PERMISSION)
         }
     }
-    // Form defaults do not trigger runtime permission prompts; only explicit family actions do.
     LaunchedEffect(showJoin) {
         if (!showJoin) return@LaunchedEffect
         if (joinDraft.host.isBlank() || joinDraft.portText.isBlank()) {
-            joinDraft = JoinFamilyDraft.fromConfig(novice, joinDraft.invitation).copy(
-                ssid1 = joinDraft.ssid1.ifBlank { novice.allowedSsids.getOrNull(0).orEmpty() },
-                ssid2 = joinDraft.ssid2,
-            )
+            joinDraft = JoinFamilyDraft.fromConfig(novice, joinDraft.invitation)
         }
     }
     LaunchedEffect(familyWizardState, reclaimedFamilyEmpty) {
@@ -483,6 +658,10 @@ fun OnboardingRoute(
         )
         if (transition != null) {
             bootstrapSecret = ""
+            ownerRootPassword = ""
+            showJoinRole = false
+            showOwnerLogin = false
+            showOwnerTakeover = false
             formError = null
             vm.consumeFamilyWizardCompletion()
             if (transition.finishRecovery) onFinished()
@@ -490,6 +669,11 @@ fun OnboardingRoute(
             // this becomes its first authoritative Baby step instead of returning to start.
             step = transition.nextStep
         } else {
+            if (familyWizardState is FamilyWizardState.WaitingForMemberApproval) {
+                showJoin = false
+                showJoinRole = false
+                showMemberWaiting = true
+            }
             formError = when (val state = familyWizardState) {
                 is FamilyWizardState.RetryableFailure -> state.message
                 else -> formError
@@ -497,7 +681,12 @@ fun OnboardingRoute(
             if (familyWizardState is FamilyWizardState.RetryableFailure &&
                 familyWizardState.snapshot.mode == FamilyWizardMode.Join
             ) {
-                showJoin = true
+                if (familyWizardState.snapshot.joinRole == FamilyWizardJoinRole.Owner) {
+                    showOwnerLogin = true
+                    showOwnerTakeover = false
+                } else {
+                    showJoin = true
+                }
             }
         }
     }
@@ -524,28 +713,55 @@ fun OnboardingRoute(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                onboardingFamilyActions().forEach { action ->
-                    val onClick = {
-                        formError = null
-                        when (action) {
-                            FamilyWizardMode.Create -> step = OnboardingStep.CreateFamily
-                            FamilyWizardMode.Join -> showJoin = true
+                verifiedEndpoint?.let { endpoint ->
+                    Text("家庭服务器已找到\n${endpoint.origin}")
+                }
+                if (pendingMemberLogin != null) {
+                    Text(
+                        "等待管理员确认",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+                Button(
+                    onClick = {
+                        if (pendingMemberLogin != null) {
+                            showMemberWaiting = true
+                        } else {
+                            formError = null
+                            endpointDraft = verifiedEndpoint?.origin.orEmpty()
+                            step = OnboardingStep.ConnectServer
+                            if (endpointDraft.isNotBlank()) vm.connectEndpoint(endpointDraft)
                         }
+                    },
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                ) {
+                    Text(
+                        when {
+                            pendingMemberLogin != null -> "查看加入申请"
+                            verifiedEndpoint == null -> "连接家庭服务器"
+                            else -> "继续登录"
+                        },
+                    )
+                }
+                if (pendingMemberLogin == null) {
+                    OutlinedButton(
+                        onClick = ::requestOrLaunchInviteScan,
+                        modifier = Modifier.fillMaxWidth().height(52.dp),
+                    ) {
+                        Icon(Icons.Outlined.QrCodeScanner, contentDescription = null)
+                        Spacer(Modifier.size(LeziSpacing.Xs))
+                        Text("扫描成员登录二维码")
                     }
-                    when (action) {
-                        FamilyWizardMode.Create -> Button(
-                            onClick = onClick,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(52.dp),
-                        ) { Text("新建家庭") }
-                        FamilyWizardMode.Join -> OutlinedButton(
-                            onClick = onClick,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(52.dp),
-                        ) { Text("加入家庭") }
-                    }
+                }
+                if (verifiedEndpoint != null) {
+                    TextButton(
+                        onClick = {
+                            vm.forgetEndpoint()
+                            endpointDraft = ""
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("忘记此服务器") }
                 }
                 OutlinedButton(
                     onClick = {
@@ -557,6 +773,107 @@ fun OnboardingRoute(
                         .height(52.dp)
                         .testTag(UiTags.ONBOARDING_OFFLINE_MODE),
                 ) { Text("离线模式") }
+            }
+            OnboardingStep.ConnectServer -> {
+                val approval = familyWizardState as? FamilyWizardState.CertificateApprovalRequired
+                val ready = familyWizardState as? FamilyWizardState.EndpointReady
+                val failure = familyWizardState as? FamilyWizardState.EndpointFailure
+                val certificateChanged =
+                    failure?.reason == com.lezi.babylog.sync.SetupProbeResult.Failed.CertificateChanged
+                Text(
+                    when {
+                        familyWizardState is FamilyWizardState.ProbingEndpoint ->
+                            "正在确认家庭服务器…"
+                        approval != null -> "确认家庭服务器证书"
+                        certificateChanged -> "服务器安全信息已变化"
+                        ready?.snapshot?.mode == FamilyWizardMode.Create -> "这里还没有家庭"
+                        ready != null -> "已找到家庭"
+                        failure != null -> failure.message
+                        else -> "连接家庭服务器"
+                    },
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                if (approval != null) {
+                    Text("这个服务器的证书尚未被手机系统认识。")
+                    Text("请向部署服务器的人确认以下指纹。首次确认仍存在连接到错误服务器的风险。")
+                    SelectionContainer {
+                        Text(approval.candidate.fingerprint)
+                    }
+                } else if (certificateChanged) {
+                    Text("已固定的服务器公钥与当前连接不一致。为保护登录凭证，连接已停止。")
+                } else if (ready == null) {
+                    Text("请输入部署乐记家庭后台的完整 HTTPS 地址")
+                    OutlinedTextField(
+                        value = endpointDraft,
+                        onValueChange = {
+                            endpointDraft = it
+                            if (familyWizardState is FamilyWizardState.EndpointFailure) {
+                                vm.keepOffline()
+                            }
+                        },
+                        enabled = !familyWizardBusy,
+                        label = { Text("https://family.example.com") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                } else {
+                    Text(ready.endpoint.origin)
+                }
+                failure?.takeUnless { certificateChanged }
+                    ?.let { Text(it.message, color = MaterialTheme.colorScheme.error) }
+                Button(
+                    enabled = !familyWizardBusy &&
+                        (approval != null || certificateChanged || ready != null || endpointDraft.isNotBlank()),
+                    onClick = {
+                        when {
+                            approval != null -> vm.trustCertificate(approval.candidate)
+                            certificateChanged -> {
+                                vm.forgetEndpoint()
+                                endpointDraft = ""
+                            }
+                            ready == null -> vm.connectEndpoint(endpointDraft)
+                            else -> {
+                                endpointDraft = ready.endpoint.origin
+                                joinDraft = JoinFamilyDraft(
+                                    host = ready.endpoint.origin,
+                                    portText = "443",
+                                    scheme = "https",
+                                )
+                                when (ready.snapshot.mode) {
+                                    FamilyWizardMode.Create -> step = OnboardingStep.CreateFamily
+                                    FamilyWizardMode.Join -> showJoinRole = true
+                                }
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                ) {
+                    Text(
+                        when {
+                            approval != null -> "信任此证书"
+                            certificateChanged -> "忘记此服务器并重新连接"
+                            ready?.snapshot?.mode == FamilyWizardMode.Create -> "新建家庭"
+                            ready?.snapshot?.mode == FamilyWizardMode.Join -> "加入家庭"
+                            else -> if (familyWizardBusy) "正在连接…" else "连接"
+                        },
+                    )
+                }
+                if (approval != null) {
+                    TextButton(
+                        onClick = { vm.keepOffline() },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("返回修改地址") }
+                }
+                TextButton(
+                    enabled = familyWizardState !is FamilyWizardState.Submitting,
+                    onClick = {
+                        vm.keepOffline()
+                        step = OnboardingStep.ChooseFamily
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (certificateChanged) "返回" else "暂不连接，保持离线")
+                }
             }
             OnboardingStep.CreateFamily -> {
                 Text(
@@ -582,43 +899,32 @@ fun OnboardingRoute(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 OutlinedTextField(
-                    value = joinDraft.ssid1,
-                    onValueChange = { joinDraft = joinDraft.copy(ssid1 = it) },
-                    label = { Text("家庭 Wi‑Fi 名称") },
+                    value = createFamilyName,
+                    onValueChange = { createFamilyName = it },
+                    label = { Text("家庭名") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                OutlinedButton(
-                    onClick = {
-                        withHomeWifiAccess {
-                            val current = vm.currentWifiSsid()?.trim().orEmpty()
-                            if (current.isEmpty()) showHomeWifiAccessGuide = true
-                            else joinDraft = joinDraft.copy(ssid1 = current)
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text("填入当前 Wi‑Fi 名称")
-                }
                 OutlinedTextField(
                     value = createDisplayName,
                     onValueChange = { createDisplayName = it },
-                    label = { Text("我是宝宝的？") },
-                    supportingText = { Text("家庭称呼，必填；家人用这个认出你") },
+                    label = { Text("我的称呼") },
+                    supportingText = { Text("家庭成员会用这个称呼认出你") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 OutlinedTextField(
-                    value = createFamilyName,
-                    onValueChange = { createFamilyName = it },
-                    label = { Text("家庭名（可选）") },
+                    value = createDeviceName,
+                    onValueChange = { createDeviceName = it },
+                    label = { Text("设备称呼") },
+                    supportingText = { Text("默认取自 Android 设备名，可修改") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 OutlinedTextField(
                     value = bootstrapSecret,
                     onValueChange = { bootstrapSecret = it },
-                    label = { Text("NAS 初始化口令（可空）") },
+                    label = { Text("管理员根密码") },
                     supportingText = { Text("仅用于本次请求，不会保存") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
@@ -630,7 +936,8 @@ fun OnboardingRoute(
                     enabled = !familyWizardBusy,
                     onClick = {
                         formError = null
-                        withHomeWifiAccess {
+                        val oneTimeRootPassword = bootstrapSecret
+                        runForegroundAction {
                             vm.submitFamilyWizard(
                                 snapshot = onboardingFamilyWizardSnapshot(
                                     mode = FamilyWizardMode.Create,
@@ -638,9 +945,11 @@ fun OnboardingRoute(
                                     draft = joinDraft,
                                     displayName = createDisplayName,
                                     familyName = createFamilyName,
+                                    deviceName = createDeviceName,
                                 ),
-                                bootstrapSecret = bootstrapSecret,
+                                bootstrapSecret = oneTimeRootPassword,
                             )
+                            bootstrapSecret = ""
                         }
                     },
                     modifier = Modifier
@@ -651,13 +960,16 @@ fun OnboardingRoute(
                         if (familyWizardBusy) {
                             "正在连接…"
                         } else {
-                            "新建家庭"
+                            "新建并登录"
                         },
                     )
                 }
                 TextButton(
                     enabled = !familyWizardBusy,
-                    onClick = { step = OnboardingStep.ChooseFamily },
+                    onClick = {
+                        bootstrapSecret = ""
+                        step = OnboardingStep.ChooseFamily
+                    },
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text("返回") }
             }
@@ -783,7 +1095,7 @@ fun OnboardingRoute(
             OnboardingStep.RecoveryPending -> {
                 val recoveryFailure = familyWizardState as? FamilyWizardState.RetryableFailure
                 Text(
-                    "家庭身份已接回，但历史数据还没有恢复完成。请保持连接家庭 Wi‑Fi 后重试。",
+                    "家庭身份已接回，但历史数据还没有恢复完成。请确认家庭服务器可访问后重试。",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.error,
                 )
@@ -842,10 +1154,251 @@ fun OnboardingRoute(
         }
     }
 
+    memberQrPayload?.let { payload ->
+        OnboardingMemberLoginQrDialog(
+            payload = payload,
+            deviceName = memberQrDeviceName,
+            onDeviceNameChange = {
+                memberQrDeviceName = it
+                memberQrFeedback = null
+            },
+            feedback = memberQrFeedback,
+            verifying = memberQrVerifying,
+            submitting = memberQrSubmitting,
+            trustReady = memberQrTrustReady,
+            onLogin = {
+                runCatching { requireDeviceName(memberQrDeviceName) }
+                    .exceptionOrNull()?.message?.let {
+                        memberQrFeedback = it
+                        return@OnboardingMemberLoginQrDialog
+                    }
+                memberQrSubmitting = true
+                vm.claimMemberLoginQr(payload, memberQrDeviceName) { error ->
+                    memberQrSubmitting = false
+                    if (error == null) {
+                        memberQrPayload = null
+                        onFinished()
+                    } else {
+                        memberQrFeedback = error
+                    }
+                }
+            },
+            onManualJoin = {
+                memberQrPayload = null
+                memberQrFeedback = null
+                endpointDraft = payload.endpoint.origin
+                step = OnboardingStep.ConnectServer
+                vm.connectEndpoint(endpointDraft)
+            },
+            onDismiss = {
+                if (!memberQrSubmitting) {
+                    memberQrPayload = null
+                    memberQrFeedback = null
+                }
+            },
+        )
+    }
+
+    if (showJoinRole) {
+        AlertDialog(
+            onDismissRequest = { if (!familyWizardBusy) showJoinRole = false },
+            title = { Text("你要如何加入？") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
+                    Text("已找到配置完成的家庭。请选择这台设备使用的身份。")
+                    Button(
+                        onClick = {
+                            formError = null
+                            showJoinRole = false
+                            showOwnerLogin = true
+                        },
+                        enabled = !familyWizardBusy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("我是家庭管理员") }
+                    OutlinedButton(
+                        onClick = {
+                            formError = null
+                            showJoinRole = false
+                            showJoin = true
+                        },
+                        enabled = !familyWizardBusy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("我是家庭成员") }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showJoinRole = false }) { Text("取消") }
+            },
+        )
+    }
+
+    if (showOwnerLogin) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!familyWizardBusy) {
+                    ownerRootPassword = ""
+                    showOwnerLogin = false
+                }
+            },
+            title = { Text("管理员登录") },
+            text = {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 480.dp)
+                        .dismissKeyboardOnTap()
+                        .verticalScroll(rememberScrollState())
+                        .imePadding(),
+                    verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
+                ) {
+                    Text("登录会新增一台管理员设备，已有管理员设备不会退出。")
+                    OutlinedTextField(
+                        value = ownerDeviceName,
+                        onValueChange = {
+                            ownerDeviceName = it
+                            formError = null
+                        },
+                        label = { Text("设备称呼") },
+                        enabled = !familyWizardBusy,
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedTextField(
+                        value = ownerRootPassword,
+                        onValueChange = {
+                            ownerRootPassword = it
+                            formError = null
+                        },
+                        label = { Text("管理员根密码") },
+                        supportingText = { Text("与 NAS 部署根密码一致；不会保存") },
+                        enabled = !familyWizardBusy,
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    formError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    TextButton(
+                        onClick = {
+                            runCatching { requireDeviceName(ownerDeviceName) }
+                                .exceptionOrNull()?.message?.let {
+                                    formError = it
+                                    return@TextButton
+                                }
+                            if (ownerRootPassword.isBlank()) {
+                                formError = "请填写管理员根密码"
+                            } else {
+                                showOwnerLogin = false
+                                showOwnerTakeover = true
+                            }
+                        },
+                        enabled = !familyWizardBusy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("丢失设备并接管…") }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        runCatching { requireDeviceName(ownerDeviceName) }
+                            .exceptionOrNull()?.message?.let {
+                                formError = it
+                                return@TextButton
+                            }
+                        val rootPassword = ownerRootPassword
+                        if (rootPassword.isBlank()) {
+                            formError = "请填写管理员根密码"
+                            return@TextButton
+                        }
+                        runForegroundAction {
+                            vm.submitFamilyWizard(
+                                snapshot = onboardingFamilyWizardSnapshot(
+                                    mode = FamilyWizardMode.Join,
+                                    step = FamilyWizardStep.Identity,
+                                    draft = joinDraft,
+                                    displayName = "",
+                                    deviceName = ownerDeviceName,
+                                    joinRole = FamilyWizardJoinRole.Owner,
+                                ),
+                                bootstrapSecret = rootPassword,
+                            )
+                            ownerRootPassword = ""
+                        }
+                    },
+                    enabled = !familyWizardBusy,
+                ) { Text(if (familyWizardBusy) "正在登录…" else "登录这台设备") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        ownerRootPassword = ""
+                        showOwnerLogin = false
+                        showJoinRole = true
+                    },
+                    enabled = !familyWizardBusy,
+                ) { Text("上一步") }
+            },
+        )
+    }
+
+    if (showOwnerTakeover) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!familyWizardBusy) {
+                    showOwnerTakeover = false
+                    showOwnerLogin = true
+                }
+            },
+            title = { Text("接管管理员身份？") },
+            text = {
+                Text("所有旧管理员设备都会退出家庭；普通成员不会退出。只有确定旧设备已丢失时才使用。")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val rootPassword = ownerRootPassword
+                        if (rootPassword.isBlank()) {
+                            formError = "请填写管理员根密码"
+                            showOwnerTakeover = false
+                            showOwnerLogin = true
+                            return@TextButton
+                        }
+                        runForegroundAction {
+                            vm.submitFamilyWizard(
+                                snapshot = onboardingFamilyWizardSnapshot(
+                                    mode = FamilyWizardMode.Join,
+                                    step = FamilyWizardStep.Identity,
+                                    draft = joinDraft,
+                                    displayName = "",
+                                    deviceName = ownerDeviceName,
+                                    joinRole = FamilyWizardJoinRole.Owner,
+                                ),
+                                bootstrapSecret = rootPassword,
+                                ownerTakeover = true,
+                            )
+                            ownerRootPassword = ""
+                        }
+                    },
+                    enabled = !familyWizardBusy,
+                ) { Text(if (familyWizardBusy) "正在接管…" else "确认接管") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showOwnerTakeover = false
+                        showOwnerLogin = true
+                    },
+                    enabled = !familyWizardBusy,
+                ) { Text("取消") }
+            },
+        )
+    }
+
     if (showJoin) {
         AlertDialog(
-            onDismissRequest = { showJoin = false },
-            title = { Text("加入家庭") },
+            onDismissRequest = { if (!familyWizardBusy) showJoin = false },
+            title = { Text("申请在这台设备登录") },
             text = {
                 Column(
                     Modifier
@@ -856,120 +1409,35 @@ fun OnboardingRoute(
                         .imePadding(),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    JoinSetupStep(
-                        step = "1",
-                        title = "家庭网络",
-                        status = if (joinDraft.host.isNotBlank() && joinDraft.ssid1.isNotBlank()) {
-                            "服务器与家庭 Wi‑Fi 已填写"
-                        } else {
-                            "填写服务器并绑定家庭 Wi‑Fi"
-                        },
-                        complete = joinDraft.host.isNotBlank() && joinDraft.ssid1.isNotBlank(),
-                    )
-                    JoinSetupStep(
-                        step = "2",
-                        title = "家庭邀请",
-                        status = if (joinDraft.invitation.isBlank()) "扫码或粘贴邀请码" else "邀请码已填入",
-                        complete = joinDraft.invitation.isNotBlank(),
-                    )
-                    JoinSetupStep(
-                        step = "3",
-                        title = "共享范围",
-                        status = "加入成功后同步育儿记录与日志图片",
-                        complete = false,
-                    )
-                    OutlinedTextField(
-                        value = joinDraft.host,
-                        onValueChange = { joinDraft = joinDraft.copy(host = it) },
-                        label = { Text("服务器主机（IP/域名）") },
-                        placeholder = { Text("192.168.50.4") },
-                        supportingText = {
-                            Text(if (joinDraft.host.isBlank()) "待填写" else "服务器地址已填写")
-                        },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    OutlinedTextField(
-                        value = joinDraft.portText,
-                        onValueChange = {
-                            joinDraft = joinDraft.copy(portText = it.filter(Char::isDigit).take(5))
-                        },
-                        label = { Text("端口") },
-                        placeholder = { Text("8765") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    OutlinedTextField(
-                        value = joinDraft.ssid1,
-                        onValueChange = { joinDraft = joinDraft.copy(ssid1 = it) },
-                        label = { Text("家庭 Wi‑Fi 名称 1（如 2.4G）") },
-                        placeholder = { Text("当前连接的 Wi‑Fi 名") },
-                        supportingText = {
-                            Text(
-                                if (joinDraft.ssid1.isNotBlank()) {
-                                    "已绑定：${joinDraft.ssid1}"
-                                } else {
-                                    "待填写，或读取当前 Wi‑Fi"
-                                },
-                            )
-                        },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    OutlinedTextField(
-                        value = joinDraft.ssid2,
-                        onValueChange = { joinDraft = joinDraft.copy(ssid2 = it) },
-                        label = { Text("家庭 Wi‑Fi 名称 2（可选，如 5G）") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    OutlinedButton(
-                        onClick = {
-                            withHomeWifiAccess {
-                                val cur = vm.currentWifiSsid()?.trim().orEmpty()
-                                if (cur.isEmpty()) {
-                                    showHomeWifiAccessGuide = true
-                                } else if (joinDraft.ssid1.isBlank()) {
-                                    joinDraft = joinDraft.copy(ssid1 = cur)
-                                } else if (joinDraft.ssid2.isBlank() && joinDraft.ssid1 != cur) {
-                                    joinDraft = joinDraft.copy(ssid2 = cur)
-                                } else if (joinDraft.ssid1 != cur && joinDraft.ssid2 != cur) {
-                                    formError = "Wi‑Fi 名称已满 2 个，请先清空一格"
-                                } else {
-                                    formError = "当前 Wi‑Fi 已在列表中"
-                                }
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text("填入当前 Wi‑Fi 名称")
-                    }
                     OutlinedTextField(
                         value = joinDisplayName,
-                        onValueChange = { joinDisplayName = it },
-                        label = { Text("我是宝宝的？") },
+                        onValueChange = {
+                            joinDisplayName = it
+                            formError = null
+                        },
+                        label = { Text("我的家庭称呼") },
                         placeholder = { Text("如：妈妈、干妈、月嫂小王") },
                         supportingText = { Text("家庭称呼，必填；家人用这个认出你") },
+                        enabled = !familyWizardBusy,
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
                     OutlinedTextField(
-                        value = joinDraft.invitation,
-                        onValueChange = { joinDraft = joinDraft.copy(invitation = it) },
-                        label = { Text("邀请码或 QR 载荷") },
-                        singleLine = true,
-                        trailingIcon = {
-                            IconButton(
-                                onClick = { withHomeWifiAccess { requestOrLaunchInviteScan() } },
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Outlined.QrCodeScanner,
-                                    contentDescription = "扫码填入邀请",
-                                )
-                            }
+                        value = memberDeviceName,
+                        onValueChange = {
+                            memberDeviceName = it
+                            formError = null
                         },
+                        label = { Text("这台设备的名称") },
+                        supportingText = { Text("默认取自 Android 设备名，可修改") },
+                        enabled = !familyWizardBusy,
+                        singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        "管理员会看到你的申请，并决定是否用这个称呼添加新成员。",
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     formError?.let { err ->
                         Text(err, color = MaterialTheme.colorScheme.error)
@@ -979,8 +1447,16 @@ fun OnboardingRoute(
             confirmButton = {
                 TextButton(
                     onClick = {
-                        withHomeWifiAccess {
-                            fillCurrentWifiIfBlank()
+                        if (joinDisplayName.isBlank()) {
+                            formError = "请填写家庭称呼"
+                            return@TextButton
+                        }
+                        runCatching { requireDeviceName(memberDeviceName) }
+                            .exceptionOrNull()?.message?.let {
+                                formError = it
+                                return@TextButton
+                            }
+                        runForegroundAction {
                             formError = null
                             vm.submitFamilyWizard(
                                 snapshot = onboardingFamilyWizardSnapshot(
@@ -988,34 +1464,133 @@ fun OnboardingRoute(
                                     step = FamilyWizardStep.Identity,
                                     draft = joinDraft,
                                     displayName = joinDisplayName,
+                                    deviceName = memberDeviceName,
+                                    joinRole = FamilyWizardJoinRole.Member,
                                 ),
                             )
                         }
                     },
-                    enabled = !familyWizardBusy,
-                ) { Text(if (familyWizardBusy) "正在加入…" else "加入") }
+                    enabled = !familyWizardBusy &&
+                        joinDisplayName.isNotBlank() && memberDeviceName.isNotBlank(),
+                ) { Text(if (familyWizardBusy) "正在发送…" else "发送确认请求") }
             },
             dismissButton = {
-                TextButton(onClick = { showJoin = false }) { Text("取消") }
+                TextButton(
+                    onClick = {
+                        showJoin = false
+                        step = OnboardingStep.ChooseFamily
+                    },
+                    enabled = !familyWizardBusy,
+                ) { Text("暂不连接，保持离线") }
             },
         )
     }
 
-    if (showHomeWifiAccessGuide) {
-        val settingsTarget = HomeWifiPermission.settingsTarget(context)
-        HomeWifiAccessGuideDialog(
-            settingsAction = when (settingsTarget) {
-                HomeWifiSettingsTarget.AppPermission -> HomeWifiSettingsAction.AppPermission
-                HomeWifiSettingsTarget.LocationServices -> HomeWifiSettingsAction.LocationServices
-                HomeWifiSettingsTarget.Wifi -> HomeWifiSettingsAction.Wifi
+    val waitingRequest = pendingMemberLogin
+    if (showMemberWaiting && waitingRequest != null) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!familyWizardBusy) showMemberWaiting = false
             },
-            onOpenSettings = {
-                showHomeWifiAccessGuide = false
-                context.startActivity(HomeWifiPermission.settingsIntent(context))
+            title = { Text("等待管理员确认") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
+                    Text("已申请：${waitingRequest.displayName}")
+                    Text("设备：${waitingRequest.deviceName}")
+                    Text(
+                        "申请将在 24 小时内失效。管理员下次前台打开 App 后可以批准或拒绝。",
+                        style = LeziTypography.Meta,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    TextButton(
+                        onClick = {
+                            vm.cancelMemberApproval()
+                            showMemberWaiting = false
+                            showJoin = true
+                        },
+                        enabled = !familyWizardBusy,
+                    ) { Text("取消申请") }
+                    TextButton(
+                        onClick = {
+                            showMemberWaiting = false
+                            step = OnboardingStep.ChooseFamily
+                        },
+                        enabled = !familyWizardBusy,
+                    ) { Text("暂不连接，保持离线") }
+                }
             },
-            onDismiss = { showHomeWifiAccessGuide = false },
+            confirmButton = {
+                TextButton(
+                    onClick = { runForegroundAction { vm.checkMemberApproval() } },
+                    enabled = !familyWizardBusy,
+                ) { Text(if (familyWizardBusy) "正在检查…" else "检查结果") }
+            },
         )
     }
+
+}
+
+@Composable
+private fun OnboardingMemberLoginQrDialog(
+    payload: MemberLoginQrPayload,
+    deviceName: String,
+    onDeviceNameChange: (String) -> Unit,
+    feedback: String?,
+    verifying: Boolean,
+    submitting: Boolean,
+    trustReady: Boolean,
+    onLogin: () -> Unit,
+    onManualJoin: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = { if (!verifying && !submitting) onDismiss() },
+        title = { Text(if (verifying) "正在确认家庭服务器…" else "登录家庭") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
+                if (verifying) {
+                    Text("正在验证二维码中的 HTTPS 地址和证书信任信息；完成前不会发送登录授权。")
+                } else {
+                    payload.familyName?.let { Text(it, style = LeziTypography.TitleSm) }
+                    Text("已由家庭管理员授权：${payload.memberDisplayName}")
+                    OutlinedTextField(
+                        value = deviceName,
+                        onValueChange = onDeviceNameChange,
+                        enabled = !submitting,
+                        label = { Text("这台设备的名称 *") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text("将信任管理员提供的家庭服务器配置。")
+                    feedback?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                    TextButton(onClick = onManualJoin, enabled = !submitting) {
+                        Text("改用加入家庭")
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (!verifying) {
+                TextButton(
+                    onClick = onLogin,
+                    enabled = trustReady && !submitting,
+                ) {
+                    Text(if (submitting) "登录中…" else "在这台设备登录")
+                }
+            }
+        },
+        dismissButton = {
+            if (!verifying) {
+                TextButton(onClick = onDismiss, enabled = !submitting) { Text("取消") }
+            }
+        },
+    )
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }
 
 internal fun Long.toDatePickerMillis(): Long =

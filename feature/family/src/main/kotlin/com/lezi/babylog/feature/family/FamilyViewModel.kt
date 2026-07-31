@@ -16,12 +16,20 @@ import com.lezi.babylog.domain.JoinFamilyUseCase
 import com.lezi.babylog.domain.SyncFamilyWizardGateway
 import com.lezi.babylog.domain.UpdateBabyInput
 import com.lezi.babylog.sync.FamilyMember
+import com.lezi.babylog.sync.CertificateTrustCandidate
+import com.lezi.babylog.sync.DisplayNameUpdateResult
 import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.sync.HomeLanServerConfig
 import com.lezi.babylog.sync.InvitePayload
 import com.lezi.babylog.sync.InvitePayloadCodec
+import com.lezi.babylog.sync.MemberLoginQrPayload
+import com.lezi.babylog.sync.MemberLoginQrTrustChangedException
+import com.lezi.babylog.sync.MemberLoginQrUnavailableException
+import com.lezi.babylog.sync.SetupProbeResult
+import com.lezi.babylog.sync.PendingMemberLogin
+import com.lezi.babylog.sync.PendingMemberLoginRequest
+import com.lezi.babylog.sync.PendingMemberRenameRequest
 import com.lezi.babylog.sync.SyncPort
-import com.lezi.babylog.sync.SyncTrigger
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
@@ -32,6 +40,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -53,7 +62,6 @@ data class FamilyUi(
     val serverHost: String = "",
     val serverPort: Int = com.lezi.babylog.sync.DEFAULT_SERVER_PORT,
     val serverScheme: String = com.lezi.babylog.sync.DEFAULT_SERVER_SCHEME,
-    val allowedSsids: List<String> = emptyList(),
     val role: FamilyRole = FamilyRole.None,
     val lastSuccessAt: Long? = null,
     /** Raw shared family name from session cache; null when empty/unknown. */
@@ -62,6 +70,9 @@ data class FamilyUi(
     val membersLoaded: Boolean = false,
     val membersLoading: Boolean = false,
     val membersError: String? = null,
+    val pendingMemberLogin: PendingMemberLogin? = null,
+    val pendingMemberRequests: List<PendingMemberLoginRequest> = emptyList(),
+    val pendingMemberRenameRequests: List<PendingMemberRenameRequest> = emptyList(),
 ) {
     /** Resolved label when the current optional family name is empty. */
     val familyNameLabel: String
@@ -74,6 +85,8 @@ private data class FamilyMembersState(
     val loaded: Boolean = false,
     val loading: Boolean = false,
     val error: String? = null,
+    val pendingRequests: List<PendingMemberLoginRequest> = emptyList(),
+    val pendingRenameRequests: List<PendingMemberRenameRequest> = emptyList(),
 )
 
 data class FamilyInviteView(
@@ -87,7 +100,6 @@ class FamilyViewModel @Inject constructor(
     private val sync: SyncPort,
     private val careLog: CareLog,
     private val avatarFileStore: BabyAvatarFileStore,
-    private val networkState: com.lezi.babylog.sync.NetworkState,
     private val joinFamily: JoinFamilyUseCase,
 ) : ViewModel() {
     private val profileSaveMutex = Mutex()
@@ -98,21 +110,51 @@ class FamilyViewModel @Inject constructor(
         initialSnapshot = FamilyWizardSnapshot.empty(FamilyWizardEntry.Account),
     )
     val familyWizardState = familyWizard.state
+    val verifiedEndpoint = sync.verifiedEndpoint()
 
-    fun currentWifiSsid(): String? = networkState.currentWifiSsid()
+    init {
+        viewModelScope.launch {
+            sync.memberLoginChecks().collect(familyWizard::observeMemberLoginCheck)
+        }
+        viewModelScope.launch {
+            combine(sync.pendingMemberLogin(), sync.session()) { pending, session ->
+                pending to session
+            }.collect { (pending, session) ->
+                if (pending != null) {
+                    familyWizard.restorePendingMemberApproval(
+                        FamilyWizardSnapshot.empty(FamilyWizardEntry.Account).copy(
+                            mode = com.lezi.babylog.domain.FamilyWizardMode.Join,
+                            step = com.lezi.babylog.domain.FamilyWizardStep.Identity,
+                            host = session.serverHost,
+                            portText = session.serverPort.toString(),
+                            scheme = session.serverScheme,
+                            joinRole = com.lezi.babylog.domain.FamilyWizardJoinRole.Member,
+                        ),
+                        pending,
+                    )
+                }
+            }
+        }
+    }
 
     private val babySurfaces = combine(
         careLog.observeBabies(),
         careLog.observeMemberLocalBabyOrphans(),
     ) { babies, orphans -> babies to orphans }
 
+    private val syncIdentity = combine(
+        sync.session(),
+        sync.pendingMemberLogin(),
+    ) { session, pending -> session to pending }
+
     private val baseUi = combine(
         sync.status(),
         careLog.observeHasBaby(),
         careLog.observeCurrentBaby(),
         babySurfaces,
-        sync.session(),
-    ) { st, hasBaby, current, babyLists, session ->
+        syncIdentity,
+    ) { st, hasBaby, current, babyLists, syncState ->
+        val (session, pendingMemberLogin) = syncState
         val (babies, localOrphans) = babyLists
         val identity = careLog.localFamilyIdentity()
         FamilyUi(
@@ -129,10 +171,10 @@ class FamilyViewModel @Inject constructor(
             serverHost = session.serverHost,
             serverPort = session.serverPort,
             serverScheme = session.serverScheme,
-            allowedSsids = session.allowedSsids,
             role = session.role,
             lastSuccessAt = session.lastSuccessAt,
             familyName = session.familyName,
+            pendingMemberLogin = pendingMemberLogin,
         )
     }
 
@@ -143,6 +185,8 @@ class FamilyViewModel @Inject constructor(
                 membersLoaded = memberState.loaded,
                 membersLoading = memberState.loading,
                 membersError = memberState.error,
+                pendingMemberRequests = memberState.pendingRequests,
+                pendingMemberRenameRequests = memberState.pendingRenameRequests,
             )
         } else {
             family
@@ -170,30 +214,49 @@ class FamilyViewModel @Inject constructor(
             members = previous?.members.orEmpty(),
             loaded = previous?.loaded ?: false,
             loading = true,
+            pendingRequests = previous?.pendingRequests.orEmpty(),
+            pendingRenameRequests = previous?.pendingRenameRequests.orEmpty(),
         )
         val result = sync.listFamilyMembers()
+        val pendingResult = if (session.role == FamilyRole.Owner) {
+            sync.listPendingMemberLogins()
+        } else {
+            Result.success(emptyList())
+        }
+        val pendingRenameResult = if (session.role == FamilyRole.Owner) {
+            sync.listPendingMemberRenameRequests()
+        } else {
+            Result.success(emptyList())
+        }
         if (sync.session().first().familyId != session.familyId) return@withLock
-        familyMembers.value = result.fold(
-            onSuccess = { members ->
+        familyMembers.value = if (
+            result.isSuccess && pendingResult.isSuccess && pendingRenameResult.isSuccess
+        ) {
                 FamilyMembersState(
                     familyId = session.familyId,
-                    members = members,
+                    members = result.getOrThrow(),
                     loaded = true,
+                    pendingRequests = pendingResult.getOrThrow(),
+                    pendingRenameRequests = pendingRenameResult.getOrThrow(),
                 )
-            },
-            onFailure = { error ->
+            } else {
+                val error = result.exceptionOrNull()
+                    ?: pendingResult.exceptionOrNull()
+                    ?: pendingRenameResult.exceptionOrNull()
+                    ?: Exception()
                 FamilyMembersState(
                     familyId = session.familyId,
                     members = previous?.members.orEmpty(),
                     loaded = previous?.loaded ?: false,
+                    pendingRequests = previous?.pendingRequests.orEmpty(),
+                    pendingRenameRequests = previous?.pendingRenameRequests.orEmpty(),
                     error = if (showErrors) {
-                        familySyncError(error, "暂时无法读取成员，请连接家庭 Wi‑Fi 后重试")
+                        familySyncError(error, "暂时无法读取成员与设备，请稍后重试")
                     } else {
                         null
                     },
                 )
-            },
-        )
+            }
     }
 
     fun setCurrent(id: Long) {
@@ -351,7 +414,6 @@ class FamilyViewModel @Inject constructor(
                                     code = it.code,
                                     host = host,
                                     port = port,
-                                    ssids = session.allowedSsids,
                                 ),
                             ),
                             expiresAt = it.expiresAt,
@@ -366,9 +428,13 @@ class FamilyViewModel @Inject constructor(
         }
     }
 
-    fun submitFamilyWizard(snapshot: FamilyWizardSnapshot, bootstrapSecret: String = "") {
+    fun submitFamilyWizard(
+        snapshot: FamilyWizardSnapshot,
+        bootstrapSecret: String = "",
+        ownerTakeover: Boolean = false,
+    ) {
         viewModelScope.launch {
-            familyWizard.submit(snapshot, bootstrapSecret)
+            familyWizard.submit(snapshot, bootstrapSecret, ownerTakeover)
             if (familyWizard.state.value is FamilyWizardState.Completed) {
                 refreshMembersNow(showErrors = true)
             }
@@ -379,8 +445,104 @@ class FamilyViewModel @Inject constructor(
         familyWizard.begin(snapshot)
     }
 
+    fun connectEndpoint(endpointDraft: String) {
+        viewModelScope.launch {
+            familyWizard.connectEndpoint(FamilyWizardEntry.Account, endpointDraft)
+        }
+    }
+
+    fun trustCertificate(candidate: CertificateTrustCandidate) {
+        viewModelScope.launch {
+            familyWizard.trustCertificate(FamilyWizardEntry.Account, candidate)
+        }
+    }
+
+    fun keepOffline() {
+        familyWizard.keepOffline(FamilyWizardEntry.Account)
+    }
+
+    fun forgetEndpoint() {
+        viewModelScope.launch { familyWizard.forgetEndpoint(FamilyWizardEntry.Account) }
+    }
+
     fun consumeFamilyWizardCompletion(): FamilyWizardOutcome? =
         familyWizard.consumeCompletion()
+
+    fun checkMemberApproval() {
+        viewModelScope.launch { familyWizard.checkMemberApproval() }
+    }
+
+    fun cancelMemberApproval() {
+        viewModelScope.launch { familyWizard.cancelMemberApproval() }
+    }
+
+    fun approveNewMemberLogin(requestId: String, onDone: (String?) -> Unit) {
+        viewModelScope.launch {
+            val result = sync.approveNewMemberLogin(requestId)
+            if (result.isSuccess) refreshMembersNow(showErrors = true)
+            onDone(result.exceptionOrNull()?.let { familySyncError(it, "批准失败，请稍后重试") })
+        }
+    }
+
+    fun bindExistingMemberLogin(
+        requestId: String,
+        membershipId: String,
+        onDone: (String?) -> Unit,
+    ) {
+        viewModelScope.launch {
+            val result = sync.bindExistingMemberLogin(requestId, membershipId)
+            if (result.isSuccess) refreshMembersNow(showErrors = true)
+            onDone(result.exceptionOrNull()?.let { familySyncError(it, "绑定失败，请稍后重试") })
+        }
+    }
+
+    fun rejectMemberLogin(requestId: String, onDone: (String?) -> Unit) {
+        viewModelScope.launch {
+            val result = sync.rejectMemberLogin(requestId)
+            if (result.isSuccess) refreshMembersNow(showErrors = true)
+            onDone(result.exceptionOrNull()?.let { familySyncError(it, "拒绝失败，请稍后重试") })
+        }
+    }
+
+    fun createMemberLoginQr(
+        membershipId: String,
+        onResult: (Result<MemberLoginQrPayload>) -> Unit,
+    ) {
+        viewModelScope.launch {
+            onResult(sync.createMemberLoginQrPayload(membershipId))
+        }
+    }
+
+    fun verifyMemberLoginQr(
+        payload: MemberLoginQrPayload,
+        onResult: (SetupProbeResult) -> Unit,
+    ) {
+        viewModelScope.launch { onResult(sync.verifyEndpoint(payload.endpoint)) }
+    }
+
+    fun claimMemberLoginQr(
+        payload: MemberLoginQrPayload,
+        deviceName: String,
+        onDone: (String?) -> Unit,
+    ) {
+        viewModelScope.launch {
+            val trusted = sync.rememberEndpoint(payload.endpoint)
+            if (trusted.isFailure) {
+                onDone("无法保存家庭服务器信任信息，请重试")
+                return@launch
+            }
+            val result = sync.claimMemberLoginQr(payload, deviceName)
+            onDone(
+                result.exceptionOrNull()?.let { error ->
+                    when (error) {
+                        is MemberLoginQrUnavailableException -> error.message
+                        is MemberLoginQrTrustChangedException -> error.message
+                        else -> familySyncError(error, "登录失败，请稍后重试")
+                    }
+                },
+            )
+        }
+    }
 
     fun leave(onMessage: (String) -> Unit) {
         viewModelScope.launch {
@@ -388,11 +550,63 @@ class FamilyViewModel @Inject constructor(
             val result = sync.leave(id)
             onMessage(
                 result.fold(
-                    onSuccess = { "已离开家庭" },
-                    onFailure = { familySyncError(it, fallback = "离开家庭失败，请稍后重试") },
+                    onSuccess = { "已退出家庭" },
+                    onFailure = {
+                        familySyncError(
+                            it,
+                            fallback = "退出失败；本机数据未清除，请稍后重试",
+                        )
+                    },
                 ),
             )
             if (result.isSuccess) familyMembers.value = FamilyMembersState()
+        }
+    }
+
+    fun logoutCurrentDevice(onDone: (success: Boolean, message: String) -> Unit) {
+        viewModelScope.launch {
+            val result = sync.logoutCurrentDevice()
+            if (result.isSuccess) familyMembers.value = FamilyMembersState()
+            onDone(
+                result.isSuccess,
+                result.fold(
+                    onSuccess = { "这台设备已退出家庭" },
+                    onFailure = {
+                        familySyncError(
+                            it,
+                            "退出失败；本机数据未清除，请稍后重试",
+                        )
+                    },
+                ),
+            )
+        }
+    }
+
+    fun revokeFamilyDevice(
+        deviceId: String,
+        deviceName: String,
+        isCurrent: Boolean,
+        onDone: (success: Boolean, message: String) -> Unit,
+    ) {
+        viewModelScope.launch {
+            val result = sync.revokeFamilyDevice(deviceId)
+            if (result.isSuccess) {
+                if (isCurrent) {
+                    familyMembers.value = FamilyMembersState()
+                } else {
+                    refreshMembersNow(showErrors = true)
+                }
+            }
+            val label = deviceName.trim().ifBlank { "这台设备" }
+            onDone(
+                result.isSuccess,
+                result.fold(
+                    onSuccess = {
+                        if (isCurrent) "这台设备已退出家庭" else "已撤销「$label」"
+                    },
+                    onFailure = { familySyncError(it, "撤销设备失败，请稍后重试") },
+                ),
+            )
         }
     }
 
@@ -410,61 +624,16 @@ class FamilyViewModel @Inject constructor(
             if (result.isSuccess) {
                 refreshMembersNow(showErrors = true)
                 val label = displayName.trim().ifBlank { "家人" }
-                onDone(true, "已将「$label」移出家庭")
+                onDone(true, "已删除成员「$label」")
             } else {
                 onDone(
                     false,
                     familySyncError(
                         result.exceptionOrNull() ?: Exception(),
-                        fallback = "移除家人失败，请稍后重试",
+                        fallback = "删除成员失败，请稍后重试",
                     ),
                 )
             }
-        }
-    }
-
-    fun pullNow(onMessage: (String) -> Unit) {
-        viewModelScope.launch {
-            val id = ui.value.familyId
-            val r = sync.sync(SyncTrigger.PullToRefresh)
-            onMessage(
-                r.fold(
-                    onSuccess = { "已同步" },
-                    onFailure = { familySyncError(it, fallback = "同步失败，请稍后重试") },
-                ),
-            )
-            if (r.isSuccess) refreshMembersNow(showErrors = true)
-        }
-    }
-
-    internal fun saveHomeLanConfig(
-        host: String,
-        portText: String,
-        ssid1: String,
-        ssid2: String,
-        fallbackScheme: String,
-        onResult: (NetworkSaveResult) -> Unit,
-    ) {
-        viewModelScope.launch {
-            val config = runCatching {
-                com.lezi.babylog.sync.HomeLanServerConfig.fromUserInput(
-                    rawHostOrUrl = host,
-                    explicitPort = portText.toIntOrNull(),
-                    allowedSsids = listOf(ssid1, ssid2),
-                    fallbackScheme = fallbackScheme,
-                )
-            }.getOrElse {
-                onResult(NetworkSaveResult.Failed(it.message ?: "服务器地址无效"))
-                return@launch
-            }
-            onResult(
-                sync.saveHomeLanConfig(config).fold(
-                    onSuccess = { NetworkSaveResult.Saved("家庭网络与服务器已保存") },
-                    onFailure = {
-                        NetworkSaveResult.Failed(familySyncError(it, "保存失败"))
-                    },
-                ),
-            )
         }
     }
 
@@ -477,7 +646,7 @@ class FamilyViewModel @Inject constructor(
                 onDone(false, it)
                 return@launch
             }
-            val result = sync.renameFamily(familyName.trim().ifEmpty { null })
+            val result = sync.renameFamily(familyName.trim())
             onDone(
                 result.isSuccess,
                 result.fold(
@@ -498,27 +667,145 @@ class FamilyViewModel @Inject constructor(
                 return@launch
             }
             val result = sync.updateMyDisplayName(displayName.trim())
-            if (result.isSuccess) {
-                careLog.updateLocalDisplayName(displayName.trim())
+            val outcome = result.getOrNull()
+            if (outcome is DisplayNameUpdateResult.Updated) {
+                careLog.updateLocalDisplayName(outcome.displayName)
+            }
+            if (outcome != null) {
                 refreshMembersNow(showErrors = true)
             }
             onDone(
                 result.isSuccess,
                 result.fold(
-                    onSuccess = { "家庭称呼已更新" },
+                    onSuccess = {
+                        when (it) {
+                            is DisplayNameUpdateResult.Updated -> "家庭称呼已更新"
+                            is DisplayNameUpdateResult.Pending ->
+                                "改名申请已提交，确认前仍显示「${it.request.currentDisplayName}」"
+                        }
+                    },
                     onFailure = { familySyncError(it, "更新称呼失败") },
                 ),
             )
         }
     }
 
-    fun deleteFamily(onMessage: (String) -> Unit) {
+    fun addFamilyMember(
+        displayName: String,
+        onDone: (success: Boolean, message: String) -> Unit,
+    ) {
         viewModelScope.launch {
-            val result = sync.deleteFamily()
-            onMessage(result.fold(
-                { "家庭数据已删除" },
-                { familySyncError(it, "删除家庭失败") },
-            ))
+            validateFamilyDisplayNameInput(displayName)?.let {
+                onDone(false, it)
+                return@launch
+            }
+            val result = sync.addFamilyMember(displayName.trim())
+            if (result.isSuccess) refreshMembersNow(showErrors = true)
+            onDone(
+                result.isSuccess,
+                result.fold(
+                    onSuccess = { "已添加「${it.displayName}」，可继续生成登录二维码" },
+                    onFailure = { familySyncError(it, "添加成员失败") },
+                ),
+            )
+        }
+    }
+
+    fun renameFamilyMember(
+        membershipId: String,
+        displayName: String,
+        onDone: (success: Boolean, message: String) -> Unit,
+    ) {
+        viewModelScope.launch {
+            validateFamilyDisplayNameInput(displayName)?.let {
+                onDone(false, it)
+                return@launch
+            }
+            val result = sync.renameFamilyMember(membershipId, displayName.trim())
+            if (result.isSuccess) refreshMembersNow(showErrors = true)
+            onDone(
+                result.isSuccess,
+                result.fold(
+                    onSuccess = { "成员称呼已更新" },
+                    onFailure = { familySyncError(it, "修改成员称呼失败") },
+                ),
+            )
+        }
+    }
+
+    fun renameFamilyDevice(
+        deviceId: String,
+        deviceName: String,
+        onDone: (success: Boolean, message: String) -> Unit,
+    ) {
+        viewModelScope.launch {
+            val normalized = deviceName.trim()
+            if (normalized.isEmpty()) {
+                onDone(false, "请填写设备称呼")
+                return@launch
+            }
+            val result = sync.renameFamilyDevice(deviceId, normalized)
+            if (result.isSuccess) refreshMembersNow(showErrors = true)
+            onDone(
+                result.isSuccess,
+                result.fold(
+                    onSuccess = { "设备称呼已更新" },
+                    onFailure = { familySyncError(it, "修改设备称呼失败") },
+                ),
+            )
+        }
+    }
+
+    fun decideMemberRename(
+        request: PendingMemberRenameRequest,
+        approve: Boolean,
+        onDone: (success: Boolean, message: String) -> Unit,
+    ) {
+        viewModelScope.launch {
+            val result = if (approve) {
+                sync.approveMemberRename(request.requestId)
+            } else {
+                sync.rejectMemberRename(request.requestId)
+            }
+            if (result.isSuccess) refreshMembersNow(showErrors = true)
+            onDone(
+                result.isSuccess,
+                result.fold(
+                    onSuccess = { if (approve) "改名申请已确认" else "改名申请已拒绝" },
+                    onFailure = { familySyncError(it, "处理改名申请失败") },
+                ),
+            )
+        }
+    }
+
+    fun cancelMyMemberRename(onDone: (success: Boolean, message: String) -> Unit) {
+        viewModelScope.launch {
+            val result = sync.cancelMyMemberRename()
+            if (result.isSuccess) refreshMembersNow(showErrors = true)
+            onDone(
+                result.isSuccess,
+                result.fold(
+                    onSuccess = { "改名申请已撤回" },
+                    onFailure = { familySyncError(it, "撤回改名申请失败") },
+                ),
+            )
+        }
+    }
+
+    fun deleteFamily(
+        familyName: String,
+        rootPassword: String,
+        onDone: (success: Boolean, message: String) -> Unit,
+    ) {
+        viewModelScope.launch {
+            val result = sync.deleteFamily(familyName, rootPassword)
+            onDone(
+                result.isSuccess,
+                result.fold(
+                    { "家庭数据已永久删除，本机数据已清除" },
+                    { familySyncError(it, "删除家庭失败，本机数据未清除") },
+                ),
+            )
             if (result.isSuccess) familyMembers.value = FamilyMembersState()
         }
     }

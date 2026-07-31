@@ -1,6 +1,5 @@
-# Default: non-root (uid 10001) + host publish bound to loopback only.
-# Phones on the LAN should reach lezi-sync via a reverse proxy on the host
-# (Caddy/Nginx/Synology) or by overriding LEZI_SYNC_PUBLISH (see README).
+# Default: non-root (uid 10001) + persistent self-signed HTTPS.
+# Initialize data/tls once with deploy/init-tls.sh before compose up.
 #
 # NAS bind mounts that cannot chown to 10001: use the isolated root profile:
 #   docker compose --profile nas-root up -d lezi-sync-nas-root
@@ -20,10 +19,16 @@ x-lezi-sync-common: &lezi-sync-common
     LEZI_DATA_DIR: /data
     LEZI_HOST: "0.0.0.0"
     LEZI_PORT: "8765"
+    LEZI_INTERNAL_PORT: "8766"
+    LEZI_TLS_CERTFILE: /data/tls/server.crt
+    LEZI_TLS_KEYFILE: /data/tls/server.key
     LEZI_INVITE_TTL_HOURS: ${LEZI_INVITE_TTL_HOURS:-24}
     LEZI_MAX_MEDIA_BYTES: ${LEZI_MAX_MEDIA_BYTES:-10485760}
     LEZI_CREATE_RATE_LIMIT: "${LEZI_CREATE_RATE_LIMIT:-20}"
     LEZI_JOIN_RATE_LIMIT: "${LEZI_JOIN_RATE_LIMIT:-60}"
+    LEZI_MEMBER_REQUEST_RATE_LIMIT: "${LEZI_MEMBER_REQUEST_RATE_LIMIT:-10}"
+    LEZI_MEMBER_REQUEST_TTL_HOURS: "${LEZI_MEMBER_REQUEST_TTL_HOURS:-24}"
+    LEZI_MAX_PENDING_MEMBER_REQUESTS: "${LEZI_MAX_PENDING_MEMBER_REQUESTS:-32}"
     LEZI_RATE_LIMIT_WINDOW_SECONDS: "${LEZI_RATE_LIMIT_WINDOW_SECONDS:-60}"
     # Default remains fail-closed. Set 1 only on a NAS filesystem that permits
     # real persistence I/O but rejects chmod with EPERM/EACCES/EOPNOTSUPP.

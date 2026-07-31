@@ -12,20 +12,20 @@
 
 | # | Ticket | Blocked by | Status |
 |---|--------|------------|--------|
-| [01](./issues/01-system-pki-server-probe.md) | 通过 HTTPS 探测家庭服务器 | — | ready-for-agent |
-| [02](./issues/02-self-signed-tofu-spki.md) | 确认自签名证书并固定 SPKI | 01 | ready-for-agent |
-| [03](./issues/03-owner-create-device-session.md) | 根密码创建家庭和管理员设备会话 | 02 | ready-for-agent |
-| [04](./issues/04-rotating-session-reauth.md) | 轮换设备会话并安全处理凭证丢失 | 03 | ready-for-agent |
-| [05](./issues/05-owner-login-takeover-root-rotation.md) | 管理员新设备登录、接管与根密码轮换 | 04 | ready-for-agent |
-| [06](./issues/06-member-request-approval.md) | 普通成员申请并由管理员批准 | 04 | ready-for-agent |
-| [07](./issues/07-bind-existing-member-device.md) | 绑定既有成员与多设备权限 | 06 | ready-for-agent |
-| [08](./issues/08-member-login-qr.md) | 成员登录二维码 | 02, 07 | ready-for-agent |
-| [09](./issues/09-family-members-devices-page.md) | 家庭成员与设备页面 | 05, 07 | ready-for-agent |
-| [10](./issues/10-member-device-names.md) | 成员与设备称呼生命周期 | 08, 09 | ready-for-agent |
-| [11](./issues/11-device-revoke-exit.md) | 撤销设备与退出当前设备 | 04, 09 | ready-for-agent |
-| [12](./issues/12-member-hard-delete-anonymize.md) | 成员彻底删除与共享数据匿名化 | 10, 11 | ready-for-agent |
-| [13](./issues/13-delete-family.md) | 删除家庭 | 05, 11 | ready-for-agent |
-| [14](./issues/14-foreground-sync-no-ssid.md) | 去除 Wi-Fi 绑定并收敛前台同步体验 | 08, 10, 11, 12, 13 | ready-for-agent |
+| [01](./issues/01-system-pki-server-probe.md) | 通过 HTTPS 探测家庭服务器 | — | complete |
+| [02](./issues/02-self-signed-tofu-spki.md) | 确认自签名证书并固定 SPKI | 01 | complete |
+| [03](./issues/03-owner-create-device-session.md) | 根密码创建家庭和管理员设备会话 | 02 | complete |
+| [04](./issues/04-rotating-session-reauth.md) | 轮换设备会话并安全处理凭证丢失 | 03 | complete |
+| [05](./issues/05-owner-login-takeover-root-rotation.md) | 管理员新设备登录、接管与根密码轮换 | 04 | complete |
+| [06](./issues/06-member-request-approval.md) | 普通成员申请并由管理员批准 | 04 | complete |
+| [07](./issues/07-bind-existing-member-device.md) | 绑定既有成员与多设备权限 | 06 | complete |
+| [08](./issues/08-member-login-qr.md) | 成员登录二维码 | 02, 07 | complete |
+| [09](./issues/09-family-members-devices-page.md) | 家庭成员与设备页面 | 05, 07 | complete |
+| [10](./issues/10-member-device-names.md) | 成员与设备称呼生命周期 | 08, 09 | complete |
+| [11](./issues/11-device-revoke-exit.md) | 撤销设备与退出当前设备 | 04, 09 | complete |
+| [12](./issues/12-member-hard-delete-anonymize.md) | 成员彻底删除与共享数据匿名化 | 10, 11 | complete |
+| [13](./issues/13-delete-family.md) | 删除家庭 | 05, 11 | complete |
+| [14](./issues/14-foreground-sync-no-ssid.md) | 去除 Wi-Fi 绑定并收敛前台同步体验 | 08, 10, 11, 12, 13 | complete |
 | [15](./issues/15-retire-legacy-network-auth.md) | 收口旧网络与鉴权模型 | 14 | ready-for-agent |
 | [16](./issues/16-cross-device-release-acceptance.md) | 跨设备发布候选验收 | 15 | ready-for-agent |
 | [17](./issues/17-release-0.3.1.md) | 升级并交付 0.3.1 | 16 | ready-for-agent |

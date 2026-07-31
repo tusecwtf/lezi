@@ -679,6 +679,10 @@ internal class ReplicaSyncEngine(
         existingCreator: String?,
         remoteCreator: String?,
     ): String {
+        // A present JSON null is parsed as an empty string and is the server's
+        // authoritative hard-delete anonymization. It must clear even a prior
+        // self author instead of being treated as a missing acknowledgement.
+        if (remoteCreator != null && remoteCreator.isBlank()) return ""
         val canonicalSelf = session.membershipId.trim()
         return existingCreator
             ?.takeIf { canonicalSelf.isNotEmpty() && it == canonicalSelf }
@@ -1695,10 +1699,10 @@ private fun parseCustomItemWire(payload: JsonObject): CustomItemWire {
     return CustomItemWire(
         name = payload.requireNonBlankString("name", "custom_item").trim(),
         iconSlot = iconSlot.toInt(),
-        createdByMembershipId = payload.requireNonBlankString(
+        createdByMembershipId = payload.requireNullableString(
             "created_by_membership_id",
             "custom_item",
-        ).trim(),
+        ).orEmpty().trim(),
     )
 }
 
@@ -1737,10 +1741,10 @@ private fun parseRecordWire(payload: JsonObject): RecordWire {
     }
     return RecordWire(
         babyClientUuid = payload.requireNonBlankString("baby_client_uuid", "record"),
-        createdByMembershipId = payload.requireNonBlankString(
+        createdByMembershipId = payload.requireNullableString(
             "created_by_membership_id",
             "record",
-        ).trim(),
+        ).orEmpty().trim(),
         type = type,
         customItemClientUuid = customItemUuid,
         timestamp = timestamp,
@@ -1803,10 +1807,10 @@ private fun parseCarePlanWire(payload: JsonObject): CarePlanWire {
         payload = nested,
         schemaVersion = SyncWireMapper.carePlanSchemaVersion(payload),
         status = status,
-        createdByMembershipId = payload.requireNonBlankString(
+        createdByMembershipId = payload.requireNullableString(
             "created_by_membership_id",
             "care_plan",
-        ).trim(),
+        ).orEmpty().trim(),
         fulfilledRecordClientUuid = payload.requireNullableString(
             "fulfilled_record_client_uuid",
             "care_plan",
@@ -1841,10 +1845,10 @@ private fun parseFulfillmentCandidateWire(payload: JsonObject): FulfillmentCandi
             "fulfillment_candidate",
         ),
         actualTimestamp = actual,
-        submitterMembershipId = payload.requireNonBlankString(
+        submitterMembershipId = payload.requireNullableString(
             "submitter_membership_id",
             "fulfillment_candidate",
-        ).trim(),
+        ).orEmpty().trim(),
         submitterRole = role,
         confirmedAt = confirmed,
     )

@@ -40,7 +40,7 @@ class FamilyErrorCopyTest {
             ),
         )
         assertEquals(
-            "已接回家庭，但数据同步失败，请点“同步”重试",
+            "已接回家庭，但数据同步失败，请在记录、汇总或成长页下拉重试",
             familyWizardOutcomeCopy(
                 FamilyWizardOutcome.Reclaimed(
                     session = session,
@@ -51,38 +51,17 @@ class FamilyErrorCopyTest {
     }
 
     @Test
-    fun networkSaveContinuationUsesExplicitOutcomeInsteadOfMessageCopy() {
-        val messages = mutableListOf<String>()
-        var continuationCount = 0
-
-        deliverNetworkSaveResult(
-            NetworkSaveResult.Saved("文案已经换掉"),
-            onMessage = messages::add,
-            onSaved = { continuationCount += 1 },
-        )
-        deliverNetworkSaveResult(
-            NetworkSaveResult.Failed("错误说明里即使写着已保存，也仍是失败"),
-            onMessage = messages::add,
-            onSaved = { continuationCount += 1 },
-        )
-
-        assertEquals(listOf("文案已经换掉", "错误说明里即使写着已保存，也仍是失败"), messages)
-        assertEquals(1, continuationCount)
-    }
-
-    @Test
     fun familyDialogStateIsMutuallyExclusive() {
-        val network = FamilyDialog.NetworkSettings
-        val message = FamilyDialog.Message("保存失败", resume = network)
+        val wizard = FamilyDialog.Wizard(FamilyWizardMode.Join, FamilyWizardStep.Identity)
+        val message = FamilyDialog.Message("保存失败", resume = wizard)
 
-        assertEquals(network, familyDialogAfterDismiss(message))
+        assertEquals(wizard, familyDialogAfterDismiss(message))
         assertNull(
             familyDialogAfterDismiss(
                 FamilyDialog.DeleteFamily(FamilyDialog.DeleteStage.Final),
             ),
         )
 
-        val wizard = FamilyDialog.Wizard(FamilyWizardMode.Join, FamilyWizardStep.Identity)
         assertEquals(
             wizard,
             familyDialogAfterDismiss(FamilyDialog.Message("已扫入邀请", resume = wizard)),
@@ -167,7 +146,7 @@ class FamilyErrorCopyTest {
         assertTrue(validateFamilyDisplayNameInput("  ") != null)
         assertTrue(validateFamilyDisplayNameInput(LOCAL_FAMILY_DISPLAY_NAME) != null)
         assertNull(validateFamilyDisplayNameInput("干爹"))
-        assertNull(validateFamilyNameInput(""))
+        assertTrue(validateFamilyNameInput("") != null)
         assertNull(validateFamilyNameInput("  我家  "))
         assertTrue(validateFamilyNameInput("家".repeat(65)) != null)
         assertTrue(validateFamilyNameInput("坏\n名") != null)
@@ -242,13 +221,22 @@ class FamilyErrorCopyTest {
     }
 
     @Test
+    fun reauthRequiredKeepsLocalDataCopyAndNeverClaimsDeviceDeletion() {
+        val overview = overviewSyncStatusLabel(
+            status = SyncStatus.ReauthRequired,
+            isJoined = false,
+        )
+        assertTrue(overview.contains("重新登录或申请"))
+        assertFalse(overview.contains("设备已删除"))
+    }
+
+    @Test
     fun familyControlVisibilityByJoinAndRole() {
         val ownerJoined = familyControlVisibility(isJoined = true, role = FamilyRole.Owner)
         assertFalse(ownerJoined.showJoin)
         assertFalse(ownerJoined.showCreateFamily)
         assertTrue(ownerJoined.showInvite)
         assertTrue(ownerJoined.showJoinedActions)
-        assertFalse(ownerJoined.showLeave)
         assertTrue(ownerJoined.showRemoveMember)
 
         val memberJoined = familyControlVisibility(isJoined = true, role = FamilyRole.Member)
@@ -256,7 +244,6 @@ class FamilyErrorCopyTest {
         assertFalse(memberJoined.showCreateFamily)
         assertFalse(memberJoined.showInvite)
         assertTrue(memberJoined.showJoinedActions)
-        assertTrue(memberJoined.showLeave)
         assertFalse(memberJoined.showRemoveMember)
 
         val unjoined = familyControlVisibility(isJoined = false, role = FamilyRole.None)
@@ -264,7 +251,6 @@ class FamilyErrorCopyTest {
         assertTrue(unjoined.showCreateFamily)
         assertFalse(unjoined.showInvite)
         assertFalse(unjoined.showJoinedActions)
-        assertFalse(unjoined.showLeave)
         assertFalse(unjoined.showRemoveMember)
     }
 
@@ -280,10 +266,20 @@ class FamilyErrorCopyTest {
     }
 
     @Test
+    fun deviceLastUsedCopyIsRelativeAndFallsBackToACalendarDate() {
+        val now = 1_754_000_000L
+        assertEquals("刚刚", formatFamilyDeviceLastUsed(now, now))
+        assertEquals("2 分钟前", formatFamilyDeviceLastUsed(now - 120, now))
+        assertEquals("3 小时前", formatFamilyDeviceLastUsed(now - 10_800, now))
+        assertEquals("昨天", formatFamilyDeviceLastUsed(now - 90_000, now))
+        assertEquals("3 天前", formatFamilyDeviceLastUsed(now - 259_200, now))
+        assertTrue(formatFamilyDeviceLastUsed(now - 700_000, now).matches(Regex("\\d{2}-\\d{2}")))
+    }
+
+    @Test
     fun primarySurfaceFlagsByJoinRoleAndNetwork() {
-        assertTrue(isHomeLanNetworkConfigured("192.168.50.4", "", listOf("Home")))
-        assertFalse(isHomeLanNetworkConfigured("", "", emptyList()))
-        assertFalse(isHomeLanNetworkConfigured("192.168.50.4", "", emptyList()))
+        assertTrue(isHomeLanNetworkConfigured("192.168.50.4", ""))
+        assertFalse(isHomeLanNetworkConfigured("", ""))
 
         val joinedConfigured = familyPrimarySurface(
             isJoined = true,

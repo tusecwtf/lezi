@@ -18,6 +18,11 @@ fi
 
 image="${LEZI_SYNC_IMAGE:-lezi-sync:${version}}"
 data_host_path="${LEZI_DATA_HOST_PATH:-/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/data}"
+tls_host="${LEZI_TLS_HOST:-192.168.50.4}"
+if [[ ! "${tls_host}" =~ ^[A-Za-z0-9.:-]+$ ]] || [[ "${#tls_host}" -gt 253 ]]; then
+  echo "error: LEZI_TLS_HOST must be a plain DNS name or IP address" >&2
+  exit 1
+fi
 out_root="${LEZI_NAS_PACKAGE_DIR:-${REPO_ROOT}/dist/lezi-sync-${version}-nas}"
 platform="${LEZI_SYNC_PLATFORM:-linux-amd64}"
 tar_name="lezi-sync-${version}-${platform}.tar"
@@ -26,6 +31,7 @@ build_image="${LEZI_PACKAGE_BUILD_IMAGE:-0}"
 echo "==> package lezi-sync ${version}"
 echo "    image:   ${image}"
 echo "    data:    ${data_host_path}"
+echo "    tls host:${tls_host}"
 echo "    output:  ${out_root}"
 
 if ! docker image inspect "${image}" >/dev/null 2>&1; then
@@ -66,7 +72,9 @@ sed \
 
 cp -a "${SCRIPT_DIR}/.env.example" "${out_root}/.env.example"
 cp -a "${SCRIPT_DIR}/remote-deploy.sh" "${out_root}/remote-deploy.sh"
+cp -a "${SCRIPT_DIR}/init-tls.sh" "${out_root}/init-tls.sh"
 chmod +x "${out_root}/remote-deploy.sh"
+chmod +x "${out_root}/init-tls.sh"
 
 image_id=""
 if docker image inspect "${image}" >/dev/null 2>&1; then
@@ -84,6 +92,7 @@ cat > "${out_root}/MANIFEST.json" <<EOF
   "platform": "${platform}",
   "tar": "${tar_name}",
   "data_host_path": "${data_host_path}",
+  "tls_host": "${tls_host}",
   "git_sha": "${git_sha}",
   "created_at": "${created_at}",
   "compose_engine": "zdocker-bundled-docker-compose-v2"
@@ -92,7 +101,7 @@ EOF
 
 (
   cd "${out_root}"
-  sha256sum "${tar_name}" docker-compose.yml MANIFEST.json remote-deploy.sh \
+  sha256sum "${tar_name}" docker-compose.yml MANIFEST.json remote-deploy.sh init-tls.sh \
     > SHA256SUMS
 )
 

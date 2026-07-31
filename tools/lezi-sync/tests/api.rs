@@ -1,16 +1,19 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::body::{Body, Bytes};
+use axum::extract::ConnectInfo;
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
 use lezi_sync::{build_app, RateLimitConfig, ServerConfig, VERSION};
+use rusqlite::Connection;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -61,6 +64,20 @@ impl Rig {
             self.now.clone(),
             8,
             |_| {},
+        )
+    }
+
+    fn restart_with_config(
+        &self,
+        generation: &str,
+        configure: impl FnOnce(&mut ServerConfig),
+    ) -> Router {
+        app_for(
+            self.directory.path(),
+            generation,
+            self.now.clone(),
+            8,
+            configure,
         )
     }
 }
@@ -116,6 +133,35 @@ async fn request_with_headers(
     content_type: Option<&str>,
     extra_headers: &[(&str, &str)],
 ) -> axum::response::Response {
+    request_with_source(
+        app,
+        method,
+        uri,
+        token,
+        body,
+        content_type,
+        RequestTransport {
+            extra_headers,
+            source: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 43210),
+        },
+    )
+    .await
+}
+
+struct RequestTransport<'a> {
+    extra_headers: &'a [(&'a str, &'a str)],
+    source: SocketAddr,
+}
+
+async fn request_with_source(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    token: Option<&str>,
+    body: Body,
+    content_type: Option<&str>,
+    transport: RequestTransport<'_>,
+) -> axum::response::Response {
     let mut builder = Request::builder().method(method).uri(uri);
     if let Some(token) = token {
         builder = builder.header(AUTHORIZATION, format!("Bearer {token}"));
@@ -123,13 +169,14 @@ async fn request_with_headers(
     if let Some(content_type) = content_type {
         builder = builder.header(CONTENT_TYPE, content_type);
     }
-    for (name, value) in extra_headers {
+    for (name, value) in transport.extra_headers {
         builder = builder.header(*name, *value);
     }
-    app.clone()
-        .oneshot(builder.body(body).unwrap())
-        .await
-        .unwrap()
+    let mut request = builder.body(body).unwrap();
+    request
+        .extensions_mut()
+        .insert(ConnectInfo(transport.source));
+    app.clone().oneshot(request).await.unwrap()
 }
 
 async fn json_request(
@@ -164,7 +211,17 @@ async fn json_request_with_headers(
 
     let (status, value) =
         raw_json_request_with_headers(app, method, uri, token, body, extra_headers).await;
-    if status.is_success() && (uri == "/v1/family/create" || uri == "/v1/join") {
+    if status.is_success()
+        && matches!(
+            uri,
+            "/v1/family/create"
+                | "/v1/join"
+                | "/v1/owner/login"
+                | "/v1/owner/takeover"
+                | "/v1/member/requests/claim"
+                | "/v1/member/login-grants/claim"
+        )
+    {
         if let (Some(token), Some(generation)) = (
             value.get("token").and_then(Value::as_str),
             value.get("generation").and_then(Value::as_str),
@@ -219,6 +276,31 @@ async fn raw_json_request_with_headers(
     (status, value)
 }
 
+async fn json_request_from(
+    app: &Router,
+    source: SocketAddr,
+    uri: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let response = request_with_source(
+        app,
+        Method::POST,
+        uri,
+        None,
+        Body::from(body.to_string()),
+        Some("application/json"),
+        RequestTransport {
+            extra_headers: &[],
+            source,
+        },
+    )
+    .await;
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let value = serde_json::from_slice(&bytes).unwrap();
+    (status, value)
+}
+
 async fn get_json(app: &Router, uri: &str, token: Option<&str>) -> (StatusCode, Value) {
     let mut current_uri = uri.to_owned();
     let has_generation = uri
@@ -245,9 +327,34 @@ async fn create_family(app: &Router, device_id: &str, request_id: &str) -> Value
         None,
         json!({
             "create_request_id": request_id,
-            "device_id": device_id,
             "display_name": "妈妈",
+            "device_name": device_id,
+            "family_name": "测试家庭",
         }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    body
+}
+
+async fn create_family_with_root(
+    app: &Router,
+    device_id: &str,
+    request_id: &str,
+    root_password: &str,
+) -> Value {
+    let (status, body) = json_request_with_headers(
+        app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": request_id,
+            "display_name": "妈妈",
+            "device_name": device_id,
+            "family_name": "测试家庭",
+        }),
+        &[("x-lezi-bootstrap-secret", root_password)],
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
@@ -313,7 +420,7 @@ async fn invite_and_join(app: &Router, owner_token: &str, device_id: &str) -> Va
         json!({
             "code": invitation["code"],
             "device_id": device_id,
-            "display_name": "成员",
+            "display_name": format!("成员-{device_id}"),
         }),
     )
     .await;
@@ -361,6 +468,72 @@ async fn liveness_and_readiness_initialize_private_single_data_root() {
 }
 
 #[tokio::test]
+async fn setup_status_exposes_only_the_empty_instance_contract() {
+    let rig = Rig::new();
+
+    let (status, body) = get_json(&rig.app, "/v1/setup-status", None).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!({
+            "protocol_version": 1,
+            "capabilities": ["setup_status"],
+            "family_state": "empty",
+        })
+    );
+}
+
+#[tokio::test]
+async fn setup_status_switches_to_configured_without_exposing_family_metadata() {
+    let rig = Rig::new();
+    let created = create_family(
+        &rig.app,
+        "setup-status-owner",
+        "setup-status-owner-request-000001",
+    )
+    .await;
+    assert!(created["family_id"].is_string());
+
+    let (status, body) = get_json(&rig.app, "/v1/setup-status", None).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!({
+            "protocol_version": 1,
+            "capabilities": ["setup_status"],
+            "family_state": "configured",
+        })
+    );
+}
+
+#[tokio::test]
+async fn setup_status_reports_maintenance_without_readiness_or_family_details() {
+    let rig = Rig::new();
+    fs::write(
+        rig.directory.path().join("lezi.db"),
+        b"not a sqlite database",
+    )
+    .unwrap();
+
+    let response = request(
+        &rig.app,
+        Method::GET,
+        "/v1/setup-status",
+        None,
+        Body::empty(),
+        None,
+    )
+    .await;
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
 async fn current_schema_version_restarts_with_credentials_and_entities() {
     let rig = Rig::new();
     let owner = create_family(
@@ -377,7 +550,7 @@ async fn current_schema_version_restarts_with_credentials_and_entities() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        3
+        11
     );
     drop(connection);
 
@@ -402,7 +575,7 @@ async fn current_schema_version_restarts_with_credentials_and_entities() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        3
+        11
     );
 }
 
@@ -414,7 +587,7 @@ fn future_database_schema_version_fails_closed_without_mutation() {
     connection
         .execute_batch(
             "
-            PRAGMA user_version = 4;
+            PRAGMA user_version = 12;
             CREATE TABLE future_sentinel(value TEXT NOT NULL);
             INSERT INTO future_sentinel(value) VALUES ('preserve-me');
             ",
@@ -474,7 +647,7 @@ fn future_database_schema_version_fails_closed_without_mutation() {
         connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        4
+        12
     );
     assert_eq!(
         connection
@@ -575,11 +748,20 @@ async fn family_create_is_strict_idempotent_and_restart_safe() {
     let request_id = "Qk7Uj6hTH1xbqa9nYs8FQ2c4e5w7r9tB";
     let first = create_family(&rig.app, "owner-device", request_id).await;
     assert!(first["membership_id"].as_str().unwrap().len() >= 32);
+    assert!(first["device_id"].as_str().unwrap().len() >= 32);
+    assert!(first["session_id"].as_str().unwrap().len() >= 32);
+    assert_eq!(
+        first["access_expires_at"],
+        rig.now.load(Ordering::SeqCst) + 900
+    );
+    assert_ne!(first["access_token"], first["refresh_token"]);
     assert_eq!(first["reclaimed"], false);
     let restarted = rig.restart("generation-b");
     let retry = create_family(&restarted, "owner-device", request_id).await;
     assert_eq!(retry["family_id"], first["family_id"]);
     assert_eq!(retry["token"], first["token"]);
+    assert_eq!(retry["refresh_token"], first["refresh_token"]);
+    assert_eq!(retry["device_id"], first["device_id"]);
     assert_eq!(retry["membership_id"], first["membership_id"]);
     assert_eq!(retry["generation"], "generation-b");
     assert_eq!(retry["reclaimed"], false);
@@ -592,236 +774,1644 @@ async fn family_create_is_strict_idempotent_and_restart_safe() {
     assert!(!persisted
         .windows(token.len())
         .any(|window| window == token.as_bytes()));
+    let refresh = first["refresh_token"].as_str().unwrap();
+    assert!(!persisted
+        .windows(refresh.len())
+        .any(|window| window == refresh.as_bytes()));
+
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    let membership_columns = connection
+        .prepare("SELECT name FROM pragma_table_info('memberships')")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(!membership_columns
+        .iter()
+        .any(|column| column == "device_id"));
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM devices", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1,
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM device_sessions", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1,
+    );
 }
 
 #[tokio::test]
-async fn family_create_reclaims_existing_owner_and_full_resync_path() {
+async fn family_create_retry_never_reissues_credentials_after_session_rotation() {
     let rig = Rig::new();
-    let first = create_family(
-        &rig.app,
-        "owner-device-a",
-        "reclaim-owner-request-aaaa0000000001",
-    )
-    .await;
-    let old_token = first["token"].as_str().unwrap().to_owned();
-    let family_id = first["family_id"].as_str().unwrap().to_owned();
-    let membership_id = first["membership_id"].as_str().unwrap().to_owned();
-    assert_eq!(first["reclaimed"], false);
-
-    // Seed a baby so reclaim + pull proves data survives.
-    let baby_id = Uuid::new_v4().to_string();
-    let (push_status, _) = publish_root_bundle(
-        &rig.app,
-        &old_token,
-        entity_wire("baby", &baby_id, 10, baby_payload("乐乐", None), None),
-    )
-    .await;
-    assert_eq!(push_status, StatusCode::OK);
-
-    // Rename family so reclaim with empty name keeps the shared name.
-    let (rename_status, _) = json_request(
+    let request_id = "create-then-refresh-request-aaaa00000001";
+    let created = create_family(&rig.app, "owner-device", request_id).await;
+    let (_, rotated) = json_request(
         &rig.app,
         Method::POST,
-        "/v1/family/name",
-        Some(&old_token),
-        json!({ "family_name": "乐乐一家" }),
-    )
-    .await;
-    assert_eq!(rename_status, StatusCode::OK);
-
-    let (reclaim_status, reclaimed) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/family/create",
+        "/v1/session/refresh",
         None,
-        json!({
-            "create_request_id": "reclaim-owner-request-bbbb0000000002",
-            "device_id": "owner-device-b",
-            "display_name": "爸爸",
-        }),
+        json!({"refresh_token": created["refresh_token"]}),
     )
     .await;
-    assert_eq!(reclaim_status, StatusCode::CREATED, "{reclaimed}");
-    assert_eq!(reclaimed["family_id"], family_id);
-    assert_eq!(reclaimed["membership_id"], membership_id);
-    assert_eq!(reclaimed["role"], "owner");
-    assert_eq!(reclaimed["reclaimed"], true);
-    assert_eq!(reclaimed["family_name"], "乐乐一家");
-    let new_token = reclaimed["token"].as_str().unwrap();
-    assert_ne!(new_token, old_token);
 
-    // Old owner session is dead.
-    assert_eq!(
-        get_json(&rig.app, "/v1/family/members", Some(&old_token))
-            .await
-            .0,
-        StatusCode::UNAUTHORIZED
-    );
-
-    // New session can list self and pull existing entities.
-    let (members_status, members) = get_json(&rig.app, "/v1/family/members", Some(new_token)).await;
-    assert_eq!(members_status, StatusCode::OK);
-    let self_member = members["members"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|row| row["is_self"] == true)
-        .unwrap();
-    assert_eq!(self_member["membership_id"], membership_id);
-    assert_eq!(self_member["display_name"], "爸爸");
-    assert_eq!(self_member["role"], "owner");
-
-    let (pull_status, pull) = get_json(
-        &rig.app,
-        &format!(
-            "/v1/pull?cursor=0&generation={}",
-            reclaimed["generation"].as_str().unwrap()
-        ),
-        Some(new_token),
-    )
-    .await;
-    assert_eq!(pull_status, StatusCode::OK, "{pull}");
-    let entities = pull["entities"].as_array().unwrap();
-    assert!(
-        entities
-            .iter()
-            .any(|entity| { entity["type"] == "baby" && entity["client_uuid"] == baby_id }),
-        "{pull}"
-    );
-
-    // Ordinary push stays retired after credential reclaim.
-    let (stale_device, _) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/push",
-        Some(new_token),
-        json!({
-            "device_id": "owner-device-a",
-            "generation": reclaimed["generation"],
-            "entities": [],
-        }),
-    )
-    .await;
-    assert_eq!(stale_device, StatusCode::UNPROCESSABLE_ENTITY);
-
-    let baby_b = Uuid::new_v4().to_string();
-    let (push_ok, _) = publish_root_bundle(
-        &rig.app,
-        new_token,
-        entity_wire("baby", &baby_b, 20, baby_payload("圆圆", None), None),
-    )
-    .await;
-    assert_eq!(push_ok, StatusCode::OK);
-
-    // Non-empty family_name on reclaim overwrites the shared name.
-    let (reclaim2_status, reclaimed2) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/family/create",
-        None,
-        json!({
-            "create_request_id": "reclaim-owner-request-cccc0000000003",
-            "device_id": "owner-device-c",
-            "display_name": "妈妈",
-            "family_name": "新名字",
-        }),
-    )
-    .await;
-    assert_eq!(reclaim2_status, StatusCode::CREATED, "{reclaimed2}");
-    assert_eq!(reclaimed2["membership_id"], membership_id);
-    assert_eq!(reclaimed2["family_name"], "新名字");
-    assert_eq!(reclaimed2["reclaimed"], true);
-
-    // Idempotent reclaim retry returns the same session.
     let (retry_status, retry) = json_request(
         &rig.app,
         Method::POST,
         "/v1/family/create",
         None,
         json!({
-            "create_request_id": "reclaim-owner-request-cccc0000000003",
-            "device_id": "owner-device-c",
+            "create_request_id": request_id,
             "display_name": "妈妈",
-            "family_name": "新名字",
+            "device_name": "owner-device",
+            "family_name": "测试家庭",
         }),
     )
     .await;
-    assert_eq!(retry_status, StatusCode::CREATED, "{retry}");
-    assert_eq!(retry["token"], reclaimed2["token"]);
-    assert_eq!(retry["membership_id"], membership_id);
-    assert_eq!(retry["reclaimed"], true);
+
+    assert_eq!(retry_status, StatusCode::CONFLICT, "{retry}");
+    assert!(retry.get("access_token").is_none());
+    assert!(retry.get("refresh_token").is_none());
+    assert_eq!(
+        get_json(
+            &rig.app,
+            "/v1/family/members",
+            rotated["access_token"].as_str(),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
 }
 
 #[tokio::test]
-async fn family_create_reclaim_requires_bootstrap_when_configured() {
+async fn concurrent_owner_create_commits_exactly_one_family_membership_device_and_session() {
+    let secret = "concurrent-root-secret";
+    let rig = Rig::with_config(|config| {
+        config.bootstrap_secret = Some(secret.to_owned());
+    });
+    let bootstrap_headers = [("x-lezi-bootstrap-secret", secret)];
+    let request_a = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": "concurrent-create-request-aaaa000001",
+            "display_name": "妈妈",
+            "device_name": "妈妈手机",
+            "family_name": "乐乐一家",
+        }),
+        &bootstrap_headers,
+    );
+    let request_b = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": "concurrent-create-request-bbbb000002",
+            "display_name": "爸爸",
+            "device_name": "爸爸手机",
+            "family_name": "另一个家庭",
+        }),
+        &bootstrap_headers,
+    );
+
+    let (result_a, result_b) = tokio::join!(request_a, request_b);
+    let statuses = [result_a.0, result_b.0];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::CREATED)
+            .count(),
+        1,
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::CONFLICT)
+            .count(),
+        1,
+    );
+
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    for table in ["families", "memberships", "devices", "device_sessions"] {
+        let count: i64 = connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1, "unexpected {table} rows");
+    }
+    let database = fs::read(rig.directory.path().join("lezi.db")).unwrap();
+    assert!(!database
+        .windows(secret.len())
+        .any(|window| window == secret.as_bytes()));
+}
+
+#[tokio::test]
+async fn refresh_rotates_once_and_replay_revokes_only_the_presenting_device() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "owner-phone",
+        "refresh-owner-request-aaaa000000000001",
+    )
+    .await;
+    let owner_access = owner["access_token"].as_str().unwrap();
+    let owner_refresh = owner["refresh_token"].as_str().unwrap();
+    let member = invite_and_join(&rig.app, owner_access, "member-phone").await;
+    let member_access = member["access_token"].as_str().unwrap();
+    let sibling_device_id = "same-membership-sibling-device";
+    let sibling_access = "same-membership-sibling-access";
+    let sibling_refresh = "same-membership-sibling-refresh";
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute(
+            "
+            INSERT INTO devices(
+                device_id, membership_id, device_name, device_name_key,
+                status, created_at, last_used_at
+            ) VALUES (?1, ?2, 'Owner tablet', 'owner tablet', 'active', ?3, ?3)
+            ",
+            rusqlite::params![
+                sibling_device_id,
+                owner["membership_id"].as_str().unwrap(),
+                rig.now.load(Ordering::SeqCst),
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "
+            INSERT INTO device_sessions(
+                session_id, device_id, access_token_hash, access_expires_at, refresh_token_hash
+            ) VALUES ('same-membership-sibling-session', ?1, ?2, ?3, ?4)
+            ",
+            rusqlite::params![
+                sibling_device_id,
+                token_hash(sibling_access),
+                rig.now.load(Ordering::SeqCst) + 900,
+                token_hash(sibling_refresh),
+            ],
+        )
+        .unwrap();
+    drop(connection);
+
+    let refresh_a = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": owner_refresh}),
+    );
+    let refresh_b = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": owner_refresh}),
+    );
+    let (a, b) = tokio::join!(refresh_a, refresh_b);
+    let (success, replay) = if a.0 == StatusCode::OK {
+        (a, b)
+    } else {
+        (b, a)
+    };
+
+    assert_eq!(success.0, StatusCode::OK, "{}", success.1);
+    assert_eq!(replay.0, StatusCode::UNAUTHORIZED, "{}", replay.1);
+    assert_eq!(replay.1["code"], "refresh_replay");
+    assert_ne!(success.1["access_token"], owner["access_token"]);
+    assert_ne!(success.1["refresh_token"], owner["refresh_token"]);
+    assert_eq!(
+        success.1["access_expires_at"],
+        rig.now.load(Ordering::SeqCst) + 900
+    );
+    assert_eq!(success.1["family_id"], owner["family_id"]);
+    assert_eq!(success.1["membership_id"], owner["membership_id"]);
+    assert_eq!(success.1["device_id"], owner["device_id"]);
+    assert_eq!(success.1["role"], "owner");
+
+    let rotated_access = success.1["access_token"].as_str().unwrap();
+    assert_eq!(
+        get_json(&rig.app, "/v1/family/members", Some(rotated_access))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED,
+        "a replay revokes the newly rotated lineage for that device",
+    );
+    assert_eq!(
+        get_json(&rig.app, "/v1/family/members", Some(member_access))
+            .await
+            .0,
+        StatusCode::OK,
+        "refresh replay must not revoke another membership or the family",
+    );
+    assert_eq!(
+        get_json(&rig.app, "/v1/family/members", Some(sibling_access))
+            .await
+            .0,
+        StatusCode::OK,
+        "refresh replay must not revoke another device on the same membership",
+    );
+
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT status FROM devices WHERE device_id = ?1",
+                [owner["device_id"].as_str().unwrap()],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "revoked",
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT status FROM devices WHERE device_id = ?1",
+                [member["device_id"].as_str().unwrap()],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "active",
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT status FROM devices WHERE device_id = ?1",
+                [sibling_device_id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "active",
+    );
+}
+
+#[tokio::test]
+async fn refresh_has_no_time_or_inactivity_expiry_but_invalid_values_fail_closed() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "owner-phone",
+        "refresh-lifetime-request-aaaa00000001",
+    )
+    .await;
+    rig.now.fetch_add(10 * 365 * 24 * 60 * 60, Ordering::SeqCst);
+
+    let (status, refreshed) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": owner["refresh_token"]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{refreshed}");
+    assert_eq!(
+        refreshed["access_expires_at"],
+        rig.now.load(Ordering::SeqCst) + 900,
+    );
+
+    for body in [
+        json!({}),
+        json!({"refresh_token": ""}),
+        json!({"refresh_token": "invalid"}),
+    ] {
+        let (status, _) =
+            json_request(&rig.app, Method::POST, "/v1/session/refresh", None, body).await;
+        assert!(status == StatusCode::UNPROCESSABLE_ENTITY || status == StatusCode::UNAUTHORIZED,);
+    }
+}
+
+#[tokio::test]
+async fn family_create_rejects_a_second_owner_claim_without_mutating_the_first() {
+    let rig = Rig::new();
+    let first = create_family(
+        &rig.app,
+        "owner-device-a",
+        "create-owner-request-aaaa000000000001",
+    )
+    .await;
+    let first_token = first["access_token"].as_str().unwrap();
+
+    let (status, body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": "create-owner-request-bbbb000000000002",
+            "display_name": "爸爸",
+            "device_name": "另一台手机",
+            "family_name": "另一个家庭",
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let (members_status, members) =
+        get_json(&rig.app, "/v1/family/members", Some(first_token)).await;
+    assert_eq!(members_status, StatusCode::OK, "{members}");
+    assert_eq!(members["members"].as_array().unwrap().len(), 1);
+    assert_eq!(members["members"][0]["role"], "owner");
+}
+
+#[tokio::test]
+async fn owner_login_adds_one_device_to_the_existing_owner_and_retries_idempotently() {
+    let root = "owner-login-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let create_body = json!({
+        "create_request_id": "owner-login-create-request-aaaa000001",
+        "display_name": "妈妈",
+        "device_name": "旧手机",
+        "family_name": "乐乐一家",
+    });
+    let (_, original) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        create_body,
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    let login_body = json!({
+        "login_request_id": "owner-login-request-bbbb00000000001",
+        "device_name": "管理员平板",
+    });
+
+    let (status, logged_in) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/owner/login",
+        None,
+        login_body.clone(),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    let (retry_status, retry) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/owner/login",
+        None,
+        login_body,
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{logged_in}");
+    assert_eq!(retry_status, StatusCode::OK, "{retry}");
+    assert_eq!(logged_in["membership_id"], original["membership_id"]);
+    assert_ne!(logged_in["device_id"], original["device_id"]);
+    assert_eq!(retry["device_id"], logged_in["device_id"]);
+    assert_eq!(retry["access_token"], logged_in["access_token"]);
+    assert_eq!(retry["refresh_token"], logged_in["refresh_token"]);
+    for token in [
+        original["access_token"].as_str(),
+        logged_in["access_token"].as_str(),
+    ] {
+        assert_eq!(
+            get_json(&rig.app, "/v1/family/members", token).await.0,
+            StatusCode::OK,
+        );
+    }
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM memberships WHERE role = 'owner' AND left_at IS NULL",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1,
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM devices WHERE membership_id = ?1 AND status = 'active'",
+                [original["membership_id"].as_str().unwrap()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        2,
+    );
+}
+
+#[tokio::test]
+async fn owner_takeover_atomically_revokes_old_owner_devices_but_not_members() {
+    let root = "owner-takeover-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let (_, original) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": "takeover-create-request-aaaa00000001",
+            "display_name": "妈妈",
+            "device_name": "旧手机",
+            "family_name": "乐乐一家",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    let member = invite_and_join(
+        &rig.app,
+        original["access_token"].as_str().unwrap(),
+        "member-phone",
+    )
+    .await;
+    let (_, second_owner) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/owner/login",
+        None,
+        json!({
+            "login_request_id": "takeover-login-request-bbbb000000001",
+            "device_name": "旧平板",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    let takeover_body = json!({
+        "login_request_id": "takeover-request-cccc00000000000001",
+        "device_name": "找回控制的新手机",
+    });
+
+    let (status, takeover) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/owner/takeover",
+        None,
+        takeover_body.clone(),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    let (retry_status, retry) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/owner/takeover",
+        None,
+        takeover_body,
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{takeover}");
+    assert_eq!(retry_status, StatusCode::OK, "{retry}");
+    assert_eq!(retry["access_token"], takeover["access_token"]);
+    assert_eq!(takeover["membership_id"], original["membership_id"]);
+    for old in [&original, &second_owner] {
+        assert_eq!(
+            get_json(&rig.app, "/v1/family/members", old["access_token"].as_str(),)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED,
+        );
+    }
+    assert_eq!(
+        get_json(
+            &rig.app,
+            "/v1/family/members",
+            takeover["access_token"].as_str(),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+    assert_eq!(
+        get_json(
+            &rig.app,
+            "/v1/family/members",
+            member["access_token"].as_str(),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+}
+
+#[tokio::test]
+async fn root_password_rotation_on_restart_revokes_only_owner_sessions() {
+    let old_root = "old-owner-root-password";
+    let new_root = "new-owner-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(old_root.to_owned()));
+    let (_, owner) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": "root-rotation-create-request-aaaa0001",
+            "display_name": "妈妈",
+            "device_name": "管理员手机",
+            "family_name": "乐乐一家",
+        }),
+        &[("x-lezi-bootstrap-secret", old_root)],
+    )
+    .await;
+    let member = invite_and_join(
+        &rig.app,
+        owner["access_token"].as_str().unwrap(),
+        "member-phone",
+    )
+    .await;
+
+    let same_root = rig.restart_with_config("generation-b", |config| {
+        config.bootstrap_secret = Some(old_root.to_owned());
+    });
+    assert_eq!(
+        get_json(
+            &same_root,
+            "/v1/family/members",
+            owner["access_token"].as_str(),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+    let changed_root = rig.restart_with_config("generation-c", |config| {
+        config.bootstrap_secret = Some(new_root.to_owned());
+    });
+    assert_eq!(
+        get_json(
+            &changed_root,
+            "/v1/family/members",
+            owner["access_token"].as_str(),
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED,
+    );
+    assert_eq!(
+        get_json(
+            &changed_root,
+            "/v1/family/members",
+            member["access_token"].as_str(),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+
+    let login = json!({
+        "login_request_id": "root-rotation-login-request-bbbb00001",
+        "device_name": "新管理员手机",
+    });
+    let (wrong, wrong_body) = json_request_with_headers(
+        &changed_root,
+        Method::POST,
+        "/v1/owner/login",
+        None,
+        login.clone(),
+        &[("x-lezi-bootstrap-secret", old_root)],
+    )
+    .await;
+    let (correct, recovered) = json_request_with_headers(
+        &changed_root,
+        Method::POST,
+        "/v1/owner/login",
+        None,
+        login,
+        &[("x-lezi-bootstrap-secret", new_root)],
+    )
+    .await;
+    assert_eq!(wrong, StatusCode::UNAUTHORIZED, "{wrong_body}");
+    assert!(!wrong_body.to_string().contains("乐乐一家"));
+    assert_eq!(correct, StatusCode::OK, "{recovered}");
+    assert_eq!(recovered["membership_id"], owner["membership_id"]);
+
+    let database = fs::read(rig.directory.path().join("lezi.db")).unwrap();
+    for secret in [old_root, new_root] {
+        assert!(!database
+            .windows(secret.len())
+            .any(|window| window == secret.as_bytes()));
+    }
+}
+
+#[tokio::test]
+async fn member_request_has_no_family_authority_and_owner_approval_claims_once() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "owner-device",
+        "member-request-owner-create-000001",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+
+    let (created, pending) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/requests",
+        None,
+        json!({"display_name": "爸爸", "device_name": "爸爸的手机"}),
+    )
+    .await;
+    assert_eq!(created, StatusCode::CREATED, "{pending}");
+    assert_eq!(pending["status"], "pending");
+    let request_id = pending["request_id"].as_str().unwrap();
+    let pending_secret = pending["pending_secret"].as_str().unwrap();
+    assert!(pending_secret.len() >= 32);
+    assert_ne!(request_id, pending_secret);
+
+    // Neither a public id nor the pending capability is a family credential.
+    assert_eq!(
+        get_json(&rig.app, "/v1/family/members", Some(pending_secret))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED,
+    );
+    let (public_status, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/requests/status",
+        None,
+        json!({"pending_secret": request_id}),
+    )
+    .await;
+    assert_eq!(public_status, StatusCode::NOT_FOUND);
+
+    let (listed, list) = get_json(&rig.app, "/v1/member/requests", Some(owner_token)).await;
+    assert_eq!(listed, StatusCode::OK, "{list}");
+    assert_eq!(
+        list,
+        json!({"requests": [{
+            "request_id": request_id,
+            "display_name": "爸爸",
+            "device_name": "爸爸的手机",
+            "created_at": rig.now.load(Ordering::SeqCst),
+            "expires_at": rig.now.load(Ordering::SeqCst) + 24 * 60 * 60,
+        }]})
+    );
+
+    let (approved, approval) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/member/requests/{request_id}/approve-new"),
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(approved, StatusCode::OK, "{approval}");
+    assert_eq!(approval, json!({"ok": true, "status": "approved"}));
+
+    let (_, status_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/requests/status",
+        None,
+        json!({"pending_secret": pending_secret}),
+    )
+    .await;
+    assert_eq!(status_body, json!({"status": "approved"}));
+
+    let (claimed, member) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/requests/claim",
+        None,
+        json!({"pending_secret": pending_secret}),
+    )
+    .await;
+    assert_eq!(claimed, StatusCode::OK, "{member}");
+    assert_eq!(member["role"], "member");
+    assert_eq!(member["family_id"], owner["family_id"]);
+    assert_ne!(member["membership_id"], owner["membership_id"]);
+    assert!(member["access_token"]
+        .as_str()
+        .is_some_and(|it| !it.is_empty()));
+    assert!(member["refresh_token"]
+        .as_str()
+        .is_some_and(|it| !it.is_empty()));
+
+    let (claimed_again, _) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/requests/claim",
+        None,
+        json!({"pending_secret": pending_secret}),
+    )
+    .await;
+    assert_eq!(claimed_again, StatusCode::CONFLICT);
+    assert_eq!(
+        get_json(
+            &rig.app,
+            "/v1/pull?cursor=0",
+            member["access_token"].as_str(),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+
+    let (_, duplicate) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/requests",
+        None,
+        json!({"display_name": "　爸爸　", "device_name": "第二台手机"}),
+    )
+    .await;
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &format!(
+                "/v1/member/requests/{}/approve-new",
+                duplicate["request_id"].as_str().unwrap(),
+            ),
+            Some(owner_token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT,
+    );
+
+    let database = fs::read(rig.directory.path().join("lezi.db")).unwrap();
+    assert!(!database
+        .windows(pending_secret.len())
+        .any(|window| window == pending_secret.as_bytes()));
+}
+
+#[tokio::test]
+async fn owner_explicitly_binds_a_pending_device_to_an_existing_member() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "bind-existing-owner-device",
+        "bind-existing-owner-request-000001",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let first_device = invite_and_join(&rig.app, owner_token, "bind-existing-member-a").await;
+    let other_member = invite_and_join(&rig.app, owner_token, "bind-existing-member-b").await;
+    let first_token = first_device["access_token"].as_str().unwrap();
+    let other_token = other_member["access_token"].as_str().unwrap();
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let plan_id = Uuid::new_v4().to_string();
+    assert_eq!(
+        publish_root_bundle(
+            &rig.app,
+            first_token,
+            entity_wire(
+                "care_plan",
+                &plan_id,
+                2,
+                care_plan_payload(&baby_id, "bath"),
+                None,
+            ),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+    let record_id = Uuid::new_v4().to_string();
+    let media_ids = [
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+    ];
+    let (published, published_body) = publish_bundle_with_media(
+        &rig.app,
+        first_token,
+        entity_wire("record", &record_id, 3, record_payload(&baby_id), None),
+        media_ids
+            .iter()
+            .enumerate()
+            .map(|(index, media_id)| {
+                (
+                    entity_wire(
+                        "media",
+                        media_id,
+                        4 + index as i64,
+                        log_media_payload(&record_id),
+                        None,
+                    ),
+                    vec![b'a' + index as u8; 3],
+                )
+            })
+            .collect(),
+    )
+    .await;
+    assert_eq!(published, StatusCode::OK, "{published_body}");
+
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/member/requests",
+            None,
+            json!({
+                "display_name": "成员-bind-existing-member-a",
+                "device_name": "伪造身份的设备",
+                "membership_id": owner["membership_id"],
+                "role": "owner",
+                "device_id": owner["device_id"],
+            }),
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+    );
+    let (_, pending) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/requests",
+        None,
+        json!({
+            "display_name": "成员-bind-existing-member-a",
+            "device_name": "同一成员的平板",
+        }),
+    )
+    .await;
+    let request_id = pending["request_id"].as_str().unwrap();
+    let pending_secret = pending["pending_secret"].as_str().unwrap();
+    let bind_path = format!("/v1/member/requests/{request_id}/bind-existing");
+
+    // A matching display name remains only a hint: claim is impossible until
+    // an Owner explicitly selects an existing ordinary membership.
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/member/requests/claim",
+            None,
+            json!({"pending_secret": pending_secret}),
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT,
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &bind_path,
+            Some(owner_token),
+            json!({
+                "membership_id": first_device["membership_id"],
+                "role": "owner",
+                "device_id": "forged-device",
+            }),
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &bind_path,
+            Some(first_token),
+            json!({"membership_id": first_device["membership_id"]}),
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN,
+    );
+
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &bind_path,
+            Some(owner_token),
+            json!({"membership_id": owner["membership_id"]}),
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT,
+    );
+
+    let (bound, body) = json_request(
+        &rig.app,
+        Method::POST,
+        &bind_path,
+        Some(owner_token),
+        json!({"membership_id": first_device["membership_id"]}),
+    )
+    .await;
+    assert_eq!(bound, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({"ok": true, "status": "approved"}));
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &bind_path,
+            Some(owner_token),
+            json!({"membership_id": first_device["membership_id"]}),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &bind_path,
+            Some(owner_token),
+            json!({"membership_id": other_member["membership_id"]}),
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT,
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/member/requests/{request_id}/approve-new"),
+            Some(owner_token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT,
+    );
+
+    let (claimed, second_device) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/requests/claim",
+        None,
+        json!({"pending_secret": pending_secret}),
+    )
+    .await;
+    assert_eq!(claimed, StatusCode::OK, "{second_device}");
+    assert_eq!(second_device["role"], "member");
+    assert_eq!(
+        second_device["membership_id"],
+        first_device["membership_id"]
+    );
+    assert_ne!(second_device["device_id"], first_device["device_id"]);
+    assert_ne!(second_device["access_token"], first_device["access_token"]);
+    assert_eq!(
+        get_json(&rig.app, "/v1/family/members", Some(first_token))
+            .await
+            .0,
+        StatusCode::OK,
+    );
+    assert_eq!(
+        get_json(
+            &rig.app,
+            "/v1/family/members",
+            second_device["access_token"].as_str(),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+    let second_token = second_device["access_token"].as_str().unwrap();
+    let (_, history) = get_json(&rig.app, "/v1/pull?cursor=0", Some(second_token)).await;
+    for expected_id in std::iter::once(&record_id)
+        .chain(std::iter::once(&plan_id))
+        .chain(media_ids.iter())
+    {
+        assert!(
+            history["entities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entity| entity["client_uuid"] == *expected_id),
+            "new device did not receive complete history entity {expected_id}: {history}",
+        );
+    }
+    for media_id in &media_ids {
+        assert_eq!(
+            request(
+                &rig.app,
+                Method::GET,
+                &format!("/v1/media/{media_id}"),
+                Some(second_token),
+                Body::empty(),
+                None,
+            )
+            .await
+            .status(),
+            StatusCode::OK,
+        );
+    }
+
+    // ACL derives from the authenticated membership, not the physical device.
+    let mut same_member_edit = care_plan_payload(&baby_id, "bath");
+    same_member_edit["note"] = json!("平板编辑");
+    assert_eq!(
+        publish_root_bundle(
+            &rig.app,
+            second_token,
+            entity_wire("care_plan", &plan_id, 10, same_member_edit.clone(), None),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+    same_member_edit["note"] = json!("其它成员越权");
+    assert_eq!(
+        publish_root_bundle(
+            &rig.app,
+            other_token,
+            entity_wire("care_plan", &plan_id, 11, same_member_edit, None),
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN,
+    );
+
+    // Deleting the selected membership also deletes the already-bound request;
+    // it cannot silently change the Owner's decision to "new".
+    let (_, doomed_request) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/requests",
+        None,
+        json!({
+            "display_name": "绝不能意外新建",
+            "device_name": "等待目标删除的设备",
+        }),
+    )
+    .await;
+    let doomed_request_id = doomed_request["request_id"].as_str().unwrap();
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/member/requests/{doomed_request_id}/bind-existing"),
+            Some(owner_token),
+            json!({"membership_id": other_member["membership_id"]}),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/family/members/remove",
+            Some(owner_token),
+            json!({"membership_id": other_member["membership_id"]}),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/member/requests/claim",
+            None,
+            json!({"pending_secret": doomed_request["pending_secret"]}),
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND,
+    );
+    let (_, after_deleted_target) =
+        get_json(&rig.app, "/v1/family/members", Some(owner_token)).await;
+    assert!(!after_deleted_target["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|member| member["display_name"] == "绝不能意外新建"));
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/member/requests/claim",
+            None,
+            json!({"pending_secret": pending_secret}),
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT,
+    );
+}
+
+#[tokio::test]
+async fn owner_member_login_grant_is_ten_minutes_single_use_and_target_bound() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "member-grant-owner-device",
+        "member-grant-owner-request-000001",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member = invite_and_join(&rig.app, owner_token, "member-grant-phone").await;
+    let member_token = member["access_token"].as_str().unwrap();
+    let other = invite_and_join(&rig.app, owner_token, "member-grant-other").await;
+
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/member/login-grants",
+            Some(owner_token),
+            json!({
+                "membership_id": member["membership_id"],
+                "role": "owner",
+                "device_id": owner["device_id"],
+            }),
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/member/login-grants",
+            Some(member_token),
+            json!({"membership_id": member["membership_id"]}),
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN,
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/member/login-grants",
+            Some(owner_token),
+            json!({"membership_id": owner["membership_id"]}),
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT,
+    );
+
+    let (created, login_grant) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/login-grants",
+        Some(owner_token),
+        json!({"membership_id": member["membership_id"]}),
+    )
+    .await;
+    assert_eq!(created, StatusCode::CREATED, "{login_grant}");
+    assert_eq!(
+        login_grant["expires_at"],
+        rig.now.load(Ordering::SeqCst) + 600
+    );
+    assert_eq!(login_grant["family_name"], "测试家庭");
+    assert_eq!(
+        login_grant["member_display_name"],
+        "成员-member-grant-phone",
+    );
+    let grant = login_grant["grant"].as_str().unwrap();
+    assert!(grant.len() >= 43);
+    assert!(login_grant.get("access_token").is_none());
+    assert!(login_grant.get("refresh_token").is_none());
+    assert!(login_grant.get("root_password").is_none());
+    let database = fs::read(rig.directory.path().join("lezi.db")).unwrap();
+    assert!(!database
+        .windows(grant.len())
+        .any(|window| window == grant.as_bytes()));
+
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/member/login-grants/claim",
+            None,
+            json!({
+                "grant": grant,
+                "device_name": "伪造字段设备",
+                "membership_id": owner["membership_id"],
+                "role": "owner",
+            }),
+        )
+        .await
+        .0,
+        StatusCode::UNPROCESSABLE_ENTITY,
+    );
+    let (claimed, new_device) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/login-grants/claim",
+        None,
+        json!({"grant": grant, "device_name": "妈妈的新平板"}),
+    )
+    .await;
+    assert_eq!(claimed, StatusCode::OK, "{new_device}");
+    assert_eq!(new_device["role"], "member");
+    assert_eq!(new_device["membership_id"], member["membership_id"]);
+    assert_ne!(new_device["device_id"], member["device_id"]);
+    assert_ne!(new_device["access_token"], member["access_token"]);
+    assert_eq!(
+        get_json(
+            &rig.app,
+            "/v1/family/members",
+            new_device["access_token"].as_str(),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/member/login-grants/claim",
+            None,
+            json!({"grant": grant, "device_name": "重放设备"}),
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT,
+    );
+
+    let (_, expiring) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/login-grants",
+        Some(owner_token),
+        json!({"membership_id": member["membership_id"]}),
+    )
+    .await;
+    rig.now.fetch_add(600, Ordering::SeqCst);
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/member/login-grants/claim",
+            None,
+            json!({"grant": expiring["grant"], "device_name": "过期设备"}),
+        )
+        .await
+        .0,
+        StatusCode::GONE,
+    );
+
+    let (_, deleted_target) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/login-grants",
+        Some(owner_token),
+        json!({"membership_id": other["membership_id"]}),
+    )
+    .await;
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/family/members/remove",
+            Some(owner_token),
+            json!({"membership_id": other["membership_id"]}),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/member/login-grants/claim",
+            None,
+            json!({"grant": deleted_target["grant"], "device_name": "已删除成员设备"}),
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND,
+    );
+
+    let deleted_family_rig = Rig::new();
+    let deleted_family_owner = create_family(
+        &deleted_family_rig.app,
+        "deleted-family-owner",
+        "deleted-family-owner-request-0001",
+    )
+    .await;
+    let deleted_family_member = invite_and_join(
+        &deleted_family_rig.app,
+        deleted_family_owner["access_token"].as_str().unwrap(),
+        "deleted-family-member",
+    )
+    .await;
+    let (_, deleted_family_grant) = json_request(
+        &deleted_family_rig.app,
+        Method::POST,
+        "/v1/member/login-grants",
+        deleted_family_owner["access_token"].as_str(),
+        json!({"membership_id": deleted_family_member["membership_id"]}),
+    )
+    .await;
+    let connection = Connection::open(deleted_family_rig.directory.path().join("lezi.db")).unwrap();
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON; DELETE FROM families;")
+        .unwrap();
+    assert_eq!(
+        json_request(
+            &deleted_family_rig.app,
+            Method::POST,
+            "/v1/member/login-grants/claim",
+            None,
+            json!({
+                "grant": deleted_family_grant["grant"],
+                "device_name": "已删除家庭设备",
+            }),
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND,
+    );
+}
+
+#[tokio::test]
+async fn rejected_cancelled_and_expired_member_requests_create_no_identity() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "owner-device",
+        "member-request-terminal-owner-00001",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+
+    let mut requests = Vec::new();
+    for (display_name, device_name) in [
+        ("被拒绝", "设备甲"),
+        ("主动取消", "设备乙"),
+        ("已经过期", "设备丙"),
+    ] {
+        let (_, body) = json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/member/requests",
+            None,
+            json!({"display_name": display_name, "device_name": device_name}),
+        )
+        .await;
+        requests.push(body);
+    }
+
+    let (rejected, _) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!(
+            "/v1/member/requests/{}/reject",
+            requests[0]["request_id"].as_str().unwrap(),
+        ),
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(rejected, StatusCode::OK);
+    let (cancelled, cancelled_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/requests/cancel",
+        None,
+        json!({"pending_secret": requests[1]["pending_secret"]}),
+    )
+    .await;
+    assert_eq!(cancelled, StatusCode::OK);
+    assert_eq!(cancelled_body, json!({"ok": true, "status": "cancelled"}));
+    rig.now.fetch_add(24 * 60 * 60, Ordering::SeqCst);
+
+    for (request, expected) in requests.iter().zip(["rejected", "cancelled", "expired"]) {
+        let (status, body) = json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/member/requests/status",
+            None,
+            json!({"pending_secret": request["pending_secret"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({"status": expected}));
+        assert_eq!(
+            json_request(
+                &rig.app,
+                Method::POST,
+                "/v1/member/requests/claim",
+                None,
+                json!({"pending_secret": request["pending_secret"]}),
+            )
+            .await
+            .0,
+            if expected == "expired" {
+                StatusCode::GONE
+            } else {
+                StatusCode::CONFLICT
+            },
+        );
+    }
+
+    let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM memberships", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1,
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM devices", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1,
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM device_sessions", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1,
+    );
+}
+
+#[tokio::test]
+async fn member_requests_are_source_limited_and_family_pending_is_bounded() {
+    let rig = Rig::with_config(|config| {
+        config.member_request_rate_limit = RateLimitConfig {
+            max_attempts: 1,
+            window_seconds: 60,
+        };
+        config.max_pending_member_requests = 1;
+    });
+    create_family(
+        &rig.app,
+        "owner-device",
+        "member-request-limits-owner-000001",
+    )
+    .await;
+    let first_source = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 50, 21)), 50001);
+    let second_source = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 50, 22)), 50002);
+
+    assert_eq!(
+        json_request_from(
+            &rig.app,
+            first_source,
+            "/v1/member/requests",
+            json!({"display_name": "成员甲", "device_name": "设备甲"}),
+        )
+        .await
+        .0,
+        StatusCode::CREATED,
+    );
+    assert_eq!(
+        json_request_from(
+            &rig.app,
+            first_source,
+            "/v1/member/requests",
+            json!({"display_name": "成员乙", "device_name": "设备乙"}),
+        )
+        .await
+        .0,
+        StatusCode::TOO_MANY_REQUESTS,
+    );
+    // A different source passes its own limiter, then hits the family-wide pending cap.
+    assert_eq!(
+        json_request_from(
+            &rig.app,
+            second_source,
+            "/v1/member/requests",
+            json!({"display_name": "成员丙", "device_name": "设备丙"}),
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT,
+    );
+}
+
+#[tokio::test]
+async fn ordinary_members_cannot_list_or_decide_pending_member_requests() {
+    let rig = Rig::new();
+    let owner = create_family(&rig.app, "owner-device", "member-request-acl-owner-0000001").await;
+    let member = invite_and_join(
+        &rig.app,
+        owner["access_token"].as_str().unwrap(),
+        "legacy-member-device",
+    )
+    .await;
+    let (_, pending) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/requests",
+        None,
+        json!({"display_name": "新成员", "device_name": "新设备"}),
+    )
+    .await;
+    let member_token = member["access_token"].as_str().unwrap();
+
+    assert_eq!(
+        get_json(&rig.app, "/v1/member/requests", Some(member_token))
+            .await
+            .0,
+        StatusCode::FORBIDDEN,
+    );
+    for action in ["approve-new", "reject"] {
+        assert_eq!(
+            json_request(
+                &rig.app,
+                Method::POST,
+                &format!(
+                    "/v1/member/requests/{}/{action}",
+                    pending["request_id"].as_str().unwrap(),
+                ),
+                Some(member_token),
+                json!({}),
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN,
+        );
+    }
+}
+#[tokio::test]
+async fn family_create_requires_the_root_password_and_never_reopens_configured_setup() {
     let secret = "sixteen-chars!!!!";
     let rig = Rig::with_config(|config| {
         config.bootstrap_secret = Some(secret.to_owned());
     });
-    let (create_status, first) = json_request_with_headers(
+    let request = json!({
+        "create_request_id": "bootstrap-create-request-aaaa00000001",
+        "display_name": "妈妈",
+        "device_name": "妈妈的手机",
+        "family_name": "乐乐一家",
+    });
+
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/family/create",
+            None,
+            request.clone(),
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED,
+    );
+    assert_eq!(
+        json_request_with_headers(
+            &rig.app,
+            Method::POST,
+            "/v1/family/create",
+            None,
+            request.clone(),
+            &[("x-lezi-bootstrap-secret", "wrong-secret!!!!!!")],
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED,
+    );
+    assert_eq!(
+        json_request_with_headers(
+            &rig.app,
+            Method::POST,
+            "/v1/family/create",
+            None,
+            request,
+            &[("x-lezi-bootstrap-secret", secret)],
+        )
+        .await
+        .0,
+        StatusCode::CREATED,
+    );
+    assert_eq!(
+        get_json(&rig.app, "/v1/family/members", Some(secret))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED,
+        "the one-time root password must never become a daily Bearer credential",
+    );
+
+    let (second_status, _) = json_request_with_headers(
         &rig.app,
         Method::POST,
         "/v1/family/create",
         None,
         json!({
-            "create_request_id": "bootstrap-reclaim-request-aaaa000001",
-            "device_id": "owner-a",
-            "display_name": "妈妈",
+            "create_request_id": "bootstrap-create-request-bbbb00000002",
+            "display_name": "爸爸",
+            "device_name": "爸爸的手机",
+            "family_name": "第二家庭",
         }),
         &[("x-lezi-bootstrap-secret", secret)],
     )
     .await;
-    assert_eq!(create_status, StatusCode::CREATED, "{first}");
-    let membership_id = first["membership_id"].as_str().unwrap().to_owned();
-
-    let (wrong_status, wrong_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/family/create",
-        None,
-        json!({
-            "create_request_id": "bootstrap-reclaim-request-bbbb000002",
-            "device_id": "owner-b",
-            "display_name": "爸爸",
-        }),
-    )
-    .await;
-    // Missing bootstrap when configured → unauthorized (before reclaim).
-    assert_eq!(wrong_status, StatusCode::UNAUTHORIZED, "{wrong_body}");
-
-    let (bad_status, _) = json_request_with_headers(
-        &rig.app,
-        Method::POST,
-        "/v1/family/create",
-        None,
-        json!({
-            "create_request_id": "bootstrap-reclaim-request-bbbb000002",
-            "device_id": "owner-b",
-            "display_name": "爸爸",
-        }),
-        &[("x-lezi-bootstrap-secret", "wrong-secret!!!!!!")],
-    )
-    .await;
-    assert_eq!(bad_status, StatusCode::UNAUTHORIZED);
-
-    let (ok_status, reclaimed) = json_request_with_headers(
-        &rig.app,
-        Method::POST,
-        "/v1/family/create",
-        None,
-        json!({
-            "create_request_id": "bootstrap-reclaim-request-bbbb000002",
-            "device_id": "owner-b",
-            "display_name": "爸爸",
-        }),
-        &[("x-lezi-bootstrap-secret", secret)],
-    )
-    .await;
-    assert_eq!(ok_status, StatusCode::CREATED, "{reclaimed}");
-    assert_eq!(reclaimed["membership_id"], membership_id);
-    assert_eq!(reclaimed["reclaimed"], true);
+    assert_eq!(second_status, StatusCode::CONFLICT);
 }
-
 #[tokio::test]
 async fn invite_join_roles_expiry_restart_and_leave_match_contract() {
     let rig = Rig::new();
@@ -1286,12 +2876,24 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
                 "role":"owner",
                 "is_self":true,
                 "membership_id": owner_membership_id,
+                "devices":[{
+                    "device_id":owner["device_id"],
+                    "device_name":"owner-sensitive-device-id",
+                    "last_used_at":rig.now.load(Ordering::SeqCst),
+                    "is_current":true,
+                }],
             },
             {
                 "display_name":"陈爸爸 🌿",
                 "role":"member",
                 "is_self":false,
                 "membership_id": member_membership_id,
+                "devices":[{
+                    "device_id":member["device_id"],
+                    "device_name":"member-sensitive-device-id",
+                    "last_used_at":rig.now.load(Ordering::SeqCst),
+                    "is_current":false,
+                }],
             },
         ]})
     );
@@ -1312,6 +2914,12 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
                 "role":"member",
                 "is_self":true,
                 "membership_id": member_membership_id,
+                "devices":[{
+                    "device_id":member["device_id"],
+                    "device_name":"member-sensitive-device-id",
+                    "last_used_at":rig.now.load(Ordering::SeqCst),
+                    "is_current":true,
+                }],
             },
         ]})
     );
@@ -1332,8 +2940,8 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
     assert_eq!(visible_members(&owner_view), visible_members(&member_view));
 
     let serialized = owner_view.to_string();
-    // Tokens, token hashes, and device identities must never appear.
-    // membership_id is the public stable identity and may appear.
+    // Tokens, token hashes, credential state and transport details must never appear.
+    // Authorized device and membership IDs are stable action keys and may appear.
     for secret in [
         owner_token,
         member_token,
@@ -1347,16 +2955,32 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
     }
     for row in owner_view["members"].as_array().unwrap() {
         let fields = row.as_object().unwrap();
-        assert_eq!(fields.len(), 4);
-        assert!(!fields.contains_key("device_id"));
+        assert_eq!(fields.len(), 5);
         assert!(fields.contains_key("membership_id"));
+        assert!(fields.contains_key("devices"));
         assert!(!fields.contains_key("token_hash"));
         assert!(!fields.contains_key("token"));
         assert!(!fields.contains_key("family_id"));
+        for device in row["devices"].as_array().unwrap() {
+            let device_fields = device.as_object().unwrap();
+            assert_eq!(device_fields.len(), 4);
+            assert!(!device_fields.contains_key("status"));
+            assert!(!device_fields.contains_key("session_id"));
+            assert!(!device_fields.contains_key("access_token_hash"));
+            assert!(!device_fields.contains_key("refresh_token_hash"));
+            assert!(!device_fields.contains_key("ip"));
+            assert!(!device_fields.contains_key("port"));
+        }
     }
+    assert!(!member_view["members"][0]
+        .as_object()
+        .unwrap()
+        .contains_key("devices"));
 
     let isolated_family_id = Uuid::new_v4().to_string();
     let isolated_token = "isolated-family-owner-token";
+    let isolated_membership_id = Uuid::new_v4().to_string();
+    let isolated_device_id = Uuid::new_v4().to_string();
     let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
     connection
         .execute(
@@ -1374,21 +2998,41 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
         .execute(
             "
             INSERT INTO memberships(
-                membership_id, family_id, role, device_id, display_name
-            ) VALUES (?1, ?2, 'owner', 'isolated-raw-device-id', '隔离家庭')
+                membership_id, family_id, role, display_name, display_name_key
+            ) VALUES (?1, ?2, 'owner', '隔离家庭', '隔离家庭')
             ",
-            rusqlite::params![Uuid::new_v4().to_string(), isolated_family_id],
+            rusqlite::params![isolated_membership_id, isolated_family_id],
         )
         .unwrap();
     connection
         .execute(
             "
-            INSERT INTO membership_credentials(token_hash, membership_id)
-            SELECT ?1, membership_id
-            FROM memberships
-            WHERE family_id = ?2 AND device_id = 'isolated-raw-device-id'
+            INSERT INTO devices(
+                device_id, membership_id, device_name, device_name_key,
+                status, created_at, last_used_at
+            ) VALUES (?1, ?2, '隔离设备', '隔离设备', 'active', ?3, ?3)
             ",
-            rusqlite::params![token_hash(isolated_token), isolated_family_id],
+            rusqlite::params![
+                isolated_device_id,
+                isolated_membership_id,
+                rig.now.load(Ordering::SeqCst)
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "
+            INSERT INTO device_sessions(
+                session_id, device_id, access_token_hash, access_expires_at, refresh_token_hash
+            ) VALUES (?1, ?2, ?3, ?4, ?5)
+            ",
+            rusqlite::params![
+                Uuid::new_v4().to_string(),
+                isolated_device_id,
+                token_hash(isolated_token),
+                rig.now.load(Ordering::SeqCst) + 900,
+                token_hash("isolated-refresh-token"),
+            ],
         )
         .unwrap();
     drop(connection);
@@ -1441,7 +3085,7 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
 }
 
 #[tokio::test]
-async fn owner_can_remove_member_and_revokes_access() {
+async fn owner_hard_deletes_member_anonymizes_shared_facts_and_releases_name() {
     let rig = Rig::new();
     let owner = create_family(
         &rig.app,
@@ -1474,8 +3118,66 @@ async fn owner_can_remove_member_and_revokes_access() {
     )
     .await;
     let member_token = joined["token"].as_str().unwrap();
+    let member_refresh_token = joined["refresh_token"].as_str().unwrap();
     let member_membership_id = joined["membership_id"].as_str().unwrap().to_owned();
     assert_eq!(joined["role"], "member");
+
+    let (_, second_device_grant) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/login-grants",
+        Some(owner_token),
+        json!({"membership_id": member_membership_id}),
+    )
+    .await;
+    let (second_device_status, second_device) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/login-grants/claim",
+        None,
+        json!({
+            "grant": second_device_grant["grant"],
+            "device_name": "爸爸的平板",
+        }),
+    )
+    .await;
+    assert_eq!(second_device_status, StatusCode::OK, "{second_device}");
+    let second_device_token = second_device["access_token"].as_str().unwrap();
+    let second_device_refresh = second_device["refresh_token"].as_str().unwrap();
+
+    let (_, unused_grant) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/login-grants",
+        Some(owner_token),
+        json!({"membership_id": member_membership_id}),
+    )
+    .await;
+    assert!(unused_grant["grant"].is_string());
+    let (rename_status, rename_request) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/display-name",
+        Some(member_token),
+        json!({"display_name": "爸爸待改名"}),
+    )
+    .await;
+    assert_eq!(rename_status, StatusCode::ACCEPTED, "{rename_request}");
+
+    let baby_id = seed_baby(&rig.app, owner_token).await;
+    let record_id = Uuid::new_v4().to_string();
+    let media_id = Uuid::new_v4().to_string();
+    let (published_status, published_body) = publish_bundle_with_media(
+        &rig.app,
+        member_token,
+        entity_wire("record", &record_id, 2, record_payload(&baby_id), None),
+        vec![(
+            entity_wire("media", &media_id, 2, log_media_payload(&record_id), None),
+            b"log".to_vec(),
+        )],
+    )
+    .await;
+    assert_eq!(published_status, StatusCode::OK, "{published_body}");
 
     // Member cannot remove anyone.
     let (member_remove, member_remove_body) = json_request(
@@ -1509,7 +3211,7 @@ async fn owner_can_remove_member_and_revokes_access() {
         .to_lowercase()
         .contains("yourself"));
 
-    // Owner removes member.
+    // Owner hard-deletes the member and every identity-bearing child row.
     let (ok_status, ok_body) = json_request(
         &rig.app,
         Method::POST,
@@ -1522,13 +3224,161 @@ async fn owner_can_remove_member_and_revokes_access() {
     assert_eq!(ok_body["ok"], true);
     assert_eq!(ok_body["membership_id"], member_membership_id);
 
+    // The terminal reason is durable: an offline device can reconnect after a
+    // server restart and still distinguish membership deletion from a generic 401.
+    let restarted = rig.restart("generation-after-member-delete");
+    for token in [member_token, second_device_token] {
+        let (status, body) = get_json(&restarted, "/v1/family/members", Some(token)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "membership_deleted");
+    }
+    for refresh in [member_refresh_token, second_device_refresh] {
+        let (status, body) = json_request(
+            &restarted,
+            Method::POST,
+            "/v1/session/refresh",
+            None,
+            json!({"refresh_token": refresh}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "membership_deleted");
+    }
+
     let (_, after) = get_json(&rig.app, "/v1/family/members", Some(owner_token)).await;
     assert_eq!(after["members"].as_array().unwrap().len(), 1);
     assert_eq!(after["members"][0]["membership_id"], owner_membership_id);
 
-    // Removed member token is revoked.
-    let (pull_status, _) = get_json(&rig.app, "/v1/pull?cursor=0", Some(member_token)).await;
-    assert_eq!(pull_status, StatusCode::UNAUTHORIZED);
+    // Every old access and refresh credential gets a stable terminal reason without
+    // retaining a membership/device identity record.
+    for token in [member_token, second_device_token] {
+        let (status, body) = get_json(&rig.app, "/v1/family/members", Some(token)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "membership_deleted");
+    }
+    for refresh in [member_refresh_token, second_device_refresh] {
+        let (status, body) = json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/session/refresh",
+            None,
+            json!({"refresh_token": refresh}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "membership_deleted");
+    }
+
+    let (_, pull) = get_json(&rig.app, "/v1/pull?cursor=0", Some(owner_token)).await;
+    let record = pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entity| entity["client_uuid"] == record_id)
+        .expect("member record remains a family fact");
+    assert_eq!(record["payload"]["created_by_membership_id"], Value::Null);
+    assert!(pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entity| entity["client_uuid"] == media_id));
+    let downloaded = request(
+        &rig.app,
+        Method::GET,
+        &format!("/v1/media/{media_id}"),
+        Some(owner_token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(downloaded.status(), StatusCode::OK);
+    assert_eq!(
+        downloaded.into_body().collect().await.unwrap().to_bytes(),
+        "log",
+    );
+
+    let connection = Connection::open(rig.directory.path().join("lezi.db")).unwrap();
+    for (table, column) in [
+        ("memberships", "membership_id"),
+        ("member_login_grants", "membership_id"),
+        ("member_rename_requests", "membership_id"),
+        ("member_login_requests", "membership_id"),
+    ] {
+        let count: i64 = connection
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1"),
+                [&member_membership_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "{table} retained deleted membership identity");
+    }
+    let device_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM devices WHERE membership_id = ?1",
+            [&member_membership_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(device_count, 0);
+    let entity_identity_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM entities WHERE payload_json LIKE '%' || ?1 || '%'",
+            [&member_membership_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(entity_identity_count, 0);
+    let bundle_identity_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sync_bundles WHERE staged_membership_id = ?1 OR root_payload_json LIKE '%' || ?1 || '%'",
+            [&member_membership_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(bundle_identity_count, 0);
+    drop(connection);
+
+    // The normalized family display name is immediately reusable, but it creates a
+    // new identity and cannot recover authorship of the anonymous record.
+    let (_, replacement_invite) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/invite",
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    let (replacement_status, replacement) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/join",
+        None,
+        json!({
+            "code": replacement_invite["code"],
+            "device_id": "replacement-member-device",
+            "display_name": "  爸爸  ",
+        }),
+    )
+    .await;
+    assert_eq!(replacement_status, StatusCode::OK, "{replacement}");
+    assert_ne!(replacement["membership_id"], member_membership_id);
+    let (_, replacement_pull) = get_json(
+        &rig.app,
+        "/v1/pull?cursor=0",
+        replacement["access_token"].as_str(),
+    )
+    .await;
+    let replacement_record = replacement_pull["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entity| entity["client_uuid"] == record_id)
+        .unwrap();
+    assert_eq!(
+        replacement_record["payload"]["created_by_membership_id"],
+        Value::Null,
+    );
 
     // Idempotent-ish: removing again is not found.
     let (again, again_body) = json_request(
@@ -1545,6 +3395,70 @@ async fn owner_can_remove_member_and_revokes_access() {
         .unwrap_or("")
         .to_lowercase()
         .contains("not found"));
+}
+
+#[tokio::test]
+async fn member_leave_hard_deletes_self_but_owner_cannot_leave() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "self-delete-owner-device",
+        "self-delete-owner-request-000000001",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member = invite_and_join(&rig.app, owner_token, "self-delete-member-device").await;
+    let member_token = member["access_token"].as_str().unwrap();
+    let member_refresh = member["refresh_token"].as_str().unwrap();
+
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/leave",
+            Some(owner_token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN,
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/leave",
+            Some(member_token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+    assert_eq!(
+        get_json(&rig.app, "/v1/family/members", Some(member_token))
+            .await
+            .1["code"],
+        "membership_deleted",
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/session/refresh",
+            None,
+            json!({"refresh_token": member_refresh}),
+        )
+        .await
+        .1["code"],
+        "membership_deleted",
+    );
+    assert_eq!(
+        get_json(&rig.app, "/v1/family/members", Some(owner_token))
+            .await
+            .0,
+        StatusCode::OK,
+    );
 }
 
 #[tokio::test]
@@ -1769,8 +3683,9 @@ async fn family_create_uses_the_same_display_name_normalization_as_join() {
         None,
         json!({
             "create_request_id": "unsafe-owner-request-000000000001",
-            "device_id": "unsafe-owner-device",
             "display_name": "管理员\u{202e}renwo",
+            "device_name": "unsafe-owner-device",
+            "family_name": "测试家庭",
         }),
     )
     .await;
@@ -1789,8 +3704,9 @@ async fn family_create_uses_the_same_display_name_normalization_as_join() {
             None,
             json!({
                 "create_request_id": request_id,
-                "device_id": "blank-owner-device",
                 "display_name": display_name,
+                "device_name": "blank-owner-device",
+                "family_name": "测试家庭",
             }),
         )
         .await;
@@ -1805,8 +3721,9 @@ async fn family_create_uses_the_same_display_name_normalization_as_join() {
         None,
         json!({
             "create_request_id": "trimmed-owner-request-00000000001",
-            "device_id": "trimmed-owner-device",
             "display_name": "　妈妈　",
+            "device_name": "trimmed-owner-device",
+            "family_name": "测试家庭",
         }),
     )
     .await;
@@ -1822,7 +3739,7 @@ async fn family_create_uses_the_same_display_name_normalization_as_join() {
 }
 
 #[tokio::test]
-async fn member_can_update_own_display_name_only() {
+async fn member_name_change_waits_for_owner_and_owner_manages_member_and_device_names() {
     let rig = Rig::new();
     let owner = create_family(
         &rig.app,
@@ -1859,11 +3776,14 @@ async fn member_can_update_own_display_name_only() {
         Method::POST,
         "/v1/family/display-name",
         Some(member_token),
-        json!({"display_name": "　干爹　"}),
+        json!({"display_name": "　干　 爹　"}),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["display_name"], "干爹");
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(body["status"], "pending");
+    assert_eq!(body["requested_display_name"], "干 爹");
+    assert_eq!(body["current_display_name"], "爸爸");
+    let rename_request_id = body["request_id"].as_str().unwrap();
 
     let (_, members) = get_json(&rig.app, "/v1/family/members", Some(owner_token)).await;
     let member_row = members["members"]
@@ -1872,10 +3792,34 @@ async fn member_can_update_own_display_name_only() {
         .iter()
         .find(|row| row["is_self"] == false && row["role"] == "member")
         .unwrap();
-    assert_eq!(member_row["display_name"], "干爹");
+    assert_eq!(member_row["display_name"], "爸爸");
     assert!(member_row.get("device_id").is_none());
 
-    // Owner rename still only touches self.
+    let (member_pending_status, _) =
+        get_json(&rig.app, "/v1/family/rename-requests", Some(member_token)).await;
+    assert_eq!(member_pending_status, StatusCode::FORBIDDEN);
+    let (pending_status, pending) =
+        get_json(&rig.app, "/v1/family/rename-requests", Some(owner_token)).await;
+    assert_eq!(pending_status, StatusCode::OK, "{pending}");
+    assert_eq!(pending["requests"].as_array().unwrap().len(), 1);
+    assert_eq!(pending["requests"][0]["request_id"], rename_request_id);
+    assert_eq!(pending["requests"][0]["current_display_name"], "爸爸");
+    assert_eq!(pending["requests"][0]["requested_display_name"], "干 爹");
+    assert!(pending["requests"][0].get("device_id").is_none());
+
+    let (approve_status, approve) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/family/rename-requests/{rename_request_id}/approve"),
+        Some(owner_token),
+        json!({}),
+    )
+    .await;
+    assert_eq!(approve_status, StatusCode::OK, "{approve}");
+    assert_eq!(approve["display_name"], "干 爹");
+
+    // Owner self-renames immediately and ordinary members cannot reserve a
+    // normalized name that is already active in the family.
     assert_eq!(
         json_request(
             &rig.app,
@@ -1893,8 +3837,170 @@ async fn member_can_update_own_display_name_only() {
         row["role"] == "owner" && row["display_name"] == "妈妈新称呼" && row["is_self"] == false
     }));
     assert!(after["members"].as_array().unwrap().iter().any(|row| {
-        row["role"] == "member" && row["display_name"] == "干爹" && row["is_self"] == true
+        row["role"] == "member" && row["display_name"] == "干 爹" && row["is_self"] == true
     }));
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/family/display-name",
+            Some(member_token),
+            json!({"display_name": "妈妈新称呼"}),
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT,
+    );
+
+    // Owner can create an intentionally device-less member and later target
+    // that same membership with the existing one-time login QR contract.
+    let (add_status, added) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/members",
+        Some(owner_token),
+        json!({"display_name": "　奶 奶　"}),
+    )
+    .await;
+    assert_eq!(add_status, StatusCode::CREATED, "{added}");
+    assert_eq!(added["display_name"], "奶 奶");
+    let added_membership_id = added["membership_id"].as_str().unwrap();
+    let (_, owner_projection) = get_json(&rig.app, "/v1/family/members", Some(owner_token)).await;
+    let device_less = owner_projection["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["membership_id"] == added_membership_id)
+        .unwrap();
+    assert_eq!(device_less["devices"], json!([]));
+    let (grant_status, grant) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/login-grants",
+        Some(owner_token),
+        json!({"membership_id": added_membership_id}),
+    )
+    .await;
+    assert_eq!(grant_status, StatusCode::CREATED, "{grant}");
+
+    // Owner can directly rename any membership with the same canonical
+    // family-wide uniqueness rule.
+    let (owner_rename_status, owner_rename) = json_request(
+        &rig.app,
+        Method::POST,
+        &format!("/v1/family/members/{added_membership_id}/display-name"),
+        Some(owner_token),
+        json!({"display_name": "外婆"}),
+    )
+    .await;
+    assert_eq!(owner_rename_status, StatusCode::OK, "{owner_rename}");
+    assert_eq!(owner_rename["display_name"], "外婆");
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/family/members/{added_membership_id}/display-name"),
+            Some(owner_token),
+            json!({"display_name": "妈妈新称呼"}),
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT,
+    );
+
+    // Device names are unique only inside one membership. A member can rename
+    // their own device, not the Owner's; the Owner may use the same name on a
+    // different membership.
+    let (_, owner_devices) = get_json(&rig.app, "/v1/family/members", Some(owner_token)).await;
+    let member_device_id = owner_devices["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["membership_id"] == member["membership_id"])
+        .unwrap()["devices"][0]["device_id"]
+        .as_str()
+        .unwrap();
+    let owner_device_id = owner_devices["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["role"] == "owner")
+        .unwrap()["devices"][0]["device_id"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/family/devices/{member_device_id}/display-name"),
+            Some(member_token),
+            json!({"device_name": "共享 设备"}),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/family/devices/{owner_device_id}/display-name"),
+            Some(member_token),
+            json!({"device_name": "越权"}),
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN,
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/family/devices/{owner_device_id}/display-name"),
+            Some(owner_token),
+            json!({"device_name": "共享 设备"}),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+
+    // A second device for the same membership cannot silently reuse the
+    // canonical name. The single-use grant remains retryable with a different
+    // user-confirmed name because the failed claim made no mutation.
+    let (_, second_device_grant) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/login-grants",
+        Some(owner_token),
+        json!({"membership_id": member["membership_id"]}),
+    )
+    .await;
+    let second_device_grant = second_device_grant["grant"].as_str().unwrap();
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/member/login-grants/claim",
+            None,
+            json!({"grant": second_device_grant, "device_name": "共享　设备"}),
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT,
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/member/login-grants/claim",
+            None,
+            json!({"grant": second_device_grant, "device_name": "成员平板"}),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
 
     // Blank / placeholder still 422 on update.
     assert_eq!(
@@ -1924,6 +4030,371 @@ async fn member_can_update_own_display_name_only() {
 }
 
 #[tokio::test]
+async fn device_revoke_and_current_logout_are_idempotent_isolated_and_report_device_removed() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "device-revoke-owner",
+        "device-revoke-owner-request-0000001",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member = invite_and_join(&rig.app, owner_token, "device-revoke-member-phone").await;
+    let member_token = member["access_token"].as_str().unwrap();
+
+    let (_, grant) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/login-grants",
+        Some(owner_token),
+        json!({"membership_id": member["membership_id"]}),
+    )
+    .await;
+    let (_, second_device) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/login-grants/claim",
+        None,
+        json!({"grant": grant["grant"], "device_name": "成员平板"}),
+    )
+    .await;
+    let second_token = second_device["access_token"].as_str().unwrap();
+    let first_device_id = member["device_id"].as_str().unwrap();
+    let revoke_path = format!("/v1/family/devices/{first_device_id}/revoke");
+
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &revoke_path,
+            Some(second_token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN,
+    );
+    for _ in 0..2 {
+        let (status, body) = json_request(
+            &rig.app,
+            Method::POST,
+            &revoke_path,
+            Some(owner_token),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, json!({"ok": true}));
+    }
+
+    let (removed_access_status, removed_access) =
+        get_json(&rig.app, "/v1/family/members", Some(member_token)).await;
+    assert_eq!(removed_access_status, StatusCode::UNAUTHORIZED);
+    assert_eq!(removed_access["code"], "device_removed");
+    let (removed_refresh_status, removed_refresh) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": member["refresh_token"]}),
+    )
+    .await;
+    assert_eq!(removed_refresh_status, StatusCode::UNAUTHORIZED);
+    assert_eq!(removed_refresh["code"], "device_removed");
+    assert_eq!(
+        get_json(&rig.app, "/v1/family/members", Some(second_token))
+            .await
+            .0,
+        StatusCode::OK,
+    );
+    assert_eq!(
+        get_json(&rig.app, "/v1/family/members", Some(owner_token))
+            .await
+            .0,
+        StatusCode::OK,
+    );
+    let (_, projected) = get_json(&rig.app, "/v1/family/members", Some(owner_token)).await;
+    let member_devices = projected["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["membership_id"] == member["membership_id"])
+        .unwrap()["devices"]
+        .as_array()
+        .unwrap();
+    assert_eq!(member_devices.len(), 1);
+    assert_eq!(member_devices[0]["device_id"], second_device["device_id"]);
+
+    // A removed device is a new binding when it returns; no old credential is inherited.
+    let (_, rebound_grant) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/login-grants",
+        Some(owner_token),
+        json!({"membership_id": member["membership_id"]}),
+    )
+    .await;
+    let (rebound_status, rebound) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/login-grants/claim",
+        None,
+        json!({"grant": rebound_grant["grant"], "device_name": "重新绑定手机"}),
+    )
+    .await;
+    assert_eq!(rebound_status, StatusCode::OK, "{rebound}");
+    assert_ne!(rebound["device_id"], member["device_id"]);
+    assert_ne!(rebound["refresh_token"], member["refresh_token"]);
+
+    // Current-device logout is valid for an ordinary member and does not remove
+    // their membership, the sibling device, or the Owner.
+    let (logout_status, logout_body) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/device/logout",
+        rebound["access_token"].as_str(),
+        json!({}),
+    )
+    .await;
+    assert_eq!(logout_status, StatusCode::OK, "{logout_body}");
+    assert_eq!(logout_body, json!({"ok": true}));
+    assert_eq!(
+        get_json(
+            &rig.app,
+            "/v1/family/members",
+            rebound["access_token"].as_str(),
+        )
+        .await
+        .1["code"],
+        "device_removed",
+    );
+    assert_eq!(
+        get_json(&rig.app, "/v1/family/members", Some(second_token))
+            .await
+            .0,
+        StatusCode::OK,
+    );
+}
+
+#[tokio::test]
+async fn member_rename_reject_cancel_expiry_and_concurrent_conflict_preserve_identity() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "rename-state-owner",
+        "rename-state-owner-request-000000001",
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let owner_refresh_token = owner["refresh_token"].as_str().unwrap();
+    let member = invite_and_join(&rig.app, owner_token, "rename-state-member").await;
+    let member_token = member["access_token"].as_str().unwrap();
+    let member_refresh_token = member["refresh_token"].as_str().unwrap();
+    let membership_id = member["membership_id"].as_str().unwrap();
+    let original_name = "成员-rename-state-member";
+
+    let request_name = |name: &str| {
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/family/display-name",
+            Some(member_token),
+            json!({"display_name": name}),
+        )
+    };
+    let (_, rejected_request) = request_name("被拒绝").await;
+    let rejected_id = rejected_request["request_id"].as_str().unwrap();
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/family/rename-requests/{rejected_id}/reject"),
+            Some(owner_token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/family/rename-requests/{rejected_id}/approve"),
+            Some(owner_token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT,
+    );
+
+    let (_, cancelled_request) = request_name("已撤回").await;
+    let cancelled_id = cancelled_request["request_id"].as_str().unwrap();
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/family/rename-requests/cancel",
+            Some(member_token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/family/rename-requests/{cancelled_id}/approve"),
+            Some(owner_token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT,
+    );
+
+    let (_, expiring_request) = request_name("已过期").await;
+    let expiring_id = expiring_request["request_id"].as_str().unwrap();
+    rig.now.fetch_add(7 * 24 * 60 * 60 + 1, Ordering::SeqCst);
+    let (_, refreshed_owner) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": owner_refresh_token}),
+    )
+    .await;
+    let owner_token = refreshed_owner["access_token"].as_str().unwrap();
+    let (_, refreshed_member) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": member_refresh_token}),
+    )
+    .await;
+    let member_token = refreshed_member["access_token"].as_str().unwrap();
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/family/rename-requests/{expiring_id}/approve"),
+            Some(owner_token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::GONE,
+    );
+
+    // A name can become unavailable after the request was created; approval
+    // rechecks inside the same transaction and leaves the old name in force.
+    let (_, stale_request) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/display-name",
+        Some(member_token),
+        json!({"display_name": "并发目标"}),
+    )
+    .await;
+    let stale_id = stale_request["request_id"].as_str().unwrap();
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/family/members",
+            Some(owner_token),
+            json!({"display_name": "并发目标"}),
+        )
+        .await
+        .0,
+        StatusCode::CREATED,
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            &format!("/v1/family/rename-requests/{stale_id}/approve"),
+            Some(owner_token),
+            json!({}),
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT,
+    );
+
+    let (_, projection) = get_json(&rig.app, "/v1/family/members", Some(owner_token)).await;
+    let identity_rows = projection["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["membership_id"] == membership_id)
+        .collect::<Vec<_>>();
+    assert_eq!(identity_rows.len(), 1);
+    assert_eq!(identity_rows[0]["display_name"], original_name);
+
+    // Two Owner maintenance calls racing for one normalized key commit exactly
+    // one winner; the losing membership remains a distinct unchanged identity.
+    let (_, first) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/members",
+        Some(owner_token),
+        json!({"display_name": "候选甲"}),
+    )
+    .await;
+    let (_, second) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/family/members",
+        Some(owner_token),
+        json!({"display_name": "候选乙"}),
+    )
+    .await;
+    let first_path = format!(
+        "/v1/family/members/{}/display-name",
+        first["membership_id"].as_str().unwrap(),
+    );
+    let second_path = format!(
+        "/v1/family/members/{}/display-name",
+        second["membership_id"].as_str().unwrap(),
+    );
+    let first_call = json_request(
+        &rig.app,
+        Method::POST,
+        &first_path,
+        Some(owner_token),
+        json!({"display_name": "唯一　目标"}),
+    );
+    let second_call = json_request(
+        &rig.app,
+        Method::POST,
+        &second_path,
+        Some(owner_token),
+        json!({"display_name": "唯一 目标"}),
+    );
+    let (first_result, second_result) = tokio::join!(first_call, second_call);
+    let statuses = [first_result.0, second_result.0];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        1,
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::CONFLICT)
+            .count(),
+        1,
+    );
+}
+
+#[tokio::test]
 async fn shared_family_name_persists_on_create_join_and_owner_rename() {
     let rig = Rig::new();
     let request_id = "family-name-create-request-000000000001";
@@ -1934,8 +4405,8 @@ async fn shared_family_name_persists_on_create_join_and_owner_rename() {
         None,
         json!({
             "create_request_id": request_id,
-            "device_id": "family-name-owner",
             "display_name": "妈妈",
+            "device_name": "family-name-owner",
             "family_name": "  乐乐一家  ",
         }),
     )
@@ -1952,8 +4423,8 @@ async fn shared_family_name_persists_on_create_join_and_owner_rename() {
         None,
         json!({
             "create_request_id": request_id,
-            "device_id": "family-name-owner",
             "display_name": "妈妈",
+            "device_name": "family-name-owner",
             "family_name": "乐乐一家",
         }),
     )
@@ -1969,15 +4440,15 @@ async fn shared_family_name_persists_on_create_join_and_owner_rename() {
         None,
         json!({
             "create_request_id": request_id,
-            "device_id": "family-name-owner",
             "display_name": "妈妈",
+            "device_name": "family-name-owner",
             "family_name": "别的名字",
         }),
     )
     .await;
     assert_eq!(retry_conflict, StatusCode::CONFLICT);
 
-    // Blank/omitted family_name is accepted and stored as null.
+    // Create requires a non-blank family name.
     let blank_rig = Rig::new();
     let (blank_status, blank_owner) = json_request(
         &blank_rig.app,
@@ -1986,14 +4457,17 @@ async fn shared_family_name_persists_on_create_join_and_owner_rename() {
         None,
         json!({
             "create_request_id": "family-name-blank-request-00000000001",
-            "device_id": "blank-name-owner",
             "display_name": "妈妈",
+            "device_name": "blank-name-owner",
             "family_name": "   ",
         }),
     )
     .await;
-    assert_eq!(blank_status, StatusCode::CREATED, "{blank_owner}");
-    assert!(blank_owner["family_name"].is_null());
+    assert_eq!(
+        blank_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{blank_owner}"
+    );
 
     // Join returns the current shared name.
     let (_, invitation) = json_request(
@@ -2083,7 +4557,8 @@ async fn shared_family_name_persists_on_create_join_and_owner_rename() {
         StatusCode::UNPROCESSABLE_ENTITY
     );
 
-    // Clear name with empty string.
+    // The current trusted protocol keeps a non-empty canonical name so the
+    // destructive family-name confirmation can never become unreachable.
     let (clear_status, clear_body) = json_request(
         &rig.app,
         Method::POST,
@@ -2092,12 +4567,15 @@ async fn shared_family_name_persists_on_create_join_and_owner_rename() {
         json!({"family_name": ""}),
     )
     .await;
-    assert_eq!(clear_status, StatusCode::OK, "{clear_body}");
-    assert!(clear_body["family_name"].is_null());
+    assert_eq!(
+        clear_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{clear_body}"
+    );
 }
 
 #[tokio::test]
-async fn zero_entity_pull_reports_family_name_value_and_null_across_restart() {
+async fn zero_entity_pull_keeps_non_empty_family_name_across_restart() {
     let rig = Rig::new();
     let owner = create_family(
         &rig.app,
@@ -2143,7 +4621,11 @@ async fn zero_entity_pull_reports_family_name_value_and_null_across_restart() {
         json!({"family_name": null}),
     )
     .await;
-    assert_eq!(clear_status, StatusCode::OK, "{clear_body}");
+    assert_eq!(
+        clear_status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{clear_body}"
+    );
     let (null_status, null_pull) = get_json(
         &restarted,
         "/v1/pull?cursor=0&generation=generation-b",
@@ -2152,11 +4634,7 @@ async fn zero_entity_pull_reports_family_name_value_and_null_across_restart() {
     .await;
     assert_eq!(null_status, StatusCode::OK, "{null_pull}");
     assert_eq!(null_pull["entities"], json!([]));
-    assert!(
-        null_pull.as_object().unwrap().contains_key("family_name"),
-        "current protocol must preserve explicit null family_name: {null_pull}"
-    );
-    assert!(null_pull["family_name"].is_null(), "{null_pull}");
+    assert_eq!(null_pull["family_name"], "小星星一家", "{null_pull}");
 
     let restarted_again = rig.restart("generation-c");
     let (restart_null_status, restart_null_pull) = get_json(
@@ -2167,14 +4645,7 @@ async fn zero_entity_pull_reports_family_name_value_and_null_across_restart() {
     .await;
     assert_eq!(restart_null_status, StatusCode::OK, "{restart_null_pull}");
     assert_eq!(restart_null_pull["entities"], json!([]));
-    assert!(
-        restart_null_pull
-            .as_object()
-            .unwrap()
-            .contains_key("family_name"),
-        "restarted NAS omitted explicit null: {restart_null_pull}"
-    );
-    assert!(restart_null_pull["family_name"].is_null());
+    assert_eq!(restart_null_pull["family_name"], "小星星一家");
 }
 
 #[tokio::test]
@@ -2194,46 +4665,23 @@ async fn family_members_project_canonical_memberships_without_role_promotion() {
         .execute(
             "
             INSERT INTO memberships(
-                membership_id, family_id, role, device_id, display_name
-            ) VALUES (?1, ?2, 'member', 'same-device', '成员')
+                membership_id, family_id, role, display_name, display_name_key
+            ) VALUES (?1, ?2, 'member', '成员', '成员')
             ",
             rusqlite::params![duplicate_membership_id, family_id],
         )
         .unwrap();
-    for token in ["member-token-a", "member-token-b"] {
-        connection
-            .execute(
-                "
-                INSERT INTO membership_credentials(token_hash, membership_id)
-                VALUES (?1, ?2)
-                ",
-                rusqlite::params![token_hash(token), duplicate_membership_id],
-            )
-            .unwrap();
-    }
-    // A role collision is kept separate: device_id is a client claim, not
-    // authentication evidence, so it must never promote a member row to owner.
+    // A display collision with the Owner's device label remains a member row;
+    // only the authenticated device session carries canonical role authority.
     let role_collision_membership_id = Uuid::new_v4().to_string();
     connection
         .execute(
             "
             INSERT INTO memberships(
-                membership_id, family_id, role, device_id, display_name
-            ) VALUES (?1, ?2, 'member', 'duplicate-owner-device', '伪装管理员')
+                membership_id, family_id, role, display_name, display_name_key
+            ) VALUES (?1, ?2, 'member', '伪装管理员', '伪装管理员')
             ",
             rusqlite::params![role_collision_membership_id, family_id],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "
-            INSERT INTO membership_credentials(token_hash, membership_id)
-            VALUES (?1, ?2)
-            ",
-            rusqlite::params![
-                token_hash("owner-device-collision"),
-                role_collision_membership_id
-            ],
         )
         .unwrap();
     drop(connection);
@@ -2272,7 +4720,7 @@ async fn family_members_project_canonical_memberships_without_role_promotion() {
             }),
         ]
     );
-    // Self uses create-time membership_id; two credentials project one membership.
+    // Self uses the create-time canonical membership id.
     assert_eq!(rows[0]["membership_id"], owner["membership_id"]);
     let member_rows: Vec<_> = rows
         .iter()
@@ -2282,8 +4730,9 @@ async fn family_members_project_canonical_memberships_without_role_promotion() {
     assert!(member_rows[0]["membership_id"].as_str().unwrap().len() >= 32);
     for row in rows {
         assert!(row["membership_id"].as_str().unwrap().len() >= 32);
-        assert_eq!(row.as_object().unwrap().len(), 4);
+        assert_eq!(row.as_object().unwrap().len(), 5);
         assert!(!row.as_object().unwrap().contains_key("device_id"));
+        assert!(row["devices"].is_array());
     }
     let serialized = members.to_string();
     assert!(!serialized.contains("member-token"));
@@ -3213,11 +5662,13 @@ async fn stale_member_avatar_snapshot_does_not_block_newer_record() {
 
 #[tokio::test]
 async fn media_limit_stops_stream_and_family_delete_waits_for_upload() {
-    let rig = Rig::new();
-    let owner = create_family(
+    let root = "stream-delete-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let owner = create_family_with_root(
         &rig.app,
         "owner-device",
         "stream-owner-request-00000000000001",
+        root,
     )
     .await;
     let token = owner["token"].as_str().unwrap().to_owned();
@@ -3307,13 +5758,14 @@ async fn media_limit_stops_stream_and_family_delete_waits_for_upload() {
     let delete_app = rig.app.clone();
     let delete_token = token.clone();
     let deletion = tokio::spawn(async move {
-        request(
+        request_with_headers(
             &delete_app,
             Method::POST,
             "/v1/family/delete",
             Some(&delete_token),
-            Body::from("{}"),
+            Body::from(r#"{"family_name":"测试家庭"}"#),
             Some("application/json"),
+            &[("x-lezi-bootstrap-secret", root)],
         )
         .await
     });
@@ -3326,12 +5778,127 @@ async fn media_limit_stops_stream_and_family_delete_waits_for_upload() {
 }
 
 #[tokio::test]
+async fn family_delete_requires_owner_name_and_root_and_persists_terminal_reason() {
+    let root = "family-delete-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let (_, owner) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        json!({
+            "create_request_id": "family-delete-confirm-request-000001",
+            "display_name": "妈妈",
+            "device_name": "妈妈手机",
+            "family_name": "乐乐一家",
+        }),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    let owner_access = owner["access_token"].as_str().unwrap();
+    let owner_refresh = owner["refresh_token"].as_str().unwrap();
+    let member = invite_and_join(&rig.app, owner_access, "爸爸手机").await;
+    let member_access = member["access_token"].as_str().unwrap();
+    let member_refresh = member["refresh_token"].as_str().unwrap();
+    let confirmation = json!({"family_name": "  乐乐一家  "});
+
+    let (member_status, _) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/family/delete",
+        Some(member_access),
+        confirmation.clone(),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    assert_eq!(member_status, StatusCode::FORBIDDEN);
+
+    for headers in [
+        Vec::<(&str, &str)>::new(),
+        vec![("x-lezi-bootstrap-secret", "wrong-family-delete-root")],
+    ] {
+        let (status, _) = json_request_with_headers(
+            &rig.app,
+            Method::POST,
+            "/v1/family/delete",
+            Some(owner_access),
+            confirmation.clone(),
+            &headers,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            get_json(&rig.app, "/v1/family/members", Some(owner_access))
+                .await
+                .0,
+            StatusCode::OK,
+        );
+    }
+
+    let (name_mismatch, mismatch_body) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/family/delete",
+        Some(owner_access),
+        json!({"family_name": "另一个家庭"}),
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    assert_eq!(name_mismatch, StatusCode::CONFLICT, "{mismatch_body}");
+    assert_eq!(
+        get_json(&rig.app, "/v1/family/members", Some(owner_access))
+            .await
+            .0,
+        StatusCode::OK,
+    );
+
+    let (deleted, deleted_body) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/family/delete",
+        Some(owner_access),
+        confirmation,
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    assert_eq!(deleted, StatusCode::OK, "{deleted_body}");
+
+    let restarted = rig.restart_with_config("generation-family-deleted", |config| {
+        config.bootstrap_secret = Some(root.to_owned());
+    });
+    for access in [owner_access, member_access] {
+        let (status, body) = get_json(&restarted, "/v1/family/members", Some(access)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "family_deleted");
+    }
+    for refresh in [owner_refresh, member_refresh] {
+        let (status, body) = json_request(
+            &restarted,
+            Method::POST,
+            "/v1/session/refresh",
+            None,
+            json!({"refresh_token": refresh}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["code"], "family_deleted");
+    }
+
+    let database = fs::read(rig.directory.path().join("lezi.db")).unwrap();
+    assert!(!database
+        .windows(root.len())
+        .any(|bytes| bytes == root.as_bytes()));
+}
+
+#[tokio::test]
 async fn owner_delete_cleans_family_media_and_allows_replacement() {
-    let rig = Rig::new();
-    let owner = create_family(
+    let root = "owner-delete-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let owner = create_family_with_root(
         &rig.app,
         "owner-device",
         "delete-owner-request-0000000000001",
+        root,
     )
     .await;
     let token = owner["token"].as_str().unwrap();
@@ -3362,12 +5929,13 @@ async fn owner_delete_cleans_family_media_and_allows_replacement() {
         .status(),
         StatusCode::UNPROCESSABLE_ENTITY
     );
-    let (deleted, _) = json_request(
+    let (deleted, _) = json_request_with_headers(
         &rig.app,
         Method::POST,
         "/v1/family/delete",
         Some(token),
-        json!({}),
+        json!({"family_name": "测试家庭"}),
+        &[("x-lezi-bootstrap-secret", root)],
     )
     .await;
     assert_eq!(deleted, StatusCode::OK);
@@ -3376,10 +5944,11 @@ async fn owner_delete_cleans_family_media_and_allows_replacement() {
         get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await.0,
         StatusCode::UNAUTHORIZED
     );
-    let replacement = create_family(
+    let replacement = create_family_with_root(
         &rig.app,
         "replacement-owner",
         "replacement-owner-request-00000001",
+        root,
     )
     .await;
     assert_ne!(replacement["family_id"], family_id);
@@ -3387,11 +5956,13 @@ async fn owner_delete_cleans_family_media_and_allows_replacement() {
 
 #[tokio::test]
 async fn family_delete_keeps_media_when_database_deletion_fails() {
-    let rig = Rig::new();
-    let owner = create_family(
+    let root = "failure-delete-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let owner = create_family_with_root(
         &rig.app,
         "delete-failure-owner",
         "delete-failure-owner-request-00001",
+        root,
     )
     .await;
     let token = owner["token"].as_str().unwrap();
@@ -3437,13 +6008,14 @@ async fn family_delete_keeps_media_when_database_deletion_fails() {
         .unwrap();
     drop(connection);
 
-    let failed = request(
+    let failed = request_with_headers(
         &rig.app,
         Method::POST,
         "/v1/family/delete",
         Some(token),
-        Body::from("{}"),
+        Body::from(r#"{"family_name":"测试家庭"}"#),
         Some("application/json"),
+        &[("x-lezi-bootstrap-secret", root)],
     )
     .await;
     assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -3477,14 +6049,17 @@ async fn family_delete_keeps_media_when_database_deletion_fails() {
         .execute("DROP TRIGGER fail_family_delete", [])
         .unwrap();
     drop(connection);
-    let restarted = rig.restart("generation-b");
+    let restarted = rig.restart_with_config("generation-b", |config| {
+        config.bootstrap_secret = Some(root.to_owned());
+    });
     assert_eq!(
-        json_request(
+        json_request_with_headers(
             &restarted,
             Method::POST,
             "/v1/family/delete",
             Some(token),
-            json!({}),
+            json!({"family_name": "测试家庭"}),
+            &[("x-lezi-bootstrap-secret", root)],
         )
         .await
         .0,
@@ -3495,22 +6070,25 @@ async fn family_delete_keeps_media_when_database_deletion_fails() {
 
 #[tokio::test]
 async fn restart_collects_only_uuid_orphan_family_media_directories() {
-    let rig = Rig::new();
-    let deleted = create_family(
+    let root = "orphan-delete-root-password";
+    let rig = Rig::with_config(|config| config.bootstrap_secret = Some(root.to_owned()));
+    let deleted = create_family_with_root(
         &rig.app,
         "orphan-cleanup-owner",
         "orphan-cleanup-owner-request-000001",
+        root,
     )
     .await;
     let deleted_token = deleted["token"].as_str().unwrap();
     let deleted_family_id = deleted["family_id"].as_str().unwrap();
     assert_eq!(
-        json_request(
+        json_request_with_headers(
             &rig.app,
             Method::POST,
             "/v1/family/delete",
             Some(deleted_token),
-            json!({}),
+            json!({"family_name": "测试家庭"}),
+            &[("x-lezi-bootstrap-secret", root)],
         )
         .await
         .0,
@@ -3524,10 +6102,11 @@ async fn restart_collects_only_uuid_orphan_family_media_directories() {
     fs::create_dir_all(&orphan).unwrap();
     fs::write(orphan.join("orphan-bytes"), b"orphan").unwrap();
 
-    let active = create_family(
+    let active = create_family_with_root(
         &rig.app,
         "active-cleanup-owner",
         "active-cleanup-owner-request-000001",
+        root,
     )
     .await;
     let active_dir = media_root.join(active["family_id"].as_str().unwrap());
@@ -3537,7 +6116,9 @@ async fn restart_collects_only_uuid_orphan_family_media_directories() {
     fs::create_dir_all(&operational).unwrap();
     fs::write(operational.join("keep"), b"keep").unwrap();
 
-    let _restarted = rig.restart("generation-b");
+    let _restarted = rig.restart_with_config("generation-b", |config| {
+        config.bootstrap_secret = Some(root.to_owned());
+    });
 
     assert!(
         !orphan.exists(),
@@ -3567,8 +6148,9 @@ async fn bootstrap_secret_gates_family_create_when_configured() {
     });
     let body = json!({
         "create_request_id": "bootstrap-owner-request-000000000001",
-        "device_id": "owner-device",
         "display_name": "妈妈",
+        "device_name": "owner-device",
+        "family_name": "测试家庭",
     });
     let (missing, detail) = json_request(
         &rig.app,
@@ -3608,8 +6190,9 @@ async fn bootstrap_secret_gates_family_create_when_configured() {
         None,
         json!({
             "create_request_id": "bootstrap-owner-request-000000000002",
-            "device_id": "owner-device",
             "display_name": "妈妈",
+            "device_name": "owner-device",
+            "family_name": "测试家庭",
         }),
         &[("x-lezi-bootstrap-secret", secret)],
     )
@@ -3629,55 +6212,44 @@ async fn create_and_join_limits_are_scoped_without_losing_global_protection() {
             window_seconds: 60,
         };
     });
-    let _first = create_family(
+    let owner = create_family(
         &rig.app,
         "owner-device",
         "rate-limit-owner-request-0000000001",
     )
     .await;
-    // A different device reclaims the one-stack owner (not 409). Each device
-    // id has its own create/reclaim allowance (max 2 here).
-    let (second, reclaimed) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/family/create",
-        None,
-        json!({
-            "create_request_id": "rate-limit-owner-request-0000000002",
-            "device_id": "other-device",
-            "display_name": "妈妈",
-        }),
-    )
-    .await;
-    assert_eq!(second, StatusCode::CREATED, "{reclaimed}");
-    assert_eq!(reclaimed["reclaimed"], true);
-    let (third, third_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/family/create",
-        None,
-        json!({
-            "create_request_id": "rate-limit-owner-request-0000000003",
-            "device_id": "other-device",
-            "display_name": "妈妈",
-        }),
-    )
-    .await;
-    assert_eq!(third, StatusCode::CREATED, "{third_body}");
-    let owner_token = third_body["token"].as_str().unwrap();
-    let (limited, body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/family/create",
-        None,
-        json!({
-            "create_request_id": "rate-limit-owner-request-0000000004",
-            "device_id": "other-device",
-            "display_name": "妈妈",
-        }),
-    )
-    .await;
-    assert_eq!(limited, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    let owner_token = owner["token"].as_str().unwrap();
+
+    let second_body = json!({
+        "create_request_id": "rate-limit-owner-request-0000000002",
+        "display_name": "妈妈",
+        "device_name": "other-device",
+        "family_name": "第二家庭",
+    });
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/family/create",
+            None,
+            second_body.clone(),
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT,
+    );
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/family/create",
+            None,
+            second_body,
+        )
+        .await
+        .0,
+        StatusCode::TOO_MANY_REQUESTS,
+    );
 
     let (invite_status, invitation) = json_request(
         &rig.app,
@@ -3689,40 +6261,46 @@ async fn create_and_join_limits_are_scoped_without_losing_global_protection() {
     .await;
     assert_eq!(invite_status, StatusCode::CREATED);
     for device in ["attacker-a", "attacker-b"] {
-        let (status, _) = json_request(
+        assert_eq!(
+            json_request(
+                &rig.app,
+                Method::POST,
+                "/v1/join",
+                None,
+                json!({"code": "WRONGCODE001", "device_id": device, "display_name": "成员"}),
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND,
+        );
+    }
+    assert_eq!(
+        json_request(
             &rig.app,
             Method::POST,
             "/v1/join",
             None,
-            json!({"code": "WRONGCODE001", "device_id": device, "display_name": "成员"}),
+            json!({"code": "WRONGCODE001", "device_id": "attacker-c", "display_name": "成员"}),
         )
-        .await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-    let (join_limited, join_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/join",
-        None,
-        json!({"code": "WRONGCODE001", "device_id": "attacker-c", "display_name": "成员"}),
-    )
-    .await;
-    assert_eq!(join_limited, StatusCode::TOO_MANY_REQUESTS, "{join_body}");
+        .await
+        .0,
+        StatusCode::TOO_MANY_REQUESTS,
+    );
 
-    // Exhausting one guessed invite code must not consume the valid invite's
-    // scoped budget.
     let code = invitation["code"].as_str().unwrap();
-    let (joined, member) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/join",
-        None,
-        json!({"code": code, "device_id": "member-device", "display_name": "成员"}),
-    )
-    .await;
-    assert_eq!(joined, StatusCode::OK, "{member}");
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/join",
+            None,
+            json!({"code": code, "device_id": "member-device", "display_name": "成员"}),
+        )
+        .await
+        .0,
+        StatusCode::OK,
+    );
 }
-
 #[tokio::test]
 async fn pull_omits_the_entire_atomic_bundle_until_media_bytes_are_committed() {
     let rig = Rig::new();
@@ -7530,7 +10108,13 @@ async fn care_plan_creator_leave_admin_still_manages_member_does_not() {
             Some(owner_token),
             json!({
                 "bundle_id": owner_bundle,
-                "root": entity_wire("care_plan", &plan_id, 3, payload, None),
+                "root": entity_wire(
+                    "care_plan",
+                    &plan_id,
+                    rig.now.load(Ordering::SeqCst) * 1_000 + 1,
+                    payload,
+                    None,
+                ),
                 "media": []
             }),
         )
@@ -7558,10 +10142,7 @@ async fn care_plan_creator_leave_admin_still_manages_member_does_not() {
         .find(|e| e["client_uuid"] == plan_id)
         .expect("care_plan still visible");
     assert_eq!(plan["payload"]["note"], "owner-after-leave");
-    assert_eq!(
-        plan["payload"]["created_by_membership_id"],
-        creator["membership_id"]
-    );
+    assert_eq!(plan["payload"]["created_by_membership_id"], Value::Null);
 }
 
 #[tokio::test]

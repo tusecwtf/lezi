@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use chrono::NaiveDate;
 use serde::Deserialize;
 use serde_json::{Map, Number, Value};
+use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 use crate::ApiError;
@@ -14,33 +15,177 @@ pub(crate) const LOCAL_DEVICE_DISPLAY_NAME: &str = "我（本机）";
 #[serde(deny_unknown_fields)]
 pub struct FamilyCreateRequest {
     pub create_request_id: String,
-    pub device_id: String,
-    #[serde(default)]
-    pub display_name: Option<String>,
-    /// Shared family display name. Optional; blank/omitted stores null.
-    #[serde(default)]
-    pub family_name: Option<String>,
+    pub display_name: String,
+    pub device_name: String,
+    pub family_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RefreshSessionRequest {
+    pub refresh_token: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OwnerLoginRequest {
+    pub login_request_id: String,
+    pub device_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemberLoginRequest {
+    pub display_name: String,
+    pub device_name: String,
+}
+
+impl MemberLoginRequest {
+    pub fn validate(&self) -> Result<(String, String, String), ApiError> {
+        let display_name = require_display_name(Some(&self.display_name))?;
+        let display_name_key = normalized_display_name_key(&display_name);
+        let device_name = require_device_name(&self.device_name)?;
+        Ok((display_name, display_name_key, device_name))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingSecretRequest {
+    pub pending_secret: String,
+}
+
+impl PendingSecretRequest {
+    pub fn validate(&self) -> Result<&str, ApiError> {
+        validate_url_safe_secret(&self.pending_secret, "pending_secret")
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BindExistingMemberRequest {
+    pub membership_id: String,
+}
+
+impl BindExistingMemberRequest {
+    pub fn validate(&self) -> Result<String, ApiError> {
+        Uuid::parse_str(self.membership_id.trim())
+            .map(|value| value.to_string())
+            .map_err(|_| ApiError::unprocessable("membership_id must be a UUID"))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateMemberLoginGrantRequest {
+    pub membership_id: String,
+}
+
+impl CreateMemberLoginGrantRequest {
+    pub fn validate(&self) -> Result<String, ApiError> {
+        Uuid::parse_str(self.membership_id.trim())
+            .map(|value| value.to_string())
+            .map_err(|_| ApiError::unprocessable("membership_id must be a UUID"))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimMemberLoginGrantRequest {
+    pub grant: String,
+    pub device_name: String,
+}
+
+impl ClaimMemberLoginGrantRequest {
+    pub fn validate(&self) -> Result<(&str, String), ApiError> {
+        Ok((
+            validate_url_safe_secret(&self.grant, "grant")?,
+            require_device_name(&self.device_name)?,
+        ))
+    }
+}
+
+impl OwnerLoginRequest {
+    pub fn validate(&self) -> Result<(String, String), ApiError> {
+        validate_urlsafe(
+            &self.login_request_id,
+            32,
+            128,
+            "login_request_id must be 32-128 URL-safe characters",
+        )?;
+        Ok((
+            self.login_request_id.clone(),
+            require_device_name(&self.device_name)?,
+        ))
+    }
+}
+
+impl RefreshSessionRequest {
+    pub fn validate(&self) -> Result<&str, ApiError> {
+        let token = self.refresh_token.trim();
+        if token.is_empty() || token.len() > 512 {
+            return Err(ApiError::unprocessable("refresh_token is required"));
+        }
+        Ok(token)
+    }
 }
 
 impl FamilyCreateRequest {
-    /// Returns `(display_name, family_name)` where `family_name` is `None` when empty.
-    pub fn validate(&self) -> Result<(String, Option<String>), ApiError> {
+    /// Returns the canonical Owner membership name, family name and device name.
+    pub fn validate(&self) -> Result<(String, String, String), ApiError> {
         validate_urlsafe(
             &self.create_request_id,
             32,
             128,
             "create_request_id must be 32-128 URL-safe characters",
         )?;
-        validate_required_string(&self.device_id, 128, "device_id")?;
-        let display_name = require_display_name(self.display_name.as_deref())?;
-        let family_name = normalize_family_name(self.family_name.as_deref())?;
-        Ok((display_name, family_name))
+        let display_name = require_display_name(Some(&self.display_name))?;
+        let family_name = normalize_family_name(Some(&self.family_name))?
+            .ok_or_else(|| ApiError::unprocessable("family_name is required"))?;
+        let device_name = require_device_name(&self.device_name)?;
+        Ok((display_name, family_name, device_name))
     }
+}
+
+pub(crate) fn require_device_name(value: &str) -> Result<String, ApiError> {
+    if value
+        .chars()
+        .any(|character| character.is_control() || is_bidirectional_control(character))
+    {
+        return Err(ApiError::unprocessable(
+            "device_name must not contain control or bidirectional formatting characters",
+        ));
+    }
+    let value = value
+        .nfkc()
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    validate_required_string(&value, 128, "device_name")?;
+    Ok(value)
+}
+
+pub(crate) fn normalized_device_name_key(value: &str) -> String {
+    value.nfkc().flat_map(char::to_lowercase).collect()
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmptyRequest {}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteFamilyRequest {
+    pub family_name: String,
+}
+
+impl DeleteFamilyRequest {
+    pub fn validate(&self) -> Result<String, ApiError> {
+        normalize_family_name(Some(&self.family_name))?
+            .ok_or_else(|| ApiError::unprocessable("family_name is required"))
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -78,23 +223,35 @@ pub struct UpdateDisplayNameRequest {
     pub display_name: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateDeviceNameRequest {
+    pub device_name: String,
+}
+
+impl UpdateDeviceNameRequest {
+    pub fn validate(&self) -> Result<String, ApiError> {
+        require_device_name(&self.device_name)
+    }
+}
+
 impl UpdateDisplayNameRequest {
     pub fn validate(&self) -> Result<String, ApiError> {
         require_display_name(Some(self.display_name.as_str()))
     }
 }
 
-/// Owner-only rename of the shared family name. Null/blank clears to null.
+/// Owner-only rename of the shared family name. Current wire requires a name.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RenameFamilyRequest {
-    #[serde(default)]
-    pub family_name: Option<String>,
+    pub family_name: String,
 }
 
 impl RenameFamilyRequest {
-    pub fn validate(&self) -> Result<Option<String>, ApiError> {
-        normalize_family_name(self.family_name.as_deref())
+    pub fn validate(&self) -> Result<String, ApiError> {
+        normalize_family_name(Some(&self.family_name))?
+            .ok_or_else(|| ApiError::unprocessable("family_name must be a non-empty family name"))
     }
 }
 
@@ -127,9 +284,14 @@ impl RemoveMemberRequest {
 /// return 422 — never silently stored as null.
 pub(crate) fn require_display_name(value: Option<&str>) -> Result<String, ApiError> {
     match normalize_display_name(value)? {
-        Some(name) if name == LOCAL_DEVICE_DISPLAY_NAME => Err(ApiError::unprocessable(
-            "display_name must not be the local device placeholder",
-        )),
+        Some(name)
+            if normalized_display_name_key(&name)
+                == normalized_display_name_key(LOCAL_DEVICE_DISPLAY_NAME) =>
+        {
+            Err(ApiError::unprocessable(
+                "display_name must not be the local device placeholder",
+            ))
+        }
         Some(name) => Ok(name),
         None => Err(ApiError::unprocessable("display_name is required")),
     }
@@ -152,12 +314,34 @@ pub(crate) fn normalize_display_name(value: Option<&str>) -> Result<Option<Strin
             "display_name must not contain control or bidirectional formatting characters",
         ));
     }
-    let value = value.trim();
+    let value = value
+        .nfkc()
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     if value.is_empty() {
         return Ok(None);
     }
-    validate_length(value, 1, 128, "display_name")?;
-    Ok(Some(value.to_owned()))
+    validate_length(&value, 1, 128, "display_name")?;
+    Ok(Some(value))
+}
+
+pub(crate) fn normalized_display_name_key(value: &str) -> String {
+    value.nfkc().flat_map(char::to_lowercase).collect()
+}
+
+fn validate_url_safe_secret<'a>(value: &'a str, field: &str) -> Result<&'a str, ApiError> {
+    if !(32..=128).contains(&value.len())
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(ApiError::unprocessable(format!(
+            "{field} must be 32-128 URL-safe characters"
+        )));
+    }
+    Ok(value)
 }
 
 /// Shared family name: optional; blank/omitted becomes `None` for client fallbacks.

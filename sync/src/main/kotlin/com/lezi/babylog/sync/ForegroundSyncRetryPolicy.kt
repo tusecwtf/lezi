@@ -14,10 +14,6 @@ internal object ForegroundSyncRetryPolicy {
                 failure.statusCode == 408 ||
                     failure.statusCode == 429 ||
                     failure.statusCode in 500..599
-            is HomeNetworkBlockedException -> failure.decision in setOf(
-                HomeNetworkDecision.ServerUnavailable,
-                HomeNetworkDecision.BackingOff,
-            )
             else -> failure.hasIoCause()
         }
         if (!retryable) return null

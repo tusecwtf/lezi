@@ -10,6 +10,10 @@ import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.LOCAL_DEVICE_DISPLAY_NAME
+import com.lezi.babylog.sync.PendingMemberLoginRequest
+import com.lezi.babylog.sync.MemberLoginQrPayload
+import java.text.Normalizer
+import java.util.Locale
 
 /**
  * Local-only display placeholder. Same literal as [LOCAL_DEVICE_DISPLAY_NAME];
@@ -17,28 +21,12 @@ import com.lezi.babylog.sync.LOCAL_DEVICE_DISPLAY_NAME
  */
 internal const val LOCAL_FAMILY_DISPLAY_NAME = LOCAL_DEVICE_DISPLAY_NAME
 
-internal sealed interface NetworkSaveResult {
-    val message: String
-
-    data class Saved(override val message: String) : NetworkSaveResult
-    data class Failed(override val message: String) : NetworkSaveResult
-}
-
-internal inline fun deliverNetworkSaveResult(
-    result: NetworkSaveResult,
-    onMessage: (String) -> Unit,
-    onSaved: () -> Unit = {},
-) {
-    onMessage(result.message)
-    if (result is NetworkSaveResult.Saved) onSaved()
-}
-
 /** UI aliases; the authoritative wizard enums live in domain and are shared with onboarding. */
 internal typealias FamilyWizardMode = com.lezi.babylog.domain.FamilyWizardMode
 internal typealias FamilyWizardStep = com.lezi.babylog.domain.FamilyWizardStep
+internal typealias FamilyWizardJoinRole = com.lezi.babylog.domain.FamilyWizardJoinRole
 
-internal fun accountFamilyActions(): List<FamilyWizardMode> =
-    listOf(FamilyWizardMode.Create, FamilyWizardMode.Join)
+internal fun accountFamilyActions(): List<String> = listOf(FamilyPrimaryCta.CONNECT)
 
 internal fun accountFamilyWizardSnapshot(
     mode: FamilyWizardMode,
@@ -46,6 +34,8 @@ internal fun accountFamilyWizardSnapshot(
     draft: com.lezi.babylog.sync.JoinFamilyDraft,
     displayName: String,
     familyName: String = "",
+    deviceName: String = "",
+    joinRole: FamilyWizardJoinRole? = null,
 ): FamilyWizardSnapshot = FamilyWizardSnapshot.fromDraft(
     entry = FamilyWizardEntry.Account,
     mode = mode,
@@ -53,25 +43,60 @@ internal fun accountFamilyWizardSnapshot(
     draft = draft,
     displayName = displayName,
     familyName = familyName,
-)
+    deviceName = deviceName,
+).copy(joinRole = joinRole)
 
 internal fun familyWizardOutcomeCopy(outcome: FamilyWizardOutcome): String = when (outcome) {
-    is FamilyWizardOutcome.Created -> "家庭已创建"
+    is FamilyWizardOutcome.Created -> when (outcome.dataRecovery) {
+        InitialFamilyDataRecovery.Complete -> "家庭已创建"
+        InitialFamilyDataRecovery.RetryRequired -> "家庭已创建；首次同步失败，可稍后重试"
+        InitialFamilyDataRecovery.NotRequired -> "家庭已创建，正在首次同步"
+    }
     is FamilyWizardOutcome.Joined -> "已加入家庭"
     is FamilyWizardOutcome.Reclaimed -> when (outcome.dataRecovery) {
         InitialFamilyDataRecovery.Complete -> "已接回家庭，数据恢复完成"
         InitialFamilyDataRecovery.RetryRequired ->
-            "已接回家庭，但数据同步失败，请点“同步”重试"
+            "已接回家庭，但数据同步失败，请在记录、汇总或成长页下拉重试"
         InitialFamilyDataRecovery.NotRequired -> "已接回家庭，正在同步数据"
+    }
+    is FamilyWizardOutcome.OwnerLoggedIn -> when (outcome.dataRecovery) {
+        InitialFamilyDataRecovery.Complete -> "管理员设备已登录"
+        InitialFamilyDataRecovery.RetryRequired -> "管理员设备已登录；首次同步失败，可稍后重试"
+        InitialFamilyDataRecovery.NotRequired -> "管理员设备已登录，正在首次同步"
+    }
+    is FamilyWizardOutcome.MemberApproved -> when (outcome.dataRecovery) {
+        InitialFamilyDataRecovery.Complete -> "管理员已确认，家庭数据同步完成"
+        InitialFamilyDataRecovery.RetryRequired -> "管理员已确认；首次同步失败，可稍后重试"
+        InitialFamilyDataRecovery.NotRequired -> "管理员已确认，正在首次同步"
     }
 }
 
 /** Exactly one family overlay can be active at a time. */
 internal sealed interface FamilyDialog {
+    data object ConnectEndpoint : FamilyDialog
     data class Wizard(val mode: FamilyWizardMode, val step: FamilyWizardStep) : FamilyDialog
-    data object NetworkSettings : FamilyDialog
+    data object OwnerTakeoverConfirm : FamilyDialog
     data object MembersList : FamilyDialog
+    data class ReviewPendingMember(val request: PendingMemberLoginRequest) : FamilyDialog
+    data class VerifyingMemberLoginQr(val payload: MemberLoginQrPayload) : FamilyDialog
+    data class ConfirmMemberLoginQr(val payload: MemberLoginQrPayload) : FamilyDialog
+    data class MemberLoginQrCode(val payload: MemberLoginQrPayload) : FamilyDialog
     data object EditMyDisplayName : FamilyDialog
+    data object AddFamilyMember : FamilyDialog
+    data class RenameFamilyMember(
+        val membershipId: String,
+        val currentDisplayName: String,
+    ) : FamilyDialog
+    data class RenameFamilyDevice(
+        val deviceId: String,
+        val currentDeviceName: String,
+    ) : FamilyDialog
+    data class ConfirmDeviceRevoke(
+        val deviceId: String,
+        val deviceName: String,
+        val isCurrent: Boolean,
+    ) : FamilyDialog
+    data object ConfirmDeviceLogout : FamilyDialog
     data object RenameFamily : FamilyDialog
     data class Invite(val invite: FamilyInviteView) : FamilyDialog
     data object ConfirmLeave : FamilyDialog
@@ -81,7 +106,6 @@ internal sealed interface FamilyDialog {
         val displayName: String,
     ) : FamilyDialog
     data class DeleteFamily(val stage: DeleteStage) : FamilyDialog
-    data class HomeWifiAccessGuide(val resume: FamilyDialog? = null) : FamilyDialog
     data class Message(val copy: String, val resume: FamilyDialog? = null) : FamilyDialog
     data class DeleteBaby(val baby: Baby) : FamilyDialog
     data class MergeBaby(val source: Baby) : FamilyDialog
@@ -91,12 +115,37 @@ internal sealed interface FamilyDialog {
     enum class DeleteStage { Warning, Final }
 }
 
+internal fun normalizedFamilyDisplayNameKey(raw: String): String {
+    val normalized = Normalizer.normalize(raw, Normalizer.Form.NFKC).trim()
+    return buildString(normalized.length) {
+        var pendingSpace = false
+        normalized.forEach { character ->
+            if (character.isWhitespace()) {
+                pendingSpace = isNotEmpty()
+            } else {
+                if (pendingSpace) append(' ')
+                append(character)
+                pendingSpace = false
+            }
+        }
+    }.lowercase(Locale.ROOT)
+}
+
+internal fun canConfirmFamilyDeletion(
+    expectedFamilyName: String,
+    enteredFamilyName: String,
+    rootPassword: String,
+): Boolean = expectedFamilyName.trim().isNotEmpty() &&
+    enteredFamilyName.trim() == expectedFamilyName.trim() &&
+    rootPassword.isNotBlank()
+
 /**
  * Overview primary CTA copy (S1).
  * Scan is available inside the join wizard Network/Identity steps (Must);
  * overview secondary「扫码加入」is Should and not shipped here.
  */
 internal object FamilyPrimaryCta {
+    const val CONNECT = "连接家庭服务器"
     const val CREATE = "新建家庭"
     const val JOIN = "加入家庭"
     const val INVITE = "邀请家人"
@@ -108,6 +157,7 @@ internal fun familyWizardInitialStep(networkConfigured: Boolean): FamilyWizardSt
 
 internal fun familyWizardTitle(mode: FamilyWizardMode, step: FamilyWizardStep): String = when (step) {
     FamilyWizardStep.Network -> "配置家庭网络"
+    FamilyWizardStep.Role -> "你要如何加入？"
     FamilyWizardStep.Identity -> when (mode) {
         FamilyWizardMode.Create -> FamilyPrimaryCta.CREATE
         FamilyWizardMode.Join -> FamilyPrimaryCta.JOIN
@@ -116,7 +166,7 @@ internal fun familyWizardTitle(mode: FamilyWizardMode, step: FamilyWizardStep): 
 
 /**
  * Step chip labels for the wizard chrome (1/2 network → identity).
- * [networkReady] must reflect real host+≥1 SSID readiness — never true merely
+ * [networkReady] must reflect a real HTTPS endpoint — never true merely
  * because [step] is Identity.
  */
 internal fun familyWizardProgress(
@@ -126,6 +176,7 @@ internal fun familyWizardProgress(
 ): Pair<String, String> {
     val step1 = if (networkReady) "✓ 家庭网络" else "1 家庭网络"
     val step2 = when {
+        step == FamilyWizardStep.Role -> "2 选择身份"
         step == FamilyWizardStep.Identity -> when (mode) {
             FamilyWizardMode.Create -> "2 新建家庭"
             FamilyWizardMode.Join -> "2 加入家庭"
@@ -138,25 +189,25 @@ internal fun familyWizardProgress(
     return step1 to step2
 }
 
-/** After invite input: Identity only when draft has host + ≥1 SSID. */
+/** After invite input: Identity only when the draft has an endpoint. */
 internal fun joinStepAfterInviteInput(networkReady: Boolean): FamilyWizardStep =
     if (networkReady) FamilyWizardStep.Identity else FamilyWizardStep.Network
 
 /**
  * Wizard session remains active while on Wizard or a stack layer that resumes
- * back to Wizard (Message / HomeWifiAccessGuide). Used to avoid wiping draft
+ * back to Wizard through a message. Used to avoid wiping draft
  * invitation when prefs update mid-flow.
  */
 internal fun isWizardSessionDialog(dialog: FamilyDialog?): Boolean = when (dialog) {
+    FamilyDialog.ConnectEndpoint -> true
     is FamilyDialog.Wizard -> true
+    FamilyDialog.OwnerTakeoverConfirm -> true
     is FamilyDialog.Message -> dialog.resume is FamilyDialog.Wizard
-    is FamilyDialog.HomeWifiAccessGuide -> dialog.resume is FamilyDialog.Wizard
     else -> false
 }
 
 internal fun familyDialogAfterDismiss(dialog: FamilyDialog): FamilyDialog? = when (dialog) {
     is FamilyDialog.Message -> dialog.resume
-    is FamilyDialog.HomeWifiAccessGuide -> dialog.resume
     else -> null
 }
 
@@ -165,16 +216,16 @@ internal fun familySyncError(error: Throwable, fallback: String): String =
 
 /**
  * Result-oriented sync phrase for the account **overview** family card (S1).
- * Never exposes Idle / BlockedOfflineHome / SSID / host / device id.
+ * Never exposes protocol state, endpoint, token, certificate, or device id.
  */
 internal fun overviewSyncStatusLabel(
     status: SyncStatus,
     isJoined: Boolean,
 ): String = when {
+    status == SyncStatus.ReauthRequired -> "登录已失效，请重新登录或申请"
     // Offline-mode and other unjoined states: local Room is usable; family path is on account.
     !isJoined || status == SyncStatus.Disabled -> "本机可记，连上家庭后再同步"
     status == SyncStatus.Syncing -> "正在同步…"
-    status == SyncStatus.BlockedOfflineHome -> "连上家里 Wi‑Fi 后才能同步"
     status == SyncStatus.Idle -> "家人记录已对齐"
     status == SyncStatus.Error -> "同步遇到问题"
     else -> "同步遇到问题"
@@ -184,29 +235,6 @@ internal fun overviewSyncStatusLabel(
 internal fun unjoinedFamilyCardSubtitle(): String =
     "本机可先记；新建或加入家庭后同步给家人"
 
-/**
- * Detailed labels for the **network settings** sheet only (ops / troubleshooting).
- * Overview must use [overviewSyncStatusLabel] instead.
- */
-internal fun syncStatusLabel(
-    status: SyncStatus,
-    hasServer: Boolean = false,
-    hasSsid: Boolean = false,
-    isJoined: Boolean = false,
-): String = when (status) {
-    SyncStatus.Disabled -> when {
-        isJoined -> "未启用"
-        !hasServer && !hasSsid -> "未加入家庭（请先保存服务器与 Wi‑Fi 名称）"
-        !hasServer -> "未加入家庭（请先保存服务器地址）"
-        !hasSsid -> "未加入家庭（请先保存 Wi‑Fi 名称）"
-        else -> "网络已配置 · 尚未加入家庭"
-    }
-    SyncStatus.BlockedOfflineHome -> "等待家庭 Wi‑Fi 或服务器可达"
-    SyncStatus.Idle -> "空闲"
-    SyncStatus.Syncing -> "同步中"
-    SyncStatus.Error -> "同步错误"
-}
-
 internal fun canEditFamilyAvatar(role: FamilyRole): Boolean = role != FamilyRole.Member
 
 internal fun canManageFamilyBabies(role: FamilyRole): Boolean = role != FamilyRole.Member
@@ -214,13 +242,12 @@ internal fun canManageFamilyBabies(role: FamilyRole): Boolean = role != FamilyRo
 internal fun familyStorageCopy(enabled: Boolean): String =
     if (enabled) "本机 + 家庭服务器" else "仅本机"
 
-/** Controls for network settings ops (invite stays overview-primary; leave/delete live here). */
+/** Controls for family account operations. */
 internal data class FamilyControlVisibility(
     val showJoin: Boolean,
     val showCreateFamily: Boolean,
     val showInvite: Boolean,
     val showJoinedActions: Boolean,
-    val showLeave: Boolean,
     /** Owner may remove non-self members from the roster. */
     val showRemoveMember: Boolean,
 )
@@ -233,7 +260,6 @@ internal fun familyControlVisibility(
     showCreateFamily = !isJoined && role == FamilyRole.None,
     showInvite = isJoined && role == FamilyRole.Owner,
     showJoinedActions = isJoined,
-    showLeave = isJoined && role == FamilyRole.Member,
     showRemoveMember = isJoined && role == FamilyRole.Owner,
 )
 
@@ -250,13 +276,11 @@ internal fun canRemoveFamilyMember(
 internal fun isHomeLanNetworkConfigured(
     serverHost: String,
     baseUrl: String,
-    allowedSsids: List<String>,
-): Boolean =
-    (serverHost.isNotBlank() || baseUrl.isNotBlank()) && allowedSsids.isNotEmpty()
+): Boolean = serverHost.isNotBlank() || baseUrl.isNotBlank()
 
 /**
  * Overview primary surface: unjoined create/join wizard CTAs and owner「邀请家人」.
- * Sync / leave / delete never appear here — they live in network settings.
+ * Leave and delete remain deliberate account actions; sync lives on data pages.
  * Scan is not a separate overview CTA; it lives inside the join wizard.
  */
 internal data class FamilyPrimarySurface(
@@ -346,7 +370,8 @@ internal fun familyMemberDisplayName(member: FamilyMember): String =
 /** Owner ★ marker for list / overview lines (never applied to non-owners). */
 internal fun familyMemberTitle(member: FamilyMember): String {
     val name = familyMemberDisplayName(member)
-    return if (member.role == FamilyRole.Owner) "$name ★" else name
+    val selfAware = if (member.isSelf) "$name（我）" else name
+    return if (member.role == FamilyRole.Owner) "$selfAware ★" else selfAware
 }
 
 /** Overview self line: local cache name + admin ★. */
@@ -383,7 +408,7 @@ internal fun displayFamilyName(
     return if (baby.isNotEmpty()) "${baby}的家庭" else "我的家庭"
 }
 
-/** Optional family name on create/rename; blank is allowed (server stores null). */
+/** Current trusted create/rename requires a non-empty family name. */
 internal fun validateFamilyNameInput(raw: String): String? {
     return com.lezi.babylog.domain.familyNameValidationError(raw)
 }

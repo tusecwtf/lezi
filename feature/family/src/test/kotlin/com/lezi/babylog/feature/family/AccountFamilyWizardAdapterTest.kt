@@ -1,6 +1,7 @@
 package com.lezi.babylog.feature.family
 
 import com.lezi.babylog.domain.FamilyWizardEntry
+import com.lezi.babylog.domain.FamilyWizardJoinRole
 import com.lezi.babylog.domain.FamilyWizardMode
 import com.lezi.babylog.domain.FamilyWizardOutcome
 import com.lezi.babylog.domain.FamilyWizardStep
@@ -16,7 +17,7 @@ class AccountFamilyWizardAdapterTest {
     @Test
     fun accountProjectsTheSharedActionsAndSnapshot() {
         val draft = JoinFamilyDraft.fromConfig(
-            HomeLanServerConfig(host = "nas.home", allowedSsids = listOf("Home")),
+            HomeLanServerConfig(host = "nas.home"),
             invitation = "INVITE-1234",
         )
 
@@ -25,12 +26,14 @@ class AccountFamilyWizardAdapterTest {
             step = FamilyWizardStep.Identity,
             draft = draft,
             displayName = "妈妈",
+            joinRole = FamilyWizardJoinRole.Owner,
         )
 
         assertEquals(FamilyWizardEntry.Account, snapshot.entry)
-        assertEquals(listOf(FamilyWizardMode.Create, FamilyWizardMode.Join), accountFamilyActions())
+        assertEquals(listOf("连接家庭服务器"), accountFamilyActions())
         assertEquals(draft, snapshot.toJoinDraft())
         assertEquals("妈妈", snapshot.displayName)
+        assertEquals(FamilyWizardJoinRole.Owner, snapshot.joinRole)
     }
 
     @Test
@@ -51,6 +54,15 @@ class AccountFamilyWizardAdapterTest {
         assertEquals(
             "已加入家庭",
             familyWizardOutcomeCopy(FamilyWizardOutcome.Joined(memberSession())),
+        )
+        assertEquals(
+            "管理员已确认，家庭数据同步完成",
+            familyWizardOutcomeCopy(
+                FamilyWizardOutcome.MemberApproved(
+                    memberSession(),
+                    InitialFamilyDataRecovery.Complete,
+                ),
+            ),
         )
     }
 }

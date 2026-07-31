@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.google.common.truth.Truth.assertThat
 import java.io.File
+import java.util.Base64
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
@@ -35,6 +36,65 @@ class SyncPreferencesTest {
     }
 
     @Test
+    fun probedEndpointIsPersistedSeparatelyAndForgettingItPreservesActiveSession() = runTest {
+        val file = File.createTempFile("lezi-trusted-endpoint-", ".preferences_pb")
+            .also { it.delete() }
+        val tokens = InMemorySecureFamilyTokenStore()
+        val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
+        val preferences = preferences(store, tokens)
+        val active = SyncSession(
+            serverHost = "current.example.com",
+            serverScheme = "https",
+            serverPort = 443,
+            familyId = "family-current",
+            familyToken = "active-token",
+            refreshToken = "active-refresh",
+            deviceId = "device-current",
+            role = FamilyRole.Owner,
+            membershipId = "membership-current",
+        )
+        preferences.saveSession(active)
+        val probed = TrustedEndpointProfile.systemPki("https://next.example.com")
+
+        preferences.rememberEndpoint(probed)
+
+        assertThat(preferences.verifiedEndpoint.first()).isEqualTo(probed)
+        assertThat(preferences.session.first()).isEqualTo(active)
+        assertThat(tokens.getToken()).isEqualTo("active-refresh")
+
+        preferences.forgetEndpoint()
+
+        assertThat(preferences.verifiedEndpoint.first()).isNull()
+        assertThat(preferences.session.first()).isEqualTo(active)
+        assertThat(tokens.getToken()).isEqualTo("active-refresh")
+    }
+
+    @Test
+    fun tofuSpkiPinSurvivesStoreRecreationWithoutPersistingAHandshakeCandidate() = runTest {
+        val file = File.createTempFile("lezi-tofu-endpoint-", ".preferences_pb")
+            .also { it.delete() }
+        val firstScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val first = preferences(
+            PreferenceDataStoreFactory.create(scope = firstScope) { file },
+        )
+        val endpoint = TrustedEndpointProfile.tofuSpki(
+            "https://192.168.50.4:8765",
+            Base64.getEncoder().encodeToString(ByteArray(32) { it.toByte() }),
+        )
+
+        first.rememberEndpoint(endpoint)
+        firstScope.cancel()
+        advanceUntilIdle()
+
+        val secondScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val second = preferences(
+            PreferenceDataStoreFactory.create(scope = secondScope) { file },
+        )
+        assertThat(second.verifiedEndpoint.first()).isEqualTo(endpoint)
+        secondScope.cancel()
+    }
+
+    @Test
     fun sessionAndCursorSurviveStoreRecreation() = runTest {
         val file = File.createTempFile("lezi-sync-", ".preferences_pb").also { it.delete() }
         val tokens = InMemorySecureFamilyTokenStore()
@@ -45,7 +105,9 @@ class SyncPreferencesTest {
             SyncSession(
                 serverHost = "nas",
                 familyId = "family-uuid",
-                familyToken = "secret-token",
+                familyToken = "short-access-token",
+                refreshToken = "secret-refresh-token",
+                accessExpiresAtEpochSeconds = 1_753_419_300,
                 deviceId = "device-uuid",
                 role = FamilyRole.Owner,
                 pullCursor = 41,
@@ -72,13 +134,15 @@ class SyncPreferencesTest {
 
         assertThat(restored.session.first().pullCursor).isEqualTo(41)
         assertThat(restored.session.first().pullGeneration).isEqualTo("server-generation")
-        assertThat(restored.session.first().familyToken).isEqualTo("secret-token")
+        assertThat(restored.session.first().familyToken).isEmpty()
+        assertThat(restored.session.first().refreshToken).isEqualTo("secret-refresh-token")
+        assertThat(restored.session.first().accessExpiresAtEpochSeconds).isEqualTo(0)
         assertThat(restored.session.first().familyName).isEqualTo("乐乐一家")
         assertThat(restored.session.first().membershipId)
             .isEqualTo("membership-after-members-call")
         assertThat(restored.session.first().pendingCreatorAcknowledgements)
             .containsExactlyElementsIn(pendingCreatorAcknowledgements)
-        assertThat(tokens.getToken()).isEqualTo("secret-token")
+        assertThat(tokens.getToken()).isEqualTo("secret-refresh-token")
 
         restored.updateCreatorAcknowledgements(
             remove = setOf(CreatorAcknowledgementRef("care_plan", "plan-awaiting-author")),
@@ -149,13 +213,11 @@ class SyncPreferencesTest {
                     pullGeneration = "g0",
                     familyName = "旧名字",
                     membershipId = "membership-before",
-                    allowedSsids = listOf("Home"),
                 ),
             )
             preferences.saveSession(
                 preferences.session.first().copy(
                     membershipId = "membership-concurrent",
-                    allowedSsids = listOf("Home", "Backup"),
                 ),
             )
             preferences.updateCreatorAcknowledgements(
@@ -173,9 +235,6 @@ class SyncPreferencesTest {
             assertThat(preferences.session.first().familyName).isEqualTo("NAS 新名字")
             assertThat(preferences.session.first().membershipId)
                 .isEqualTo("membership-concurrent")
-            assertThat(preferences.session.first().allowedSsids)
-                .containsExactly("Home", "Backup")
-                .inOrder()
             assertThat(preferences.session.first().pendingCreatorAcknowledgements).containsExactly(
                 CreatorAcknowledgementRef("custom_item", "item-concurrent"),
             )
@@ -190,9 +249,6 @@ class SyncPreferencesTest {
             assertThat(preferences.session.first().pullGeneration).isEqualTo("g2")
             assertThat(preferences.session.first().membershipId)
                 .isEqualTo("membership-concurrent")
-            assertThat(preferences.session.first().allowedSsids)
-                .containsExactly("Home", "Backup")
-                .inOrder()
             file.delete()
         }
 
@@ -233,7 +289,7 @@ class SyncPreferencesTest {
     }
 
     @Test
-    fun familyTokenIsNotWrittenToPlaintextDataStore() = runTest {
+    fun accessIsProcessOnlyAndRefreshIsNotWrittenToPlaintextDataStore() = runTest {
         val file = File.createTempFile("lezi-sync-", ".preferences_pb").also { it.delete() }
         val tokens = InMemorySecureFamilyTokenStore()
         val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
@@ -243,6 +299,7 @@ class SyncPreferencesTest {
                 serverHost = "nas",
                 familyId = "family",
                 familyToken = "secret-token",
+                refreshToken = "secret-refresh-token",
                 deviceId = "device",
                 role = FamilyRole.Owner,
             ),
@@ -250,8 +307,65 @@ class SyncPreferencesTest {
 
         val raw = store.data.first()
         assertThat(raw[stringPreferencesKey("sync_server_host")]).isEqualTo("nas")
-        assertThat(tokens.getToken()).isEqualTo("secret-token")
+        assertThat(tokens.getToken()).isEqualTo("secret-refresh-token")
         assertThat(preferences.session.first().familyToken).isEqualTo("secret-token")
+        file.delete()
+    }
+
+    @Test
+    fun reauthClearRemovesOnlyCredentialsAndSurvivesProcessRecreation() = runTest {
+        val file = File.createTempFile("lezi-reauth-", ".preferences_pb").also { it.delete() }
+        val tokens = InMemorySecureFamilyTokenStore()
+        val firstScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val first = preferences(
+            PreferenceDataStoreFactory.create(scope = firstScope) { file },
+            tokens,
+        )
+        val endpoint = TrustedEndpointProfile.systemPki("https://family.example.com")
+        first.rememberEndpoint(endpoint)
+        first.saveSession(
+            SyncSession(
+                serverHost = "family.example.com",
+                serverPort = 443,
+                serverScheme = "https",
+                familyId = "family",
+                familyToken = "access-secret",
+                refreshToken = "refresh-secret",
+                accessExpiresAtEpochSeconds = 2_000_900,
+                deviceId = "device",
+                role = FamilyRole.Member,
+                pullCursor = 42,
+                pullGeneration = "generation",
+                familyName = "乐乐一家",
+                membershipId = "membership",
+            ),
+        )
+
+        first.clearDeviceCredentialsForReauth()
+
+        val retained = first.session.first()
+        assertThat(retained.reauthRequired).isTrue()
+        assertThat(retained.familyToken).isEmpty()
+        assertThat(retained.refreshToken).isEmpty()
+        assertThat(retained.familyId).isEqualTo("family")
+        assertThat(retained.deviceId).isEqualTo("device")
+        assertThat(retained.membershipId).isEqualTo("membership")
+        assertThat(retained.pullCursor).isEqualTo(42)
+        assertThat(first.verifiedEndpoint.first()).isEqualTo(endpoint)
+        assertThat(tokens.getToken()).isEmpty()
+        firstScope.cancel()
+        advanceUntilIdle()
+
+        val secondScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val restored = preferences(
+            PreferenceDataStoreFactory.create(scope = secondScope) { file },
+            tokens,
+        )
+        assertThat(restored.session.first().reauthRequired).isTrue()
+        assertThat(restored.session.first().familyId).isEqualTo("family")
+        assertThat(restored.session.first().pullCursor).isEqualTo(42)
+        assertThat(restored.verifiedEndpoint.first()).isEqualTo(endpoint)
+        secondScope.cancel()
         file.delete()
     }
 
@@ -266,6 +380,7 @@ class SyncPreferencesTest {
                 serverHost = "old-nas",
                 familyId = "old-family",
                 familyToken = "old-token",
+                refreshToken = "old-refresh-token",
                 deviceId = "stable-device",
                 role = FamilyRole.Owner,
                 pullCursor = 99,
@@ -274,7 +389,7 @@ class SyncPreferencesTest {
             ),
         )
 
-        preferences.saveServer("http://new-nas:8765")
+        preferences.saveServer("https://new-nas:8765")
 
         assertThat(preferences.session.first()).isEqualTo(
             SyncSession(
@@ -298,6 +413,7 @@ class SyncPreferencesTest {
                 serverHost = "old-nas",
                 familyId = "old-family",
                 familyToken = "old-token",
+                refreshToken = "old-refresh-token",
                 deviceId = "stable-device",
                 role = FamilyRole.Owner,
                 pullCursor = 99,
@@ -307,11 +423,11 @@ class SyncPreferencesTest {
         tokens.failNextClear = true
 
         val failure = runCatching {
-            first.saveServer("http://new-nas:8765")
+            first.saveServer("https://new-nas:8765")
         }.exceptionOrNull()
 
         assertThat(failure).hasMessageThat().contains("secure clear interrupted")
-        assertThat(tokens.getToken()).isEqualTo("old-token")
+        assertThat(tokens.getToken()).isEqualTo("old-refresh-token")
         assertThat(first.session.first()).isEqualTo(
             SyncSession(
                 serverHost = "new-nas",
@@ -339,6 +455,72 @@ class SyncPreferencesTest {
                 deviceId = "stable-device",
             ),
         )
+        secondScope.cancel()
+        file.delete()
+    }
+
+    @Test
+    fun pendingDeviceRemovalClearMarkerSurvivesRestartUntilExplicitCompletion() = runTest {
+        val file = File.createTempFile("lezi-device-removal-", ".preferences_pb")
+            .also { it.delete() }
+        val firstScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val first = preferences(PreferenceDataStoreFactory.create(scope = firstScope) { file })
+
+        first.markPendingDeviceRemovalClear()
+        assertThat(first.hasPendingDeviceRemovalClear()).isTrue()
+        firstScope.cancel()
+        advanceUntilIdle()
+
+        val secondScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val restored = preferences(PreferenceDataStoreFactory.create(scope = secondScope) { file })
+        assertThat(restored.hasPendingDeviceRemovalClear()).isTrue()
+
+        restored.clearPendingDeviceRemovalClear()
+        assertThat(restored.hasPendingDeviceRemovalClear()).isFalse()
+        secondScope.cancel()
+        file.delete()
+    }
+
+    @Test
+    fun pendingMembershipDeletionClearMarkerSurvivesRestartUntilExplicitCompletion() = runTest {
+        val file = File.createTempFile("lezi-membership-deletion-", ".preferences_pb")
+            .also { it.delete() }
+        val firstScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val first = preferences(PreferenceDataStoreFactory.create(scope = firstScope) { file })
+
+        first.markPendingMembershipDeletionClear()
+        assertThat(first.hasPendingMembershipDeletionClear()).isTrue()
+        firstScope.cancel()
+        advanceUntilIdle()
+
+        val secondScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val restored = preferences(PreferenceDataStoreFactory.create(scope = secondScope) { file })
+        assertThat(restored.hasPendingMembershipDeletionClear()).isTrue()
+
+        restored.clearPendingMembershipDeletionClear()
+        assertThat(restored.hasPendingMembershipDeletionClear()).isFalse()
+        secondScope.cancel()
+        file.delete()
+    }
+
+    @Test
+    fun pendingFamilyDeletionClearMarkerSurvivesRestartUntilExplicitCompletion() = runTest {
+        val file = File.createTempFile("lezi-family-deletion-", ".preferences_pb")
+            .also { it.delete() }
+        val firstScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val first = preferences(PreferenceDataStoreFactory.create(scope = firstScope) { file })
+
+        first.markPendingFamilyDeletionClear()
+        assertThat(first.hasPendingFamilyDeletionClear()).isTrue()
+        firstScope.cancel()
+        advanceUntilIdle()
+
+        val secondScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val restored = preferences(PreferenceDataStoreFactory.create(scope = secondScope) { file })
+        assertThat(restored.hasPendingFamilyDeletionClear()).isTrue()
+
+        restored.clearPendingFamilyDeletionClear()
+        assertThat(restored.hasPendingFamilyDeletionClear()).isFalse()
         secondScope.cancel()
         file.delete()
     }
@@ -427,6 +609,116 @@ class SyncPreferencesTest {
         )
         assertThat(restored.ensureCreateRequestId()).isNotEqualTo(requestId)
         secondScope.cancel()
+        file.delete()
+    }
+
+    @Test
+    fun ownerLoginRequestIdSurvivesRetryUntilOwnerSessionIsPersisted() = runTest {
+        val file = File.createTempFile("lezi-owner-login-", ".preferences_pb").also { it.delete() }
+        val firstScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val firstStore = PreferenceDataStoreFactory.create(scope = firstScope) { file }
+        val first = preferences(firstStore)
+        val requestId = first.ensureOwnerLoginRequestId()
+        assertThat(first.ensureOwnerLoginRequestId()).isEqualTo(requestId)
+        firstScope.cancel()
+        advanceUntilIdle()
+
+        val secondScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val secondStore = PreferenceDataStoreFactory.create(scope = secondScope) { file }
+        val restored = preferences(secondStore)
+        assertThat(restored.ensureOwnerLoginRequestId()).isEqualTo(requestId)
+
+        restored.saveSession(
+            SyncSession(
+                serverHost = "nas",
+                familyId = "family",
+                familyToken = "token",
+                deviceId = "device",
+                role = FamilyRole.Owner,
+            ),
+        )
+        assertThat(restored.ensureOwnerLoginRequestId()).isNotEqualTo(requestId)
+        secondScope.cancel()
+        file.delete()
+    }
+
+    @Test
+    fun pendingMemberCapabilitySurvivesProcessButIsEncryptedAndRetiredWithSession() = runTest {
+        val file = File.createTempFile("lezi-member-pending-", ".preferences_pb")
+            .also { it.delete() }
+        val tokens = InMemorySecureFamilyTokenStore()
+        val firstScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val firstStore = PreferenceDataStoreFactory.create(scope = firstScope) { file }
+        val first = preferences(firstStore, tokens)
+        val receipt = MemberLoginReceipt(
+            requestId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            pendingSecret = "pending-secret-000000000000000000000001",
+            expiresAtEpochSeconds = 1_753_504_800,
+        )
+
+        first.savePendingMemberLogin(receipt, "爸爸", "Pixel 9")
+        assertThat(first.pendingMemberLogin.first()).isEqualTo(
+            PendingMemberLogin(
+                requestId = receipt.requestId,
+                displayName = "爸爸",
+                deviceName = "Pixel 9",
+                expiresAtEpochSeconds = receipt.expiresAtEpochSeconds,
+            ),
+        )
+        assertThat(first.pendingMemberSecret()).isEqualTo(receipt.pendingSecret)
+        assertThat(file.readBytes().toString(Charsets.ISO_8859_1))
+            .doesNotContain(receipt.pendingSecret)
+        firstScope.cancel()
+        advanceUntilIdle()
+
+        val secondScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
+        val restored = preferences(
+            PreferenceDataStoreFactory.create(scope = secondScope) { file },
+            tokens,
+        )
+        assertThat(restored.pendingMemberLogin.first()?.requestId).isEqualTo(receipt.requestId)
+        assertThat(restored.pendingMemberSecret()).isEqualTo(receipt.pendingSecret)
+
+        restored.saveSession(
+            SyncSession(
+                serverHost = "family.home",
+                serverScheme = "https",
+                familyId = "family",
+                familyToken = "member-access",
+                refreshToken = "member-refresh",
+                deviceId = "member-device",
+                role = FamilyRole.Member,
+                membershipId = "member-membership",
+            ),
+        )
+        assertThat(restored.pendingMemberLogin.first()).isNull()
+        assertThat(tokens.getPendingMemberSecret()).isEmpty()
+        secondScope.cancel()
+        file.delete()
+    }
+
+    @Test
+    fun nonAuthoritativeConfigRewriteKeepsPendingMemberCapability() = runTest {
+        val file = File.createTempFile("lezi-member-config-", ".preferences_pb")
+            .also { it.delete() }
+        val tokens = InMemorySecureFamilyTokenStore()
+        val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
+        val preferences = preferences(store, tokens)
+        val receipt = MemberLoginReceipt(
+            requestId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            pendingSecret = "pending-secret-000000000000000000000002",
+            expiresAtEpochSeconds = 1_753_504_800,
+        )
+        preferences.saveHomeLanConfig(HomeLanServerConfig(host = "old.home"))
+        preferences.savePendingMemberLogin(receipt, "奶奶", "Pixel 10")
+
+        preferences.saveHomeLanConfig(
+            HomeLanServerConfig(host = "new.home"),
+            clearSessionIfServerChanged = false,
+        )
+
+        assertThat(preferences.pendingMemberLogin.first()?.requestId).isEqualTo(receipt.requestId)
+        assertThat(preferences.pendingMemberSecret()).isEqualTo(receipt.pendingSecret)
         file.delete()
     }
 }

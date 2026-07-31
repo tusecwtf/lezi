@@ -13,7 +13,7 @@ class OnboardingJoinConfigTest {
     @Test
     fun httpsQrPrefillRemainsHttpsWhenOnboardingBuildsSavedConfig() {
         val draft = JoinFamilyDraft.fromConfig(
-            HomeLanServerConfig.noviceUiDefaults("CurrentHome"),
+            HomeLanServerConfig.noviceUiDefaults(),
         ).prefillInvitation(
             """{"v":1,"baseUrl":"https://lezi.home:443","host":"lezi.home","port":443,"code":"ABCD1234","ssids":["Home"]}""",
         )
@@ -22,7 +22,6 @@ class OnboardingJoinConfigTest {
 
         assertEquals("https", draft.scheme)
         assertEquals("https://lezi.home:443", config.baseUrl)
-        assertEquals(listOf("Home"), config.allowedSsids)
         assertEquals("ABCD1234", draft.invitation)
         assertEquals("ABCD1234", draft.toCommand(displayName = "妈妈").invitation)
     }
@@ -37,7 +36,7 @@ class OnboardingJoinConfigTest {
         assertNull(memberDisplayNameValidationError("干妈"))
 
         val draft = JoinFamilyDraft.fromConfig(
-            HomeLanServerConfig.noviceUiDefaults("Home"),
+            HomeLanServerConfig.noviceUiDefaults(),
         ).copy(invitation = "CODE1234")
 
         val missingName = runCatching { draft.toCommand(displayName = "") }.exceptionOrNull()

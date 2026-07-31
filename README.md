@@ -97,8 +97,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 # （Zspace SSH 用户 HOME 常为 /home/ 不可写，故不用 ~）
 
 # 4) 验收（本机或 NAS）
-curl -fsS http://192.168.50.4:8765/health   # 期望 version 与发版一致
-curl -fsS http://192.168.50.4:8765/ready
+curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.50.4:8765/health
+curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.50.4:8765/ready
 ```
 
 常用环境变量：
@@ -109,11 +109,12 @@ curl -fsS http://192.168.50.4:8765/ready
 | `NAS_SSH_PORT` | `10000` |
 | `NAS_REMOTE_DIR` | `/tmp/lezi-sync-releases/lezi-sync-<ver>-nas` |
 | `LEZI_DATA_HOST_PATH` | `/tmp/zfsv3/sata1/13096920600/data/Docker/lezi/data` |
+| `LEZI_TLS_HOST` | `192.168.50.4`；首次证书 SAN 使用的 NAS DNS 名或 IP |
 | `LEZI_FORCE_PACKAGE=1` | 强制重打包 |
 | `LEZI_SKIP_PACKAGE=1` | 仅 scp+部署已有 `dist/` 包 |
 | `LEZI_BOOTSTRAP_SECRET` | 仅无现网容器可继承时手动提供 |
 
-**手机访问**：账户页填 `http://<NAS-LAN-IP>:8765`（当前生产映射 `0.0.0.0:8765`）；须用 NAS 防火墙禁止公网访问 8765。需要 HTTPS 时在 NAS 反代到本机 8765。
+**手机访问**：账户页填 `https://<NAS-LAN-IP>:8765`。首次会显示部署脚本打印的 SPKI 指纹，确认后固定；后续公钥变化会硬阻断。须用 NAS 防火墙禁止公网访问 8765。
 
 **首次空部署**（无现网容器）须自行设置 `LEZI_BOOTSTRAP_SECRET`（≥16 字符）后再 `push-and-deploy`，并在 App 建家时填同一口令。
 
@@ -124,7 +125,7 @@ curl -fsS http://192.168.50.4:8765/ready
 [`tools/lezi-sync/README.md`](tools/lezi-sync/README.md)。
 
 Android 模拟器调试本机服务时，在账户页手动填写
-`http://10.0.2.2:8765`；该地址只用于调试，不是任何 build type 的默认值。
+`https://10.0.2.2:8765`；证书需包含 `10.0.2.2` SAN。该地址只用于调试，不是任何 build type 的默认值。
 
 ## 已知限制
 

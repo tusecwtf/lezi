@@ -1,6 +1,6 @@
 # 乐记 — Android 技术说明
 
-> 主 PRD：[`README.md`](./README.md) · 数据：[`data-model.md`](./data-model.md) · 家庭同步：[`sync-home-lan.md`](./sync-home-lan.md)
+> 主 PRD：[`README.md`](./README.md) · 数据：[`data-model.md`](./data-model.md) · 0.3 同步基线：[`sync-home-lan.md`](./sync-home-lan.md) · 下一版目标：[`sync-trusted-endpoint.md`](./sync-trusted-endpoint.md)
 
 ---
 
@@ -19,7 +19,7 @@
 | 通知 | NotificationCompat + **非精确**本地闹钟 | 护理计划（含下次喂养计划）；**不要求** `SCHEDULE_EXACT_ALARM`；**不为同步/伴侣新记录推送** |
 | 计时 | 前台服务 + 状态持久化 | 关 App 仍跑 |
 | Widget | Glance | |
-| 同步 | `RealSyncPort` + 家局域网 NAS | 已实现持久会话、家网/前台门闩、Outbox、Bearer push/pull 与媒体 |
+| 同步 | `RealSyncPort` + 单一家庭服务器 | 0.3 已实现家网门闩；下一版目标为可信 HTTPS、每设备会话、无 SSID 的仅前台 Outbox/pull/push |
 | NAS 后端 | **Rust + Axum + Tokio + SQLite** | 交付物 `tools/lezi-sync`；单二进制、单卷 `DATA_DIR`（db+media） |
 | IAP / 广告 | **不引入** | |
 | 测试 | JUnit + 聚合纯函数单测 + 关键 Compose 测试 | |
@@ -88,12 +88,13 @@ UI 事件
   → domain UseCase
   → Room（立刻成功 → UI 刷新）
   → 标记 syncDirty；同步触发将 baby / record / media 快照入 Outbox
-  → 仅当：前台 && 家 Wi‑Fi && NAS health && 已配置 token
+  → 仅当：前台 && trusted HTTPS endpoint && 有效 device session
         → push；回前台/下拉 → pull + 媒体字节
 ```
 
-实现无后台同步、无推送拉同步；单一 host:port + 本机 SSID 白名单≤2 为门闩；空态 UI 预填 `192.168.50.4:8765` 与当前 SSID，邀请 QR 可带 host、port、code 与最多两个 SSID。
-未配置时为 `Disabled`，离线/非家网写入仍先落 Room 并保留待同步状态。
+实现继续无后台同步、无推送拉同步。下一版删除单一 host:port + SSID 白名单门闩，改为系统 PKI
+或 TOFU/SPKI 的 HTTPS endpoint 与每设备 opaque session；未登录、断网或等待审批时仍先落 Room
+并保留待同步状态。记录/汇总/成长下拉刷新是唯一显式立即同步动作。
 
 计时器：
 
@@ -122,9 +123,9 @@ UI 事件
 | FOREGROUND_SERVICE（及合规类型） | 喂奶计时 | 当前 |
 | RECEIVE_BOOT_COMPLETED | 重启恢复本地提醒/计时 | 当前 |
 | 相册 / Photo Picker | 日记照片 | 当前 |
-| INTERNET / ACCESS_NETWORK_STATE | 家网 health、push/pull 与媒体 | 已声明；网络调用仍受前台 + Wi-Fi + health 门闩 |
-| ACCESS_FINE_LOCATION | 读取当前 SSID，执行硬家庭 Wi-Fi 门闩 | 仅用户操作家庭同步时申请；Android 将 SSID 视为位置敏感字段，应用不读取坐标、不上传 SSID |
-| CAMERA | 扫描家庭邀请 QR | 可选硬件；无相机仍可粘贴载荷 |
+| INTERNET / ACCESS_NETWORK_STATE | HTTPS setup/login、push/pull 与媒体 | 已声明；下一版网络调用受前台 + transport trust + session 约束，不限 Wi-Fi |
+| ACCESS_FINE_LOCATION | 家庭同步不再需要 | 下一版删除仅为 SSID 存在的声明与运行时申请 |
+| CAMERA | 扫描管理员 App 提供的普通成员单次登录 QR | 可选硬件；拒绝后仍可手动 endpoint + 申请 |
 | SCHEDULE_EXACT_ALARM / USE_EXACT_ALARM | **不申请**；护理计划提醒用非精确闹钟即可 | |
 | 麦克风 / 后台定位 / 附近设备 | **不申请** | |
 
@@ -143,9 +144,9 @@ UI 事件
 |----|------|
 | release R8 | `isMinifyEnabled = true` + `isShrinkResources = true` |
 | 系统备份 | `android:allowBackup="false"`；`backup_rules` / `data_extraction_rules` 对齐排除 |
-| 明文 HTTP | 家网 PRD 默认：`usesCleartextTraffic=true`；可选反向代理 HTTPS（见 `sync-home-lan.md`） |
+| 明文 HTTP | 0.3 基线允许；下一版 release 生产禁用，只允许不载入真实凭证的 loopback dev/test |
 | FileProvider | 仅 `cache/export`；不暴露 `files/` / database |
-| 日志 | 不打印 family token / Authorization；用户可见错误经 `productUiError` 过滤技术细节 |
+| 日志 | 不打印根密码、access/refresh、grant、Authorization 或敏感 body；用户可见错误过滤技术细节 |
 
 ---
 

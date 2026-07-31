@@ -2,6 +2,7 @@ package com.lezi.babylog.sync
 
 import dagger.Binds
 import dagger.Module
+import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
@@ -13,11 +14,19 @@ abstract class SyncModule {
     @Binds @Singleton abstract fun secureFamilyTokenStore(
         impl: EncryptedSecureFamilyTokenStore,
     ): SecureFamilyTokenStore
-    @Binds @Singleton abstract fun networkState(impl: AndroidNetworkState): NetworkState
-    @Binds @Singleton abstract fun healthProbe(impl: HttpHealthProbe): HealthProbe
+    @Binds @Singleton abstract fun setupProbe(impl: HttpSetupProbe): SetupProbe
     @Binds @Singleton abstract fun policyClock(impl: SystemPolicyClock): PolicyClock
     @Binds @Singleton abstract fun foregroundState(impl: ProcessForegroundState): ForegroundState
-    @Binds @Singleton abstract fun syncBackend(impl: HttpSyncBackend): SyncBackend
     @Binds @Singleton abstract fun syncPort(impl: RealSyncPort): SyncPort
     @Binds @Singleton abstract fun mediaFileStore(impl: AndroidSyncMediaFileStore): SyncMediaFileStore
+
+    companion object {
+        @Provides
+        @Singleton
+        fun syncBackend(
+            http: HttpSyncBackend,
+            preferences: SyncPreferences,
+            clock: PolicyClock,
+        ): SyncBackend = RefreshingSyncBackend(http, preferences, clock)
+    }
 }

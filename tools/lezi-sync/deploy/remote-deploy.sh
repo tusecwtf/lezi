@@ -12,9 +12,10 @@ cd "${DIR}"
 CONTAINER_NAME="${LEZI_CONTAINER_NAME:-lezi-sync}"
 COMPOSE_PROJECT="${LEZI_COMPOSE_PROJECT:-lezi}"
 ZDOCKER_COMPOSE="${ZDOCKER_COMPOSE:-/zspace/applications/services/zdocker/bin/docker-compose}"
-HEALTH_URL="${LEZI_HEALTH_URL:-http://127.0.0.1:8765/health}"
-READY_URL="${LEZI_READY_URL:-http://127.0.0.1:8765/ready}"
+HEALTH_URL="${LEZI_HEALTH_URL:-https://127.0.0.1:8765/health}"
+READY_URL="${LEZI_READY_URL:-https://127.0.0.1:8765/ready}"
 EXPECTED_VERSION="${LEZI_SYNC_VERSION:-}"
+TLS_HOST="${LEZI_TLS_HOST:-192.168.50.4}"
 
 if [[ -f MANIFEST.json ]]; then
   if command -v python3 >/dev/null 2>&1; then
@@ -23,6 +24,8 @@ if [[ -f MANIFEST.json ]]; then
   if [[ -z "${EXPECTED_VERSION}" ]]; then
     EXPECTED_VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' MANIFEST.json | head -1)"
   fi
+  manifest_tls_host="$(sed -n 's/.*"tls_host"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' MANIFEST.json | head -1)"
+  [[ -n "${manifest_tls_host}" ]] && TLS_HOST="${manifest_tls_host}"
 fi
 
 tar_file="$(ls -1 lezi-sync-*-linux-amd64.tar 2>/dev/null | head -1 || true)"
@@ -83,12 +86,20 @@ data_path="$(
     | head -1 \
     | sed -E 's/^[[:space:]]*-[[:space:]]+//; s,:/data.*,,; s/[[:space:]]*$//'
 )"
+if [[ -z "${data_path}" || "${data_path}" != /* ]]; then
+  echo "error: compose /data bind source must be an absolute host path" >&2
+  exit 1
+fi
 if [[ -n "${data_path}" && -d "${data_path}" ]]; then
   echo "==> data path exists: ${data_path}"
 else
   echo "warn: data path missing or unreadable: ${data_path:-unknown}" >&2
   echo "      ensure uid 10001 can write it (chown 10001:10001)" >&2
 fi
+
+echo "==> initialize or validate persistent TLS identity"
+"${DIR}/init-tls.sh" "${data_path}" "${image}" "${TLS_HOST}"
+tls_certificate="${data_path}/tls/server.crt"
 
 echo "==> stop/remove existing container ${CONTAINER_NAME} (data bind kept)"
 if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
@@ -121,6 +132,9 @@ else
     -e LEZI_DATA_DIR=/data \
     -e LEZI_HOST=0.0.0.0 \
     -e LEZI_PORT=8765 \
+    -e LEZI_INTERNAL_PORT=8766 \
+    -e LEZI_TLS_CERTFILE=/data/tls/server.crt \
+    -e LEZI_TLS_KEYFILE=/data/tls/server.key \
     -e LEZI_INVITE_TTL_HOURS=24 \
     -e LEZI_MAX_MEDIA_BYTES=10485760 \
     -e LEZI_CREATE_RATE_LIMIT=20 \
@@ -136,8 +150,8 @@ fi
 echo "==> wait for health"
 ok=0
 for i in $(seq 1 30); do
-  if curl -fsS "${HEALTH_URL}" >/tmp/lezi-health.out 2>/dev/null \
-    && curl -fsS "${READY_URL}" >/tmp/lezi-ready.out 2>/dev/null; then
+  if curl --cacert "${tls_certificate}" -fsS "${HEALTH_URL}" >/tmp/lezi-health.out 2>/dev/null \
+    && curl --cacert "${tls_certificate}" -fsS "${READY_URL}" >/tmp/lezi-ready.out 2>/dev/null; then
     ok=1
     break
   fi

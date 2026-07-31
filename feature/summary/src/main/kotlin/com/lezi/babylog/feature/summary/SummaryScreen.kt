@@ -19,6 +19,8 @@ import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -57,6 +59,9 @@ import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.WeekSummary
 import com.lezi.babylog.domain.weekStartFor
+import com.lezi.babylog.core.model.SyncStatus
+import com.lezi.babylog.sync.SyncPort
+import com.lezi.babylog.sync.SyncTrigger
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.LocalDate
 import java.time.ZoneId
@@ -69,6 +74,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 
 enum class SummaryRange(
     val label: String,
@@ -145,6 +151,7 @@ private data class SummaryRequest(
 class SummaryViewModel @Inject constructor(
     private val careLog: CareLog,
     private val settings: SettingsStore,
+    private val syncPort: SyncPort,
 ) : ViewModel() {
     private val zone = ZoneId.systemDefault()
     private val aggregationEngine = SummaryAggregationEngine()
@@ -222,6 +229,12 @@ class SummaryViewModel @Inject constructor(
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(), SummaryUi())
 
+    val syncStatus = syncPort.status().stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5_000),
+        SyncStatus.Disabled,
+    )
+
     fun setRange(r: SummaryRange) {
         range.value = r
     }
@@ -229,8 +242,13 @@ class SummaryViewModel @Inject constructor(
     fun setAnchorDate(day: LocalDate) {
         anchorDate.value = day
     }
+
+    fun refresh() {
+        viewModelScope.launch { syncPort.sync(SyncTrigger.PullToRefresh) }
+    }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SummaryRoute(
     anchorDate: LocalDate,
@@ -240,6 +258,7 @@ fun SummaryRoute(
         vm.setAnchorDate(anchorDate)
     }
     val ui by vm.ui.collectAsStateWithLifecycle()
+    val syncStatus by vm.syncStatus.collectAsStateWithLifecycle()
     if (ui.calculating) {
         PageScaffoldBackground {
             Box(
@@ -265,29 +284,42 @@ fun SummaryRoute(
     }
 
     PageScaffoldBackground {
-        Column(
-            Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(
-                    horizontal = if (journal) 0.dp else LeziSpacing.Page,
-                    vertical = LeziSpacing.Page,
-                ),
-            verticalArrangement = Arrangement.spacedBy(if (journal) 0.dp else LeziSpacing.Sm),
+        PullToRefreshBox(
+            isRefreshing = syncStatus == SyncStatus.Syncing,
+            onRefresh = vm::refresh,
+            modifier = Modifier.fillMaxSize(),
         ) {
             Column(
-                Modifier.padding(horizontal = if (journal) LeziSpacing.Page else 0.dp),
+                Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(
+                        horizontal = if (journal) 0.dp else LeziSpacing.Page,
+                        vertical = LeziSpacing.Page,
+                    ),
+                verticalArrangement = Arrangement.spacedBy(if (journal) 0.dp else LeziSpacing.Sm),
             ) {
-                PageHero(
-                    eyebrow = "",
-                    title = "汇总",
-                )
+                Column(
+                    Modifier.padding(horizontal = if (journal) LeziSpacing.Page else 0.dp),
+                ) {
+                    PageHero(
+                        eyebrow = "",
+                        title = "汇总",
+                    )
 
-                RangeTabs(
-                    selected = ui.range,
-                    onSelect = vm::setRange,
-                )
-            }
+                    if (syncStatus == SyncStatus.Error) {
+                        Text(
+                            "同步遇到问题，本机汇总仍可使用",
+                            style = LeziTypography.Meta,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+
+                    RangeTabs(
+                        selected = ui.range,
+                        onSelect = vm::setRange,
+                    )
+                }
 
             val windows = t.chartWindows
             SummaryKpiStrip(
@@ -463,6 +495,7 @@ fun SummaryRoute(
             }
 
             Spacer(Modifier.height(LeziSpacing.Xxl))
+            }
         }
     }
 }

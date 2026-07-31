@@ -672,5 +672,4 @@ private fun joinedClearSession() = SyncSession(
     role = FamilyRole.Owner,
     serverHost = "192.168.1.20",
     serverPort = 8787,
-    allowedSsids = listOf("Home"),
 )

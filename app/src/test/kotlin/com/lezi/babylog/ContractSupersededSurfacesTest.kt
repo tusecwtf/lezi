@@ -79,6 +79,80 @@ class ContractSupersededSurfacesTest {
             .contains("@xml/care_widget_info_v2")
     }
 
+    @Test
+    fun releaseTransportDisallowsCleartextAndDebugExceptionIsLoopbackOnly() {
+        val mainManifest = source("app/src/main/AndroidManifest.xml")
+        val releaseNetworkConfig = source("app/src/main/res/xml/network_security_config.xml")
+        val debugManifest = source("app/src/debug/AndroidManifest.xml")
+        val debugNetworkConfig = source("app/src/debug/res/xml/network_security_config.xml")
+
+        assertThat(mainManifest).contains("android:usesCleartextTraffic=\"false\"")
+        assertThat(releaseNetworkConfig).contains("cleartextTrafficPermitted=\"false\"")
+        assertThat(releaseNetworkConfig).doesNotContain("cleartextTrafficPermitted=\"true\"")
+        assertThat(debugManifest).contains("android:usesCleartextTraffic=\"true\"")
+        assertThat(debugNetworkConfig).contains("localhost")
+        assertThat(debugNetworkConfig).contains("127.0.0.1")
+        assertThat(debugNetworkConfig).contains("10.0.2.2")
+        assertThat(debugNetworkConfig).doesNotContain("192.168.")
+    }
+
+    @Test
+    fun foregroundTrustedSyncHasNoWifiIdentitySurfaceAndExactlyThreeRefreshHosts() {
+        val manifest = source("app/src/main/AndroidManifest.xml")
+        for (permission in listOf(
+            "ACCESS_WIFI_STATE",
+            "ACCESS_COARSE_LOCATION",
+            "ACCESS_FINE_LOCATION",
+        )) {
+            assertThat(manifest).doesNotContain(permission)
+        }
+
+        val retiredNetworkSources = listOf(
+            "sync/src/main/kotlin/com/lezi/babylog/sync/HomeNetworkPolicy.kt",
+            "sync/src/main/kotlin/com/lezi/babylog/sync/HomeWifiPermission.kt",
+            "core/ui/src/main/kotlin/com/lezi/babylog/core/ui/HomeWifiAccessGuide.kt",
+            "feature/family/src/main/kotlin/com/lezi/babylog/feature/family/FamilyNetworkForm.kt",
+        )
+        retiredNetworkSources.forEach { relative ->
+            assertThat(root.resolve(relative).exists()).isFalse()
+        }
+
+        val currentSyncSurfaces = listOf(
+            "sync/src/main/kotlin",
+            "feature/family/src/main/kotlin",
+            "feature/onboarding/src/main/kotlin",
+        ).flatMap { relative ->
+            root.resolve(relative).walkTopDown().filter(File::isFile).toList()
+        }.joinToString("\n") { it.readText() }
+        for (retired in listOf("allowedSsids", "currentWifiSsid", "HomeWifi", "SSID", "BSSID")) {
+            assertThat(currentSyncSurfaces).doesNotContain(retired)
+        }
+
+        val refreshHosts = listOf(
+            source("feature/log/src/main/kotlin/com/lezi/babylog/feature/log/LogTimelineList.kt"),
+            source("feature/summary/src/main/kotlin/com/lezi/babylog/feature/summary/SummaryScreen.kt"),
+            source("feature/growth/src/main/kotlin/com/lezi/babylog/feature/growth/GrowthScreen.kt"),
+        )
+        refreshHosts.forEach { assertThat(it).contains("PullToRefreshBox(") }
+        val allFeatureSources = root.resolve("feature").walkTopDown()
+            .filter { it.isFile && "/src/main/" in it.invariantSeparatorsPath }
+            .joinToString("\n") { it.readText() }
+        assertThat(allFeatureSources.windowedOccurrences("PullToRefreshBox("))
+            .isEqualTo(3)
+
+        val refreshDelegates = listOf(
+            source("feature/log/src/main/kotlin/com/lezi/babylog/feature/log/LogViewModel.kt"),
+            refreshHosts[1],
+            refreshHosts[2],
+        )
+        refreshDelegates.forEach {
+            assertThat(it).contains("syncPort.sync(SyncTrigger.PullToRefresh)")
+        }
+        assertThat(source(
+            "feature/family/src/main/kotlin/com/lezi/babylog/feature/family/FamilySharingContent.kt",
+        )).doesNotContain("立即同步")
+    }
+
     private fun source(relativePath: String): String = root.resolve(relativePath).readText()
 
     private fun String.windowedOccurrences(needle: String): Int {

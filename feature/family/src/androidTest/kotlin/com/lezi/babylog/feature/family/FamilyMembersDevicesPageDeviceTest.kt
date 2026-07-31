@@ -1,0 +1,339 @@
+package com.lezi.babylog.feature.family
+
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.unit.Density
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.lezi.babylog.designsystem.LeziTheme
+import com.lezi.babylog.sync.FamilyDevice
+import com.lezi.babylog.sync.FamilyMember
+import com.lezi.babylog.sync.FamilyRole
+import com.lezi.babylog.sync.PendingMemberLoginRequest
+import com.lezi.babylog.sync.PendingMemberRenameRequest
+import com.google.common.truth.Truth.assertThat
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+
+@RunWith(AndroidJUnit4::class)
+class FamilyMembersDevicesPageDeviceTest {
+    @get:Rule
+    val compose = createComposeRule()
+
+    @Test
+    fun ownerSeesEveryAuthorizedDevicePendingRequestAndNoTechnicalFields() {
+        val now = System.currentTimeMillis() / 1_000L
+        var revokedDevice: String? = null
+        compose.setContent {
+            LeziTheme {
+                FamilyMembersListSheet(
+                    ui = familyUi(
+                        role = FamilyRole.Owner,
+                        members = listOf(
+                            member(
+                                "管理员",
+                                FamilyRole.Owner,
+                                isSelf = true,
+                                devices = listOf(
+                                    device("owner-phone", "我的 Pixel", now, isCurrent = true),
+                                    device("owner-tablet", "家庭平板", now - 90),
+                                ),
+                            ),
+                            member(
+                                "妈妈",
+                                FamilyRole.Member,
+                                devices = listOf(device("mom-phone", "Pixel 10", now - 86_400)),
+                            ),
+                            member("奶奶", FamilyRole.Member, devices = emptyList()),
+                        ),
+                        pendingRequests = listOf(
+                            PendingMemberLoginRequest(
+                                requestId = "pending-request-secret-id",
+                                displayName = "爷爷",
+                                deviceName = "新手机",
+                                createdAtEpochSeconds = now - 180,
+                                expiresAtEpochSeconds = now + 3_600,
+                            ),
+                        ),
+                        pendingRenameRequests = listOf(
+                            PendingMemberRenameRequest(
+                                requestId = "00000000-0000-0000-0000-000000000010",
+                                membershipId = "membership-妈妈",
+                                currentDisplayName = "妈妈",
+                                requestedDisplayName = "妈咪",
+                                createdAtEpochSeconds = now - 60,
+                                expiresAtEpochSeconds = now + 3_600,
+                            ),
+                        ),
+                    ),
+                    onRefreshMembers = {},
+                    onEditMyDisplayName = {},
+                    onAddMember = {},
+                    onRenameMember = { _, _ -> },
+                    onRenameDevice = { _, _ -> },
+                    onRevokeDevice = { deviceId, _, _ -> revokedDevice = deviceId },
+                    onReviewRename = { _, _ -> },
+                    onDismiss = {},
+                )
+            }
+        }
+
+        compose.onNodeWithText("待确认设备（1）").assertIsDisplayed()
+        compose.onNodeWithText("待处理改名（1）").assertIsDisplayed()
+        compose.onNodeWithText("妈妈 → 妈咪").assertIsDisplayed()
+        compose.onNodeWithText("添加成员").assertIsDisplayed()
+        compose.onNodeWithText("爷爷").fetchSemanticsNode()
+        compose.onNodeWithContentDescription("我的 Pixel，这台设备，刚刚").fetchSemanticsNode()
+        compose.onNodeWithText("家庭平板").fetchSemanticsNode()
+        compose.onNodeWithText("Pixel 10").fetchSemanticsNode()
+        compose.onNodeWithText("暂无设备").fetchSemanticsNode()
+        compose.onAllNodesWithText("撤销设备").assertCountEquals(3)
+        compose.onAllNodesWithText("撤销设备")[0].performClick()
+        compose.runOnIdle { assertThat(revokedDevice).isEqualTo("owner-phone") }
+        for (technical in listOf("owner-phone", "mom-phone", "pending-request-secret-id", "token", "SPKI")) {
+            compose.onAllNodesWithText(technical, substring = true).assertCountEquals(0)
+        }
+    }
+
+    @Test
+    fun ordinaryMemberSeesEveryNameButOnlyOwnDeviceDetails() {
+        val now = System.currentTimeMillis() / 1_000L
+        compose.setContent {
+            LeziTheme {
+                FamilyMembersListSheet(
+                    ui = familyUi(
+                        role = FamilyRole.Member,
+                        membershipId = "member-self",
+                        members = listOf(
+                            member(
+                                "管理员",
+                                FamilyRole.Owner,
+                                devices = listOf(device("owner-tablet", "管理员平板", now)),
+                            ),
+                            member(
+                                "妈妈",
+                                FamilyRole.Member,
+                                isSelf = true,
+                                membershipId = "member-self",
+                                devices = listOf(
+                                    device("self-phone", "我的手机", now, isCurrent = true),
+                                    device("self-tablet", "我的平板", now - 3_600),
+                                ),
+                            ),
+                            member(
+                                "奶奶",
+                                FamilyRole.Member,
+                                devices = listOf(device("grandma-phone", "奶奶手机", now)),
+                            ),
+                        ),
+                    ),
+                    onRefreshMembers = {},
+                    onEditMyDisplayName = {},
+                    onDismiss = {},
+                )
+            }
+        }
+
+        for (name in listOf("管理员 ★", "妈妈（我）", "奶奶", "我的手机", "我的平板")) {
+            compose.onNodeWithText(name).fetchSemanticsNode()
+        }
+        compose.onAllNodesWithText("管理员平板").assertCountEquals(0)
+        compose.onAllNodesWithText("奶奶手机").assertCountEquals(0)
+        compose.onAllNodesWithText("待确认设备", substring = true).assertCountEquals(0)
+        compose.onNodeWithText("申请改称呼").assertIsDisplayed()
+        compose.onAllNodesWithText("撤销设备").assertCountEquals(0)
+    }
+
+    @Test
+    fun loadedEmptyProjectionHasARecoverableEmptyState() {
+        compose.setContent {
+            LeziTheme {
+                FamilyMembersListSheet(
+                    ui = familyUi(role = FamilyRole.Member, members = emptyList()),
+                    onRefreshMembers = {},
+                    onEditMyDisplayName = {},
+                    onDismiss = {},
+                )
+            }
+        }
+
+        compose.onNodeWithText("暂时没有可显示的家庭成员").assertIsDisplayed()
+        compose.onNodeWithText("刷新").assertIsDisplayed()
+    }
+
+    @Test
+    fun errorStateRemainsReadableAtTwoHundredPercentFontScale() {
+        compose.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(1f, 2f)) {
+                LeziTheme {
+                    FamilyMembersListSheet(
+                        ui = familyUi(
+                            role = FamilyRole.Owner,
+                            members = emptyList(),
+                            error = "暂时无法读取成员与设备，请稍后重试",
+                        ),
+                        onRefreshMembers = {},
+                        onEditMyDisplayName = {},
+                        onDismiss = {},
+                    )
+                }
+            }
+        }
+
+        compose.onNodeWithText("家庭成员与设备").assertIsDisplayed()
+        compose.onNodeWithText("暂时无法读取成员与设备，请稍后重试").fetchSemanticsNode()
+        compose.onNodeWithText("刷新").fetchSemanticsNode()
+    }
+
+    @Test
+    fun remoteRevokeConfirmationDoesNotPromiseInstantOfflineWipe() {
+        compose.setContent {
+            LeziTheme {
+                RevokeFamilyDeviceDialog(
+                    deviceName = "奶奶手机",
+                    isCurrent = false,
+                    onConfirm = {},
+                    onDismiss = {},
+                )
+            }
+        }
+
+        compose.onNodeWithText("撤销「奶奶手机」？").assertIsDisplayed()
+        compose.onNodeWithText("设备离线时不会即时收到通知", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("确认撤销").assertIsDisplayed()
+    }
+
+    @Test
+    fun currentDeviceLogoutExplainsServerFirstFullLocalClear() {
+        compose.setContent {
+            LeziTheme {
+                LogoutCurrentDeviceDialog(onConfirm = {}, onDismiss = {})
+            }
+        }
+
+        compose.onNodeWithText("退出这台设备？").assertIsDisplayed()
+        compose.onNodeWithText("服务器确认退出后", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("待同步内容", substring = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun membershipExitExplainsHardDeleteAnonymizationAndServerFirstClear() {
+        compose.setContent {
+            LeziTheme {
+                LeaveFamilyDialog(onConfirm = {}, onDismiss = {})
+            }
+        }
+
+        compose.onNodeWithText("退出家庭？").assertIsDisplayed()
+        compose.onNodeWithText("成员身份、全部设备和登录信息会被彻底删除", substring = true)
+            .assertIsDisplayed()
+        compose.onNodeWithText("作者显示为“家人”", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("退出家庭").assertIsDisplayed()
+    }
+
+    @Test
+    fun ownerMemberDeleteExplainsRemoteClearAndAnonymousHistory() {
+        compose.setContent {
+            LeziTheme {
+                RemoveMemberConfirmDialog(
+                    displayName = "爸爸",
+                    removing = false,
+                    onConfirm = {},
+                    onDismiss = {},
+                )
+            }
+        }
+
+        compose.onNodeWithText("删除成员？").assertIsDisplayed()
+        compose.onNodeWithText("彻底删除「爸爸」的成员身份和全部设备", substring = true)
+            .assertIsDisplayed()
+        compose.onNodeWithText("作者显示为“家人”", substring = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun ownerFamilyDeleteRequiresExactNameAndRootWithReadableIrreversibleError() {
+        val enteredName = mutableStateOf("")
+        val rootPassword = mutableStateOf("")
+        compose.setContent {
+            LeziTheme {
+                DeleteFamilyDialog(
+                    stage = FamilyDialog.DeleteStage.Final,
+                    expectedFamilyName = "乐乐一家",
+                    familyNameInput = enteredName.value,
+                    onFamilyNameInputChange = { enteredName.value = it },
+                    rootPassword = rootPassword.value,
+                    onRootPasswordChange = { rootPassword.value = it },
+                    errorMessage = "根密码不正确，本机数据未清除",
+                    deleting = false,
+                    onContinue = {},
+                    onConfirm = {},
+                    onDismiss = {},
+                )
+            }
+        }
+
+        compose.onNodeWithText("删除整个家庭").assertIsDisplayed()
+        compose.onNodeWithText("且无法恢复", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("根密码不正确，本机数据未清除")
+            .assertIsDisplayed()
+            .assert(
+                SemanticsMatcher.expectValue(
+                    SemanticsProperties.LiveRegion,
+                    LiveRegionMode.Assertive,
+                ),
+            )
+        compose.onNodeWithText("永久删除家庭").assertIsNotEnabled()
+
+        compose.onNodeWithText("输入家庭名：乐乐一家").performTextInput("乐乐一家")
+        compose.onNodeWithText("管理员根密码").performTextInput("root-password-secret")
+        compose.onNodeWithText("永久删除家庭").assertIsEnabled()
+    }
+
+    private fun familyUi(
+        role: FamilyRole,
+        membershipId: String = "owner-self",
+        members: List<FamilyMember>,
+        pendingRequests: List<PendingMemberLoginRequest> = emptyList(),
+        pendingRenameRequests: List<PendingMemberRenameRequest> = emptyList(),
+        error: String? = null,
+    ) = FamilyUi(
+        enabled = true,
+        role = role,
+        membershipId = membershipId,
+        members = members,
+        membersLoaded = true,
+        membersError = error,
+        pendingMemberRequests = pendingRequests,
+        pendingMemberRenameRequests = pendingRenameRequests,
+    )
+
+    private fun member(
+        name: String,
+        role: FamilyRole,
+        isSelf: Boolean = false,
+        membershipId: String = "membership-$name",
+        devices: List<FamilyDevice>?,
+    ) = FamilyMember(name, role, isSelf, membershipId, devices)
+
+    private fun device(
+        id: String,
+        name: String,
+        lastUsedAt: Long,
+        isCurrent: Boolean = false,
+    ) = FamilyDevice(id, name, lastUsedAt, isCurrent)
+}

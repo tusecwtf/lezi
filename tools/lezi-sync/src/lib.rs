@@ -7,6 +7,7 @@ mod store;
 use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::extract::rejection::{JsonRejection, QueryRejection};
-use axum::extract::{DefaultBodyLimit, Path as AxumPath, Query, Request, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path as AxumPath, Query, Request, State};
 use axum::http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, WWW_AUTHENTICATE};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -25,21 +26,32 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use futures_util::StreamExt;
 use hmac::{Hmac, Mac};
-use members::{list_family_members, remove_family_member, update_my_display_name};
+use members::{
+    add_family_member, approve_member_rename_request, cancel_my_member_rename_request,
+    list_family_members, list_member_rename_requests, reject_member_rename_request,
+    remove_family_member, rename_family_device, rename_family_member, revoke_family_device,
+    update_my_display_name,
+};
 use model::{
-    BundleCommitRequest, BundleStageRequest, EmptyRequest, FamilyCreateRequest, InviteRequest,
-    JoinRequest, RenameFamilyRequest,
+    normalized_display_name_key, BindExistingMemberRequest, BundleCommitRequest,
+    BundleStageRequest, ClaimMemberLoginGrantRequest, CreateMemberLoginGrantRequest,
+    DeleteFamilyRequest, EmptyRequest, FamilyCreateRequest, InviteRequest, JoinRequest,
+    MemberLoginRequest, OwnerLoginRequest, PendingSecretRequest, RefreshSessionRequest,
+    RenameFamilyRequest,
 };
 use rand::distributions::{Distribution, Uniform};
 use rand::rngs::OsRng;
 use rand::RngCore;
 pub use rate_limit::RateLimitConfig;
 use rate_limit::RateLimiter;
-use readiness::{readiness, CachedReadiness};
+use readiness::{is_ready, readiness, CachedReadiness};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use store::{CommittedPendingBundleMedia, Principal, Store, StoreError};
+use store::{
+    CommittedPendingBundleMedia, CreateFamilyInput, CreateMemberLoginRequestInput, Principal,
+    Store, StoreError,
+};
 use tokio::sync::Mutex;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
@@ -49,12 +61,18 @@ pub const DEFAULT_INVITE_TTL_HOURS: u16 = 24;
 pub const DEFAULT_MAX_MEDIA_BYTES: usize = 10 * 1024 * 1024;
 pub const DEFAULT_CREATE_RATE_LIMIT: u32 = 20;
 pub const DEFAULT_JOIN_RATE_LIMIT: u32 = 60;
+pub const DEFAULT_MEMBER_REQUEST_RATE_LIMIT: u32 = 10;
+pub const DEFAULT_MEMBER_REQUEST_TTL_HOURS: u16 = 24;
+pub const DEFAULT_MAX_PENDING_MEMBER_REQUESTS: usize = 32;
+pub const MEMBER_LOGIN_GRANT_TTL_SECONDS: i64 = 10 * 60;
 pub const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: i64 = 60;
 /// Advertised on `/health` so clients can refuse metadata-first fallbacks.
 pub const CAPABILITY_ATOMIC_BUNDLE: &str = "atomic_bundle";
 /// Advertised on `/health` so clients only send the additive server-owned author field
 /// to servers that accept and canonicalize it.
 pub const CAPABILITY_RECORD_MEMBERSHIP_AUTHOR: &str = "record_membership_author";
+pub const SETUP_PROTOCOL_VERSION: u16 = 1;
+pub const CAPABILITY_SETUP_STATUS: &str = "setup_status";
 const MAX_ENTITY_FUTURE_SKEW_MILLIS: i64 = 24 * 60 * 60 * 1_000;
 pub(crate) const PULL_PAGE_ENTITY_LIMIT: usize = 200;
 pub(crate) const PULL_PAGE_TARGET_BYTES: usize = 8 * 1024 * 1024;
@@ -81,6 +99,9 @@ pub struct ServerConfig {
     pub bootstrap_secret: Option<String>,
     pub create_rate_limit: RateLimitConfig,
     pub join_rate_limit: RateLimitConfig,
+    pub member_request_rate_limit: RateLimitConfig,
+    pub member_request_ttl_hours: u16,
+    pub max_pending_member_requests: usize,
     clock: Clock,
     invite_code_factory: InviteCodeFactory,
 }
@@ -103,6 +124,12 @@ impl ServerConfig {
                 max_attempts: DEFAULT_JOIN_RATE_LIMIT,
                 window_seconds: DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
             },
+            member_request_rate_limit: RateLimitConfig {
+                max_attempts: DEFAULT_MEMBER_REQUEST_RATE_LIMIT,
+                window_seconds: DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+            },
+            member_request_ttl_hours: DEFAULT_MEMBER_REQUEST_TTL_HOURS,
+            max_pending_member_requests: DEFAULT_MAX_PENDING_MEMBER_REQUESTS,
             clock: Arc::new(system_epoch_seconds),
             invite_code_factory: Arc::new(secure_invite_code),
         }
@@ -119,19 +146,34 @@ impl ServerConfig {
         config.invite_ttl_hours = parse_env("LEZI_INVITE_TTL_HOURS", DEFAULT_INVITE_TTL_HOURS)?;
         config.bootstrap_secret = match std::env::var("LEZI_BOOTSTRAP_SECRET") {
             Ok(value) if !value.is_empty() => Some(value),
-            Ok(_) | Err(std::env::VarError::NotPresent) => None,
+            Ok(_) | Err(std::env::VarError::NotPresent) => {
+                return Err("LEZI_BOOTSTRAP_SECRET is required".to_owned())
+            }
             Err(error) => return Err(format!("LEZI_BOOTSTRAP_SECRET: {error}")),
         };
         config.create_rate_limit.max_attempts =
             parse_env("LEZI_CREATE_RATE_LIMIT", DEFAULT_CREATE_RATE_LIMIT)?;
         config.join_rate_limit.max_attempts =
             parse_env("LEZI_JOIN_RATE_LIMIT", DEFAULT_JOIN_RATE_LIMIT)?;
+        config.member_request_rate_limit.max_attempts = parse_env(
+            "LEZI_MEMBER_REQUEST_RATE_LIMIT",
+            DEFAULT_MEMBER_REQUEST_RATE_LIMIT,
+        )?;
+        config.member_request_ttl_hours = parse_env(
+            "LEZI_MEMBER_REQUEST_TTL_HOURS",
+            DEFAULT_MEMBER_REQUEST_TTL_HOURS,
+        )?;
+        config.max_pending_member_requests = parse_env(
+            "LEZI_MAX_PENDING_MEMBER_REQUESTS",
+            DEFAULT_MAX_PENDING_MEMBER_REQUESTS,
+        )?;
         let window = parse_env(
             "LEZI_RATE_LIMIT_WINDOW_SECONDS",
             DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
         )?;
         config.create_rate_limit.window_seconds = window;
         config.join_rate_limit.window_seconds = window;
+        config.member_request_rate_limit.window_seconds = window;
         config.validate()?;
         Ok(config)
     }
@@ -156,10 +198,16 @@ impl ServerConfig {
         if self.max_media_bytes == 0 {
             return Err("LEZI_MAX_MEDIA_BYTES must be greater than zero".to_owned());
         }
-        if self.create_rate_limit.max_attempts == 0 || self.join_rate_limit.max_attempts == 0 {
+        if self.create_rate_limit.max_attempts == 0
+            || self.join_rate_limit.max_attempts == 0
+            || self.member_request_rate_limit.max_attempts == 0
+        {
             return Err("rate limit max_attempts must be greater than zero".to_owned());
         }
-        if self.create_rate_limit.window_seconds <= 0 || self.join_rate_limit.window_seconds <= 0 {
+        if self.create_rate_limit.window_seconds <= 0
+            || self.join_rate_limit.window_seconds <= 0
+            || self.member_request_rate_limit.window_seconds <= 0
+        {
             return Err("LEZI_RATE_LIMIT_WINDOW_SECONDS must be greater than zero".to_owned());
         }
         if self
@@ -168,6 +216,12 @@ impl ServerConfig {
             .is_some_and(|secret| secret.len() < 16)
         {
             return Err("LEZI_BOOTSTRAP_SECRET must be at least 16 characters when set".to_owned());
+        }
+        if self.member_request_ttl_hours != 24 {
+            return Err("LEZI_MEMBER_REQUEST_TTL_HOURS must be exactly 24".to_owned());
+        }
+        if self.max_pending_member_requests == 0 {
+            return Err("LEZI_MAX_PENDING_MEMBER_REQUESTS must be greater than zero".to_owned());
         }
         Ok(())
     }
@@ -187,8 +241,12 @@ struct AppState {
     invite_code_factory: InviteCodeFactory,
     family_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     bootstrap_secret: Option<Arc<str>>,
+    owner_root_fingerprint: Option<Arc<str>>,
     create_limiter: Arc<RateLimiter>,
     join_limiter: Arc<RateLimiter>,
+    member_request_limiter: Arc<RateLimiter>,
+    member_request_ttl_seconds: i64,
+    max_pending_member_requests: usize,
     readiness_cache: Arc<Mutex<Option<CachedReadiness>>>,
 }
 
@@ -205,17 +263,93 @@ impl AppState {
         (self.clock)()
     }
 
-    fn owner_token(&self, create_request_hash: &str, family_id: &str) -> String {
-        derive_token(
-            &self.signing_secret,
-            &format!("owner:{create_request_hash}:{family_id}"),
+    fn owner_tokens(
+        &self,
+        create_request_hash: &str,
+        family_id: &str,
+        device_id: &str,
+    ) -> (String, String) {
+        (
+            derive_token(
+                &self.signing_secret,
+                &format!("owner-access:{create_request_hash}:{family_id}:{device_id}"),
+            ),
+            derive_token(
+                &self.signing_secret,
+                &format!("owner-refresh:{create_request_hash}:{family_id}:{device_id}"),
+            ),
         )
     }
 
-    fn member_token(&self, code_hash: &str, device_id: &str) -> String {
-        derive_token(
-            &self.signing_secret,
-            &format!("join:{code_hash}:{device_id}"),
+    fn owner_login_tokens(
+        &self,
+        request_hash: &str,
+        family_id: &str,
+        device_id: &str,
+    ) -> (String, String) {
+        (
+            derive_token(
+                &self.signing_secret,
+                &format!("owner-login-access:{request_hash}:{family_id}:{device_id}"),
+            ),
+            derive_token(
+                &self.signing_secret,
+                &format!("owner-login-refresh:{request_hash}:{family_id}:{device_id}"),
+            ),
+        )
+    }
+
+    fn member_tokens(
+        &self,
+        code_hash: &str,
+        family_id: &str,
+        device_name: &str,
+    ) -> (String, String) {
+        (
+            derive_token(
+                &self.signing_secret,
+                &format!("join-access:{code_hash}:{family_id}:{device_name}"),
+            ),
+            derive_token(
+                &self.signing_secret,
+                &format!("join-refresh:{code_hash}:{family_id}:{device_name}"),
+            ),
+        )
+    }
+
+    fn member_request_tokens(
+        &self,
+        request_hash: &str,
+        family_id: &str,
+        device_id: &str,
+    ) -> (String, String) {
+        (
+            derive_token(
+                &self.signing_secret,
+                &format!("member-request-access:{request_hash}:{family_id}:{device_id}"),
+            ),
+            derive_token(
+                &self.signing_secret,
+                &format!("member-request-refresh:{request_hash}:{family_id}:{device_id}"),
+            ),
+        )
+    }
+
+    fn member_login_grant_tokens(
+        &self,
+        grant_hash: &str,
+        family_id: &str,
+        device_id: &str,
+    ) -> (String, String) {
+        (
+            derive_token(
+                &self.signing_secret,
+                &format!("member-grant-access:{grant_hash}:{family_id}:{device_id}"),
+            ),
+            derive_token(
+                &self.signing_secret,
+                &format!("member-grant-refresh:{grant_hash}:{family_id}:{device_id}"),
+            ),
         )
     }
 
@@ -286,12 +420,16 @@ pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
         None => load_or_create_server_secret(&config.data_dir)?,
     };
     let bootstrap_secret = config.bootstrap_secret.filter(|value| !value.is_empty());
+    let owner_root_fingerprint = bootstrap_secret
+        .as_deref()
+        .map(|secret| derive_token(&signing_secret, &format!("owner-root:{secret}")));
     if bootstrap_secret.is_none() {
         tracing::warn!(
             "LEZI_BOOTSTRAP_SECRET is unset; POST /v1/family/create is open to the LAN until a family exists (set a secret for production)"
         );
     }
     let store = Store::open(database_path)?;
+    store.reconcile_owner_root_fingerprint((config.clock)(), owner_root_fingerprint.as_deref())?;
     collect_orphan_family_media(&store, &media_root)?;
     retry_committed_pending_bundle_media_cleanup(&store, &media_root)?;
     let state = AppState {
@@ -307,22 +445,96 @@ pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
         invite_code_factory: config.invite_code_factory,
         family_locks: Arc::new(Mutex::new(HashMap::new())),
         bootstrap_secret: bootstrap_secret.map(|value| Arc::from(value.into_boxed_str())),
+        owner_root_fingerprint: owner_root_fingerprint
+            .map(|value| Arc::from(value.into_boxed_str())),
         create_limiter: Arc::new(RateLimiter::new(config.create_rate_limit)),
         join_limiter: Arc::new(RateLimiter::new(config.join_rate_limit)),
+        member_request_limiter: Arc::new(RateLimiter::new(config.member_request_rate_limit)),
+        member_request_ttl_seconds: i64::from(config.member_request_ttl_hours) * 60 * 60,
+        max_pending_member_requests: config.max_pending_member_requests,
         readiness_cache: Arc::new(Mutex::new(None)),
     };
     let body_limit = state.max_media_bytes.max(16 * 1024 * 1024);
     Ok(Router::new()
         .route("/health", get(health))
         .route("/ready", get(readiness))
+        .route("/v1/setup-status", get(setup_status))
         .route("/v1/family/create", post(create_family))
-        .route("/v1/family/members", get(list_family_members))
+        .route("/v1/owner/login", post(owner_login_device))
+        .route("/v1/owner/takeover", post(owner_takeover))
+        .route(
+            "/v1/member/requests",
+            get(list_member_login_requests).post(create_member_login_request),
+        )
+        .route(
+            "/v1/member/requests/status",
+            post(member_login_request_status),
+        )
+        .route(
+            "/v1/member/requests/cancel",
+            post(cancel_member_login_request),
+        )
+        .route(
+            "/v1/member/requests/claim",
+            post(claim_member_login_request),
+        )
+        .route(
+            "/v1/member/requests/{request_id}/approve-new",
+            post(approve_new_member_login_request),
+        )
+        .route(
+            "/v1/member/requests/{request_id}/bind-existing",
+            post(bind_existing_member_login_request),
+        )
+        .route(
+            "/v1/member/requests/{request_id}/reject",
+            post(reject_member_login_request),
+        )
+        .route("/v1/member/login-grants", post(create_member_login_grant))
+        .route(
+            "/v1/member/login-grants/claim",
+            post(claim_member_login_grant),
+        )
+        .route("/v1/session/refresh", post(refresh_session))
+        .route(
+            "/v1/family/members",
+            get(list_family_members).post(add_family_member),
+        )
+        .route(
+            "/v1/family/members/{membership_id}/display-name",
+            post(rename_family_member),
+        )
+        .route(
+            "/v1/family/devices/{device_id}/display-name",
+            post(rename_family_device),
+        )
+        .route(
+            "/v1/family/devices/{device_id}/revoke",
+            post(revoke_family_device),
+        )
+        .route(
+            "/v1/family/rename-requests",
+            get(list_member_rename_requests),
+        )
+        .route(
+            "/v1/family/rename-requests/cancel",
+            post(cancel_my_member_rename_request),
+        )
+        .route(
+            "/v1/family/rename-requests/{request_id}/approve",
+            post(approve_member_rename_request),
+        )
+        .route(
+            "/v1/family/rename-requests/{request_id}/reject",
+            post(reject_member_rename_request),
+        )
         .route("/v1/family/members/remove", post(remove_family_member))
         .route("/v1/family/display-name", post(update_my_display_name))
         .route("/v1/family/name", post(rename_family))
         .route("/v1/invite", post(create_invite))
         .route("/v1/join", post(join))
         .route("/v1/leave", post(leave))
+        .route("/v1/device/logout", post(logout_current_device))
         .route("/v1/family/delete", post(delete_family))
         .route("/v1/push", post(retired_ordinary_push))
         .route("/v1/pull", get(pull_entities))
@@ -355,6 +567,23 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
     }))
 }
 
+async fn setup_status(State(state): State<Arc<AppState>>) -> Result<Response, ApiError> {
+    if !is_ready(&state).await {
+        return Ok(StatusCode::SERVICE_UNAVAILABLE.into_response());
+    }
+    let family_state = if state.store.family_ids()?.is_empty() {
+        "empty"
+    } else {
+        "configured"
+    };
+    Ok(Json(json!({
+        "protocol_version": SETUP_PROTOCOL_VERSION,
+        "capabilities": [CAPABILITY_SETUP_STATUS],
+        "family_state": family_state,
+    }))
+    .into_response())
+}
+
 async fn create_family(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -364,27 +593,32 @@ async fn create_family(
     // allowance reserved for callers that can actually create a family.
     require_bootstrap_secret(&state, &headers)?;
     let request = json_body(body)?;
-    let (display_name, family_name) = request.validate()?;
-    let scope = format!("device:{}", hash_secret(&request.device_id));
-    if !state.create_limiter.check_and_record(&scope, state.now()) {
+    let (display_name, family_name, device_name) = request.validate()?;
+    let display_name_key = normalized_display_name_key(&display_name);
+    let scope = "family-create";
+    if !state.create_limiter.check_and_record(scope, state.now()) {
         return Err(ApiError::too_many_requests(
             "Too many family create attempts; try again later",
         ));
     }
     let signing_state = state.clone();
     let result = state.store.create_family(
-        state.now(),
-        &request.create_request_id,
-        &request.device_id,
-        &display_name,
-        family_name.as_deref(),
-        move |request_hash, family_id| signing_state.owner_token(request_hash, family_id),
+        CreateFamilyInput {
+            now: state.now(),
+            create_request_id: &request.create_request_id,
+            display_name: &display_name,
+            display_name_key: &display_name_key,
+            family_name: &family_name,
+            device_name: &device_name,
+            owner_root_fingerprint: state.owner_root_fingerprint.as_deref(),
+        },
+        move |request_hash, family_id, device_id| {
+            signing_state.owner_tokens(request_hash, family_id, device_id)
+        },
     );
-    let (family_id, token, membership_id, stored_family_name, reclaimed) = match result {
+    let issued = match result {
         Ok(value) => value,
         Err(StoreError::FamilyAlreadyExists) => {
-            // Only reached when the same create_request_id is reused with a
-            // conflicting device_id / display_name — not for a second family.
             return Err(ApiError::conflict("Family already exists"));
         }
         Err(error) => return Err(error.into()),
@@ -392,21 +626,412 @@ async fn create_family(
     Ok((
         StatusCode::CREATED,
         Json(json!({
-            "family_id": family_id,
-            "token": token,
+            "family_id": issued.family_id,
+            "access_token": issued.access_token,
+            "token": issued.access_token,
+            "access_expires_at": issued.access_expires_at,
+            "refresh_token": issued.refresh_token,
             "role": "owner",
-            "membership_id": membership_id,
+            "membership_id": issued.membership_id,
+            "device_id": issued.device_id,
+            "session_id": issued.session_id,
             "generation": state.generation,
-            "family_name": stored_family_name,
-            "reclaimed": reclaimed,
+            "family_name": issued.family_name,
+            "reclaimed": false,
         })),
     ))
 }
 
+async fn owner_login_device(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<OwnerLoginRequest>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    issue_owner_device(state, headers, body, false).await
+}
+
+async fn owner_takeover(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<OwnerLoginRequest>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    issue_owner_device(state, headers, body, true).await
+}
+
+async fn issue_owner_device(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<OwnerLoginRequest>, JsonRejection>,
+    takeover: bool,
+) -> Result<Json<Value>, ApiError> {
+    require_owner_root_password(&state, &headers)?;
+    let request = json_body(body)?;
+    let (login_request_id, device_name) = request.validate()?;
+    let signing_state = state.clone();
+    let issued = match state.store.owner_login(
+        state.now(),
+        &login_request_id,
+        &device_name,
+        takeover,
+        move |request_hash, family_id, device_id| {
+            signing_state.owner_login_tokens(request_hash, family_id, device_id)
+        },
+    ) {
+        Ok(value) => value,
+        Err(StoreError::FamilyNotConfigured) => {
+            return Err(ApiError::conflict("Owner login is unavailable"));
+        }
+        Err(StoreError::OwnerLoginRequestConflict) => {
+            return Err(ApiError::conflict("Owner login request cannot be replayed"));
+        }
+        Err(StoreError::DeviceNameConflict) => {
+            return Err(ApiError::conflict(
+                "Device name is already in use for this family member",
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    Ok(Json(json!({
+        "family_id": issued.family_id,
+        "membership_id": issued.membership_id,
+        "device_id": issued.device_id,
+        "session_id": issued.session_id,
+        "role": "owner",
+        "access_token": issued.access_token,
+        "token": issued.access_token,
+        "access_expires_at": issued.access_expires_at,
+        "refresh_token": issued.refresh_token,
+        "generation": state.generation,
+        "family_name": issued.family_name,
+    })))
+}
+
+async fn create_member_login_request(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(source): ConnectInfo<SocketAddr>,
+    body: Result<Json<MemberLoginRequest>, JsonRejection>,
+) -> Result<impl IntoResponse, ApiError> {
+    let request = json_body(body)?;
+    let (display_name, display_name_key, device_name) = request.validate()?;
+    let scope = format!("member-request-source:{}", source.ip());
+    if !state
+        .member_request_limiter
+        .check_and_record(&scope, state.now())
+    {
+        return Err(ApiError::too_many_requests(
+            "Too many member login requests; try again later",
+        ));
+    }
+    let pending_secret = secure_session_token();
+    let pending = state
+        .store
+        .create_member_login_request(CreateMemberLoginRequestInput {
+            now: state.now(),
+            ttl_seconds: state.member_request_ttl_seconds,
+            max_pending: state.max_pending_member_requests,
+            display_name: &display_name,
+            display_name_key: &display_name_key,
+            device_name: &device_name,
+            pending_secret: &pending_secret,
+        })
+        .map_err(map_member_request_error)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "request_id": pending.request_id,
+            "pending_secret": pending_secret,
+            "status": "pending",
+            "expires_at": pending.expires_at,
+        })),
+    ))
+}
+
+async fn member_login_request_status(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<PendingSecretRequest>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let request = json_body(body)?;
+    let status = state
+        .store
+        .member_login_request_status(request.validate()?, state.now())
+        .map_err(map_member_request_error)?;
+    Ok(Json(json!({"status": status})))
+}
+
+async fn cancel_member_login_request(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<PendingSecretRequest>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let request = json_body(body)?;
+    let status = state
+        .store
+        .cancel_member_login_request(request.validate()?, state.now())
+        .map_err(map_member_request_error)?;
+    Ok(Json(json!({"ok": true, "status": status})))
+}
+
+async fn list_member_login_requests(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let principal = require_owner(&state, &headers)?;
+    let requests = state
+        .store
+        .pending_member_login_requests(&principal.family_id, state.now())?;
+    Ok(Json(json!({"requests": requests})))
+}
+
+async fn approve_new_member_login_request(
+    State(state): State<Arc<AppState>>,
+    AxumPath(request_id): AxumPath<Uuid>,
+    headers: HeaderMap,
+    body: Result<Json<EmptyRequest>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let principal = require_owner(&state, &headers)?;
+    let _ = json_body(body)?;
+    state
+        .store
+        .approve_new_member_login_request(
+            &principal.family_id,
+            &request_id.to_string(),
+            state.now(),
+        )
+        .map_err(map_member_request_error)?;
+    Ok(Json(json!({"ok": true, "status": "approved"})))
+}
+
+async fn bind_existing_member_login_request(
+    State(state): State<Arc<AppState>>,
+    AxumPath(request_id): AxumPath<Uuid>,
+    headers: HeaderMap,
+    body: Result<Json<BindExistingMemberRequest>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let principal = require_owner(&state, &headers)?;
+    let request = json_body(body)?;
+    state
+        .store
+        .bind_existing_member_login_request(
+            &principal.family_id,
+            &request_id.to_string(),
+            &request.validate()?,
+            state.now(),
+        )
+        .map_err(map_member_request_error)?;
+    Ok(Json(json!({"ok": true, "status": "approved"})))
+}
+
+async fn reject_member_login_request(
+    State(state): State<Arc<AppState>>,
+    AxumPath(request_id): AxumPath<Uuid>,
+    headers: HeaderMap,
+    body: Result<Json<EmptyRequest>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let principal = require_owner(&state, &headers)?;
+    let _ = json_body(body)?;
+    state
+        .store
+        .reject_member_login_request(&principal.family_id, &request_id.to_string(), state.now())
+        .map_err(map_member_request_error)?;
+    Ok(Json(json!({"ok": true, "status": "rejected"})))
+}
+
+async fn claim_member_login_request(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<PendingSecretRequest>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let request = json_body(body)?;
+    let signing_state = state.clone();
+    let issued = state
+        .store
+        .claim_member_login_request(
+            request.validate()?,
+            state.now(),
+            move |hash, family, device| signing_state.member_request_tokens(hash, family, device),
+        )
+        .map_err(map_member_request_error)?;
+    Ok(Json(json!({
+        "family_id": issued.family_id,
+        "membership_id": issued.membership_id,
+        "device_id": issued.device_id,
+        "session_id": issued.session_id,
+        "role": "member",
+        "access_token": issued.access_token,
+        "token": issued.access_token,
+        "access_expires_at": issued.access_expires_at,
+        "refresh_token": issued.refresh_token,
+        "generation": state.generation,
+        "family_name": issued.family_name,
+    })))
+}
+
+async fn create_member_login_grant(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<CreateMemberLoginGrantRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let principal = require_owner(&state, &headers)?;
+    let request = json_body(body)?;
+    let membership_id = request.validate()?;
+    let grant = secure_session_token();
+    let created = state
+        .store
+        .create_member_login_grant(
+            &principal.family_id,
+            &membership_id,
+            &grant,
+            state.now(),
+            MEMBER_LOGIN_GRANT_TTL_SECONDS,
+        )
+        .map_err(map_member_login_grant_error)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "grant": grant,
+            "family_name": created.family_name,
+            "member_display_name": created.member_display_name,
+            "expires_at": created.expires_at,
+        })),
+    ))
+}
+
+async fn claim_member_login_grant(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<ClaimMemberLoginGrantRequest>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let request = json_body(body)?;
+    let (grant, device_name) = request.validate()?;
+    let signing_state = state.clone();
+    let issued = state
+        .store
+        .claim_member_login_grant(
+            grant,
+            &device_name,
+            state.now(),
+            move |hash, family, device| {
+                signing_state.member_login_grant_tokens(hash, family, device)
+            },
+        )
+        .map_err(map_member_login_grant_error)?;
+    Ok(Json(json!({
+        "family_id": issued.family_id,
+        "membership_id": issued.membership_id,
+        "device_id": issued.device_id,
+        "session_id": issued.session_id,
+        "role": "member",
+        "access_token": issued.access_token,
+        "token": issued.access_token,
+        "access_expires_at": issued.access_expires_at,
+        "refresh_token": issued.refresh_token,
+        "generation": state.generation,
+        "family_name": issued.family_name,
+    })))
+}
+
+fn map_member_login_grant_error(error: StoreError) -> ApiError {
+    match error {
+        StoreError::MemberLoginGrantNotFound => ApiError::not_found("Member login grant not found"),
+        StoreError::MemberLoginGrantExpired => ApiError::gone("Member login grant expired"),
+        StoreError::MemberLoginGrantAlreadyUsed => {
+            ApiError::conflict("Member login grant was already used")
+        }
+        StoreError::MembershipNotFound => ApiError::conflict("Target family member is unavailable"),
+        StoreError::DeviceNameConflict => {
+            ApiError::conflict("Device name is already in use for this family member")
+        }
+        other => other.into(),
+    }
+}
+
+fn map_member_request_error(error: StoreError) -> ApiError {
+    match error {
+        StoreError::MemberRequestNotFound => ApiError::not_found("Member request not found"),
+        StoreError::MemberRequestExpired => ApiError::gone("Member request expired"),
+        StoreError::MemberRequestStateConflict => {
+            ApiError::conflict("Member request is not available for this action")
+        }
+        StoreError::MemberRequestLimit => ApiError::conflict("Too many pending member requests"),
+        StoreError::DisplayNameConflict => {
+            ApiError::conflict("Family display name is already in use")
+        }
+        StoreError::MembershipNotFound => ApiError::conflict("Target family member is unavailable"),
+        StoreError::FamilyNotConfigured => ApiError::conflict("Family is not configured"),
+        StoreError::DeviceNameConflict => {
+            ApiError::conflict("Device name is already in use for this family member")
+        }
+        other => other.into(),
+    }
+}
+
+async fn refresh_session(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<RefreshSessionRequest>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let request = json_body(body)?;
+    let refresh_token = request.validate()?;
+    let access_token = secure_session_token();
+    let next_refresh_token = secure_session_token();
+    let refreshed = match state.store.refresh_session(
+        state.now(),
+        refresh_token,
+        &access_token,
+        &next_refresh_token,
+    ) {
+        Ok(value) => value,
+        Err(StoreError::InvalidRefreshToken) => {
+            return Err(ApiError::unauthorized_code(
+                "invalid_refresh",
+                "Refresh token is invalid or revoked",
+            ));
+        }
+        Err(StoreError::RefreshTokenReplay) => {
+            return Err(ApiError::unauthorized_code(
+                "refresh_replay",
+                "Refresh token replay revoked this device",
+            ));
+        }
+        Err(StoreError::DeviceRemoved) => {
+            return Err(ApiError::unauthorized_code(
+                "device_removed",
+                "This device was removed from the family",
+            ));
+        }
+        Err(StoreError::MembershipDeleted) => {
+            return Err(ApiError::unauthorized_code(
+                "membership_deleted",
+                "This family membership was deleted",
+            ));
+        }
+        Err(StoreError::FamilyDeleted) => {
+            return Err(ApiError::unauthorized_code(
+                "family_deleted",
+                "This family was deleted",
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let role = state
+        .store
+        .authenticate(&refreshed.access_token, state.now())?
+        .ok_or_else(|| ApiError::internal("rotated session is not authenticatable"))?
+        .role;
+    Ok(Json(json!({
+        "family_id": refreshed.family_id,
+        "membership_id": refreshed.membership_id,
+        "device_id": refreshed.device_id,
+        "session_id": refreshed.session_id,
+        "role": role,
+        "access_token": refreshed.access_token,
+        "access_expires_at": refreshed.access_expires_at,
+        "refresh_token": refreshed.refresh_token,
+        "generation": state.generation,
+        "family_name": refreshed.family_name,
+    })))
+}
+
 /// Owner-only rename of the shared family name.
 ///
-/// Body: `{"family_name": "…"}` — blank/null clears the name (client applies
-/// fallback). Response: `{"ok": true, "family_name": …}`.
+/// Body: `{"family_name": "…"}` — current wire requires a non-empty name so
+/// destructive family-name confirmation remains reachable.
 async fn rename_family(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -417,7 +1042,7 @@ async fn rename_family(
     let family_name = request.validate()?;
     state
         .store
-        .rename_family(&principal.family_id, family_name.as_deref())?;
+        .rename_family(&principal.family_id, &family_name)?;
     Ok(Json(json!({
         "ok": true,
         "family_name": family_name,
@@ -459,6 +1084,7 @@ async fn join(
 ) -> Result<Json<Value>, ApiError> {
     let request = json_body(body)?;
     let display_name = request.validate()?;
+    let display_name_key = normalized_display_name_key(&display_name);
     let scope = format!("invite:{}", hash_secret(&request.code));
     if !state.join_limiter.check_and_record(&scope, state.now()) {
         return Err(ApiError::too_many_requests(
@@ -470,10 +1096,13 @@ async fn join(
         &request.code,
         &request.device_id,
         &display_name,
+        &display_name_key,
         state.now(),
-        move |code_hash, device_id| signing_state.member_token(code_hash, device_id),
+        move |code_hash, family_id, device_name| {
+            signing_state.member_tokens(code_hash, family_id, device_name)
+        },
     );
-    let (family_id, token, membership_id, family_name) = match result {
+    let issued = match result {
         Ok(value) => value,
         Err(StoreError::InviteNotFound) => return Err(ApiError::not_found("Invitation not found")),
         Err(StoreError::InviteExpired) => return Err(ApiError::gone("Invitation expired")),
@@ -482,17 +1111,25 @@ async fn join(
                 "Invitation already used by another device",
             ))
         }
+        Err(StoreError::DisplayNameConflict) => {
+            return Err(ApiError::conflict("Family display name is already in use"))
+        }
         Err(error) => return Err(error.into()),
     };
     Ok(Json(json!({
-        "family_id": family_id,
-        "token": token,
+        "family_id": issued.family_id,
+        "access_token": issued.access_token,
+        "token": issued.access_token,
+        "access_expires_at": issued.access_expires_at,
+        "refresh_token": issued.refresh_token,
         "role": "member",
-        "membership_id": membership_id,
+        "membership_id": issued.membership_id,
+        "device_id": issued.device_id,
+        "session_id": issued.session_id,
         "entities": [],
         "cursor": 0,
         "generation": state.generation,
-        "family_name": family_name,
+        "family_name": issued.family_name,
     })))
 }
 
@@ -508,23 +1145,50 @@ async fn leave(
             "Owner must delete the family instead of leaving",
         ));
     }
+    state.store.hard_delete_membership(
+        &principal.family_id,
+        &principal.membership_id,
+        state.now(),
+    )?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn logout_current_device(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<EmptyRequest>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let principal = authenticate(&state, &headers)?;
+    let _ = json_body(body)?;
     state
         .store
-        .leave_membership(&principal.membership_id, state.now())?;
+        .revoke_family_device(&principal.family_id, &principal.device_id, state.now())?;
     Ok(Json(json!({"ok": true})))
 }
 
 async fn delete_family(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    body: Result<Json<EmptyRequest>, JsonRejection>,
+    body: Result<Json<DeleteFamilyRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let principal = require_owner(&state, &headers)?;
-    let _ = json_body(body)?;
+    require_owner_root_password(&state, &headers)?;
+    let confirmed_family_name = json_body(body)?.validate()?;
     let family_lock = state.family_lock(&principal.family_id).await;
     let _guard = family_lock.lock().await;
     let family_media = state.media_root.join(&principal.family_id);
-    state.store.delete_family(&principal.family_id)?;
+    match state
+        .store
+        .delete_family(&principal.family_id, &confirmed_family_name)
+    {
+        Ok(()) => {}
+        Err(StoreError::FamilyNameMismatch) => {
+            return Err(ApiError::conflict(
+                "Family name confirmation does not match",
+            ));
+        }
+        Err(error) => return Err(error.into()),
+    }
     if family_media.exists() {
         match fs::remove_dir_all(&family_media) {
             Ok(()) => {
@@ -700,6 +1364,11 @@ async fn stage_bundle(
         Err(StoreError::ForbiddenCarePlan) => {
             return Err(ApiError::forbidden(
                 "Only the creator or family owner may change this care plan",
+            ))
+        }
+        Err(StoreError::ForbiddenAnonymousFact) => {
+            return Err(ApiError::forbidden(
+                "Only the family owner may change an anonymous shared fact",
             ))
         }
         Err(StoreError::CarePlanTombstoneResurrection) => {
@@ -1032,6 +1701,11 @@ async fn commit_bundle(
                 "Only the creator or family owner may change this care plan",
             ))
         }
+        Err(StoreError::ForbiddenAnonymousFact) => {
+            return Err(ApiError::forbidden(
+                "Only the family owner may change an anonymous shared fact",
+            ))
+        }
         Err(StoreError::CarePlanTombstoneResurrection) => {
             return Err(ApiError::conflict(
                 "Deleted care plan cannot be resurrected",
@@ -1087,10 +1761,34 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Principal, ApiE
     if !scheme.eq_ignore_ascii_case("bearer") || token.is_empty() {
         return Err(ApiError::unauthorized());
     }
-    state
-        .store
-        .authenticate(token)?
-        .ok_or_else(ApiError::unauthorized)
+    let principal = match state.store.authenticate(token, state.now())? {
+        Some(principal) => principal,
+        None => match state.store.revoked_access_reason(token)?.as_deref() {
+            Some("device_removed") => {
+                return Err(ApiError::unauthorized_code(
+                    "device_removed",
+                    "This device was removed from the family",
+                ));
+            }
+            Some("membership_deleted") => {
+                return Err(ApiError::unauthorized_code(
+                    "membership_deleted",
+                    "This family membership was deleted",
+                ));
+            }
+            Some("family_deleted") => {
+                return Err(ApiError::unauthorized_code(
+                    "family_deleted",
+                    "This family was deleted",
+                ));
+            }
+            _ => return Err(ApiError::unauthorized()),
+        },
+    };
+    if principal.device_id.is_empty() {
+        return Err(ApiError::unauthorized());
+    }
+    Ok(principal)
 }
 
 fn require_bootstrap_secret(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
@@ -1104,6 +1802,24 @@ fn require_bootstrap_secret(state: &AppState, headers: &HeaderMap) -> Result<(),
     if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
         return Err(ApiError::unauthorized_detail(
             "Bootstrap secret required or invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn require_owner_root_password(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let Some(expected) = state.bootstrap_secret.as_deref() else {
+        return Err(ApiError::unauthorized_detail(
+            "Administrator authentication failed",
+        ));
+    };
+    let provided = headers
+        .get(BOOTSTRAP_SECRET_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
+        return Err(ApiError::unauthorized_detail(
+            "Administrator authentication failed",
         ));
     }
     Ok(())
@@ -1274,6 +1990,12 @@ fn derive_token(secret: &[u8], message: &str) -> String {
 
 fn secure_generation() -> String {
     let mut bytes = [0u8; 24];
+    OsRng.fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn secure_session_token() -> String {
+    let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
 }
@@ -1756,6 +2478,7 @@ pub struct ApiError {
     status: StatusCode,
     detail: Value,
     authenticate: bool,
+    code: Option<&'static str>,
 }
 
 impl ApiError {
@@ -1764,6 +2487,7 @@ impl ApiError {
             status,
             detail: detail.into(),
             authenticate: false,
+            code: None,
         }
     }
 
@@ -1776,6 +2500,7 @@ impl ApiError {
             status: StatusCode::UNAUTHORIZED,
             detail: Value::String("Invalid or revoked token".to_owned()),
             authenticate: true,
+            code: None,
         }
     }
 
@@ -1784,6 +2509,16 @@ impl ApiError {
             status: StatusCode::UNAUTHORIZED,
             detail: detail.into(),
             authenticate: false,
+            code: None,
+        }
+    }
+
+    fn unauthorized_code(code: &'static str, detail: impl Into<Value>) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            detail: detail.into(),
+            authenticate: true,
+            code: Some(code),
         }
     }
 
@@ -1826,7 +2561,11 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let mut response = (self.status, Json(json!({"detail": self.detail}))).into_response();
+        let body = match self.code {
+            Some(code) => json!({"code": code, "detail": self.detail}),
+            None => json!({"detail": self.detail}),
+        };
+        let mut response = (self.status, Json(body)).into_response();
         if self.authenticate {
             response
                 .headers_mut()
@@ -1914,7 +2653,7 @@ mod tests {
         connection
             .execute_batch(
                 "
-                PRAGMA user_version = 4;
+                PRAGMA user_version = 12;
                 CREATE TABLE future_sentinel(value TEXT NOT NULL);
                 ",
             )

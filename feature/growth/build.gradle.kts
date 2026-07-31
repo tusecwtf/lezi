@@ -37,6 +37,7 @@ dependencies {
     implementation(project(":core:datastore"))
     implementation(project(":designsystem"))
     implementation(project(":domain"))
+    implementation(project(":sync"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)

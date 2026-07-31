@@ -3,6 +3,7 @@ package com.lezi.babylog.domain
 import com.lezi.babylog.sync.CarePlanFamilyAppliedListener
 import com.lezi.babylog.sync.FamilyBabyAuthorityAppliedListener
 import com.lezi.babylog.sync.LocalClearRecoveryGate
+import com.lezi.babylog.sync.RemovedDeviceLocalClearGate
 import dagger.Binds
 import dagger.Module
 import dagger.Provides
@@ -78,5 +79,13 @@ object CarePlanFamilyProjectionModule {
         coordinator: dagger.Lazy<LocalDataClearCoordinator>,
     ): LocalClearRecoveryGate = LocalClearRecoveryGate {
         coordinator.get().recoverPendingReminderCleanup()
+    }
+
+    @Provides
+    @Singleton
+    fun removedDeviceLocalClearGate(
+        coordinator: dagger.Lazy<LocalDataClearCoordinator>,
+    ): RemovedDeviceLocalClearGate = RemovedDeviceLocalClearGate {
+        coordinator.get().clear(LocalDataClearScope.AllLocalData)
     }
 }

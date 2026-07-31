@@ -5,26 +5,24 @@ import org.junit.Test
 
 class InvitePayloadCodecTest {
     @Test
-    fun qrPayloadRoundTripsServerAddressCodeAndSsids() {
+    fun qrPayloadRoundTripsHttpsServerAddressAndCode() {
         val payload = InvitePayloadCodec.encode(
             InvitePayload(
-                baseUrl = "http://192.168.50.4:8765/",
+                baseUrl = "https://192.168.50.4:8765/",
                 code = "abcd1234",
                 host = "192.168.50.4",
                 port = 8765,
-                ssids = listOf("Home-2.4G", "Home-5G", "extra-dropped"),
             ),
         )
 
         assertThat(payload).contains("\"host\"")
-        assertThat(payload).contains("\"ssids\"")
+        assertThat(payload).doesNotContain("ssid")
         assertThat(InvitePayloadCodec.decode(payload)).isEqualTo(
             InvitePayload(
-                baseUrl = "http://192.168.50.4:8765",
+                baseUrl = "https://192.168.50.4:8765",
                 code = "ABCD1234",
                 host = "192.168.50.4",
                 port = 8765,
-                ssids = listOf("Home-2.4G", "Home-5G"),
             ),
         )
     }
@@ -54,7 +52,6 @@ class InvitePayloadCodecTest {
         val decoded = InvitePayloadCodec.decode("ab12cd34")
         assertThat(decoded.code).isEqualTo("AB12CD34")
         assertThat(decoded.baseUrl).isEmpty()
-        assertThat(decoded.ssids).isEmpty()
     }
 
     @Test
@@ -65,13 +62,11 @@ class InvitePayloadCodecTest {
                 code = "ABCD1234",
                 host = "192.168.50.4",
                 port = 8765,
-                ssids = listOf("Home"),
             ),
         )
         val decoded = InvitePayloadCodec.decode(payload)
-        assertThat(decoded.baseUrl).isEqualTo("http://192.168.50.4:8765")
+        assertThat(decoded.baseUrl).isEqualTo("https://192.168.50.4:8765")
         assertThat(decoded.host).isEqualTo("192.168.50.4")
-        assertThat(decoded.ssids).containsExactly("Home")
     }
 
     @Test

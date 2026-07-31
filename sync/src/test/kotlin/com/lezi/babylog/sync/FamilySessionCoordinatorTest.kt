@@ -6,6 +6,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -44,7 +45,7 @@ class FamilySessionCoordinatorTest {
         )
 
         val result = coordinator.execute(
-            FamilySessionCommand.SaveServer("http://192.168.1.99:8765"),
+            FamilySessionCommand.SaveServer("https://192.168.1.99:8765"),
         )
 
         assertThat(result.getOrThrow()).isEqualTo(FamilySessionOutcome.Completed)
@@ -54,7 +55,6 @@ class FamilySessionCoordinatorTest {
                 deviceId = previous.deviceId,
                 serverHost = "192.168.1.99",
                 serverPort = 8765,
-                allowedSsids = previous.allowedSsids,
             ),
         )
     }
@@ -76,7 +76,7 @@ class FamilySessionCoordinatorTest {
         )
 
         val failure = coordinator.execute(
-            FamilySessionCommand.SaveServer("http://192.168.1.99:8765"),
+            FamilySessionCommand.SaveServer("https://192.168.1.99:8765"),
         ).exceptionOrNull()
 
         assertThat(failure).hasMessageThat().contains("receipt reset interrupted")
@@ -85,7 +85,7 @@ class FamilySessionCoordinatorTest {
     }
 
     @Test
-    fun structuredEndpointUpdatePreservesSsidsOnSameHostAndResetsReceiptsOnHostChange() =
+    fun structuredEndpointUpdateResetsReceiptsWheneverTheOriginChanges() =
         runTest {
             val preferences = MemorySyncPreferences(joinedFamilySession())
             val resetSessions = mutableListOf<SyncSession>()
@@ -107,7 +107,6 @@ class FamilySessionCoordinatorTest {
                     ),
                 ).isSuccess,
             ).isTrue()
-            assertThat(preferences.current().allowedSsids).containsExactly("Home")
             assertThat(preferences.current().isJoined).isFalse()
             assertThat(resetSessions).hasSize(1)
 
@@ -117,8 +116,7 @@ class FamilySessionCoordinatorTest {
                         HomeLanServerConfig(
                             host = "new.home",
                             port = 8765,
-                            scheme = "http",
-                            allowedSsids = listOf("NewHome"),
+                            scheme = "https",
                         ),
                     ),
                 ).isSuccess,
@@ -129,8 +127,7 @@ class FamilySessionCoordinatorTest {
                 HomeLanServerConfig(
                     host = "new.home",
                     port = 8765,
-                    scheme = "http",
-                    allowedSsids = listOf("NewHome"),
+                    scheme = "https",
                 ),
             )
         }
@@ -140,7 +137,6 @@ class FamilySessionCoordinatorTest {
         val previous = SyncSession(
             serverHost = "192.168.1.20",
             serverPort = 8787,
-            allowedSsids = listOf("Home"),
         )
         val preferences = MemorySyncPreferences(previous)
         val backend = RecordingSyncBackend().apply {
@@ -158,13 +154,13 @@ class FamilySessionCoordinatorTest {
         val replica = RecordingFamilySessionReplica(
             onReset = {
                 assertThat(preferences.current()).isEqualTo(
-                    previous.copy(deviceId = "test-device"),
+                    previous,
                 )
                 events += "receipts-reset"
             },
             onApply = { session, entities ->
                 assertThat(preferences.current()).isEqualTo(
-                    previous.copy(deviceId = "test-device"),
+                    previous,
                 )
                 assertThat(session.familyId).isEqualTo("family-created")
                 assertThat(entities.map(SyncEntity::clientUuid)).containsExactly("baby-a")
@@ -183,9 +179,10 @@ class FamilySessionCoordinatorTest {
                 assertThat(preferences.current()).isEqualTo(session)
                 events += "session-published"
             },
-            requestSync = { trigger ->
-                assertThat(trigger).isEqualTo(SyncTrigger.LocalWrite)
-                events += "sync-requested"
+            recoverReclaimedSession = { session ->
+                assertThat(preferences.current()).isEqualTo(session)
+                events += "initial-pull"
+                InitialFamilyDataRecovery.Complete
             },
         )
 
@@ -215,7 +212,7 @@ class FamilySessionCoordinatorTest {
                 "receipts-reset",
                 "initial-applied",
                 "session-published",
-                "sync-requested",
+                "initial-pull",
             )
             .inOrder()
     }
@@ -225,7 +222,6 @@ class FamilySessionCoordinatorTest {
         val previous = SyncSession(
             serverHost = "192.168.1.20",
             serverPort = 8787,
-            allowedSsids = listOf("Home"),
         )
         val preferences = MemorySyncPreferences(previous)
         val backend = RecordingSyncBackend().apply {
@@ -250,7 +246,7 @@ class FamilySessionCoordinatorTest {
             FamilySessionCommand.CreateFamily(
                 displayName = "爸爸",
                 bootstrapSecret = "deploy-secret",
-                familyName = null,
+                familyName = "乐乐一家",
             ),
         ).getOrThrow()
 
@@ -270,11 +266,82 @@ class FamilySessionCoordinatorTest {
     }
 
     @Test
+    fun ownerLoginPersistsCanonicalSessionBeforeRecoveryAndCarriesTakeoverMode() = runTest {
+        listOf(false, true).forEach { takeover ->
+            val previous = SyncSession(
+                serverHost = "192.168.1.20",
+                serverPort = 8787,
+            )
+            val preferences = MemorySyncPreferences(previous)
+            val backend = RecordingSyncBackend()
+            val events = mutableListOf<String>()
+            val coordinator = coordinator(
+                preferences = preferences,
+                backend = backend,
+                requireRemoteAllowed = { events += "gate" },
+                onSessionChanged = { events += "session-published" },
+                recoverReclaimedSession = { session ->
+                    assertThat(preferences.current()).isEqualTo(session)
+                    events += "initial-pull"
+                    InitialFamilyDataRecovery.RetryRequired
+                },
+            )
+
+            val outcome = coordinator.execute(
+                FamilySessionCommand.OwnerLogin(
+                    deviceName = "  Pixel 9  ",
+                    rootPassword = "root-password-secret",
+                    takeover = takeover,
+                ),
+            ).getOrThrow() as FamilySessionOutcome.Joined
+
+            assertThat(backend.ownerLoginRequestIds)
+                .containsExactly("88888888-8888-8888-8888-888888888888")
+            assertThat(backend.ownerLoginDeviceNames).containsExactly("Pixel 9")
+            assertThat(backend.ownerLoginRootPasswords).containsExactly("root-password-secret")
+            assertThat(backend.ownerLoginTakeovers).containsExactly(takeover)
+            assertThat(outcome.session.role).isEqualTo(FamilyRole.Owner)
+            assertThat(outcome.session.familyId).isEqualTo("family-owner-login")
+            assertThat(outcome.session.pullCursor).isEqualTo(0)
+            assertThat(outcome.dataRecovery).isEqualTo(InitialFamilyDataRecovery.RetryRequired)
+            assertThat(events)
+                .containsExactly("gate", "session-published", "initial-pull")
+                .inOrder()
+        }
+    }
+
+    @Test
+    fun ownerLoginWrongRootMapsToProductErrorWithoutPublishingSession() = runTest {
+        listOf(401, 403).forEach { statusCode ->
+            val previous = SyncSession(
+                serverHost = "192.168.1.20",
+                serverPort = 8787,
+            )
+            val backend = RecordingSyncBackend().apply {
+                ownerLoginFailure = SyncHttpException(statusCode)
+            }
+            val preferences = MemorySyncPreferences(previous)
+            val coordinator = coordinator(preferences = preferences, backend = backend)
+
+            val failure = coordinator.execute(
+                FamilySessionCommand.OwnerLogin(
+                    deviceName = "Pixel 9",
+                    rootPassword = "wrong-root",
+                    takeover = false,
+                ),
+            ).exceptionOrNull()
+
+            assertThat(failure).isInstanceOf(OwnerRootPasswordRejectedException::class.java)
+            assertThat(preferences.current()).isEqualTo(previous)
+            assertThat(backend.ownerLoginRequestIds).hasSize(1)
+        }
+    }
+
+    @Test
     fun joinUsesTheConfirmedEndpointAndPublishesItOnlyAfterTheRemoteJoin() = runTest {
         val previous = SyncSession(
             serverHost = "old.home",
             serverPort = 8765,
-            allowedSsids = listOf("OldHome"),
         )
         val preferences = MemorySyncPreferences(previous)
         val backend = RecordingSyncBackend().apply {
@@ -292,13 +359,11 @@ class FamilySessionCoordinatorTest {
             host = "confirmed.home",
             port = 9443,
             scheme = "https",
-            allowedSsids = listOf("ConfirmedHome"),
         )
         val invitation = InvitePayloadCodec.encode(
             InvitePayload(
-                baseUrl = "http://stale-qr.home:8787",
+                baseUrl = "https://stale-qr.home:8787",
                 code = "ABCD1234",
-                ssids = listOf("StaleHome"),
             ),
         )
         val events = mutableListOf<String>()
@@ -529,6 +594,20 @@ class FamilySessionCoordinatorTest {
     }
 
     @Test
+    fun ownerRenameRejectsBlankNameBeforeBackendSoDeleteConfirmationStaysReachable() = runTest {
+        val previous = joinedFamilySession().copy(familyName = "旧家庭名")
+        val preferences = MemorySyncPreferences(previous)
+        val backend = RecordingSyncBackend()
+        val coordinator = coordinator(preferences = preferences, backend = backend)
+
+        val result = coordinator.execute(FamilySessionCommand.RenameFamily("  "))
+
+        assertThat(result.isFailure).isTrue()
+        assertThat(backend.renamedFamilyNames).isEmpty()
+        assertThat(preferences.current()).isEqualTo(previous)
+    }
+
+    @Test
     fun memberCanUpdateOnlyTheAuthenticatedMembershipDisplayName() = runTest {
         val backend = RecordingSyncBackend()
         val coordinator = coordinator(
@@ -542,12 +621,16 @@ class FamilySessionCoordinatorTest {
             FamilySessionCommand.UpdateMyDisplayName("  干爹  "),
         )
 
-        assertThat(outcome.getOrThrow()).isEqualTo(FamilySessionOutcome.Completed)
+        assertThat(outcome.getOrThrow()).isEqualTo(
+            FamilySessionOutcome.DisplayNameUpdateCompleted(
+                DisplayNameUpdateResult.Updated("干爹"),
+            ),
+        )
         assertThat(backend.updatedDisplayNames).containsExactly("干爹")
     }
 
     @Test
-    fun memberLeaveClearsOutboxReceiptsAndSessionOnlyAfterRemoteSuccess() = runTest {
+    fun memberLeaveOnlyConfirmsRemoteDeleteBeforeOuterCrashSafeCleanup() = runTest {
         val previous = joinedFamilySession(role = FamilyRole.Member)
         val preferences = MemorySyncPreferences(previous)
         val backend = RecordingSyncBackend()
@@ -561,32 +644,13 @@ class FamilySessionCoordinatorTest {
                 updatedAt = 10,
             ),
         )
-        val events = mutableListOf<String>()
         backend.onLeave = {
             assertThat(preferences.current()).isEqualTo(previous)
-            events += "remote-left"
-        }
-        outbox.afterDeleteFamily = {
-            assertThat(preferences.current()).isEqualTo(previous)
-            events += "outbox-cleared"
         }
         val coordinator = coordinator(
             preferences = preferences,
             backend = backend,
             outbox = outbox,
-            replica = RecordingFamilySessionReplica(
-                onReset = { session ->
-                    assertThat(session).isEqualTo(previous)
-                    assertThat(outbox.all()).isEmpty()
-                    assertThat(preferences.current()).isEqualTo(previous)
-                    events += "receipts-reset"
-                },
-            ),
-            onSessionChanged = { session ->
-                assertThat(session).isEqualTo(SyncSession())
-                assertThat(preferences.current()).isEqualTo(SyncSession())
-                events += "session-cleared"
-            },
         )
 
         val outcome = coordinator.execute(
@@ -594,18 +658,12 @@ class FamilySessionCoordinatorTest {
         )
 
         assertThat(outcome.getOrThrow()).isEqualTo(FamilySessionOutcome.Completed)
-        assertThat(events)
-            .containsExactly(
-                "remote-left",
-                "outbox-cleared",
-                "receipts-reset",
-                "session-cleared",
-            )
-            .inOrder()
+        assertThat(preferences.current()).isEqualTo(previous)
+        assertThat(outbox.all()).hasSize(1)
     }
 
     @Test
-    fun ownerDeleteClearsOutboxReceiptsAndSessionOnlyAfterRemoteSuccess() = runTest {
+    fun ownerDeleteOnlyConfirmsRemoteBeforeOuterCrashSafeClear() = runTest {
         val previous = joinedFamilySession(role = FamilyRole.Owner)
         val preferences = MemorySyncPreferences(previous)
         val backend = RecordingSyncBackend()
@@ -624,38 +682,22 @@ class FamilySessionCoordinatorTest {
             assertThat(preferences.current()).isEqualTo(previous)
             events += "remote-deleted"
         }
-        outbox.afterDeleteFamily = {
-            assertThat(preferences.current()).isEqualTo(previous)
-            events += "outbox-cleared"
-        }
         val coordinator = coordinator(
             preferences = preferences,
             backend = backend,
             outbox = outbox,
-            replica = RecordingFamilySessionReplica(
-                onReset = {
-                    assertThat(outbox.all()).isEmpty()
-                    assertThat(preferences.current()).isEqualTo(previous)
-                    events += "receipts-reset"
-                },
-            ),
-            onSessionChanged = {
-                assertThat(preferences.current()).isEqualTo(SyncSession())
-                events += "session-cleared"
-            },
         )
 
-        val outcome = coordinator.execute(FamilySessionCommand.DeleteFamily)
+        val outcome = coordinator.execute(
+            FamilySessionCommand.DeleteFamily("  乐乐一家  ", "root-password-secret"),
+        )
 
         assertThat(outcome.getOrThrow()).isEqualTo(FamilySessionOutcome.Completed)
-        assertThat(events)
-            .containsExactly(
-                "remote-deleted",
-                "outbox-cleared",
-                "receipts-reset",
-                "session-cleared",
-            )
-            .inOrder()
+        assertThat(events).containsExactly("remote-deleted")
+        assertThat(preferences.current()).isEqualTo(previous)
+        assertThat(outbox.all()).hasSize(1)
+        assertThat(backend.deletedFamilyConfirmations)
+            .containsExactly("乐乐一家" to "root-password-secret")
     }
 
     @Test
@@ -669,7 +711,7 @@ class FamilySessionCoordinatorTest {
         )
 
         val failure = coordinator.execute(
-            FamilySessionCommand.DeleteFamily,
+            FamilySessionCommand.DeleteFamily("乐乐一家", "root-password-secret"),
         ).exceptionOrNull()
 
         assertThat(failure).hasMessageThat().contains("管理员")
@@ -677,7 +719,26 @@ class FamilySessionCoordinatorTest {
     }
 
     @Test
-    fun blankBootstrapSecretIsNormalizedToNullAndStillCreates() = runTest {
+    fun ownerFamilyDeleteRequiresExactNameAndNonBlankRootBeforeBackend() = runTest {
+        val backend = RecordingSyncBackend()
+        val preferences = MemorySyncPreferences(joinedFamilySession())
+        val coordinator = coordinator(preferences = preferences, backend = backend)
+
+        val wrongName = coordinator.execute(
+            FamilySessionCommand.DeleteFamily("乐乐二家", "root-password-secret"),
+        ).exceptionOrNull()
+        val blankRoot = coordinator.execute(
+            FamilySessionCommand.DeleteFamily("乐乐一家", "   "),
+        ).exceptionOrNull()
+
+        assertThat(wrongName).hasMessageThat().contains("家庭名")
+        assertThat(blankRoot).hasMessageThat().contains("根密码")
+        assertThat(backend.deleteFamilyCalls).isEqualTo(0)
+        assertThat(preferences.current()).isEqualTo(joinedFamilySession())
+    }
+
+    @Test
+    fun blankRootPasswordFailsBeforeCallingTheBackend() = runTest {
         val backend = RecordingSyncBackend()
         var gateCalls = 0
         val coordinator = coordinator(
@@ -685,25 +746,24 @@ class FamilySessionCoordinatorTest {
                 SyncSession(
                     serverHost = "192.168.1.20",
                     serverPort = 8787,
-                    allowedSsids = listOf("Home"),
                 ),
             ),
             backend = backend,
             requireRemoteAllowed = { gateCalls += 1 },
         )
 
-        val outcome = coordinator.execute(
+        val failure = coordinator.execute(
             FamilySessionCommand.CreateFamily(
                 displayName = "妈妈",
                 bootstrapSecret = "  ",
-                familyName = null,
+                familyName = "乐乐一家",
             ),
-        ).getOrThrow()
+        ).exceptionOrNull()
 
-        assertThat(outcome).isInstanceOf(FamilySessionOutcome.Joined::class.java)
+        assertThat(failure).hasMessageThat().contains("根密码")
         assertThat(gateCalls).isEqualTo(1)
-        assertThat(backend.createBootstrapSecrets).containsExactly(null)
-        assertThat(backend.createRequestIds).hasSize(1)
+        assertThat(backend.createBootstrapSecrets).isEmpty()
+        assertThat(backend.createRequestIds).isEmpty()
     }
 
     @Test
@@ -712,7 +772,6 @@ class FamilySessionCoordinatorTest {
             val previous = SyncSession(
                 serverHost = "192.168.1.20",
                 serverPort = 8787,
-                allowedSsids = listOf("Home"),
             )
             val backend = RecordingSyncBackend().apply {
                 createFailure = SyncHttpException(statusCode)
@@ -724,7 +783,7 @@ class FamilySessionCoordinatorTest {
                 FamilySessionCommand.CreateFamily(
                     displayName = "妈妈",
                     bootstrapSecret = "wrong",
-                    familyName = null,
+                    familyName = "乐乐一家",
                 ),
             ).exceptionOrNull()
 
@@ -733,7 +792,7 @@ class FamilySessionCoordinatorTest {
             assertThat(failure).hasMessageThat()
                 .isEqualTo("初始化口令不正确，请核对 NAS 配置")
             assertThat(preferences.current()).isEqualTo(
-                previous.copy(deviceId = "test-device"),
+                previous,
             )
             assertThat(backend.createRequestIds).hasSize(1)
         }
@@ -745,15 +804,13 @@ class FamilySessionCoordinatorTest {
             SyncSession(
                 serverHost = "192.168.1.20",
                 serverPort = 8787,
-                allowedSsids = listOf("Home"),
             ),
         ).apply {
             clearCreateRequestIdFailure = IllegalStateException("preferences unavailable")
         }
-        val requested = mutableListOf<SyncTrigger>()
         val coordinator = coordinator(
             preferences = preferences,
-            requestSync = { requested += it },
+            recoverReclaimedSession = { InitialFamilyDataRecovery.Complete },
         )
 
         val result = coordinator.execute(
@@ -767,7 +824,6 @@ class FamilySessionCoordinatorTest {
         assertThat(result.getOrThrow()).isInstanceOf(FamilySessionOutcome.Joined::class.java)
         assertThat(preferences.current().isJoined).isTrue()
         assertThat(preferences.clearCreateRequestIdCalls).isEqualTo(0)
-        assertThat(requested).containsExactly(SyncTrigger.LocalWrite)
     }
 
     @Test
@@ -776,19 +832,18 @@ class FamilySessionCoordinatorTest {
             SyncSession(
                 serverHost = "192.168.1.20",
                 serverPort = 8787,
-                allowedSsids = listOf("Home"),
             ),
         )
         val coordinator = coordinator(
             preferences = preferences,
-            requestSync = { error("scheduler unavailable") },
+            recoverReclaimedSession = { InitialFamilyDataRecovery.RetryRequired },
         )
 
         val result = coordinator.execute(
             FamilySessionCommand.CreateFamily(
                 displayName = "妈妈",
                 bootstrapSecret = "bootstrap-secret",
-                familyName = null,
+                familyName = "乐乐一家",
             ),
         )
 
@@ -808,7 +863,6 @@ class FamilySessionCoordinatorTest {
             host = "confirmed.home",
             port = 9443,
             scheme = "https",
-            allowedSsids = listOf("Home"),
         )
 
         val failure = coordinator.execute(
@@ -857,7 +911,6 @@ class FamilySessionCoordinatorTest {
             val previous = SyncSession(
                 serverHost = "192.168.1.20",
                 serverPort = 8787,
-                allowedSsids = listOf("Home"),
             )
             val preferences = MemorySyncPreferences(previous)
             val backend = RecordingSyncBackend().apply {
@@ -871,7 +924,7 @@ class FamilySessionCoordinatorTest {
                     FamilySessionCommand.CreateFamily(
                         displayName = "妈妈",
                         bootstrapSecret = "bootstrap-secret",
-                        familyName = null,
+                        familyName = "乐乐一家",
                     ),
                 )
             }
@@ -897,7 +950,7 @@ class FamilySessionCoordinatorTest {
         }
 
     @Test
-    fun revokedMemberCanCompleteLocalLeaveCleanup() = runTest {
+    fun generic401CannotPretendMemberWasHardDeleted() = runTest {
         val preferences = MemorySyncPreferences(
             joinedFamilySession(role = FamilyRole.Member),
         )
@@ -906,10 +959,8 @@ class FamilySessionCoordinatorTest {
         }
         val coordinator = coordinator(preferences = preferences, backend = backend)
 
-        assertThat(
-            coordinator.execute(FamilySessionCommand.Leave).isSuccess,
-        ).isTrue()
-        assertThat(preferences.current()).isEqualTo(SyncSession())
+        assertThat(coordinator.execute(FamilySessionCommand.Leave).isFailure).isTrue()
+        assertThat(preferences.current().isJoined).isTrue()
     }
 
     @Test
@@ -922,7 +973,9 @@ class FamilySessionCoordinatorTest {
         val coordinator = coordinator(preferences = preferences, backend = backend)
 
         assertThat(
-            coordinator.execute(FamilySessionCommand.DeleteFamily).isFailure,
+            coordinator.execute(
+                FamilySessionCommand.DeleteFamily("乐乐一家", "root-password-secret"),
+            ).isFailure,
         ).isTrue()
         assertThat(preferences.current()).isEqualTo(previous)
     }
@@ -948,6 +1001,278 @@ class FamilySessionCoordinatorTest {
         ).hasMessageThat().contains("管理员")
         assertThat(ownerBackend.leaveFailure).isNull()
         assertThat(memberBackend.renamedFamilyNames).isEmpty()
+    }
+
+    @Test
+    fun ownerRevokesAnyDeviceWhileBothRolesCanLogoutOnlyTheirCurrentDevice() = runTest {
+        val ownerPreferences = MemorySyncPreferences(joinedFamilySession(FamilyRole.Owner))
+        val ownerBackend = RecordingSyncBackend()
+        val owner = coordinator(ownerPreferences, ownerBackend)
+        val memberPreferences = MemorySyncPreferences(joinedFamilySession(FamilyRole.Member))
+        val memberBackend = RecordingSyncBackend()
+        val member = coordinator(memberPreferences, memberBackend)
+
+        assertThat(
+            owner.execute(FamilySessionCommand.RevokeFamilyDevice("device-remote")).isSuccess,
+        ).isTrue()
+        assertThat(
+            member.execute(FamilySessionCommand.RevokeFamilyDevice("device-remote")).isFailure,
+        ).isTrue()
+        assertThat(ownerBackend.revokedDeviceIds).containsExactly("device-remote")
+        assertThat(memberBackend.revokedDeviceIds).isEmpty()
+
+        assertThat(owner.execute(FamilySessionCommand.LogoutCurrentDevice).isSuccess).isTrue()
+        assertThat(member.execute(FamilySessionCommand.LogoutCurrentDevice).isSuccess).isTrue()
+        assertThat(ownerBackend.deviceLogoutCalls).isEqualTo(1)
+        assertThat(memberBackend.deviceLogoutCalls).isEqualTo(1)
+        assertThat(ownerPreferences.current().isJoined).isTrue()
+        assertThat(memberPreferences.current().isJoined).isTrue()
+    }
+
+    @Test
+    fun memberRequestIsDurableAndPendingChecksNeverClaimOrPublishASession() = runTest {
+        val initial = SyncSession(
+            serverHost = "family.home",
+            serverPort = 8765,
+            serverScheme = "https",
+        )
+        val preferences = MemorySyncPreferences(initial)
+        val backend = RecordingSyncBackend().apply {
+            memberLoginStatuses += MemberLoginStatus.Pending
+        }
+        val coordinator = coordinator(preferences = preferences, backend = backend)
+
+        val requested = coordinator.execute(
+            FamilySessionCommand.RequestMemberLogin("  爸爸  ", "  Pixel 9  "),
+        ).getOrThrow() as FamilySessionOutcome.MemberLoginRequested
+        val checked = coordinator.execute(FamilySessionCommand.CheckMemberLogin)
+            .getOrThrow() as FamilySessionOutcome.MemberLoginChecked
+
+        assertThat(backend.memberLoginRequests).containsExactly(
+            Triple("https://family.home:8765", "爸爸", "Pixel 9"),
+        )
+        assertThat(requested.request).isEqualTo(preferences.pendingMemberLogin.first())
+        assertThat(preferences.pendingMemberSecret())
+            .isEqualTo(backend.nextMemberLoginReceipt.pendingSecret)
+        assertThat(checked.result).isEqualTo(MemberLoginCheckResult.Waiting(requested.request))
+        assertThat(backend.memberLoginClaimCalls).isEqualTo(0)
+        assertThat(preferences.current().isJoined).isFalse()
+    }
+
+    @Test
+    fun approvedMemberClaimPersistsSessionBeforeReplicaRecoveryAndNeverClaimsTwice() = runTest {
+        val initial = SyncSession(
+            serverHost = "family.home",
+            serverPort = 8765,
+            serverScheme = "https",
+        )
+        val preferences = MemorySyncPreferences(initial)
+        val backend = RecordingSyncBackend().apply {
+            memberLoginStatuses += MemberLoginStatus.Approved
+        }
+        preferences.savePendingMemberLogin(
+            backend.nextMemberLoginReceipt,
+            displayName = "爸爸",
+            deviceName = "Pixel 9",
+        )
+        var resetSawDurableSession = false
+        val coordinator = coordinator(
+            preferences = preferences,
+            backend = backend,
+            replica = RecordingFamilySessionReplica(
+                onReset = {
+                    resetSawDurableSession = preferences.current().isJoined
+                },
+            ),
+            recoverReclaimedSession = {
+                assertThat(preferences.current()).isEqualTo(it)
+                error("first pull offline")
+            },
+        )
+
+        val checked = coordinator.execute(FamilySessionCommand.CheckMemberLogin)
+            .getOrThrow() as FamilySessionOutcome.MemberLoginChecked
+        val joined = checked.result as MemberLoginCheckResult.Joined
+
+        assertThat(resetSawDurableSession).isTrue()
+        assertThat(joined.session).isEqualTo(preferences.current())
+        assertThat(joined.dataRecovery).isEqualTo(InitialFamilyDataRecovery.RetryRequired)
+        assertThat(preferences.pendingMemberLogin.first()).isNull()
+        assertThat(preferences.pendingMemberSecret()).isEmpty()
+        assertThat(backend.memberLoginClaimCalls).isEqualTo(1)
+
+        assertThat(coordinator.execute(FamilySessionCommand.CheckMemberLogin).isFailure).isTrue()
+        assertThat(backend.memberLoginClaimCalls).isEqualTo(1)
+    }
+
+    @Test
+    fun rejectedMemberRequestClearsCapabilityWithoutCreatingIdentity() = runTest {
+        val initial = SyncSession(
+            serverHost = "family.home",
+            serverPort = 8765,
+            serverScheme = "https",
+        )
+        val preferences = MemorySyncPreferences(initial)
+        val backend = RecordingSyncBackend().apply {
+            memberLoginStatuses += MemberLoginStatus.Rejected
+        }
+        preferences.savePendingMemberLogin(
+            backend.nextMemberLoginReceipt,
+            displayName = "爸爸",
+            deviceName = "Pixel 9",
+        )
+        val coordinator = coordinator(preferences = preferences, backend = backend)
+
+        val outcome = coordinator.execute(FamilySessionCommand.CheckMemberLogin)
+            .getOrThrow() as FamilySessionOutcome.MemberLoginChecked
+
+        assertThat(outcome.result)
+            .isEqualTo(MemberLoginCheckResult.Terminal(MemberLoginStatus.Rejected))
+        assertThat(preferences.pendingMemberLogin.first()).isNull()
+        assertThat(preferences.current()).isEqualTo(initial)
+        assertThat(backend.memberLoginClaimCalls).isEqualTo(0)
+    }
+
+    @Test
+    fun onlyOwnerCanListApproveAndRejectPendingMemberRequests() = runTest {
+        val requestId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        val pending = PendingMemberLoginRequest(
+            requestId = requestId,
+            displayName = "爸爸",
+            deviceName = "Pixel 9",
+            createdAtEpochSeconds = 100,
+            expiresAtEpochSeconds = 200,
+        )
+        val ownerBackend = RecordingSyncBackend().apply {
+            nextPendingMemberLogins = listOf(pending)
+        }
+        val owner = coordinator(
+            preferences = MemorySyncPreferences(joinedFamilySession(FamilyRole.Owner)),
+            backend = ownerBackend,
+        )
+        val memberBackend = RecordingSyncBackend()
+        val member = coordinator(
+            preferences = MemorySyncPreferences(joinedFamilySession(FamilyRole.Member)),
+            backend = memberBackend,
+        )
+
+        val listed = owner.execute(FamilySessionCommand.ListPendingMemberLogins)
+            .getOrThrow() as FamilySessionOutcome.PendingMemberLoginsListed
+        assertThat(listed.requests).containsExactly(pending)
+        assertThat(
+            owner.execute(FamilySessionCommand.ApproveNewMemberLogin(requestId)).isSuccess,
+        ).isTrue()
+        assertThat(
+            owner.execute(
+                FamilySessionCommand.BindExistingMemberLogin(requestId, "membership-existing"),
+            ).isSuccess,
+        ).isTrue()
+        assertThat(
+            owner.execute(FamilySessionCommand.RejectMemberLogin(requestId)).isSuccess,
+        ).isTrue()
+        assertThat(ownerBackend.approvedMemberLoginRequestIds).containsExactly(requestId)
+        assertThat(ownerBackend.boundMemberLoginRequests).containsExactly(
+            requestId to "membership-existing",
+        )
+        assertThat(ownerBackend.rejectedMemberLoginRequestIds).containsExactly(requestId)
+
+        assertThat(member.execute(FamilySessionCommand.ListPendingMemberLogins).isFailure).isTrue()
+        assertThat(
+            member.execute(FamilySessionCommand.ApproveNewMemberLogin(requestId)).isFailure,
+        ).isTrue()
+        assertThat(
+            member.execute(
+                FamilySessionCommand.BindExistingMemberLogin(requestId, "membership-existing"),
+            ).isFailure,
+        ).isTrue()
+        assertThat(memberBackend.approvedMemberLoginRequestIds).isEmpty()
+        assertThat(memberBackend.boundMemberLoginRequests).isEmpty()
+    }
+
+    @Test
+    fun onlyOwnerCanCreateTargetBoundMemberLoginGrant() = runTest {
+        val endpoint = TrustedEndpointProfile.systemPki("https://family.example.com")
+        val ownerPreferences = MemorySyncPreferences(
+            joinedFamilySession(FamilyRole.Owner).copy(
+                serverHost = "family.example.com",
+                serverPort = 443,
+                serverScheme = "https",
+            ),
+        ).apply { rememberEndpoint(endpoint) }
+        val ownerBackend = RecordingSyncBackend()
+        val owner = coordinator(ownerPreferences, ownerBackend)
+
+        val outcome = owner.execute(
+            FamilySessionCommand.CreateMemberLoginGrant("membership-member"),
+        ).getOrThrow()
+
+        assertThat(outcome).isEqualTo(
+            FamilySessionOutcome.MemberLoginGrantCreated(ownerBackend.nextMemberLoginGrant),
+        )
+        assertThat(ownerBackend.memberLoginGrantTargets)
+            .containsExactly(Triple("token-a", endpoint, "membership-member"))
+
+        val memberBackend = RecordingSyncBackend()
+        val member = coordinator(
+            MemorySyncPreferences(joinedFamilySession(FamilyRole.Member)),
+            memberBackend,
+        )
+        assertThat(
+            member.execute(
+                FamilySessionCommand.CreateMemberLoginGrant("membership-member"),
+            ).isFailure,
+        ).isTrue()
+        assertThat(memberBackend.memberLoginGrantTargets).isEmpty()
+    }
+
+    @Test
+    fun qrGrantClaimRequiresExactPersistedTrustAndPersistsSessionBeforeRecovery() = runTest {
+        val endpoint = TrustedEndpointProfile.tofuSpki(
+            "https://family.example.com:9443",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        )
+        val payload = MemberLoginQrPayload(
+            endpoint = endpoint,
+            grant = "grant-0000000000000000000000000000000000000",
+            familyName = "乐乐一家",
+            memberDisplayName = "妈妈",
+            expiresAtEpochSeconds = 1_753_419_000,
+        )
+        val preferences = MemorySyncPreferences(SyncSession()).apply {
+            rememberEndpoint(endpoint)
+        }
+        val backend = RecordingSyncBackend()
+        var recoverySawDurableSession = false
+        val coordinator = coordinator(
+            preferences = preferences,
+            backend = backend,
+            recoverReclaimedSession = {
+                recoverySawDurableSession = preferences.current().isJoined
+                error("first pull offline")
+            },
+        )
+
+        val outcome = coordinator.execute(
+            FamilySessionCommand.ClaimMemberLoginGrant(payload, "  Pixel Tablet  "),
+        ).getOrThrow() as FamilySessionOutcome.Joined
+
+        assertThat(recoverySawDurableSession).isTrue()
+        assertThat(outcome.session).isEqualTo(preferences.current())
+        assertThat(outcome.dataRecovery).isEqualTo(InitialFamilyDataRecovery.RetryRequired)
+        assertThat(backend.memberLoginGrantClaims).containsExactly(
+            Triple(endpoint, payload.grant, "Pixel Tablet"),
+        )
+        assertThat(preferences.current().baseUrl).isEqualTo(endpoint.origin)
+
+        val mismatchBackend = RecordingSyncBackend()
+        val mismatchPreferences = MemorySyncPreferences(SyncSession()).apply {
+            rememberEndpoint(TrustedEndpointProfile.systemPki("https://other.example.com"))
+        }
+        val mismatch = coordinator(mismatchPreferences, mismatchBackend).execute(
+            FamilySessionCommand.ClaimMemberLoginGrant(payload, "Pixel Tablet"),
+        )
+        assertThat(mismatch.isFailure).isTrue()
+        assertThat(mismatchBackend.memberLoginGrantClaims).isEmpty()
     }
 
     @Test
@@ -1032,5 +1357,5 @@ private fun joinedFamilySession(
     pullGeneration = "generation-a",
     serverHost = "192.168.1.20",
     serverPort = 8787,
-    allowedSsids = listOf("Home"),
+    familyName = "乐乐一家",
 )

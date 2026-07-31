@@ -4,12 +4,20 @@
 
 **Blocked by:** 10 — 成员与设备称呼生命周期；11 — 撤销设备与退出当前设备
 
-**Status:** ready-for-agent
+**Status:** complete
 
-- [ ] 管理员可删除普通成员；普通成员可选择“退出家庭”，但管理员不得通过该动作退出或绕过家庭删除规则。
-- [ ] 服务端在一个原子操作中删除 membership、其全部 Device、会话、待确认申请和改名申请，不保留可用于识别“旧成员”的身份记录或墓碑。
-- [ ] 删除后立即释放该家庭内的规范化成员称呼，后续可创建同名称的新成员，但不得自动关联旧身份或旧设备。
-- [ ] 该成员已同步的记录、计划和完整照片包继续作为家庭共享事实存在；作者引用置空，前台统一显示“家人”。
-- [ ] 匿名化后的共享事实只能由管理员按产品权限继续管理，不得因新建同名称成员而恢复作者所有权。
-- [ ] 被删除成员的所有设备在下一次连接已信任 endpoint 时收到明确的 `membership_deleted` 结果并执行可恢复的本地家庭数据清理。
-- [ ] UI 清楚区分“退出当前设备”“退出家庭”和管理员“删除成员”；增加原子删除、称呼复用、匿名数据、离线设备和中断恢复测试。
+- [x] 管理员可删除普通成员；普通成员可选择“退出家庭”，但管理员不得通过该动作退出或绕过家庭删除规则。
+- [x] 服务端在一个原子操作中删除 membership、其全部 Device、会话、待确认申请和改名申请，不保留可用于识别“旧成员”的身份记录或墓碑。
+- [x] 删除后立即释放该家庭内的规范化成员称呼，后续可创建同名称的新成员，但不得自动关联旧身份或旧设备。
+- [x] 该成员已同步的记录、计划和完整照片包继续作为家庭共享事实存在；作者引用置空，前台统一显示“家人”。
+- [x] 匿名化后的共享事实只能由管理员按产品权限继续管理，不得因新建同名称成员而恢复作者所有权。
+- [x] 被删除成员的所有设备在下一次连接已信任 endpoint 时收到明确的 `membership_deleted` 结果并执行可恢复的本地家庭数据清理。
+- [x] UI 清楚区分“退出当前设备”“退出家庭”和管理员“删除成员”；增加原子删除、称呼复用、匿名数据、离线设备和中断恢复测试。
+
+## Verification · 2026-07-31
+
+- `cargo fmt --all -- --check`、`cargo clippy --all-targets --all-features -- -D warnings` 通过。
+- `cargo test --locked --lib --test api` 通过（38 个库测试、105 个 API 测试）；`cargo test --locked --test tls` 通过（1 个 TLS 测试）。
+- `./gradlew :sync:testDebugUnitTest :domain:testDebugUnitTest :feature:family:testDebugUnitTest` 通过（362 + 293 + 19）。
+- `./gradlew :feature:family:connectedDebugAndroidTest` 在 `lezi_api35(AVD) - 15` 通过（20 个设备测试）。
+- `./gradlew :app:assembleDebug` 与 `git diff --check` 通过。

@@ -19,6 +19,57 @@ import org.junit.Test
 
 class ReplicaSyncEngineTest {
     @Test
+    fun pullAcceptsServerAnonymizedRecordAndPlanAuthorsAsFamilyFallback() = runTest {
+        val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
+        val rig = ReplicaEngineRig(session)
+        val babyId = rig.babies.seed(
+            localReplicaBaby().copy(syncDirty = false, familyAuthority = true),
+        )
+        rig.records.seed(
+            RecordEntity(
+                clientUuid = "anonymous-record",
+                babyId = babyId,
+                type = "formula",
+                timestamp = 900,
+                payloadJson = """{"amount_ml":70}""",
+                createdByMembershipId = "deleted-member",
+                updatedAt = 400,
+                syncDirty = false,
+            ),
+        )
+        rig.carePlans.seed(
+            localReplicaCarePlan("anonymous-plan", "deleted-member", updatedAt = 401).copy(
+                babyId = babyId,
+            ),
+        )
+
+        rig.engine.applyInitialEntities(
+            session,
+            listOf(
+                SyncEntity(
+                    type = "record",
+                    clientUuid = "anonymous-record",
+                    payloadJson =
+                        """{"baby_client_uuid":"baby-local","created_by_membership_id":null,"type":"formula","custom_item_client_uuid":null,"timestamp":1000,"end_timestamp":null,"note":null,"payload_json":{"amount_ml":80},"schema_version":2}""",
+                    updatedAt = 500,
+                ),
+                SyncEntity(
+                    type = "care_plan",
+                    clientUuid = "anonymous-plan",
+                    payloadJson =
+                        """{"baby_client_uuid":"baby-local","type":"formula","custom_item_client_uuid":null,"scheduled_at":9000000001000,"scheduled_zone_id":"Asia/Shanghai","note":null,"status":"pending","payload_json":{"amount_ml":120},"schema_version":2,"created_by_membership_id":null,"fulfilled_record_client_uuid":null,"fulfilled_at":null}""",
+                    updatedAt = 501,
+                ),
+            ),
+        )
+
+        assertThat(rig.records.getByClientUuid("anonymous-record")?.createdByMembershipId)
+            .isEmpty()
+        assertThat(rig.carePlans.getByClientUuid("anonymous-plan")?.createdByMembershipId)
+            .isEmpty()
+    }
+
+    @Test
     fun concurrentNextFeedCreateAcceptsNasWinnerAndDropsLosingOutbox() = runTest {
         val session = joinedReplicaSession().copy(
             role = FamilyRole.Member,
@@ -960,7 +1011,6 @@ private fun joinedReplicaSession() = SyncSession(
     membershipId = "membership-a",
     serverHost = "192.168.50.4",
     serverPort = 8765,
-    allowedSsids = listOf("Home"),
 )
 
 private fun remoteReplicaBaby() = SyncEntity(

@@ -27,6 +27,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -55,6 +56,7 @@ import com.lezi.babylog.core.model.RecordDateDecision
 import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordTimeDecision
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.designsystem.LeziSurfacePanel
 import com.lezi.babylog.designsystem.LeziClockDialDialog
 import com.lezi.babylog.designsystem.LeziDatePicker
@@ -71,6 +73,8 @@ import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.GrowthMeasurementLifecycle
 import com.lezi.babylog.domain.ObserveGrowthMeasurements
+import com.lezi.babylog.sync.SyncPort
+import com.lezi.babylog.sync.SyncTrigger
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate
@@ -86,6 +90,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 
 enum class GrowthMetric { WEIGHT, HEIGHT, HEAD }
 
@@ -111,6 +116,7 @@ class GrowthViewModel @Inject constructor(
     private val careLog: CareLog,
     private val settingsStore: SettingsStore,
     private val measurements: GrowthMeasurementLifecycle,
+    private val syncPort: SyncPort,
 ) : ViewModel() {
     private val metric = MutableStateFlow(GrowthMetric.WEIGHT)
     private val writes = GrowthMeasurementWriteCoordinator(
@@ -121,6 +127,12 @@ class GrowthViewModel @Inject constructor(
     )
 
     val editor = writes.state
+
+    val syncStatus = syncPort.status().stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5_000),
+        SyncStatus.Disabled,
+    )
 
     val timeStepMin = settingsStore.settings
         .map { it.timeStepMin }
@@ -195,6 +207,10 @@ class GrowthViewModel @Inject constructor(
 
     fun deleteMeasurement(): Boolean = writes.submitDelete()
 
+    fun refresh() {
+        viewModelScope.launch { syncPort.sync(SyncTrigger.PullToRefresh) }
+    }
+
 }
 
 private val GrowthMetric.recordType: RecordType
@@ -211,6 +227,7 @@ fun GrowthRoute(
     vm: GrowthViewModel = hiltViewModel(),
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
+    val syncStatus by vm.syncStatus.collectAsStateWithLifecycle()
     val timeStepMin by vm.timeStepMin.collectAsStateWithLifecycle()
     val timePickerStyle by vm.timePickerStyle.collectAsStateWithLifecycle()
     val preferredHand by vm.preferredHand.collectAsStateWithLifecycle()
@@ -263,20 +280,33 @@ fun GrowthRoute(
     }
 
     PageScaffoldBackground {
-        Column(
-            Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(LeziSpacing.Page),
-            verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
+        PullToRefreshBox(
+            isRefreshing = syncStatus == SyncStatus.Syncing,
+            onRefresh = vm::refresh,
+            modifier = Modifier.fillMaxSize(),
         ) {
-            com.lezi.babylog.designsystem.PageHero(
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(LeziSpacing.Page),
+                verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
+            ) {
+                com.lezi.babylog.designsystem.PageHero(
                 eyebrow = "",
                 title = "成长",
                 trailing = {
                     LeziPrimaryButton("新增测量", onClick = { openNewMeasurement() })
                 },
             )
+
+            if (syncStatus == SyncStatus.Error) {
+                Text(
+                    "同步遇到问题，本机成长记录仍可使用",
+                    style = LeziTypography.Meta,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FilterChip(
@@ -377,6 +407,7 @@ fun GrowthRoute(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(LeziSpacing.Xxl))
+            }
         }
     }
 

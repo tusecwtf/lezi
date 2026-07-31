@@ -3,11 +3,13 @@ package com.lezi.babylog.sync
 import com.lezi.babylog.core.model.RecordPhotoResourcePolicy
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
+import java.text.Normalizer
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import javax.inject.Inject
+import javax.net.ssl.HttpsURLConnection
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -45,15 +47,42 @@ internal fun requireMemberDisplayName(displayName: String?): String {
     require(displayName.none { it.isISOControl() || it.isBidirectionalControl() }) {
         "家庭称呼不能包含控制字符或双向格式控制符"
     }
-    val normalized = displayName.trim()
+    val normalized = normalizeHumanFacingName(displayName)
     require(normalized.isNotEmpty()) { "请填写家庭称呼" }
-    require(normalized != LOCAL_DEVICE_DISPLAY_NAME) {
+    require(normalized != normalizeHumanFacingName(LOCAL_DEVICE_DISPLAY_NAME)) {
         "请填写家庭称呼，不能使用本机占位名"
     }
     require(normalized.codePointCount(0, normalized.length) <= 128) {
         "家庭称呼最多 128 个字符"
     }
     return normalized
+}
+
+fun requireDeviceName(deviceName: String?): String {
+    require(!deviceName.isNullOrBlank()) { "请填写设备称呼" }
+    require(deviceName.none { it.isISOControl() || it.isBidirectionalControl() }) {
+        "设备称呼不能包含控制字符或双向格式控制符"
+    }
+    return normalizeHumanFacingName(deviceName).also {
+        require(it.isNotEmpty()) { "请填写设备称呼" }
+        require(it.codePointCount(0, it.length) <= 128) { "设备称呼最多 128 个字符" }
+    }
+}
+
+private fun normalizeHumanFacingName(value: String): String {
+    val compatibilityNormalized = Normalizer.normalize(value, Normalizer.Form.NFKC).trim()
+    return buildString(compatibilityNormalized.length) {
+        var pendingSpace = false
+        compatibilityNormalized.forEach { character ->
+            if (character.isWhitespace()) {
+                pendingSpace = isNotEmpty()
+            } else {
+                if (pendingSpace) append(' ')
+                append(character)
+                pendingSpace = false
+            }
+        }
+    }
 }
 
 /**
@@ -79,7 +108,19 @@ private fun Char.isBidirectionalControl(): Boolean =
         this in '\u202a'..'\u202e' ||
         this in '\u2066'..'\u206f'
 
-class HttpSyncBackend @Inject constructor() : SyncBackend {
+internal fun interface SyncHttpConnectionFactory {
+    fun open(url: URL): HttpURLConnection
+}
+
+private object DefaultSyncHttpConnectionFactory : SyncHttpConnectionFactory {
+    override fun open(url: URL): HttpURLConnection = url.openConnection() as HttpURLConnection
+}
+
+class HttpSyncBackend internal constructor(
+    private val connectionFactory: SyncHttpConnectionFactory,
+) : SyncBackend {
+    @Inject
+    constructor() : this(DefaultSyncHttpConnectionFactory)
     override suspend fun create(
         baseUrl: String,
         deviceId: String,
@@ -89,15 +130,206 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
         familyName: String?,
     ) =
         post(baseUrl, "/v1/family/create", null, buildJsonObject {
-            put("device_id", deviceId)
             put("create_request_id", createRequestId)
             put("display_name", requireMemberDisplayName(displayName))
-            normalizeFamilyNameForWire(familyName)?.let { put("family_name", it) }
+            put("device_name", requireDeviceName(deviceId))
+            put("family_name", requireNotNull(normalizeFamilyNameForWire(familyName)) {
+                "请填写家庭名"
+            })
         }, extraHeaders = buildMap {
             bootstrapSecret?.takeIf(String::isNotBlank)?.let {
                 put(BOOTSTRAP_SECRET_HEADER, it)
             }
         }).toCreateResult()
+
+    override suspend fun refresh(baseUrl: String, refreshToken: String): SessionRefreshResult {
+        val token = refreshToken.trim()
+        require(token.isNotEmpty()) { "当前设备缺少 refresh token" }
+        return post(
+            baseUrl,
+            "/v1/session/refresh",
+            null,
+            buildJsonObject { put("refresh_token", token) },
+        ).toSessionRefreshResult()
+    }
+
+    override suspend fun refresh(
+        endpoint: TrustedEndpointProfile,
+        refreshToken: String,
+    ): SessionRefreshResult {
+        val token = refreshToken.trim()
+        require(token.isNotEmpty()) { "当前设备缺少 refresh token" }
+        return post(
+            endpoint = endpoint,
+            path = "/v1/session/refresh",
+            token = null,
+            body = buildJsonObject { put("refresh_token", token) },
+        ).toSessionRefreshResult()
+    }
+
+    override suspend fun ownerLogin(
+        baseUrl: String,
+        deviceName: String,
+        loginRequestId: String,
+        rootPassword: String,
+        takeover: Boolean,
+    ): JoinResult {
+        val secret = rootPassword
+        require(secret.isNotBlank()) { "请填写管理员根密码" }
+        return post(
+            base = baseUrl,
+            path = if (takeover) "/v1/owner/takeover" else "/v1/owner/login",
+            token = null,
+            body = buildJsonObject {
+                put("login_request_id", loginRequestId)
+                put("device_name", requireDeviceName(deviceName))
+            },
+            extraHeaders = mapOf(BOOTSTRAP_SECRET_HEADER to secret),
+        ).toOwnerLoginResult()
+    }
+
+    override suspend fun requestMemberLogin(
+        baseUrl: String,
+        displayName: String,
+        deviceName: String,
+    ): MemberLoginReceipt {
+        val json = post(
+            baseUrl,
+            "/v1/member/requests",
+            null,
+            buildJsonObject {
+                put("display_name", requireMemberDisplayName(displayName))
+                put("device_name", requireDeviceName(deviceName))
+            },
+        )
+        require(json.requiredString("status", "member request") == "pending") {
+            "member request 响应 status 无效"
+        }
+        return MemberLoginReceipt(
+            requestId = json.requiredNonBlankString("request_id", "member request"),
+            pendingSecret = json.requiredNonBlankString("pending_secret", "member request"),
+            expiresAtEpochSeconds = json.requiredLong("expires_at", "member request"),
+        )
+    }
+
+    override suspend fun memberLoginStatus(
+        baseUrl: String,
+        pendingSecret: String,
+    ): MemberLoginStatus = post(
+        baseUrl,
+        "/v1/member/requests/status",
+        null,
+        pendingSecretBody(pendingSecret),
+    ).requiredMemberLoginStatus("member request status")
+
+    override suspend fun cancelMemberLogin(baseUrl: String, pendingSecret: String) {
+        post(
+            baseUrl,
+            "/v1/member/requests/cancel",
+            null,
+            pendingSecretBody(pendingSecret),
+        )
+    }
+
+    override suspend fun claimMemberLogin(
+        baseUrl: String,
+        pendingSecret: String,
+    ): JoinResult = post(
+        baseUrl,
+        "/v1/member/requests/claim",
+        null,
+        pendingSecretBody(pendingSecret),
+    ).toMemberClaimResult()
+
+    override suspend fun pendingMemberLogins(
+        session: SyncSession,
+    ): List<PendingMemberLoginRequest> = get(
+        session.baseUrl,
+        "/v1/member/requests",
+        session.familyToken,
+    ).requiredArray("requests", "pending member requests").mapIndexed { index, element ->
+        val request = element as? JsonObject
+            ?: throw IllegalArgumentException("requests[$index] 不是对象")
+        PendingMemberLoginRequest(
+            requestId = request.requiredNonBlankString("request_id", "requests[$index]"),
+            displayName = request.requiredNonBlankString("display_name", "requests[$index]"),
+            deviceName = request.requiredNonBlankString("device_name", "requests[$index]"),
+            createdAtEpochSeconds = request.requiredLong("created_at", "requests[$index]"),
+            expiresAtEpochSeconds = request.requiredLong("expires_at", "requests[$index]"),
+        )
+    }
+
+    override suspend fun approveNewMemberLogin(session: SyncSession, requestId: String) {
+        post(
+            session.baseUrl,
+            "/v1/member/requests/${requireRequestId(requestId)}/approve-new",
+            session.familyToken,
+            buildJsonObject {},
+        )
+    }
+
+    override suspend fun bindExistingMemberLogin(
+        session: SyncSession,
+        requestId: String,
+        membershipId: String,
+    ) {
+        post(
+            session.baseUrl,
+            "/v1/member/requests/${requireRequestId(requestId)}/bind-existing",
+            session.familyToken,
+            buildJsonObject {
+                put("membership_id", requireTargetMembershipId(membershipId))
+            },
+        )
+    }
+
+    override suspend fun rejectMemberLogin(session: SyncSession, requestId: String) {
+        post(
+            session.baseUrl,
+            "/v1/member/requests/${requireRequestId(requestId)}/reject",
+            session.familyToken,
+            buildJsonObject {},
+        )
+    }
+
+    override suspend fun createMemberLoginGrant(
+        session: SyncSession,
+        endpoint: TrustedEndpointProfile,
+        membershipId: String,
+    ): MemberLoginGrant {
+        require(endpoint.matchesOrigin(session.baseUrl)) { "可信服务器与当前家庭会话不一致" }
+        val json = post(
+            endpoint,
+            "/v1/member/login-grants",
+            session.familyToken,
+            buildJsonObject {
+                put("membership_id", requireTargetMembershipId(membershipId))
+            },
+        )
+        return MemberLoginGrant(
+            grant = json.requiredUrlSafeCapability("grant", "member login grant"),
+            familyName = json.requiredFamilyName("member login grant"),
+            memberDisplayName = requireMemberDisplayName(
+                json.requiredNonBlankString("member_display_name", "member login grant"),
+            ),
+            expiresAtEpochSeconds = json.requiredLong("expires_at", "member login grant")
+                .also { require(it > 0) { "member login grant 响应 expires_at 无效" } },
+        )
+    }
+
+    override suspend fun claimMemberLoginGrant(
+        endpoint: TrustedEndpointProfile,
+        grant: String,
+        deviceName: String,
+    ): JoinResult = post(
+        endpoint = endpoint,
+        path = "/v1/member/login-grants/claim",
+        token = null,
+        body = buildJsonObject {
+            put("grant", requireUrlSafeCapability(grant))
+            put("device_name", requireDeviceName(deviceName))
+        },
+    ).toMemberClaimResult()
 
     override suspend fun pull(session: SyncSession): PullResult {
         session.requireCurrentReplicaTransport()
@@ -135,8 +367,11 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
             put("display_name", requireMemberDisplayName(displayName))
         }).toJoinResult()
 
-    override suspend fun updateMyDisplayName(session: SyncSession, displayName: String) {
-        post(
+    override suspend fun updateMyDisplayName(
+        session: SyncSession,
+        displayName: String,
+    ): DisplayNameUpdateResult {
+        val response = post(
             session.baseUrl,
             "/v1/family/display-name",
             session.familyToken,
@@ -144,17 +379,119 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
                 put("display_name", requireMemberDisplayName(displayName))
             },
         )
+        return when (response.requiredString("status", "display-name")) {
+            "updated" -> DisplayNameUpdateResult.Updated(
+                response.requiredNonBlankString("display_name", "display-name"),
+            )
+            "pending" -> DisplayNameUpdateResult.Pending(
+                response.toPendingMemberRenameRequest(
+                    context = "display-name",
+                    fallbackMembershipId = session.membershipId,
+                ),
+            )
+            else -> throw IllegalArgumentException("display-name.status 无效")
+        }
+    }
+
+    override suspend fun pendingMemberRenameRequests(
+        session: SyncSession,
+    ): List<PendingMemberRenameRequest> {
+        val response = get(
+            session.baseUrl,
+            "/v1/family/rename-requests",
+            session.familyToken,
+        )
+        return response.requiredArray("requests", "rename-requests").mapIndexed { index, item ->
+            val request = item as? JsonObject
+                ?: throw IllegalArgumentException("rename-requests[$index] 不是对象")
+            request.toPendingMemberRenameRequest("rename-requests[$index]")
+        }
+    }
+
+    override suspend fun approveMemberRename(session: SyncSession, requestId: String) {
+        post(
+            session.baseUrl,
+            "/v1/family/rename-requests/${requireOpaqueActionId(requestId, "改名申请")}/approve",
+            session.familyToken,
+            buildJsonObject {},
+        )
+    }
+
+    override suspend fun rejectMemberRename(session: SyncSession, requestId: String) {
+        post(
+            session.baseUrl,
+            "/v1/family/rename-requests/${requireOpaqueActionId(requestId, "改名申请")}/reject",
+            session.familyToken,
+            buildJsonObject {},
+        )
+    }
+
+    override suspend fun cancelMyMemberRename(session: SyncSession) {
+        post(
+            session.baseUrl,
+            "/v1/family/rename-requests/cancel",
+            session.familyToken,
+            buildJsonObject {},
+        )
+    }
+
+    override suspend fun addFamilyMember(
+        session: SyncSession,
+        displayName: String,
+    ): FamilyMember {
+        val response = post(
+            session.baseUrl,
+            "/v1/family/members",
+            session.familyToken,
+            buildJsonObject { put("display_name", requireMemberDisplayName(displayName)) },
+        )
+        return FamilyMember(
+            displayName = response.requiredNonBlankString("display_name", "member-create"),
+            role = when (response.requiredString("role", "member-create")) {
+                "member" -> FamilyRole.Member
+                else -> throw IllegalArgumentException("member-create.role 无效")
+            },
+            isSelf = false,
+            membershipId = response.requiredNonBlankString("membership_id", "member-create"),
+            devices = emptyList(),
+        )
+    }
+
+    override suspend fun renameFamilyMember(
+        session: SyncSession,
+        membershipId: String,
+        displayName: String,
+    ) {
+        post(
+            session.baseUrl,
+            "/v1/family/members/${requireOpaqueActionId(membershipId, "家庭成员")}/display-name",
+            session.familyToken,
+            buildJsonObject { put("display_name", requireMemberDisplayName(displayName)) },
+        )
+    }
+
+    override suspend fun renameFamilyDevice(
+        session: SyncSession,
+        deviceId: String,
+        deviceName: String,
+    ) {
+        post(
+            session.baseUrl,
+            "/v1/family/devices/${requireOpaqueActionId(deviceId, "家庭设备")}/display-name",
+            session.familyToken,
+            buildJsonObject { put("device_name", requireDeviceName(deviceName)) },
+        )
     }
 
     override suspend fun renameFamily(session: SyncSession, familyName: String?) {
-        val normalized = normalizeFamilyNameForWire(familyName)
+        val normalized = requireNotNull(normalizeFamilyNameForWire(familyName)) {
+            "家庭名不能为空"
+        }
         post(
             session.baseUrl,
             "/v1/family/name",
             session.familyToken,
-            buildJsonObject {
-                if (normalized == null) put("family_name", JsonNull) else put("family_name", normalized)
-            },
+            buildJsonObject { put("family_name", normalized) },
         )
     }
 
@@ -163,6 +500,35 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
         return json.requiredArray("members", "members").mapIndexed { index, memberElement ->
             val member = memberElement as? JsonObject
                 ?: throw IllegalArgumentException("members[$index] 不是对象")
+            val devices = member["devices"]?.let { deviceElement ->
+                val array = deviceElement as? JsonArray
+                    ?: throw IllegalArgumentException("members[$index].devices 不是数组")
+                array.mapIndexed { deviceIndex, item ->
+                    val device = item as? JsonObject ?: throw IllegalArgumentException(
+                        "members[$index].devices[$deviceIndex] 不是对象",
+                    )
+                    FamilyDevice(
+                        deviceId = device.requiredNonBlankString(
+                            "device_id",
+                            "members[$index].devices[$deviceIndex]",
+                        ),
+                        deviceName = requireDeviceName(
+                            device.requiredNonBlankString(
+                                "device_name",
+                                "members[$index].devices[$deviceIndex]",
+                            ),
+                        ),
+                        lastUsedAtEpochSeconds = device.requiredLong(
+                            "last_used_at",
+                            "members[$index].devices[$deviceIndex]",
+                        ),
+                        isCurrent = device.requiredBoolean(
+                            "is_current",
+                            "members[$index].devices[$deviceIndex]",
+                        ),
+                    )
+                }
+            }
             FamilyMember(
                 displayName = member.requiredNonBlankString("display_name", "members[$index]"),
                 role = when (member.requiredString("role", "members[$index]")) {
@@ -175,12 +541,50 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
                     "membership_id",
                     "members[$index]",
                 ),
+                devices = devices,
             )
         }
     }
 
+    private fun JsonObject.toPendingMemberRenameRequest(
+        context: String,
+        fallbackMembershipId: String? = null,
+    ): PendingMemberRenameRequest = PendingMemberRenameRequest(
+        requestId = requiredNonBlankString("request_id", context),
+        membershipId = this["membership_id"]?.let {
+            requiredNonBlankString("membership_id", context)
+        } ?: fallbackMembershipId?.takeIf(String::isNotBlank)
+            ?: throw IllegalArgumentException("$context 缺少 membership_id"),
+        currentDisplayName = requiredNonBlankString("current_display_name", context),
+        requestedDisplayName = requiredNonBlankString("requested_display_name", context),
+        createdAtEpochSeconds = requiredLong("created_at", context),
+        expiresAtEpochSeconds = requiredLong("expires_at", context),
+    )
+
+    private fun requireOpaqueActionId(value: String, label: String): String {
+        val normalized = value.trim()
+        require(normalized.isNotEmpty() && normalized.none { it == '/' || it == '?' || it == '#' }) {
+            "请选择有效的$label"
+        }
+        return normalized
+    }
+
     override suspend fun leave(session: SyncSession) {
         post(session.baseUrl, "/v1/leave", session.familyToken, buildJsonObject {})
+    }
+
+    override suspend fun logoutCurrentDevice(session: SyncSession) {
+        post(session.baseUrl, "/v1/device/logout", session.familyToken, buildJsonObject {})
+    }
+
+    override suspend fun revokeFamilyDevice(session: SyncSession, deviceId: String) {
+        val id = requireOpaqueActionId(deviceId, "家庭设备")
+        post(
+            session.baseUrl,
+            "/v1/family/devices/$id/revoke",
+            session.familyToken,
+            buildJsonObject {},
+        )
     }
 
     override suspend fun removeMember(session: SyncSession, membershipId: String) {
@@ -194,8 +598,22 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
         )
     }
 
-    override suspend fun deleteFamily(session: SyncSession) {
-        post(session.baseUrl, "/v1/family/delete", session.familyToken, buildJsonObject {})
+    override suspend fun deleteFamily(
+        session: SyncSession,
+        familyName: String,
+        rootPassword: String,
+    ) {
+        val normalizedFamilyName = requireNotNull(normalizeFamilyNameForWire(familyName)) {
+            "请输入家庭名"
+        }
+        require(rootPassword.isNotBlank()) { "请输入管理员根密码" }
+        post(
+            session.baseUrl,
+            "/v1/family/delete",
+            session.familyToken,
+            buildJsonObject { put("family_name", normalizedFamilyName) },
+            extraHeaders = mapOf(BOOTSTRAP_SECRET_HEADER to rootPassword),
+        )
     }
 
     override suspend fun getMedia(session: SyncSession, clientUuid: String): ByteArray =
@@ -262,6 +680,13 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
         extraHeaders: Map<String, String> = emptyMap(),
     ): JsonObject = requestJson(base, path, "POST", token, body, extraHeaders)
 
+    private suspend fun post(
+        endpoint: TrustedEndpointProfile,
+        path: String,
+        token: String?,
+        body: JsonObject,
+    ): JsonObject = requestJson(endpoint.origin, path, "POST", token, body, trustedEndpoint = endpoint)
+
     private suspend fun get(base: String, path: String, token: String?): JsonObject =
         requestJson(base, path, "GET", token, null)
 
@@ -272,8 +697,9 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
         token: String?,
         body: JsonObject?,
         extraHeaders: Map<String, String> = emptyMap(),
+        trustedEndpoint: TrustedEndpointProfile? = null,
     ): JsonObject = withContext(Dispatchers.IO) {
-        val connection = open(base, path, method, token, extraHeaders)
+        val connection = open(base, path, method, token, extraHeaders, trustedEndpoint)
         try {
             if (body != null) {
                 connection.doOutput = true
@@ -376,8 +802,15 @@ class HttpSyncBackend @Inject constructor() : SyncBackend {
         method: String,
         token: String?,
         extraHeaders: Map<String, String> = emptyMap(),
+        trustedEndpoint: TrustedEndpointProfile? = null,
     ): HttpURLConnection =
-        (URL("${base.trimEnd('/')}$path").openConnection() as HttpURLConnection).apply {
+        connectionFactory.open(URL("${base.trimEnd('/')}$path")).apply {
+            trustedEndpoint?.spkiSha256?.let { pin ->
+                require(this is HttpsURLConnection) {
+                    "固定证书的家庭服务器必须使用 HTTPS"
+                }
+                sslSocketFactory = pinnedSslContext(pin).socketFactory
+            }
             requestMethod = method
             connectTimeout = 8_000
             readTimeout = 8_000
@@ -519,25 +952,111 @@ private fun JsonObject.toBundleStageStatus(): BundleStageStatus = BundleStageSta
 
 private fun JsonObject.toCreateResult(): JoinResult {
     require(requiredString("role", "create") == "owner") { "create 响应 role 无效" }
-    val reclaimed = requireNotNull(get("reclaimed")?.jsonPrimitive?.booleanOrNull) {
-        "create 响应缺少 reclaimed"
-    }
     return JoinResult(
         familyId = requiredNonBlankString("family_id", "create"),
-        token = requiredNonBlankString("token", "create"),
+        token = requiredNonBlankString("access_token", "create"),
+        refreshToken = requiredNonBlankString("refresh_token", "create"),
+        accessExpiresAtEpochSeconds = requiredLong("access_expires_at", "create"),
+        deviceId = requiredNonBlankString("device_id", "create"),
         role = FamilyRole.Owner,
         generation = requiredNonBlankString("generation", "create"),
         familyName = requiredFamilyName("create"),
         membershipId = requiredNonBlankString("membership_id", "create"),
-        reclaimed = reclaimed,
+        reclaimed = false,
     )
 }
+
+private fun JsonObject.toOwnerLoginResult(): JoinResult {
+    require(requiredString("role", "owner login") == "owner") {
+        "owner login 响应 role 无效"
+    }
+    return JoinResult(
+        familyId = requiredNonBlankString("family_id", "owner login"),
+        token = requiredNonBlankString("access_token", "owner login"),
+        refreshToken = requiredNonBlankString("refresh_token", "owner login"),
+        accessExpiresAtEpochSeconds = requiredLong("access_expires_at", "owner login"),
+        deviceId = requiredNonBlankString("device_id", "owner login"),
+        role = FamilyRole.Owner,
+        generation = requiredNonBlankString("generation", "owner login"),
+        familyName = requiredFamilyName("owner login"),
+        membershipId = requiredNonBlankString("membership_id", "owner login"),
+    )
+}
+
+private fun JsonObject.toMemberClaimResult(): JoinResult {
+    require(requiredString("role", "member claim") == "member") {
+        "member claim 响应 role 无效"
+    }
+    return JoinResult(
+        familyId = requiredNonBlankString("family_id", "member claim"),
+        token = requiredNonBlankString("access_token", "member claim"),
+        refreshToken = requiredNonBlankString("refresh_token", "member claim"),
+        accessExpiresAtEpochSeconds = requiredLong("access_expires_at", "member claim"),
+        deviceId = requiredNonBlankString("device_id", "member claim"),
+        role = FamilyRole.Member,
+        generation = requiredNonBlankString("generation", "member claim"),
+        familyName = requiredFamilyName("member claim"),
+        membershipId = requiredNonBlankString("membership_id", "member claim"),
+    )
+}
+
+private fun pendingSecretBody(pendingSecret: String): JsonObject {
+    require(pendingSecret.isNotBlank()) { "等待确认凭据已丢失，请重新申请" }
+    return buildJsonObject { put("pending_secret", pendingSecret) }
+}
+
+private fun JsonObject.requiredMemberLoginStatus(context: String): MemberLoginStatus =
+    when (requiredString("status", context)) {
+        "pending" -> MemberLoginStatus.Pending
+        "approved" -> MemberLoginStatus.Approved
+        "rejected" -> MemberLoginStatus.Rejected
+        "cancelled" -> MemberLoginStatus.Cancelled
+        "expired" -> MemberLoginStatus.Expired
+        "claimed" -> MemberLoginStatus.Claimed
+        else -> throw IllegalArgumentException("$context 响应 status 无效")
+    }
+
+private fun requireUrlSafeCapability(value: String): String = value.trim().also {
+    require(it.matches(Regex("[A-Za-z0-9_-]{32,128}"))) { "成员登录授权格式无效" }
+}
+
+private fun JsonObject.requiredUrlSafeCapability(key: String, context: String): String =
+    requireUrlSafeCapability(requiredNonBlankString(key, context))
+
+private fun requireRequestId(requestId: String): String = requestId.trim().also {
+    require(it.matches(Regex("[A-Za-z0-9_-]{32,128}"))) { "待确认申请 ID 无效" }
+}
+
+private fun requireTargetMembershipId(membershipId: String): String = membershipId.trim().also {
+    require(it.isNotEmpty() && it.length <= 128 && it.none(Char::isWhitespace)) {
+        "目标家庭成员 ID 无效"
+    }
+}
+
+private fun JsonObject.toSessionRefreshResult(): SessionRefreshResult = SessionRefreshResult(
+    familyId = requiredNonBlankString("family_id", "refresh"),
+    membershipId = requiredNonBlankString("membership_id", "refresh"),
+    deviceId = requiredNonBlankString("device_id", "refresh"),
+    role = when (requiredString("role", "refresh")) {
+        "owner" -> FamilyRole.Owner
+        "member" -> FamilyRole.Member
+        else -> throw IllegalArgumentException("refresh 响应 role 无效")
+    },
+    accessToken = requiredNonBlankString("access_token", "refresh"),
+    refreshToken = requiredNonBlankString("refresh_token", "refresh"),
+    accessExpiresAtEpochSeconds = requiredLong("access_expires_at", "refresh"),
+    generation = requiredNonBlankString("generation", "refresh"),
+    familyName = requiredFamilyName("refresh"),
+)
 
 private fun JsonObject.toJoinResult(): JoinResult {
     require(requiredString("role", "join") == "member") { "join 响应 role 无效" }
     return JoinResult(
         familyId = requiredNonBlankString("family_id", "join"),
-        token = requiredNonBlankString("token", "join"),
+        token = requiredNonBlankString("access_token", "join"),
+        refreshToken = requiredNonBlankString("refresh_token", "join"),
+        accessExpiresAtEpochSeconds = requiredLong("access_expires_at", "join"),
+        deviceId = requiredNonBlankString("device_id", "join"),
         role = FamilyRole.Member,
         entities = entities("join"),
         cursor = requiredLong("cursor", "join"),
@@ -645,6 +1164,19 @@ internal fun syncHttpDetailOrNull(responseBody: String): String? {
         val root = Json.parseToJsonElement(trimmed).jsonObject
         val detail = root["detail"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
         detail.takeIf { it.isNotEmpty() }?.take(240)
+    }.getOrNull()
+}
+
+internal fun syncHttpCodeOrNull(responseBody: String): String? {
+    val trimmed = responseBody.trim()
+    if (trimmed.isEmpty()) return null
+    return runCatching {
+        Json.parseToJsonElement(trimmed).jsonObject["code"]
+            ?.jsonPrimitive
+            ?.contentOrNull
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
+            ?.take(64)
     }.getOrNull()
 }
 

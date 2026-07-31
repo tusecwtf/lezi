@@ -9,7 +9,7 @@ import com.lezi.babylog.core.common.productUiError
  */
 fun familySyncError(error: Throwable, fallback: String): String {
     if (error is SyncNotEnabledException) {
-        return "请先填写家庭服务器地址并绑定 Wi‑Fi 名称后加入家庭"
+        return "请先填写并确认家庭服务器地址后加入家庭"
     }
     // Always surface HTTP status + server `detail` for ops (422 validation, 401, …).
     // Message is already product-shaped by [formatSyncHttpFailure]; do not re-filter.

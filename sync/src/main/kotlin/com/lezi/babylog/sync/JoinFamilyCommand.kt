@@ -27,7 +27,6 @@ enum class JoinNetworkProvenance {
     NoviceHint,
     PrefsSaved,
     ScannedFull,
-    ScannedHost,
     UserEdited,
 }
 
@@ -39,7 +38,6 @@ data class InvitationInputResult(
     val draft: JoinFamilyDraft,
     val error: String? = null,
     val decodedHost: Boolean = false,
-    val decodedSsidsFromPayload: Boolean = false,
     val fromFullPayload: Boolean = false,
 )
 
@@ -49,15 +47,9 @@ data class JoinFamilyDraft(
     val host: String = "",
     val portText: String = DEFAULT_SERVER_PORT.toString(),
     val scheme: String = DEFAULT_SERVER_SCHEME,
-    val ssid1: String = "",
-    val ssid2: String = "",
 ) {
-    val ssids: List<String>
-        get() = HomeLanServerConfig.normalizeSsids(listOf(ssid1, ssid2))
-
-    /** Join readiness: non-blank host and ≥1 SSID (includes novice prefill when SSID present). */
-    fun hasJoinNetwork(): Boolean =
-        host.isNotBlank() && ssids.isNotEmpty()
+    /** Join readiness is an explicit endpoint; trust is established by the setup probe. */
+    fun hasJoinNetwork(): Boolean = host.isNotBlank()
 
     /**
      * Decode invite and merge network fields. Stores **short code** only.
@@ -73,8 +65,6 @@ data class JoinFamilyDraft(
             host = invitedConfig.host.takeIf(String::isNotBlank) ?: host,
             portText = if (invitedConfig.host.isNotBlank()) invitedConfig.port.toString() else portText,
             scheme = if (invitedConfig.host.isNotBlank()) invitedConfig.scheme else scheme,
-            ssid1 = decoded.ssids.getOrNull(0) ?: ssid1,
-            ssid2 = decoded.ssids.getOrNull(1) ?: ssid2,
         )
     }
 
@@ -96,7 +86,6 @@ data class JoinFamilyDraft(
                 InvitationInputResult(
                     draft = next,
                     decodedHost = decoded.host.isNotBlank() || decoded.baseUrl.isNotBlank(),
-                    decodedSsidsFromPayload = decoded.ssids.isNotEmpty(),
                     fromFullPayload = true,
                 )
             }.getOrElse {
@@ -130,8 +119,6 @@ data class JoinFamilyDraft(
             host = normalized.host,
             portText = normalized.port.toString(),
             scheme = normalized.scheme,
-            ssid1 = normalized.allowedSsids.getOrNull(0).orEmpty(),
-            ssid2 = normalized.allowedSsids.getOrNull(1).orEmpty(),
             // invitation preserved
         )
     }
@@ -139,18 +126,16 @@ data class JoinFamilyDraft(
     /**
      * Build a join command. [displayName] is product-required (same rules as
      * createFamily / updateMyDisplayName); blank / 「我（本机）」 fail.
-     * Network host + ≥1 SSID are always required so account wizard and onboarding share one path.
+     * A trusted endpoint is required so account wizard and onboarding share one path.
      */
     fun toCommand(displayName: String): JoinFamilyCommand {
         require(invitation.trim().isNotEmpty()) { "请填写邀请码" }
         val config = HomeLanServerConfig.fromUserInput(
             rawHostOrUrl = host,
             explicitPort = portText.toIntOrNull(),
-            allowedSsids = ssids,
             fallbackScheme = scheme,
         )
         require(config.isServerConfigured) { "请填写服务器主机" }
-        require(config.allowedSsids.isNotEmpty()) { "请至少填写一个家庭 Wi‑Fi 名称" }
         val normalizedName = requireMemberDisplayName(displayName)
         return JoinFamilyCommand(
             invitation = invitation.trim(),
@@ -167,28 +152,23 @@ data class JoinFamilyDraft(
                 host = normalized.host,
                 portText = normalized.port.toString(),
                 scheme = normalized.scheme,
-                ssid1 = normalized.allowedSsids.getOrNull(0).orEmpty(),
-                ssid2 = normalized.allowedSsids.getOrNull(1).orEmpty(),
             )
         }
     }
 }
 
-/** Pure: after invite applied, land on Identity only when host+≥1 SSID ready. */
+/** Pure: after invite applied, land on Identity only when an endpoint is ready. */
 fun joinDraftReadyForIdentity(draft: JoinFamilyDraft): Boolean = draft.hasJoinNetwork()
 
 /** Pure: Network-step neutral hint after partial prefill; null = no info line. */
 fun joinNetworkPartialPrefillHint(draft: JoinFamilyDraft): String? = when {
-    draft.host.isNotBlank() && draft.ssids.isEmpty() ->
-        "已带入服务器 ${draft.host.trim()}，请绑定家庭 Wi‑Fi"
     draft.invitation.isNotBlank() && !draft.hasJoinNetwork() && draft.host.isBlank() ->
-        "邀请码已填入，请填写服务器与家庭 Wi‑Fi"
+        "邀请码已填入，请填写家庭服务器地址"
     else -> null
 }
 
 /**
- * Durable Identity network summary. Honest about SSID source (ScannedHost never
- * claims Wi‑Fi came from the invite).
+ * Durable Identity endpoint summary.
  */
 fun identityNetworkSummary(
     draft: JoinFamilyDraft,
@@ -196,18 +176,15 @@ fun identityNetworkSummary(
 ): String? {
     if (!draft.hasJoinNetwork()) return null
     val endpoint = "${draft.host.trim()}:${draft.portText.trim()}"
-    val wifi = draft.ssids.joinToString(" / ")
     return when (provenance) {
         JoinNetworkProvenance.ScannedFull ->
-            "网络已从邀请带入 · $endpoint · Wi‑Fi $wifi"
-        JoinNetworkProvenance.ScannedHost ->
-            "服务器已从邀请带入；Wi‑Fi 使用本机预填 · $endpoint · Wi‑Fi $wifi"
+            "服务器已从邀请带入 · $endpoint"
         JoinNetworkProvenance.PrefsSaved,
         JoinNetworkProvenance.UserEdited,
         ->
-            "家庭网络已就绪 · $endpoint · Wi‑Fi $wifi"
+            "家庭服务器已就绪 · $endpoint"
         JoinNetworkProvenance.NoviceHint ->
-            "已预填默认服务器与当前 Wi‑Fi（可改） · $endpoint · Wi‑Fi $wifi"
+            "已预填家庭服务器地址（可改） · $endpoint"
         JoinNetworkProvenance.None -> null
     }
 }
@@ -217,7 +194,7 @@ fun identityNetworkMissingHint(draft: JoinFamilyDraft): String? =
     if (draft.hasJoinNetwork()) {
         null
     } else {
-        "尚未配置家庭网络：请扫码带入，或点「上一步」填写"
+        "尚未配置家庭服务器：请扫码带入，或点「上一步」填写"
     }
 
 /**
@@ -247,22 +224,19 @@ fun provenanceAfterInviteInput(
 ): JoinNetworkProvenance {
     if (result.error != null) return previous
     return when {
-        result.fromFullPayload && result.decodedHost && result.decodedSsidsFromPayload ->
-            JoinNetworkProvenance.ScannedFull
         result.fromFullPayload && result.decodedHost ->
-            JoinNetworkProvenance.ScannedHost
+            JoinNetworkProvenance.ScannedFull
         else -> previous
     }
 }
 
 /**
- * After the user edits host/port/SSID fields, demote scanned provenance so
+ * After the user edits endpoint fields, demote scanned provenance so
  * summary no longer claims values still come from the invite.
  */
 fun provenanceAfterManualNetworkEdit(previous: JoinNetworkProvenance): JoinNetworkProvenance =
     when (previous) {
         JoinNetworkProvenance.ScannedFull,
-        JoinNetworkProvenance.ScannedHost,
         JoinNetworkProvenance.NoviceHint,
         JoinNetworkProvenance.None,
         -> JoinNetworkProvenance.UserEdited

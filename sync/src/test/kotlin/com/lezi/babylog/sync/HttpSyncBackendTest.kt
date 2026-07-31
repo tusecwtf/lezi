@@ -1,17 +1,303 @@
 package com.lezi.babylog.sync
 
 import com.google.common.truth.Truth.assertThat
+import java.io.OutputStream
 import java.net.InetAddress
+import java.net.HttpURLConnection
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.URL
+import java.security.cert.Certificate
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SSLHandshakeException
 import kotlin.concurrent.thread
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
 
 class HttpSyncBackendTest {
+    @Test
+    fun familyDeleteSendsNormalizedNameAndRequestScopedRootOutsideTheJsonBody() = runTest {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val captured = CompletableFuture<String>()
+        val responder = thread(name = "lezi-family-delete-test-server") {
+            runCatching {
+                server.accept().use { socket ->
+                    captured.complete(readRequest(socket))
+                    val body = """{"ok":true}""".toByteArray(Charsets.UTF_8)
+                    socket.getOutputStream().use { output ->
+                        output.write(
+                            (
+                                "HTTP/1.1 200 OK\r\n" +
+                                    "Content-Type: application/json\r\n" +
+                                    "Content-Length: ${body.size}\r\n" +
+                                    "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                        )
+                        output.write(body)
+                    }
+                }
+            }.onFailure(captured::completeExceptionally)
+        }
+
+        try {
+            loopbackBackend().deleteFamily(
+                testSession(server).copy(serverScheme = "http"),
+                "  Lezi Home  ",
+                "family-delete-root-secret",
+            )
+            val request = captured.get(2, TimeUnit.SECONDS)
+
+            assertThat(request.lineSequence().first()).startsWith("POST /v1/family/delete")
+            assertThat(request).contains("Authorization: Bearer family-token")
+            assertThat(request).contains(
+                "X-Lezi-Bootstrap-Secret: family-delete-root-secret",
+            )
+            assertThat(request.substringAfter("\n\n"))
+                .isEqualTo("""{"family_name":"Lezi Home"}""")
+            assertThat(request.substringAfter("\n\n"))
+                .doesNotContain("family-delete-root-secret")
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
+    fun ownerLoginAndTakeoverUseRootHeaderWithoutAuthorizationAndParseOwnerSession() = runTest {
+        listOf(
+            false to "/v1/owner/login",
+            true to "/v1/owner/takeover",
+        ).forEach { (takeover, expectedPath) ->
+            val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+            val captured = CompletableFuture<String>()
+            val responder = thread(name = "lezi-owner-login-test-server") {
+                runCatching {
+                    server.accept().use { socket ->
+                        captured.complete(readRequest(socket))
+                        val body =
+                            """{"family_id":"family","access_token":"owner-access","refresh_token":"owner-refresh","access_expires_at":1753419300,"device_id":"device-owner","role":"owner","membership_id":"membership-owner","generation":"generation-a","family_name":"Happy Home"}"""
+                                .toByteArray(Charsets.UTF_8)
+                        socket.getOutputStream().use { output ->
+                            output.write(
+                                (
+                                    "HTTP/1.1 201 Created\r\n" +
+                                        "Content-Type: application/json\r\n" +
+                                        "Content-Length: ${body.size}\r\n" +
+                                        "Connection: close\r\n\r\n"
+                                ).toByteArray(Charsets.US_ASCII),
+                            )
+                            output.write(body)
+                        }
+                    }
+                }.onFailure(captured::completeExceptionally)
+            }
+
+            try {
+                val result = loopbackBackend().ownerLogin(
+                    baseUrl = "http://${server.inetAddress.hostAddress}:${server.localPort}",
+                    deviceName = "  Pixel 9  ",
+                    loginRequestId = "owner-login-request-0000000000000001",
+                    rootPassword = "root-password-secret",
+                    takeover = takeover,
+                )
+                val request = captured.get(2, TimeUnit.SECONDS)
+
+                assertThat(request.lineSequence().first()).startsWith("POST $expectedPath")
+                assertThat(request).contains("X-Lezi-Bootstrap-Secret: root-password-secret")
+                assertThat(request).doesNotContain("Authorization:")
+                assertThat(request.substringAfter("\n\n")).isEqualTo(
+                    """{"login_request_id":"owner-login-request-0000000000000001","device_name":"Pixel 9"}""",
+                )
+                assertThat(result.role).isEqualTo(FamilyRole.Owner)
+                assertThat(result.membershipId).isEqualTo("membership-owner")
+                assertThat(result.deviceId).isEqualTo("device-owner")
+                assertThat(result.token).isEqualTo("owner-access")
+                assertThat(result.refreshToken).isEqualTo("owner-refresh")
+            } finally {
+                server.close()
+                responder.join(2_000)
+            }
+        }
+    }
+
+    @Test
+    fun memberRequestStatusCancelClaimAndOwnerDecisionsUseSeparatedCapabilities() = runTest {
+        val server = ServerSocket(0, 10, InetAddress.getByName("127.0.0.1"))
+        val captured = mutableListOf<String>()
+        val responder = thread(name = "lezi-member-request-test-server") {
+            repeat(8) {
+                server.accept().use { socket ->
+                    val request = readRequest(socket)
+                    captured += request
+                    val body = when {
+                        request.startsWith("POST /v1/member/requests HTTP") ->
+                            """{"request_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","pending_secret":"pending-secret-000000000000000000000001","status":"pending","expires_at":1753504800}"""
+                        request.startsWith("POST /v1/member/requests/status HTTP") ->
+                            """{"status":"approved"}"""
+                        request.startsWith("POST /v1/member/requests/cancel HTTP") ->
+                            """{"ok":true,"status":"cancelled"}"""
+                        request.startsWith("POST /v1/member/requests/claim HTTP") ->
+                            """{"family_id":"family","membership_id":"membership-member","device_id":"device-member","session_id":"session-member","role":"member","access_token":"member-access","token":"member-access","access_expires_at":1753419300,"refresh_token":"member-refresh","generation":"generation-a","family_name":"乐乐一家"}"""
+                        request.startsWith("GET /v1/member/requests HTTP") ->
+                            """{"requests":[{"request_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","display_name":"爸爸","device_name":"Pixel 9","created_at":1753418400,"expires_at":1753504800}]}"""
+                        request.contains("/approve-new ") ->
+                            """{"ok":true,"status":"approved"}"""
+                        request.contains("/bind-existing ") ->
+                            """{"ok":true,"status":"approved"}"""
+                        else -> """{"ok":true,"status":"rejected"}"""
+                    }.toByteArray(Charsets.UTF_8)
+                    socket.getOutputStream().use { output ->
+                        output.write(
+                            (
+                                "HTTP/1.1 200 OK\r\n" +
+                                    "Content-Type: application/json\r\n" +
+                                    "Content-Length: ${body.size}\r\n" +
+                                    "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                        )
+                        output.write(body)
+                    }
+                }
+            }
+        }
+        val baseUrl = "http://${server.inetAddress.hostAddress}:${server.localPort}"
+        val backend = loopbackBackend()
+        val pendingSecret = "pending-secret-000000000000000000000001"
+        val requestId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        val owner = testSession(server)
+
+        try {
+            val receipt = backend.requestMemberLogin(baseUrl, "  Dad  ", "  Pixel 9  ")
+            val status = backend.memberLoginStatus(baseUrl, pendingSecret)
+            backend.cancelMemberLogin(baseUrl, pendingSecret)
+            val claimed = backend.claimMemberLogin(baseUrl, pendingSecret)
+            val pending = backend.pendingMemberLogins(owner)
+            backend.approveNewMemberLogin(owner, requestId)
+            backend.bindExistingMemberLogin(owner, requestId, "membership-existing")
+            backend.rejectMemberLogin(owner, requestId)
+
+            assertThat(receipt.requestId).isEqualTo(requestId)
+            assertThat(status).isEqualTo(MemberLoginStatus.Approved)
+            assertThat(claimed.role).isEqualTo(FamilyRole.Member)
+            assertThat(claimed.refreshToken).isEqualTo("member-refresh")
+            assertThat(pending.single().displayName).isEqualTo("爸爸")
+            assertThat(captured.take(4).all { "Authorization:" !in it }).isTrue()
+            assertThat(captured[0].substringAfter("\n\n")).isEqualTo(
+                """{"display_name":"Dad","device_name":"Pixel 9"}""",
+            )
+            assertThat(captured[1].substringAfter("\n\n"))
+                .isEqualTo("""{"pending_secret":"$pendingSecret"}""")
+            assertThat(captured[2].substringAfter("\n\n"))
+                .isEqualTo("""{"pending_secret":"$pendingSecret"}""")
+            assertThat(captured[3].substringAfter("\n\n"))
+                .isEqualTo("""{"pending_secret":"$pendingSecret"}""")
+            assertThat(captured.drop(4).all { "Authorization: Bearer family-token" in it }).isTrue()
+            assertThat(captured[5].lineSequence().first())
+                .startsWith("POST /v1/member/requests/$requestId/approve-new ")
+            assertThat(captured[6].lineSequence().first())
+                .startsWith("POST /v1/member/requests/$requestId/bind-existing ")
+            assertThat(captured[6].substringAfter("\n\n"))
+                .isEqualTo("""{"membership_id":"membership-existing"}""")
+            assertThat(captured[7].lineSequence().first())
+                .startsWith("POST /v1/member/requests/$requestId/reject ")
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
+    fun memberLoginQrGrantUsesOwnerAuthThenClaimsOnlyWithPinnedEndpointAndDeviceName() = runTest {
+        val server = ServerSocket(0, 2, InetAddress.getByName("127.0.0.1"))
+        val captured = mutableListOf<String>()
+        val responder = thread(name = "lezi-member-grant-test-server") {
+            repeat(2) { index ->
+                server.accept().use { socket ->
+                    captured += readRequest(socket)
+                    val body = if (index == 0) {
+                        """{"grant":"grant-0000000000000000000000000000000000000","family_name":"乐乐一家","member_display_name":"妈妈","expires_at":1753419000}"""
+                    } else {
+                        """{"family_id":"family","membership_id":"membership-member","device_id":"device-new","session_id":"session-new","role":"member","access_token":"member-access","token":"member-access","access_expires_at":1753419300,"refresh_token":"member-refresh","generation":"generation-a","family_name":"乐乐一家"}"""
+                    }.toByteArray(Charsets.UTF_8)
+                    socket.getOutputStream().use { output ->
+                        output.write(
+                            (
+                                "HTTP/1.1 200 OK\r\n" +
+                                    "Content-Type: application/json\r\n" +
+                                    "Content-Length: ${body.size}\r\n" +
+                                    "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                        )
+                        output.write(body)
+                    }
+                }
+            }
+        }
+        val baseUrl = "http://${server.inetAddress.hostAddress}:${server.localPort}"
+        val backend = HttpSyncBackend(
+            SyncHttpConnectionFactory { requested ->
+                URL(baseUrl + requested.file).openConnection() as HttpURLConnection
+            },
+        )
+        val owner = testSession(server)
+
+        try {
+            val endpoint = TrustedEndpointProfile.systemPki(
+                baseUrl.replace("http://", "https://"),
+            )
+            val grant = backend.createMemberLoginGrant(owner.copy(serverScheme = "https"), endpoint, "membership-member")
+            val joined = backend.claimMemberLoginGrant(
+                endpoint,
+                grant.grant,
+                "  Pixel Tablet  ",
+            )
+
+            assertThat(grant.memberDisplayName).isEqualTo("妈妈")
+            assertThat(grant.familyName).isEqualTo("乐乐一家")
+            assertThat(joined.membershipId).isEqualTo("membership-member")
+            assertThat(captured[0].lineSequence().first())
+                .startsWith("POST /v1/member/login-grants ")
+            assertThat(captured[0]).contains("Authorization: Bearer family-token")
+            assertThat(captured[0].substringAfter("\n\n"))
+                .isEqualTo("""{"membership_id":"membership-member"}""")
+            assertThat(captured[1].lineSequence().first())
+                .startsWith("POST /v1/member/login-grants/claim ")
+            assertThat(captured[1]).doesNotContain("Authorization:")
+            assertThat(captured[1].substringAfter("\n\n")).isEqualTo(
+                """{"grant":"${grant.grant}","device_name":"Pixel Tablet"}""",
+            )
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
+    fun pinnedMemberGrantClaimInstallsSpkiTrustBeforeTheGrantCanBeWritten() = runTest {
+        val connection = RejectingPinnedHttpsConnection()
+        val backend = HttpSyncBackend(SyncHttpConnectionFactory { connection })
+        val endpoint = TrustedEndpointProfile.tofuSpki(
+            "https://family.example.com:9443",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        )
+
+        val failure = runCatching {
+            backend.claimMemberLoginGrant(
+                endpoint,
+                "grant-0000000000000000000000000000000000000",
+                "Pixel Tablet",
+            )
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(SSLHandshakeException::class.java)
+        assertThat(connection.outputAttempted).isTrue()
+        assertThat(connection.sslSocketFactory)
+            .isNotSameInstanceAs(HttpsURLConnection.getDefaultSSLSocketFactory())
+    }
+
     @Test
     fun commitRejectsMalformedCanonicalRecordAuthors() = runTest {
         val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
@@ -39,7 +325,7 @@ class HttpSyncBackendTest {
 
         try {
             val failure = runCatching {
-                HttpSyncBackend().commitBundle(testSession(server), "b1")
+                loopbackBackend().commitBundle(testSession(server), "b1")
             }.exceptionOrNull()
 
             assertThat(failure).isInstanceOf(IllegalArgumentException::class.java)
@@ -85,7 +371,7 @@ class HttpSyncBackendTest {
         }
 
         try {
-            val backend = HttpSyncBackend()
+            val backend = loopbackBackend()
             val session = testSession(server)
             val draft = AtomicBundleDraft(
                 bundleId = "b1",
@@ -159,7 +445,7 @@ class HttpSyncBackendTest {
 
         try {
             val failure = runCatching {
-                HttpSyncBackend().pull(testSession(server))
+                loopbackBackend().pull(testSession(server))
             }.exceptionOrNull()
 
             assertThat(failure).isInstanceOf(IllegalArgumentException::class.java)
@@ -196,7 +482,7 @@ class HttpSyncBackendTest {
         }
 
         try {
-            val result = HttpSyncBackend().pull(testSession(server))
+            val result = loopbackBackend().pull(testSession(server))
 
             assertThat(result.cursor).isEqualTo(7)
             assertThat(result.generation).isEqualTo("generation-a")
@@ -234,7 +520,7 @@ class HttpSyncBackendTest {
 
         try {
             val failure = runCatching {
-                HttpSyncBackend().pull(testSession(server))
+                loopbackBackend().pull(testSession(server))
             }.exceptionOrNull()
 
             assertThat(failure).isInstanceOf(IllegalArgumentException::class.java)
@@ -277,7 +563,7 @@ class HttpSyncBackendTest {
         }
 
         try {
-            val backend = HttpSyncBackend()
+            val backend = loopbackBackend()
             val session = testSession(server)
 
             assertThat(backend.pull(session).familyName).isNull()
@@ -316,7 +602,7 @@ class HttpSyncBackendTest {
                     captured.complete(headers.joinToString("\n") + "\n\n" + String(body, 0, read))
 
                     val response =
-                        """{"family_id":"family","token":"owner-token","role":"owner","membership_id":"membership-owner","generation":"generation-a","family_name":null,"reclaimed":false}"""
+                        """{"family_id":"family","access_token":"owner-token","refresh_token":"owner-refresh","access_expires_at":1753419300,"device_id":"device-owner","role":"owner","membership_id":"membership-owner","generation":"generation-a","family_name":"My Home"}"""
                             .toByteArray(Charsets.UTF_8)
                     socket.getOutputStream().use { output ->
                         output.write(
@@ -334,12 +620,13 @@ class HttpSyncBackendTest {
         }
 
         try {
-            val result = HttpSyncBackend().create(
+            val result = loopbackBackend().create(
                 baseUrl = "http://${server.inetAddress.hostAddress}:${server.localPort}",
                 deviceId = "device",
                 displayName = "Mom",
                 createRequestId = "create-request-id-0000000000000001",
                 bootstrapSecret = "one-time-bootstrap-secret",
+                familyName = "My Home",
             )
             val request = captured.get(2, TimeUnit.SECONDS)
 
@@ -383,7 +670,7 @@ class HttpSyncBackendTest {
 
         try {
             val failure = runCatching {
-                HttpSyncBackend().pull(testSession(server))
+                loopbackBackend().pull(testSession(server))
             }.exceptionOrNull()
 
             assertThat(failure).isInstanceOf(SyncResponseTooLargeException::class.java)
@@ -424,7 +711,7 @@ class HttpSyncBackendTest {
 
         try {
             val failure = runCatching {
-                HttpSyncBackend().getMedia(testSession(server), "media-id")
+                loopbackBackend().getMedia(testSession(server), "media-id")
             }.exceptionOrNull()
 
             assertThat(failure).isInstanceOf(SyncResponseTooLargeException::class.java)
@@ -480,7 +767,7 @@ class HttpSyncBackendTest {
 
         try {
             val failure = runCatching {
-                HttpSyncBackend().pull(testSession(server))
+                loopbackBackend().pull(testSession(server))
             }.exceptionOrNull()
 
             assertThat(failure).isInstanceOf(SyncHttpException::class.java)
@@ -503,8 +790,10 @@ class HttpSyncBackendTest {
                     captured.complete(readRequest(socket))
                     val body = (
                         "{\"members\":[" +
-                            "{\"display_name\":\"妈妈\",\"role\":\"owner\",\"is_self\":true," +
-                            "\"membership_id\":\"membership-owner-uuid\"}," +
+                        "{\"display_name\":\"妈妈\",\"role\":\"owner\",\"is_self\":true," +
+                            "\"membership_id\":\"membership-owner-uuid\",\"devices\":[{" +
+                            "\"device_id\":\"device-owner-uuid\",\"device_name\":\"我的 Pixel\"," +
+                            "\"last_used_at\":1754000000,\"is_current\":true}]}," +
                             "{\"display_name\":\"爸爸\",\"role\":\"member\",\"is_self\":false," +
                             "\"membership_id\":\"membership-member-uuid\"}]}"
                         ).toByteArray(Charsets.UTF_8)
@@ -524,7 +813,7 @@ class HttpSyncBackendTest {
         }
 
         try {
-            val members = HttpSyncBackend().members(testSession(server))
+            val members = loopbackBackend().members(testSession(server))
             val request = captured.get(2, TimeUnit.SECONDS)
 
             assertThat(members).containsExactly(
@@ -533,6 +822,14 @@ class HttpSyncBackendTest {
                     FamilyRole.Owner,
                     isSelf = true,
                     membershipId = "membership-owner-uuid",
+                    devices = listOf(
+                        FamilyDevice(
+                            deviceId = "device-owner-uuid",
+                            deviceName = "我的 Pixel",
+                            lastUsedAtEpochSeconds = 1_754_000_000,
+                            isCurrent = true,
+                        ),
+                    ),
                 ),
                 FamilyMember(
                     "爸爸",
@@ -583,7 +880,7 @@ class HttpSyncBackendTest {
 
         try {
             val failure = runCatching {
-                HttpSyncBackend().members(testSession(server))
+                loopbackBackend().members(testSession(server))
             }.exceptionOrNull()
             assertThat(failure).isInstanceOf(IllegalArgumentException::class.java)
             assertThat(failure).hasMessageThat().contains("role")
@@ -594,8 +891,120 @@ class HttpSyncBackendTest {
     }
 
     @Test
+    fun ordinaryDisplayNameUpdateReturnsPendingWithoutPretendingTheNameChanged() = runTest {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val captured = CompletableFuture<String>()
+        val responder = thread(name = "lezi-member-rename-request-test-server") {
+            runCatching {
+                server.accept().use { socket ->
+                    captured.complete(readRequest(socket))
+                    val body = (
+                        "{\"status\":\"pending\",\"request_id\":\"rename-uuid\"," +
+                            "\"current_display_name\":\"Dad\"," +
+                            "\"requested_display_name\":\"Godfather\"," +
+                            "\"created_at\":1754000000,\"expires_at\":1754604800}"
+                        ).toByteArray(Charsets.UTF_8)
+                    socket.getOutputStream().use { output ->
+                        output.write(
+                            (
+                                "HTTP/1.1 202 Accepted\r\n" +
+                                    "Content-Type: application/json\r\n" +
+                                    "Content-Length: ${body.size}\r\n" +
+                                    "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                        )
+                        output.write(body)
+                    }
+                }
+            }.onFailure(captured::completeExceptionally)
+        }
+
+        try {
+            val result = loopbackBackend().updateMyDisplayName(
+                testSession(server).copy(membershipId = "membership-self"),
+                "Godfather",
+            )
+            val request = captured.get(2, TimeUnit.SECONDS)
+
+            assertThat(result).isEqualTo(
+                DisplayNameUpdateResult.Pending(
+                    PendingMemberRenameRequest(
+                        requestId = "rename-uuid",
+                        membershipId = "membership-self",
+                        currentDisplayName = "Dad",
+                        requestedDisplayName = "Godfather",
+                        createdAtEpochSeconds = 1_754_000_000,
+                        expiresAtEpochSeconds = 1_754_604_800,
+                    ),
+                ),
+            )
+            assertThat(request.lineSequence().first())
+                .isEqualTo("POST /v1/family/display-name HTTP/1.1")
+            assertThat(request).contains("\"display_name\":\"Godfather\"")
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
+    fun pendingRenameRequestsParseOnlyOwnerReviewFields() = runTest {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val captured = CompletableFuture<String>()
+        val responder = thread(name = "lezi-pending-renames-test-server") {
+            runCatching {
+                server.accept().use { socket ->
+                    captured.complete(readRequest(socket))
+                    val body = (
+                        "{\"requests\":[{\"request_id\":\"rename-uuid\"," +
+                            "\"membership_id\":\"member-uuid\"," +
+                            "\"current_display_name\":\"爸爸\"," +
+                            "\"requested_display_name\":\"干爹\"," +
+                            "\"created_at\":1754000000,\"expires_at\":1754604800}]}"
+                        ).toByteArray(Charsets.UTF_8)
+                    socket.getOutputStream().use { output ->
+                        output.write(
+                            (
+                                "HTTP/1.1 200 OK\r\n" +
+                                    "Content-Type: application/json\r\n" +
+                                    "Content-Length: ${body.size}\r\n" +
+                                    "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                        )
+                        output.write(body)
+                    }
+                }
+            }.onFailure(captured::completeExceptionally)
+        }
+
+        try {
+            val requests = loopbackBackend().pendingMemberRenameRequests(testSession(server))
+            val request = captured.get(2, TimeUnit.SECONDS)
+
+            assertThat(requests).containsExactly(
+                PendingMemberRenameRequest(
+                    requestId = "rename-uuid",
+                    membershipId = "member-uuid",
+                    currentDisplayName = "爸爸",
+                    requestedDisplayName = "干爹",
+                    createdAtEpochSeconds = 1_754_000_000,
+                    expiresAtEpochSeconds = 1_754_604_800,
+                ),
+            )
+            assertThat(request.lineSequence().first())
+                .isEqualTo("GET /v1/family/rename-requests HTTP/1.1")
+            assertThat(request).doesNotContain("token=")
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
     fun createAndJoinShareSafeDisplayNameNormalization() {
         assertThat(requireMemberDisplayName("  爸爸  ")).isEqualTo("爸爸")
+        assertThat(requireMemberDisplayName("　爸　 爸　")).isEqualTo("爸 爸")
+        assertThat(requireDeviceName("　Ｐｉｘｅｌ　 １０　")).isEqualTo("Pixel 10")
         assertThat(runCatching { requireMemberDisplayName("我（本机）") }.exceptionOrNull())
             .isInstanceOf(IllegalArgumentException::class.java)
         assertThat(runCatching { requireMemberDisplayName("   ") }.exceptionOrNull())
@@ -620,7 +1029,7 @@ class HttpSyncBackendTest {
                     captured.complete(readRequest(socket))
                     val body =
                         (
-                            """{"family_id":"family","token":"member-token","role":"member",""" +
+                            """{"family_id":"family","access_token":"member-token","refresh_token":"member-refresh","access_expires_at":1753419300,"device_id":"device-member","role":"member",""" +
                                 """"membership_id":"membership-join-uuid","entities":[],"cursor":0,"generation":"generation-a","family_name":null}"""
                             ).toByteArray(Charsets.UTF_8)
                     socket.getOutputStream().use { output ->
@@ -639,7 +1048,7 @@ class HttpSyncBackendTest {
         }
 
         try {
-            val result = HttpSyncBackend().join(
+            val result = loopbackBackend().join(
                 baseUrl = "http://${server.inetAddress.hostAddress}:${server.localPort}",
                 code = "ABCD1234",
                 deviceId = "device-a",
@@ -664,7 +1073,7 @@ class HttpSyncBackendTest {
                 server.accept().use { socket ->
                     readRequest(socket)
                     val body =
-                        """{"family_id":"family","token":"member-token","role":"member","entities":[],"cursor":0,"generation":"generation-a","family_name":null}"""
+                        """{"family_id":"family","access_token":"member-token","refresh_token":"member-refresh","access_expires_at":1753419300,"device_id":"device-member","role":"member","entities":[],"cursor":0,"generation":"generation-a","family_name":null}"""
                             .toByteArray(Charsets.UTF_8)
                     socket.getOutputStream().use { output ->
                         output.write(
@@ -683,7 +1092,7 @@ class HttpSyncBackendTest {
 
         try {
             val failure = runCatching {
-                HttpSyncBackend().join(
+                loopbackBackend().join(
                     baseUrl = "http://${server.inetAddress.hostAddress}:${server.localPort}",
                     code = "ABCD1234",
                     deviceId = "device-a",
@@ -709,10 +1118,9 @@ class HttpSyncBackendTest {
                     captured.complete(readRequest(socket))
                     val body =
                         (
-                            """{"family_id":"family","token":"owner-token","role":"owner",""" +
+                            """{"family_id":"family","access_token":"owner-token","refresh_token":"owner-refresh","access_expires_at":1753419300,"device_id":"device-owner","role":"owner",""" +
                                 """"membership_id":"membership-create-uuid",""" +
-                                """"generation":"generation-a","family_name":"Happy Home",""" +
-                                """"reclaimed":false}"""
+                                """"generation":"generation-a","family_name":"Happy Home"}"""
                             ).toByteArray(Charsets.UTF_8)
                     socket.getOutputStream().use { output ->
                         output.write(
@@ -730,7 +1138,7 @@ class HttpSyncBackendTest {
         }
 
         try {
-            val result = HttpSyncBackend().create(
+            val result = loopbackBackend().create(
                 baseUrl = "http://${server.inetAddress.hostAddress}:${server.localPort}",
                 deviceId = "device",
                 displayName = "Mom",
@@ -752,7 +1160,7 @@ class HttpSyncBackendTest {
     }
 
     @Test
-    fun createOmitsBlankFamilyNameAndParsesCurrentNullResponse() = runTest {
+    fun createRequiresAndSendsFamilyName() = runTest {
         val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
         val captured = CompletableFuture<String>()
         val responder = thread(name = "lezi-create-blank-family-name-test-server") {
@@ -760,7 +1168,7 @@ class HttpSyncBackendTest {
                 server.accept().use { socket ->
                     captured.complete(readRequest(socket))
                     val body =
-                        """{"family_id":"family","token":"owner-token","role":"owner","membership_id":"membership-owner","generation":"generation-a","family_name":null,"reclaimed":true}"""
+                        """{"family_id":"family","access_token":"owner-token","refresh_token":"owner-refresh","access_expires_at":1753419300,"device_id":"device-owner","role":"owner","membership_id":"membership-owner","generation":"generation-a","family_name":"My Home"}"""
                             .toByteArray(Charsets.UTF_8)
                     socket.getOutputStream().use { output ->
                         output.write(
@@ -778,19 +1186,19 @@ class HttpSyncBackendTest {
         }
 
         try {
-            val result = HttpSyncBackend().create(
+            val result = loopbackBackend().create(
                 baseUrl = "http://${server.inetAddress.hostAddress}:${server.localPort}",
                 deviceId = "device",
                 displayName = "Mom",
                 createRequestId = "create-request-id-0000000000000003",
                 bootstrapSecret = null,
-                familyName = "   ",
+                familyName = "  My Home  ",
             )
             val request = captured.get(2, TimeUnit.SECONDS)
 
-            assertThat(result.familyName).isNull()
-            assertThat(result.reclaimed).isTrue()
-            assertThat(request.substringAfter("\n\n")).doesNotContain("family_name")
+            assertThat(result.familyName).isEqualTo("My Home")
+            assertThat(result.reclaimed).isFalse()
+            assertThat(request.substringAfter("\n\n")).contains("\"family_name\":\"My Home\"")
         } finally {
             server.close()
             responder.join(2_000)
@@ -824,7 +1232,7 @@ class HttpSyncBackendTest {
         }
 
         try {
-            HttpSyncBackend().renameFamily(
+            loopbackBackend().renameFamily(
                 session = testSession(server),
                 familyName = "  Niannian Home  ",
             )
@@ -836,6 +1244,135 @@ class HttpSyncBackendTest {
             server.close()
             responder.join(2_000)
         }
+    }
+
+    @Test
+    fun refreshUsesOnlyTheRefreshBodyAndParsesCanonicalRotatedSession() = runTest {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val captured = CompletableFuture<String>()
+        val responder = thread(name = "lezi-refresh-test-server") {
+            runCatching {
+                server.accept().use { socket ->
+                    captured.complete(readRequest(socket))
+                    val body =
+                        """{"family_id":"family","membership_id":"membership","device_id":"device","session_id":"session","role":"owner","access_token":"access-new","refresh_token":"refresh-new","access_expires_at":2000900,"generation":"generation-b","family_name":"乐乐一家"}"""
+                            .toByteArray(Charsets.UTF_8)
+                    socket.getOutputStream().use { output ->
+                        output.write(
+                            (
+                                "HTTP/1.1 200 OK\r\n" +
+                                    "Content-Type: application/json\r\n" +
+                                    "Content-Length: ${body.size}\r\n" +
+                                    "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                        )
+                        output.write(body)
+                    }
+                }
+            }.onFailure(captured::completeExceptionally)
+        }
+
+        try {
+            val result = loopbackBackend().refresh(
+                "http://${server.inetAddress.hostAddress}:${server.localPort}",
+                "refresh-old",
+            )
+            val request = captured.get(2, TimeUnit.SECONDS)
+
+            assertThat(request.lineSequence().first()).startsWith("POST /v1/session/refresh")
+            assertThat(request).doesNotContain("Authorization:")
+            assertThat(request.substringAfter("\n\n")).isEqualTo(
+                """{"refresh_token":"refresh-old"}""",
+            )
+            assertThat(result.accessToken).isEqualTo("access-new")
+            assertThat(result.refreshToken).isEqualTo("refresh-new")
+            assertThat(result.role).isEqualTo(FamilyRole.Owner)
+            assertThat(result.accessExpiresAtEpochSeconds).isEqualTo(2_000_900)
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
+    fun deviceLogoutAndOwnerRevokeUseExplicitAuthenticatedRoutes() = runTest {
+        val server = ServerSocket(0, 2, InetAddress.getByName("127.0.0.1"))
+        val captured = mutableListOf<String>()
+        val responder = thread(name = "lezi-device-revoke-test-server") {
+            repeat(2) {
+                server.accept().use { socket ->
+                    captured += readRequest(socket)
+                    val body = """{"ok":true}""".toByteArray(Charsets.UTF_8)
+                    socket.getOutputStream().use { output ->
+                        output.write(
+                            (
+                                "HTTP/1.1 200 OK\r\n" +
+                                    "Content-Type: application/json\r\n" +
+                                    "Content-Length: ${body.size}\r\n" +
+                                    "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                        )
+                        output.write(body)
+                    }
+                }
+            }
+        }
+
+        try {
+            val backend = loopbackBackend()
+            val session = testSession(server)
+            backend.logoutCurrentDevice(session)
+            backend.revokeFamilyDevice(session, "remote-device")
+
+            assertThat(captured.map { it.lineSequence().first() }).containsExactly(
+                "POST /v1/device/logout HTTP/1.1",
+                "POST /v1/family/devices/remote-device/revoke HTTP/1.1",
+            ).inOrder()
+            captured.forEach { request ->
+                assertThat(request).contains("Authorization: Bearer family-token")
+                assertThat(request.substringAfter("\n\n")).isEqualTo("{}")
+            }
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
+    fun capturedDiagnosticLogRedactsAccessRefreshAndAuthorizationValues() {
+        val session = SyncSession(
+            familyId = "family",
+            familyToken = "access-secret",
+            refreshToken = "refresh-secret",
+            deviceId = "device",
+            role = FamilyRole.Owner,
+        )
+        val joined = JoinResult(
+            familyId = "family",
+            token = "access-secret",
+            refreshToken = "refresh-secret",
+            deviceId = "device",
+            role = FamilyRole.Owner,
+            generation = "generation",
+            membershipId = "membership",
+        )
+        val refreshed = SessionRefreshResult(
+            familyId = "family",
+            membershipId = "membership",
+            deviceId = "device",
+            role = FamilyRole.Owner,
+            accessToken = "access-secret",
+            refreshToken = "refresh-secret",
+            accessExpiresAtEpochSeconds = 2_000_900,
+            generation = "generation",
+            familyName = null,
+        )
+
+        val capturedLog = listOf(session, joined, refreshed).joinToString(separator = "\n")
+
+        assertThat(capturedLog).doesNotContain("access-secret")
+        assertThat(capturedLog).doesNotContain("refresh-secret")
+        assertThat(capturedLog).doesNotContain("Authorization")
     }
 
     @Test
@@ -857,6 +1394,25 @@ class HttpSyncBackendTest {
         deviceId = "device",
         role = FamilyRole.Owner,
         pullGeneration = "generation-a",
+    )
+
+    /**
+     * Production sessions are HTTPS-only. These protocol-focused tests use a
+     * tiny plain-HTTP loopback fixture, so redirect only loopback HTTPS opens
+     * through the existing injectable connection seam.
+     */
+    private fun loopbackBackend() = HttpSyncBackend(
+        SyncHttpConnectionFactory { requested ->
+            val connectionUrl = if (
+                requested.protocol == "https" &&
+                requested.host in setOf("127.0.0.1", "localhost", "::1")
+            ) {
+                URL("http", requested.host, requested.port, requested.file)
+            } else {
+                requested
+            }
+            connectionUrl.openConnection() as HttpURLConnection
+        },
     )
 
     private fun readRequest(socket: Socket): String {
@@ -892,5 +1448,30 @@ class HttpSyncBackendTest {
 
         assertThat(formatSyncHttpFailure(503, "")).isEqualTo("家庭服务器请求失败（HTTP 503）")
         assertThat(formatSyncHttpFailure(500, "not-json")).isEqualTo("家庭服务器请求失败（HTTP 500）")
+        assertThat(syncHttpCodeOrNull("""{"code":"device_removed","detail":"gone"}"""))
+            .isEqualTo("device_removed")
+        assertThat(syncHttpCodeOrNull("""{"code":"membership_deleted","detail":"gone"}"""))
+            .isEqualTo("membership_deleted")
+        assertThat(syncHttpCodeOrNull("""{"code":"family_deleted","detail":"gone"}"""))
+            .isEqualTo("family_deleted")
+        assertThat(syncHttpCodeOrNull("not-json")).isNull()
     }
+}
+
+private class RejectingPinnedHttpsConnection : HttpsURLConnection(
+    URL("https://family.example.com:9443/v1/member/login-grants/claim"),
+) {
+    var outputAttempted = false
+
+    override fun getOutputStream(): OutputStream {
+        outputAttempted = true
+        throw SSLHandshakeException("SPKI mismatch before HTTP body")
+    }
+
+    override fun disconnect() = Unit
+    override fun usingProxy(): Boolean = false
+    override fun connect() = Unit
+    override fun getCipherSuite(): String = ""
+    override fun getLocalCertificates(): Array<Certificate>? = null
+    override fun getServerCertificates(): Array<Certificate> = emptyArray()
 }

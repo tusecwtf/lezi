@@ -10,15 +10,17 @@
 | 定位 | 家庭育儿日志：低摩擦记录 + 日/周回顾 + 成长曲线 + 家庭同步 |
 | 语言 | **简体中文** |
 | 商业 | **无**广告 / 会员 / IAP / 付费主题墙 |
-| 数据 | 当前 Room 为本地真相源，经家网 NAS 做仅前台家庭同步；只支持 fresh-current schema/payload/wire |
+| 数据 | Room 为本地真相源，经用户已验证的单一家庭服务器做仅前台同步；只支持 fresh-current schema/payload/wire |
 
 当前版本 **0.3.0**（`versionName` 不再含 `offline`）。家庭局域网同步的
 Android 与服务端实现、自动化测试、本机 Docker 运行和双模拟器前台
 formula/pee UI 交叉可见均已验证；双模拟器还在严格使用
 `192.168.50.4:8765` 的服务端上完成建家、邀请码加入、双向协议记录和头像 ACL。
 相机扫码、日志图跨端 UI、蜂窝回家冲刷、伴侣通知和双端独立设置仍待目标环境执行；
-不宣称物理 NAS 生产部署或全部设备级 Must 通过。同步细节见
-[sync-home-lan.md](./sync-home-lan.md)。
+不宣称物理 NAS 生产部署或全部设备级 Must 通过。0.3.0 已实现基线见
+[sync-home-lan.md](./sync-home-lan.md)；下一版可信 HTTPS、管理员根密码、多设备成员、审批登录与
+无 SSID 前台同步的目标契约见 [sync-trusted-endpoint.md](./sync-trusted-endpoint.md)。服务器地址
+搬迁由部署完成，App 不提供迁移/恢复协议或页面。
 
 合入后的行为以本目录为准；进行中的票在 [`.scratch/`](../../.scratch/)（见
 [`docs/agents/issue-tracker.md`](../agents/issue-tracker.md)）。闭合票不长期归档，
@@ -30,7 +32,8 @@ formula/pee UI 交叉可见均已验证；双模拟器还在严格使用
 |------|------|
 | [ui.md](./ui.md) | 画风、设计原则、页面与组件 |
 | [data-model.md](./data-model.md) | 实体、字段、本地优先、SyncPort 契约 |
-| [sync-home-lan.md](./sync-home-lan.md) | **当前家庭局域网同步**：门闩、前台策略、NAS Docker（`lezi-sync`） |
+| [sync-home-lan.md](./sync-home-lan.md) | **0.3.0 已实现同步基线**：同步域、原子包、旧 SSID/HTTP 会话合同 |
+| [sync-trusted-endpoint.md](./sync-trusted-endpoint.md) | **下一版目标合同**：可信 HTTPS、根密码管理员、多设备成员、审批登录、无 SSID 前台同步 |
 | [local-photo-loading.md](./local-photo-loading.md) | 记录照片缩略图/全屏统一采样、方向、取消与失败边界 |
 | [tech.md](./tech.md) | Android 技术栈、模块、权限、验收 |
 | [assets-notes.md](./assets-notes.md) | 排泄图标资源约定（尿尿量档 / 便便分档） |
@@ -334,7 +337,7 @@ Widget 每个实例独立保存 `widgetId`、绑定 `babyId` 和快捷记录类�
 | 快记 | 主路径为“点记录类型 → 核对/确认”；点击时刻在首次点选时冻结 |
 | 单手 | 两套模板固定底部快捷坞；左右手偏好持久化；二级面板确认键位于拇指可达区 |
 | 电池 | 计时用前台服务，避免无意义唤醒 |
-| 隐私 | 数据默认本机；同步前明示全量共享；不采通讯录/物理位置；系统要求的位置授权仅用于本机 SSID 精确门闩，SSID 与坐标均不上传 |
+| 隐私 | 数据默认本机；同步前明示全量共享；不采通讯录/物理位置；可信同步目标不读取 SSID、不申请仅为 SSID 存在的位置权限 |
 | 无障碍 | 触控 ≥48dp；图标有描述；支持系统字体缩放 |
 
 细节见 [tech.md](./tech.md)。

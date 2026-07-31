@@ -207,7 +207,6 @@ class JoinFamilyUseCaseTest {
         draft = JoinFamilyDraft.fromConfig(
             HomeLanServerConfig(
                 host = "nas.home",
-                allowedSsids = listOf("Home"),
             ),
             invitation = "INVITE-1234",
         ),
@@ -219,7 +218,6 @@ class JoinFamilyUseCaseTest {
         familyToken = "token-1",
         membershipId = "membership-1",
         serverHost = "nas.home",
-        allowedSsids = listOf("Home"),
     )
 }
 

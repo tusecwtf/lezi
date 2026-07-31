@@ -1,10 +1,11 @@
 # 乐记 — 当前家庭局域网同步规格
 
-> **文档定位更新（2026-07-30）：** 本文保留 0.3.0 已实现基线和仍有效的同步域、
+> **文档定位更新（2026-07-31）：** 本文保留 0.3.0 已实现基线和仍有效的同步域、
 > 原子包、ACL 与冲突规则。下一版网络与鉴权目标已经由
 > [`sync-trusted-endpoint.md`](./sync-trusted-endpoint.md) 取代本文中互相冲突的内容，
 > 尤其是 §0–4、§7–9、§11–12 与 §14 中的硬 SSID、默认 HTTP、长期 family token、
-> 进程级 `generation`、仅 NAS 地址及“改 URL 即清会话”规则。实现完成前，下文仍可用于
+> 进程级 `generation`、一设备一 membership、成员 `left_at` 软删除、仅 NAS 地址及“改 URL 即
+> 清会话”规则。目标合同还明确 App 不实现 NAS→VPS 迁移/恢复。实现完成前，下文仍可用于
 > 解释 0.3.0 代码现状，但不得再作为新增网络/鉴权工作的目标合同。
 >
 > 决策锁定：2026-07-25（grilling）
@@ -446,9 +447,9 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 ### 9.2 `POST /v1/family/create`
 
 - 门闩：客户端仅在家调用
-- Body：`{ "create_request_id", "device_id", "display_name", "family_name?" }`
+- Body：`{ "create_request_id", "device_name", "display_name", "family_name" }`
   - `display_name`：**家庭称呼**，产品层必填；校验同 join
-  - `family_name`：共享家庭名，可空；trim 后空则存 null，由客户端兜底展示
+  - `family_name`：共享家庭名，trim 后必须非空；最长 64 个 Unicode 字符
   - 客户端在成功落盘会话前必须复用同一高熵 `create_request_id`
 - 鉴权：配置了 `LEZI_BOOTSTRAP_SECRET` 时要求请求头
   `X-Lezi-Bootstrap-Secret` 匹配；**未配置**时 create/reclaim 均对本机网络开放（仅开发）
@@ -540,11 +541,11 @@ Base：`{baseUrl}`，JSON UTF-8。除 `/health`、`/ready` 外均需 Bearer
 ### 9.5.2 `POST /v1/family/name`
 
 - Auth：**仅 owner** family token（member → `403`）
-- Body：`{ "family_name"? }` — 共享家庭名；trim 后空/`null` 存 null（客户端兜底
-  展示「我的家庭」/「{宝宝昵称}的家庭」）；最长 64 个 Unicode 字符；控制字符或
+- Body：`{ "family_name" }` — 共享家庭名；trim 后必须非空（使删除家庭的家庭名确认
+  始终可达）；最长 64 个 Unicode 字符；控制字符或
   Unicode 双向文本格式控制符 → `422`
-- 响应：`{ "ok": true, "family_name": "…" | null }`
-- 与 create 的可选 `family_name` 同一规范化规则。改名发起端立即回写本机会话缓存；
+- 响应：`{ "ok": true, "family_name": "…" }`
+- 与 create 的必填 `family_name` 同一规范化规则。改名发起端立即回写本机会话缓存；
   其他已加入成员在下一次允许的前台/下拉 pull 中收敛；不另提供 GET 读路径
 
 ### 9.6 `POST /v1/push`
@@ -642,17 +643,27 @@ fulfillment_candidate`：Record/CarePlan 的媒体成员只能是 `log`，Baby �
 
 ### 9.9 `POST /v1/family/delete`
 
-- Auth：owner
-- 多重确认由客户端 UI；服务端必须先以 SQLite 删除家庭并通过外键级联清空
-  entities、tokens、invites，再删除该家庭媒体目录。DB 删除失败时不得先删媒体。
+- Auth：仅当前 Owner bearer；Member 返回 `403`
+- Body：`{ "family_name": "…" }`，trim 后必须与服务端当前家庭名完全一致；不匹配
+  返回 `409`
+- 高风险校验：请求头 `X-Lezi-Bootstrap-Secret` 必须匹配当前根密码；缺失或错误返回
+  `401`。根密码只用于本次校验，不进入 body、日志、数据库、会话或遥测。
+- 服务端在单个 `IMMEDIATE` SQLite 事务中，为该家庭全部 access/refresh credential
+  hash 写入不含 family、membership、Device 引用的 `family_deleted` 终止原因，再通过
+  外键级联删除 family、memberships、devices、sessions、requests、entities、plans、
+  media index、bundle staging 与 sync cursor。DB 失败必须整体回滚，且不得先删媒体。
+- DB 提交后才删除该家庭媒体目录；重复请求或成功响应丢失后重试，会以
+  `401`/`family_deleted` 明确收敛，而不是把普通 401 当删除成功。
 - DB 已成功但媒体目录清理失败或进程中断时，UUID 家庭目录保留为不可见孤儿；
   后续启动按第 8 节有限 GC 规则重试并同步 `media/` 父目录。
+- Android 只在 `2xx` 或明确 `family_deleted` 后写入可恢复的本地清理标记并清 Room、
+  Outbox、媒体、credential 与 endpoint 信任；校验、普通 401、网络或媒体清理失败不清本机。
 
 ### 9.10 `POST /v1/leave`
 
 - Auth：member token；owner 调用返回 `403`
-- 标记当前 canonical membership 离开，并原子吊销指向它的全部 credentials；
-  **不**删家庭数据。单 credential 轮换/吊销不改变 membership。owner 必须使用
+- 原子硬删除当前 canonical membership、Device 与全部 credentials，并把保留共享事实
+  的作者/提交者引用匿名化；**不**删家庭共享数据。单 credential 轮换/吊销不改变 membership。owner 必须使用
   `/v1/family/delete`，首版不提供“停止共享但保留无管理员家庭”的语义。
 
 ### 9.11 `POST /v1/family/members/remove`
@@ -663,11 +674,10 @@ fulfillment_candidate`：Record/CarePlan 的媒体成员只能是 `log`，Baby �
   - 不能移除自己（`membership_id == principal`）→ `403`（管理员请用 `/v1/family/delete`）
   - 目标不存在或已离开 → `404`
   - 目标 role 为 `owner` → `403`（首版单管理员，禁止移管理员）
-  - 目标 role 为 `member` → 与 leave 相同：标记 `left_at` 并原子吊销其全部 credentials
+  - 目标 role 为 `member` → 与 leave 相同：原子硬删除 membership、Device 与全部 credentials，匿名化共享事实引用
 - 响应：`{ "ok": true, "membership_id": "…" }`
-- **不**删除家庭实体/历史记录；记录上的 `created_by_membership_id` 仍可引用已离开 membership
-  （客户端展示用当前称呼解析失败时走「家人」等兜底）
-- 被移除设备下次 API 调用 → `401`；不主动推送通知（家网无后台推送）
+- **不**删除家庭实体/历史记录；作者/提交者引用置空，客户端展示「家人」等匿名兜底
+- 被移除设备下次 API 调用 → `401`/`membership_deleted`；不主动推送通知（家网无后台推送）
 
 ---
 

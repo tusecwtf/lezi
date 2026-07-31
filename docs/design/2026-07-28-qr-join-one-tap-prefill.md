@@ -5,7 +5,7 @@
 | **Title** | 扫码加入一键预填家庭网络与邀请码 |
 | **Author** | (TBD) |
 | **Date** | 2026-07-28 |
-| **Status** | Must Implemented；Should open（概览扫码、Owner 空 SSID 提示） |
+| **Status** | Implemented 0.3 baseline；superseded for next current wire |
 | **Related PRD** | `docs/prd/sync-home-lan.md` §9.3 / §11；`docs/prd/ui.md` §5.7 |
 | **Related ADR** | ADR-0009（账户概览与称呼）；ADR-0008（仅 fresh-current） |
 
@@ -28,6 +28,12 @@
 
 当前 Must 范围已实现；本文继续保留为详细交互依据。尚未实现的 Should 仅有：账户概览
 次级「扫码加入」入口、Owner 本机未绑定 SSID 时的发码软提示；二者不阻塞现行向导扫码。
+
+> **2026-07-31 disposition:** 上述 SSID/QR v1 Should 不再实施。下一版只有管理员 App 为目标
+> 普通成员生成的一张十分钟单次 QR，同时携带可信 endpoint 配置与设备登录授权；服务器不展示
+> QR，管理员也不扫码登录。最终 Connect/Probe/Login 向导以
+> [`2026-07-30-trusted-sync-onboarding-ui.md`](./2026-07-30-trusted-sync-onboarding-ui.md)
+> 和 [`sync-trusted-endpoint.md`](../prd/sync-trusted-endpoint.md) 为准；本文仅保留 0.3 代码历史。
 
 ---
 

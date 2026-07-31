@@ -2,20 +2,14 @@ package com.lezi.babylog.sync
 
 import java.net.URI
 
-/** Max SSIDs for 2.4G / 5G names of the same home AP. */
-const val MAX_ALLOWED_SSIDS = 2
-
 const val DEFAULT_SERVER_HOST = "192.168.50.4"
 const val DEFAULT_SERVER_PORT = 8765
-const val DEFAULT_SERVER_SCHEME = "http"
+const val DEFAULT_SERVER_SCHEME = "https"
 
-/**
- * Single NAS endpoint + local SSID allowlist (not synced to the server).
- */
+/** Single endpoint origin. Trust identity is stored separately as [TrustedEndpointProfile]. */
 data class HomeLanServerConfig(
     val host: String = "",
     val port: Int = DEFAULT_SERVER_PORT,
-    val allowedSsids: List<String> = emptyList(),
     val scheme: String = DEFAULT_SERVER_SCHEME,
 ) {
     val baseUrl: String
@@ -30,30 +24,20 @@ data class HomeLanServerConfig(
     val isServerConfigured: Boolean
         get() = host.trim().isNotEmpty() && port in 1..65535
 
-    val hasSsidAllowlist: Boolean
-        get() = normalizeSsids(allowedSsids).isNotEmpty()
-
     fun withNormalized(): HomeLanServerConfig = copy(
         host = host.trim(),
         port = port.takeIf { it in 1..65535 } ?: DEFAULT_SERVER_PORT,
-        allowedSsids = normalizeSsids(allowedSsids),
         scheme = normalizeScheme(scheme),
     )
 
     companion object {
-        fun normalizeSsids(ssids: List<String>): List<String> =
-            ssids.map { it.trim() }
-                .filter { it.isNotEmpty() }
-                .distinct()
-                .take(MAX_ALLOWED_SSIDS)
-
         fun normalizeScheme(scheme: String): String =
-            scheme.trim().lowercase().takeIf { it == "http" || it == "https" }
+            scheme.trim().lowercase().takeIf { it == "https" }
                 ?: DEFAULT_SERVER_SCHEME
 
         /**
          * Parse user input that may be a bare host, host:port, or full URL.
-         * Bare hosts use HTTP; full URLs retain their HTTP or HTTPS scheme.
+         * Bare hosts use HTTPS; current endpoints do not accept cleartext HTTP.
          */
         fun parseHostPort(
             rawHostOrUrl: String,
@@ -73,11 +57,15 @@ data class HomeLanServerConfig(
             val raw = baseUrl.trim()
             if (raw.isEmpty()) return HomeLanServerConfig()
             val uri = validatedEndpointUri(raw)
-            val (host, port) = parseHostPort(raw, DEFAULT_SERVER_PORT)
+            val implicitPort = if (raw.contains("://") && uri.scheme.equals("https", true)) {
+                443
+            } else {
+                DEFAULT_SERVER_PORT
+            }
+            val (host, port) = parseHostPort(raw, implicitPort)
             return HomeLanServerConfig(
                 host = host,
                 port = port,
-                allowedSsids = emptyList(),
                 scheme = normalizeScheme(uri.scheme),
             )
         }
@@ -90,7 +78,6 @@ data class HomeLanServerConfig(
         fun fromUserInput(
             rawHostOrUrl: String,
             explicitPort: Int?,
-            allowedSsids: List<String>,
             fallbackScheme: String = DEFAULT_SERVER_SCHEME,
         ): HomeLanServerConfig {
             val raw = rawHostOrUrl.trim()
@@ -111,7 +98,6 @@ data class HomeLanServerConfig(
                 port = embeddedPort
                     ?: explicitPort?.takeIf { it in 1..65535 }
                     ?: parsed.port,
-                allowedSsids = allowedSsids,
                 scheme = explicitScheme ?: normalizeScheme(fallbackScheme),
             ).withNormalized()
         }
@@ -125,9 +111,8 @@ data class HomeLanServerConfig(
                 throw IllegalArgumentException("服务器地址格式不正确", error)
             }
             if (hasExplicitScheme) {
-                require(uri.scheme.equals("http", ignoreCase = true) ||
-                    uri.scheme.equals("https", ignoreCase = true)) {
-                    "服务器地址只支持 HTTP 或 HTTPS"
+                require(uri.scheme.equals("https", ignoreCase = true)) {
+                    "家庭服务器仅支持 HTTPS 地址"
                 }
             }
             require(uri.rawUserInfo == null) { "服务器地址不能包含用户名或密码" }
@@ -162,17 +147,10 @@ data class HomeLanServerConfig(
         }
 
         /** Unsaved defaults for an empty setup form. */
-        fun noviceUiDefaults(currentSsid: String?): HomeLanServerConfig =
+        fun noviceUiDefaults(): HomeLanServerConfig =
             HomeLanServerConfig(
                 host = DEFAULT_SERVER_HOST,
                 port = DEFAULT_SERVER_PORT,
-                allowedSsids = listOfNotNull(currentSsid?.trim()?.takeIf { it.isNotEmpty() }),
             )
-
-        fun ssidMatches(current: String?, allowed: List<String>): Boolean {
-            val cur = current?.trim().orEmpty()
-            if (cur.isEmpty()) return false
-            return normalizeSsids(allowed).any { it == cur }
-        }
     }
 }

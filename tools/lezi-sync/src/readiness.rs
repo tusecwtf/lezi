@@ -20,20 +20,24 @@ pub(super) struct CachedReadiness {
 }
 
 pub(super) async fn readiness(State(state): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    let healthy = is_ready(&state).await;
+    response(&state.version, healthy)
+}
+
+pub(super) async fn is_ready(state: &Arc<AppState>) -> bool {
     let now = state.now();
     let mut cache = state.readiness_cache.lock().await;
-    let healthy = if let Some(cached) = *cache {
+    if let Some(cached) = *cache {
         if now >= cached.checked_at
             && now.saturating_sub(cached.checked_at) < READINESS_CACHE_SECONDS
         {
             cached.healthy
         } else {
-            refresh(&state, now, &mut cache).await
+            refresh(state, now, &mut cache).await
         }
     } else {
-        refresh(&state, now, &mut cache).await
-    };
-    response(&state.version, healthy)
+        refresh(state, now, &mut cache).await
+    }
 }
 
 async fn refresh(state: &AppState, now: i64, cache: &mut Option<CachedReadiness>) -> bool {

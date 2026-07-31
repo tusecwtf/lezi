@@ -10,7 +10,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * At-rest store for the long-lived family Bearer token.
+ * At-rest store for the rotating device-session refresh token.
  *
  * Production uses Keystore-backed [EncryptedSharedPreferences]; JVM tests inject
  * [InMemorySecureFamilyTokenStore].
@@ -19,11 +19,15 @@ interface SecureFamilyTokenStore {
     fun getToken(): String
     fun setToken(token: String)
     fun clearToken()
+    fun getPendingMemberSecret(): String = ""
+    fun setPendingMemberSecret(secret: String) = Unit
+    fun clearPendingMemberSecret() = Unit
 }
 
 /** Process-local token store for JVM unit tests. */
 class InMemorySecureFamilyTokenStore : SecureFamilyTokenStore {
     private val token = AtomicReference("")
+    private val pendingMemberSecret = AtomicReference("")
 
     override fun getToken(): String = token.get()
 
@@ -33,6 +37,16 @@ class InMemorySecureFamilyTokenStore : SecureFamilyTokenStore {
 
     override fun clearToken() {
         token.set("")
+    }
+
+    override fun getPendingMemberSecret(): String = pendingMemberSecret.get()
+
+    override fun setPendingMemberSecret(secret: String) {
+        pendingMemberSecret.set(secret)
+    }
+
+    override fun clearPendingMemberSecret() {
+        pendingMemberSecret.set("")
     }
 }
 
@@ -50,19 +64,39 @@ class EncryptedSecureFamilyTokenStore @Inject constructor(
             return
         }
         check(prefs.edit().putString(KEY_FAMILY_TOKEN, token).commit()) {
-            "Unable to persist encrypted family token"
+            "Unable to persist encrypted refresh token"
         }
     }
 
     override fun clearToken() {
         check(prefs.edit().remove(KEY_FAMILY_TOKEN).commit()) {
-            "Unable to clear encrypted family token"
+            "Unable to clear encrypted refresh token"
+        }
+    }
+
+    override fun getPendingMemberSecret(): String =
+        prefs.getString(KEY_PENDING_MEMBER_SECRET, "").orEmpty()
+
+    override fun setPendingMemberSecret(secret: String) {
+        if (secret.isBlank()) {
+            clearPendingMemberSecret()
+            return
+        }
+        check(prefs.edit().putString(KEY_PENDING_MEMBER_SECRET, secret).commit()) {
+            "Unable to persist encrypted pending member secret"
+        }
+    }
+
+    override fun clearPendingMemberSecret() {
+        check(prefs.edit().remove(KEY_PENDING_MEMBER_SECRET).commit()) {
+            "Unable to clear encrypted pending member secret"
         }
     }
 
     private companion object {
         const val PREFS_NAME = "lezi_secure_family"
         const val KEY_FAMILY_TOKEN = "family_token"
+        const val KEY_PENDING_MEMBER_SECRET = "pending_member_secret"
 
         fun createPrefs(context: Context): SharedPreferences {
             val masterKey = MasterKey.Builder(context)

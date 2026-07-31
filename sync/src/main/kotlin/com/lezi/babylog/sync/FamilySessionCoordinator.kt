@@ -11,18 +11,63 @@ internal sealed interface FamilySessionCommand {
     data class SaveHomeLanConfig(val config: HomeLanServerConfig) : FamilySessionCommand
     data class CreateFamily(
         val displayName: String,
+        val deviceName: String = "Android 设备",
         val bootstrapSecret: String,
         val familyName: String?,
+    ) : FamilySessionCommand
+    data class OwnerLogin(
+        val deviceName: String,
+        val rootPassword: String,
+        val takeover: Boolean,
+    ) : FamilySessionCommand
+    data class RequestMemberLogin(
+        val displayName: String,
+        val deviceName: String,
+    ) : FamilySessionCommand
+    data object CheckMemberLogin : FamilySessionCommand
+    data object CancelMemberLogin : FamilySessionCommand
+    data object ListPendingMemberLogins : FamilySessionCommand
+    data class ApproveNewMemberLogin(val requestId: String) : FamilySessionCommand
+    data class BindExistingMemberLogin(
+        val requestId: String,
+        val membershipId: String,
+    ) : FamilySessionCommand
+    data class RejectMemberLogin(val requestId: String) : FamilySessionCommand
+    data class CreateMemberLoginGrant(val membershipId: String) : FamilySessionCommand
+    data class ClaimMemberLoginGrant(
+        val payload: MemberLoginQrPayload,
+        val deviceName: String,
     ) : FamilySessionCommand
     data class JoinFamily(val command: JoinFamilyCommand) : FamilySessionCommand
     data object CreateInvite : FamilySessionCommand
     data object ListMembers : FamilySessionCommand
+    data object ListPendingMemberRenames : FamilySessionCommand
+    data class ApproveMemberRename(val requestId: String) : FamilySessionCommand
+    data class RejectMemberRename(val requestId: String) : FamilySessionCommand
+    data object CancelMyMemberRename : FamilySessionCommand
+    data class AddFamilyMember(val displayName: String) : FamilySessionCommand
+    data class RenameFamilyMember(
+        val membershipId: String,
+        val displayName: String,
+    ) : FamilySessionCommand
+    data class RenameFamilyDevice(
+        val deviceId: String,
+        val deviceName: String,
+    ) : FamilySessionCommand
+    data class RevokeFamilyDevice(val deviceId: String) : FamilySessionCommand
+    data object LogoutCurrentDevice : FamilySessionCommand
     data class RenameFamily(val familyName: String?) : FamilySessionCommand
     data class UpdateMyDisplayName(val displayName: String) : FamilySessionCommand
     data object Leave : FamilySessionCommand
     /** Owner removes another active membership (not self). */
     data class RemoveMember(val membershipId: String) : FamilySessionCommand
-    data object DeleteFamily : FamilySessionCommand
+    data class DeleteFamily(
+        val familyName: String,
+        val rootPassword: String,
+    ) : FamilySessionCommand {
+        override fun toString(): String =
+            "DeleteFamily(familyName=$familyName, rootPassword=<redacted>)"
+    }
 }
 
 internal sealed interface FamilySessionOutcome {
@@ -34,7 +79,20 @@ internal sealed interface FamilySessionOutcome {
         val dataRecovery: InitialFamilyDataRecovery = InitialFamilyDataRecovery.NotRequired,
     ) : FamilySessionOutcome
     data class InviteCreated(val invite: Invite) : FamilySessionOutcome
+    data class MemberLoginGrantCreated(val grant: MemberLoginGrant) : FamilySessionOutcome
     data class MembersListed(val members: List<FamilyMember>) : FamilySessionOutcome
+    data class PendingMemberRenamesListed(
+        val requests: List<PendingMemberRenameRequest>,
+    ) : FamilySessionOutcome
+    data class DisplayNameUpdateCompleted(
+        val result: DisplayNameUpdateResult,
+    ) : FamilySessionOutcome
+    data class FamilyMemberAdded(val member: FamilyMember) : FamilySessionOutcome
+    data class MemberLoginRequested(val request: PendingMemberLogin) : FamilySessionOutcome
+    data class MemberLoginChecked(val result: MemberLoginCheckResult) : FamilySessionOutcome
+    data class PendingMemberLoginsListed(
+        val requests: List<PendingMemberLoginRequest>,
+    ) : FamilySessionOutcome
 }
 
 /**
@@ -86,15 +144,43 @@ internal class FamilySessionCoordinator(
                 is FamilySessionCommand.SaveServer -> saveServer(command.baseUrl)
                 is FamilySessionCommand.SaveHomeLanConfig -> saveHomeLanConfig(command.config)
                 is FamilySessionCommand.CreateFamily -> createFamily(command)
+                is FamilySessionCommand.OwnerLogin -> ownerLogin(command)
+                is FamilySessionCommand.RequestMemberLogin -> requestMemberLogin(command)
+                FamilySessionCommand.CheckMemberLogin -> checkMemberLogin()
+                FamilySessionCommand.CancelMemberLogin -> cancelMemberLogin()
+                FamilySessionCommand.ListPendingMemberLogins -> listPendingMemberLogins()
+                is FamilySessionCommand.ApproveNewMemberLogin ->
+                    approveNewMemberLogin(command.requestId)
+                is FamilySessionCommand.BindExistingMemberLogin ->
+                    bindExistingMemberLogin(command.requestId, command.membershipId)
+                is FamilySessionCommand.RejectMemberLogin -> rejectMemberLogin(command.requestId)
+                is FamilySessionCommand.CreateMemberLoginGrant ->
+                    createMemberLoginGrant(command.membershipId)
+                is FamilySessionCommand.ClaimMemberLoginGrant ->
+                    claimMemberLoginGrant(command.payload, command.deviceName)
                 is FamilySessionCommand.JoinFamily -> joinFamily(command.command)
                 FamilySessionCommand.CreateInvite -> createInvite()
                 FamilySessionCommand.ListMembers -> listMembers()
+                FamilySessionCommand.ListPendingMemberRenames -> listPendingMemberRenames()
+                is FamilySessionCommand.ApproveMemberRename ->
+                    approveMemberRename(command.requestId)
+                is FamilySessionCommand.RejectMemberRename ->
+                    rejectMemberRename(command.requestId)
+                FamilySessionCommand.CancelMyMemberRename -> cancelMyMemberRename()
+                is FamilySessionCommand.AddFamilyMember -> addFamilyMember(command.displayName)
+                is FamilySessionCommand.RenameFamilyMember ->
+                    renameFamilyMember(command.membershipId, command.displayName)
+                is FamilySessionCommand.RenameFamilyDevice ->
+                    renameFamilyDevice(command.deviceId, command.deviceName)
+                is FamilySessionCommand.RevokeFamilyDevice ->
+                    revokeFamilyDevice(command.deviceId)
+                FamilySessionCommand.LogoutCurrentDevice -> logoutCurrentDevice()
                 is FamilySessionCommand.RenameFamily -> renameFamily(command.familyName)
                 is FamilySessionCommand.UpdateMyDisplayName ->
                     updateMyDisplayName(command.displayName)
                 FamilySessionCommand.Leave -> leave()
                 is FamilySessionCommand.RemoveMember -> removeMember(command.membershipId)
-                FamilySessionCommand.DeleteFamily -> deleteFamily()
+                is FamilySessionCommand.DeleteFamily -> deleteFamily(command)
             }
         }
 
@@ -103,15 +189,14 @@ internal class FamilySessionCoordinator(
             val previous = preferences.session.first()
             val parsed = HomeLanServerConfig.fromBaseUrl(baseUrl).withNormalized()
             require(parsed.isServerConfigured) { "请先填写家庭服务器地址" }
-            val merged = parsed.copy(allowedSsids = previous.allowedSsids)
-            if (previous.baseUrl.isNotBlank() && previous.baseUrl != merged.baseUrl) {
+            if (previous.baseUrl.isNotBlank() && previous.baseUrl != parsed.baseUrl) {
                 replica.resetLocalSyncReceipts(
                     previous,
                     crossingFamilyBoundary = true,
                 )
             }
             preferences.saveHomeLanConfig(
-                merged,
+                parsed,
                 clearSessionIfServerChanged = true,
             )
             onSessionChanged(preferences.session.first())
@@ -122,26 +207,16 @@ internal class FamilySessionCoordinator(
         config: HomeLanServerConfig,
     ): FamilySessionOutcome = withBarrier {
         val previous = preferences.session.first()
-        val merged = config.withNormalized().let { normalized ->
-            if (
-                normalized.allowedSsids.isEmpty() &&
-                previous.allowedSsids.isNotEmpty() &&
-                normalized.host == previous.serverHost
-            ) {
-                normalized.copy(allowedSsids = previous.allowedSsids)
-            } else {
-                normalized
-            }
-        }
-        require(merged.isServerConfigured) { "请先填写家庭服务器地址" }
-        if (previous.baseUrl.isNotBlank() && previous.baseUrl != merged.baseUrl) {
+        val normalized = config.withNormalized()
+        require(normalized.isServerConfigured) { "请先填写家庭服务器地址" }
+        if (previous.baseUrl.isNotBlank() && previous.baseUrl != normalized.baseUrl) {
             replica.resetLocalSyncReceipts(
                 previous,
                 crossingFamilyBoundary = true,
             )
         }
         preferences.saveHomeLanConfig(
-            merged,
+            normalized,
             clearSessionIfServerChanged = true,
         )
         onSessionChanged(preferences.session.first())
@@ -157,19 +232,18 @@ internal class FamilySessionCoordinator(
                 "请先退出当前家庭，再创建新的家庭"
             }
             requireRemoteAllowed(current.homeLanConfig)
-            val deviceId = preferences.ensureDeviceId()
             val createRequestId = preferences.ensureCreateRequestId()
-            // Blank secret is allowed: NAS may run without LEZI_BOOTSTRAP_SECRET.
-            // HttpSyncBackend omits the header when blank; non-blank wrong values still map to
-            // BootstrapSecretRejectedException below.
+            require(command.bootstrapSecret.isNotBlank()) { "请填写管理员根密码" }
             val joined = try {
                 backend.create(
                     baseUrl = current.homeLanConfig.baseUrl,
-                    deviceId = deviceId,
+                    deviceId = requireDeviceName(command.deviceName),
                     displayName = requireMemberDisplayName(command.displayName),
                     createRequestId = createRequestId,
-                    bootstrapSecret = command.bootstrapSecret.takeIf(String::isNotBlank),
-                    familyName = normalizeFamilyNameForWire(command.familyName),
+                    bootstrapSecret = command.bootstrapSecret,
+                    familyName = requireNotNull(normalizeFamilyNameForWire(command.familyName)) {
+                        "请填写家庭名"
+                    },
                 )
             } catch (error: SyncHttpException) {
                 if (error.statusCode == 401 || error.statusCode == 403) {
@@ -179,22 +253,12 @@ internal class FamilySessionCoordinator(
             }
             val session = persistJoin(
                 baseUrl = current.homeLanConfig.baseUrl,
-                deviceId = deviceId,
-                joined = if (joined.reclaimed) joined.copy(cursor = 0L) else joined,
+                deviceId = joined.deviceId,
+                joined = joined.copy(cursor = 0L),
             )
-            // saveSession atomically retires the create request id. Reclaim recovery
-            // stays inside this barrier so a queued endpoint mutation cannot clear
-            // the new credential before its required cursor-zero full pull.
-            val dataRecovery = if (joined.reclaimed) {
-                recoverReclaimedSession(session)
-            } else {
-                try {
-                    requestSync(SyncTrigger.LocalWrite)
-                } catch (_: Exception) {
-                    // A later foreground transition retries from the durable outbox.
-                }
-                InitialFamilyDataRecovery.NotRequired
-            }
+            // The device session is durable before this independent cursor-zero pull.
+            // Failure leaves the session intact so foreground retry never reruns create.
+            val dataRecovery = recoverReclaimedSession(session)
             FamilySessionOutcome.Joined(
                 session = session,
                 reclaimed = joined.reclaimed,
@@ -212,9 +276,6 @@ internal class FamilySessionCoordinator(
         val decoded = InvitePayloadCodec.decode(command.invitation.trim())
         val config = command.homeLanConfig.withNormalized()
         require(config.isServerConfigured) { "请先填写家庭服务器地址" }
-        require(config.allowedSsids.isNotEmpty()) {
-            "请至少填写一个家庭 Wi‑Fi 名称"
-        }
         requireRemoteAllowed(config)
         val deviceId = preferences.ensureDeviceId()
         val joined = backend.join(
@@ -230,6 +291,217 @@ internal class FamilySessionCoordinator(
                 joined = joined,
                 joinedConfig = config,
             ),
+        )
+    }
+
+    private suspend fun ownerLogin(
+        command: FamilySessionCommand.OwnerLogin,
+    ): FamilySessionOutcome = withBarrier {
+        val current = preferences.session.first()
+        require(!current.isJoined) {
+            "请先退出当前家庭，再登录管理员设备"
+        }
+        requireRemoteAllowed(current.homeLanConfig)
+        require(command.rootPassword.isNotBlank()) { "请填写管理员根密码" }
+        val joined = try {
+            backend.ownerLogin(
+                baseUrl = current.homeLanConfig.baseUrl,
+                deviceName = requireDeviceName(command.deviceName),
+                loginRequestId = preferences.ensureOwnerLoginRequestId(),
+                rootPassword = command.rootPassword,
+                takeover = command.takeover,
+            )
+        } catch (error: SyncHttpException) {
+            if (error.statusCode == 401 || error.statusCode == 403) {
+                throw OwnerRootPasswordRejectedException()
+            }
+            throw error
+        }
+        require(joined.role == FamilyRole.Owner) { "管理员登录响应角色无效" }
+        val session = persistJoin(
+            baseUrl = current.homeLanConfig.baseUrl,
+            deviceId = joined.deviceId,
+            joined = joined.copy(cursor = 0L),
+        )
+        FamilySessionOutcome.Joined(
+            session = session,
+            dataRecovery = recoverReclaimedSession(session),
+        )
+    }
+
+    private suspend fun requestMemberLogin(
+        command: FamilySessionCommand.RequestMemberLogin,
+    ): FamilySessionOutcome = withBarrier {
+        val current = preferences.session.first()
+        require(!current.isJoined) { "请先退出当前家庭，再提交加入申请" }
+        require(preferences.pendingMemberLogin.first() == null) {
+            "已有一条等待管理员确认的申请"
+        }
+        requireRemoteAllowed(current.homeLanConfig)
+        val displayName = requireMemberDisplayName(command.displayName)
+        val deviceName = requireDeviceName(command.deviceName)
+        val receipt = backend.requestMemberLogin(
+            current.homeLanConfig.baseUrl,
+            displayName,
+            deviceName,
+        )
+        preferences.savePendingMemberLogin(receipt, displayName, deviceName)
+        FamilySessionOutcome.MemberLoginRequested(
+            requireNotNull(preferences.pendingMemberLogin.first()) {
+                "加入申请未能保存，请重试"
+            },
+        )
+    }
+
+    private suspend fun checkMemberLogin(): FamilySessionOutcome = withBarrier {
+        val current = preferences.session.first()
+        require(!current.isJoined) { "这台设备已经加入家庭" }
+        val pending = requireNotNull(preferences.pendingMemberLogin.first()) {
+            "没有等待管理员确认的申请"
+        }
+        requireRemoteAllowed(current.homeLanConfig)
+        val secret = preferences.pendingMemberSecret()
+        require(secret.isNotBlank()) { "等待确认凭据已丢失，请重新申请" }
+        when (val status = backend.memberLoginStatus(current.homeLanConfig.baseUrl, secret)) {
+            MemberLoginStatus.Pending -> FamilySessionOutcome.MemberLoginChecked(
+                MemberLoginCheckResult.Waiting(pending),
+            )
+            MemberLoginStatus.Approved -> {
+                val joined = backend.claimMemberLogin(current.homeLanConfig.baseUrl, secret)
+                require(joined.role == FamilyRole.Member) { "成员登录响应角色无效" }
+                // A claim is single-use: make the session durable before any replica work.
+                val session = persistClaimedMemberSession(current, joined)
+                val dataRecovery = try {
+                    replica.resetLocalSyncReceipts(
+                        current,
+                        crossingFamilyBoundary = true,
+                    )
+                    recoverReclaimedSession(session)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Throwable) {
+                    InitialFamilyDataRecovery.RetryRequired
+                }
+                FamilySessionOutcome.MemberLoginChecked(
+                    MemberLoginCheckResult.Joined(session, dataRecovery),
+                )
+            }
+            MemberLoginStatus.Rejected,
+            MemberLoginStatus.Cancelled,
+            MemberLoginStatus.Expired,
+            MemberLoginStatus.Claimed,
+            -> {
+                preferences.clearPendingMemberLogin()
+                FamilySessionOutcome.MemberLoginChecked(MemberLoginCheckResult.Terminal(status))
+            }
+        }
+    }
+
+    private suspend fun cancelMemberLogin(): FamilySessionOutcome = withBarrier {
+        val current = preferences.session.first()
+        require(!current.isJoined) { "这台设备已经加入家庭" }
+        requireNotNull(preferences.pendingMemberLogin.first()) {
+            "没有等待管理员确认的申请"
+        }
+        requireRemoteAllowed(current.homeLanConfig)
+        val secret = preferences.pendingMemberSecret()
+        require(secret.isNotBlank()) { "等待确认凭据已丢失，请重新申请" }
+        backend.cancelMemberLogin(current.homeLanConfig.baseUrl, secret)
+        preferences.clearPendingMemberLogin()
+        FamilySessionOutcome.Completed
+    }
+
+    private suspend fun listPendingMemberLogins(): FamilySessionOutcome =
+        withAllowedSession { session ->
+            require(session.role == FamilyRole.Owner) { "仅家庭管理员可查看待确认设备" }
+            FamilySessionOutcome.PendingMemberLoginsListed(backend.pendingMemberLogins(session))
+        }
+
+    private suspend fun approveNewMemberLogin(requestId: String): FamilySessionOutcome =
+        withAllowedSession { session ->
+            require(session.role == FamilyRole.Owner) { "仅家庭管理员可批准加入申请" }
+            backend.approveNewMemberLogin(session, requirePendingRequestId(requestId))
+            FamilySessionOutcome.Completed
+        }
+
+    private suspend fun bindExistingMemberLogin(
+        requestId: String,
+        membershipId: String,
+    ): FamilySessionOutcome = withAllowedSession { session ->
+        require(session.role == FamilyRole.Owner) { "仅家庭管理员可绑定加入申请" }
+        backend.bindExistingMemberLogin(
+            session,
+            requirePendingRequestId(requestId),
+            requireTargetMembershipId(membershipId),
+        )
+        FamilySessionOutcome.Completed
+    }
+
+    private suspend fun rejectMemberLogin(requestId: String): FamilySessionOutcome =
+        withAllowedSession { session ->
+            require(session.role == FamilyRole.Owner) { "仅家庭管理员可拒绝加入申请" }
+            backend.rejectMemberLogin(session, requirePendingRequestId(requestId))
+            FamilySessionOutcome.Completed
+        }
+
+    private suspend fun createMemberLoginGrant(
+        membershipId: String,
+    ): FamilySessionOutcome = withAllowedSession { session ->
+        require(session.role == FamilyRole.Owner) {
+            "仅家庭管理员可生成成员登录二维码"
+        }
+        val endpoint = requireNotNull(preferences.verifiedEndpoint.first()) {
+            "当前家庭服务器尚未建立可信 HTTPS 配置"
+        }
+        require(endpoint.matchesOrigin(session.baseUrl)) {
+            "当前家庭会话与可信服务器地址不一致"
+        }
+        FamilySessionOutcome.MemberLoginGrantCreated(
+            backend.createMemberLoginGrant(
+                session,
+                endpoint,
+                requireTargetMembershipId(membershipId),
+            ),
+        )
+    }
+
+    private suspend fun claimMemberLoginGrant(
+        payload: MemberLoginQrPayload,
+        deviceName: String,
+    ): FamilySessionOutcome = withBarrier {
+        require(!preferences.session.first().isJoined) {
+            "请先退出当前家庭，再登录成员设备"
+        }
+        require(preferences.verifiedEndpoint.first() == payload.endpoint) {
+            "请先确认并保存二维码中的家庭服务器信任信息"
+        }
+        val joined = backend.claimMemberLoginGrant(
+            endpoint = payload.endpoint,
+            grant = payload.grant,
+            deviceName = requireDeviceName(deviceName),
+        )
+        require(joined.role == FamilyRole.Member) { "成员登录响应角色无效" }
+        // The grant is single-use: publish the new session before fallible replica recovery.
+        val previous = preferences.session.first()
+        val session = persistClaimedMemberSession(
+            previous = previous,
+            joined = joined.copy(cursor = 0L),
+            baseUrl = payload.endpoint.origin,
+        )
+        val dataRecovery = try {
+            replica.resetLocalSyncReceipts(
+                previous,
+                crossingFamilyBoundary = true,
+            )
+            recoverReclaimedSession(session)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            InitialFamilyDataRecovery.RetryRequired
+        }
+        FamilySessionOutcome.Joined(
+            session = session,
+            dataRecovery = dataRecovery,
         )
     }
 
@@ -249,12 +521,103 @@ internal class FamilySessionCoordinator(
             FamilySessionOutcome.MembersListed(members)
         }
 
+    private suspend fun listPendingMemberRenames(): FamilySessionOutcome =
+        withAllowedSession { session ->
+            require(session.role == FamilyRole.Owner) {
+                "仅家庭管理员可查看改名申请"
+            }
+            FamilySessionOutcome.PendingMemberRenamesListed(
+                backend.pendingMemberRenameRequests(session),
+            )
+        }
+
+    private suspend fun approveMemberRename(requestId: String): FamilySessionOutcome =
+        withAllowedSession { session ->
+            require(session.role == FamilyRole.Owner) {
+                "仅家庭管理员可确认改名申请"
+            }
+            backend.approveMemberRename(session, requirePendingRequestId(requestId))
+            FamilySessionOutcome.Completed
+        }
+
+    private suspend fun rejectMemberRename(requestId: String): FamilySessionOutcome =
+        withAllowedSession { session ->
+            require(session.role == FamilyRole.Owner) {
+                "仅家庭管理员可拒绝改名申请"
+            }
+            backend.rejectMemberRename(session, requirePendingRequestId(requestId))
+            FamilySessionOutcome.Completed
+        }
+
+    private suspend fun cancelMyMemberRename(): FamilySessionOutcome =
+        withAllowedSession { session ->
+            require(session.role == FamilyRole.Member) {
+                "管理员称呼修改无需等待确认"
+            }
+            backend.cancelMyMemberRename(session)
+            FamilySessionOutcome.Completed
+        }
+
+    private suspend fun addFamilyMember(displayName: String): FamilySessionOutcome =
+        withAllowedSession { session ->
+            require(session.role == FamilyRole.Owner) {
+                "仅家庭管理员可添加成员"
+            }
+            FamilySessionOutcome.FamilyMemberAdded(
+                backend.addFamilyMember(session, requireMemberDisplayName(displayName)),
+            )
+        }
+
+    private suspend fun renameFamilyMember(
+        membershipId: String,
+        displayName: String,
+    ): FamilySessionOutcome = withAllowedSession { session ->
+        require(session.role == FamilyRole.Owner) {
+            "仅家庭管理员可直接修改成员称呼"
+        }
+        backend.renameFamilyMember(
+            session,
+            requireTargetMembershipId(membershipId),
+            requireMemberDisplayName(displayName),
+        )
+        FamilySessionOutcome.Completed
+    }
+
+    private suspend fun renameFamilyDevice(
+        deviceId: String,
+        deviceName: String,
+    ): FamilySessionOutcome = withAllowedSession { session ->
+        backend.renameFamilyDevice(
+            session,
+            requireDeviceActionId(deviceId),
+            requireDeviceName(deviceName),
+        )
+        FamilySessionOutcome.Completed
+    }
+
+    private suspend fun revokeFamilyDevice(deviceId: String): FamilySessionOutcome =
+        withAllowedSession { session ->
+            require(session.role == FamilyRole.Owner) {
+                "仅家庭管理员可撤销家庭设备"
+            }
+            backend.revokeFamilyDevice(session, requireDeviceActionId(deviceId))
+            FamilySessionOutcome.Completed
+        }
+
+    private suspend fun logoutCurrentDevice(): FamilySessionOutcome =
+        withAllowedSession { session ->
+            backend.logoutCurrentDevice(session)
+            FamilySessionOutcome.Completed
+        }
+
     private suspend fun renameFamily(familyName: String?): FamilySessionOutcome =
         withAllowedSession { session ->
             require(session.role == FamilyRole.Owner) {
                 "仅家庭管理员可修改家庭名"
             }
-            val normalized = normalizeFamilyNameForWire(familyName)
+            val normalized = requireNotNull(normalizeFamilyNameForWire(familyName)) {
+                "家庭名不能为空"
+            }
             backend.renameFamily(session, normalized)
             val updated = session.copy(familyName = normalized)
             preferences.saveSession(updated)
@@ -265,11 +628,12 @@ internal class FamilySessionCoordinator(
     private suspend fun updateMyDisplayName(
         displayName: String,
     ): FamilySessionOutcome = withAllowedSession { session ->
-        backend.updateMyDisplayName(
-            session,
-            requireMemberDisplayName(displayName),
+        FamilySessionOutcome.DisplayNameUpdateCompleted(
+            backend.updateMyDisplayName(
+                session,
+                requireMemberDisplayName(displayName),
+            ),
         )
-        FamilySessionOutcome.Completed
     }
 
     private suspend fun leave(): FamilySessionOutcome =
@@ -277,12 +641,7 @@ internal class FamilySessionCoordinator(
             require(session.role == FamilyRole.Member) {
                 "家庭管理员请使用“删除家庭数据”完成退出"
             }
-            try {
-                backend.leave(session)
-            } catch (error: SyncHttpException) {
-                if (!error.meansFamilySessionIsGone()) throw error
-            }
-            clearSession(session)
+            backend.leave(session)
             FamilySessionOutcome.Completed
         }
 
@@ -300,29 +659,28 @@ internal class FamilySessionCoordinator(
             FamilySessionOutcome.Completed
         }
 
-    private suspend fun deleteFamily(): FamilySessionOutcome =
+    private suspend fun deleteFamily(command: FamilySessionCommand.DeleteFamily): FamilySessionOutcome =
         withAllowedSession { session ->
             require(session.role == FamilyRole.Owner) {
                 "仅家庭管理员可删除家庭"
             }
-            try {
-                backend.deleteFamily(session)
-            } catch (error: SyncHttpException) {
-                if (!error.meansFamilySessionIsGone()) throw error
+            val expectedFamilyName = requireNotNull(
+                normalizeFamilyNameForWire(session.familyName),
+            ) {
+                "当前家庭名不可用，请先设置家庭名"
             }
-            clearSession(session)
+            val confirmedFamilyName = requireNotNull(
+                normalizeFamilyNameForWire(command.familyName),
+            ) {
+                "请输入家庭名"
+            }
+            require(confirmedFamilyName == expectedFamilyName) {
+                "输入的家庭名与当前家庭不一致"
+            }
+            require(command.rootPassword.isNotBlank()) { "请输入管理员根密码" }
+            backend.deleteFamily(session, confirmedFamilyName, command.rootPassword)
             FamilySessionOutcome.Completed
         }
-
-    private suspend fun clearSession(session: SyncSession) {
-        outboxDao.deleteFamily(session.familyId)
-        replica.resetLocalSyncReceipts(
-            session,
-            crossingFamilyBoundary = true,
-        )
-        preferences.clearAllLocalSyncConfig()
-        onSessionChanged(preferences.session.first())
-    }
 
     private suspend fun persistJoin(
         baseUrl: String,
@@ -332,18 +690,18 @@ internal class FamilySessionCoordinator(
     ): SyncSession {
         val previous = preferences.session.first()
         val parsed = HomeLanServerConfig.fromBaseUrl(baseUrl).withNormalized()
-        val config = joinedConfig?.withNormalized()
-            ?: parsed.copy(allowedSsids = previous.allowedSsids)
+        val config = joinedConfig?.withNormalized() ?: parsed
         val session = SyncSession(
             familyId = joined.familyId,
             familyToken = joined.token,
-            deviceId = deviceId,
+            refreshToken = joined.refreshToken,
+            accessExpiresAtEpochSeconds = joined.accessExpiresAtEpochSeconds,
+            deviceId = joined.deviceId.ifBlank { deviceId },
             role = joined.role,
             pullCursor = joined.cursor,
             pullGeneration = joined.generation,
             serverHost = config.host.ifBlank { previous.serverHost },
             serverPort = if (config.host.isNotBlank()) config.port else previous.serverPort,
-            allowedSsids = config.allowedSsids,
             serverScheme = if (config.host.isNotBlank()) config.scheme else previous.serverScheme,
             familyName = joined.familyName?.trim()?.takeIf { it.isNotEmpty() },
             membershipId = joined.membershipId.trim(),
@@ -355,6 +713,32 @@ internal class FamilySessionCoordinator(
         if (joined.entities.isNotEmpty()) {
             replica.applyInitialEntities(session, joined.entities)
         }
+        preferences.saveSession(session)
+        onSessionChanged(session)
+        return session
+    }
+
+    private suspend fun persistClaimedMemberSession(
+        previous: SyncSession,
+        joined: JoinResult,
+        baseUrl: String = previous.homeLanConfig.baseUrl,
+    ): SyncSession {
+        val parsed = HomeLanServerConfig.fromBaseUrl(baseUrl).withNormalized()
+        val session = SyncSession(
+            familyId = joined.familyId,
+            familyToken = joined.token,
+            refreshToken = joined.refreshToken,
+            accessExpiresAtEpochSeconds = joined.accessExpiresAtEpochSeconds,
+            deviceId = joined.deviceId,
+            role = joined.role,
+            pullCursor = 0L,
+            pullGeneration = joined.generation,
+            serverHost = parsed.host,
+            serverPort = parsed.port,
+            serverScheme = parsed.scheme,
+            familyName = joined.familyName?.trim()?.takeIf(String::isNotEmpty),
+            membershipId = joined.membershipId.trim(),
+        )
         preferences.saveSession(session)
         onSessionChanged(session)
         return session
@@ -377,8 +761,19 @@ internal class FamilySessionCoordinator(
         }
 }
 
-private fun SyncHttpException.meansFamilySessionIsGone(): Boolean =
-    statusCode == 401
+private fun requirePendingRequestId(requestId: String): String = requestId.trim().also {
+    require(it.matches(Regex("[A-Za-z0-9_-]{32,128}"))) { "待确认申请 ID 无效" }
+}
+
+private fun requireTargetMembershipId(membershipId: String): String = membershipId.trim().also {
+    require(it.isNotEmpty() && it.length <= 128 && it.none(Char::isWhitespace)) {
+        "目标家庭成员 ID 无效"
+    }
+}
+
+private fun requireDeviceActionId(deviceId: String): String = deviceId.trim().also {
+    require(it.isNotEmpty()) { "请选择家庭设备" }
+}
 
 private suspend fun <T> resultOf(block: suspend () -> T): Result<T> =
     try {

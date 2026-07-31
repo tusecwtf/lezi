@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded by ADR-0011
 ---
 
 # 家庭身份用设备 membership 称呼，账户首屏只做家庭概览

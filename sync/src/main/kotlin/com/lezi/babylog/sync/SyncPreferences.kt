@@ -34,7 +34,13 @@ data class CreatorAcknowledgementRef(
 
 data class SyncSession(
     val familyId: String = "",
+    /** Short-lived access token. Never persisted; blank after process reconstruction. */
     val familyToken: String = "",
+    /** Rotating refresh token projected from Keystore-backed storage. */
+    val refreshToken: String = "",
+    val accessExpiresAtEpochSeconds: Long = 0,
+    /** Credentials are gone, but family identity and local replica are intentionally retained. */
+    val reauthRequired: Boolean = false,
     val deviceId: String = "",
     val role: FamilyRole = FamilyRole.None,
     val pullCursor: Long = 0,
@@ -42,7 +48,6 @@ data class SyncSession(
     val lastSuccessAt: Long? = null,
     val serverHost: String = "",
     val serverPort: Int = DEFAULT_SERVER_PORT,
-    val allowedSsids: List<String> = emptyList(),
     val serverScheme: String = DEFAULT_SERVER_SCHEME,
     /**
      * Shared family name cached from create/join/rename responses.
@@ -61,23 +66,32 @@ data class SyncSession(
         get() = homeLanConfig.baseUrl
 
     val isJoined: Boolean
-        get() = baseUrl.isNotBlank() && familyId.isNotBlank() && familyToken.isNotBlank()
+        get() = !reauthRequired && baseUrl.isNotBlank() && familyId.isNotBlank() &&
+            (familyToken.isNotBlank() || refreshToken.isNotBlank())
 
     val homeLanConfig: HomeLanServerConfig
         get() = HomeLanServerConfig(
             host = serverHost,
             port = serverPort,
-            allowedSsids = allowedSsids,
             scheme = serverScheme,
         ).withNormalized()
 
     fun isCreatorAcknowledgementPending(entityType: String, clientUuid: String): Boolean =
         CreatorAcknowledgementRef(entityType.trim(), clientUuid.trim()) in
             pendingCreatorAcknowledgements
+
+    override fun toString(): String =
+        "SyncSession(familyId=$familyId, deviceId=$deviceId, role=$role, " +
+            "pullCursor=$pullCursor, reauthRequired=$reauthRequired, credentials=<redacted>)"
 }
 
 interface SyncPreferences {
     val session: Flow<SyncSession>
+    val verifiedEndpoint: Flow<TrustedEndpointProfile?>
+    val pendingMemberLogin: Flow<PendingMemberLogin?>
+        get() = kotlinx.coroutines.flow.flowOf(null)
+    suspend fun rememberEndpoint(endpoint: TrustedEndpointProfile)
+    suspend fun forgetEndpoint()
     suspend fun saveServer(baseUrl: String)
     suspend fun saveHomeLanConfig(config: HomeLanServerConfig, clearSessionIfServerChanged: Boolean = true)
     suspend fun saveSession(session: SyncSession)
@@ -94,11 +108,34 @@ interface SyncPreferences {
     suspend fun markSuccess(atMillis: Long)
     suspend fun ensureDeviceId(): String
     suspend fun ensureCreateRequestId(): String
+    /** Durable across retries; retired atomically with a committed session. */
+    suspend fun ensureOwnerLoginRequestId(): String
+    suspend fun savePendingMemberLogin(
+        receipt: MemberLoginReceipt,
+        displayName: String,
+        deviceName: String,
+    ): Unit = throw UnsupportedOperationException("Pending member login is not implemented")
+    suspend fun pendingMemberSecret(): String = ""
+    suspend fun clearPendingMemberLogin() = Unit
     suspend fun clearCreateRequestId()
-    /** Wipes the host, port, SSID allowlist, and family session. */
+    /** Wipes the endpoint, trust profile, credentials, and family session. */
     suspend fun clearAllLocalSyncConfig()
+    /** Clears this Device's credentials while retaining endpoint, identity and local family data. */
+    suspend fun clearDeviceCredentialsForReauth()
     /** Completes a same-version credential clear interrupted between durability domains. */
     suspend fun recoverPendingCredentialClear() {}
+    /** Durable hand-off after the server confirms this Device is terminally removed. */
+    suspend fun markPendingDeviceRemovalClear() {}
+    suspend fun hasPendingDeviceRemovalClear(): Boolean = false
+    suspend fun clearPendingDeviceRemovalClear() {}
+    /** Durable hand-off after the server confirms this membership was hard-deleted. */
+    suspend fun markPendingMembershipDeletionClear() {}
+    suspend fun hasPendingMembershipDeletionClear(): Boolean = false
+    suspend fun clearPendingMembershipDeletionClear() {}
+    /** Durable hand-off after the server confirms the entire family was deleted. */
+    suspend fun markPendingFamilyDeletionClear() {}
+    suspend fun hasPendingFamilyDeletionClear(): Boolean = false
+    suspend fun clearPendingFamilyDeletionClear() {}
 }
 
 @Singleton
@@ -106,13 +143,61 @@ class DataStoreSyncPreferences @Inject constructor(
     private val dataStore: DataStore<Preferences>,
     private val secureTokenStore: SecureFamilyTokenStore,
 ) : SyncPreferences {
+    private val processAccessToken = java.util.concurrent.atomic.AtomicReference("")
+    private val processAccessExpiry = java.util.concurrent.atomic.AtomicLong(0)
     override val session: Flow<SyncSession> = dataStore.data.map { prefs ->
         mapSession(prefs)
+    }
+    override val verifiedEndpoint: Flow<TrustedEndpointProfile?> = dataStore.data.map { prefs ->
+        val origin = prefs[Keys.VERIFIED_ENDPOINT_ORIGIN].orEmpty()
+        val trustMode = prefs[Keys.VERIFIED_ENDPOINT_TRUST_MODE]
+        val pin = prefs[Keys.VERIFIED_ENDPOINT_SPKI_SHA256].orEmpty()
+        if (origin.isBlank()) return@map null
+        runCatching {
+            when (trustMode) {
+                EndpointTrustMode.SystemPki.name -> TrustedEndpointProfile.systemPki(origin)
+                EndpointTrustMode.TofuSpki.name -> TrustedEndpointProfile.tofuSpki(origin, pin)
+                else -> null
+            }
+        }.getOrNull()
+    }
+    override val pendingMemberLogin: Flow<PendingMemberLogin?> = dataStore.data.map { prefs ->
+        val requestId = prefs[Keys.PENDING_MEMBER_REQUEST_ID].orEmpty()
+        if (requestId.isBlank() || secureTokenStore.getPendingMemberSecret().isBlank()) {
+            return@map null
+        }
+        PendingMemberLogin(
+            requestId = requestId,
+            displayName = prefs[Keys.PENDING_MEMBER_DISPLAY_NAME].orEmpty(),
+            deviceName = prefs[Keys.PENDING_MEMBER_DEVICE_NAME].orEmpty(),
+            expiresAtEpochSeconds = prefs[Keys.PENDING_MEMBER_EXPIRES_AT] ?: 0L,
+        )
+    }
+
+    override suspend fun rememberEndpoint(endpoint: TrustedEndpointProfile) {
+        dataStore.edit { prefs ->
+            prefs[Keys.VERIFIED_ENDPOINT_ORIGIN] = endpoint.origin
+            prefs[Keys.VERIFIED_ENDPOINT_TRUST_MODE] = endpoint.trustMode.name
+            val pin = endpoint.spkiSha256
+            if (pin == null) {
+                prefs.remove(Keys.VERIFIED_ENDPOINT_SPKI_SHA256)
+            } else {
+                prefs[Keys.VERIFIED_ENDPOINT_SPKI_SHA256] = pin
+            }
+        }
+    }
+
+    override suspend fun forgetEndpoint() {
+        dataStore.edit { prefs ->
+            prefs.remove(Keys.VERIFIED_ENDPOINT_ORIGIN)
+            prefs.remove(Keys.VERIFIED_ENDPOINT_TRUST_MODE)
+            prefs.remove(Keys.VERIFIED_ENDPOINT_SPKI_SHA256)
+        }
     }
 
     private fun mapSession(prefs: Preferences): SyncSession {
         val rawScheme = prefs[Keys.SERVER_SCHEME].orEmpty()
-        val schemeIsValid = rawScheme.lowercase() == "http" || rawScheme.lowercase() == "https"
+        val schemeIsValid = rawScheme.lowercase() == "https"
         val host = if (schemeIsValid) {
             prefs[Keys.SERVER_HOST].orEmpty()
         } else {
@@ -121,11 +206,14 @@ class DataStoreSyncPreferences @Inject constructor(
         val port = prefs[Keys.SERVER_PORT]
             ?: DEFAULT_SERVER_PORT
         val scheme = if (schemeIsValid) rawScheme.lowercase() else DEFAULT_SERVER_SCHEME
-        val ssids = decodeSsids(prefs[Keys.ALLOWED_SSIDS])
         val credentialClearPending = prefs[Keys.PENDING_FAMILY_CREDENTIAL_CLEAR] == true
         return SyncSession(
             familyId = prefs[Keys.FAMILY_ID].orEmpty(),
-            familyToken = if (credentialClearPending) "" else secureTokenStore.getToken(),
+            familyToken = if (credentialClearPending) "" else processAccessToken.get(),
+            refreshToken = if (credentialClearPending) "" else secureTokenStore.getToken(),
+            accessExpiresAtEpochSeconds =
+                if (credentialClearPending) 0 else processAccessExpiry.get(),
+            reauthRequired = prefs[Keys.REAUTH_REQUIRED] == true,
             deviceId = prefs[Keys.DEVICE_ID].orEmpty(),
             role = prefs[Keys.ROLE]?.let { runCatching { FamilyRole.valueOf(it) }.getOrNull() }
                 ?: FamilyRole.None,
@@ -134,7 +222,6 @@ class DataStoreSyncPreferences @Inject constructor(
             lastSuccessAt = prefs[Keys.LAST_SUCCESS_AT],
             serverHost = host,
             serverPort = port,
-            allowedSsids = ssids,
             serverScheme = scheme,
             familyName = prefs[Keys.FAMILY_NAME]?.trim()?.takeIf { it.isNotEmpty() },
             membershipId = prefs[Keys.MEMBERSHIP_ID].orEmpty(),
@@ -145,11 +232,7 @@ class DataStoreSyncPreferences @Inject constructor(
 
     override suspend fun saveServer(baseUrl: String) {
         val config = HomeLanServerConfig.fromBaseUrl(baseUrl).withNormalized()
-        val previous = session.first()
-        saveHomeLanConfig(
-            config.copy(allowedSsids = previous.allowedSsids),
-            clearSessionIfServerChanged = true,
-        )
+        saveHomeLanConfig(config, clearSessionIfServerChanged = true)
     }
 
     override suspend fun saveHomeLanConfig(
@@ -162,8 +245,9 @@ class DataStoreSyncPreferences @Inject constructor(
         val serverChanged = previous.baseUrl.isNotBlank() &&
             previous.baseUrl != newBase &&
             newBase.isNotBlank()
+        val shouldClearSession = clearSessionIfServerChanged && serverChanged
         dataStore.edit { prefs ->
-            if (clearSessionIfServerChanged && serverChanged) {
+            if (shouldClearSession) {
                 clearFamilyValues(prefs)
                 prefs[Keys.PENDING_FAMILY_CREDENTIAL_CLEAR] = true
             }
@@ -175,29 +259,25 @@ class DataStoreSyncPreferences @Inject constructor(
                 prefs[Keys.SERVER_PORT] = normalized.port
                 prefs[Keys.SERVER_SCHEME] = normalized.scheme
             }
-            val ssidEncoded = encodeSsids(normalized.allowedSsids)
-            if (ssidEncoded.isBlank()) {
-                prefs.remove(Keys.ALLOWED_SSIDS)
-            } else {
-                prefs[Keys.ALLOWED_SSIDS] = ssidEncoded
-            }
         }
+        if (shouldClearSession) secureTokenStore.clearPendingMemberSecret()
         finishPendingFamilyCredentialClear()
     }
 
     override suspend fun saveSession(session: SyncSession) {
-        secureTokenStore.setToken(session.familyToken)
+        secureTokenStore.setToken(session.refreshToken)
+        processAccessToken.set(session.familyToken)
+        processAccessExpiry.set(session.accessExpiresAtEpochSeconds)
         val config = session.homeLanConfig.withNormalized()
         dataStore.edit { prefs ->
+            prefs.remove(Keys.REAUTH_REQUIRED)
+            prefs.remove(Keys.PENDING_FAMILY_CREDENTIAL_CLEAR)
             val previousFamilyId = prefs[Keys.FAMILY_ID].orEmpty()
             if (config.host.isNotBlank()) {
                 prefs[Keys.SERVER_HOST] = config.host
                 prefs[Keys.SERVER_PORT] = config.port
                 prefs[Keys.SERVER_SCHEME] = config.scheme
             }
-            val ssidEncoded = encodeSsids(config.allowedSsids.ifEmpty { session.allowedSsids })
-            if (ssidEncoded.isBlank()) prefs.remove(Keys.ALLOWED_SSIDS)
-            else prefs[Keys.ALLOWED_SSIDS] = ssidEncoded
             prefs[Keys.FAMILY_ID] = session.familyId
             if (previousFamilyId != session.familyId) {
                 prefs.remove(Keys.PENDING_CREATOR_ACKNOWLEDGEMENTS)
@@ -206,6 +286,8 @@ class DataStoreSyncPreferences @Inject constructor(
             // durable commit. A separate post-commit edit can fail after the UI
             // already owns a valid joined session.
             prefs.remove(Keys.CREATE_REQUEST_ID)
+            prefs.remove(Keys.OWNER_LOGIN_REQUEST_ID)
+            clearPendingMemberValues(prefs)
             prefs[Keys.DEVICE_ID] = session.deviceId
             prefs[Keys.ROLE] = session.role.name
             prefs[Keys.PULL_CURSOR] = session.pullCursor
@@ -232,6 +314,7 @@ class DataStoreSyncPreferences @Inject constructor(
                 prefs[Keys.MEMBERSHIP_ID] = membershipId
             }
         }
+        secureTokenStore.clearPendingMemberSecret()
     }
 
     override suspend fun updateCursor(cursor: Long, generation: String) {
@@ -313,6 +396,42 @@ class DataStoreSyncPreferences @Inject constructor(
         return requireNotNull(dataStore.data.first()[Keys.CREATE_REQUEST_ID])
     }
 
+    override suspend fun ensureOwnerLoginRequestId(): String {
+        dataStore.data.first()[Keys.OWNER_LOGIN_REQUEST_ID]
+            ?.takeIf(String::isNotBlank)
+            ?.let { return it }
+        val generated = UUID.randomUUID().toString()
+        dataStore.edit { prefs ->
+            if (prefs[Keys.OWNER_LOGIN_REQUEST_ID].isNullOrBlank()) {
+                prefs[Keys.OWNER_LOGIN_REQUEST_ID] = generated
+            }
+        }
+        return requireNotNull(dataStore.data.first()[Keys.OWNER_LOGIN_REQUEST_ID])
+    }
+
+    override suspend fun savePendingMemberLogin(
+        receipt: MemberLoginReceipt,
+        displayName: String,
+        deviceName: String,
+    ) {
+        require(receipt.requestId.isNotBlank()) { "pending request id is required" }
+        require(receipt.pendingSecret.isNotBlank()) { "pending member secret is required" }
+        secureTokenStore.setPendingMemberSecret(receipt.pendingSecret)
+        dataStore.edit { prefs ->
+            prefs[Keys.PENDING_MEMBER_REQUEST_ID] = receipt.requestId
+            prefs[Keys.PENDING_MEMBER_DISPLAY_NAME] = displayName
+            prefs[Keys.PENDING_MEMBER_DEVICE_NAME] = deviceName
+            prefs[Keys.PENDING_MEMBER_EXPIRES_AT] = receipt.expiresAtEpochSeconds
+        }
+    }
+
+    override suspend fun pendingMemberSecret(): String = secureTokenStore.getPendingMemberSecret()
+
+    override suspend fun clearPendingMemberLogin() {
+        dataStore.edit(::clearPendingMemberValues)
+        secureTokenStore.clearPendingMemberSecret()
+    }
+
     override suspend fun clearCreateRequestId() {
         dataStore.edit { it.remove(Keys.CREATE_REQUEST_ID) }
     }
@@ -324,13 +443,57 @@ class DataStoreSyncPreferences @Inject constructor(
             prefs.remove(Keys.SERVER_HOST)
             prefs.remove(Keys.SERVER_PORT)
             prefs.remove(Keys.SERVER_SCHEME)
-            prefs.remove(Keys.ALLOWED_SSIDS)
+            prefs.remove(Keys.VERIFIED_ENDPOINT_ORIGIN)
+            prefs.remove(Keys.VERIFIED_ENDPOINT_TRUST_MODE)
+            prefs.remove(Keys.VERIFIED_ENDPOINT_SPKI_SHA256)
+        }
+        finishPendingFamilyCredentialClear()
+        secureTokenStore.clearPendingMemberSecret()
+    }
+
+    override suspend fun clearDeviceCredentialsForReauth() {
+        dataStore.edit { prefs ->
+            prefs[Keys.REAUTH_REQUIRED] = true
+            prefs[Keys.PENDING_FAMILY_CREDENTIAL_CLEAR] = true
         }
         finishPendingFamilyCredentialClear()
     }
 
     override suspend fun recoverPendingCredentialClear() {
         finishPendingFamilyCredentialClear()
+    }
+
+    override suspend fun markPendingDeviceRemovalClear() {
+        dataStore.edit { it[Keys.PENDING_DEVICE_REMOVAL_CLEAR] = true }
+    }
+
+    override suspend fun hasPendingDeviceRemovalClear(): Boolean =
+        dataStore.data.first()[Keys.PENDING_DEVICE_REMOVAL_CLEAR] == true
+
+    override suspend fun clearPendingDeviceRemovalClear() {
+        dataStore.edit { it.remove(Keys.PENDING_DEVICE_REMOVAL_CLEAR) }
+    }
+
+    override suspend fun markPendingMembershipDeletionClear() {
+        dataStore.edit { it[Keys.PENDING_MEMBERSHIP_DELETION_CLEAR] = true }
+    }
+
+    override suspend fun hasPendingMembershipDeletionClear(): Boolean =
+        dataStore.data.first()[Keys.PENDING_MEMBERSHIP_DELETION_CLEAR] == true
+
+    override suspend fun clearPendingMembershipDeletionClear() {
+        dataStore.edit { it.remove(Keys.PENDING_MEMBERSHIP_DELETION_CLEAR) }
+    }
+
+    override suspend fun markPendingFamilyDeletionClear() {
+        dataStore.edit { it[Keys.PENDING_FAMILY_DELETION_CLEAR] = true }
+    }
+
+    override suspend fun hasPendingFamilyDeletionClear(): Boolean =
+        dataStore.data.first()[Keys.PENDING_FAMILY_DELETION_CLEAR] == true
+
+    override suspend fun clearPendingFamilyDeletionClear() {
+        dataStore.edit { it.remove(Keys.PENDING_FAMILY_DELETION_CLEAR) }
     }
 
     private suspend fun finishPendingFamilyCredentialClear() {
@@ -340,6 +503,8 @@ class DataStoreSyncPreferences @Inject constructor(
         // clear succeeds, so process death can only expose the terminal unjoined
         // state and a later foreground operation can finish idempotently.
         secureTokenStore.clearToken()
+        processAccessToken.set("")
+        processAccessExpiry.set(0)
         dataStore.edit { prefs ->
             prefs.remove(Keys.PENDING_FAMILY_CREDENTIAL_CLEAR)
         }
@@ -352,17 +517,21 @@ class DataStoreSyncPreferences @Inject constructor(
         prefs.remove(Keys.PULL_GENERATION)
         prefs.remove(Keys.LAST_SUCCESS_AT)
         prefs.remove(Keys.CREATE_REQUEST_ID)
+        prefs.remove(Keys.OWNER_LOGIN_REQUEST_ID)
+        clearPendingMemberValues(prefs)
         prefs.remove(Keys.FAMILY_NAME)
         prefs.remove(Keys.MEMBERSHIP_ID)
         prefs.remove(Keys.PENDING_CREATOR_ACKNOWLEDGEMENTS)
+        prefs.remove(Keys.REAUTH_REQUIRED)
     }
 
-    private fun encodeSsids(ssids: List<String>): String =
-        HomeLanServerConfig.normalizeSsids(ssids).joinToString("\u001e")
-
-    private fun decodeSsids(raw: String?): List<String> {
-        if (raw.isNullOrBlank()) return emptyList()
-        return HomeLanServerConfig.normalizeSsids(raw.split('\u001e', '\n', ','))
+    private fun clearPendingMemberValues(
+        prefs: androidx.datastore.preferences.core.MutablePreferences,
+    ) {
+        prefs.remove(Keys.PENDING_MEMBER_REQUEST_ID)
+        prefs.remove(Keys.PENDING_MEMBER_DISPLAY_NAME)
+        prefs.remove(Keys.PENDING_MEMBER_DEVICE_NAME)
+        prefs.remove(Keys.PENDING_MEMBER_EXPIRES_AT)
     }
 
     private fun encodeCreatorAcknowledgements(
@@ -413,7 +582,6 @@ class DataStoreSyncPreferences @Inject constructor(
         val SERVER_HOST = stringPreferencesKey("sync_server_host")
         val SERVER_PORT = intPreferencesKey("sync_server_port")
         val SERVER_SCHEME = stringPreferencesKey("sync_server_scheme")
-        val ALLOWED_SSIDS = stringPreferencesKey("sync_allowed_ssids")
         val FAMILY_ID = stringPreferencesKey("sync_family_id")
         val DEVICE_ID = stringPreferencesKey("sync_device_id")
         val ROLE = stringPreferencesKey("sync_family_role")
@@ -421,12 +589,29 @@ class DataStoreSyncPreferences @Inject constructor(
         val PULL_GENERATION = stringPreferencesKey("sync_pull_generation")
         val LAST_SUCCESS_AT = longPreferencesKey("sync_last_success_at")
         val CREATE_REQUEST_ID = stringPreferencesKey("sync_create_request_id")
+        val OWNER_LOGIN_REQUEST_ID = stringPreferencesKey("sync_owner_login_request_id")
+        val PENDING_MEMBER_REQUEST_ID = stringPreferencesKey("sync_pending_member_request_id")
+        val PENDING_MEMBER_DISPLAY_NAME = stringPreferencesKey("sync_pending_member_display_name")
+        val PENDING_MEMBER_DEVICE_NAME = stringPreferencesKey("sync_pending_member_device_name")
+        val PENDING_MEMBER_EXPIRES_AT = longPreferencesKey("sync_pending_member_expires_at")
         val FAMILY_NAME = stringPreferencesKey("sync_family_name")
         val MEMBERSHIP_ID = stringPreferencesKey("sync_membership_id")
         val PENDING_CREATOR_ACKNOWLEDGEMENTS =
             stringPreferencesKey("sync_pending_creator_acknowledgements")
         val PENDING_FAMILY_CREDENTIAL_CLEAR =
             booleanPreferencesKey("sync_pending_family_credential_clear")
+        val PENDING_DEVICE_REMOVAL_CLEAR =
+            booleanPreferencesKey("sync_pending_device_removal_clear")
+        val PENDING_MEMBERSHIP_DELETION_CLEAR =
+            booleanPreferencesKey("sync_pending_membership_deletion_clear")
+        val PENDING_FAMILY_DELETION_CLEAR =
+            booleanPreferencesKey("sync_pending_family_deletion_clear")
+        val REAUTH_REQUIRED = booleanPreferencesKey("sync_reauth_required")
+        val VERIFIED_ENDPOINT_ORIGIN = stringPreferencesKey("sync_verified_endpoint_origin")
+        val VERIFIED_ENDPOINT_TRUST_MODE =
+            stringPreferencesKey("sync_verified_endpoint_trust_mode")
+        val VERIFIED_ENDPOINT_SPKI_SHA256 =
+            stringPreferencesKey("sync_verified_endpoint_spki_sha256")
     }
 
     private companion object {

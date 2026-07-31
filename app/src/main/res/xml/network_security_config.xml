@@ -1,28 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-  Home-LAN HTTP is a product requirement (PRD sync-home-lan).
-
-  Android networkSecurityConfig cannot express RFC1918/CGNAT CIDR allowlists
-  (domains are exact hostnames/IPs only). Therefore cleartext remains permitted
-  at the platform layer so users can point at dynamic LAN IPs such as
-  http://192.168.x.x:8765 or http://10.0.2.2:8765 (emulator).
-
-  Residual risk is reduced in-app:
-  - Family UI warns when the configured base URL is public cleartext HTTP
-    (see HomeLanHosts.isPublicCleartextBaseUrl).
-  - Prefer HTTPS reverse-proxy on the NAS when exposing beyond the home LAN.
--->
+<!-- Production family endpoints are HTTPS-only. Debug loopback exceptions live in src/debug. -->
 <network-security-config>
-    <base-config cleartextTrafficPermitted="true">
+    <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>
     </base-config>
-
-    <!-- Explicit localhost / emulator aliases for auditability. -->
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="true">localhost</domain>
-        <domain includeSubdomains="true">127.0.0.1</domain>
-        <domain includeSubdomains="true">10.0.2.2</domain>
-    </domain-config>
 </network-security-config>

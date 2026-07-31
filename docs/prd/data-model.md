@@ -3,6 +3,12 @@
 > 当前 Android 以 **Room** 为本地真相源，并经 **`SyncPort`** 接家庭局域网 `lezi-sync`。
 > 只支持当前 Room schema、当前 payload 与当前 NAS wire；见 [ADR-0008](../adr/0008-support-only-fresh-current-product-contracts.md)。
 > 主 PRD：[`README.md`](./README.md)
+>
+> **下一版身份与网络目标（2026-07-31）：** 下文涉及一设备一 membership、`left_at`、长期
+> credential、SSID/HTTP/generation 的 0.3 实现说明由
+> [`sync-trusted-endpoint.md`](./sync-trusted-endpoint.md) 和
+> [ADR-0011](../adr/0011-root-admin-and-multi-device-membership.md) 取代。目标模型如下节明确为
+> membership 1:N device、每设备轮换 session、成员硬删除与无 SSID trusted endpoint。
 
 ---
 
@@ -11,7 +17,7 @@
 1. **先写本地，再同步**（有实现时）：UI 只依赖 Room。  
 2. **家庭域 vs 本机域** 分离，避免设置冲突。  
 3. 每条业务实体带 **`client_uuid`**，便于幂等与后期同步。  
-4. 未配置或不满足家网门闩时，`SyncPort` 安全 no-op / 保留 Outbox，
+4. 未登录、离线、等待审批或可信 endpoint 不可达时，`SyncPort` 安全 no-op / 保留 Outbox，
    **不得**阻塞记账。
 
 ---
@@ -19,9 +25,10 @@
 ## 2. ER 概要
 
 ```text
-LocalUser 1──* Membership *──1 Family
+LocalUser 1──0..1 Device *──1 Membership *──1 Family
+Device 1──* DeviceSession
 Family 1──* Baby
-Family 1──* ShareInvite
+Family 1──* PendingDeviceRequest
 Family 1──* CustomItemDef
 Baby 1──* Record
 Record 1──* MediaAsset
@@ -29,7 +36,8 @@ LocalUser 1──1 SettingsLocal     # 永不进家庭同步域
 Family 可选 Outbox                  # 上行队列
 ```
 
-最小路径：创建默认 `Family` + 当前 `LocalUser`（匿名）+ `Baby` + `Record`。
+离线最小路径只需本机 `LocalUser` + `Baby` + `Record`；`Family` 在可信服务器完成建家后才建立，
+不为离线模式伪造服务器家庭身份。
 
 ---
 
@@ -44,16 +52,16 @@ Family 可选 Outbox                  # 上行队列
 | `device_id` | 本机标识 |
 | `created_at` | |
 
-无强制账号体系；身份展示以家庭 membership 的称呼为准，不引入跨设备照护者实体。
-见 [`docs/adr/0009-family-identity-and-account-overview.md`](../adr/0009-family-identity-and-account-overview.md)。
+无全局账号体系；`LocalUser` 只表示本机投影。家庭内的人类身份以 membership 为准，设备与
+membership 分层。见 [ADR-0011](../adr/0011-root-admin-and-multi-device-membership.md)。
 
 ### 3.2 Family
 
 | 字段 | 说明 |
 |------|------|
 | `id` | |
-| `name` | **共享家庭名**；全员一致；仅 owner 可改；可空，客户端兜底「我的家庭」/「{宝宝昵称}的家庭」 |
-| `owner_user_id` | 管理员（本地）；NAS 侧以 owner membership 为准 |
+| `name` | 必填的**共享家庭名**；全员一致；仅 owner 可改 |
+| `owner_membership_id` | 唯一 Owner membership；也可由 `role=owner` 唯一约束派生 |
 | `created_at` | |
 
 NAS 家庭记录须持久化共享 `name`（或等价字段），并在成员可见摘要中下发。
@@ -65,42 +73,60 @@ NAS 家庭记录须持久化共享 `name`（或等价字段），并在成员可
 | `membership_id` | NAS 生成的不可变 membership UUID，产品身份主键 |
 | `family_id` | 所属家庭 |
 | `role` | `owner` \| `member` |
-| `device_id` | 当前建家、加入与 token 会话绑定使用；不承担作者或 ACL 权威 |
-| `display_name` | 当前家庭称呼；所有指向该 membership 的凭证共享 |
-| `left_at` | 空表示 active；非空表示已退出 |
+| `display_name` | 当前家庭内唯一的称呼；由管理员批准或修改 |
+| `created_at` | 创建时间；删除 membership 时身份行硬删除 |
 
-NAS 将持久 membership 与 Bearer credential 分表。`memberships.membership_id` 是
-不可变公开身份；`membership_credentials.token_hash` 是可轮换、可单独吊销并指向
-membership 的访问凭证，不是成员主键。`membership_id` 在建家/加入时分配一次；
-token 更新、地址变化或同一 current schema 的服务器重启不得改变它。角色、
-称呼与写者身份只由认证后的 canonical membership principal 决定，客户端 payload
-不得冒充管理员或其他成员。
+NAS 将 membership、device 与 credential 分表。`membership_id` 是不可变公开标识，不能用于
+换发 token；一个 membership 可以绑定多台 device。角色、称呼和作者身份只由认证后的
+canonical principal 决定，客户端 payload 不得冒充管理员、其它成员或其它设备。
 
-`display_name` 在产品层于建家/加入时**必填**；服务端 trim，拒绝控制字符与双向文本
-格式控制符，最长 128 个 Unicode 字符；空白、省略字段与本机占位名「我（本机）」均
-返回 `422`，不得静默收成 null。家庭成员视图返回规范化后的 `display_name`、`role`、
-`is_self`、`membership_id`。时间轴只用 Record 的 `created_by_membership_id` 关联当前
-称呼，members response 与 Record payload 均不包含 `device_id`。
-服务端按当前 Bearer principal 计算 `is_self`，不返回 token、`token_hash` 或
-`family_id`。本人可
-通过 `POST /v1/family/display-name` 更新自己的称呼，不能改他人。客户端不得把本机
-UI 占位名“我（本机）”当成真实成员名上传。管理员在 UI 上以 ★ 标出。
+`display_name` 先做 Unicode normalization、trim 与连续空白折叠，再执行当前 family 唯一约束；
+拒绝空白、控制字符、双向文本格式控制符和产品占位名。普通成员不能直接更新称呼，只能提交
+rename request；Owner 可批准、拒绝、主动改名或添加 membership。
 
-运行时不按客户端声明的 `device_id` 合并，新 join 总是创建独立 membership。
-单凭证轮换/吊销
-不改变 membership；成员退出会标记该 membership 离开并吊销它的全部凭证。管理员
-删除家庭时由外键级联清除 membership 与 credential。
+成员删除/自行退出家庭时，membership、devices、sessions 与 pending/rename requests 在事务中
+硬删除；记录/计划等事实保留，但 `created_by_membership_id` 置空并显示「家人」。称呼立即可
+复用，不保留身份墓碑。只有不含身份数据的短期 token-hash revocation marker 可存活到 token
+原到期时间。
 
-权限（当前）：
+### 3.3.1 Device
+
+| 字段 | 说明 |
+|------|------|
+| `device_id` | 服务器分配的不可变设备标识；不是凭据 |
+| `membership_id` | 所属人类 membership |
+| `device_name` | 同一 membership 内唯一；默认来自 Android 设备名，可改 |
+| `last_used_at` | 管理员可见的最近使用时间 |
+| `created_at` | 绑定时间 |
+
+每台 Device 拥有独立 credential lineage。撤销一台设备不改变 membership 或其它设备；服务端
+对该设备返回 `device_removed`，客户端下次可信连接后清本地家庭数据。
+
+### 3.3.2 DeviceSession
+
+| 字段 | 说明 |
+|------|------|
+| `session_id` | 会话 lineage 标识 |
+| `device_id` | 只绑定一台 Device |
+| access hash/expiry | 目标 15 分钟短 access |
+| refresh hash/rotation | 每次使用轮换并检测 replay；无时间/inactivity 自动过期 |
+| revoked reason | logout、device removal、replay、Owner root rotation 等 |
+
+`LEZI_BOOTSTRAP_SECRET` 不属于 DeviceSession。它只验证 Owner create/login/takeover 或 family delete，
+然后签发/撤销设备会话。
+
+目标权限：
 
 | | 管理员 | 成员 |
 |--|--------|------|
-| 编辑/删任意记录 | ✓ | ✓（当前合同：任一 active 成员可按 LWW 编辑/删除任意护理记录） |
-| 邀请/移除成员 | ✓ | × |
-| 停止共享 | ✓ | 可退出自己 |
+| 编辑/删记录 | ✓（全部） | ✓（`created_by_membership_id == self`，含本人其它设备创建） |
+| 审批/添加/改名/删除成员 | ✓ | ×（本人改名只能申请） |
+| 查看设备 | 全部 | 仅本人 membership |
+| 撤销设备 | 全部 | 仅退出当前设备 |
+| 停止共享 | 删除家庭 | 退出当前设备或硬删除自己的 membership |
 
-Record 不使用 creator-only ACL；首次上传者归属只用于展示，不限制后续编辑。CarePlan 与
-CustomItemDef 仍使用 creator-or-owner 管理规则。不做保育只读角色、不做字段级 ACL。
+Record、CarePlan 与其附件使用 membership-self-or-owner 管理规则；同 membership 多设备均视为
+self。新登录设备读取完整家庭历史。不做保育只读角色、不做字段级 ACL。
 
 ### 3.4 Baby
 
@@ -417,28 +443,30 @@ Android 本机表 `fulfillment_candidates` 在履行事务中写入稳定 `clien
 
 ```kotlin
 enum class SyncStatus {
-  Disabled,            // 未配置服务器/SSID 白名单或未加入家庭
-  BlockedOfflineHome,  // 非 Wi-Fi、SSID 未命中/读不到、health 失败、退避或不在前台
+  OfflineOnly,         // 用户尚未连接/登录家庭，或选择保持离线
+  PendingApproval,     // 普通成员等待管理员确认
+  TrustBlocked,        // TLS/SPKI 安全信息不一致，禁止发送凭证
+  ReauthRequired,      // 普通凭证丢失；保留本地数据并重新申请
   Idle,
   Syncing,
-  Error,
+  RetryableError,
 }
 ```
 
-本机家网配置（`SyncPreferences`，**不同步到 NAS**）：
+本机可信连接与会话投影（**不同步到家庭业务域**）：
 
 | 字段 | 说明 |
 |------|------|
-| `serverHost` / `serverPort` | 单一 NAS；port 默认 8765；派生 `baseUrl=http://host:port` |
-| `allowedSsids` | 最多 2 个；trim 后精确匹配当前 Wi‑Fi 名 |
-| 会话身份字段 | `familyId` / token / role / `membershipId`（同前） |
-| pull 检查点 | `cursor` / `generation` / `familyName` 缓存；成功页原子更新 |
+| trusted endpoint | normalized HTTPS origin + system PKI 或 pinned SPKI |
+| setup state | 未登录时可记住已通过 probe 的 endpoint；不得上传 |
+| device session | device/membership/family 本机投影 + 安全存储 refresh；access 只在内存 |
+| pending request | 无权限 request ID 与 expiry；不包含家庭数据 |
+| pull checkpoint | cursor 与 familyName 缓存；成功后原子更新 |
 
 `familyName` 是 NAS 权威共享家庭名的本机会话缓存：create/join/本机 rename 会立即
 写入；之后每次允许的前台/下拉 pull 都可刷新，即使该页没有实体。NAS 显式
 返回 `null` 时清空缓存并走产品兜底；缺少当前必需字段时 pull 失败并保留缓存。更新检查点只改
-`cursor`、`generation` 和 presence-aware `familyName`，不得覆盖并发变化的家庭身份
-或本机网络配置。
+`cursor` 和 presence-aware `familyName`，不得覆盖并发变化的家庭身份或 trusted endpoint。
 
 ### 6.2 接口（契约级，语言示意）
 
@@ -456,9 +484,10 @@ interface SyncPort {
   fun requestSync(trigger: SyncTrigger)
 
   suspend fun saveServer(baseUrl: String): Result<Unit>
-  /** displayName=家庭称呼（必填）；familyName=共享家庭名（可空） */
+  /** displayName=家庭称呼（必填）；familyName=共享家庭名（必填） */
   suspend fun createFamily(displayName: String, familyName: String?, bootstrapSecret: String?): Result<SyncSession>
-  suspend fun renameFamily(familyName: String?): Result<Unit>
+  suspend fun renameFamily(familyName: String): Result<Unit>
+  suspend fun deleteFamily(familyName: String, rootPassword: String): Result<Unit>
   suspend fun updateMyDisplayName(displayName: String): Result<Unit>
   suspend fun sync(trigger: SyncTrigger): Result<Unit>
 

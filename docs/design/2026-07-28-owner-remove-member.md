@@ -3,12 +3,17 @@
 | 字段 | 值 |
 |------|-----|
 | **Date** | 2026-07-28 |
-| **Status** | Folded（规则已写回 `docs/prd/ui.md` §5.7） |
+| **Status** | Superseded by ADR-0011 |
 | **Related** | `docs/prd/sync-home-lan.md` §4.3 / §9.11；`docs/prd/ui.md` §5.7 成员二级 |
 
 ## Overview
 
 家庭管理员（owner）可在家人名单中移除普通成员。服务端复用 leave 语义（`left_at` + 吊销全部 credentials），**不**删除历史护理记录；客户端仅 owner 对非本人 member 行显示「移除」并二次确认。
+
+> **2026-07-31 disposition:** 本文只保留 0.3 行为历史。下一版删除成员是身份硬删除：删除
+> membership、全部设备/凭证/申请，释放称呼，并把既有事实的作者引用清空为「家人」。最终
+> 合同见 [ADR-0011](../adr/0011-root-admin-and-multi-device-membership.md) 与
+> [`sync-trusted-endpoint.md`](../prd/sync-trusted-endpoint.md) §6。
 
 ## 规则
 

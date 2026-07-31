@@ -183,9 +183,13 @@ class FakeSyncBackend : SyncBackend {
         )
     }
 
-    override suspend fun updateMyDisplayName(session: SyncSession, displayName: String) {
-        membershipNames["${session.familyId}:${session.deviceId}"] =
-            requireMemberDisplayName(displayName)
+    override suspend fun updateMyDisplayName(
+        session: SyncSession,
+        displayName: String,
+    ): DisplayNameUpdateResult {
+        val normalized = requireMemberDisplayName(displayName)
+        membershipNames["${session.familyId}:${session.deviceId}"] = normalized
+        return DisplayNameUpdateResult.Updated(normalized)
     }
 
     override suspend fun renameFamily(session: SyncSession, familyName: String?) {
@@ -206,7 +210,14 @@ class FakeSyncBackend : SyncBackend {
     /** Membership ids removed via [removeMember] (test inspection). */
     val removedMembershipIds = mutableListOf<String>()
 
-    override suspend fun deleteFamily(session: SyncSession) {
+    override suspend fun deleteFamily(
+        session: SyncSession,
+        familyName: String,
+        rootPassword: String,
+    ) {
+        require(session.role == FamilyRole.Owner)
+        require(normalizeFamilyNameForWire(familyName) == familyNames[session.familyId])
+        require(rootPassword.isNotBlank())
         rows.remove(session.familyId)
         mediaBytes.remove(session.familyId)
     }

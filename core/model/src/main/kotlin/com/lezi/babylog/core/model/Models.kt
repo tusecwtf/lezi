@@ -361,8 +361,8 @@ fun normalizeQuickRecordSlots(slots: List<String>): List<String> {
 
 enum class SyncStatus {
     Disabled,
-    BlockedOfflineHome,
     Idle,
     Syncing,
+    ReauthRequired,
     Error,
 }

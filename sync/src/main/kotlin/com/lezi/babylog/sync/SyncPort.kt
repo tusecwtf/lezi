@@ -13,13 +13,30 @@ data class Invite(val code: String, val expiresAt: Long)
  * Privacy-preserving family member projection from the home server.
  *
  * [membershipId] is the server-minted immutable membership identity (UUID) and
- * the only Record-author link. Transport device ids are deliberately absent.
+ * the only Record-author link. Device details are present only when authorized:
+ * Owner for every member, ordinary Member for self only.
  */
+data class FamilyDevice(
+    /** Opaque server action key; never rendered as account copy. */
+    val deviceId: String,
+    val deviceName: String,
+    val lastUsedAtEpochSeconds: Long,
+    val isCurrent: Boolean,
+) {
+    init {
+        require(deviceId.isNotBlank()) { "家庭设备 ID 不能为空" }
+        require(deviceName.isNotBlank()) { "家庭设备称呼不能为空" }
+        require(lastUsedAtEpochSeconds >= 0) { "家庭设备最近使用时间无效" }
+    }
+}
+
 data class FamilyMember(
     val displayName: String,
     val role: FamilyRole,
     val isSelf: Boolean,
     val membershipId: String,
+    /** Null means this viewer is not authorized to receive this member's device details. */
+    val devices: List<FamilyDevice>? = null,
 ) {
     init {
         require(displayName.isNotBlank()) { "家庭成员称呼不能为空" }
@@ -61,8 +78,19 @@ class NoOpLocalClearRecoveryGate : LocalClearRecoveryGate {
     override suspend fun recoverPendingLocalClear(): LocalDataClearScope? = null
 }
 
+fun interface RemovedDeviceLocalClearGate {
+    suspend fun clearAllLocalFamilyData()
+}
+
+class NoOpRemovedDeviceLocalClearGate : RemovedDeviceLocalClearGate {
+    override suspend fun clearAllLocalFamilyData() = Unit
+}
+
 class SyncNotEnabledException : Exception("请先配置家庭服务器并加入家庭")
 class BootstrapSecretRejectedException : Exception("初始化口令不正确，请核对 NAS 配置")
+class OwnerRootPasswordRejectedException : Exception("管理员根密码不正确，请重试")
+class MemberLoginQrUnavailableException : Exception("这个二维码已失效，请让管理员重新生成")
+class MemberLoginQrTrustChangedException : Exception("家庭服务器安全信息不一致，登录已停止")
 
 /** Outcome of [SyncPort.createFamily]: owner session plus whether the NAS reclaimed. */
 enum class InitialFamilyDataRecovery {
@@ -74,18 +102,53 @@ enum class InitialFamilyDataRecovery {
 data class CreateFamilyResult(
     val session: SyncSession,
     val reclaimed: Boolean,
-    val dataRecovery: InitialFamilyDataRecovery = InitialFamilyDataRecovery.NotRequired,
+    val dataRecovery: InitialFamilyDataRecovery = InitialFamilyDataRecovery.Complete,
 )
+
+data class OwnerLoginResult(
+    val session: SyncSession,
+    val dataRecovery: InitialFamilyDataRecovery,
+)
+
+data class PendingMemberLogin(
+    val requestId: String,
+    val displayName: String,
+    val deviceName: String,
+    val expiresAtEpochSeconds: Long,
+)
+
+sealed interface MemberLoginCheckResult {
+    data class Waiting(val request: PendingMemberLogin) : MemberLoginCheckResult
+    data class Terminal(val status: MemberLoginStatus) : MemberLoginCheckResult
+    data class Joined(
+        val session: SyncSession,
+        val dataRecovery: InitialFamilyDataRecovery,
+    ) : MemberLoginCheckResult
+}
 
 interface SyncPort {
     fun status(): Flow<SyncStatus>
     fun session(): Flow<SyncSession>
+    fun verifiedEndpoint(): Flow<TrustedEndpointProfile?> = kotlinx.coroutines.flow.flowOf(null)
+    fun pendingMemberLogin(): Flow<PendingMemberLogin?> = kotlinx.coroutines.flow.flowOf(null)
+    /** Exact foreground/manual member-login checks observed by an open approval UI. */
+    fun memberLoginChecks(): Flow<MemberLoginCheckResult> = kotlinx.coroutines.flow.emptyFlow()
     fun isEnabled(): Boolean
     fun requestSync(trigger: SyncTrigger)
+    suspend fun probeEndpoint(endpointDraft: String): SetupProbeResult =
+        SetupProbeResult.Failed.Unreachable
+    /** Verifies a QR-provided endpoint and pin without persisting its grant or trust decision. */
+    suspend fun verifyEndpoint(endpoint: TrustedEndpointProfile): SetupProbeResult =
+        SetupProbeResult.Failed.Unreachable
+    suspend fun trustCertificate(candidate: CertificateTrustCandidate): SetupProbeResult =
+        SetupProbeResult.Failed.Unreachable
+    suspend fun rememberEndpoint(endpoint: TrustedEndpointProfile): Result<Unit> =
+        Result.failure(SyncNotEnabledException())
+    suspend fun forgetEndpoint(): Result<Unit> = Result.success(Unit)
     /** Reclaims exact committed media tombstones; logical mutation success is independent. */
     suspend fun cleanupTombstonedMedia(clientUuids: Set<String>): Result<Unit>
     suspend fun saveServer(baseUrl: String): Result<Unit>
-    /** Persists the host, port, and up to two SSIDs; form defaults are not applied here. */
+    /** Persists an endpoint origin; trust is established separately by setup probe. */
     suspend fun saveHomeLanConfig(config: HomeLanServerConfig): Result<Unit>
     /**
      * @param displayName 家庭称呼 (product-required; blank rejected at the session seam)
@@ -93,10 +156,39 @@ interface SyncPort {
      */
     suspend fun createFamily(
         displayName: String,
+        deviceName: String = "Android 设备",
         bootstrapSecret: String,
         familyName: String? = null,
     ): Result<CreateFamilyResult>
-    /** Owner-only rename of the shared family name; blank/null clears. */
+    suspend fun ownerLogin(
+        deviceName: String,
+        rootPassword: String,
+        takeover: Boolean = false,
+    ): Result<OwnerLoginResult> = Result.failure(SyncNotEnabledException())
+    suspend fun requestMemberLogin(
+        displayName: String,
+        deviceName: String,
+    ): Result<PendingMemberLogin> = Result.failure(SyncNotEnabledException())
+    suspend fun checkMemberLogin(): Result<MemberLoginCheckResult> =
+        Result.failure(SyncNotEnabledException())
+    suspend fun cancelMemberLogin(): Result<Unit> = Result.failure(SyncNotEnabledException())
+    suspend fun listPendingMemberLogins(): Result<List<PendingMemberLoginRequest>> =
+        Result.failure(SyncNotEnabledException())
+    suspend fun approveNewMemberLogin(requestId: String): Result<Unit> =
+        Result.failure(SyncNotEnabledException())
+    suspend fun bindExistingMemberLogin(
+        requestId: String,
+        membershipId: String,
+    ): Result<Unit> = Result.failure(SyncNotEnabledException())
+    suspend fun rejectMemberLogin(requestId: String): Result<Unit> =
+        Result.failure(SyncNotEnabledException())
+    suspend fun createMemberLoginQrPayload(membershipId: String): Result<MemberLoginQrPayload> =
+        Result.failure(SyncNotEnabledException())
+    suspend fun claimMemberLoginQr(
+        payload: MemberLoginQrPayload,
+        deviceName: String,
+    ): Result<SyncSession> = Result.failure(SyncNotEnabledException())
+    /** Owner-only rename of the shared family name; current wire requires non-empty. */
     suspend fun renameFamily(familyName: String?): Result<Unit>
     suspend fun sync(trigger: SyncTrigger): Result<Unit>
     suspend fun pull(familyId: String): Result<Unit>
@@ -105,12 +197,30 @@ interface SyncPort {
     /** Persists the joined session only; the shared domain join use case owns the immediate sync request. */
     suspend fun joinFamily(command: JoinFamilyCommand): Result<SyncSession>
     suspend fun listFamilyMembers(): Result<List<FamilyMember>>
-    /** Self-only rename of this device's membership 家庭称呼. */
-    suspend fun updateMyDisplayName(displayName: String): Result<Unit>
+    /** Owner updates immediately; Member receives a pending approval request. */
+    suspend fun updateMyDisplayName(displayName: String): Result<DisplayNameUpdateResult>
+    suspend fun listPendingMemberRenameRequests(): Result<List<PendingMemberRenameRequest>> =
+        Result.failure(SyncNotEnabledException())
+    suspend fun approveMemberRename(requestId: String): Result<Unit> =
+        Result.failure(SyncNotEnabledException())
+    suspend fun rejectMemberRename(requestId: String): Result<Unit> =
+        Result.failure(SyncNotEnabledException())
+    suspend fun cancelMyMemberRename(): Result<Unit> = Result.failure(SyncNotEnabledException())
+    suspend fun addFamilyMember(displayName: String): Result<FamilyMember> =
+        Result.failure(SyncNotEnabledException())
+    suspend fun renameFamilyMember(
+        membershipId: String,
+        displayName: String,
+    ): Result<Unit> = Result.failure(SyncNotEnabledException())
+    suspend fun renameFamilyDevice(deviceId: String, deviceName: String): Result<Unit> =
+        Result.failure(SyncNotEnabledException())
+    suspend fun revokeFamilyDevice(deviceId: String): Result<Unit> =
+        Result.failure(SyncNotEnabledException())
+    suspend fun logoutCurrentDevice(): Result<Unit> = Result.failure(SyncNotEnabledException())
     suspend fun leave(familyId: String): Result<Unit>
     /** Owner removes another active member by server membership id. */
     suspend fun removeMember(membershipId: String): Result<Unit>
-    suspend fun deleteFamily(): Result<Unit>
+    suspend fun deleteFamily(familyName: String, rootPassword: String): Result<Unit>
     /** [workflow] joins domain Room work and committed cleanup to the replica barrier. */
     /**
      * Clears the selected local domain and replica state under one sync barrier.
@@ -129,6 +239,7 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
     private val session = MutableStateFlow(SyncSession())
     override fun status(): Flow<SyncStatus> = status
     override fun session(): Flow<SyncSession> = session
+    override fun pendingMemberLogin(): Flow<PendingMemberLogin?> = kotlinx.coroutines.flow.flowOf(null)
     override fun isEnabled() = false
     override fun requestSync(trigger: SyncTrigger) = Unit
     override suspend fun cleanupTombstonedMedia(clientUuids: Set<String>) = Result.success(Unit)
@@ -136,9 +247,15 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
     override suspend fun saveHomeLanConfig(config: HomeLanServerConfig) = Result.success(Unit)
     override suspend fun createFamily(
         displayName: String,
+        deviceName: String,
         bootstrapSecret: String,
         familyName: String?,
     ) = Result.failure<CreateFamilyResult>(SyncNotEnabledException())
+    override suspend fun ownerLogin(
+        deviceName: String,
+        rootPassword: String,
+        takeover: Boolean,
+    ) = Result.failure<OwnerLoginResult>(SyncNotEnabledException())
     override suspend fun renameFamily(familyName: String?) =
         Result.failure<Unit>(SyncNotEnabledException())
     override suspend fun sync(trigger: SyncTrigger) = Result.success(Unit)
@@ -150,11 +267,15 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
     override suspend fun listFamilyMembers() =
         Result.failure<List<FamilyMember>>(SyncNotEnabledException())
     override suspend fun updateMyDisplayName(displayName: String) =
-        Result.failure<Unit>(SyncNotEnabledException())
+        Result.failure<DisplayNameUpdateResult>(SyncNotEnabledException())
     override suspend fun leave(familyId: String) = Result.failure<Unit>(SyncNotEnabledException())
+    override suspend fun revokeFamilyDevice(deviceId: String) =
+        Result.failure<Unit>(SyncNotEnabledException())
+    override suspend fun logoutCurrentDevice() = Result.failure<Unit>(SyncNotEnabledException())
     override suspend fun removeMember(membershipId: String) =
         Result.failure<Unit>(SyncNotEnabledException())
-    override suspend fun deleteFamily() = Result.failure<Unit>(SyncNotEnabledException())
+    override suspend fun deleteFamily(familyName: String, rootPassword: String) =
+        Result.failure<Unit>(SyncNotEnabledException())
     override suspend fun clearLocalData(
         scope: LocalDataClearScope,
         workflow: LocalClearWorkflow,

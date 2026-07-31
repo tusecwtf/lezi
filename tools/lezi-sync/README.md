@@ -1,16 +1,16 @@
 # lezi-sync
 
 乐记家庭局域网同步服务的 Rust 实现。Android 端使用当前 `/v1/*`
-HTTP interface；服务端以 Axum + Tokio + rusqlite 运行，NAS 上只需要一个
+HTTPS interface；服务端以 Axum + Tokio + rustls + rusqlite 运行，NAS 上只需要一个
 Docker 容器和一个持久化目录。
 
 ## 数据目录合同
 
-服务仅支持 fresh-only 部署，当前 SQLite `PRAGMA user_version=3`。空数据目录、
-不存在的 `lezi.db` 或零字节空库会初始化为当前 v3 schema；已有数据目录只有在
-`user_version=3` 且表、索引、约束完全匹配当前 schema 时才允许重启并保留数据。
+服务仅支持 fresh-only 部署，当前 SQLite `PRAGMA user_version=11`。空数据目录、
+不存在的 `lezi.db` 或零字节空库会初始化为当前 v11 schema；已有数据目录只有在
+`user_version=11` 且表、索引、约束完全匹配当前 schema 时才允许重启并保留数据。
 
-任何非空 v0/v1/v2、未来版本、或声称 v3 但形状不匹配的数据库都在只读预检阶段
+任何非空旧版本、未来版本、或声称 v11 但形状不匹配的数据库都在只读预检阶段
 fail closed；不会原位迁移，不会创建 `media/`、`server.secret`、SQLite sidecar，也不会
 改变数据根或数据库权限。旧版本数据不是受支持的部署输入；部署时必须选择新的空数据根。
 
@@ -19,6 +19,9 @@ $LEZI_DATA_DIR/
 ├── lezi.db
 ├── lezi.db-wal / lezi.db-shm
 ├── server.secret
+├── tls/
+│   ├── server.crt
+│   └── server.key
 └── media/
     └── {family_uuid}/{media_uuid}
 ```
@@ -43,6 +46,7 @@ LEZI_SYNC_VERSION=0.3.0 ./build-image.sh
 |---|---|---|
 | 容器用户 | `10001:10001`（`lezi`） | 非 root |
 | 主机端口映射 | `127.0.0.1:8765:8765` | 仅 loopback；手机经反代或显式覆盖访问 |
+| TLS identity | `/data/tls/` | 自签名证书和私钥随数据卷持久化；不进入镜像或 release manifest |
 | 引导密钥 | Compose 必填 | 缺失或空值时 Compose 拒绝启动（见下） |
 
 ```bash
@@ -57,10 +61,13 @@ sudo chown -R 10001:10001 /volume1/docker/lezi
 export LEZI_BOOTSTRAP_SECRET="$(openssl rand -hex 24)"
 export LEZI_DATA_HOST_PATH=/volume1/docker/lezi
 
+# 首次生成、以后验证并复用同一 SPKI；生产默认在镜像内调用 openssl。
+./deploy/init-tls.sh "${LEZI_DATA_HOST_PATH}" lezi-sync:0.3.0 nas.example.lan
+
 docker compose up -d
 docker compose ps
-curl -fsS http://127.0.0.1:8765/health
-curl -fsS http://127.0.0.1:8765/ready
+curl --cacert "${LEZI_DATA_HOST_PATH}/tls/server.crt" -fsS https://127.0.0.1:8765/health
+curl --cacert "${LEZI_DATA_HOST_PATH}/tls/server.crt" -fsS https://127.0.0.1:8765/ready
 ```
 
 ### 端口发布覆盖
@@ -75,8 +82,7 @@ LEZI_SYNC_PUBLISH=0.0.0.0:8765 \
   docker compose up -d
 ```
 
-更稳妥的是在 NAS 上用 Caddy/Nginx/系统反代终结 TLS，并把 compose 保持
-`127.0.0.1:8765`。
+8765 本身只提供 TLS；不要在其前方增加会把明文重新发布到 LAN 的反向代理。
 
 ### NAS 无法 chown 时的 root profile（非默认）
 
@@ -137,21 +143,26 @@ docker buildx build \
 | `LEZI_DATA_DIR` | `/data` | SQLite、密钥和媒体的唯一数据根 |
 | `LEZI_HOST` | `0.0.0.0` | 容器内监听地址（宿主暴露面由 compose 端口映射控制） |
 | `LEZI_PORT` | `8765` | 监听端口 |
+| `LEZI_INTERNAL_PORT` | `8766` | 仅监听 `127.0.0.1` 的容器内 HTTP readiness 端口，不发布到宿主 |
+| `LEZI_TLS_CERTFILE` | 必填 | PEM certificate；NAS 包固定为 `/data/tls/server.crt` |
+| `LEZI_TLS_KEYFILE` | 必填 | PEM private key；NAS 包固定为 `/data/tls/server.key` |
 | `LEZI_SYNC_VERSION` | `0.3.0` | `/health` 返回的版本 |
 | `LEZI_INVITE_TTL_HOURS` | `24` | 邀请有效期，范围 1–168 |
 | `LEZI_MAX_MEDIA_BYTES` | `10485760` | 单个媒体最大字节数 |
-| `LEZI_BOOTSTRAP_SECRET` | Compose 必填；`cargo run` 可空 | `POST /v1/family/create` 要求同值 `X-Lezi-Bootstrap-Secret`；Compose 缺失或空值时拒绝启动 |
+| `LEZI_BOOTSTRAP_SECRET` | Compose 必填；`cargo run` 可空 | 唯一 Owner 根密码；create、Owner 登录/接管要求同值 `X-Lezi-Bootstrap-Secret`；Compose 缺失或空值时拒绝启动 |
 | `LEZI_CREATE_RATE_LIMIT` | `20` | 每台 device 每窗口的 create 尝试上限 |
 | `LEZI_JOIN_RATE_LIMIT` | `60` | 每个邀请码每窗口的 join 尝试上限 |
-| `LEZI_RATE_LIMIT_WINDOW_SECONDS` | `60` | create/join 限流窗口秒数 |
+| `LEZI_MEMBER_REQUEST_RATE_LIMIT` | `10` | 每个来源地址每窗口的成员申请上限 |
+| `LEZI_MEMBER_REQUEST_TTL_HOURS` | `24` | 成员申请有效期；当前协议固定为 24 |
+| `LEZI_MAX_PENDING_MEMBER_REQUESTS` | `32` | 单家庭最多待处理成员申请数 |
+| `LEZI_RATE_LIMIT_WINDOW_SECONDS` | `60` | create/join/成员申请限流窗口秒数 |
 | `LEZI_SYNC_PUBLISH` | `127.0.0.1:8765` | compose 宿主侧发布地址（仅 docker compose） |
 | `LEZI_ALLOW_PERMISSION_HARDENING_SKIP` | Compose `0`；`cargo run` 未设置 | 仅显式设为 `1` 时，chmod 在 EPERM/EACCES/EOPNOTSUPP 上 warn 并继续；默认 fail-closed |
 
-服务本身只监听 HTTP。可信家庭局域网可以直接访问；需要 HTTPS 时，在 NAS
-上使用 Caddy、Nginx 或系统自带反向代理终止 TLS，并只把容器端口暴露在私有
-Docker 网络或家庭 LAN。不要把 8765 直接映射到公网。
+公开端口只监听 HTTPS。容器内另有仅 loopback 可见的 readiness HTTP 端口供
+`HEALTHCHECK` 使用；它不映射到宿主。不要把 8765 映射到公网。
 
-### 生产 bootstrap（fail-closed）
+### 生产 Owner 根密码（fail-closed）
 
 - **Compose 部署必须设置** `LEZI_BOOTSTRAP_SECRET`（≥16 字符随机串）；缺失或
   空值时 `docker compose` 会在启动前报错。
@@ -165,15 +176,14 @@ X-Lezi-Bootstrap-Secret: <same as LEZI_BOOTSTRAP_SECRET>
 Content-Type: application/json
 ```
 
-- Android 建家页输入相同的一次性初始化口令；客户端仅将其放入该请求头，不写入
-  session、邀请载荷或本地持久化。缺失或错误时建家失败并允许重新输入。
-- **管理员卸载重装接回**：`POST /v1/family/create` 在数据根已有家庭且 bootstrap
-  校验通过时，接回**同一** owner `membership_id`（吊销旧 token、更新 `device_id`/
-  称呼，可选覆盖家庭名），响应含 `"reclaimed": true`。口令只在部署环境变量中；
-  可在 NAS 上查看或临时更换 `LEZI_BOOTSTRAP_SECRET` 后重启服务再接回。未配置
-  bootstrap 时（本地 `cargo run`）与开放 create 一样允许 LAN 内 reclaim。
-  实体数据在 `LEZI_DATA_DIR`，不在环境变量里；接回后客户端 full pull 按
-  `client_uuid` 恢复。
+- Android 建家、Owner 新设备登录和接管时输入同一根密码；客户端仅将其短暂放入
+  对应请求头，不写入 session、SavedState、邀请载荷或本地持久化。缺失或错误时失败并
+  允许重新输入。根密码从不作为日常 API Bearer。
+- `POST /v1/family/create` 只用于空服务器初始化；实例配置后，即使根密码正确也固定
+  返回冲突，不能借 create 接回管理员或重新签发凭证。管理员新设备登录与接管使用
+  独立的认证路径。
+- 保持数据目录不变，仅更换部署环境中的 `LEZI_BOOTSTRAP_SECRET` 并重启，会在启动事务中
+  撤销全部旧 Owner DeviceSession；Member DeviceSession 保持有效。App 不提供查看或修改根密码。
 
 ## 本地开发
 
@@ -182,7 +192,12 @@ cargo fmt --all -- --check
 cargo test --locked
 cargo clippy --all-targets --all-features -- -D warnings
 
-LEZI_DATA_DIR=/tmp/lezi-sync-data cargo run --release
+tmp_data="$(mktemp -d)"
+LEZI_TLS_USE_HOST_OPENSSL=1 ./deploy/init-tls.sh "${tmp_data}" ignored localhost
+LEZI_DATA_DIR="${tmp_data}" \
+  LEZI_TLS_CERTFILE="${tmp_data}/tls/server.crt" \
+  LEZI_TLS_KEYFILE="${tmp_data}/tls/server.key" \
+  cargo run --release
 ```
 
 容器健康检查调用同一个 Rust 二进制：
@@ -193,9 +208,11 @@ lezi-sync healthcheck
 
 ## HTTP interface
 
-除 `/health`、`/ready`、`/v1/family/create` 和 `/v1/join` 外，接口都要求
-`Authorization: Bearer <family-token>`。`create`/`join` 受进程内速率限制；
-`create` 在配置了 `LEZI_BOOTSTRAP_SECRET` 时还要求 bootstrap 头。局部分桶达到
+除 `/health`、`/ready`、`/v1/setup-status`、`/v1/family/create`、`/v1/owner/login`、
+`/v1/owner/takeover`、`/v1/join`、`/v1/session/refresh` 以及成员申请方使用 pending
+secret 的 request/status/cancel/claim 外，接口都要求
+`Authorization: Bearer <device-session-access-token>`。`create`/`join` 受进程内速率限制；
+生产启动必须配置 `LEZI_BOOTSTRAP_SECRET`，`create` 还要求匹配的 bootstrap 头。局部分桶达到
 上限时只阻断同一 device/邀请码；轮换标识仍受局部上限 10 倍的全局兜底限制。
 无效 bootstrap 或格式错误的请求不消耗有效建家调用的额度。
 
@@ -203,15 +220,38 @@ lezi-sync healthcheck
 |---|---|---|
 | GET | `/health` | 廉价进程存活检查，正常 `{ok, version, capabilities:["atomic_bundle","record_membership_author"]}`，不访问 DB/文件系统 |
 | GET | `/ready` | DB 与数据目录就绪检查；结果缓存 5 秒，异常返回 `503 {ok:false,status:"degraded",version}` |
-| POST | `/v1/family/create` | 幂等创建家庭，或接回已有家庭的 owner（`reclaimed`）；可选 `family_name` |
-| GET | `/v1/family/members` | 当前家庭的 active 成员安全视图；owner/member 均可读 |
-| POST | `/v1/family/members/remove` | owner 移除另一 active member（不能移自己/owner）；吊销其凭证 |
-| POST | `/v1/family/display-name` | 成员更新自己的家庭称呼 |
-| POST | `/v1/family/name` | owner 改共享家庭名 |
+| GET | `/v1/setup-status` | 可信连接后的最小无鉴权探测；就绪时只返回 `protocol_version`、`capabilities:["setup_status"]` 与 `family_state:empty\|configured`，维护中返回无正文 503 |
+| POST | `/v1/family/create` | 仅空服务器可用；根密码幂等创建唯一家庭、Owner membership、首台 Device 与 DeviceSession |
+| POST | `/v1/owner/login` | configured 家庭用根密码幂等新增一个 Device 到唯一 Owner membership；旧 Owner Device 不受影响 |
+| POST | `/v1/owner/takeover` | 明确接管：原子撤销全部旧 Owner DeviceSession 后为当前 Device 签发 session；Member session 不受影响 |
+| POST | `/v1/session/refresh` | 用当前 refresh credential 原子轮换 access/refresh；请求不携带 access Bearer |
+| POST | `/v1/member/requests` | 无鉴权提交家庭称呼与设备称呼；返回仅限该申请的 pending secret，24 小时失效 |
+| POST | `/v1/member/requests/status` | 仅用 pending secret 查询申请状态；公开 request ID 不可查询 |
+| POST | `/v1/member/requests/cancel` | 仅用 pending secret 取消申请 |
+| POST | `/v1/member/requests/claim` | 已获批申请用 pending secret 单次领取独立 member session |
+| GET | `/v1/member/requests` | 仅 Owner 列出当前家庭待确认设备；普通 Member 返回 403 |
+| POST | `/v1/member/requests/{id}/approve-new` | 仅 Owner 用唯一家庭称呼批准为新 membership |
+| POST | `/v1/member/requests/{id}/bind-existing` | 仅 Owner 显式把申请设备绑定到指定的既有普通 membership；不会按同名自动绑定 |
+| POST | `/v1/member/requests/{id}/reject` | 仅 Owner 拒绝申请，不创建身份或凭证 |
+| POST | `/v1/member/login-grants` | 仅 Owner 为指定 active 普通 membership 创建十分钟、单次兑换的短期 grant；只存哈希 |
+| POST | `/v1/member/login-grants/claim` | 经已确认 HTTPS/SPKI 连接，用 grant 与设备称呼领取绑定目标 membership 的独立 DeviceSession |
+| GET | `/v1/family/members` | 当前家庭的 active 成员与设备安全视图；Owner 看全部设备，Member 只收到自己的设备明细 |
+| POST | `/v1/family/members` | 仅 Owner 创建一个尚未绑定设备的普通 membership；称呼按家庭唯一 |
+| POST | `/v1/family/members/{id}/display-name` | 仅 Owner 直接修改任一 active membership 的家庭称呼 |
+| POST | `/v1/family/devices/{id}/display-name` | Member 修改自己的设备称呼；Owner 可修改任一设备；同 membership 内唯一 |
+| POST | `/v1/family/devices/{id}/revoke` | 仅 Owner 幂等撤销指定 Device 的全部 session；membership 与其它设备不受影响 |
+| POST | `/v1/device/logout` | 当前 Owner 或 Member 主动撤销这台 Device；服务端确认后客户端才清本机 |
+| POST | `/v1/family/members/remove` | Owner 彻底删除另一 active Member（不能删除自己/Owner），匿名化并保留其共享事实 |
+| POST | `/v1/family/display-name` | Owner 自己立即改名；普通 Member 只提交待审批改名申请，旧称呼继续生效 |
+| GET | `/v1/family/rename-requests` | 仅 Owner 列出当前家庭待处理改名申请 |
+| POST | `/v1/family/rename-requests/{id}/approve` | 仅 Owner 原子重检唯一性并批准改名 |
+| POST | `/v1/family/rename-requests/{id}/reject` | 仅 Owner 拒绝改名，旧称呼不变 |
+| POST | `/v1/family/rename-requests/cancel` | 普通 Member 撤回自己的待处理改名，旧称呼不变 |
+| POST | `/v1/family/name` | Owner 改非空共享家庭名 |
 | POST | `/v1/invite` | owner 创建一次性邀请码 |
 | POST | `/v1/join` | 邀请码换 member token（响应含 `family_name`） |
-| POST | `/v1/leave` | member 退出自身 membership 并吊销其全部凭证 |
-| POST | `/v1/family/delete` | owner 删除家庭及媒体 |
+| POST | `/v1/leave` | 普通 Member 彻底删除自身 membership；Owner 不可用此接口退出 |
+| POST | `/v1/family/delete` | Owner 以家庭名 + 根密码永久删除整个家庭图及媒体 |
 | POST | `/v1/push` | 已退役；固定 `422`，实体只经 atomic bundle 发布 |
 | GET | `/v1/pull?cursor=&generation=` | 有界分页、单调 cursor 增量 pull |
 | PUT/GET | `/v1/media/{client_uuid}` | PUT 已退役；GET 保留为已发布媒体下载 |
@@ -225,44 +265,91 @@ lezi-sync healthcheck
 Media 的 kind 与关联创建后不可改变；member 可以写日志媒体，但头像 metadata
 和字节只允许 owner 修改。
 
-`GET /v1/family/members` 返回 owner-first 的稳定列表：
-`{"members":[{"display_name":"妈妈","role":"owner","is_self":true,"membership_id":"…"}]}`。
+`GET /v1/family/members` 返回 owner-first 的稳定列表。授权可见的 membership 带 active
+`devices`，每项仅含 opaque `device_id`、设备称呼、`last_used_at` 与 `is_current`；Owner
+获得全家庭设备，普通 Member 的其它成员行省略整个 `devices` 字段，不泄露设备数量、
+最近使用或凭证状态。
 服务端只按 Bearer principal 的 `family_id` 查询 active memberships，并按返回行的
 `membership_id` 是否等于 principal membership 计算 `is_self`；响应绝不包含 token、
-`token_hash` 或 `family_id`。
+`token_hash`、session 状态、IP、端口或 `family_id`。
 `membership_id` 是服务端生成的**不可变** membership 公开身份（UUID），创建/加入时
 写入，token 轮换、地址变化或进程重启均不改变；供计划作者、自定义定义与履行冲突
-等 ACL 引用。`device_id` 仍是建家/加入和 token 会话绑定的必填身份声明，但不是
-记录作者字段，也不从 members API 暴露。建家/加入时 `display_name`（家庭称呼）**必填**：
+等 ACL 引用。建家时客户端只提交可编辑的 `device_name`，canonical `device_id` 由
+服务器生成并从 access credential 解析，不能由客户端声明权限身份。建家/加入时
+`display_name`（家庭称呼）**必填**：
 trim 后空白、省略字段、或本机 UI 占位名“我（本机）”均返回 `422`，不再静默收成
 null；最长 128 个 Unicode 字符，并拒绝控制符与双向文本格式控制符。
 
-`POST /v1/family/display-name`（Auth：任一有效家庭 token）允许成员**仅更新自己的**
-`display_name`；body `{"display_name":"…"}`，校验规则同建家/加入；响应
-`{"ok":true,"display_name":"…"}`。
+所有成员/设备称呼先执行 Unicode NFKC、首尾 trim、连续空白折叠，再按规范键比较。
+家庭称呼在 family 内唯一；设备称呼只在同一 membership 的 active 设备中唯一。
+规范化冲突返回可重试 `409`，不会覆盖设备、复制 membership 或按同名自动登录。
 
-`POST /v1/family/create` 另接受可选 `family_name`（共享家庭名）：trim 后空则存
-`null`；最长 64 Unicode 字符；禁控制符/双向控制符。create/join 响应均含
-`family_name`（可 null）。create 响应另含 `reclaimed`（bool）。已有家庭时，
-正确 bootstrap（或未配置 bootstrap）会接回同一 owner membership，而不是 `409`；
-接回时 `family_name` 仅非空覆盖。同一 `create_request_id` 幂等重试须匹配相同
-`device_id` 与 `display_name`，否则 `409`。
+`POST /v1/family/display-name` body 为 `{"display_name":"…"}`。Owner 自己改名立即返回
+`status=updated`；普通 Member 返回 `202 status=pending`，审批前列表与历史作者仍使用旧
+称呼。Owner 的 approve 在同一事务内重新检查目标 membership 与唯一性；拒绝、撤回、
+七天过期都不会改称呼。Owner 也可先 `POST /v1/family/members` 创建零设备 member，随后
+沿用目标 membership 单次 QR 或显式绑定待确认设备。
+
+`POST /v1/family/create` 要求非空 `family_name`、`display_name`、`device_name` 和
+`create_request_id`；名字均 trim，家庭名最长 64 Unicode 字符，成员/设备称呼最长
+128 个字符，并拒绝控制符与双向文本格式控制符。同一请求 ID 的网络重试返回同一
+DeviceSession；不同请求在家庭已存在时返回 `409`，不会把 create 降级成管理员登录。
+响应返回短期 `access_token`、`access_expires_at` 和长期轮换 `refresh_token`。根密码
+只验证本次创建，不会成为 Bearer credential，也不会写入数据库。幂等 create 只可
+重放仍是当前值的初始 session 响应；一旦该 session 已轮换，原请求 ID 固定返回冲突，
+不能成为凭证恢复通道。
+
+`POST /v1/session/refresh` body 只含 `{"refresh_token":"…"}`。成功时 access 有效期
+为 15 分钟，并返回同时轮换的新 refresh；refresh 本身没有时间或 inactivity 到期。
+服务端只保存 credential hash 与已使用 refresh 的 rotation lineage。旧 refresh 重放
+返回 `401`/`refresh_replay` 并只撤销它所属的 Device；同一 membership 的其它 Device、
+其它 membership 和家庭均保持有效。未知或已撤销 refresh 返回
+`401`/`invalid_refresh`。family/membership/device ID 和称呼均不能换取 credential。
+
+显式设备撤销把该 Device 标记为 revoked，并为它的 access/refresh 返回
+`401`/`device_removed`；响应不包含家庭、成员或其它设备信息。同一 membership 的其它
+Device 继续有效。远程撤销不承诺让离线设备即时擦除；Android 仅在下次连接已信任
+endpoint 收到这个明确 code，或当前设备 logout 已获 2xx 确认后，才进入可恢复的
+Room、Outbox、media、endpoint 与 credential 清理。普通 401、网络错误和 refresh
+失效不会触发该清理；被撤销设备以后必须以新申请或目标 membership 单次登录 grant
+重新绑定，并获得全新 Device/session。
+
+删除普通 membership（Owner 删除成员或 Member 主动退出家庭）在一个事务中彻底删除
+该 membership、全部 Device/session、待领取登录 grant、已绑定待确认申请和改名申请；
+规范化家庭称呼随即释放。已提交的 Record、CarePlan、履行候选及完整媒体包仍是家庭
+共享事实，但作者/提交者引用置空；只有 Owner 可继续管理匿名事实。之后创建的同名称
+成员是全新身份，不能恢复旧作者或所有权。
+
+服务端只为旧 access/refresh credential 的哈希保留不含 family、membership 或 Device
+身份的终止原因。被删除成员的离线设备在下次连接已信任 endpoint 时稳定收到
+`401`/`membership_deleted`，Android 随后以可恢复流程清理 Room、Outbox、媒体、endpoint
+信任和会话材料；普通 401、网络错误或 refresh 失效均不得触发此清理。“退出这台设备”
+只撤销当前 Device，“退出家庭”与 Owner“删除成员”则删除整个普通 membership。
 
 `POST /v1/family/name`（Auth：**仅 owner**）改共享家庭名；body
-`{"family_name":"…"}`（空/`null` 清除）；member 返回 `403`；响应
-`{"ok":true,"family_name":…}`。客户端冷启动依赖本机会话缓存（create/join/rename
+`{"family_name":"…"}` 必须为 trim 后非空的当前家庭名；member 返回 `403`；响应
+`{"ok":true,"family_name":"…"}`。保持非空使删除家庭的家庭名确认始终可达。客户端冷启动依赖本机会话缓存（create/join/rename
 回写），无独立 GET。
 
-NAS 持久化将 membership 与 credential 分开：`memberships.membership_id` 是产品身份
-主键；`membership_credentials.token_hash` 只用于认证并指向 membership，同一
-membership 可持有多个可独立轮换/吊销的凭证。运行时 members 每个 active membership 投影一行，
-新 join 即使声明相同 `device_id` 也创建独立 membership；退出标记当前 membership
-离开并吊销其全部凭证。管理员删除家庭时由外键级联清除全部 memberships 与凭证。
+`POST /v1/family/delete` 仅接受当前 Owner bearer，并同时要求 body
+`{"family_name":"…"}` 与请求头 `X-Lezi-Bootstrap-Secret`。家庭名规范化后必须与
+当前名完全一致，根密码只参与本次常量时间校验。服务端先在单个 SQLite 事务中为全部
+旧 access/refresh hash 留下不含身份引用的 `family_deleted` 终止原因，再级联删除整个
+家庭图；提交后才清媒体。丢失成功响应的原设备及其它离线设备重试时稳定收到
+`401`/`family_deleted`，客户端据此执行可恢复的本地全量清理；普通 401 或网络失败不清理。
 
-`POST /v1/family/create` 与 `POST /v1/join` 响应均含 `membership_id`；同一
-`create_request_id` / 同一邀请码幂等重试返回**相同** `membership_id`。角色与写者
-身份只来自 Bearer principal：member 不能冒充 owner 调用邀请/改名等接口；push 中
-与 token 不符的 `device_id` 返回 `403`。
+NAS 持久化明确分为 `families`、`memberships`、`devices` 和 `device_sessions`：
+membership 是家庭角色身份，一个 membership 可拥有多台 Device；每台 Device 的
+DeviceSession 保存 access/refresh 的 hash、过期时间和吊销状态，不保存明文 credential。
+受保护 API 只从 access hash 解析 canonical family、membership、device 与 role。
+运行时 members 每个 active membership 投影一行；普通 membership 退出或被删除时会
+原子硬删除身份及全部设备会话，并匿名化保留的家庭共享事实。管理员删除家庭时由外键
+级联清除全部身份与会话。
+
+`POST /v1/family/create` 与 `POST /v1/join` 响应均含 `membership_id`、canonical
+`device_id` 和设备 session credential；同一 `create_request_id` / 同一邀请码幂等
+重试返回**相同**身份。角色与写者身份只来自 Bearer principal：member 不能冒充
+owner 调用邀请/改名等接口；请求内与 credential 不符的身份声明返回 `403`。
 
 pull 响应包含当前字段 `has_more`。每页最多扫描 200 个实体，并以约 8 MiB
 序列化实体为体积目标；响应 `cursor` 只前进到本页已扫描的 revision。客户端在

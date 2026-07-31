@@ -2,6 +2,7 @@ package com.lezi.babylog.feature.onboarding
 
 import com.lezi.babylog.domain.FamilyWizardEntry
 import com.lezi.babylog.domain.FamilyWizardMode
+import com.lezi.babylog.domain.FamilyWizardJoinRole
 import com.lezi.babylog.domain.FamilyWizardOutcome
 import com.lezi.babylog.domain.FamilyWizardState
 import com.lezi.babylog.domain.FamilyWizardStep
@@ -18,7 +19,7 @@ class OnboardingFamilyWizardAdapterTest {
     @Test
     fun onboardingProjectsTheSharedActionsAndSnapshot() {
         val draft = JoinFamilyDraft.fromConfig(
-            HomeLanServerConfig(host = "nas.home", allowedSsids = listOf("Home")),
+            HomeLanServerConfig(host = "nas.home"),
             invitation = "INVITE-1234",
         )
 
@@ -27,12 +28,14 @@ class OnboardingFamilyWizardAdapterTest {
             step = FamilyWizardStep.Identity,
             draft = draft,
             displayName = "妈妈",
+            joinRole = FamilyWizardJoinRole.Member,
         )
 
         assertEquals(FamilyWizardEntry.Onboarding, snapshot.entry)
-        assertEquals(listOf(FamilyWizardMode.Create, FamilyWizardMode.Join), onboardingFamilyActions())
+        assertEquals(listOf("连接家庭服务器"), onboardingFamilyActions())
         assertEquals(draft, snapshot.toJoinDraft())
         assertEquals("妈妈", snapshot.displayName)
+        assertEquals(FamilyWizardJoinRole.Member, snapshot.joinRole)
         assertTrue(onboardingChooseFamilyBody().contains("离线模式"))
     }
 
@@ -70,7 +73,7 @@ class OnboardingFamilyWizardAdapterTest {
             mode = FamilyWizardMode.Create,
             step = FamilyWizardStep.Identity,
             draft = JoinFamilyDraft.fromConfig(
-                HomeLanServerConfig(host = "nas.home", allowedSsids = listOf("Home")),
+                HomeLanServerConfig(host = "nas.home"),
             ),
             displayName = "妈妈",
         )
@@ -95,11 +98,50 @@ class OnboardingFamilyWizardAdapterTest {
             ),
         )
         assertEquals(
+            OnboardingFamilyTransition(true, OnboardingStep.RecoveryComplete),
+            onboardingFamilyWizardTransition(
+                completed(
+                    snapshot.copy(mode = FamilyWizardMode.Join),
+                    FamilyWizardOutcome.OwnerLoggedIn(
+                        ownerSession(),
+                        InitialFamilyDataRecovery.Complete,
+                    ),
+                ),
+                reclaimedFamilyEmpty = false,
+            ),
+        )
+        assertEquals(
             OnboardingFamilyTransition(true, OnboardingStep.ChooseFamily),
             onboardingFamilyWizardTransition(
                 completed(
                     snapshot.copy(mode = FamilyWizardMode.Join),
                     FamilyWizardOutcome.Joined(memberSession()),
+                ),
+                reclaimedFamilyEmpty = null,
+            ),
+        )
+        assertEquals(
+            OnboardingFamilyTransition(true, OnboardingStep.ChooseFamily),
+            onboardingFamilyWizardTransition(
+                completed(
+                    snapshot.copy(mode = FamilyWizardMode.Join),
+                    FamilyWizardOutcome.MemberApproved(
+                        memberSession(),
+                        InitialFamilyDataRecovery.Complete,
+                    ),
+                ),
+                reclaimedFamilyEmpty = null,
+            ),
+        )
+        assertEquals(
+            OnboardingFamilyTransition(false, OnboardingStep.RecoveryPending),
+            onboardingFamilyWizardTransition(
+                completed(
+                    snapshot.copy(mode = FamilyWizardMode.Join),
+                    FamilyWizardOutcome.MemberApproved(
+                        memberSession(),
+                        InitialFamilyDataRecovery.RetryRequired,
+                    ),
                 ),
                 reclaimedFamilyEmpty = null,
             ),
@@ -112,7 +154,7 @@ class OnboardingFamilyWizardAdapterTest {
             mode = FamilyWizardMode.Create,
             step = FamilyWizardStep.Identity,
             draft = JoinFamilyDraft.fromConfig(
-                HomeLanServerConfig(host = "nas.home", allowedSsids = listOf("Home")),
+                HomeLanServerConfig(host = "nas.home"),
             ),
             displayName = "妈妈",
         )
@@ -126,7 +168,7 @@ class OnboardingFamilyWizardAdapterTest {
             onboardingFamilyWizardTransition(
                 FamilyWizardState.RetryableFailure(
                     snapshot,
-                    "历史数据恢复失败，请保持连接家庭 Wi‑Fi 后重试",
+                    "历史数据恢复失败，请确认家庭服务器可访问后重试",
                     committed,
                 ),
                 reclaimedFamilyEmpty = null,
@@ -143,7 +185,7 @@ class OnboardingFamilyWizardAdapterTest {
         mode = FamilyWizardMode.Create,
         step = FamilyWizardStep.Identity,
         draft = JoinFamilyDraft.fromConfig(
-            HomeLanServerConfig(host = "nas.home", allowedSsids = listOf("Home")),
+            HomeLanServerConfig(host = "nas.home"),
         ),
         displayName = "妈妈",
     )
