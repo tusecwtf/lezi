@@ -1,9 +1,11 @@
 # Spec · 自托管应用内更新（侧载 APK）
 
-**Status:** ready-for-agent  
+**Status:** complete · 5/5  
 **Source:** 2026-07-31 grilling + research  
 **Research:** [`docs/design/2026-07-31-android-apk-in-app-update-research.md`](../../docs/design/2026-07-31-android-apk-in-app-update-research.md)  
-**Tracker:** [ISSUES.md](./ISSUES.md)
+**Tracker:** [ISSUES.md](./ISSUES.md)  
+**PRD:** [`docs/prd/tech.md`](../../docs/prd/tech.md) §4.2 · [`sync-trusted-endpoint.md`](../../docs/prd/sync-trusted-endpoint.md) §7.4  
+**Evidence:** [evidence/05/validation.md](./evidence/05/validation.md)
 
 ## Problem Statement
 

@@ -15,7 +15,7 @@ post-0.3.0 独立审查残差另开 tracker；使用方式见
 | 可信同步 endpoint、鉴权与 NAS→VPS 迁移 | [spec](./trusted-sync-endpoint-auth/spec.md) | [ISSUES](./trusted-sync-endpoint-auth/ISSUES.md)（17 票） | active · 14/17 · frontier 15 |
 | 离线模式（先本机记账，账户再连家庭） | [spec](./offline-mode/spec.md) | [票索引](./offline-mode/ISSUES.md) | complete · 6/6 |
 | 审查残差 P1（domain/composer + 网络层 0.3.1 复核） | [spec](./p1-review-residuals/spec.md) | [ISSUES](./p1-review-residuals/ISSUES.md)（8 票） | ready-for-agent · frontier 01/02/04；05–08 planned 等 0.3.1 |
-| 自托管应用内更新（侧载 APK + NAS 部署带包） | [spec](./self-hosted-app-update/spec.md) | [ISSUES](./self-hosted-app-update/ISSUES.md)（5 票 · 垂直切片） | ready-for-agent · frontier 01 |
+| 自托管应用内更新（侧载 APK + NAS 部署带包） | [spec](./self-hosted-app-update/spec.md) | [ISSUES](./self-hosted-app-update/ISSUES.md)（5 票 · 垂直切片） | complete · 5/5 · [evidence/05](./self-hosted-app-update/evidence/05/validation.md) |
 
 产品契约已写回 [`docs/prd/`](../docs/prd/)；本轮最终构建、设备与 current-wire 结果见
 [`release-0.3.0/validation.md`](./2c6bbf6-program-audit-remediation/evidence/release-0.3.0/validation.md)。

@@ -114,6 +114,16 @@ curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.50.4:8765/ready
 | `LEZI_FORCE_PACKAGE=1` | 强制重打包 |
 | `LEZI_SKIP_PACKAGE=1` | 仅 scp+部署已有 `dist/` 包 |
 | `LEZI_BOOTSTRAP_SECRET` | 仅无现网容器可继承时手动提供 |
+| `LEZI_RELEASE_APK` | 打进 NAS 包的 signed release APK（默认 `app/build/outputs/apk/release/app-release.apk`） |
+| `LEZI_APP_UPDATE_JSON` | 更新元数据（默认 `tools/lezi-sync/deploy/app-update.json`；sha256 须与 APK 一致） |
+
+**自托管应用内更新**：`package-nas.sh` **fail-closed** — 缺少 release APK 或 `app-update.json`
+不合法（含 sha256 不匹配）则打包失败。成功包含 `app-update/app-release.apk` 与元数据；部署后
+写入数据卷，由 lezi-sync 鉴权提供 `GET /v1/app-update` 与 `GET /v1/app-update/apk`。已加入家庭
+的客户端可检查/下载并经系统 `PackageInstaller` 安装；**不是** Google Play In-App Updates。
+抬高 `min_supported_version_code` 可强制旧客户端升级并拒绝权威同步（仍放行更新下载）。详见
+[`docs/prd/tech.md`](docs/prd/tech.md) §4.2 与
+[`tools/lezi-sync/deploy/DEPLOY.md`](tools/lezi-sync/deploy/DEPLOY.md)。
 
 **手机访问**：账户页填 `https://<NAS-LAN-IP>:8765`。首次会显示部署脚本打印的 SPKI 指纹，确认后固定；后续公钥变化会硬阻断。须用 NAS 防火墙禁止公网访问 8765。
 
@@ -140,6 +150,8 @@ Android 模拟器调试本机服务时，在账户页手动填写
 - **Widget**：需手动添加到桌面
 - **厂商杀后台**：母乳计时依赖 FGS + DataStore
 - **无广告 / 无 IAP / 无强制登录**
+- **应用内更新**：仅 release `com.lezi.babylog` + 已加入家庭会话；debug 后缀包不承诺自更新；
+  安装 UI 与「未知应用来源」授权依赖系统；不承诺清除 PackageInstaller 系统缓存
 
 ## 设计系统
 

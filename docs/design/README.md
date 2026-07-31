@@ -22,7 +22,7 @@
 | [2026-07-29-timeline-swipe-edit-delete.md](./2026-07-29-timeline-swipe-edit-delete.md) | Implemented | 时间轴左右滑；`ui.md` 已链到本文 |
 | [2026-07-30-sync-network-auth-architecture-research.md](./2026-07-30-sync-network-auth-architecture-research.md) | Folded / Partly superseded | 原始网络研究；最终身份、QR 与迁移结论以 ADR-0011/PRD 为准 |
 | [2026-07-30-trusted-sync-onboarding-ui.md](./2026-07-30-trusted-sync-onboarding-ui.md) | Active | 服务器连接、根密码管理员、成员审批/QR、成员设备与浅同步状态设计 |
-| [2026-07-31-android-apk-in-app-update-research.md](./2026-07-31-android-apk-in-app-update-research.md) | Active · tracker | 应用内 APK 升级调研；实现见 [`.scratch/self-hosted-app-update/`](../../.scratch/self-hosted-app-update/spec.md) |
+| [2026-07-31-android-apk-in-app-update-research.md](./2026-07-31-android-apk-in-app-update-research.md) | Implemented · PRD | 应用内 APK 升级调研；合同见 tech §4.2；tracker [self-hosted-app-update](../../.scratch/self-hosted-app-update/spec.md) |
 
 ## 命名
 

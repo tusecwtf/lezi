@@ -262,6 +262,26 @@ session，不影响 membership 和其它设备。
 | `membership_deleted` | 清当前设备的全部本地家庭数据 |
 | `family_deleted` | 清当前设备的全部本地家庭数据 |
 | 非法 Outbox 操作 403 | 单项终止并解释；不阻断普通 pull |
+| `client_update_required` | 本机 versionCode 缺失或低于服务器 `min_supported_version_code`；**映射为强制升级 UI**，不得呈现为普通网络/NAS 故障；本地 Room 与会话保留；更新检查与 APK 下载仍可用 |
+
+## 7.4 客户端版本门槛与自托管更新
+
+家庭服务器可对已部署的 release 客户端抬高最低 versionCode，避免破坏性协议下旧客户端半兼容
+脏写。本通道是**自托管应用内更新**（`PackageInstaller` + 鉴权 APK），**不是** Google Play
+In-App Updates。完整产品合同见 [tech.md §4.2](./tech.md)。
+
+| 项 | 合同 |
+|----|------|
+| 请求头 | 权威同步与其它需门槛的受保护请求携带 `X-Lezi-Client-Version-Code`（十进制整数） |
+| 门槛判定 | 服务器读取部署元数据 `min_supported_version_code`；头缺失/非法或 `< min` 时拒绝权威 sync 写/拉 |
+| 错误语义 | HTTP 失败 body 含稳定 `code=client_update_required`；客户端映射强制升级，不重试当普通网络错误 |
+| 放行 | 同一有效会话下 `GET /v1/app-update` 与 `GET /v1/app-update/apk` **不**走门槛拒绝，避免升级死锁 |
+| 缺元数据 | 未部署 `app-update.json` 时同步** fail-open**（不砖掉家庭）；元数据/APK 路由对已鉴权调用诚实 404 |
+| 资格 | 仅已加入且会话有效；无匿名/未信任 endpoint 的 APK 通道 |
+| 发现 | 前台握手/同步顺带 best-effort 检查；菜单关于区手动检查；可选更新可横幅提示（会话内稍后抑制） |
+
+比较语义只用整数 versionCode；versionName 仅展示。`versionCode` 与 lezi-sync Cargo 版本号
+不要求数值相等。
 
 ## 8. 页面与权限
 
@@ -299,7 +319,10 @@ session，不影响 membership 和其它设备。
 - access refresh/logout/revoke：轮换、重放检测与独立设备撤销；
 - membership/device rename/delete：唯一性、权限和硬删除；
 - authenticated session summary：从 credential 返回 canonical family/membership/device/role；
-- bundle push/pull/media：沿用原子同步和服务端 ACL。
+- bundle push/pull/media：沿用原子同步和服务端 ACL；并在请求头 versionCode 低于 minSupported 时
+  以 `client_update_required` 拒绝；
+- authenticated app-update：`GET /v1/app-update` 返回部署元数据 JSON；`GET /v1/app-update/apk`
+  在 sha256 与元数据一致时提供 release APK；均需设备会话，不设匿名旁路。
 
 所有身份判断只从已验证 credential 与服务端状态推导，不能信任请求体自报 family、membership、
 device 或 role。服务端不得记录根密码、access/refresh token、grant 或敏感请求体。
@@ -332,6 +355,9 @@ App 不提供 NAS→VPS 迁移、handoff、备份恢复、server identity 搬迁
 9. 账户与成员设备页面符合角色可见性；记录/汇总/成长下拉刷新并只显示浅同步状态。
 10. 两台 Android 客户端可在 HTTPS 服务上完成建家、成员申请/批准、多设备绑定、双向原子同步、
     撤销与删除负向路径；最终 Release APK 与最终服务端产物通过各自发布 gate。
+11. 自托管更新：无会话不能拉元数据/APK；已加入可检查；低于 minSupported 时权威同步失败且
+    UI 进入强制升级，同时仍可下载安装；打包缺 release APK 失败；升级后应用私有目录无 APK 残留
+    （系统安装器缓存不在承诺范围）。
 
 ## 12. 文档与代码处置
 

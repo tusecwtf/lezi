@@ -34,6 +34,8 @@ Environment overrides:
 | `LEZI_SKIP_PACKAGE=1` | only scp+deploy existing `dist/lezi-sync-*-nas` |
 | `LEZI_PACKAGE_BUILD_IMAGE=1` | `package-nas.sh` builds image if missing |
 | `LEZI_BOOTSTRAP_SECRET` | only if no live container to inherit |
+| `LEZI_RELEASE_APK` | signed release APK path (default repo `app/build/outputs/apk/release/app-release.apk`) |
+| `LEZI_APP_UPDATE_JSON` | app-update metadata JSON (default `deploy/app-update.json`) |
 
 ## Stages
 
@@ -63,13 +65,35 @@ Metadata contract (`app-update.json`, snake_case):
 }
 ```
 
-- `package_name` must be `com.lezi.babylog` (release applicationId only).
-- `sha256` must match `sha256sum` of the APK byte-for-byte.
+- `package_name` must be `com.lezi.babylog` (release applicationId only; **not** debug suffix).
+- `sha256` must match `sha256sum` of the APK byte-for-byte (64 lowercase hex).
+- Raise `min_supported_version_code` only for **breaking** client contracts; clients below that
+  value get `code=client_update_required` on authoritative sync paths, but can still call the
+  app-update routes with a valid session.
 - Package layout: `app-update/app-release.apk` + `app-update/app-update.json`.
 - On deploy, files are installed to the data bind as `/data/app-release.apk` and `/data/app-update.json` (container uid `10001`).
-- Authenticated clients: `GET /v1/app-update` (JSON) and `GET /v1/app-update/apk` (APK; integrity re-checked server-side).
+- Authenticated clients only (Bearer device session): `GET /v1/app-update` (JSON) and
+  `GET /v1/app-update/apk` (`application/vnd.android.package-archive`; integrity re-checked
+  server-side). No anonymous / public CDN URL for the family APK.
+- Product channel is **self-hosted sideload** (Android `PackageInstaller`), **not** Google Play
+  In-App Updates. See [`docs/prd/tech.md`](../../../docs/prd/tech.md) §4.2.
 
 Optional path overrides on the server process: `LEZI_APP_UPDATE_METADATA_PATH`, `LEZI_APP_UPDATE_APK_PATH`.
+
+Quick local checks (from `tools/lezi-sync`):
+
+```bash
+# fail-closed: missing APK
+LEZI_FORCE_PACKAGE=1 LEZI_RELEASE_APK=/nonexistent/app-release.apk ./deploy/package-nas.sh
+# expect non-zero exit
+
+# success path (image or reusable dist tar present)
+LEZI_FORCE_PACKAGE=1 \
+  LEZI_RELEASE_APK=../../app/build/outputs/apk/release/app-release.apk \
+  LEZI_APP_UPDATE_JSON=deploy/app-update.json \
+  ./deploy/package-nas.sh
+# expect dist/lezi-sync-<ver>-nas/app-update/{app-release.apk,app-update.json}
+```
 
 ## Secret handling
 

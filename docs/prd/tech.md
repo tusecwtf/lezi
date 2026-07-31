@@ -123,6 +123,7 @@ UI 事件
 | RECEIVE_BOOT_COMPLETED | 重启恢复本地提醒/计时 | 当前 |
 | 相册 / Photo Picker | 日记照片 | 当前 |
 | INTERNET / ACCESS_NETWORK_STATE | HTTPS setup/login、push/pull 与媒体 | 已声明；网络调用受前台 + transport trust + session 约束，不限网络类型 |
+| REQUEST_INSTALL_PACKAGES | 自托管应用内更新：调起系统 `PackageInstaller` 会话安装 release APK | 已声明；仅 release `com.lezi.babylog` 通道使用；须用户确认安装与「未知应用来源」授权 |
 | ACCESS_FINE_LOCATION / ACCESS_WIFI_STATE | 家庭同步不需要 | 不声明，不存在运行时申请 |
 | CAMERA | 扫描管理员 App 提供的普通成员单次登录 QR | 可选硬件；拒绝后仍可手动 endpoint + 申请 |
 | SCHEDULE_EXACT_ALARM / USE_EXACT_ALARM | **不申请**；护理计划提醒用非精确闹钟即可 | |
@@ -144,8 +145,51 @@ UI 事件
 | release R8 | `isMinifyEnabled = true` + `isShrinkResources = true` |
 | 系统备份 | `android:allowBackup="false"`；`backup_rules` / `data_extraction_rules` 对齐排除 |
 | 明文 HTTP | 0.3 基线允许；下一版 release 生产禁用，只允许不载入真实凭证的 loopback dev/test |
-| FileProvider | 仅 `cache/export`；不暴露 `files/` / database |
+| FileProvider | 仅 `cache/export`；不暴露 `files/` / database；升级 APK **不**经 FileProvider 长期暴露 |
+| 升级暂存 | 仅应用私有 `cache/app-update`（若需落盘）；成功/失败/取消后清理；**禁止**公共 Download / 共享目录 |
 | 日志 | 不打印根密码、access/refresh、grant、Authorization 或敏感 body；用户可见错误过滤技术细节 |
+
+---
+
+## 4.2 自托管应用内更新（侧载 APK）
+
+本产品当前以**家庭服务器侧载**为主通道，提供应用内检查 / 下载 / 系统安装。**不是**
+Google Play In-App Updates / Play Core；若未来上架 Play，须另 flavor，不得在 Play 构建走
+自研 APK 替换。
+
+| 项 | 合同 |
+|----|------|
+| 通道 | 平台 `PackageInstaller.Session` + 家庭服务器鉴权元数据/APK；无 FCM、无后台推包 |
+| 资格 | **仅已加入家庭**、endpoint 已信任、有效设备会话；未加入 / 离线模式无下载通道 |
+| 版本语义 | 比较与门槛只用整数 **versionCode**；**versionName** 仅展示 |
+| 双档 | `local < latest` → 可选；`local < minSupportedVersionCode` → 强制全屏（无「稍后」绕过主功能） |
+| 请求头 | 受保护同步请求携带 `X-Lezi-Client-Version-Code`（整数） |
+| 服务端 API | 鉴权 `GET /v1/app-update`（JSON）与 `GET /v1/app-update/apk`（APK 字节）；与同步共用会话与 TLS/信任 |
+| 门槛 | 头缺失或 `< minSupported` 时权威 sync 写/拉（pull / bundle / media 等）返回 `code=client_update_required`；**仍放行**更新元数据与 APK 下载 |
+| 部署 | `package-nas` **fail-closed**：须 release APK + 合法 `app-update.json` 且 sha256 一致；随包部署到数据卷由 lezi-sync 提供，不另开匿名静态站 |
+| 客户端缝 | `SyncPort`：`checkAppUpdate`、`availableOptionalAppUpdate` / `availableForcedAppUpdate`、`installAvailableAppUpdate`、会话内 dismiss；UI 不直连 PackageInstaller |
+| 安装约束 | 同签名、更高 versionCode 原地替换；仅 release `applicationId = com.lezi.babylog`；本轮不承诺 debug 后缀包自更新 |
+| 无残留 | 流程结束后应用私有目录无 APK；**不**承诺清除系统 PackageInstaller 内部缓存 |
+
+元数据形状（wire **snake_case**；部署文件 `app-update.json`）：
+
+```json
+{
+  "package_name": "com.lezi.babylog",
+  "version_code": 7,
+  "version_name": "0.3.1",
+  "min_supported_version_code": 6,
+  "sha256": "<64 lowercase hex of APK>",
+  "release_notes": "可选"
+}
+```
+
+触发：① 已加入且前台对信任 endpoint 握手/同步时顺带检查；② 菜单关于区点击检查。
+可选更新：确认层 → 下载 → sha256 → 安装；账户区非阻塞横幅，同一 versionCode **进程会话内**
+「稍后」不再刷屏。强制更新：全屏，须仍能完成下载安装。详细同步门槛与错误语义见
+[sync-trusted-endpoint.md](./sync-trusted-endpoint.md)；部署 runbook 见
+[`tools/lezi-sync/deploy/DEPLOY.md`](../../tools/lezi-sync/deploy/DEPLOY.md)。调研笔记：
+[`docs/design/2026-07-31-android-apk-in-app-update-research.md`](../design/2026-07-31-android-apk-in-app-update-research.md)。
 
 ---
 
@@ -158,6 +202,7 @@ UI 事件
 | summary / growth / search / export TXT / widget | 当前交付 |
 | PDF / custom / food types / CarePlan calendar | 当前交付 |
 | RealSync 家网实现 | 默认 DI；本机 Docker + 双模拟器前台已验收 |
+| 自托管应用内更新 | 鉴权元数据/APK、双档门槛、PackageInstaller、打包 fail-closed；见 §4.2 |
 | `lezi-sync` NAS | API/镜像/自动化；物理 NAS 生产部署待目标环境 |
 
 > **当前同步策略（2026-07-25）**：中心化 NAS、硬家网、仅前台、无即时通知；
@@ -190,6 +235,8 @@ UI 事件
 - NoOpSync 不抛未捕获异常
 - fresh Room 创建当前 schema；force-stop/重启后当前数据、Outbox、TimerState 与提醒清理状态保持
 - Room 只注册 fresh-current 建库路径；非当前 payload/计时状态不得进入正常业务路径
+- 应用内更新：SyncPort 检查结果（NotJoined / UpToDate / Optional / Forced）、校验失败不安装、
+  同步被 `client_update_required` 映射为强制态；lezi-sync HTTP 鉴权元数据/APK 与门槛
 
 **冒烟（当前 APK）**
 
@@ -199,6 +246,7 @@ UI 事件
 4. force-stop → 再开 → 数据一致
 5. 开深色、切第二宝宝
 6. 账户页可见且无崩溃、无购买入口
+7. （已加入家庭）关于区显示 `版本 {versionName}`；检查更新得到已最新或可选确认；强制时全屏
 
 ---
 
@@ -218,3 +266,5 @@ docs/prd/  # 本产品规格
 - 包名、图标、文案自有；不使用参考产品商标。
 - 上架前自备隐私说明（本机数据、是否同步、儿童信息）。
 - 曲线数据注明来源与免责，不作医疗诊断。
+- **Play 渠道**：不得在 Play 分发构建中使用本自托管 APK 替换通道；Play 构建须另 flavor 并仅用
+  Play In-App Updates（若上架）。当前主路径为侧载 + 家庭服务器。
