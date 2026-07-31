@@ -30,7 +30,13 @@ fn public_endpoint_is_https_only_and_keeps_the_same_certificate_across_restart()
             setup,
             json!({
                 "protocol_version": 1,
-                "capabilities": ["setup_status"],
+                "capabilities": [
+                    "trusted_https_endpoint_v1",
+                    "device_sessions_v1",
+                    "membership_devices_v1",
+                    "atomic_bundle",
+                    "record_membership_author",
+                ],
                 "family_state": "empty",
             })
         );

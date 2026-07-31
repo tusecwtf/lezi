@@ -4,10 +4,10 @@
 > 只支持当前 Room schema、当前 payload 与当前 NAS wire；见 [ADR-0008](../adr/0008-support-only-fresh-current-product-contracts.md)。
 > 主 PRD：[`README.md`](./README.md)
 >
-> **下一版身份与网络目标（2026-07-31）：** 下文涉及一设备一 membership、`left_at`、长期
-> credential、SSID/HTTP/generation 的 0.3 实现说明由
+> **当前身份与网络合同（0.3.1）：** 历史的一设备一 membership、`left_at`、长期
+> credential、网络名称/明文传输的 0.3 实现说明已由
 > [`sync-trusted-endpoint.md`](./sync-trusted-endpoint.md) 和
-> [ADR-0011](../adr/0011-root-admin-and-multi-device-membership.md) 取代。目标模型如下节明确为
+> [ADR-0011](../adr/0011-root-admin-and-multi-device-membership.md) 取代。当前模型如下节明确为
 > membership 1:N device、每设备轮换 session、成员硬删除与无 SSID trusted endpoint。
 
 ---
@@ -311,15 +311,11 @@ tombstone 或 Outbox 元数据。删除失败或中断时保留该路径作为�
 
 主题色存在 Baby 上，但 **同步策略默认：主题与排序属本机**（与参考产品一致）。若未来共享主题，再单开开关。
 
-### 3.9 ShareInvite
+### 3.9 成员申请与单次登录授权
 
-| 字段 | 说明 |
-|------|------|
-| `code` | 短码 |
-| `qr_payload` | |
-| `expires_at` | 建议默认 24h，可配 |
-| `created_by` | |
-| `used_count` / `max_uses` | |
+旧 `ShareInvite` 短码模型已退役，不存在于当前 Android、NAS schema 或 wire。当前成员申请只在
+本机暂存无权限 request ID、pending secret 与过期时间；管理员签发的成员登录授权十分钟、
+单次使用，服务端只存哈希。两者都不得进入家庭业务 Outbox、系统备份或日志。
 
 ### 3.10 CustomItemDef
 
@@ -463,7 +459,7 @@ enum class SyncStatus {
 | pending request | 无权限 request ID 与 expiry；不包含家庭数据 |
 | pull checkpoint | cursor 与 familyName 缓存；成功后原子更新 |
 
-`familyName` 是 NAS 权威共享家庭名的本机会话缓存：create/join/本机 rename 会立即
+`familyName` 是 NAS 权威共享家庭名的本机会话缓存：create/login/claim/本机 rename 会立即
 写入；之后每次允许的前台/下拉 pull 都可刷新，即使该页没有实体。NAS 显式
 返回 `null` 时清空缓存并走产品兜底；缺少当前必需字段时 pull 失败并保留缓存。更新检查点只改
 `cursor` 和 presence-aware `familyName`，不得覆盖并发变化的家庭身份或 trusted endpoint。
@@ -477,15 +473,21 @@ interface SyncPort {
   fun status(): Flow<SyncStatus>
   fun session(): Flow<SyncSession>
 
-  /** 已保存服务器且持有家庭会话时为 true */
+  /** 已信任 endpoint 且持有有效设备会话时为 true */
   fun isEnabled(): Boolean
 
-  /** 前台非阻塞触发；未加入家庭时 no-op */
+  /** 前台非阻塞触发；未认证时 no-op */
   fun requestSync(trigger: SyncTrigger)
 
-  suspend fun saveServer(baseUrl: String): Result<Unit>
-  /** displayName=家庭称呼（必填）；familyName=共享家庭名（必填） */
-  suspend fun createFamily(displayName: String, familyName: String?, bootstrapSecret: String?): Result<SyncSession>
+  suspend fun probeEndpoint(endpointDraft: String): SetupProbeResult
+  suspend fun trustCertificate(candidate: CertificateTrustCandidate): SetupProbeResult
+  suspend fun rememberEndpoint(endpoint: TrustedEndpointProfile): Result<Unit>
+  suspend fun createFamily(displayName: String, deviceName: String, bootstrapSecret: String, familyName: String?): Result<CreateFamilyResult>
+  suspend fun ownerLogin(deviceName: String, rootPassword: String, takeover: Boolean): Result<OwnerLoginResult>
+  suspend fun requestMemberLogin(displayName: String, deviceName: String): Result<PendingMemberLogin>
+  suspend fun checkMemberLogin(): Result<MemberLoginCheckResult>
+  suspend fun createMemberLoginQrPayload(membershipId: String): Result<MemberLoginQrPayload>
+  suspend fun claimMemberLoginQr(payload: MemberLoginQrPayload, deviceName: String): Result<SyncSession>
   suspend fun renameFamily(familyName: String): Result<Unit>
   suspend fun deleteFamily(familyName: String, rootPassword: String): Result<Unit>
   suspend fun updateMyDisplayName(displayName: String): Result<Unit>
@@ -495,11 +497,8 @@ interface SyncPort {
   suspend fun pull(familyId: String): Result<Unit>
   suspend fun push(familyId: String): Result<Unit>
 
-  suspend fun createInvite(familyId: String): Result<Invite>
-  /** 当前 token 所在家庭的 active 成员安全视图（含称呼与 role） */
+  /** 当前设备会话所在家庭的 active 成员安全视图（含称呼与 role） */
   suspend fun listFamilyMembers(): Result<List<FamilyMemberView>>
-  /** invitation + 家网配置 + 必填家庭称呼组成唯一 Join command */
-  suspend fun joinFamily(command: JoinFamilyCommand): Result<SyncSession>
   suspend fun leave(familyId: String): Result<Unit>
   /** 仅 owner：按 membership_id 移除另一 active member */
   suspend fun removeMember(membershipId: String): Result<Unit>
@@ -507,7 +506,7 @@ interface SyncPort {
 
   /** 清本机 Record/CarePlan/履行候选及日志媒体；保留宝宝、自定义项目和家庭会话 */
   suspend fun clearLocalRecords(workflow: LocalClearWorkflow): Result<Unit>
-  /** 全量 wipe（含 outbox/头像媒体），join 前用；使用同一耐久 workflow */
+  /** 全量 wipe（含 outbox/头像媒体）；使用同一耐久 workflow */
   suspend fun clearAllLocalData(workflow: LocalClearWorkflow): Result<Unit>
 }
 ```
@@ -515,12 +514,13 @@ interface SyncPort {
 ### 6.3 未配置实现
 
 - 无会话时状态保持 `Disabled`，前台与本地写触发为安全 no-op。
-- 建家、加入、邀请前必须配置服务器；失败返回中文产品文案。
-- 只有已加入家庭的会话才会生成并上传 Outbox；服务器地址变化时原子清除旧 token/cursor。
+- 建家、管理员登录或成员申请前必须先确认可信 endpoint；失败返回中文产品文案。
+- 只有有效设备会话才会生成并上传 Outbox；endpoint 变化时必须重新建立 trust 并普通登录，
+  不向新地址发送旧 credential。
 
 ### 6.4 当前规则（摘要）
 
-> **网络拓扑、门闩、前台策略、NAS Docker 与 API 的权威说明见 [`sync-home-lan.md`](./sync-home-lan.md)。** 本节仅保留数据契约摘要。
+> **transport trust、身份、前台策略、部署与 API 的权威说明见 [`sync-trusted-endpoint.md`](./sync-trusted-endpoint.md)。** 本节仅保留数据契约摘要。
 
 | 规则 | 说明 |
 |------|------|
@@ -537,7 +537,7 @@ interface SyncPort {
 | 跨机引用 | Record 使用 `baby_client_uuid`，不用对端本地自增 id |
 | 通知 | **不**对成员新记录推送 |
 | 验收 | 双方在家且打开 App 时回前台/下拉一致；**不**承诺息屏 60s |
-| 安全 | 默认家网 HTTP + family token；可选 HTTPS；加入前明示全量共享 |
+| 安全 | 用户确认的 HTTPS endpoint + 每设备轮换 access/refresh session；加入前明示全量共享 |
 | 持久化 | NAS 单数据根：`DATA_DIR/lezi.db` + `DATA_DIR/media/` |
 
 当前 Room schema 强制 `MediaAsset` 只有一个归属：`log` 在 `record_id` 与 `plan_id`

@@ -173,7 +173,7 @@ class HttpSyncBackend internal constructor(
         loginRequestId: String,
         rootPassword: String,
         takeover: Boolean,
-    ): JoinResult {
+    ): SessionBootstrapResult {
         val secret = rootPassword
         require(secret.isNotBlank()) { "请填写管理员根密码" }
         return post(
@@ -234,7 +234,7 @@ class HttpSyncBackend internal constructor(
     override suspend fun claimMemberLogin(
         baseUrl: String,
         pendingSecret: String,
-    ): JoinResult = post(
+    ): SessionBootstrapResult = post(
         baseUrl,
         "/v1/member/requests/claim",
         null,
@@ -246,7 +246,7 @@ class HttpSyncBackend internal constructor(
     ): List<PendingMemberLoginRequest> = get(
         session.baseUrl,
         "/v1/member/requests",
-        session.familyToken,
+        session.accessToken,
     ).requiredArray("requests", "pending member requests").mapIndexed { index, element ->
         val request = element as? JsonObject
             ?: throw IllegalArgumentException("requests[$index] 不是对象")
@@ -263,7 +263,7 @@ class HttpSyncBackend internal constructor(
         post(
             session.baseUrl,
             "/v1/member/requests/${requireRequestId(requestId)}/approve-new",
-            session.familyToken,
+            session.accessToken,
             buildJsonObject {},
         )
     }
@@ -276,7 +276,7 @@ class HttpSyncBackend internal constructor(
         post(
             session.baseUrl,
             "/v1/member/requests/${requireRequestId(requestId)}/bind-existing",
-            session.familyToken,
+            session.accessToken,
             buildJsonObject {
                 put("membership_id", requireTargetMembershipId(membershipId))
             },
@@ -287,7 +287,7 @@ class HttpSyncBackend internal constructor(
         post(
             session.baseUrl,
             "/v1/member/requests/${requireRequestId(requestId)}/reject",
-            session.familyToken,
+            session.accessToken,
             buildJsonObject {},
         )
     }
@@ -301,7 +301,7 @@ class HttpSyncBackend internal constructor(
         val json = post(
             endpoint,
             "/v1/member/login-grants",
-            session.familyToken,
+            session.accessToken,
             buildJsonObject {
                 put("membership_id", requireTargetMembershipId(membershipId))
             },
@@ -321,7 +321,7 @@ class HttpSyncBackend internal constructor(
         endpoint: TrustedEndpointProfile,
         grant: String,
         deviceName: String,
-    ): JoinResult = post(
+    ): SessionBootstrapResult = post(
         endpoint = endpoint,
         path = "/v1/member/login-grants/claim",
         token = null,
@@ -337,7 +337,7 @@ class HttpSyncBackend internal constructor(
         val json = get(
             session.baseUrl,
             "/v1/pull?cursor=${session.pullCursor}&generation=$generation",
-            session.familyToken,
+            session.accessToken,
         )
         return PullResult(
             entities = json.entities("pull"),
@@ -350,23 +350,6 @@ class HttpSyncBackend internal constructor(
         )
     }
 
-    override suspend fun invite(session: SyncSession): Invite {
-        val json = post(session.baseUrl, "/v1/invite", session.familyToken, buildJsonObject {})
-        return inviteFromWire(json)
-    }
-
-    override suspend fun join(
-        baseUrl: String,
-        code: String,
-        deviceId: String,
-        displayName: String?,
-    ): JoinResult =
-        post(baseUrl, "/v1/join", null, buildJsonObject {
-            put("code", code)
-            put("device_id", deviceId)
-            put("display_name", requireMemberDisplayName(displayName))
-        }).toJoinResult()
-
     override suspend fun updateMyDisplayName(
         session: SyncSession,
         displayName: String,
@@ -374,7 +357,7 @@ class HttpSyncBackend internal constructor(
         val response = post(
             session.baseUrl,
             "/v1/family/display-name",
-            session.familyToken,
+            session.accessToken,
             buildJsonObject {
                 put("display_name", requireMemberDisplayName(displayName))
             },
@@ -399,7 +382,7 @@ class HttpSyncBackend internal constructor(
         val response = get(
             session.baseUrl,
             "/v1/family/rename-requests",
-            session.familyToken,
+            session.accessToken,
         )
         return response.requiredArray("requests", "rename-requests").mapIndexed { index, item ->
             val request = item as? JsonObject
@@ -412,7 +395,7 @@ class HttpSyncBackend internal constructor(
         post(
             session.baseUrl,
             "/v1/family/rename-requests/${requireOpaqueActionId(requestId, "改名申请")}/approve",
-            session.familyToken,
+            session.accessToken,
             buildJsonObject {},
         )
     }
@@ -421,7 +404,7 @@ class HttpSyncBackend internal constructor(
         post(
             session.baseUrl,
             "/v1/family/rename-requests/${requireOpaqueActionId(requestId, "改名申请")}/reject",
-            session.familyToken,
+            session.accessToken,
             buildJsonObject {},
         )
     }
@@ -430,7 +413,7 @@ class HttpSyncBackend internal constructor(
         post(
             session.baseUrl,
             "/v1/family/rename-requests/cancel",
-            session.familyToken,
+            session.accessToken,
             buildJsonObject {},
         )
     }
@@ -442,7 +425,7 @@ class HttpSyncBackend internal constructor(
         val response = post(
             session.baseUrl,
             "/v1/family/members",
-            session.familyToken,
+            session.accessToken,
             buildJsonObject { put("display_name", requireMemberDisplayName(displayName)) },
         )
         return FamilyMember(
@@ -465,7 +448,7 @@ class HttpSyncBackend internal constructor(
         post(
             session.baseUrl,
             "/v1/family/members/${requireOpaqueActionId(membershipId, "家庭成员")}/display-name",
-            session.familyToken,
+            session.accessToken,
             buildJsonObject { put("display_name", requireMemberDisplayName(displayName)) },
         )
     }
@@ -478,7 +461,7 @@ class HttpSyncBackend internal constructor(
         post(
             session.baseUrl,
             "/v1/family/devices/${requireOpaqueActionId(deviceId, "家庭设备")}/display-name",
-            session.familyToken,
+            session.accessToken,
             buildJsonObject { put("device_name", requireDeviceName(deviceName)) },
         )
     }
@@ -490,13 +473,13 @@ class HttpSyncBackend internal constructor(
         post(
             session.baseUrl,
             "/v1/family/name",
-            session.familyToken,
+            session.accessToken,
             buildJsonObject { put("family_name", normalized) },
         )
     }
 
     override suspend fun members(session: SyncSession): List<FamilyMember> {
-        val json = get(session.baseUrl, "/v1/family/members", session.familyToken)
+        val json = get(session.baseUrl, "/v1/family/members", session.accessToken)
         return json.requiredArray("members", "members").mapIndexed { index, memberElement ->
             val member = memberElement as? JsonObject
                 ?: throw IllegalArgumentException("members[$index] 不是对象")
@@ -570,11 +553,11 @@ class HttpSyncBackend internal constructor(
     }
 
     override suspend fun leave(session: SyncSession) {
-        post(session.baseUrl, "/v1/leave", session.familyToken, buildJsonObject {})
+        post(session.baseUrl, "/v1/leave", session.accessToken, buildJsonObject {})
     }
 
     override suspend fun logoutCurrentDevice(session: SyncSession) {
-        post(session.baseUrl, "/v1/device/logout", session.familyToken, buildJsonObject {})
+        post(session.baseUrl, "/v1/device/logout", session.accessToken, buildJsonObject {})
     }
 
     override suspend fun revokeFamilyDevice(session: SyncSession, deviceId: String) {
@@ -582,7 +565,7 @@ class HttpSyncBackend internal constructor(
         post(
             session.baseUrl,
             "/v1/family/devices/$id/revoke",
-            session.familyToken,
+            session.accessToken,
             buildJsonObject {},
         )
     }
@@ -593,7 +576,7 @@ class HttpSyncBackend internal constructor(
         post(
             session.baseUrl,
             "/v1/family/members/remove",
-            session.familyToken,
+            session.accessToken,
             buildJsonObject { put("membership_id", id) },
         )
     }
@@ -610,14 +593,14 @@ class HttpSyncBackend internal constructor(
         post(
             session.baseUrl,
             "/v1/family/delete",
-            session.familyToken,
+            session.accessToken,
             buildJsonObject { put("family_name", normalizedFamilyName) },
             extraHeaders = mapOf(BOOTSTRAP_SECRET_HEADER to rootPassword),
         )
     }
 
     override suspend fun getMedia(session: SyncSession, clientUuid: String): ByteArray =
-        requestBytes(session.baseUrl, "/v1/media/$clientUuid", "GET", session.familyToken)
+        requestBytes(session.baseUrl, "/v1/media/$clientUuid", "GET", session.accessToken)
 
     override suspend fun stageBundle(
         session: SyncSession,
@@ -630,7 +613,7 @@ class HttpSyncBackend internal constructor(
             put("media", buildJsonArray { draft.media.forEach { add(it.toJson()) } })
             put("generation", session.pullGeneration)
         }
-        return post(session.baseUrl, "/v1/bundles", session.familyToken, body).toBundleStageStatus()
+        return post(session.baseUrl, "/v1/bundles", session.accessToken, body).toBundleStageStatus()
     }
 
     override suspend fun putBundleMedia(
@@ -643,7 +626,7 @@ class HttpSyncBackend internal constructor(
             session.baseUrl,
             "/v1/bundles/$bundleId/media/$clientUuid",
             "PUT",
-            session.familyToken,
+            session.accessToken,
             source,
         )
         return json.toBundleStageStatus()
@@ -660,7 +643,7 @@ class HttpSyncBackend internal constructor(
         val json = post(
             session.baseUrl,
             "/v1/bundles/$bundleId/commit",
-            session.familyToken,
+            session.accessToken,
             body,
         )
         return BundleCommitResult(
@@ -887,21 +870,6 @@ private fun InputStream.readBytesUpTo(
     return output.toByteArray()
 }
 
-internal fun inviteFromWire(json: JsonObject): Invite {
-    val expiresAtSeconds = requireNotNull(
-        json["expires_at"]?.jsonPrimitive?.longOrNull,
-    ) { "邀请响应缺少 expires_at" }
-    require(expiresAtSeconds in 0..Long.MAX_VALUE / MILLIS_PER_SECOND) {
-        "邀请失效时间无效"
-    }
-    return Invite(
-        code = requireNotNull(json["code"]?.jsonPrimitive?.contentOrNull) {
-            "邀请响应缺少 code"
-        },
-        expiresAt = expiresAtSeconds * MILLIS_PER_SECOND,
-    )
-}
-
 private fun SyncEntity.toJson() = buildJsonObject {
     put("type", type)
     put("client_uuid", clientUuid)
@@ -950,11 +918,11 @@ private fun JsonObject.toBundleStageStatus(): BundleStageStatus = BundleStageSta
     stagedMedia = requiredStringArray("staged_media", "bundle stage"),
 )
 
-private fun JsonObject.toCreateResult(): JoinResult {
+private fun JsonObject.toCreateResult(): SessionBootstrapResult {
     require(requiredString("role", "create") == "owner") { "create 响应 role 无效" }
-    return JoinResult(
+    return SessionBootstrapResult(
         familyId = requiredNonBlankString("family_id", "create"),
-        token = requiredNonBlankString("access_token", "create"),
+        accessToken = requiredNonBlankString("access_token", "create"),
         refreshToken = requiredNonBlankString("refresh_token", "create"),
         accessExpiresAtEpochSeconds = requiredLong("access_expires_at", "create"),
         deviceId = requiredNonBlankString("device_id", "create"),
@@ -966,13 +934,13 @@ private fun JsonObject.toCreateResult(): JoinResult {
     )
 }
 
-private fun JsonObject.toOwnerLoginResult(): JoinResult {
+private fun JsonObject.toOwnerLoginResult(): SessionBootstrapResult {
     require(requiredString("role", "owner login") == "owner") {
         "owner login 响应 role 无效"
     }
-    return JoinResult(
+    return SessionBootstrapResult(
         familyId = requiredNonBlankString("family_id", "owner login"),
-        token = requiredNonBlankString("access_token", "owner login"),
+        accessToken = requiredNonBlankString("access_token", "owner login"),
         refreshToken = requiredNonBlankString("refresh_token", "owner login"),
         accessExpiresAtEpochSeconds = requiredLong("access_expires_at", "owner login"),
         deviceId = requiredNonBlankString("device_id", "owner login"),
@@ -983,13 +951,13 @@ private fun JsonObject.toOwnerLoginResult(): JoinResult {
     )
 }
 
-private fun JsonObject.toMemberClaimResult(): JoinResult {
+private fun JsonObject.toMemberClaimResult(): SessionBootstrapResult {
     require(requiredString("role", "member claim") == "member") {
         "member claim 响应 role 无效"
     }
-    return JoinResult(
+    return SessionBootstrapResult(
         familyId = requiredNonBlankString("family_id", "member claim"),
-        token = requiredNonBlankString("access_token", "member claim"),
+        accessToken = requiredNonBlankString("access_token", "member claim"),
         refreshToken = requiredNonBlankString("refresh_token", "member claim"),
         accessExpiresAtEpochSeconds = requiredLong("access_expires_at", "member claim"),
         deviceId = requiredNonBlankString("device_id", "member claim"),
@@ -1048,23 +1016,6 @@ private fun JsonObject.toSessionRefreshResult(): SessionRefreshResult = SessionR
     generation = requiredNonBlankString("generation", "refresh"),
     familyName = requiredFamilyName("refresh"),
 )
-
-private fun JsonObject.toJoinResult(): JoinResult {
-    require(requiredString("role", "join") == "member") { "join 响应 role 无效" }
-    return JoinResult(
-        familyId = requiredNonBlankString("family_id", "join"),
-        token = requiredNonBlankString("access_token", "join"),
-        refreshToken = requiredNonBlankString("refresh_token", "join"),
-        accessExpiresAtEpochSeconds = requiredLong("access_expires_at", "join"),
-        deviceId = requiredNonBlankString("device_id", "join"),
-        role = FamilyRole.Member,
-        entities = entities("join"),
-        cursor = requiredLong("cursor", "join"),
-        generation = requiredNonBlankString("generation", "join"),
-        familyName = requiredFamilyName("join"),
-        membershipId = requiredNonBlankString("membership_id", "join"),
-    )
-}
 
 private fun JsonObject.pullFamilyName(): String? {
     return requiredFamilyName("pull")

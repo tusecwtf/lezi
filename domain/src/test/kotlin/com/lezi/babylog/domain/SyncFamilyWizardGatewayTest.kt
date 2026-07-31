@@ -3,7 +3,7 @@ package com.lezi.babylog.domain
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.sync.CreateFamilyResult
 import com.lezi.babylog.sync.FamilyRole
-import com.lezi.babylog.sync.HomeLanServerConfig
+import com.lezi.babylog.sync.FamilyEndpointConfig
 import com.lezi.babylog.sync.NoOpSyncPort
 import com.lezi.babylog.sync.OwnerLoginResult
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
@@ -18,10 +18,10 @@ class SyncFamilyWizardGatewayTest {
         val events = mutableListOf<String>()
         val local = RecordingFamilyWizardLocalStore(events)
         val sync = RecordingCreateSyncPort(events)
-        val gateway = SyncFamilyWizardGateway(local, sync, unusedJoinFamily())
+        val gateway = SyncFamilyWizardGateway(local, sync)
 
         val result = gateway.createFamily(
-            config = configuredHomeLan(),
+            config = configuredEndpoint(),
             displayName = "妈妈",
             bootstrapSecret = "bootstrap-secret",
             familyName = "乐乐家",
@@ -38,10 +38,10 @@ class SyncFamilyWizardGatewayTest {
             scaffoldFailure = IllegalStateException("database unavailable")
         }
         val sync = RecordingCreateSyncPort(events)
-        val gateway = SyncFamilyWizardGateway(local, sync, unusedJoinFamily())
+        val gateway = SyncFamilyWizardGateway(local, sync)
 
         val result = gateway.createFamily(
-            config = configuredHomeLan(),
+            config = configuredEndpoint(),
             displayName = "妈妈",
             bootstrapSecret = "bootstrap-secret",
             familyName = null,
@@ -57,10 +57,10 @@ class SyncFamilyWizardGatewayTest {
         val events = mutableListOf<String>()
         val local = RecordingFamilyWizardLocalStore(events)
         val sync = RecordingCreateSyncPort(events)
-        val gateway = SyncFamilyWizardGateway(local, sync, unusedJoinFamily())
+        val gateway = SyncFamilyWizardGateway(local, sync)
 
         val result = gateway.ownerLogin(
-            config = configuredHomeLan(),
+            config = configuredEndpoint(),
             deviceName = "Pixel",
             rootPassword = "root-password-secret",
             takeover = true,
@@ -107,7 +107,7 @@ private class RecordingCreateSyncPort(
             CreateFamilyResult(
                 session = SyncSession(
                     familyId = "family-owner",
-                    familyToken = "owner-token",
+                    accessToken = "owner-token",
                     role = FamilyRole.Owner,
                     membershipId = "owner-membership",
                 ),
@@ -128,7 +128,7 @@ private class RecordingCreateSyncPort(
             OwnerLoginResult(
                 session = SyncSession(
                     familyId = "family-owner",
-                    familyToken = "owner-token",
+                    accessToken = "owner-token",
                     role = FamilyRole.Owner,
                     membershipId = "owner-membership",
                 ),
@@ -138,11 +138,6 @@ private class RecordingCreateSyncPort(
     }
 }
 
-private fun unusedJoinFamily(): JoinFamilyUseCase = object : JoinFamilyUseCase {
-    override suspend fun execute(request: JoinFamilyRequest): JoinFamilyResult =
-        error("join must not be called")
-}
-
-private fun configuredHomeLan() = HomeLanServerConfig(
+private fun configuredEndpoint() = FamilyEndpointConfig(
     host = "nas.home",
 )

@@ -21,7 +21,7 @@ import org.junit.Test
 class SyncPreferencesTest {
     private fun preferences(
         store: androidx.datastore.core.DataStore<androidx.datastore.preferences.core.Preferences>,
-        tokens: SecureFamilyTokenStore = InMemorySecureFamilyTokenStore(),
+        tokens: SecureRefreshTokenStore = InMemorySecureRefreshTokenStore(),
     ) = DataStoreSyncPreferences(store, tokens)
 
     @Test
@@ -39,7 +39,7 @@ class SyncPreferencesTest {
     fun probedEndpointIsPersistedSeparatelyAndForgettingItPreservesActiveSession() = runTest {
         val file = File.createTempFile("lezi-trusted-endpoint-", ".preferences_pb")
             .also { it.delete() }
-        val tokens = InMemorySecureFamilyTokenStore()
+        val tokens = InMemorySecureRefreshTokenStore()
         val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
         val preferences = preferences(store, tokens)
         val active = SyncSession(
@@ -47,7 +47,7 @@ class SyncPreferencesTest {
             serverScheme = "https",
             serverPort = 443,
             familyId = "family-current",
-            familyToken = "active-token",
+            accessToken = "active-token",
             refreshToken = "active-refresh",
             deviceId = "device-current",
             role = FamilyRole.Owner,
@@ -97,7 +97,7 @@ class SyncPreferencesTest {
     @Test
     fun sessionAndCursorSurviveStoreRecreation() = runTest {
         val file = File.createTempFile("lezi-sync-", ".preferences_pb").also { it.delete() }
-        val tokens = InMemorySecureFamilyTokenStore()
+        val tokens = InMemorySecureRefreshTokenStore()
         val firstScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
         val firstStore = PreferenceDataStoreFactory.create(scope = firstScope) { file }
         val first = preferences(firstStore, tokens)
@@ -105,7 +105,7 @@ class SyncPreferencesTest {
             SyncSession(
                 serverHost = "nas",
                 familyId = "family-uuid",
-                familyToken = "short-access-token",
+                accessToken = "short-access-token",
                 refreshToken = "secret-refresh-token",
                 accessExpiresAtEpochSeconds = 1_753_419_300,
                 deviceId = "device-uuid",
@@ -134,7 +134,7 @@ class SyncPreferencesTest {
 
         assertThat(restored.session.first().pullCursor).isEqualTo(41)
         assertThat(restored.session.first().pullGeneration).isEqualTo("server-generation")
-        assertThat(restored.session.first().familyToken).isEmpty()
+        assertThat(restored.session.first().accessToken).isEmpty()
         assertThat(restored.session.first().refreshToken).isEqualTo("secret-refresh-token")
         assertThat(restored.session.first().accessExpiresAtEpochSeconds).isEqualTo(0)
         assertThat(restored.session.first().familyName).isEqualTo("乐乐一家")
@@ -157,14 +157,14 @@ class SyncPreferencesTest {
     @Test
     fun familyNameIsClearedWithFamilySessionAndBlankBecomesNull() = runTest {
         val file = File.createTempFile("lezi-sync-name-", ".preferences_pb").also { it.delete() }
-        val tokens = InMemorySecureFamilyTokenStore()
+        val tokens = InMemorySecureRefreshTokenStore()
         val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
         val preferences = preferences(store, tokens)
         preferences.saveSession(
             SyncSession(
                 serverHost = "nas",
                 familyId = "family",
-                familyToken = "secret-token",
+                accessToken = "secret-token",
                 deviceId = "device",
                 role = FamilyRole.Owner,
                 familyName = "  我家  ",
@@ -181,7 +181,7 @@ class SyncPreferencesTest {
         preferences.saveSession(
             preferences.session.first().copy(
                 familyId = "family",
-                familyToken = "secret-token",
+                accessToken = "secret-token",
                 familyName = "恢复",
             ),
         )
@@ -206,7 +206,7 @@ class SyncPreferencesTest {
                 SyncSession(
                     serverHost = "nas",
                     familyId = "family",
-                    familyToken = "token",
+                    accessToken = "token",
                     deviceId = "device",
                     role = FamilyRole.Member,
                     pullCursor = 4,
@@ -262,7 +262,7 @@ class SyncPreferencesTest {
             SyncSession(
                 serverHost = "nas",
                 familyId = "family-a",
-                familyToken = "token-a",
+                accessToken = "token-a",
                 deviceId = "device",
                 role = FamilyRole.Member,
             ),
@@ -279,7 +279,7 @@ class SyncPreferencesTest {
         preferences.saveSession(
             stale.copy(
                 familyId = "family-b",
-                familyToken = "token-b",
+                accessToken = "token-b",
                 familyName = "另一个家庭",
             ),
         )
@@ -291,14 +291,14 @@ class SyncPreferencesTest {
     @Test
     fun accessIsProcessOnlyAndRefreshIsNotWrittenToPlaintextDataStore() = runTest {
         val file = File.createTempFile("lezi-sync-", ".preferences_pb").also { it.delete() }
-        val tokens = InMemorySecureFamilyTokenStore()
+        val tokens = InMemorySecureRefreshTokenStore()
         val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
         val preferences = preferences(store, tokens)
         preferences.saveSession(
             SyncSession(
                 serverHost = "nas",
                 familyId = "family",
-                familyToken = "secret-token",
+                accessToken = "secret-token",
                 refreshToken = "secret-refresh-token",
                 deviceId = "device",
                 role = FamilyRole.Owner,
@@ -308,14 +308,14 @@ class SyncPreferencesTest {
         val raw = store.data.first()
         assertThat(raw[stringPreferencesKey("sync_server_host")]).isEqualTo("nas")
         assertThat(tokens.getToken()).isEqualTo("secret-refresh-token")
-        assertThat(preferences.session.first().familyToken).isEqualTo("secret-token")
+        assertThat(preferences.session.first().accessToken).isEqualTo("secret-token")
         file.delete()
     }
 
     @Test
     fun reauthClearRemovesOnlyCredentialsAndSurvivesProcessRecreation() = runTest {
         val file = File.createTempFile("lezi-reauth-", ".preferences_pb").also { it.delete() }
-        val tokens = InMemorySecureFamilyTokenStore()
+        val tokens = InMemorySecureRefreshTokenStore()
         val firstScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
         val first = preferences(
             PreferenceDataStoreFactory.create(scope = firstScope) { file },
@@ -329,7 +329,7 @@ class SyncPreferencesTest {
                 serverPort = 443,
                 serverScheme = "https",
                 familyId = "family",
-                familyToken = "access-secret",
+                accessToken = "access-secret",
                 refreshToken = "refresh-secret",
                 accessExpiresAtEpochSeconds = 2_000_900,
                 deviceId = "device",
@@ -345,7 +345,7 @@ class SyncPreferencesTest {
 
         val retained = first.session.first()
         assertThat(retained.reauthRequired).isTrue()
-        assertThat(retained.familyToken).isEmpty()
+        assertThat(retained.accessToken).isEmpty()
         assertThat(retained.refreshToken).isEmpty()
         assertThat(retained.familyId).isEqualTo("family")
         assertThat(retained.deviceId).isEqualTo("device")
@@ -372,14 +372,14 @@ class SyncPreferencesTest {
     @Test
     fun changingJoinedServerClearsCredentialsAndFamilyReceipts() = runTest {
         val file = File.createTempFile("lezi-sync-", ".preferences_pb").also { it.delete() }
-        val tokens = InMemorySecureFamilyTokenStore()
+        val tokens = InMemorySecureRefreshTokenStore()
         val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
         val preferences = preferences(store, tokens)
         preferences.saveSession(
             SyncSession(
                 serverHost = "old-nas",
                 familyId = "old-family",
-                familyToken = "old-token",
+                accessToken = "old-token",
                 refreshToken = "old-refresh-token",
                 deviceId = "stable-device",
                 role = FamilyRole.Owner,
@@ -412,7 +412,7 @@ class SyncPreferencesTest {
             SyncSession(
                 serverHost = "old-nas",
                 familyId = "old-family",
-                familyToken = "old-token",
+                accessToken = "old-token",
                 refreshToken = "old-refresh-token",
                 deviceId = "stable-device",
                 role = FamilyRole.Owner,
@@ -534,7 +534,7 @@ class SyncPreferencesTest {
             SyncSession(
                 serverHost = "old-nas",
                 familyId = "old-family",
-                familyToken = "old-token",
+                accessToken = "old-token",
                 deviceId = "stable-device",
                 role = FamilyRole.Owner,
                 pullCursor = 99,
@@ -547,7 +547,7 @@ class SyncPreferencesTest {
             SyncSession(
                 serverHost = "new-nas",
                 familyId = "new-family",
-                familyToken = "new-token",
+                accessToken = "new-token",
                 deviceId = "stable-device",
                 role = FamilyRole.Member,
             ),
@@ -556,7 +556,7 @@ class SyncPreferencesTest {
         assertThat(preferences.session.first().lastSuccessAt).isNull()
         assertThat(preferences.session.first().pullCursor).isEqualTo(0)
         assertThat(preferences.session.first().pullGeneration).isEmpty()
-        assertThat(preferences.session.first().familyToken).isEqualTo("new-token")
+        assertThat(preferences.session.first().accessToken).isEqualTo("new-token")
     }
 
     @Test
@@ -571,7 +571,7 @@ class SyncPreferencesTest {
                 serverPort = 443,
                 serverScheme = "https",
                 familyId = "family",
-                familyToken = "token",
+                accessToken = "token",
                 deviceId = "device",
                 role = FamilyRole.Owner,
             ),
@@ -579,7 +579,7 @@ class SyncPreferencesTest {
 
         val restored = preferences.session.first()
         assertThat(restored.baseUrl).isEqualTo("https://lezi.home:443")
-        assertThat(restored.homeLanConfig.baseUrl).isEqualTo("https://lezi.home:443")
+        assertThat(restored.endpointConfig.baseUrl).isEqualTo("https://lezi.home:443")
     }
 
     @Test
@@ -602,7 +602,7 @@ class SyncPreferencesTest {
             SyncSession(
                 serverHost = "nas",
                 familyId = "family",
-                familyToken = "token",
+                accessToken = "token",
                 deviceId = "device",
                 role = FamilyRole.Owner,
             ),
@@ -632,7 +632,7 @@ class SyncPreferencesTest {
             SyncSession(
                 serverHost = "nas",
                 familyId = "family",
-                familyToken = "token",
+                accessToken = "token",
                 deviceId = "device",
                 role = FamilyRole.Owner,
             ),
@@ -646,7 +646,7 @@ class SyncPreferencesTest {
     fun pendingMemberCapabilitySurvivesProcessButIsEncryptedAndRetiredWithSession() = runTest {
         val file = File.createTempFile("lezi-member-pending-", ".preferences_pb")
             .also { it.delete() }
-        val tokens = InMemorySecureFamilyTokenStore()
+        val tokens = InMemorySecureRefreshTokenStore()
         val firstScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler) + SupervisorJob())
         val firstStore = PreferenceDataStoreFactory.create(scope = firstScope) { file }
         val first = preferences(firstStore, tokens)
@@ -684,7 +684,7 @@ class SyncPreferencesTest {
                 serverHost = "family.home",
                 serverScheme = "https",
                 familyId = "family",
-                familyToken = "member-access",
+                accessToken = "member-access",
                 refreshToken = "member-refresh",
                 deviceId = "member-device",
                 role = FamilyRole.Member,
@@ -701,7 +701,7 @@ class SyncPreferencesTest {
     fun nonAuthoritativeConfigRewriteKeepsPendingMemberCapability() = runTest {
         val file = File.createTempFile("lezi-member-config-", ".preferences_pb")
             .also { it.delete() }
-        val tokens = InMemorySecureFamilyTokenStore()
+        val tokens = InMemorySecureRefreshTokenStore()
         val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
         val preferences = preferences(store, tokens)
         val receipt = MemberLoginReceipt(
@@ -709,11 +709,11 @@ class SyncPreferencesTest {
             pendingSecret = "pending-secret-000000000000000000000002",
             expiresAtEpochSeconds = 1_753_504_800,
         )
-        preferences.saveHomeLanConfig(HomeLanServerConfig(host = "old.home"))
+        preferences.saveEndpointConfig(FamilyEndpointConfig(host = "old.home"))
         preferences.savePendingMemberLogin(receipt, "奶奶", "Pixel 10")
 
-        preferences.saveHomeLanConfig(
-            HomeLanServerConfig(host = "new.home"),
+        preferences.saveEndpointConfig(
+            FamilyEndpointConfig(host = "new.home"),
             clearSessionIfServerChanged = false,
         )
 
@@ -723,8 +723,8 @@ class SyncPreferencesTest {
     }
 }
 
-private class FailOnceClearTokenStore : SecureFamilyTokenStore {
-    private val delegate = InMemorySecureFamilyTokenStore()
+private class FailOnceClearTokenStore : SecureRefreshTokenStore {
+    private val delegate = InMemorySecureRefreshTokenStore()
     var failNextClear = false
 
     override fun getToken(): String = delegate.getToken()

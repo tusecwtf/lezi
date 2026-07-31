@@ -262,7 +262,7 @@ class AtomicMediaBundlePublisherTest {
     private companion object {
         val session = SyncSession(
             familyId = "family-1",
-            familyToken = "token-1",
+            accessToken = "token-1",
             deviceId = "device-1",
             role = FamilyRole.Owner,
             pullGeneration = "generation-1",

@@ -110,6 +110,8 @@ class ContractSupersededSurfacesTest {
         val retiredNetworkSources = listOf(
             "sync/src/main/kotlin/com/lezi/babylog/sync/HomeNetworkPolicy.kt",
             "sync/src/main/kotlin/com/lezi/babylog/sync/HomeWifiPermission.kt",
+            "sync/src/main/kotlin/com/lezi/babylog/sync/HomeLanHosts.kt",
+            "sync/src/main/kotlin/com/lezi/babylog/sync/HomeLanServerConfig.kt",
             "core/ui/src/main/kotlin/com/lezi/babylog/core/ui/HomeWifiAccessGuide.kt",
             "feature/family/src/main/kotlin/com/lezi/babylog/feature/family/FamilyNetworkForm.kt",
         )
@@ -151,6 +153,41 @@ class ContractSupersededSurfacesTest {
         assertThat(source(
             "feature/family/src/main/kotlin/com/lezi/babylog/feature/family/FamilySharingContent.kt",
         )).doesNotContain("立即同步")
+    }
+
+    @Test
+    fun legacyNetworkAndFamilyTokenContractsCannotBeReenabled() {
+        val retiredSources = listOf(
+            "sync/src/main/kotlin/com/lezi/babylog/sync/InvitePayloadCodec.kt",
+            "sync/src/main/kotlin/com/lezi/babylog/sync/JoinFamilyCommand.kt",
+            "sync/src/main/kotlin/com/lezi/babylog/sync/JoinFamilyError.kt",
+            "sync/src/main/kotlin/com/lezi/babylog/sync/SecureFamilyTokenStore.kt",
+            "domain/src/main/kotlin/com/lezi/babylog/domain/JoinFamilyUseCase.kt",
+        )
+        retiredSources.forEach { relative ->
+            assertThat(root.resolve(relative).exists()).isFalse()
+        }
+
+        val androidProduction = productionKotlin.joinToString("\n") { it.readText() }
+        for (legacy in listOf(
+            "familyToken",
+            "createInvite(",
+            "joinFamily(",
+            "InvitePayloadCodec",
+            "JoinFamilyCommand",
+            "HomeLanServerConfig",
+            "HomeLanHosts",
+            "JoinResult",
+        )) {
+            assertThat(androidProduction).doesNotContain(legacy)
+        }
+
+        val server = source("tools/lezi-sync/src/lib.rs")
+        assertThat(server).doesNotContain(".route(\"/v1/invite\"")
+        assertThat(server).doesNotContain(".route(\"/v1/join\"")
+        assertThat(server).doesNotContain("\"token\":")
+        assertThat(source("tools/lezi-sync/src/store.rs"))
+            .doesNotContain("CREATE TABLE invites")
     }
 
     private fun source(relativePath: String): String = root.resolve(relativePath).readText()

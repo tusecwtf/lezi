@@ -24,23 +24,23 @@ data class CanonicalRecordAuthor(
     val createdByMembershipId: String,
 )
 
-data class JoinResult(
+data class SessionBootstrapResult(
     val familyId: String,
     /** Short-lived access credential; process memory only. */
-    val token: String,
+    val accessToken: String,
     /** Long-lived rotating credential; Android secure storage only. */
     val refreshToken: String = "",
     val accessExpiresAtEpochSeconds: Long = 0,
     /** Canonical server-minted device identity. */
     val deviceId: String = "",
     val role: FamilyRole,
-    /** Create has no bootstrap entity page, while join may return one. */
+    /** Current session bootstrap does not carry an entity page. */
     val entities: List<SyncEntity> = emptyList(),
-    /** Create starts from cursor zero; join publishes its explicit bootstrap cursor. */
+    /** Current create/login/claim bootstrap starts from cursor zero. */
     val cursor: Long = 0,
-    /** Required by both create and join in the current protocol. */
+    /** Required by every current session bootstrap response. */
     val generation: String,
-    /** Shared family name from create/join; null means the current server stores no name. */
+    /** Shared family name from create/login/claim; null means the server stores no name. */
     val familyName: String? = null,
     /** Server-minted immutable membership identity. */
     val membershipId: String,
@@ -51,7 +51,7 @@ data class JoinResult(
     val reclaimed: Boolean = false,
 ) {
     override fun toString(): String =
-        "JoinResult(familyId=$familyId, deviceId=$deviceId, role=$role, " +
+        "SessionBootstrapResult(familyId=$familyId, deviceId=$deviceId, role=$role, " +
             "membershipId=$membershipId, credentials=<redacted>)"
 }
 
@@ -153,7 +153,7 @@ interface SyncBackend {
         createRequestId: String,
         bootstrapSecret: String?,
         familyName: String? = null,
-    ): JoinResult
+    ): SessionBootstrapResult
 
     suspend fun refresh(baseUrl: String, refreshToken: String): SessionRefreshResult =
         throw UnsupportedOperationException("Session refresh is not implemented")
@@ -170,7 +170,7 @@ interface SyncBackend {
         loginRequestId: String,
         rootPassword: String,
         takeover: Boolean,
-    ): JoinResult = throw UnsupportedOperationException("Owner login is not implemented")
+    ): SessionBootstrapResult = throw UnsupportedOperationException("Owner login is not implemented")
 
     suspend fun requestMemberLogin(
         baseUrl: String,
@@ -185,7 +185,7 @@ interface SyncBackend {
         throw UnsupportedOperationException("Member login cancellation is not implemented")
     }
 
-    suspend fun claimMemberLogin(baseUrl: String, pendingSecret: String): JoinResult =
+    suspend fun claimMemberLogin(baseUrl: String, pendingSecret: String): SessionBootstrapResult =
         throw UnsupportedOperationException("Member login claim is not implemented")
 
     suspend fun pendingMemberLogins(session: SyncSession): List<PendingMemberLoginRequest> =
@@ -217,18 +217,9 @@ interface SyncBackend {
         endpoint: TrustedEndpointProfile,
         grant: String,
         deviceName: String,
-    ): JoinResult = throw UnsupportedOperationException("Member login grant claim is not implemented")
+    ): SessionBootstrapResult = throw UnsupportedOperationException("Member login grant claim is not implemented")
 
     suspend fun pull(session: SyncSession): PullResult
-    suspend fun invite(session: SyncSession): Invite
-
-    suspend fun join(
-        baseUrl: String,
-        code: String,
-        deviceId: String,
-        displayName: String?,
-    ): JoinResult
-
     suspend fun members(session: SyncSession): List<FamilyMember>
     /** Owner updates immediately; ordinary Member receives a pending approval request. */
     suspend fun updateMyDisplayName(

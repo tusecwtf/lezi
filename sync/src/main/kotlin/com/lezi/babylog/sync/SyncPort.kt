@@ -7,8 +7,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import javax.inject.Inject
 import javax.inject.Singleton
 
-data class Invite(val code: String, val expiresAt: Long)
-
 /**
  * Privacy-preserving family member projection from the home server.
  *
@@ -149,7 +147,7 @@ interface SyncPort {
     suspend fun cleanupTombstonedMedia(clientUuids: Set<String>): Result<Unit>
     suspend fun saveServer(baseUrl: String): Result<Unit>
     /** Persists an endpoint origin; trust is established separately by setup probe. */
-    suspend fun saveHomeLanConfig(config: HomeLanServerConfig): Result<Unit>
+    suspend fun saveEndpointConfig(config: FamilyEndpointConfig): Result<Unit>
     /**
      * @param displayName 家庭称呼 (product-required; blank rejected at the session seam)
      * @param familyName shared family name (optional; blank → server null + client fallback)
@@ -193,9 +191,6 @@ interface SyncPort {
     suspend fun sync(trigger: SyncTrigger): Result<Unit>
     suspend fun pull(familyId: String): Result<Unit>
     suspend fun push(familyId: String): Result<Unit>
-    suspend fun createInvite(familyId: String): Result<Invite>
-    /** Persists the joined session only; the shared domain join use case owns the immediate sync request. */
-    suspend fun joinFamily(command: JoinFamilyCommand): Result<SyncSession>
     suspend fun listFamilyMembers(): Result<List<FamilyMember>>
     /** Owner updates immediately; Member receives a pending approval request. */
     suspend fun updateMyDisplayName(displayName: String): Result<DisplayNameUpdateResult>
@@ -244,7 +239,7 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
     override fun requestSync(trigger: SyncTrigger) = Unit
     override suspend fun cleanupTombstonedMedia(clientUuids: Set<String>) = Result.success(Unit)
     override suspend fun saveServer(baseUrl: String) = Result.success(Unit)
-    override suspend fun saveHomeLanConfig(config: HomeLanServerConfig) = Result.success(Unit)
+    override suspend fun saveEndpointConfig(config: FamilyEndpointConfig) = Result.success(Unit)
     override suspend fun createFamily(
         displayName: String,
         deviceName: String,
@@ -261,9 +256,6 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
     override suspend fun sync(trigger: SyncTrigger) = Result.success(Unit)
     override suspend fun pull(familyId: String) = Result.success(Unit)
     override suspend fun push(familyId: String) = Result.success(Unit)
-    override suspend fun createInvite(familyId: String) = Result.failure<Invite>(SyncNotEnabledException())
-    override suspend fun joinFamily(command: JoinFamilyCommand) =
-        Result.failure<SyncSession>(SyncNotEnabledException())
     override suspend fun listFamilyMembers() =
         Result.failure<List<FamilyMember>>(SyncNotEnabledException())
     override suspend fun updateMyDisplayName(displayName: String) =

@@ -24,7 +24,7 @@ class FamilyErrorCopyTest {
     fun reclaimedFamilyCopyDistinguishesRecoveredAndRetryableData() {
         val session = SyncSession(
             familyId = "family-a",
-            familyToken = "owner-token",
+            accessToken = "owner-token",
             deviceId = "device-a",
             role = FamilyRole.Owner,
             membershipId = "owner-membership",
@@ -207,7 +207,7 @@ class FamilyErrorCopyTest {
         val card = buildFamilyOverviewCard(
             isJoined = false,
             role = FamilyRole.None,
-            networkConfigured = false,
+            endpointConfigured = false,
             familyName = null,
             babyNickname = "年年",
             localDisplayName = "",
@@ -216,7 +216,6 @@ class FamilyErrorCopyTest {
             status = com.lezi.babylog.core.model.SyncStatus.Disabled,
         )
         assertTrue(card.showCreateJoin)
-        assertFalse(card.showInvite)
         assertEquals(label, card.syncStatusLabel)
     }
 
@@ -235,21 +234,18 @@ class FamilyErrorCopyTest {
         val ownerJoined = familyControlVisibility(isJoined = true, role = FamilyRole.Owner)
         assertFalse(ownerJoined.showJoin)
         assertFalse(ownerJoined.showCreateFamily)
-        assertTrue(ownerJoined.showInvite)
         assertTrue(ownerJoined.showJoinedActions)
         assertTrue(ownerJoined.showRemoveMember)
 
         val memberJoined = familyControlVisibility(isJoined = true, role = FamilyRole.Member)
         assertFalse(memberJoined.showJoin)
         assertFalse(memberJoined.showCreateFamily)
-        assertFalse(memberJoined.showInvite)
         assertTrue(memberJoined.showJoinedActions)
         assertFalse(memberJoined.showRemoveMember)
 
         val unjoined = familyControlVisibility(isJoined = false, role = FamilyRole.None)
         assertTrue(unjoined.showJoin)
         assertTrue(unjoined.showCreateFamily)
-        assertFalse(unjoined.showInvite)
         assertFalse(unjoined.showJoinedActions)
         assertFalse(unjoined.showRemoveMember)
     }
@@ -278,45 +274,42 @@ class FamilyErrorCopyTest {
 
     @Test
     fun primarySurfaceFlagsByJoinRoleAndNetwork() {
-        assertTrue(isHomeLanNetworkConfigured("192.168.50.4", ""))
-        assertFalse(isHomeLanNetworkConfigured("", ""))
+        assertTrue(isEndpointConfigured("192.168.50.4", ""))
+        assertFalse(isEndpointConfigured("", ""))
 
         val joinedConfigured = familyPrimarySurface(
             isJoined = true,
             role = FamilyRole.Owner,
-            networkConfigured = true,
+            endpointConfigured = true,
         )
         assertTrue(joinedConfigured.compactJoined)
-        assertTrue(joinedConfigured.showInvite)
         assertFalse(joinedConfigured.showCreateJoin)
 
         val joinedMember = familyPrimarySurface(
             isJoined = true,
             role = FamilyRole.Member,
-            networkConfigured = true,
+            endpointConfigured = true,
         )
         assertTrue(joinedMember.compactJoined)
-        assertFalse(joinedMember.showInvite)
 
         val unjoined = familyPrimarySurface(
             isJoined = false,
             role = FamilyRole.None,
-            networkConfigured = false,
+            endpointConfigured = false,
         )
         assertFalse(unjoined.compactJoined)
         assertTrue(unjoined.showCreateJoin)
-        assertFalse(unjoined.showInvite)
     }
 
     @Test
     fun familyWizardStartsAtNetworkOnlyWhenNotConfigured() {
         assertEquals(
-            FamilyWizardStep.Network,
-            familyWizardInitialStep(networkConfigured = false),
+            FamilyWizardStep.Endpoint,
+            familyWizardInitialStep(endpointConfigured = false),
         )
         assertEquals(
             FamilyWizardStep.Identity,
-            familyWizardInitialStep(networkConfigured = true),
+            familyWizardInitialStep(endpointConfigured = true),
         )
         assertEquals(
             FamilyPrimaryCta.CREATE,
@@ -330,23 +323,15 @@ class FamilyErrorCopyTest {
         val dishonestWouldBe = familyWizardProgress(
             FamilyWizardMode.Join,
             FamilyWizardStep.Identity,
-            networkReady = false,
+            endpointReady = false,
         )
-        assertEquals("1 家庭网络", dishonestWouldBe.first)
+        assertEquals("1 家庭服务器", dishonestWouldBe.first)
         val ready = familyWizardProgress(
             FamilyWizardMode.Join,
-            FamilyWizardStep.Network,
-            networkReady = true,
+            FamilyWizardStep.Endpoint,
+            endpointReady = true,
         )
-        assertEquals("✓ 家庭网络", ready.first)
-        assertEquals(
-            FamilyWizardStep.Identity,
-            joinStepAfterInviteInput(networkReady = true),
-        )
-        assertEquals(
-            FamilyWizardStep.Network,
-            joinStepAfterInviteInput(networkReady = false),
-        )
+        assertEquals("✓ 家庭服务器", ready.first)
         assertTrue(
             isWizardSessionDialog(
                 FamilyDialog.Message("x", resume = FamilyDialog.Wizard(
@@ -363,7 +348,7 @@ class FamilyErrorCopyTest {
         val joined = buildFamilyOverviewCard(
             isJoined = true,
             role = FamilyRole.Owner,
-            networkConfigured = true,
+            endpointConfigured = true,
             familyName = "乐乐一家",
             babyNickname = "乐乐",
             localDisplayName = "妈妈",
@@ -371,7 +356,6 @@ class FamilyErrorCopyTest {
             membersLoaded = true,
             status = SyncStatus.Idle,
         )
-        assertTrue(joined.showInvite)
         assertFalse(joined.showCreateJoin)
         assertTrue(joined.showMembersEntry)
         assertTrue(joined.showRenameFamily)
@@ -381,7 +365,7 @@ class FamilyErrorCopyTest {
         val unjoined = buildFamilyOverviewCard(
             isJoined = false,
             role = FamilyRole.None,
-            networkConfigured = false,
+            endpointConfigured = false,
             familyName = null,
             babyNickname = null,
             localDisplayName = LOCAL_FAMILY_DISPLAY_NAME,
@@ -390,7 +374,6 @@ class FamilyErrorCopyTest {
             status = SyncStatus.Disabled,
         )
         assertTrue(unjoined.showCreateJoin)
-        assertFalse(unjoined.showInvite)
         assertFalse(unjoined.showMembersEntry)
         assertFalse(unjoined.showRenameFamily)
     }

@@ -109,7 +109,7 @@ class TrustedEndpointTlsTest {
         Files.createDirectories(response.parent)
         Files.write(
             response,
-            """{"protocol_version":1,"capabilities":["setup_status"],"family_state":"empty"}"""
+            """{"protocol_version":1,"capabilities":["trusted_https_endpoint_v1","device_sessions_v1","membership_devices_v1","atomic_bundle","record_membership_author"],"family_state":"empty"}"""
                 .toByteArray(),
         )
         return ProcessBuilder(

@@ -13,9 +13,9 @@ import javax.inject.Singleton
  * At-rest store for the rotating device-session refresh token.
  *
  * Production uses Keystore-backed [EncryptedSharedPreferences]; JVM tests inject
- * [InMemorySecureFamilyTokenStore].
+ * [InMemorySecureRefreshTokenStore].
  */
-interface SecureFamilyTokenStore {
+interface SecureRefreshTokenStore {
     fun getToken(): String
     fun setToken(token: String)
     fun clearToken()
@@ -25,7 +25,7 @@ interface SecureFamilyTokenStore {
 }
 
 /** Process-local token store for JVM unit tests. */
-class InMemorySecureFamilyTokenStore : SecureFamilyTokenStore {
+class InMemorySecureRefreshTokenStore : SecureRefreshTokenStore {
     private val token = AtomicReference("")
     private val pendingMemberSecret = AtomicReference("")
 
@@ -51,25 +51,25 @@ class InMemorySecureFamilyTokenStore : SecureFamilyTokenStore {
 }
 
 @Singleton
-class EncryptedSecureFamilyTokenStore @Inject constructor(
+class EncryptedSecureRefreshTokenStore @Inject constructor(
     @ApplicationContext context: Context,
-) : SecureFamilyTokenStore {
+) : SecureRefreshTokenStore {
     private val prefs: SharedPreferences = createPrefs(context)
 
-    override fun getToken(): String = prefs.getString(KEY_FAMILY_TOKEN, "").orEmpty()
+    override fun getToken(): String = prefs.getString(KEY_REFRESH_TOKEN, "").orEmpty()
 
     override fun setToken(token: String) {
         if (token.isBlank()) {
             clearToken()
             return
         }
-        check(prefs.edit().putString(KEY_FAMILY_TOKEN, token).commit()) {
+        check(prefs.edit().putString(KEY_REFRESH_TOKEN, token).commit()) {
             "Unable to persist encrypted refresh token"
         }
     }
 
     override fun clearToken() {
-        check(prefs.edit().remove(KEY_FAMILY_TOKEN).commit()) {
+        check(prefs.edit().remove(KEY_REFRESH_TOKEN).commit()) {
             "Unable to clear encrypted refresh token"
         }
     }
@@ -95,7 +95,7 @@ class EncryptedSecureFamilyTokenStore @Inject constructor(
 
     private companion object {
         const val PREFS_NAME = "lezi_secure_family"
-        const val KEY_FAMILY_TOKEN = "family_token"
+        const val KEY_REFRESH_TOKEN = "refresh_token"
         const val KEY_PENDING_MEMBER_SECRET = "pending_member_secret"
 
         fun createPrefs(context: Context): SharedPreferences {

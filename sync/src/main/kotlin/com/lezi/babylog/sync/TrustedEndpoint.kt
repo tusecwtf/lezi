@@ -27,7 +27,11 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 
 const val SETUP_PROTOCOL_VERSION = 1
-const val CAPABILITY_SETUP_STATUS = "setup_status"
+const val CAPABILITY_TRUSTED_HTTPS_ENDPOINT = "trusted_https_endpoint_v1"
+const val CAPABILITY_DEVICE_SESSIONS = "device_sessions_v1"
+const val CAPABILITY_MEMBERSHIP_DEVICES = "membership_devices_v1"
+const val CAPABILITY_ATOMIC_BUNDLE = "atomic_bundle"
+const val CAPABILITY_RECORD_MEMBERSHIP_AUTHOR = "record_membership_author"
 
 enum class EndpointTrustMode {
     SystemPki,
@@ -411,9 +415,9 @@ private fun parseSetupStatus(
         return SetupProbeResult.Failed.NotLezi
     }
     val capabilities = capabilityValues.map { (it as JsonPrimitive).content }.toSet()
-    if (
-        protocolVersion != SETUP_PROTOCOL_VERSION ||
-        CAPABILITY_SETUP_STATUS !in capabilities
+    if (protocolVersion != SETUP_PROTOCOL_VERSION || !capabilities.containsAll(
+            REQUIRED_SETUP_CAPABILITIES,
+        )
     ) {
         return SetupProbeResult.Failed.Incompatible
     }
@@ -429,3 +433,10 @@ private const val SHA_256_BYTES = 32
 private const val TLS_TIMEOUT_MILLIS = 8_000
 private const val MAX_SETUP_RESPONSE_BYTES = 64 * 1024
 private val SETUP_STATUS_FIELDS = setOf("protocol_version", "capabilities", "family_state")
+private val REQUIRED_SETUP_CAPABILITIES = setOf(
+    CAPABILITY_TRUSTED_HTTPS_ENDPOINT,
+    CAPABILITY_DEVICE_SESSIONS,
+    CAPABILITY_MEMBERSHIP_DEVICES,
+    CAPABILITY_ATOMIC_BUNDLE,
+    CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+)

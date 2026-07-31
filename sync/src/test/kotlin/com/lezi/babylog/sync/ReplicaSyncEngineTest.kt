@@ -1004,7 +1004,7 @@ private class ReplicaEngineRig(
 
 private fun joinedReplicaSession() = SyncSession(
     familyId = "family-a",
-    familyToken = "token-a",
+    accessToken = "token-a",
     deviceId = "device-a",
     role = FamilyRole.Owner,
     pullGeneration = "generation-a",

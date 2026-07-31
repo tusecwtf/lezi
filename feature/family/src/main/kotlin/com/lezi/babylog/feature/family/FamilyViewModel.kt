@@ -12,16 +12,12 @@ import com.lezi.babylog.domain.FamilyWizardEntry
 import com.lezi.babylog.domain.FamilyWizardOutcome
 import com.lezi.babylog.domain.FamilyWizardSnapshot
 import com.lezi.babylog.domain.FamilyWizardState
-import com.lezi.babylog.domain.JoinFamilyUseCase
 import com.lezi.babylog.domain.SyncFamilyWizardGateway
 import com.lezi.babylog.domain.UpdateBabyInput
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.CertificateTrustCandidate
 import com.lezi.babylog.sync.DisplayNameUpdateResult
 import com.lezi.babylog.sync.FamilyRole
-import com.lezi.babylog.sync.HomeLanServerConfig
-import com.lezi.babylog.sync.InvitePayload
-import com.lezi.babylog.sync.InvitePayloadCodec
 import com.lezi.babylog.sync.MemberLoginQrPayload
 import com.lezi.babylog.sync.MemberLoginQrTrustChangedException
 import com.lezi.babylog.sync.MemberLoginQrUnavailableException
@@ -89,24 +85,17 @@ private data class FamilyMembersState(
     val pendingRenameRequests: List<PendingMemberRenameRequest> = emptyList(),
 )
 
-data class FamilyInviteView(
-    val code: String,
-    val payload: String,
-    val expiresAt: Long,
-)
-
 @HiltViewModel
 class FamilyViewModel @Inject constructor(
     private val sync: SyncPort,
     private val careLog: CareLog,
     private val avatarFileStore: BabyAvatarFileStore,
-    private val joinFamily: JoinFamilyUseCase,
 ) : ViewModel() {
     private val profileSaveMutex = Mutex()
     private val memberRefreshMutex = Mutex()
     private val familyMembers = MutableStateFlow(FamilyMembersState())
     private val familyWizard = FamilyWizardController(
-        gateway = SyncFamilyWizardGateway(sync, joinFamily, careLog),
+        gateway = SyncFamilyWizardGateway(sync, careLog),
         initialSnapshot = FamilyWizardSnapshot.empty(FamilyWizardEntry.Account),
     )
     val familyWizardState = familyWizard.state
@@ -383,48 +372,6 @@ class FamilyViewModel @Inject constructor(
                 targetBabyId = preview.targetBabyId,
             )
             onDone(if (merged) "宝宝档案已合并" else "档案状态已变化，请重新预览")
-        }
-    }
-
-    fun createInvite(onResult: (Result<FamilyInviteView>) -> Unit) {
-        viewModelScope.launch {
-            val familyId = ui.value.familyId
-            val result = sync.createInvite(familyId)
-            onResult(
-                result
-                    .map {
-                        val session = ui.value
-                        val host = session.serverHost.ifBlank {
-                            HomeLanServerConfig.fromBaseUrl(session.baseUrl).host
-                        }
-                        val port = session.serverPort.takeIf { p -> p in 1..65535 }
-                            ?: HomeLanServerConfig.fromBaseUrl(session.baseUrl).port
-                        val base = session.baseUrl.ifBlank {
-                            HomeLanServerConfig(
-                                host = host,
-                                port = port,
-                                scheme = session.serverScheme,
-                            ).baseUrl
-                        }
-                        FamilyInviteView(
-                            code = it.code,
-                            payload = InvitePayloadCodec.encode(
-                                InvitePayload(
-                                    baseUrl = base,
-                                    code = it.code,
-                                    host = host,
-                                    port = port,
-                                ),
-                            ),
-                            expiresAt = it.expiresAt,
-                        )
-                    }
-                    .recoverCatching {
-                        throw IllegalStateException(
-                            familySyncError(it, fallback = "生成共享码失败，请稍后重试"),
-                        )
-                    },
-            )
         }
     }
 

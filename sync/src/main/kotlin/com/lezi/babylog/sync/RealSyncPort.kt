@@ -88,7 +88,7 @@ class RealSyncPort @Inject constructor(
         fulfillmentCandidateDao = fulfillmentCandidateDao,
         requireRemoteAllowed = { session ->
             val decision = foregroundSyncGate.evaluate(
-                session.homeLanConfig,
+                session.endpointConfig,
                 preferences.verifiedEndpoint.first(),
                 foregroundState.isForeground(),
             )
@@ -263,10 +263,10 @@ class RealSyncPort @Inject constructor(
     override suspend fun saveServer(baseUrl: String): Result<Unit> =
         executeFamily(FamilySessionCommand.SaveServer(baseUrl)).map { Unit }
 
-    override suspend fun saveHomeLanConfig(
-        config: HomeLanServerConfig,
+    override suspend fun saveEndpointConfig(
+        config: FamilyEndpointConfig,
     ): Result<Unit> =
-        executeFamily(FamilySessionCommand.SaveHomeLanConfig(config)).map { Unit }
+        executeFamily(FamilySessionCommand.SaveEndpointConfig(config)).map { Unit }
 
     override suspend fun createFamily(
         displayName: String,
@@ -390,16 +390,6 @@ class RealSyncPort @Inject constructor(
 
     override suspend fun renameFamily(familyName: String?): Result<Unit> =
         executeFamily(FamilySessionCommand.RenameFamily(familyName)).map { Unit }
-
-    override suspend fun joinFamily(
-        command: JoinFamilyCommand,
-    ): Result<SyncSession> =
-        executeFamily(FamilySessionCommand.JoinFamily(command))
-            .map { (it as FamilySessionOutcome.Joined).session }
-
-    override suspend fun createInvite(familyId: String): Result<Invite> =
-        executeFamily(FamilySessionCommand.CreateInvite)
-            .map { (it as FamilySessionOutcome.InviteCreated).invite }
 
     override suspend fun listFamilyMembers(): Result<List<FamilyMember>> =
         executeFamily(FamilySessionCommand.ListMembers)

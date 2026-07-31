@@ -30,7 +30,6 @@ class FakeSyncBackend : SyncBackend {
 
     private val rows = mutableMapOf<String, MutableMap<String, Row>>()
     private val mediaBytes = mutableMapOf<String, MutableMap<String, ByteArray>>()
-    private val invites = mutableMapOf<String, Pair<String, Long>>()
     private val membershipNames = mutableMapOf<String, String>()
     /** Stable membership_id keyed by familyId:deviceId (mirrors server immutability). */
     private val membershipIds = mutableMapOf<String, String>()
@@ -67,28 +66,6 @@ class FakeSyncBackend : SyncBackend {
     suspend fun pull(familyId: String, cursor: Long): Result<PullResult> =
         runCatching { pullRows(familyId, cursor) }
 
-    suspend fun invite(familyId: String): Result<Invite> = runCatching {
-        val invite = Invite("TEST${invites.size + 1}", System.currentTimeMillis() + 86_400_000)
-        invites[invite.code] = familyId to invite.expiresAt
-        invite
-    }
-
-    suspend fun join(code: String, deviceId: String): Result<JoinResult> = runCatching {
-        val invite = invites[code.uppercase()] ?: error("invalid code")
-        require(invite.second >= System.currentTimeMillis()) { "expired" }
-        val pull = pullRows(invite.first, 0)
-        JoinResult(
-            familyId = invite.first,
-            token = "fake-token",
-            role = FamilyRole.Member,
-            entities = pull.entities,
-            cursor = pull.cursor,
-            generation = FAKE_SYNC_GENERATION,
-            familyName = familyNames[invite.first],
-            membershipId = membershipIdFor(invite.first, deviceId),
-        )
-    }
-
     override suspend fun create(
         baseUrl: String,
         deviceId: String,
@@ -96,7 +73,7 @@ class FakeSyncBackend : SyncBackend {
         createRequestId: String,
         bootstrapSecret: String?,
         familyName: String?,
-    ): JoinResult {
+    ): SessionBootstrapResult {
         val name = requireMemberDisplayName(displayName)
         val sharedName = normalizeFamilyNameForWire(familyName)
         val existingFamilyId = soleFamilyId
@@ -115,9 +92,9 @@ class FakeSyncBackend : SyncBackend {
             }
             ownerTokenSeq += 1
             membershipIds["$existingFamilyId:$deviceId"] = membershipId
-            return JoinResult(
+            return SessionBootstrapResult(
                 familyId = existingFamilyId,
-                token = "owner-token-reclaimed-$ownerTokenSeq",
+                accessToken = "owner-token-reclaimed-$ownerTokenSeq",
                 role = FamilyRole.Owner,
                 generation = FAKE_SYNC_GENERATION,
                 familyName = familyNames[existingFamilyId],
@@ -133,9 +110,9 @@ class FakeSyncBackend : SyncBackend {
         ownerDeviceId = deviceId
         membershipNames["$familyId:$deviceId"] = name
         familyNames[familyId] = sharedName
-        return JoinResult(
+        return SessionBootstrapResult(
             familyId = familyId,
-            token = "owner-token",
+            accessToken = "owner-token",
             role = FamilyRole.Owner,
             generation = FAKE_SYNC_GENERATION,
             familyName = sharedName,
@@ -153,20 +130,6 @@ class FakeSyncBackend : SyncBackend {
     }
 
     override suspend fun pull(session: SyncSession) = pullRows(session.familyId, session.pullCursor)
-
-    override suspend fun invite(session: SyncSession) = invite(session.familyId).getOrThrow()
-
-    override suspend fun join(
-        baseUrl: String,
-        code: String,
-        deviceId: String,
-        displayName: String?,
-    ): JoinResult {
-        val name = requireMemberDisplayName(displayName)
-        val joined = join(code, deviceId).getOrThrow()
-        membershipNames["${joined.familyId}:$deviceId"] = name
-        return joined
-    }
 
     override suspend fun members(session: SyncSession): List<FamilyMember> {
         require(session.membershipId.isNotBlank()) {

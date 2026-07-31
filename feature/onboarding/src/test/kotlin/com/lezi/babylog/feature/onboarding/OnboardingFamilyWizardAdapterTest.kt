@@ -7,9 +7,9 @@ import com.lezi.babylog.domain.FamilyWizardOutcome
 import com.lezi.babylog.domain.FamilyWizardState
 import com.lezi.babylog.domain.FamilyWizardStep
 import com.lezi.babylog.sync.FamilyRole
-import com.lezi.babylog.sync.HomeLanServerConfig
+import com.lezi.babylog.sync.FamilyEndpointConfig
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
-import com.lezi.babylog.sync.JoinFamilyDraft
+import com.lezi.babylog.sync.FamilyEndpointDraft
 import com.lezi.babylog.sync.SyncSession
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -18,9 +18,8 @@ import org.junit.Test
 class OnboardingFamilyWizardAdapterTest {
     @Test
     fun onboardingProjectsTheSharedActionsAndSnapshot() {
-        val draft = JoinFamilyDraft.fromConfig(
-            HomeLanServerConfig(host = "nas.home"),
-            invitation = "INVITE-1234",
+        val draft = FamilyEndpointDraft.fromConfig(
+            FamilyEndpointConfig(host = "nas.home"),
         )
 
         val snapshot = onboardingFamilyWizardSnapshot(
@@ -33,7 +32,7 @@ class OnboardingFamilyWizardAdapterTest {
 
         assertEquals(FamilyWizardEntry.Onboarding, snapshot.entry)
         assertEquals(listOf("连接家庭服务器"), onboardingFamilyActions())
-        assertEquals(draft, snapshot.toJoinDraft())
+        assertEquals(draft, snapshot.toEndpointDraft())
         assertEquals("妈妈", snapshot.displayName)
         assertEquals(FamilyWizardJoinRole.Member, snapshot.joinRole)
         assertTrue(onboardingChooseFamilyBody().contains("离线模式"))
@@ -72,8 +71,8 @@ class OnboardingFamilyWizardAdapterTest {
         val snapshot = onboardingFamilyWizardSnapshot(
             mode = FamilyWizardMode.Create,
             step = FamilyWizardStep.Identity,
-            draft = JoinFamilyDraft.fromConfig(
-                HomeLanServerConfig(host = "nas.home"),
+            draft = FamilyEndpointDraft.fromConfig(
+                FamilyEndpointConfig(host = "nas.home"),
             ),
             displayName = "妈妈",
         )
@@ -115,16 +114,6 @@ class OnboardingFamilyWizardAdapterTest {
             onboardingFamilyWizardTransition(
                 completed(
                     snapshot.copy(mode = FamilyWizardMode.Join),
-                    FamilyWizardOutcome.Joined(memberSession()),
-                ),
-                reclaimedFamilyEmpty = null,
-            ),
-        )
-        assertEquals(
-            OnboardingFamilyTransition(true, OnboardingStep.ChooseFamily),
-            onboardingFamilyWizardTransition(
-                completed(
-                    snapshot.copy(mode = FamilyWizardMode.Join),
                     FamilyWizardOutcome.MemberApproved(
                         memberSession(),
                         InitialFamilyDataRecovery.Complete,
@@ -153,8 +142,8 @@ class OnboardingFamilyWizardAdapterTest {
         val snapshot = onboardingFamilyWizardSnapshot(
             mode = FamilyWizardMode.Create,
             step = FamilyWizardStep.Identity,
-            draft = JoinFamilyDraft.fromConfig(
-                HomeLanServerConfig(host = "nas.home"),
+            draft = FamilyEndpointDraft.fromConfig(
+                FamilyEndpointConfig(host = "nas.home"),
             ),
             displayName = "妈妈",
         )
@@ -184,8 +173,8 @@ class OnboardingFamilyWizardAdapterTest {
     private fun emptySnapshot() = onboardingFamilyWizardSnapshot(
         mode = FamilyWizardMode.Create,
         step = FamilyWizardStep.Identity,
-        draft = JoinFamilyDraft.fromConfig(
-            HomeLanServerConfig(host = "nas.home"),
+        draft = FamilyEndpointDraft.fromConfig(
+            FamilyEndpointConfig(host = "nas.home"),
         ),
         displayName = "妈妈",
     )
@@ -193,14 +182,14 @@ class OnboardingFamilyWizardAdapterTest {
 
 private fun ownerSession() = SyncSession(
     familyId = "family-owner",
-    familyToken = "owner-token",
+    accessToken = "owner-token",
     role = FamilyRole.Owner,
     membershipId = "owner-membership",
 )
 
 private fun memberSession() = SyncSession(
     familyId = "family-member",
-    familyToken = "member-token",
+    accessToken = "member-token",
     role = FamilyRole.Member,
     membershipId = "member-membership",
 )

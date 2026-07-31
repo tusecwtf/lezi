@@ -147,15 +147,13 @@ docker buildx build \
 | `LEZI_TLS_CERTFILE` | 必填 | PEM certificate；NAS 包固定为 `/data/tls/server.crt` |
 | `LEZI_TLS_KEYFILE` | 必填 | PEM private key；NAS 包固定为 `/data/tls/server.key` |
 | `LEZI_SYNC_VERSION` | `0.3.0` | `/health` 返回的版本 |
-| `LEZI_INVITE_TTL_HOURS` | `24` | 邀请有效期，范围 1–168 |
 | `LEZI_MAX_MEDIA_BYTES` | `10485760` | 单个媒体最大字节数 |
 | `LEZI_BOOTSTRAP_SECRET` | Compose 必填；`cargo run` 可空 | 唯一 Owner 根密码；create、Owner 登录/接管要求同值 `X-Lezi-Bootstrap-Secret`；Compose 缺失或空值时拒绝启动 |
 | `LEZI_CREATE_RATE_LIMIT` | `20` | 每台 device 每窗口的 create 尝试上限 |
-| `LEZI_JOIN_RATE_LIMIT` | `60` | 每个邀请码每窗口的 join 尝试上限 |
 | `LEZI_MEMBER_REQUEST_RATE_LIMIT` | `10` | 每个来源地址每窗口的成员申请上限 |
 | `LEZI_MEMBER_REQUEST_TTL_HOURS` | `24` | 成员申请有效期；当前协议固定为 24 |
 | `LEZI_MAX_PENDING_MEMBER_REQUESTS` | `32` | 单家庭最多待处理成员申请数 |
-| `LEZI_RATE_LIMIT_WINDOW_SECONDS` | `60` | create/join/成员申请限流窗口秒数 |
+| `LEZI_RATE_LIMIT_WINDOW_SECONDS` | `60` | create/成员申请限流窗口秒数 |
 | `LEZI_SYNC_PUBLISH` | `127.0.0.1:8765` | compose 宿主侧发布地址（仅 docker compose） |
 | `LEZI_ALLOW_PERMISSION_HARDENING_SKIP` | Compose `0`；`cargo run` 未设置 | 仅显式设为 `1` 时，chmod 在 EPERM/EACCES/EOPNOTSUPP 上 warn 并继续；默认 fail-closed |
 
@@ -209,11 +207,11 @@ lezi-sync healthcheck
 ## HTTP interface
 
 除 `/health`、`/ready`、`/v1/setup-status`、`/v1/family/create`、`/v1/owner/login`、
-`/v1/owner/takeover`、`/v1/join`、`/v1/session/refresh` 以及成员申请方使用 pending
+`/v1/owner/takeover`、`/v1/session/refresh` 以及成员申请方使用 pending
 secret 的 request/status/cancel/claim 外，接口都要求
-`Authorization: Bearer <device-session-access-token>`。`create`/`join` 受进程内速率限制；
+`Authorization: Bearer <device-session-access-token>`。`create` 与成员申请受进程内速率限制；
 生产启动必须配置 `LEZI_BOOTSTRAP_SECRET`，`create` 还要求匹配的 bootstrap 头。局部分桶达到
-上限时只阻断同一 device/邀请码；轮换标识仍受局部上限 10 倍的全局兜底限制。
+上限时只阻断同一 device 或来源地址；轮换标识仍受局部上限 10 倍的全局兜底限制。
 无效 bootstrap 或格式错误的请求不消耗有效建家调用的额度。
 
 | 方法 | 路径 | 摘要 |
@@ -248,8 +246,6 @@ secret 的 request/status/cancel/claim 外，接口都要求
 | POST | `/v1/family/rename-requests/{id}/reject` | 仅 Owner 拒绝改名，旧称呼不变 |
 | POST | `/v1/family/rename-requests/cancel` | 普通 Member 撤回自己的待处理改名，旧称呼不变 |
 | POST | `/v1/family/name` | Owner 改非空共享家庭名 |
-| POST | `/v1/invite` | owner 创建一次性邀请码 |
-| POST | `/v1/join` | 邀请码换 member token（响应含 `family_name`） |
 | POST | `/v1/leave` | 普通 Member 彻底删除自身 membership；Owner 不可用此接口退出 |
 | POST | `/v1/family/delete` | Owner 以家庭名 + 根密码永久删除整个家庭图及媒体 |
 | POST | `/v1/push` | 已退役；固定 `422`，实体只经 atomic bundle 发布 |
@@ -328,7 +324,7 @@ Room、Outbox、media、endpoint 与 credential 清理。普通 401、网络错�
 
 `POST /v1/family/name`（Auth：**仅 owner**）改共享家庭名；body
 `{"family_name":"…"}` 必须为 trim 后非空的当前家庭名；member 返回 `403`；响应
-`{"ok":true,"family_name":"…"}`。保持非空使删除家庭的家庭名确认始终可达。客户端冷启动依赖本机会话缓存（create/join/rename
+`{"ok":true,"family_name":"…"}`。保持非空使删除家庭的家庭名确认始终可达。客户端冷启动依赖本机会话缓存（create/login/rename
 回写），无独立 GET。
 
 `POST /v1/family/delete` 仅接受当前 Owner bearer，并同时要求 body
@@ -346,10 +342,10 @@ DeviceSession 保存 access/refresh 的 hash、过期时间和吊销状态，不
 原子硬删除身份及全部设备会话，并匿名化保留的家庭共享事实。管理员删除家庭时由外键
 级联清除全部身份与会话。
 
-`POST /v1/family/create` 与 `POST /v1/join` 响应均含 `membership_id`、canonical
-`device_id` 和设备 session credential；同一 `create_request_id` / 同一邀请码幂等
-重试返回**相同**身份。角色与写者身份只来自 Bearer principal：member 不能冒充
-owner 调用邀请/改名等接口；请求内与 credential 不符的身份声明返回 `403`。
+`POST /v1/family/create`、管理员登录和普通成员 claim 响应均含 `membership_id`、canonical
+`device_id` 与设备 session credential；同一建家 request、登录 request 或单次授权兑换
+按各自合同幂等。角色与写者身份只来自 Bearer principal：member 不能冒充 owner 调用
+成员管理或改名等接口；请求内与 credential 不符的身份声明返回 `403`。
 
 pull 响应包含当前字段 `has_more`。每页最多扫描 200 个实体，并以约 8 MiB
 序列化实体为体积目标；响应 `cursor` 只前进到本页已扫描的 revision。客户端在

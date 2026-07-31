@@ -2,12 +2,11 @@ package com.lezi.babylog.sync
 
 import java.net.URI
 
-const val DEFAULT_SERVER_HOST = "192.168.50.4"
 const val DEFAULT_SERVER_PORT = 8765
 const val DEFAULT_SERVER_SCHEME = "https"
 
 /** Single endpoint origin. Trust identity is stored separately as [TrustedEndpointProfile]. */
-data class HomeLanServerConfig(
+data class FamilyEndpointConfig(
     val host: String = "",
     val port: Int = DEFAULT_SERVER_PORT,
     val scheme: String = DEFAULT_SERVER_SCHEME,
@@ -24,7 +23,7 @@ data class HomeLanServerConfig(
     val isServerConfigured: Boolean
         get() = host.trim().isNotEmpty() && port in 1..65535
 
-    fun withNormalized(): HomeLanServerConfig = copy(
+    fun withNormalized(): FamilyEndpointConfig = copy(
         host = host.trim(),
         port = port.takeIf { it in 1..65535 } ?: DEFAULT_SERVER_PORT,
         scheme = normalizeScheme(scheme),
@@ -53,9 +52,9 @@ data class HomeLanServerConfig(
             return host to (uri.port.takeIf { it > 0 } ?: defaultPort)
         }
 
-        fun fromBaseUrl(baseUrl: String): HomeLanServerConfig {
+        fun fromBaseUrl(baseUrl: String): FamilyEndpointConfig {
             val raw = baseUrl.trim()
-            if (raw.isEmpty()) return HomeLanServerConfig()
+            if (raw.isEmpty()) return FamilyEndpointConfig()
             val uri = validatedEndpointUri(raw)
             val implicitPort = if (raw.contains("://") && uri.scheme.equals("https", true)) {
                 443
@@ -63,7 +62,7 @@ data class HomeLanServerConfig(
                 DEFAULT_SERVER_PORT
             }
             val (host, port) = parseHostPort(raw, implicitPort)
-            return HomeLanServerConfig(
+            return FamilyEndpointConfig(
                 host = host,
                 port = port,
                 scheme = normalizeScheme(uri.scheme),
@@ -79,7 +78,7 @@ data class HomeLanServerConfig(
             rawHostOrUrl: String,
             explicitPort: Int?,
             fallbackScheme: String = DEFAULT_SERVER_SCHEME,
-        ): HomeLanServerConfig {
+        ): FamilyEndpointConfig {
             val raw = rawHostOrUrl.trim()
             require(!(!raw.contains("://") && raw.count { it == ':' } > 1 && !raw.contains('['))) {
                 "IPv6 地址请使用方括号，例如 [2001:db8::1]"
@@ -93,7 +92,7 @@ data class HomeLanServerConfig(
             val explicitScheme = uri?.scheme
                 ?.takeIf { raw.contains("://") }
                 ?.let(::normalizeScheme)
-            return HomeLanServerConfig(
+            return FamilyEndpointConfig(
                 host = parsed.host,
                 port = embeddedPort
                     ?: explicitPort?.takeIf { it in 1..65535 }
@@ -146,11 +145,7 @@ data class HomeLanServerConfig(
             return uri
         }
 
-        /** Unsaved defaults for an empty setup form. */
-        fun noviceUiDefaults(): HomeLanServerConfig =
-            HomeLanServerConfig(
-                host = DEFAULT_SERVER_HOST,
-                port = DEFAULT_SERVER_PORT,
-            )
+        /** Empty, unsaved setup draft; the product never embeds a server address. */
+        fun emptyDraft(): FamilyEndpointConfig = FamilyEndpointConfig()
     }
 }

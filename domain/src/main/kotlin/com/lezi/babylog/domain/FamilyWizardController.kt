@@ -2,13 +2,13 @@ package com.lezi.babylog.domain
 
 import com.lezi.babylog.sync.CreateFamilyResult
 import com.lezi.babylog.sync.CertificateTrustCandidate
-import com.lezi.babylog.sync.HomeLanServerConfig
+import com.lezi.babylog.sync.FamilyEndpointConfig
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.OwnerLoginResult
 import com.lezi.babylog.sync.MemberLoginCheckResult
 import com.lezi.babylog.sync.MemberLoginStatus
 import com.lezi.babylog.sync.PendingMemberLogin
-import com.lezi.babylog.sync.JoinFamilyDraft
+import com.lezi.babylog.sync.FamilyEndpointDraft
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncSession
 import com.lezi.babylog.sync.SyncTrigger
@@ -34,7 +34,7 @@ enum class FamilyWizardEntry { Onboarding, Account }
 /** The only authoritative family-session actions. Reclaim is a create result, not a third mode. */
 enum class FamilyWizardMode { Create, Join }
 
-enum class FamilyWizardStep { Network, Role, Identity }
+enum class FamilyWizardStep { Endpoint, Role, Identity }
 
 enum class FamilyWizardJoinRole { Owner, Member }
 
@@ -46,7 +46,6 @@ data class FamilyWizardSnapshot(
     val entry: FamilyWizardEntry,
     val mode: FamilyWizardMode,
     val step: FamilyWizardStep,
-    val invitation: String = "",
     val host: String = "",
     val portText: String = com.lezi.babylog.sync.DEFAULT_SERVER_PORT.toString(),
     val scheme: String = com.lezi.babylog.sync.DEFAULT_SERVER_SCHEME,
@@ -56,8 +55,7 @@ data class FamilyWizardSnapshot(
     val endpointDraft: String = "",
     val joinRole: FamilyWizardJoinRole? = null,
 ) : Serializable {
-    fun toJoinDraft(): JoinFamilyDraft = JoinFamilyDraft(
-        invitation = invitation,
+    fun toEndpointDraft(): FamilyEndpointDraft = FamilyEndpointDraft(
         host = host,
         portText = portText,
         scheme = scheme,
@@ -67,14 +65,14 @@ data class FamilyWizardSnapshot(
         fun empty(entry: FamilyWizardEntry): FamilyWizardSnapshot = FamilyWizardSnapshot(
             entry = entry,
             mode = FamilyWizardMode.Create,
-            step = FamilyWizardStep.Network,
+            step = FamilyWizardStep.Endpoint,
         )
 
         fun fromDraft(
             entry: FamilyWizardEntry,
             mode: FamilyWizardMode,
             step: FamilyWizardStep,
-            draft: JoinFamilyDraft,
+            draft: FamilyEndpointDraft,
             displayName: String = "",
             familyName: String = "",
             deviceName: String = "",
@@ -82,7 +80,6 @@ data class FamilyWizardSnapshot(
             entry = entry,
             mode = mode,
             step = step,
-            invitation = draft.invitation,
             host = draft.host,
             portText = draft.portText,
             scheme = draft.scheme,
@@ -120,7 +117,6 @@ sealed interface FamilyWizardOutcome {
         override val dataRecovery: InitialFamilyDataRecovery,
     ) : CreateSession
 
-    data class Joined(override val session: SyncSession) : FamilyWizardOutcome
 }
 
 sealed interface FamilyWizardState {
@@ -176,27 +172,25 @@ interface FamilyWizardGateway {
 
     suspend fun forgetEndpoint(): Result<Unit>
 
-    suspend fun saveHomeLanConfig(config: HomeLanServerConfig): Result<Unit>
+    suspend fun saveEndpointConfig(config: FamilyEndpointConfig): Result<Unit>
 
     suspend fun createFamily(
-        config: HomeLanServerConfig,
+        config: FamilyEndpointConfig,
         displayName: String,
         deviceName: String = "Android 设备",
         bootstrapSecret: String,
         familyName: String?,
     ): Result<CreateFamilyResult>
 
-    suspend fun joinFamily(request: JoinFamilyRequest): JoinFamilyResult
-
     suspend fun ownerLogin(
-        config: HomeLanServerConfig,
+        config: FamilyEndpointConfig,
         deviceName: String,
         rootPassword: String,
         takeover: Boolean,
     ): Result<OwnerLoginResult>
 
     suspend fun requestMemberLogin(
-        config: HomeLanServerConfig,
+        config: FamilyEndpointConfig,
         displayName: String,
         deviceName: String,
     ): Result<PendingMemberLogin> = Result.failure(IllegalStateException("成员申请暂不可用"))
@@ -234,20 +228,17 @@ private class CreateFamilyPreparationException(cause: Throwable) :
 /** Production adapter shared by the onboarding and account ViewModels. */
 class SyncFamilyWizardGateway private constructor(
     private val sync: SyncPort,
-    private val joinFamily: JoinFamilyUseCase,
     private val localStore: FamilyWizardLocalStore,
 ) : FamilyWizardGateway {
     constructor(
         sync: SyncPort,
-        joinFamily: JoinFamilyUseCase,
         careLog: CareLog,
-    ) : this(sync, joinFamily, CareLogFamilyWizardLocalStore(careLog))
+    ) : this(sync, CareLogFamilyWizardLocalStore(careLog))
 
     internal constructor(
         localStore: FamilyWizardLocalStore,
         sync: SyncPort,
-        joinFamily: JoinFamilyUseCase,
-    ) : this(sync, joinFamily, localStore)
+    ) : this(sync, localStore)
 
     override suspend fun probeEndpoint(endpointDraft: String): SetupProbeResult =
         sync.probeEndpoint(endpointDraft)
@@ -261,11 +252,11 @@ class SyncFamilyWizardGateway private constructor(
 
     override suspend fun forgetEndpoint(): Result<Unit> = sync.forgetEndpoint()
 
-    override suspend fun saveHomeLanConfig(config: HomeLanServerConfig): Result<Unit> =
-        sync.saveHomeLanConfig(config)
+    override suspend fun saveEndpointConfig(config: FamilyEndpointConfig): Result<Unit> =
+        sync.saveEndpointConfig(config)
 
     override suspend fun createFamily(
-        config: HomeLanServerConfig,
+        config: FamilyEndpointConfig,
         displayName: String,
         deviceName: String,
         bootstrapSecret: String,
@@ -297,11 +288,8 @@ class SyncFamilyWizardGateway private constructor(
         return result
     }
 
-    override suspend fun joinFamily(request: JoinFamilyRequest): JoinFamilyResult =
-        joinFamily.execute(request)
-
     override suspend fun ownerLogin(
-        config: HomeLanServerConfig,
+        config: FamilyEndpointConfig,
         deviceName: String,
         rootPassword: String,
         takeover: Boolean,
@@ -321,7 +309,7 @@ class SyncFamilyWizardGateway private constructor(
     }
 
     override suspend fun requestMemberLogin(
-        config: HomeLanServerConfig,
+        config: FamilyEndpointConfig,
         displayName: String,
         deviceName: String,
     ): Result<PendingMemberLogin> {
@@ -345,7 +333,7 @@ class SyncFamilyWizardGateway private constructor(
 }
 
 /**
- * Shared create/join state machine. It retains only [FamilyWizardSnapshot], serializes submission,
+ * Shared create/login state machine. It retains only [FamilyWizardSnapshot], serializes submission,
  * keeps all failures recoverable, and exposes completion as a consume-once navigation signal.
  */
 class FamilyWizardController(
@@ -480,7 +468,7 @@ class FamilyWizardController(
         }
         if (!submission.tryLock()) return
         try {
-            val config = validateNetwork(snapshot) ?: return
+            val config = validateEndpoint(snapshot) ?: return
             when (snapshot.mode) {
                 FamilyWizardMode.Create -> submitCreate(snapshot, config, bootstrapSecret)
                 FamilyWizardMode.Join -> when (snapshot.joinRole) {
@@ -491,11 +479,10 @@ class FamilyWizardController(
                         ownerTakeover,
                     )
                     FamilyWizardJoinRole.Member -> submitMemberRequest(snapshot, config)
-                    null -> if (snapshot.invitation.isBlank()) {
-                        submitMemberRequest(snapshot, config)
-                    } else {
-                        submitJoin(snapshot)
-                    }
+                    null -> mutableState.value = FamilyWizardState.RetryableFailure(
+                        snapshot = snapshot.copy(step = FamilyWizardStep.Role),
+                        message = "请选择家庭管理员或家庭成员",
+                    )
                 }
             }
         } finally {
@@ -562,7 +549,7 @@ class FamilyWizardController(
 
     private suspend fun submitCreate(
         snapshot: FamilyWizardSnapshot,
-        config: HomeLanServerConfig,
+        config: FamilyEndpointConfig,
         bootstrapSecret: String,
     ) {
         val identity = snapshot.copy(step = FamilyWizardStep.Identity)
@@ -591,13 +578,13 @@ class FamilyWizardController(
         }
         mutableState.value = FamilyWizardState.Submitting(identity)
         try {
-            gateway.saveHomeLanConfig(config).getOrThrow()
+            gateway.saveEndpointConfig(config).getOrThrow()
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
             mutableState.value = FamilyWizardState.RetryableFailure(
-                snapshot = snapshot.copy(step = FamilyWizardStep.Network),
-                message = familySyncError(error, "保存家庭网络失败，请重试"),
+                snapshot = snapshot.copy(step = FamilyWizardStep.Endpoint),
+                message = familySyncError(error, "保存家庭服务器失败，请重试"),
             )
             return
         }
@@ -630,49 +617,9 @@ class FamilyWizardController(
         )
     }
 
-    private suspend fun submitJoin(snapshot: FamilyWizardSnapshot) {
-        val identity = snapshot.copy(step = FamilyWizardStep.Identity)
-        val request = try {
-            JoinFamilyRequest(snapshot.toJoinDraft(), snapshot.displayName).also {
-                // Build the command here so validation and error copy are identical at both entries.
-                it.draft.toCommand(it.displayName)
-            }
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (error: Throwable) {
-            mutableState.value = FamilyWizardState.RetryableFailure(
-                snapshot = identity,
-                message = error.message?.takeIf(String::isNotBlank) ?: "加入家庭信息无效",
-            )
-            return
-        }
-        mutableState.value = FamilyWizardState.Submitting(identity)
-        val result = try {
-            gateway.joinFamily(request)
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (error: Throwable) {
-            mutableState.value = FamilyWizardState.RetryableFailure(
-                snapshot = identity,
-                message = familySyncError(error, "加入家庭失败，请稍后重试"),
-            )
-            return
-        }
-        when (result) {
-            is JoinFamilyResult.Joined -> publishCompleted(
-                identity,
-                FamilyWizardOutcome.Joined(result.session),
-            )
-            is JoinFamilyResult.Failed -> mutableState.value = FamilyWizardState.RetryableFailure(
-                snapshot = identity,
-                message = result.message,
-            )
-        }
-    }
-
     private suspend fun submitMemberRequest(
         snapshot: FamilyWizardSnapshot,
-        config: HomeLanServerConfig,
+        config: FamilyEndpointConfig,
     ) {
         val identity = snapshot.copy(
             step = FamilyWizardStep.Identity,
@@ -691,13 +638,13 @@ class FamilyWizardController(
         }
         mutableState.value = FamilyWizardState.Submitting(identity)
         try {
-            gateway.saveHomeLanConfig(config).getOrThrow()
+            gateway.saveEndpointConfig(config).getOrThrow()
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
             mutableState.value = FamilyWizardState.RetryableFailure(
-                snapshot = snapshot.copy(step = FamilyWizardStep.Network),
-                message = familySyncError(error, "保存家庭网络失败，请重试"),
+                snapshot = snapshot.copy(step = FamilyWizardStep.Endpoint),
+                message = familySyncError(error, "保存家庭服务器失败，请重试"),
             )
             return
         }
@@ -808,7 +755,7 @@ class FamilyWizardController(
 
     private suspend fun submitOwnerLogin(
         snapshot: FamilyWizardSnapshot,
-        config: HomeLanServerConfig,
+        config: FamilyEndpointConfig,
         rootPassword: String,
         takeover: Boolean,
     ) {
@@ -826,13 +773,13 @@ class FamilyWizardController(
         }
         mutableState.value = FamilyWizardState.Submitting(identity)
         try {
-            gateway.saveHomeLanConfig(config).getOrThrow()
+            gateway.saveEndpointConfig(config).getOrThrow()
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
             mutableState.value = FamilyWizardState.RetryableFailure(
-                snapshot = snapshot.copy(step = FamilyWizardStep.Network),
-                message = familySyncError(error, "保存家庭网络失败，请重试"),
+                snapshot = snapshot.copy(step = FamilyWizardStep.Endpoint),
+                message = familySyncError(error, "保存家庭服务器失败，请重试"),
             )
             return
         }
@@ -913,13 +860,13 @@ class FamilyWizardController(
         return completed.outcome
     }
 
-    private fun validateNetwork(snapshot: FamilyWizardSnapshot): HomeLanServerConfig? {
-        val network = snapshot.copy(step = FamilyWizardStep.Network)
-        familyWizardNetworkValidationError(snapshot)?.let { message ->
-            mutableState.value = FamilyWizardState.RetryableFailure(network, message)
+    private fun validateEndpoint(snapshot: FamilyWizardSnapshot): FamilyEndpointConfig? {
+        val endpoint = snapshot.copy(step = FamilyWizardStep.Endpoint)
+        familyWizardEndpointValidationError(snapshot)?.let { message ->
+            mutableState.value = FamilyWizardState.RetryableFailure(endpoint, message)
             return null
         }
-        return HomeLanServerConfig.fromUserInput(
+        return FamilyEndpointConfig.fromUserInput(
             rawHostOrUrl = snapshot.host,
             explicitPort = snapshot.portText.toIntOrNull(),
             fallbackScheme = snapshot.scheme,
@@ -946,10 +893,10 @@ private fun SetupProbeResult.Failed.userMessage(): String = when (this) {
 }
 
 /** One Network-step validation policy used by both UI entries and by submit. */
-fun familyWizardNetworkValidationError(snapshot: FamilyWizardSnapshot): String? {
+fun familyWizardEndpointValidationError(snapshot: FamilyWizardSnapshot): String? {
     if (snapshot.host.isBlank()) return "请填写服务器主机"
     return try {
-        HomeLanServerConfig.fromUserInput(
+        FamilyEndpointConfig.fromUserInput(
             rawHostOrUrl = snapshot.host,
             explicitPort = snapshot.portText.toIntOrNull(),
             fallbackScheme = snapshot.scheme,

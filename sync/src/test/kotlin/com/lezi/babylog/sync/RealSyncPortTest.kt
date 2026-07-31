@@ -327,7 +327,7 @@ class RealSyncPortTest {
     @Test
     fun retainedIdentityWithoutCredentialsPublishesReauthRequiredNotDeviceRemoved() = runTest {
         val retained = joinedSession("family-a").copy(
-            familyToken = "",
+            accessToken = "",
             refreshToken = "",
             accessExpiresAtEpochSeconds = 0,
             reauthRequired = true,
@@ -395,7 +395,6 @@ class RealSyncPortTest {
         assertThat(preferences.verifiedEndpoint.first()).isEqualTo(trusted)
         assertThat(preferences.current()).isEqualTo(session)
         assertThat(rig.backend.createRequestIds).isEmpty()
-        assertThat(rig.backend.joinCalls).isEqualTo(0)
     }
 
     @Test
@@ -540,45 +539,6 @@ class RealSyncPortTest {
         assertThat(preferences.pendingMemberLogin.first()).isNull()
     }
 
-    @Test
-    fun startupCredentialRecoverySerializesJoinAndPreservesTheNewToken() = runTest {
-        val configured = SyncSession(
-            deviceId = "device-a",
-            serverHost = "192.168.1.20",
-            serverPort = 8787,
-        )
-        val preferences = MemorySyncPreferences(
-            initial = configured,
-            blockFirstSecretMigration = true,
-        )
-        val rig = SyncRig(
-            session = configured,
-            syncPreferences = preferences,
-        )
-        preferences.secretMigrationStarted.await()
-
-        val joining = async {
-            rig.port.joinFamily(
-                JoinFamilyCommand(
-                    invitation = "ABCD1234",
-                    homeLanConfig = configured.homeLanConfig,
-                    displayName = "妈妈",
-                ),
-            )
-        }
-
-        try {
-            runCurrent()
-            assertThat(joining.isCompleted).isFalse()
-            assertThat(rig.backend.joinCalls).isEqualTo(0)
-            assertThat(preferences.saveSessionCalls).isEqualTo(0)
-        } finally {
-            preferences.releaseSecretMigration.complete(Unit)
-        }
-
-        assertThat(joining.await().exceptionOrNull()).isNull()
-        assertThat(rig.port.session().first().familyToken).isEqualTo("member-token")
-    }
 
     @Test
     fun unjoinedSyncRecoversDurableReplicaCleanupBeforeDisabledNoOp() = runTest {
@@ -722,7 +682,7 @@ class RealSyncPortTest {
         rig.backend.pullStarted!!.await()
 
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Syncing)
-        assertThat(rig.port.session().first().familyToken).isEqualTo("owner-token")
+        assertThat(rig.port.session().first().accessToken).isEqualTo("owner-token")
         assertThat(rig.port.session().first().refreshToken).isEqualTo("owner-refresh-token")
 
         rig.backend.releasePull!!.complete(Unit)
@@ -730,7 +690,7 @@ class RealSyncPortTest {
 
         assertThat(created.reclaimed).isFalse()
         assertThat(created.dataRecovery).isEqualTo(InitialFamilyDataRecovery.Complete)
-        assertThat(rig.port.session().first().familyToken).isEqualTo("owner-token")
+        assertThat(rig.port.session().first().accessToken).isEqualTo("owner-token")
         assertThat(rig.backend.pullCursors).containsExactly(0L)
         assertThat(rig.backend.syncOrder)
             .containsExactly("stage:baby", "pull:0")
@@ -759,7 +719,7 @@ class RealSyncPortTest {
         assertThat(result.isSuccess).isTrue()
         assertThat(result.getOrThrow().dataRecovery)
             .isEqualTo(InitialFamilyDataRecovery.RetryRequired)
-        assertThat(rig.port.session().first().familyToken).isEqualTo("owner-token")
+        assertThat(rig.port.session().first().accessToken).isEqualTo("owner-token")
         assertThat(rig.port.session().first().refreshToken).isEqualTo("owner-refresh-token")
         assertThat(rig.port.session().first().pullCursor).isEqualTo(0L)
         assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Error)
@@ -811,8 +771,8 @@ class RealSyncPortTest {
         }
         rig.backend.createStarted!!.await()
         val changingNetwork = async {
-            rig.port.saveHomeLanConfig(
-                HomeLanServerConfig(
+            rig.port.saveEndpointConfig(
+                FamilyEndpointConfig(
                     host = "192.168.1.99",
                     port = 8787,
                 ),
@@ -1850,27 +1810,20 @@ class RealSyncPortTest {
             familyName = "旧家庭名",
         )
         val ownerSession = joinedSession(ownerJoin.familyId).copy(
-            familyToken = ownerJoin.token,
+            accessToken = ownerJoin.accessToken,
             deviceId = "owner-device",
             role = ownerJoin.role,
             familyName = ownerJoin.familyName,
             membershipId = ownerJoin.membershipId,
             pullGeneration = ownerJoin.generation,
         )
-        val invite = sharedBackend.invite(ownerSession)
-        val memberJoin = sharedBackend.join(
-            baseUrl = ownerSession.baseUrl,
-            code = invite.code,
+        val memberSession = joinedSession(ownerJoin.familyId).copy(
+            accessToken = "member-access",
             deviceId = "member-device",
-            displayName = "爸爸",
-        )
-        val memberSession = joinedSession(memberJoin.familyId).copy(
-            familyToken = memberJoin.token,
-            deviceId = "member-device",
-            role = memberJoin.role,
-            familyName = memberJoin.familyName,
-            membershipId = memberJoin.membershipId,
-            pullGeneration = memberJoin.generation,
+            role = FamilyRole.Member,
+            familyName = ownerJoin.familyName,
+            membershipId = "member-membership",
+            pullGeneration = ownerJoin.generation,
         )
         val ownerRig = SyncRig(ownerSession, syncBackend = sharedBackend)
         val memberRig = SyncRig(memberSession, syncBackend = sharedBackend)
@@ -3221,7 +3174,7 @@ class RealSyncPortTest {
         rig.backend.remember("media", avatarUuid)
 
         assertThat(rig.port.leave("family-a").isSuccess).isTrue()
-        rig.preferences.saveSession(session.copy(familyToken = "replacement-token"))
+        rig.preferences.saveSession(session.copy(accessToken = "replacement-token"))
         rig.backend.nextPull = PullResult(
             entities = listOf(
                 remoteBaby().copy(
@@ -5677,7 +5630,6 @@ internal class RecordingSyncBackend : SyncBackend {
     var deleteFamilyCalls = 0
     val deletedFamilyConfirmations = mutableListOf<Pair<String, String>>()
     var createFailure: Throwable? = null
-    var joinFailure: Throwable? = null
     var membersFailure: Throwable? = null
     var nextMembers: List<FamilyMember>? = null
     var rejectMemberAvatarPointers = false
@@ -5703,9 +5655,9 @@ internal class RecordingSyncBackend : SyncBackend {
     )
     val memberLoginStatuses = ArrayDeque<MemberLoginStatus>()
     var memberLoginClaimCalls = 0
-    var nextMemberLoginClaim = JoinResult(
+    var nextMemberLoginClaim = SessionBootstrapResult(
         familyId = "family-member-approved",
-        token = "member-approved-access",
+        accessToken = "member-approved-access",
         refreshToken = "member-approved-refresh",
         accessExpiresAtEpochSeconds = 1_753_419_300,
         deviceId = "device-member-approved",
@@ -5729,10 +5681,6 @@ internal class RecordingSyncBackend : SyncBackend {
         mutableListOf<Triple<String, TrustedEndpointProfile, String>>()
     val memberLoginGrantClaims =
         mutableListOf<Triple<TrustedEndpointProfile, String, String>>()
-    var joinCalls = 0
-    val joinBaseUrls = mutableListOf<String>()
-    val joinCodes = mutableListOf<String>()
-    val joinDisplayNames = mutableListOf<String?>()
     val updatedDisplayNames = mutableListOf<String>()
     val renamedFamilyNames = mutableListOf<String?>()
     var renameFamilyFailure: Throwable? = null
@@ -5740,11 +5688,7 @@ internal class RecordingSyncBackend : SyncBackend {
     var nextCreateFamilyName: String? = null
     var nextCreateEntities: List<SyncEntity> = emptyList()
     var nextCreateReclaimed: Boolean = false
-    var nextJoinFamilyName: String? = null
-    var nextJoinEntities: List<SyncEntity> = emptyList()
     var memberCalls = 0
-    var nextInvite = Invite(code = "INVITE", expiresAt = 1_000)
-    val inviteSessions = mutableListOf<SyncSession>()
     private val knownEntities = mutableSetOf<Pair<String, String>>()
 
     fun remember(type: String, clientUuid: String) {
@@ -5758,7 +5702,7 @@ internal class RecordingSyncBackend : SyncBackend {
         createRequestId: String,
         bootstrapSecret: String?,
         familyName: String?,
-    ): JoinResult {
+    ): SessionBootstrapResult {
         createRequestIds += createRequestId
         createDisplayNames += displayName
         createFamilyNames += familyName
@@ -5766,9 +5710,9 @@ internal class RecordingSyncBackend : SyncBackend {
         createStarted?.complete(Unit)
         releaseCreate?.await()
         createFailure?.let { throw it }
-        return JoinResult(
+        return SessionBootstrapResult(
             familyId = "family-created",
-            token = if (nextCreateReclaimed) "owner-token-reclaimed" else "owner-token",
+            accessToken = if (nextCreateReclaimed) "owner-token-reclaimed" else "owner-token",
             refreshToken = "owner-refresh-token",
             accessExpiresAtEpochSeconds = 1_753_419_300,
             deviceId = "device-created",
@@ -5787,15 +5731,15 @@ internal class RecordingSyncBackend : SyncBackend {
         loginRequestId: String,
         rootPassword: String,
         takeover: Boolean,
-    ): JoinResult {
+    ): SessionBootstrapResult {
         ownerLoginRequestIds += loginRequestId
         ownerLoginDeviceNames += deviceName
         ownerLoginRootPasswords += rootPassword
         ownerLoginTakeovers += takeover
         ownerLoginFailure?.let { throw it }
-        return JoinResult(
+        return SessionBootstrapResult(
             familyId = "family-owner-login",
-            token = "owner-login-access",
+            accessToken = "owner-login-access",
             refreshToken = "owner-login-refresh",
             accessExpiresAtEpochSeconds = 1_753_419_300,
             deviceId = "device-owner-login",
@@ -5824,7 +5768,7 @@ internal class RecordingSyncBackend : SyncBackend {
         cancelMemberLoginCalls++
     }
 
-    override suspend fun claimMemberLogin(baseUrl: String, pendingSecret: String): JoinResult {
+    override suspend fun claimMemberLogin(baseUrl: String, pendingSecret: String): SessionBootstrapResult {
         memberLoginClaimCalls++
         return nextMemberLoginClaim
     }
@@ -5854,7 +5798,7 @@ internal class RecordingSyncBackend : SyncBackend {
         endpoint: TrustedEndpointProfile,
         membershipId: String,
     ): MemberLoginGrant {
-        memberLoginGrantTargets += Triple(session.familyToken, endpoint, membershipId)
+        memberLoginGrantTargets += Triple(session.accessToken, endpoint, membershipId)
         return nextMemberLoginGrant
     }
 
@@ -5862,7 +5806,7 @@ internal class RecordingSyncBackend : SyncBackend {
         endpoint: TrustedEndpointProfile,
         grant: String,
         deviceName: String,
-    ): JoinResult {
+    ): SessionBootstrapResult {
         memberLoginGrantClaims += Triple(endpoint, grant, deviceName)
         return nextMemberLoginClaim
     }
@@ -5937,32 +5881,6 @@ internal class RecordingSyncBackend : SyncBackend {
             cursor = session.pullCursor,
             generation = session.pullGeneration,
             hasMore = false,
-        )
-    }
-
-    override suspend fun invite(session: SyncSession): Invite {
-        inviteSessions += session
-        return nextInvite
-    }
-    override suspend fun join(
-        baseUrl: String,
-        code: String,
-        deviceId: String,
-        displayName: String?,
-    ): JoinResult {
-        joinCalls++
-        joinBaseUrls += baseUrl
-        joinCodes += code
-        joinDisplayNames += displayName
-        joinFailure?.let { throw it }
-        return JoinResult(
-            familyId = "family-joined",
-            token = "member-token",
-            role = FamilyRole.Member,
-            generation = "current-generation",
-            entities = nextJoinEntities,
-            familyName = nextJoinFamilyName,
-            membershipId = "membership-joined",
         )
     }
 
@@ -6195,12 +6113,12 @@ internal class MemorySyncPreferences(
     }
 
     override suspend fun saveServer(baseUrl: String) {
-        val parsed = HomeLanServerConfig.fromBaseUrl(baseUrl).withNormalized()
-        saveHomeLanConfig(parsed)
+        val parsed = FamilyEndpointConfig.fromBaseUrl(baseUrl).withNormalized()
+        saveEndpointConfig(parsed)
     }
 
-    override suspend fun saveHomeLanConfig(
-        config: HomeLanServerConfig,
+    override suspend fun saveEndpointConfig(
+        config: FamilyEndpointConfig,
         clearSessionIfServerChanged: Boolean,
     ) {
         val n = config.withNormalized()
@@ -6218,7 +6136,7 @@ internal class MemorySyncPreferences(
         ) {
             next = next.copy(
                 familyId = "",
-                familyToken = "",
+                accessToken = "",
                 refreshToken = "",
                 accessExpiresAtEpochSeconds = 0,
                 reauthRequired = false,
@@ -6256,7 +6174,7 @@ internal class MemorySyncPreferences(
         if (!shouldBlockSecretMigration.compareAndSet(true, false)) return
         secretMigrationStarted.complete(Unit)
         releaseSecretMigration.await()
-        state.value = state.value.copy(familyToken = "")
+        state.value = state.value.copy(accessToken = "")
     }
 
     override suspend fun updateCursor(cursor: Long, generation: String) {
@@ -6349,7 +6267,7 @@ internal class MemorySyncPreferences(
 
     override suspend fun clearDeviceCredentialsForReauth() {
         state.value = state.value.copy(
-            familyToken = "",
+            accessToken = "",
             refreshToken = "",
             accessExpiresAtEpochSeconds = 0,
             reauthRequired = true,
@@ -6870,7 +6788,7 @@ internal class RecordingTransactionRunner : DatabaseTransactionRunner {
 
 private fun joinedSession(familyId: String) = SyncSession(
     familyId = familyId,
-    familyToken = "token",
+    accessToken = "token",
     deviceId = "device-a",
     role = FamilyRole.Owner,
     pullGeneration = "current-generation",

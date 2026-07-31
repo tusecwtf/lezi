@@ -3,7 +3,7 @@ package com.lezi.babylog.domain
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.sync.CreateFamilyResult
 import com.lezi.babylog.sync.CertificateTrustCandidate
-import com.lezi.babylog.sync.HomeLanServerConfig
+import com.lezi.babylog.sync.FamilyEndpointConfig
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.OwnerLoginResult
 import com.lezi.babylog.sync.MemberLoginCheckResult
@@ -42,7 +42,7 @@ class FamilyWizardControllerTest {
         assertThat(approval.candidate).isEqualTo(candidate)
         assertThat(gateway.events).containsExactly("probe")
         assertThat(gateway.createCalls).isEqualTo(0)
-        assertThat(gateway.joinRequest).isNull()
+        assertThat(gateway.memberRequestCalls).isEqualTo(0)
 
         controller.trustCertificate(FamilyWizardEntry.Account, candidate)
 
@@ -51,7 +51,7 @@ class FamilyWizardControllerTest {
         assertThat(ready.snapshot.mode).isEqualTo(FamilyWizardMode.Create)
         assertThat(gateway.events).containsExactly("probe", "accept-certificate").inOrder()
         assertThat(gateway.createCalls).isEqualTo(0)
-        assertThat(gateway.joinRequest).isNull()
+        assertThat(gateway.memberRequestCalls).isEqualTo(0)
     }
 
     @Test
@@ -74,7 +74,7 @@ class FamilyWizardControllerTest {
         assertThat(gateway.events).containsExactly("probe")
         assertThat(gateway.rememberedEndpoints).isEmpty()
         assertThat(gateway.createCalls).isEqualTo(0)
-        assertThat(gateway.joinRequest).isNull()
+        assertThat(gateway.memberRequestCalls).isEqualTo(0)
     }
 
     @Test
@@ -99,7 +99,7 @@ class FamilyWizardControllerTest {
         assertThat(ready.snapshot.step).isEqualTo(FamilyWizardStep.Identity)
         assertThat(gateway.events).containsExactly("probe", "remember").inOrder()
         assertThat(gateway.createCalls).isEqualTo(0)
-        assertThat(gateway.joinRequest).isNull()
+        assertThat(gateway.memberRequestCalls).isEqualTo(0)
     }
 
     @Test
@@ -266,24 +266,6 @@ class FamilyWizardControllerTest {
         )
     }
 
-    @Test
-    fun sameJoinInputFromBothEntriesProducesSameRequestAndJoinedOutcome() = runTest {
-        val requests = FamilyWizardEntry.entries.map { entry ->
-            val gateway = RecordingFamilyWizardGateway(
-                joinResult = JoinFamilyResult.Joined(memberSession()),
-            )
-            val controller = FamilyWizardController(gateway)
-
-            controller.submit(snapshot(entry, FamilyWizardMode.Join))
-
-            val completed = controller.state.value as FamilyWizardState.Completed
-            assertThat(completed.outcome)
-                .isEqualTo(FamilyWizardOutcome.Joined(memberSession()))
-            gateway.joinRequest
-        }
-
-        assertThat(requests[0]).isEqualTo(requests[1])
-    }
 
     @Test
     fun configuredFamilyOffersOwnerRoleAndBothEntriesShareLoginAndTakeoverContract() = runTest {
@@ -334,29 +316,29 @@ class FamilyWizardControllerTest {
     fun validationAndGatewayFailuresStayOnRecoverableStepsWithRetainedInput() = runTest {
         val gateway = RecordingFamilyWizardGateway()
         val controller = FamilyWizardController(gateway)
-        val invalidNetwork = snapshot(
+        val invalidEndpoint = snapshot(
             FamilyWizardEntry.Onboarding,
             FamilyWizardMode.Create,
         ).copy(host = "")
 
         assertThat(
             FamilyWizardEntry.entries.map { entry ->
-                familyWizardNetworkValidationError(invalidNetwork.copy(entry = entry))
+                familyWizardEndpointValidationError(invalidEndpoint.copy(entry = entry))
             },
         ).containsExactly("请填写服务器主机", "请填写服务器主机")
 
-        controller.submit(invalidNetwork, "not-retained")
+        controller.submit(invalidEndpoint, "not-retained")
 
         assertThat(controller.state.value).isEqualTo(
             FamilyWizardState.RetryableFailure(
-                snapshot = invalidNetwork.copy(step = FamilyWizardStep.Network),
+                snapshot = invalidEndpoint.copy(step = FamilyWizardStep.Endpoint),
                 message = "请填写服务器主机",
                 committedOutcome = null,
             ),
         )
         assertThat(gateway.events).isEmpty()
 
-        val invalidIdentity = invalidNetwork.copy(
+        val invalidIdentity = invalidEndpoint.copy(
             host = "nas.home",
             displayName = "  ",
             step = FamilyWizardStep.Identity,
@@ -458,14 +440,13 @@ class FamilyWizardControllerTest {
         controller.submit(create, "once")
         assertThat(controller.consumeCompletion()).isNotNull()
 
-        val join = snapshot(FamilyWizardEntry.Account, FamilyWizardMode.Join)
-        controller.begin(join)
-        controller.submit(join)
+        val anotherCreate = create.copy(displayName = "爸爸")
+        controller.begin(anotherCreate)
+        controller.submit(anotherCreate, "twice")
 
         assertThat((controller.state.value as FamilyWizardState.Completed).outcome)
-            .isEqualTo(FamilyWizardOutcome.Joined(memberSession()))
-        assertThat(gateway.createCalls).isEqualTo(1)
-        assertThat(gateway.events.count { it == "join" }).isEqualTo(1)
+            .isEqualTo(FamilyWizardOutcome.Created(ownerSession()))
+        assertThat(gateway.createCalls).isEqualTo(2)
     }
 
     @Test
@@ -473,7 +454,6 @@ class FamilyWizardControllerTest {
         val gateway = RecordingFamilyWizardGateway()
         val controller = FamilyWizardController(gateway)
         val input = snapshot(FamilyWizardEntry.Account, FamilyWizardMode.Join).copy(
-            invitation = "",
             joinRole = FamilyWizardJoinRole.Member,
         )
 
@@ -482,7 +462,7 @@ class FamilyWizardControllerTest {
         val waiting = controller.state.value as FamilyWizardState.WaitingForMemberApproval
         assertThat(waiting.request).isEqualTo(gateway.pendingRequest)
         assertThat(gateway.events).containsExactly("save", "member-request").inOrder()
-        assertThat(gateway.joinRequest).isNull()
+        assertThat(gateway.memberRequestCalls).isEqualTo(1)
 
         gateway.memberCheckResult = Result.success(MemberLoginCheckResult.Waiting(waiting.request))
         controller.checkMemberApproval()
@@ -494,7 +474,6 @@ class FamilyWizardControllerTest {
         val gateway = RecordingFamilyWizardGateway()
         val controller = FamilyWizardController(gateway)
         val input = snapshot(FamilyWizardEntry.Onboarding, FamilyWizardMode.Join).copy(
-            invitation = "",
             joinRole = FamilyWizardJoinRole.Member,
         )
         controller.submit(input)
@@ -529,7 +508,6 @@ class FamilyWizardControllerTest {
         val gateway = RecordingFamilyWizardGateway()
         val controller = FamilyWizardController(gateway)
         val input = snapshot(FamilyWizardEntry.Onboarding, FamilyWizardMode.Join).copy(
-            invitation = "",
             joinRole = FamilyWizardJoinRole.Member,
         )
         controller.submit(input)
@@ -558,7 +536,6 @@ class FamilyWizardControllerTest {
     fun rejectedAndCancelledMemberRequestsRemainOfflineAndRecoverable() = runTest {
         val gateway = RecordingFamilyWizardGateway()
         val input = snapshot(FamilyWizardEntry.Account, FamilyWizardMode.Join).copy(
-            invitation = "",
             joinRole = FamilyWizardJoinRole.Member,
         )
         val rejected = FamilyWizardController(gateway)
@@ -578,29 +555,6 @@ class FamilyWizardControllerTest {
         assertThat(cancelledGateway.cancelMemberCalls).isEqualTo(1)
     }
 
-    @Test
-    fun thrownJoinNetworkFailureStaysRetryableAndAUiRestoreCannotUndoCompletion() = runTest {
-        val gateway = RecordingFamilyWizardGateway(
-            joinThrowable = IllegalStateException("Failed to connect to nas.home:8765"),
-        )
-        val controller = FamilyWizardController(gateway)
-        val join = snapshot(FamilyWizardEntry.Account, FamilyWizardMode.Join)
-
-        controller.submit(join)
-
-        val failure = controller.state.value as FamilyWizardState.RetryableFailure
-        assertThat(failure.snapshot.step).isEqualTo(FamilyWizardStep.Identity)
-        assertThat(failure.message).isEqualTo("家庭同步服务暂未连接，请稍后重试")
-
-        gateway.joinThrowable = null
-        controller.submit(join)
-        val completed = controller.state.value
-        controller.restore(join.copy(displayName = "权限拒绝后的界面草稿"))
-
-        assertThat(controller.state.value).isEqualTo(completed)
-        assertThat((controller.state.value as FamilyWizardState.Completed).outcome)
-            .isEqualTo(FamilyWizardOutcome.Joined(memberSession()))
-    }
 
     private fun snapshot(
         entry: FamilyWizardEntry,
@@ -609,7 +563,6 @@ class FamilyWizardControllerTest {
         entry = entry,
         mode = mode,
         step = FamilyWizardStep.Identity,
-        invitation = "INVITE-1234",
         host = "nas.home",
         portText = "443",
         scheme = "https",
@@ -620,7 +573,7 @@ class FamilyWizardControllerTest {
 }
 
 private data class CreateRequest(
-    val config: HomeLanServerConfig,
+    val config: FamilyEndpointConfig,
     val displayName: String,
     val deviceName: String,
     val bootstrapSecret: String,
@@ -628,7 +581,7 @@ private data class CreateRequest(
 )
 
 private data class OwnerLoginRequest(
-    val config: HomeLanServerConfig,
+    val config: FamilyEndpointConfig,
     val deviceName: String,
     val rootPassword: String,
     val takeover: Boolean,
@@ -638,12 +591,10 @@ private class RecordingFamilyWizardGateway(
     var createResult: Result<CreateFamilyResult> = Result.success(
         CreateFamilyResult(ownerSession(), reclaimed = false),
     ),
-    var joinResult: JoinFamilyResult = JoinFamilyResult.Joined(memberSession()),
     var ownerLoginResult: Result<OwnerLoginResult> = Result.success(
         OwnerLoginResult(ownerSession(), InitialFamilyDataRecovery.Complete),
     ),
     var recoveryResult: Result<Unit> = Result.success(Unit),
-    var joinThrowable: Throwable? = null,
     var probeResult: SetupProbeResult = SetupProbeResult.Failed.Unreachable,
     var certificateAcceptanceResult: SetupProbeResult = SetupProbeResult.Failed.Unreachable,
 ) : FamilyWizardGateway {
@@ -660,7 +611,6 @@ private class RecordingFamilyWizardGateway(
     var cancelMemberCalls = 0
     val events = mutableListOf<String>()
     var request: CreateRequest? = null
-    var joinRequest: JoinFamilyRequest? = null
     var ownerLoginRequest: OwnerLoginRequest? = null
     var createCalls = 0
     var recoveryCalls = 0
@@ -695,13 +645,13 @@ private class RecordingFamilyWizardGateway(
         return Result.success(Unit)
     }
 
-    override suspend fun saveHomeLanConfig(config: HomeLanServerConfig): Result<Unit> {
+    override suspend fun saveEndpointConfig(config: FamilyEndpointConfig): Result<Unit> {
         events += "save"
         return Result.success(Unit)
     }
 
     override suspend fun createFamily(
-        config: HomeLanServerConfig,
+        config: FamilyEndpointConfig,
         displayName: String,
         deviceName: String,
         bootstrapSecret: String,
@@ -713,15 +663,8 @@ private class RecordingFamilyWizardGateway(
         return createResult
     }
 
-    override suspend fun joinFamily(request: JoinFamilyRequest): JoinFamilyResult {
-        events += "join"
-        joinRequest = request
-        joinThrowable?.let { throw it }
-        return joinResult
-    }
-
     override suspend fun ownerLogin(
-        config: HomeLanServerConfig,
+        config: FamilyEndpointConfig,
         deviceName: String,
         rootPassword: String,
         takeover: Boolean,
@@ -732,7 +675,7 @@ private class RecordingFamilyWizardGateway(
     }
 
     override suspend fun requestMemberLogin(
-        config: HomeLanServerConfig,
+        config: FamilyEndpointConfig,
         displayName: String,
         deviceName: String,
     ): Result<PendingMemberLogin> {
@@ -773,11 +716,11 @@ private class BlockingFamilyWizardGateway : FamilyWizardGateway {
 
     override suspend fun forgetEndpoint(): Result<Unit> = Result.success(Unit)
 
-    override suspend fun saveHomeLanConfig(config: HomeLanServerConfig): Result<Unit> =
+    override suspend fun saveEndpointConfig(config: FamilyEndpointConfig): Result<Unit> =
         Result.success(Unit)
 
     override suspend fun createFamily(
-        config: HomeLanServerConfig,
+        config: FamilyEndpointConfig,
         displayName: String,
         deviceName: String,
         bootstrapSecret: String,
@@ -789,11 +732,8 @@ private class BlockingFamilyWizardGateway : FamilyWizardGateway {
         return Result.success(CreateFamilyResult(ownerSession(), reclaimed = false))
     }
 
-    override suspend fun joinFamily(request: JoinFamilyRequest): JoinFamilyResult =
-        JoinFamilyResult.Joined(memberSession())
-
     override suspend fun ownerLogin(
-        config: HomeLanServerConfig,
+        config: FamilyEndpointConfig,
         deviceName: String,
         rootPassword: String,
         takeover: Boolean,
@@ -806,7 +746,7 @@ private class BlockingFamilyWizardGateway : FamilyWizardGateway {
 
 private fun ownerSession() = SyncSession(
     familyId = "family-owner",
-    familyToken = "owner-token",
+    accessToken = "owner-token",
     role = com.lezi.babylog.sync.FamilyRole.Owner,
     membershipId = "owner-membership",
     serverHost = "nas.home",
@@ -814,7 +754,7 @@ private fun ownerSession() = SyncSession(
 
 private fun memberSession() = SyncSession(
     familyId = "family-member",
-    familyToken = "member-token",
+    accessToken = "member-token",
     role = com.lezi.babylog.sync.FamilyRole.Member,
     membershipId = "member-membership",
     serverHost = "nas.home",

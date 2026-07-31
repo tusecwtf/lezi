@@ -3,8 +3,8 @@
 > 对齐调研中的 **信息架构与交互模式**；视觉资产自有，不使用原版小鸡商标素材。  
 > 主 PRD：[`README.md`](./README.md)
 >
-> **同步 UI 目标更新（2026-07-31）：** 家庭向导、账户同步状态与网络设置中涉及 SSID、
-> HTTP、QR v1 和长期 family token 的现有描述是 0.3.0 基线；下一版以
+> **同步 UI 当前合同（0.3.1）：** 旧网络身份、明文传输、QR v1 与长期家庭凭证界面均已
+> 退役。以
 > [`sync-trusted-endpoint.md`](./sync-trusted-endpoint.md) §8 和
 > [`可信家庭认证与同步 UI/UX 设计`](../design/2026-07-30-trusted-sync-onboarding-ui.md)
 > 为准：先 probe 再决定新建/加入；根密码登录唯一管理员；普通成员申请审批或扫描管理员

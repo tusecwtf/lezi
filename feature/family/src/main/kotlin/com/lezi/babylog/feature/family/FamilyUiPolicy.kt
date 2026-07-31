@@ -31,7 +31,7 @@ internal fun accountFamilyActions(): List<String> = listOf(FamilyPrimaryCta.CONN
 internal fun accountFamilyWizardSnapshot(
     mode: FamilyWizardMode,
     step: FamilyWizardStep,
-    draft: com.lezi.babylog.sync.JoinFamilyDraft,
+    draft: com.lezi.babylog.sync.FamilyEndpointDraft,
     displayName: String,
     familyName: String = "",
     deviceName: String = "",
@@ -52,7 +52,6 @@ internal fun familyWizardOutcomeCopy(outcome: FamilyWizardOutcome): String = whe
         InitialFamilyDataRecovery.RetryRequired -> "家庭已创建；首次同步失败，可稍后重试"
         InitialFamilyDataRecovery.NotRequired -> "家庭已创建，正在首次同步"
     }
-    is FamilyWizardOutcome.Joined -> "已加入家庭"
     is FamilyWizardOutcome.Reclaimed -> when (outcome.dataRecovery) {
         InitialFamilyDataRecovery.Complete -> "已接回家庭，数据恢复完成"
         InitialFamilyDataRecovery.RetryRequired ->
@@ -98,7 +97,6 @@ internal sealed interface FamilyDialog {
     ) : FamilyDialog
     data object ConfirmDeviceLogout : FamilyDialog
     data object RenameFamily : FamilyDialog
-    data class Invite(val invite: FamilyInviteView) : FamilyDialog
     data object ConfirmLeave : FamilyDialog
     /** Owner confirms removing another member (not self). */
     data class ConfirmRemoveMember(
@@ -148,15 +146,14 @@ internal object FamilyPrimaryCta {
     const val CONNECT = "连接家庭服务器"
     const val CREATE = "新建家庭"
     const val JOIN = "加入家庭"
-    const val INVITE = "邀请家人"
 }
 
-/** Where the family wizard should open given current home-LAN readiness (prefs only). */
-internal fun familyWizardInitialStep(networkConfigured: Boolean): FamilyWizardStep =
-    if (networkConfigured) FamilyWizardStep.Identity else FamilyWizardStep.Network
+/** Where the family wizard should open given current endpoint readiness. */
+internal fun familyWizardInitialStep(endpointConfigured: Boolean): FamilyWizardStep =
+    if (endpointConfigured) FamilyWizardStep.Identity else FamilyWizardStep.Endpoint
 
 internal fun familyWizardTitle(mode: FamilyWizardMode, step: FamilyWizardStep): String = when (step) {
-    FamilyWizardStep.Network -> "配置家庭网络"
+    FamilyWizardStep.Endpoint -> "配置家庭服务器"
     FamilyWizardStep.Role -> "你要如何加入？"
     FamilyWizardStep.Identity -> when (mode) {
         FamilyWizardMode.Create -> FamilyPrimaryCta.CREATE
@@ -165,16 +162,16 @@ internal fun familyWizardTitle(mode: FamilyWizardMode, step: FamilyWizardStep): 
 }
 
 /**
- * Step chip labels for the wizard chrome (1/2 network → identity).
- * [networkReady] must reflect a real HTTPS endpoint — never true merely
+ * Step chip labels for the wizard chrome (1/2 endpoint → identity).
+ * [endpointReady] must reflect a real HTTPS endpoint — never true merely
  * because [step] is Identity.
  */
 internal fun familyWizardProgress(
     mode: FamilyWizardMode,
     step: FamilyWizardStep,
-    networkReady: Boolean,
+    endpointReady: Boolean,
 ): Pair<String, String> {
-    val step1 = if (networkReady) "✓ 家庭网络" else "1 家庭网络"
+    val step1 = if (endpointReady) "✓ 家庭服务器" else "1 家庭服务器"
     val step2 = when {
         step == FamilyWizardStep.Role -> "2 选择身份"
         step == FamilyWizardStep.Identity -> when (mode) {
@@ -189,14 +186,9 @@ internal fun familyWizardProgress(
     return step1 to step2
 }
 
-/** After invite input: Identity only when the draft has an endpoint. */
-internal fun joinStepAfterInviteInput(networkReady: Boolean): FamilyWizardStep =
-    if (networkReady) FamilyWizardStep.Identity else FamilyWizardStep.Network
-
 /**
  * Wizard session remains active while on Wizard or a stack layer that resumes
- * back to Wizard through a message. Used to avoid wiping draft
- * invitation when prefs update mid-flow.
+ * back to Wizard through a message.
  */
 internal fun isWizardSessionDialog(dialog: FamilyDialog?): Boolean = when (dialog) {
     FamilyDialog.ConnectEndpoint -> true
@@ -246,7 +238,6 @@ internal fun familyStorageCopy(enabled: Boolean): String =
 internal data class FamilyControlVisibility(
     val showJoin: Boolean,
     val showCreateFamily: Boolean,
-    val showInvite: Boolean,
     val showJoinedActions: Boolean,
     /** Owner may remove non-self members from the roster. */
     val showRemoveMember: Boolean,
@@ -258,7 +249,6 @@ internal fun familyControlVisibility(
 ): FamilyControlVisibility = FamilyControlVisibility(
     showJoin = !isJoined,
     showCreateFamily = !isJoined && role == FamilyRole.None,
-    showInvite = isJoined && role == FamilyRole.Owner,
     showJoinedActions = isJoined,
     showRemoveMember = isJoined && role == FamilyRole.Owner,
 )
@@ -273,38 +263,34 @@ internal fun canRemoveFamilyMember(
         member.role == FamilyRole.Member &&
         member.membershipId.trim().isNotEmpty()
 
-internal fun isHomeLanNetworkConfigured(
+internal fun isEndpointConfigured(
     serverHost: String,
     baseUrl: String,
 ): Boolean = serverHost.isNotBlank() || baseUrl.isNotBlank()
 
 /**
- * Overview primary surface: unjoined create/join wizard CTAs and owner「邀请家人」.
+ * Overview primary surface: unauthenticated create/login wizard CTAs.
  * Leave and delete remain deliberate account actions; sync lives on data pages.
  * Scan is not a separate overview CTA; it lives inside the join wizard.
  */
 internal data class FamilyPrimarySurface(
     val compactJoined: Boolean,
     val showCreateJoin: Boolean,
-    val showInvite: Boolean,
     val createLabel: String = FamilyPrimaryCta.CREATE,
     val joinLabel: String = FamilyPrimaryCta.JOIN,
-    val inviteLabel: String = FamilyPrimaryCta.INVITE,
 )
 
 internal fun familyPrimarySurface(
     isJoined: Boolean,
     role: FamilyRole,
-    networkConfigured: Boolean,
+    endpointConfigured: Boolean,
 ): FamilyPrimarySurface {
     val controls = familyControlVisibility(isJoined, role)
     return FamilyPrimarySurface(
-        compactJoined = isJoined && networkConfigured,
+        compactJoined = isJoined && endpointConfigured,
         showCreateJoin = controls.showJoin || controls.showCreateFamily,
-        showInvite = controls.showInvite,
         createLabel = FamilyPrimaryCta.CREATE,
         joinLabel = FamilyPrimaryCta.JOIN,
-        inviteLabel = FamilyPrimaryCta.INVITE,
     )
 }
 
@@ -315,7 +301,6 @@ internal data class FamilyOverviewCard(
     val selfTitle: String,
     val syncStatusLabel: String,
     val showCreateJoin: Boolean,
-    val showInvite: Boolean,
     val showMembersEntry: Boolean,
     val showRenameFamily: Boolean,
 )
@@ -323,7 +308,7 @@ internal data class FamilyOverviewCard(
 internal fun buildFamilyOverviewCard(
     isJoined: Boolean,
     role: FamilyRole,
-    networkConfigured: Boolean,
+    endpointConfigured: Boolean,
     familyName: String?,
     babyNickname: String?,
     localDisplayName: String,
@@ -331,7 +316,7 @@ internal fun buildFamilyOverviewCard(
     membersLoaded: Boolean,
     status: SyncStatus,
 ): FamilyOverviewCard {
-    val primary = familyPrimarySurface(isJoined, role, networkConfigured)
+    val primary = familyPrimarySurface(isJoined, role, endpointConfigured)
     return FamilyOverviewCard(
         familyNameLabel = if (isJoined) {
             displayFamilyName(familyName, babyNickname)
@@ -350,7 +335,6 @@ internal fun buildFamilyOverviewCard(
         },
         syncStatusLabel = overviewSyncStatusLabel(status, isJoined),
         showCreateJoin = primary.showCreateJoin,
-        showInvite = primary.showInvite,
         showMembersEntry = isJoined,
         showRenameFamily = isJoined && role == FamilyRole.Owner,
     )
@@ -388,7 +372,7 @@ internal fun overviewSelfTitle(displayName: String, role: FamilyRole): String {
 }
 
 /**
- * Client-side gate for create/join/self-rename free-text 称呼.
+ * Client-side gate for create/member-request/self-rename free-text 称呼.
  * Delegates to sync [com.lezi.babylog.sync.memberDisplayNameValidationError] so account
  * wizard and onboarding share one rule set (no third form stack).
  */

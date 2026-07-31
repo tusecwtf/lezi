@@ -5,7 +5,7 @@ import org.junit.Test
 
 class ForegroundSyncGateTest {
     private val endpoint = TrustedEndpointProfile.systemPki("https://family.example.com:443")
-    private val config = HomeLanServerConfig.fromBaseUrl(endpoint.origin)
+    private val config = FamilyEndpointConfig.fromBaseUrl(endpoint.origin)
 
     @Test
     fun trustedEndpointIsAllowedWithoutAnyNetworkTransportInput() {
@@ -19,7 +19,7 @@ class ForegroundSyncGateTest {
 
         assertThat(gate.evaluate(config, endpoint, isForeground = false))
             .isEqualTo(ForegroundSyncDecision.Background)
-        assertThat(gate.evaluate(HomeLanServerConfig(), endpoint, isForeground = true))
+        assertThat(gate.evaluate(FamilyEndpointConfig(), endpoint, isForeground = true))
             .isEqualTo(ForegroundSyncDecision.MissingEndpoint)
         assertThat(
             gate.evaluate(

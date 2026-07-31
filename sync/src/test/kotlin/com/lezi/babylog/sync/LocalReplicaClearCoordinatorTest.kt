@@ -667,7 +667,7 @@ private fun baby(avatarPath: String?) = BabyEntity(
 
 private fun joinedClearSession() = SyncSession(
     familyId = "family-a",
-    familyToken = "token",
+    accessToken = "token",
     deviceId = "device-a",
     role = FamilyRole.Owner,
     serverHost = "192.168.1.20",

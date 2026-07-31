@@ -27,7 +27,7 @@ class FakeSyncBackendTest {
         )
         val session = SyncSession(
             familyId = created.familyId,
-            familyToken = created.token,
+            accessToken = created.accessToken,
             deviceId = "owner-device",
             role = FamilyRole.Owner,
             membershipId = created.membershipId.orEmpty(),
@@ -75,7 +75,7 @@ class FakeSyncBackendTest {
         )
         val session = SyncSession(
             familyId = family.familyId,
-            familyToken = family.token,
+            accessToken = family.accessToken,
             deviceId = "owner",
             role = FamilyRole.Owner,
             membershipId = family.membershipId.orEmpty(),
@@ -146,26 +146,19 @@ class FakeSyncBackendTest {
         )
         val owner = SyncSession(
             familyId = ownerJoin.familyId,
-            familyToken = ownerJoin.token,
+            accessToken = ownerJoin.accessToken,
             deviceId = "device-a",
             role = FamilyRole.Owner,
             membershipId = ownerJoin.membershipId.orEmpty(),
             serverHost = "127.0.0.1",
             serverPort = 8765,
         )
-        val invite = backend.invite(owner)
-        val memberJoin = backend.join(
-            baseUrl = "http://127.0.0.1:8765",
-            code = invite.code,
-            deviceId = "device-b",
-            displayName = "爸爸",
-        )
         val member = SyncSession(
-            familyId = memberJoin.familyId,
-            familyToken = memberJoin.token,
+            familyId = owner.familyId,
+            accessToken = "member-access",
             deviceId = "device-b",
             role = FamilyRole.Member,
-            membershipId = memberJoin.membershipId.orEmpty(),
+            membershipId = "member-b",
             serverHost = "127.0.0.1",
             serverPort = 8765,
             pullCursor = 0,
@@ -323,17 +316,6 @@ class FakeSyncBackendTest {
         assertThat(unchanged.entities).isEmpty()
         assertThat(unchanged.cursor).isEqualTo(pullA.cursor)
 
-        val invite = backend.invite(family).getOrThrow()
-        assertThat(invite.code).isNotEmpty()
-        val join = backend.join(invite.code, "C").getOrThrow()
-        assertThat(join.familyId).isEqualTo(family)
-        assertThat(join.membershipId).isNotEmpty()
-        assertThat(join.entities.map(SyncEntity::clientUuid))
-            .containsExactly("baby-a", "record-a")
-        assertThat(join.cursor).isEqualTo(3)
-        // Idempotent membership identity for the same family+device.
-        assertThat(backend.join(invite.code, "C").getOrThrow().membershipId)
-            .isEqualTo(join.membershipId)
         assertThat(backend.pull("another-family", 0).getOrThrow().entities).isEmpty()
     }
 
@@ -351,26 +333,19 @@ class FakeSyncBackendTest {
         )
         val owner = SyncSession(
             familyId = ownerJoin.familyId,
-            familyToken = ownerJoin.token,
+            accessToken = ownerJoin.accessToken,
             deviceId = "owner-dev",
             role = FamilyRole.Owner,
             membershipId = ownerJoin.membershipId.orEmpty(),
             serverHost = "127.0.0.1",
             serverPort = 8765,
         )
-        val invite = backend.invite(owner)
-        val memberJoin = backend.join(
-            baseUrl = "http://127.0.0.1:8765",
-            code = invite.code,
-            deviceId = "member-dev",
-            displayName = "爸爸",
-        )
         val member = SyncSession(
-            familyId = memberJoin.familyId,
-            familyToken = memberJoin.token,
+            familyId = owner.familyId,
+            accessToken = "member-access",
             deviceId = "member-dev",
             role = FamilyRole.Member,
-            membershipId = memberJoin.membershipId.orEmpty(),
+            membershipId = "member-membership",
             serverHost = "127.0.0.1",
             serverPort = 8765,
         )
@@ -458,11 +433,11 @@ class FakeSyncBackendTest {
         val owner = SyncSession(
             serverHost = "lan",
             familyId = family,
-            familyToken = "owner",
+            accessToken = "owner",
             deviceId = "owner-device",
             role = FamilyRole.Owner,
         )
-        val member = owner.copy(familyToken = "member", deviceId = "member-device", role = FamilyRole.Member)
+        val member = owner.copy(accessToken = "member", deviceId = "member-device", role = FamilyRole.Member)
         val baby = SyncEntity(
             type = "baby",
             clientUuid = "baby-a",

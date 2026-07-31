@@ -31,7 +31,7 @@ internal fun familyMemberRosterMinimumTouchHeight() = LeziSpacing.Touch
 
 /**
  * Account Tab family zone: overview family card + primary CTAs.
- * Network ops stay in the network sheet; device logout and member-only identity deletion
+ * Endpoint setup stays in the family wizard; device logout and member-only identity deletion
  * remain distinct Account-bottom actions.
  * Full member list opens from the member-count entry (secondary surface).
  */
@@ -39,7 +39,7 @@ internal fun familyMemberRosterMinimumTouchHeight() = LeziSpacing.Touch
 internal fun FamilySharingContent(
     ui: FamilyUi,
     primary: FamilyPrimarySurface,
-    networkConfigured: Boolean,
+    endpointConfigured: Boolean,
     onOpenMembers: () -> Unit,
     onConnectFamily: () -> Unit,
     onScanMemberLoginQr: () -> Unit,
@@ -61,7 +61,7 @@ internal fun FamilySharingContent(
     val card = buildFamilyOverviewCard(
         isJoined = ui.enabled,
         role = ui.role,
-        networkConfigured = networkConfigured,
+        endpointConfigured = endpointConfigured,
         familyName = ui.familyName,
         babyNickname = ui.current?.nickname,
         localDisplayName = ui.displayName,
@@ -140,7 +140,6 @@ internal fun FamilySharingContent(
                 card.syncStatusLabel
             },
             isError = ui.status == com.lezi.babylog.core.model.SyncStatus.Error,
-            onOpenNetwork = null,
         )
         if (ui.enabled) {
             Text(
@@ -151,7 +150,7 @@ internal fun FamilySharingContent(
         }
     }
 
-    // Unjoined: wizard CTAs only (scan lives inside join wizard). Owner: 邀请家人 on overview.
+    // Unauthenticated: the wizard and current member-login QR are the only entry points.
     if (primary.showCreateJoin) {
         LeziPrimaryButton(
             if (ui.pendingMemberLogin != null) "查看加入申请" else FamilyPrimaryCta.CONNECT,
@@ -245,21 +244,11 @@ internal fun FamilyMemberRosterEntry(
 internal fun FamilySyncStatusEntry(
     statusLabel: String,
     isError: Boolean,
-    onOpenNetwork: (() -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
     val baseModifier = modifier
         .fillMaxWidth()
         .heightIn(min = LeziSpacing.Touch)
-    val interactionModifier = if (onOpenNetwork == null) {
-        baseModifier
-    } else {
-        baseModifier.clickable(
-            onClickLabel = "打开网络设置",
-            role = Role.Button,
-            onClick = onOpenNetwork,
-        )
-    }
     Text(
         statusLabel,
         style = LeziTypography.BodyStrong,
@@ -268,7 +257,7 @@ internal fun FamilySyncStatusEntry(
         } else {
             MaterialTheme.colorScheme.onSurface
         },
-        modifier = interactionModifier
+        modifier = baseModifier
             .padding(vertical = LeziSpacing.Xs)
             .semantics {
                 contentDescription = "同步状态：$statusLabel"

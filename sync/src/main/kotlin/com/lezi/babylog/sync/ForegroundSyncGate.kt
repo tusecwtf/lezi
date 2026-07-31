@@ -14,7 +14,7 @@ enum class ForegroundSyncDecision {
 @Singleton
 class ForegroundSyncGate @Inject constructor() {
     fun evaluate(
-        config: HomeLanServerConfig,
+        config: FamilyEndpointConfig,
         trustedEndpoint: TrustedEndpointProfile?,
         isForeground: Boolean,
     ): ForegroundSyncDecision {

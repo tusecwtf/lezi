@@ -3,10 +3,8 @@ package com.lezi.babylog.feature.family
 import androidx.compose.foundation.layout.Column
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
-import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertTextContains
@@ -34,31 +32,24 @@ class FamilyAccountAffordanceSemanticsTest {
     val compose = createComposeRule()
 
     @Test
-    fun offlineSyncEntryNamesStateActionAndUsesFortyEightDpTarget() {
-        var openNetworkCount = 0
+    fun offlineSyncEntryNamesStateWithoutRestoringASettingsAction() {
         compose.setContent {
             LeziTheme {
-                FamilySyncStatusEntry(
-                    statusLabel = OFFLINE_RESULT,
-                    isError = true,
-                    onOpenNetwork = { openNetworkCount += 1 },
-                    modifier = Modifier.testTag(SYNC_ENTRY),
+                    FamilySyncStatusEntry(
+                        statusLabel = OFFLINE_RESULT,
+                        isError = true,
+                        modifier = Modifier.testTag(SYNC_ENTRY),
                 )
             }
         }
 
         val entry = compose.onNodeWithTag(SYNC_ENTRY)
-            .assertHasClickAction()
             .assertHeightIsAtLeast(48.dp)
             .assertTextContains(OFFLINE_RESULT)
         val semantics = entry.fetchSemanticsNode().config
-        assertThat(semantics[SemanticsProperties.Role]).isEqualTo(Role.Button)
         assertThat(semantics[SemanticsProperties.ContentDescription])
             .containsExactly("同步状态：$OFFLINE_RESULT")
-        assertThat(semantics[SemanticsActions.OnClick].label).isEqualTo("打开网络设置")
-
-        entry.performClick()
-        compose.runOnIdle { assertThat(openNetworkCount).isEqualTo(1) }
+        assertThat(semantics.contains(SemanticsActions.OnClick)).isFalse()
     }
 
     @Test
@@ -72,9 +63,8 @@ class FamilyAccountAffordanceSemanticsTest {
                         modifier = Modifier.testTag(MEMBER_ENTRY),
                     )
                     FamilySyncStatusEntry(
-                        statusLabel = "等待连接家庭网络",
+                        statusLabel = "等待连接家庭服务器",
                         isError = false,
-                        onOpenNetwork = {},
                         modifier = Modifier.testTag(SYNC_ENTRY),
                     )
                 }
@@ -125,7 +115,7 @@ class FamilyAccountAffordanceSemanticsTest {
                         membersLoaded = true,
                     ),
                     primary = familyPrimarySurface(true, FamilyRole.Owner, true),
-                    networkConfigured = true,
+                    endpointConfigured = true,
                     onOpenMembers = {},
                     onConnectFamily = {},
                     onScanMemberLoginQr = {},
@@ -160,7 +150,7 @@ class FamilyAccountAffordanceSemanticsTest {
                         membersLoaded = true,
                     ),
                     primary = familyPrimarySurface(true, FamilyRole.Member, true),
-                    networkConfigured = true,
+                    endpointConfigured = true,
                     onOpenMembers = {},
                     onConnectFamily = {},
                     onScanMemberLoginQr = {},
@@ -176,6 +166,6 @@ class FamilyAccountAffordanceSemanticsTest {
     private companion object {
         const val MEMBER_ENTRY = "family_member_entry"
         const val SYNC_ENTRY = "family_sync_entry"
-        const val OFFLINE_RESULT = "未连接家庭网络，请连接家里 Wi-Fi 后同步"
+        const val OFFLINE_RESULT = "未连接家庭服务器，请连接家里 Wi-Fi 后同步"
     }
 }

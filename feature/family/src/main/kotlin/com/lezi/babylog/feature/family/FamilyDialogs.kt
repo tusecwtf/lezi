@@ -160,9 +160,9 @@ internal fun FamilyEndpointConnectionDialog(
 private fun FamilyWizardStepHeader(
     mode: FamilyWizardMode,
     step: FamilyWizardStep,
-    networkConfigured: Boolean,
+    endpointConfigured: Boolean,
 ) {
-    val (step1, step2) = familyWizardProgress(mode, step, networkConfigured)
+    val (step1, step2) = familyWizardProgress(mode, step, endpointConfigured)
     Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Xs)) {
         Text(
             step1 + "  ·  " + step2,
@@ -172,23 +172,18 @@ private fun FamilyWizardStepHeader(
     }
 }
 
-/**
- * Wizard endpoint step: HTTPS host and port.
- * Join mode may expose scan + invite chip; Create keeps save-then-advance.
- */
+/** Wizard endpoint step: trusted HTTPS host and port. */
 @Composable
-internal fun FamilyWizardNetworkDialog(
+internal fun FamilyWizardEndpointDialog(
     mode: FamilyWizardMode,
     host: String,
     onHostChange: (String) -> Unit,
     port: String,
     onPortChange: (String) -> Unit,
-    networkReady: Boolean,
+    endpointReady: Boolean,
     feedback: String?,
-    networkInfoHint: String? = null,
-    inviteCodeSummary: String? = null,
+    endpointInfoHint: String? = null,
     saving: Boolean,
-    onScan: (() -> Unit)? = null,
     onContinue: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -196,7 +191,7 @@ internal fun FamilyWizardNetworkDialog(
         onDismissRequest = { if (!saving) onDismiss() },
         modifier = Modifier.imePadding(),
         properties = DialogProperties(decorFitsSystemWindows = false),
-        title = { Text(familyWizardTitle(mode, FamilyWizardStep.Network)) },
+        title = { Text(familyWizardTitle(mode, FamilyWizardStep.Endpoint)) },
         text = {
             Column(
                 modifier = Modifier
@@ -205,17 +200,11 @@ internal fun FamilyWizardNetworkDialog(
                     .dismissKeyboardOnTap(),
                 verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
             ) {
-                FamilyWizardStepHeader(mode, FamilyWizardStep.Network, networkReady)
+                FamilyWizardStepHeader(mode, FamilyWizardStep.Endpoint, endpointReady)
                 FamilyScopeRow("本机", "家庭服务器", "受信任的 HTTPS 地址仅存本机，可中断后继续")
-                if (inviteCodeSummary != null) {
+                if (endpointInfoHint != null) {
                     Text(
-                        "邀请码已填 · $inviteCodeSummary",
-                        style = LeziTypography.BodyStrong,
-                    )
-                }
-                if (networkInfoHint != null) {
-                    Text(
-                        networkInfoHint,
+                        endpointInfoHint,
                         style = LeziTypography.Meta,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -239,21 +228,6 @@ internal fun FamilyWizardNetworkDialog(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.fillMaxWidth(),
                 )
-                if (onScan != null) {
-                    OutlinedButton(
-                        onClick = onScan,
-                        enabled = !saving,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Icon(
-                            Icons.Outlined.QrCodeScanner,
-                            contentDescription = null,
-                            modifier = Modifier.size(20.dp),
-                        )
-                        Spacer(Modifier.size(8.dp))
-                        Text("扫码填入邀请与家庭服务器")
-                    }
-                }
                 if (feedback != null) {
                     Text(feedback, color = MaterialTheme.colorScheme.error, style = LeziTypography.Meta)
                 }
@@ -281,7 +255,7 @@ internal fun FamilyJoinRoleDialog(
     busy: Boolean,
     onOwner: () -> Unit,
     onMember: () -> Unit,
-    onBackToNetwork: () -> Unit,
+    onBackToEndpoint: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
@@ -304,7 +278,7 @@ internal fun FamilyJoinRoleDialog(
         },
         confirmButton = {},
         dismissButton = {
-            TextButton(onClick = onBackToNetwork, enabled = !busy) { Text("上一步") }
+            TextButton(onClick = onBackToEndpoint, enabled = !busy) { Text("上一步") }
         },
     )
 }
@@ -399,102 +373,6 @@ internal fun OwnerTakeoverConfirmationDialog(
         },
         dismissButton = {
             TextButton(onClick = onDismiss, enabled = !submitting) { Text("取消") }
-        },
-    )
-}
-
-@Composable
-internal fun JoinFamilyDialog(
-    joinCode: String,
-    onJoinCodeChange: (String) -> Unit,
-    displayName: String,
-    onDisplayNameChange: (String) -> Unit,
-    displayNameError: String?,
-    joining: Boolean,
-    networkReady: Boolean = true,
-    networkSummary: String? = null,
-    networkMissingHint: String? = null,
-    inviteFieldError: String? = null,
-    confirmEnabled: Boolean = true,
-    showWizardChrome: Boolean = true,
-    onScan: () -> Unit,
-    onBackToNetwork: (() -> Unit)? = null,
-    onConfirm: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = { if (!joining) onDismiss() },
-        modifier = Modifier.imePadding(),
-        properties = DialogProperties(decorFitsSystemWindows = false),
-        title = { Text(FamilyPrimaryCta.JOIN) },
-        text = {
-            Column(
-                modifier = Modifier
-                    .heightIn(max = 480.dp)
-                    .verticalScroll(rememberScrollState())
-                    .dismissKeyboardOnTap(),
-                verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
-            ) {
-                if (showWizardChrome) {
-                    FamilyWizardStepHeader(
-                        FamilyWizardMode.Join,
-                        FamilyWizardStep.Identity,
-                        networkReady,
-                    )
-                }
-                FamilyScopeRow("共享", "家庭数据", "宝宝档案、照护记录、日志图片")
-                FamilyScopeRow("本机", "个人偏好", "主题、提醒、桌面小组件")
-                if (networkSummary != null) {
-                    Text(networkSummary, style = LeziTypography.Meta)
-                } else if (networkMissingHint != null) {
-                    Text(
-                        networkMissingHint,
-                        style = LeziTypography.Meta,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-                OutlinedTextField(
-                    value = displayName,
-                    onValueChange = onDisplayNameChange,
-                    label = { Text("我是宝宝的？") },
-                    placeholder = { Text("如：妈妈、干妈、月嫂小王") },
-                    supportingText = {
-                        Text(displayNameError ?: "家庭称呼，必填；家人用这个认出你")
-                    },
-                    isError = displayNameError != null,
-                    enabled = !joining,
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = joinCode,
-                    onValueChange = onJoinCodeChange,
-                    label = { Text("邀请码") },
-                    placeholder = { Text("输入共享码，或使用下方扫码") },
-                    supportingText = inviteFieldError?.let { { Text(it) } },
-                    isError = inviteFieldError != null,
-                    singleLine = true,
-                    enabled = !joining,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedButton(onClick = onScan, enabled = !joining, modifier = Modifier.fillMaxWidth()) {
-                    Icon(Icons.Outlined.QrCodeScanner, contentDescription = null, modifier = Modifier.size(20.dp))
-                    Spacer(Modifier.size(8.dp))
-                    Text("扫码填入邀请与家庭服务器")
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onConfirm, enabled = confirmEnabled && !joining) {
-                Text(if (joining) "正在加入…" else "加入")
-            }
-        },
-        dismissButton = {
-            if (onBackToNetwork != null) {
-                TextButton(onClick = onBackToNetwork, enabled = !joining) { Text("上一步") }
-            } else {
-                TextButton(onClick = onDismiss, enabled = !joining) { Text("取消") }
-            }
         },
     )
 }
@@ -622,9 +500,9 @@ internal fun CreateFamilyDialog(
     onBootstrapSecretChange: (String) -> Unit,
     feedback: String?,
     creating: Boolean,
-    networkConfigured: Boolean = true,
+    endpointConfigured: Boolean = true,
     showWizardChrome: Boolean = true,
-    onBackToNetwork: (() -> Unit)? = null,
+    onBackToEndpoint: (() -> Unit)? = null,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -648,7 +526,7 @@ internal fun CreateFamilyDialog(
                     FamilyWizardStepHeader(
                         FamilyWizardMode.Create,
                         FamilyWizardStep.Identity,
-                        networkConfigured,
+                        endpointConfigured,
                     )
                 }
                 FamilyScopeRow("称呼", "家庭身份", "必填自由文本，不是关系芯片")
@@ -712,8 +590,8 @@ internal fun CreateFamilyDialog(
             }
         },
         dismissButton = {
-            if (onBackToNetwork != null) {
-                TextButton(onClick = onBackToNetwork, enabled = !creating) { Text("上一步") }
+            if (onBackToEndpoint != null) {
+                TextButton(onClick = onBackToEndpoint, enabled = !creating) { Text("上一步") }
             } else {
                 TextButton(onClick = onDismiss, enabled = !creating) { Text("取消") }
             }
@@ -812,48 +690,6 @@ internal fun EditMyDisplayNameDialog(
         dismissButton = {
             TextButton(onClick = onDismiss, enabled = !saving) { Text("取消") }
         },
-    )
-}
-
-@Composable
-internal fun FamilyInviteDialog(invite: FamilyInviteView, onDismiss: () -> Unit) {
-    SecureWindowWhileVisible()
-    var showPayload by remember(invite.code) { mutableStateOf(false) }
-    val qrBitmap = remember(invite.payload) {
-        BarcodeEncoder().encodeBitmap(invite.payload, BarcodeFormat.QR_CODE, 640, 640).asImageBitmap()
-    }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("家庭邀请二维码") },
-        text = {
-            Column(
-                modifier = Modifier.heightIn(max = 520.dp).verticalScroll(rememberScrollState()),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
-            ) {
-                FamilyScopeRow("扫码", "自动填入", "家庭服务器与邀请信息")
-                FamilyScopeRow("安全", "隐私保护", "截屏与录屏已禁用")
-                Image(bitmap = qrBitmap, contentDescription = "家庭邀请二维码", modifier = Modifier.size(240.dp))
-                Text(
-                    "共享码 ${invite.code} · 有效至 " +
-                        java.text.DateFormat.getDateTimeInstance().format(invite.expiresAt),
-                    style = LeziTypography.BodyStrong,
-                )
-                TextButton(onClick = { showPayload = !showPayload }) {
-                    Text(if (showPayload) "隐藏完整载荷" else "显示完整载荷（含服务器地址）")
-                }
-                if (showPayload) {
-                    SelectionContainer {
-                        Text(
-                            invite.payload,
-                            style = LeziTypography.Meta,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
     )
 }
 

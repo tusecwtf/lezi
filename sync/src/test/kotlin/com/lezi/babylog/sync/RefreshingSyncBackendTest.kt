@@ -8,7 +8,7 @@ import org.junit.Test
 class RefreshingSyncBackendTest {
     @Test
     fun expiredOrProcessRecreatedAccessRefreshesBeforeOneOriginalRequest() = runTest {
-        val preferences = MemorySyncPreferences(joinedSession(familyToken = "", expiresAt = 0))
+        val preferences = MemorySyncPreferences(joinedSession(accessToken = "", expiresAt = 0))
         val delegate = RefreshRecordingBackend()
         val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
 
@@ -17,7 +17,7 @@ class RefreshingSyncBackendTest {
         assertThat(result.cursor).isEqualTo(7)
         assertThat(delegate.refreshTokens).containsExactly("refresh-old")
         assertThat(delegate.pullTokens).containsExactly("access-new")
-        assertThat(preferences.current().familyToken).isEqualTo("access-new")
+        assertThat(preferences.current().accessToken).isEqualTo("access-new")
         assertThat(preferences.current().refreshToken).isEqualTo("refresh-new")
         assertThat(preferences.current().accessExpiresAtEpochSeconds).isEqualTo(2_000_900)
     }
@@ -36,7 +36,7 @@ class RefreshingSyncBackendTest {
 
     @Test
     fun existingMemberBindingUsesTheAuthenticatedOwnerSessionAfterRefresh() = runTest {
-        val preferences = MemorySyncPreferences(joinedSession(familyToken = "", expiresAt = 0))
+        val preferences = MemorySyncPreferences(joinedSession(accessToken = "", expiresAt = 0))
         val delegate = RefreshRecordingBackend()
         val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
 
@@ -58,7 +58,7 @@ class RefreshingSyncBackendTest {
 
     @Test
     fun memberLoginGrantCreationUsesRefreshedOwnerButClaimNeedsNoExistingSession() = runTest {
-        val preferences = MemorySyncPreferences(joinedSession(familyToken = "", expiresAt = 0))
+        val preferences = MemorySyncPreferences(joinedSession(accessToken = "", expiresAt = 0))
         val delegate = RefreshRecordingBackend()
         val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
         val endpoint = TrustedEndpointProfile.systemPki("https://family.example.com")
@@ -82,7 +82,7 @@ class RefreshingSyncBackendTest {
     @Test
     fun invalidRefreshClearsOnlyDeviceCredentialsAndEntersReauthRequired() = runTest {
         val endpoint = TrustedEndpointProfile.systemPki("https://family.example.com")
-        val original = joinedSession(familyToken = "", expiresAt = 0)
+        val original = joinedSession(accessToken = "", expiresAt = 0)
         val preferences = MemorySyncPreferences(original).apply { rememberEndpoint(endpoint) }
         val delegate = RefreshRecordingBackend().apply {
             refreshFailure = SyncHttpException(401, "{\"code\":\"invalid_refresh\"}")
@@ -95,7 +95,7 @@ class RefreshingSyncBackendTest {
         val retained = preferences.current()
         assertThat(retained.reauthRequired).isTrue()
         assertThat(retained.isJoined).isFalse()
-        assertThat(retained.familyToken).isEmpty()
+        assertThat(retained.accessToken).isEmpty()
         assertThat(retained.refreshToken).isEmpty()
         assertThat(retained.familyId).isEqualTo(original.familyId)
         assertThat(retained.membershipId).isEqualTo(original.membershipId)
@@ -110,7 +110,7 @@ class RefreshingSyncBackendTest {
 
     @Test
     fun missingRefreshClearsOnlyDeviceCredentialsAndEntersReauthRequired() = runTest {
-        val original = joinedSession(familyToken = "", expiresAt = 0).copy(refreshToken = "")
+        val original = joinedSession(accessToken = "", expiresAt = 0).copy(refreshToken = "")
         val preferences = MemorySyncPreferences(original)
         val delegate = RefreshRecordingBackend()
         val backend = RefreshingSyncBackend(delegate, preferences, FixedAuthClock(2_000_000))
@@ -126,7 +126,7 @@ class RefreshingSyncBackendTest {
 
     @Test
     fun transientRefreshFailurePreservesCredentialsAndDoesNotEnterReauth() = runTest {
-        val original = joinedSession(familyToken = "", expiresAt = 0)
+        val original = joinedSession(accessToken = "", expiresAt = 0)
         val preferences = MemorySyncPreferences(original)
         val delegate = RefreshRecordingBackend().apply {
             refreshFailure = SyncHttpException(503, "{\"detail\":\"maintenance\"}")
@@ -143,7 +143,7 @@ class RefreshingSyncBackendTest {
 
     @Test
     fun explicitDeviceRemovedOnRefreshIsTerminalAndDoesNotBecomeOrdinaryReauth() = runTest {
-        val original = joinedSession(familyToken = "", expiresAt = 0)
+        val original = joinedSession(accessToken = "", expiresAt = 0)
         val preferences = MemorySyncPreferences(original)
         val delegate = RefreshRecordingBackend().apply {
             refreshFailure = SyncHttpException(
@@ -181,7 +181,7 @@ class RefreshingSyncBackendTest {
 
     @Test
     fun explicitMembershipDeletedOnRefreshIsTerminalAndPreservesStateForRecoverableClear() = runTest {
-        val original = joinedSession(familyToken = "", expiresAt = 0)
+        val original = joinedSession(accessToken = "", expiresAt = 0)
         val preferences = MemorySyncPreferences(original)
         val delegate = RefreshRecordingBackend().apply {
             refreshFailure = SyncHttpException(
@@ -219,7 +219,7 @@ class RefreshingSyncBackendTest {
 
     @Test
     fun explicitFamilyDeletedOnRefreshIsTerminalAndPreservesStateForRecoverableClear() = runTest {
-        val original = joinedSession(familyToken = "", expiresAt = 0)
+        val original = joinedSession(accessToken = "", expiresAt = 0)
         val preferences = MemorySyncPreferences(original)
         val delegate = RefreshRecordingBackend().apply {
             refreshFailure = SyncHttpException(
@@ -307,7 +307,7 @@ private class RefreshRecordingBackend : SyncBackend by FakeSyncBackend() {
     }
 
     override suspend fun pull(session: SyncSession): PullResult {
-        pullTokens += session.familyToken
+        pullTokens += session.accessToken
         pullFailure?.let { throw it }
         if (alwaysFailPullWith401 || (failFirstPullWith401 && pullTokens.size == 1)) {
             throw SyncHttpException(401)
@@ -326,7 +326,7 @@ private class RefreshRecordingBackend : SyncBackend by FakeSyncBackend() {
         requestId: String,
         membershipId: String,
     ) {
-        bindCalls += Triple(session.familyToken, requestId, membershipId)
+        bindCalls += Triple(session.accessToken, requestId, membershipId)
     }
 
     override suspend fun createMemberLoginGrant(
@@ -334,7 +334,7 @@ private class RefreshRecordingBackend : SyncBackend by FakeSyncBackend() {
         endpoint: TrustedEndpointProfile,
         membershipId: String,
     ): MemberLoginGrant {
-        grantCreateCalls += session.familyToken to membershipId
+        grantCreateCalls += session.accessToken to membershipId
         return MemberLoginGrant(
             grant = "grant-0000000000000000000000000000000000000",
             familyName = "乐乐一家",
@@ -347,11 +347,11 @@ private class RefreshRecordingBackend : SyncBackend by FakeSyncBackend() {
         endpoint: TrustedEndpointProfile,
         grant: String,
         deviceName: String,
-    ): JoinResult {
+    ): SessionBootstrapResult {
         grantClaimCalls += Triple(endpoint, grant, deviceName)
-        return JoinResult(
+        return SessionBootstrapResult(
             familyId = "family",
-            token = "member-access",
+            accessToken = "member-access",
             refreshToken = "member-refresh",
             accessExpiresAtEpochSeconds = 2_000_900,
             deviceId = "new-device",
@@ -368,11 +368,11 @@ private class FixedAuthClock(private val nowMillis: Long) : PolicyClock {
 }
 
 private fun joinedSession(
-    familyToken: String = "access-old",
+    accessToken: String = "access-old",
     expiresAt: Long = 3_000_000,
 ): SyncSession = SyncSession(
     familyId = "family",
-    familyToken = familyToken,
+    accessToken = accessToken,
     refreshToken = "refresh-old",
     accessExpiresAtEpochSeconds = expiresAt,
     deviceId = "device",

@@ -577,7 +577,7 @@ private fun joinedSession(
     familyId: String = "family",
 ) = SyncSession(
     familyId = familyId,
-    familyToken = "token",
+    accessToken = "token",
     serverHost = "nas.local",
     role = role,
     membershipId = membershipId,

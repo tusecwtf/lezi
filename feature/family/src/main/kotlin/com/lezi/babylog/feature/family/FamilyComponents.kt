@@ -45,7 +45,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/** Apply FLAG_SECURE for the lifetime of the current composition (invite QR). */
+/** Apply FLAG_SECURE for the lifetime of the current composition (member-login QR). */
 @Composable
 internal fun SecureWindowWhileVisible() {
     val view = LocalView.current

@@ -98,8 +98,8 @@ class FamilySessionCoordinatorTest {
 
             assertThat(
                 coordinator.execute(
-                    FamilySessionCommand.SaveHomeLanConfig(
-                        HomeLanServerConfig(
+                    FamilySessionCommand.SaveEndpointConfig(
+                        FamilyEndpointConfig(
                             host = "192.168.1.20",
                             port = 9443,
                             scheme = "https",
@@ -112,8 +112,8 @@ class FamilySessionCoordinatorTest {
 
             assertThat(
                 coordinator.execute(
-                    FamilySessionCommand.SaveHomeLanConfig(
-                        HomeLanServerConfig(
+                    FamilySessionCommand.SaveEndpointConfig(
+                        FamilyEndpointConfig(
                             host = "new.home",
                             port = 8765,
                             scheme = "https",
@@ -123,8 +123,8 @@ class FamilySessionCoordinatorTest {
             ).isTrue()
 
             assertThat(resetSessions).hasSize(2)
-            assertThat(preferences.current().homeLanConfig).isEqualTo(
-                HomeLanServerConfig(
+            assertThat(preferences.current().endpointConfig).isEqualTo(
+                FamilyEndpointConfig(
                     host = "new.home",
                     port = 8765,
                     scheme = "https",
@@ -172,7 +172,7 @@ class FamilySessionCoordinatorTest {
             backend = backend,
             replica = replica,
             requireRemoteAllowed = { config ->
-                assertThat(config).isEqualTo(previous.homeLanConfig)
+                assertThat(config).isEqualTo(previous.endpointConfig)
                 events += "gate"
             },
             onSessionChanged = { session ->
@@ -199,7 +199,7 @@ class FamilySessionCoordinatorTest {
         assertThat(joinedOutcome.reclaimed).isFalse()
         val joined = joinedOutcome.session
         assertThat(joined.familyId).isEqualTo("family-created")
-        assertThat(joined.familyToken).isEqualTo("owner-token")
+        assertThat(joined.accessToken).isEqualTo("owner-token")
         assertThat(joined.membershipId).isEqualTo("membership-created")
         assertThat(joined.familyName).isEqualTo("乐乐一家")
         assertThat(joined.pullCursor).isEqualTo(0)
@@ -254,7 +254,7 @@ class FamilySessionCoordinatorTest {
         assertThat(joined.reclaimed).isTrue()
         assertThat(joined.dataRecovery).isEqualTo(InitialFamilyDataRecovery.Complete)
         assertThat(joined.session.familyId).isEqualTo("family-created")
-        assertThat(joined.session.familyToken).isEqualTo("owner-token-reclaimed")
+        assertThat(joined.session.accessToken).isEqualTo("owner-token-reclaimed")
         assertThat(joined.session.membershipId).isEqualTo("membership-created")
         assertThat(joined.session.role).isEqualTo(FamilyRole.Owner)
         assertThat(joined.session.pullCursor).isEqualTo(0)
@@ -337,133 +337,6 @@ class FamilySessionCoordinatorTest {
         }
     }
 
-    @Test
-    fun joinUsesTheConfirmedEndpointAndPublishesItOnlyAfterTheRemoteJoin() = runTest {
-        val previous = SyncSession(
-            serverHost = "old.home",
-            serverPort = 8765,
-        )
-        val preferences = MemorySyncPreferences(previous)
-        val backend = RecordingSyncBackend().apply {
-            nextJoinFamilyName = "新家庭"
-            nextJoinEntities = listOf(
-                SyncEntity(
-                    type = "baby",
-                    clientUuid = "baby-joined",
-                    payloadJson = """{"nickname":"乐乐"}""",
-                    updatedAt = 20,
-                ),
-            )
-        }
-        val confirmed = HomeLanServerConfig(
-            host = "confirmed.home",
-            port = 9443,
-            scheme = "https",
-        )
-        val invitation = InvitePayloadCodec.encode(
-            InvitePayload(
-                baseUrl = "https://stale-qr.home:8787",
-                code = "ABCD1234",
-            ),
-        )
-        val events = mutableListOf<String>()
-        val coordinator = coordinator(
-            preferences = preferences,
-            backend = backend,
-            replica = RecordingFamilySessionReplica(
-                onReset = {
-                    assertThat(preferences.current()).isEqualTo(
-                        previous.copy(deviceId = "test-device"),
-                    )
-                    events += "receipts-reset"
-                },
-                onApply = { session, entities ->
-                    assertThat(session.homeLanConfig).isEqualTo(confirmed)
-                    assertThat(entities.map(SyncEntity::clientUuid))
-                        .containsExactly("baby-joined")
-                    events += "initial-applied"
-                },
-            ),
-            requireRemoteAllowed = { config ->
-                assertThat(config).isEqualTo(confirmed)
-                assertThat(preferences.current().homeLanConfig).isEqualTo(previous.homeLanConfig)
-                events += "gate"
-            },
-            onSessionChanged = {
-                events += "session-published"
-            },
-            requestSync = {
-                events += "unexpected-sync-request"
-            },
-        )
-
-        val outcome = coordinator.execute(
-            FamilySessionCommand.JoinFamily(
-                JoinFamilyCommand(
-                    invitation = invitation,
-                    homeLanConfig = confirmed,
-                    displayName = "  爸爸  ",
-                ),
-            ),
-        ).getOrThrow()
-
-        val joined = (outcome as FamilySessionOutcome.Joined).session
-        assertThat(joined.familyId).isEqualTo("family-joined")
-        assertThat(joined.role).isEqualTo(FamilyRole.Member)
-        assertThat(joined.familyName).isEqualTo("新家庭")
-        assertThat(joined.homeLanConfig).isEqualTo(confirmed)
-        assertThat(backend.joinBaseUrls).containsExactly("https://confirmed.home:9443")
-        assertThat(backend.joinCodes).containsExactly("ABCD1234")
-        assertThat(backend.joinDisplayNames).containsExactly("爸爸")
-        assertThat(events)
-            .containsExactly("gate", "receipts-reset", "initial-applied", "session-published")
-            .inOrder()
-    }
-
-    @Test
-    fun ownerCanCreateInviteThroughTheJoinedSession() = runTest {
-        val session = joinedFamilySession()
-        val preferences = MemorySyncPreferences(session)
-        val backend = RecordingSyncBackend().apply {
-            nextInvite = Invite(code = "INVITE-A", expiresAt = 1_800)
-        }
-        var gatedConfig: HomeLanServerConfig? = null
-        val coordinator = coordinator(
-            preferences = preferences,
-            backend = backend,
-            requireRemoteAllowed = { gatedConfig = it },
-        )
-
-        val outcome = coordinator.execute(
-            FamilySessionCommand.CreateInvite,
-        ).getOrThrow()
-
-        assertThat(outcome).isEqualTo(
-            FamilySessionOutcome.InviteCreated(
-                Invite(code = "INVITE-A", expiresAt = 1_800),
-            ),
-        )
-        assertThat(gatedConfig).isEqualTo(session.homeLanConfig)
-        assertThat(backend.inviteSessions).containsExactly(session)
-    }
-
-    @Test
-    fun memberCannotCreateInvite() = runTest {
-        val backend = RecordingSyncBackend()
-        val coordinator = coordinator(
-            preferences = MemorySyncPreferences(
-                joinedFamilySession(role = FamilyRole.Member),
-            ),
-            backend = backend,
-        )
-
-        val failure = coordinator.execute(
-            FamilySessionCommand.CreateInvite,
-        ).exceptionOrNull()
-
-        assertThat(failure).hasMessageThat().contains("管理员")
-        assertThat(backend.inviteSessions).isEmpty()
-    }
 
     @Test
     fun ownerCanRemoveAnotherMember() = runTest {
@@ -851,36 +724,6 @@ class FamilySessionCoordinatorTest {
         assertThat(preferences.current().isJoined).isTrue()
     }
 
-    @Test
-    fun failedJoinDoesNotPublishTheConfirmedEndpointOrSession() = runTest {
-        val previous = SyncSession()
-        val preferences = MemorySyncPreferences(previous)
-        val backend = RecordingSyncBackend().apply {
-            joinFailure = IllegalStateException("join rejected")
-        }
-        val coordinator = coordinator(preferences = preferences, backend = backend)
-        val confirmed = HomeLanServerConfig(
-            host = "confirmed.home",
-            port = 9443,
-            scheme = "https",
-        )
-
-        val failure = coordinator.execute(
-            FamilySessionCommand.JoinFamily(
-                JoinFamilyCommand(
-                    invitation = "ABCD1234",
-                    homeLanConfig = confirmed,
-                    displayName = "爸爸",
-                ),
-            ),
-        ).exceptionOrNull()
-
-        assertThat(failure).hasMessageThat().contains("join rejected")
-        assertThat(preferences.current()).isEqualTo(
-            previous.copy(deviceId = "test-device"),
-        )
-        assertThat(backend.joinBaseUrls).containsExactly("https://confirmed.home:9443")
-    }
 
     @Test
     fun homeLanGateFailurePreventsAuthenticatedBackendIo() = runTest {
@@ -905,49 +748,6 @@ class FamilySessionCoordinatorTest {
         assertThat(observed).containsExactly(session)
     }
 
-    @Test
-    fun sharedBarrierPreventsConcurrentCreateAndJoinFromOverwritingTheFirstCredential() =
-        runTest {
-            val previous = SyncSession(
-                serverHost = "192.168.1.20",
-                serverPort = 8787,
-            )
-            val preferences = MemorySyncPreferences(previous)
-            val backend = RecordingSyncBackend().apply {
-                createStarted = CompletableDeferred()
-                releaseCreate = CompletableDeferred()
-            }
-            val coordinator = coordinator(preferences = preferences, backend = backend)
-
-            val creating = async {
-                coordinator.execute(
-                    FamilySessionCommand.CreateFamily(
-                        displayName = "妈妈",
-                        bootstrapSecret = "bootstrap-secret",
-                        familyName = "乐乐一家",
-                    ),
-                )
-            }
-            backend.createStarted!!.await()
-            val joining = async {
-                coordinator.execute(
-                    FamilySessionCommand.JoinFamily(
-                        JoinFamilyCommand(
-                            invitation = "JOIN-CODE",
-                            homeLanConfig = previous.homeLanConfig,
-                            displayName = "爸爸",
-                        ),
-                    ),
-                )
-            }
-            runCurrent()
-            backend.releaseCreate!!.complete(Unit)
-
-            assertThat(creating.await().isSuccess).isTrue()
-            assertThat(joining.await().isFailure).isTrue()
-            assertThat(backend.joinCalls).isEqualTo(0)
-            assertThat(preferences.current().familyId).isEqualTo("family-created")
-        }
 
     @Test
     fun generic401CannotPretendMemberWasHardDeleted() = runTest {
@@ -1299,7 +1099,7 @@ private fun coordinator(
     backend: RecordingSyncBackend = RecordingSyncBackend(),
     outbox: MemoryOutboxDao = MemoryOutboxDao(),
     replica: RecordingFamilySessionReplica = RecordingFamilySessionReplica(),
-    requireRemoteAllowed: suspend (HomeLanServerConfig) -> Unit = {},
+    requireRemoteAllowed: suspend (FamilyEndpointConfig) -> Unit = {},
     onSessionChanged: (SyncSession) -> Unit = {},
     onSessionObserved: (SyncSession) -> Unit = {},
     requestSync: (SyncTrigger) -> Unit = {},
@@ -1350,7 +1150,7 @@ private fun joinedFamilySession(
     role: FamilyRole = FamilyRole.Owner,
 ): SyncSession = SyncSession(
     familyId = "family-a",
-    familyToken = "token-a",
+    accessToken = "token-a",
     deviceId = "device-a",
     role = role,
     pullCursor = 0,

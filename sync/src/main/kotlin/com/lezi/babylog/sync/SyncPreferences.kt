@@ -35,7 +35,7 @@ data class CreatorAcknowledgementRef(
 data class SyncSession(
     val familyId: String = "",
     /** Short-lived access token. Never persisted; blank after process reconstruction. */
-    val familyToken: String = "",
+    val accessToken: String = "",
     /** Rotating refresh token projected from Keystore-backed storage. */
     val refreshToken: String = "",
     val accessExpiresAtEpochSeconds: Long = 0,
@@ -50,27 +50,27 @@ data class SyncSession(
     val serverPort: Int = DEFAULT_SERVER_PORT,
     val serverScheme: String = DEFAULT_SERVER_SCHEME,
     /**
-     * Shared family name cached from create/join/rename responses.
+     * Shared family name cached from create/login/claim/rename responses.
      * Null when the current family has no configured shared name.
      * Cold start relies on this local cache (no GET family-name path in this ticket).
      */
     val familyName: String? = null,
     /**
      * Server-minted immutable membership identity for this device's family session.
-     * Empty only while not joined; current create/join responses require this field.
+     * Empty only while not authenticated; current session bootstrap responses require this field.
      */
     val membershipId: String = "",
     val pendingCreatorAcknowledgements: Set<CreatorAcknowledgementRef> = emptySet(),
 ) {
     val baseUrl: String
-        get() = homeLanConfig.baseUrl
+        get() = endpointConfig.baseUrl
 
     val isJoined: Boolean
         get() = !reauthRequired && baseUrl.isNotBlank() && familyId.isNotBlank() &&
-            (familyToken.isNotBlank() || refreshToken.isNotBlank())
+            (accessToken.isNotBlank() || refreshToken.isNotBlank())
 
-    val homeLanConfig: HomeLanServerConfig
-        get() = HomeLanServerConfig(
+    val endpointConfig: FamilyEndpointConfig
+        get() = FamilyEndpointConfig(
             host = serverHost,
             port = serverPort,
             scheme = serverScheme,
@@ -93,7 +93,7 @@ interface SyncPreferences {
     suspend fun rememberEndpoint(endpoint: TrustedEndpointProfile)
     suspend fun forgetEndpoint()
     suspend fun saveServer(baseUrl: String)
-    suspend fun saveHomeLanConfig(config: HomeLanServerConfig, clearSessionIfServerChanged: Boolean = true)
+    suspend fun saveEndpointConfig(config: FamilyEndpointConfig, clearSessionIfServerChanged: Boolean = true)
     suspend fun saveSession(session: SyncSession)
     suspend fun updateCursor(cursor: Long, generation: String = "")
     suspend fun updatePullCheckpoint(
@@ -141,7 +141,7 @@ interface SyncPreferences {
 @Singleton
 class DataStoreSyncPreferences @Inject constructor(
     private val dataStore: DataStore<Preferences>,
-    private val secureTokenStore: SecureFamilyTokenStore,
+    private val secureTokenStore: SecureRefreshTokenStore,
 ) : SyncPreferences {
     private val processAccessToken = java.util.concurrent.atomic.AtomicReference("")
     private val processAccessExpiry = java.util.concurrent.atomic.AtomicLong(0)
@@ -209,7 +209,7 @@ class DataStoreSyncPreferences @Inject constructor(
         val credentialClearPending = prefs[Keys.PENDING_FAMILY_CREDENTIAL_CLEAR] == true
         return SyncSession(
             familyId = prefs[Keys.FAMILY_ID].orEmpty(),
-            familyToken = if (credentialClearPending) "" else processAccessToken.get(),
+            accessToken = if (credentialClearPending) "" else processAccessToken.get(),
             refreshToken = if (credentialClearPending) "" else secureTokenStore.getToken(),
             accessExpiresAtEpochSeconds =
                 if (credentialClearPending) 0 else processAccessExpiry.get(),
@@ -231,12 +231,12 @@ class DataStoreSyncPreferences @Inject constructor(
     }
 
     override suspend fun saveServer(baseUrl: String) {
-        val config = HomeLanServerConfig.fromBaseUrl(baseUrl).withNormalized()
-        saveHomeLanConfig(config, clearSessionIfServerChanged = true)
+        val config = FamilyEndpointConfig.fromBaseUrl(baseUrl).withNormalized()
+        saveEndpointConfig(config, clearSessionIfServerChanged = true)
     }
 
-    override suspend fun saveHomeLanConfig(
-        config: HomeLanServerConfig,
+    override suspend fun saveEndpointConfig(
+        config: FamilyEndpointConfig,
         clearSessionIfServerChanged: Boolean,
     ) {
         val normalized = config.withNormalized()
@@ -266,9 +266,9 @@ class DataStoreSyncPreferences @Inject constructor(
 
     override suspend fun saveSession(session: SyncSession) {
         secureTokenStore.setToken(session.refreshToken)
-        processAccessToken.set(session.familyToken)
+        processAccessToken.set(session.accessToken)
         processAccessExpiry.set(session.accessExpiresAtEpochSeconds)
-        val config = session.homeLanConfig.withNormalized()
+        val config = session.endpointConfig.withNormalized()
         dataStore.edit { prefs ->
             prefs.remove(Keys.REAUTH_REQUIRED)
             prefs.remove(Keys.PENDING_FAMILY_CREDENTIAL_CLEAR)

@@ -26,7 +26,7 @@
 | [12](./issues/12-member-hard-delete-anonymize.md) | 成员彻底删除与共享数据匿名化 | 10, 11 | complete |
 | [13](./issues/13-delete-family.md) | 删除家庭 | 05, 11 | complete |
 | [14](./issues/14-foreground-sync-no-ssid.md) | 去除 Wi-Fi 绑定并收敛前台同步体验 | 08, 10, 11, 12, 13 | complete |
-| [15](./issues/15-retire-legacy-network-auth.md) | 收口旧网络与鉴权模型 | 14 | ready-for-agent |
+| [15](./issues/15-retire-legacy-network-auth.md) | 收口旧网络与鉴权模型 | 14 | complete |
 | [16](./issues/16-cross-device-release-acceptance.md) | 跨设备发布候选验收 | 15 | ready-for-agent |
 | [17](./issues/17-release-0.3.1.md) | 升级并交付 0.3.1 | 16 | ready-for-agent |
 

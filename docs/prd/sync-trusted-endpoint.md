@@ -335,7 +335,8 @@ App 不提供 NAS→VPS 迁移、handoff、备份恢复、server identity 搬迁
 
 ## 12. 文档与代码处置
 
-- 本文与 ADR-0011 是目标合同；ADR-0009、ADR-0010 已被取代。
-- `sync-home-lan.md` 仅保留 0.3.0 已实现基线，不得据其旧 wire 扩展新功能。
-- 当前 SSID/HTTP/邀请码/一设备 membership 代码尚未因文档发布而完成迁移。
+- 本文与 ADR-0011 是当前合同；ADR-0009、ADR-0010 已被取代。
+- `sync-home-lan.md` 只保留历史处置说明，不得据其恢复旧 wire、配置或界面。
+- 0.3.1 已完成 fresh-current 收口：生产只保留可信 HTTPS、每设备会话、成员申请/审批与
+  单次成员登录授权；旧网络身份、邀请加入和长期家庭凭证不提供兼容旁路。
 - `.scratch/trusted-sync-endpoint-auth/spec.md` 是拆票输入；旧票在重新拆分前不得实施。

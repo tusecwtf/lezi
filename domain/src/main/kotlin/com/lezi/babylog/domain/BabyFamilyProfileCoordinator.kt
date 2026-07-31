@@ -216,7 +216,7 @@ internal class BabyFamilyProfileCoordinator(
     }
 
     /**
-     * Cache the current membership 家庭称呼 on [LocalUserEntity] after create/join/self-rename.
+     * Cache the current membership 家庭称呼 after create/login/claim/self-rename.
      * Blank / local placeholder clear the cache so UI falls back to the default.
      */
     suspend fun updateLocalDisplayName(displayName: String?) {

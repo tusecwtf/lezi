@@ -42,11 +42,6 @@ abstract class DomainModule {
         impl: DefaultSystemCalendarConfigurationCoordinator,
     ): SystemCalendarConfigurationCoordinator
 
-    @Binds
-    @Singleton
-    internal abstract fun bindJoinFamilyUseCase(
-        impl: DefaultJoinFamilyUseCase,
-    ): JoinFamilyUseCase
 }
 
 /**

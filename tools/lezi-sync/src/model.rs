@@ -189,36 +189,6 @@ impl DeleteFamilyRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct InviteRequest {}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct JoinRequest {
-    pub code: String,
-    pub device_id: String,
-    #[serde(default)]
-    pub display_name: Option<String>,
-}
-
-impl JoinRequest {
-    pub fn validate(&self) -> Result<String, ApiError> {
-        if !(8..=32).contains(&self.code.len())
-            || !self
-                .code
-                .bytes()
-                .all(|value| value.is_ascii_uppercase() || value.is_ascii_digit())
-        {
-            return Err(ApiError::unprocessable(
-                "code must contain 8-32 uppercase letters or digits",
-            ));
-        }
-        validate_required_string(&self.device_id, 128, "device_id")?;
-        require_display_name(self.display_name.as_deref())
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct UpdateDisplayNameRequest {
     pub display_name: String,
 }
@@ -278,7 +248,7 @@ impl RemoveMemberRequest {
     }
 }
 
-/// Product-required family 称呼 for create / join / self-rename.
+/// Product-required family 称呼 for create / member request / self-rename.
 ///
 /// Blank, whitespace-only, and the device-local placeholder 「我（本机）」 all
 /// return 422 — never silently stored as null.

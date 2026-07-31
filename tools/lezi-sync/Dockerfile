@@ -20,7 +20,6 @@ ENV LEZI_SYNC_VERSION=${LEZI_SYNC_VERSION} \
     LEZI_INTERNAL_PORT=8766 \
     LEZI_TLS_CERTFILE=/data/tls/server.crt \
     LEZI_TLS_KEYFILE=/data/tls/server.key \
-    LEZI_INVITE_TTL_HOURS=24 \
     LEZI_MAX_MEDIA_BYTES=10485760
 
 # Default non-root runtime uid/gid. NAS bind mounts that cannot chown to 10001

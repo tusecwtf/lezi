@@ -12,15 +12,12 @@
 | 商业 | **无**广告 / 会员 / IAP / 付费主题墙 |
 | 数据 | Room 为本地真相源，经用户已验证的单一家庭服务器做仅前台同步；只支持 fresh-current schema/payload/wire |
 
-当前版本 **0.3.0**（`versionName` 不再含 `offline`）。家庭局域网同步的
-Android 与服务端实现、自动化测试、本机 Docker 运行和双模拟器前台
-formula/pee UI 交叉可见均已验证；双模拟器还在严格使用
-`192.168.50.4:8765` 的服务端上完成建家、邀请码加入、双向协议记录和头像 ACL。
-相机扫码、日志图跨端 UI、蜂窝回家冲刷、伴侣通知和双端独立设置仍待目标环境执行；
-不宣称物理 NAS 生产部署或全部设备级 Must 通过。0.3.0 已实现基线见
-[sync-home-lan.md](./sync-home-lan.md)；下一版可信 HTTPS、管理员根密码、多设备成员、审批登录与
-无 SSID 前台同步的目标契约见 [sync-trusted-endpoint.md](./sync-trusted-endpoint.md)。服务器地址
-搬迁由部署完成，App 不提供迁移/恢复协议或页面。
+当前发布线以 [sync-trusted-endpoint.md](./sync-trusted-endpoint.md) 为唯一家庭同步合同：
+用户确认可信 HTTPS endpoint，管理员根密码只用于建家/管理员登录，普通成员经审批或管理员
+签发的单次登录授权取得独立设备会话；同步只在 App 前台触发。旧网络身份、明文协议、邀请
+加入和长期家庭凭证已整体退役且无兼容旁路。物理 NAS、双真机和相机扫码仍须按发布门提供
+实机证据；服务器地址搬迁由部署完成，App 不提供迁移/恢复协议或页面。历史处置见
+[sync-home-lan.md](./sync-home-lan.md)。
 
 合入后的行为以本目录为准；进行中的票在 [`.scratch/`](../../.scratch/)（见
 [`docs/agents/issue-tracker.md`](../agents/issue-tracker.md)）。闭合票不长期归档，
@@ -32,8 +29,8 @@ formula/pee UI 交叉可见均已验证；双模拟器还在严格使用
 |------|------|
 | [ui.md](./ui.md) | 画风、设计原则、页面与组件 |
 | [data-model.md](./data-model.md) | 实体、字段、本地优先、SyncPort 契约 |
-| [sync-home-lan.md](./sync-home-lan.md) | **0.3.0 已实现同步基线**：同步域、原子包、旧 SSID/HTTP 会话合同 |
-| [sync-trusted-endpoint.md](./sync-trusted-endpoint.md) | **下一版目标合同**：可信 HTTPS、根密码管理员、多设备成员、审批登录、无 SSID 前台同步 |
+| [sync-home-lan.md](./sync-home-lan.md) | **历史处置**：旧网络与鉴权基线已取代，不是实现合同 |
+| [sync-trusted-endpoint.md](./sync-trusted-endpoint.md) | **当前合同**：可信 HTTPS、根密码管理员、多设备成员、审批登录、无网络名称身份的前台同步 |
 | [local-photo-loading.md](./local-photo-loading.md) | 记录照片缩略图/全屏统一采样、方向、取消与失败边界 |
 | [tech.md](./tech.md) | Android 技术栈、模块、权限、验收 |
 | [assets-notes.md](./assets-notes.md) | 排泄图标资源约定（尿尿量档 / 便便分档） |
@@ -61,7 +58,7 @@ formula/pee UI 交叉可见均已验证；双模拟器还在严格使用
 | 日视图 | 时间轴、日汇总、一日时间条、日历跳日、图标显隐排序 |
 | 提醒 | 下次喂养护理计划、本机非精确提醒与可选系统日历副本 |
 | 宝宝 | 多宝宝、每宝宝本机主题色、日龄；家庭档案仅管理员管理 |
-| 家庭 UI | 账户/共享入口（默认 RealSync；邀请码 / 同步状态 / 家网门闩） |
+| 家庭 UI | 账户/共享入口（默认 RealSync；可信 endpoint、管理员登录、成员申请/设备管理、浅同步状态） |
 | 汇总 | 周图（喂养/睡眠/排泄/体温） |
 | 成长 | 身长体重等 + 百分位曲线（可插拔数据源） |
 | 其它 | 搜索、TXT/PDF 导出、桌面小组件、深色模式、自定义项目 |
@@ -243,11 +240,11 @@ formula/pee UI 交叉可见均已验证；双模拟器还在严格使用
 
 | 模式 | 行为 |
 |------|------|
-| **当前默认 DI** | **家庭局域网中心化**：自建 NAS Docker `lezi-sync`；**仅家 Wi‑Fi + NAS 可达**；**仅前台**同步（回前台 / 下拉 / 写成功 push）；邀请码 + family token；同步管理员权威 Baby、Record、CustomItemDef、CarePlan、履行候选与记录/计划原子照片包；成员只拉取 Baby，不能写 Baby；`RealSyncPort` 为默认绑定 |
+| **当前默认 DI** | **可信家庭服务器中心化**：自建 NAS/VPS `lezi-sync`；用户确认 HTTPS endpoint + 独立设备会话；**仅前台**同步（回前台 / 三页下拉 / 写成功 push）；同步管理员权威 Baby、Record、CustomItemDef、CarePlan、履行候选与记录/计划原子照片包；成员只拉取 Baby，不能写 Baby；`RealSyncPort` 为默认绑定 |
 | 本机独立 | 宝宝主题与排序、图标排序、暗色、护理计划提醒/系统日历偏好、时间制等 **不同步** |
 | 不做 | 部分字段共享、伴侣推送/即时通知同步、后台轮询同步、P2P 主路径、奶库、公网强制云 |
 
-权威细节：[sync-home-lan.md](./sync-home-lan.md) · 数据接口：[data-model.md](./data-model.md)。
+权威细节：[sync-trusted-endpoint.md](./sync-trusted-endpoint.md) · 数据接口：[data-model.md](./data-model.md)。
 
 ### 4.8 导出与其它
 
@@ -314,11 +311,11 @@ Widget 每个实例独立保存 `widgetId`、绑定 `babyId` 和快捷记录类�
 
 ### 6.3 家庭同步与扩展
 
-- [x] Android `SyncPort`、家网门闩、前台触发、Outbox、媒体与家庭 UI 实现
+- [x] Android `SyncPort`、可信 endpoint 门闩、前台触发、Outbox、媒体与家庭 UI 实现
 - [x] NAS `tools/lezi-sync` API、SQLite、Docker/Compose 单数据根配置与自动化测试
 - [x] 本机 Docker 镜像构建与运行
-- [x] 双模拟器前台 formula/pee UI 交叉可见；严格 live 服务端建家/加入与双向协议通过
-- [ ] **物理 NAS / 双真机 / 相机扫码** 目标环境验收（见 [sync-home-lan.md](./sync-home-lan.md) §5.4）
+- [x] 可信 session 与双向同步协议自动化覆盖
+- [ ] **物理 NAS / 双真机 / 相机扫码** 目标环境验收（见 [sync-trusted-endpoint.md](./sync-trusted-endpoint.md) §11）
 - [x] **本机** PDF、自定义项目、辅食类、扩展测量、疫苗手记、护理计划日历
 - [x] `CustomItemDef`、`CarePlan`、履行候选、计划照片与 Record/计划原子照片包家庭同步；设备系统日历配置保持本机
 

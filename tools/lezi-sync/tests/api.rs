@@ -3,7 +3,7 @@ use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::body::{Body, Bytes};
@@ -89,27 +89,18 @@ fn app_for(
     max_media_bytes: usize,
     configure: impl FnOnce(&mut ServerConfig),
 ) -> Router {
-    static INVITE_COUNTER: AtomicU64 = AtomicU64::new(1);
     let clock = now.clone();
     let mut config = ServerConfig::new(directory);
     config.generation = Some(generation.to_owned());
     config.max_media_bytes = max_media_bytes;
-    // Integration tests create/join many times within one process; keep limits high
-    // unless a test tightens them deliberately.
+    // Integration tests create many instances within one process; keep this
+    // limit high unless a test tightens it deliberately.
     config.create_rate_limit = RateLimitConfig {
         max_attempts: 10_000,
         window_seconds: 60,
     };
-    config.join_rate_limit = RateLimitConfig {
-        max_attempts: 10_000,
-        window_seconds: 60,
-    };
     configure(&mut config);
-    config = config
-        .with_clock(move || clock.load(Ordering::SeqCst))
-        .with_invite_code_factory(|| {
-            format!("CODE{:08}", INVITE_COUNTER.fetch_add(1, Ordering::SeqCst))
-        });
+    config = config.with_clock(move || clock.load(Ordering::SeqCst));
     build_app(config).unwrap()
 }
 
@@ -215,7 +206,6 @@ async fn json_request_with_headers(
         && matches!(
             uri,
             "/v1/family/create"
-                | "/v1/join"
                 | "/v1/owner/login"
                 | "/v1/owner/takeover"
                 | "/v1/member/requests/claim"
@@ -223,7 +213,7 @@ async fn json_request_with_headers(
         )
     {
         if let (Some(token), Some(generation)) = (
-            value.get("token").and_then(Value::as_str),
+            value.get("access_token").and_then(Value::as_str),
             value.get("generation").and_then(Value::as_str),
         ) {
             test_client_sessions().lock().unwrap().insert(
@@ -402,26 +392,46 @@ fn avatar_media_payload(baby_id: &str) -> Value {
     })
 }
 
-async fn invite_and_join(app: &Router, owner_token: &str, device_id: &str) -> Value {
-    let (status, invitation) = json_request(
+async fn approve_new_member(app: &Router, owner_token: &str, device_id: &str) -> Value {
+    let display_name = format!("成员-{device_id}");
+    approve_new_member_named(app, owner_token, device_id, &display_name).await
+}
+
+async fn approve_new_member_named(
+    app: &Router,
+    owner_token: &str,
+    device_id: &str,
+    display_name: &str,
+) -> Value {
+    let (status, pending) = json_request(
         app,
         Method::POST,
-        "/v1/invite",
+        "/v1/member/requests",
+        None,
+        json!({
+            "display_name": display_name,
+            "device_name": device_id,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let request_id = pending["request_id"].as_str().unwrap();
+    let pending_secret = pending["pending_secret"].as_str().unwrap();
+    let (status, approval) = json_request(
+        app,
+        Method::POST,
+        &format!("/v1/member/requests/{request_id}/approve-new"),
         Some(owner_token),
         json!({}),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(status, StatusCode::OK, "{approval}");
     let (status, member) = json_request(
         app,
         Method::POST,
-        "/v1/join",
+        "/v1/member/requests/claim",
         None,
-        json!({
-            "code": invitation["code"],
-            "device_id": device_id,
-            "display_name": format!("成员-{device_id}"),
-        }),
+        json!({"pending_secret": pending_secret}),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{member}");
@@ -478,7 +488,13 @@ async fn setup_status_exposes_only_the_empty_instance_contract() {
         body,
         json!({
             "protocol_version": 1,
-            "capabilities": ["setup_status"],
+            "capabilities": [
+                "trusted_https_endpoint_v1",
+                "device_sessions_v1",
+                "membership_devices_v1",
+                "atomic_bundle",
+                "record_membership_author",
+            ],
             "family_state": "empty",
         })
     );
@@ -502,10 +518,34 @@ async fn setup_status_switches_to_configured_without_exposing_family_metadata() 
         body,
         json!({
             "protocol_version": 1,
-            "capabilities": ["setup_status"],
+            "capabilities": [
+                "trusted_https_endpoint_v1",
+                "device_sessions_v1",
+                "membership_devices_v1",
+                "atomic_bundle",
+                "record_membership_author",
+            ],
             "family_state": "configured",
         })
     );
+}
+
+#[tokio::test]
+async fn legacy_invite_and_join_routes_are_absent() {
+    let rig = Rig::new();
+
+    for path in ["/v1/invite", "/v1/join"] {
+        let response = request(
+            &rig.app,
+            Method::POST,
+            path,
+            None,
+            Body::from("{}"),
+            Some("application/json"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
 }
 
 #[tokio::test]
@@ -542,7 +582,7 @@ async fn current_schema_version_restarts_with_credentials_and_entities() {
         "schema-version-owner-request-000001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, token).await;
     let database_path = rig.directory.path().join("lezi.db");
     let connection = rusqlite::Connection::open(&database_path).unwrap();
@@ -759,7 +799,7 @@ async fn family_create_is_strict_idempotent_and_restart_safe() {
     let restarted = rig.restart("generation-b");
     let retry = create_family(&restarted, "owner-device", request_id).await;
     assert_eq!(retry["family_id"], first["family_id"]);
-    assert_eq!(retry["token"], first["token"]);
+    assert_eq!(retry["access_token"], first["access_token"]);
     assert_eq!(retry["refresh_token"], first["refresh_token"]);
     assert_eq!(retry["device_id"], first["device_id"]);
     assert_eq!(retry["membership_id"], first["membership_id"]);
@@ -770,7 +810,7 @@ async fn family_create_is_strict_idempotent_and_restart_safe() {
     assert!(!persisted
         .windows(request_id.len())
         .any(|window| window == request_id.as_bytes()));
-    let token = first["token"].as_str().unwrap();
+    let token = first["access_token"].as_str().unwrap();
     assert!(!persisted
         .windows(token.len())
         .any(|window| window == token.as_bytes()));
@@ -926,7 +966,7 @@ async fn refresh_rotates_once_and_replay_revokes_only_the_presenting_device() {
     .await;
     let owner_access = owner["access_token"].as_str().unwrap();
     let owner_refresh = owner["refresh_token"].as_str().unwrap();
-    let member = invite_and_join(&rig.app, owner_access, "member-phone").await;
+    let member = approve_new_member(&rig.app, owner_access, "member-phone").await;
     let member_access = member["access_token"].as_str().unwrap();
     let sibling_device_id = "same-membership-sibling-device";
     let sibling_access = "same-membership-sibling-access";
@@ -1224,7 +1264,7 @@ async fn owner_takeover_atomically_revokes_old_owner_devices_but_not_members() {
         &[("x-lezi-bootstrap-secret", root)],
     )
     .await;
-    let member = invite_and_join(
+    let member = approve_new_member(
         &rig.app,
         original["access_token"].as_str().unwrap(),
         "member-phone",
@@ -1319,7 +1359,7 @@ async fn root_password_rotation_on_restart_revokes_only_owner_sessions() {
         &[("x-lezi-bootstrap-secret", old_root)],
     )
     .await;
-    let member = invite_and_join(
+    let member = approve_new_member(
         &rig.app,
         owner["access_token"].as_str().unwrap(),
         "member-phone",
@@ -1554,8 +1594,8 @@ async fn owner_explicitly_binds_a_pending_device_to_an_existing_member() {
     )
     .await;
     let owner_token = owner["access_token"].as_str().unwrap();
-    let first_device = invite_and_join(&rig.app, owner_token, "bind-existing-member-a").await;
-    let other_member = invite_and_join(&rig.app, owner_token, "bind-existing-member-b").await;
+    let first_device = approve_new_member(&rig.app, owner_token, "bind-existing-member-a").await;
+    let other_member = approve_new_member(&rig.app, owner_token, "bind-existing-member-b").await;
     let first_token = first_device["access_token"].as_str().unwrap();
     let other_token = other_member["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, owner_token).await;
@@ -1911,9 +1951,9 @@ async fn owner_member_login_grant_is_ten_minutes_single_use_and_target_bound() {
     )
     .await;
     let owner_token = owner["access_token"].as_str().unwrap();
-    let member = invite_and_join(&rig.app, owner_token, "member-grant-phone").await;
+    let member = approve_new_member(&rig.app, owner_token, "member-grant-phone").await;
     let member_token = member["access_token"].as_str().unwrap();
-    let other = invite_and_join(&rig.app, owner_token, "member-grant-other").await;
+    let other = approve_new_member(&rig.app, owner_token, "member-grant-other").await;
 
     assert_eq!(
         json_request(
@@ -2099,7 +2139,7 @@ async fn owner_member_login_grant_is_ten_minutes_single_use_and_target_bound() {
         "deleted-family-owner-request-0001",
     )
     .await;
-    let deleted_family_member = invite_and_join(
+    let deleted_family_member = approve_new_member(
         &deleted_family_rig.app,
         deleted_family_owner["access_token"].as_str().unwrap(),
         "deleted-family-member",
@@ -2297,7 +2337,7 @@ async fn member_requests_are_source_limited_and_family_pending_is_bounded() {
 async fn ordinary_members_cannot_list_or_decide_pending_member_requests() {
     let rig = Rig::new();
     let owner = create_family(&rig.app, "owner-device", "member-request-acl-owner-0000001").await;
-    let member = invite_and_join(
+    let member = approve_new_member(
         &rig.app,
         owner["access_token"].as_str().unwrap(),
         "legacy-member-device",
@@ -2412,126 +2452,6 @@ async fn family_create_requires_the_root_password_and_never_reopens_configured_s
     .await;
     assert_eq!(second_status, StatusCode::CONFLICT);
 }
-#[tokio::test]
-async fn invite_join_roles_expiry_restart_and_leave_match_contract() {
-    let rig = Rig::new();
-    let owner = create_family(
-        &rig.app,
-        "owner-device",
-        "invite-owner-request-0000000000001",
-    )
-    .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let (status, invitation) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/invite",
-        Some(owner_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(
-        invitation["expires_at"],
-        rig.now.load(Ordering::SeqCst) + 24 * 60 * 60
-    );
-    let code = invitation["code"].as_str().unwrap();
-    assert!(code
-        .bytes()
-        .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit()));
-    let (status, member) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/join",
-        None,
-        json!({"code": code, "device_id": "member-device", "display_name": "成员"}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(member["role"], "member");
-    assert!(member["membership_id"].as_str().unwrap().len() >= 32);
-    assert_ne!(member["membership_id"], owner["membership_id"]);
-    let restarted = rig.restart("generation-b");
-    let (retry_status, retry) = json_request(
-        &restarted,
-        Method::POST,
-        "/v1/join",
-        None,
-        json!({"code": code, "device_id": "member-device", "display_name": "成员"}),
-    )
-    .await;
-    assert_eq!(retry_status, StatusCode::OK);
-    assert_eq!(retry["token"], member["token"]);
-    assert_eq!(retry["membership_id"], member["membership_id"]);
-    assert_eq!(retry["generation"], "generation-b");
-    let (replay_status, _) = json_request(
-        &restarted,
-        Method::POST,
-        "/v1/join",
-        None,
-        json!({"code": code, "device_id": "other-device", "display_name": "成员"}),
-    )
-    .await;
-    assert_eq!(replay_status, StatusCode::CONFLICT);
-    let member_token = member["token"].as_str().unwrap();
-    let (member_invite, _) = json_request(
-        &restarted,
-        Method::POST,
-        "/v1/invite",
-        Some(member_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(member_invite, StatusCode::FORBIDDEN);
-    let (owner_leave, owner_leave_body) = json_request(
-        &restarted,
-        Method::POST,
-        "/v1/leave",
-        Some(owner_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(owner_leave, StatusCode::FORBIDDEN);
-    assert_eq!(
-        owner_leave_body,
-        json!({"detail":"Owner must delete the family instead of leaving"})
-    );
-    let (leave_status, _) = json_request(
-        &restarted,
-        Method::POST,
-        "/v1/leave",
-        Some(member_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(leave_status, StatusCode::OK);
-    assert_eq!(
-        get_json(&restarted, "/v1/pull?cursor=0", Some(member_token))
-            .await
-            .0,
-        StatusCode::UNAUTHORIZED
-    );
-
-    let (status, expiring) = json_request(
-        &restarted,
-        Method::POST,
-        "/v1/invite",
-        Some(owner_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED);
-    rig.now.fetch_add(25 * 60 * 60, Ordering::SeqCst);
-    let (expired, _) = json_request(
-        &restarted,
-        Method::POST,
-        "/v1/join",
-        None,
-        json!({"code": expiring["code"], "device_id": "late-device", "display_name": "成员"}),
-    )
-    .await;
-    assert_eq!(expired, StatusCode::GONE);
-}
 
 #[tokio::test]
 async fn current_wire_rejects_removed_compatibility_fields() {
@@ -2542,21 +2462,7 @@ async fn current_wire_rejects_removed_compatibility_fields() {
         "strict-wire-owner-request-00000001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
-    let (invite_status, invite_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/invite",
-        Some(token),
-        json!({"family_id": owner["family_id"]}),
-    )
-    .await;
-    assert_eq!(
-        invite_status,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{invite_body}"
-    );
-
+    let token = owner["access_token"].as_str().unwrap();
     let (pull_status, pull_body) = get_json(&rig.app, "/v1/pull", Some(token)).await;
     assert_eq!(pull_status, StatusCode::UNPROCESSABLE_ENTITY, "{pull_body}");
 
@@ -2611,7 +2517,7 @@ async fn current_sync_requests_require_generation_envelopes_and_keep_push_retire
         "strict-envelope-owner-request-00001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
 
     for body in [
         json!({"entities": []}),
@@ -2703,7 +2609,7 @@ async fn current_record_and_care_plan_wire_rejects_obsolete_or_untyped_payloads(
         "strict-payload-owner-request-0001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, token).await;
 
     for invalid_schema in [Value::Null, json!(1), json!(3), json!("2")] {
@@ -2838,30 +2744,15 @@ async fn family_members_are_authenticated_isolated_stable_and_redacted() {
         "member-list-owner-request-0000000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let (invite_status, invitation) = json_request(
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member = approve_new_member_named(
         &rig.app,
-        Method::POST,
-        "/v1/invite",
-        Some(owner_token),
-        json!({}),
+        owner_token,
+        "member-sensitive-device-id",
+        "　 陈爸爸 🌿  ",
     )
     .await;
-    assert_eq!(invite_status, StatusCode::CREATED);
-    let (join_status, member) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/join",
-        None,
-        json!({
-            "code": invitation["code"],
-            "device_id": "member-sensitive-device-id",
-            "display_name": "　 陈爸爸 🌿  ",
-        }),
-    )
-    .await;
-    assert_eq!(join_status, StatusCode::OK, "{member}");
-    let member_token = member["token"].as_str().unwrap();
+    let member_token = member["access_token"].as_str().unwrap();
 
     let owner_membership_id = owner["membership_id"].as_str().unwrap();
     let member_membership_id = member["membership_id"].as_str().unwrap();
@@ -3093,31 +2984,12 @@ async fn owner_hard_deletes_member_anonymizes_shared_facts_and_releases_name() {
         "remove-member-owner-request-001-xxxxxxxx",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
     let owner_membership_id = owner["membership_id"].as_str().unwrap().to_owned();
 
-    let (_, invitation) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/invite",
-        Some(owner_token),
-        json!({}),
-    )
-    .await;
-    let code = invitation["code"].as_str().unwrap();
-    let (_, joined) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/join",
-        None,
-        json!({
-            "code": code,
-            "device_id": "remove-member-device",
-            "display_name": "爸爸",
-        }),
-    )
-    .await;
-    let member_token = joined["token"].as_str().unwrap();
+    let joined =
+        approve_new_member_named(&rig.app, owner_token, "remove-member-device", "爸爸").await;
+    let member_token = joined["access_token"].as_str().unwrap();
     let member_refresh_token = joined["refresh_token"].as_str().unwrap();
     let member_membership_id = joined["membership_id"].as_str().unwrap().to_owned();
     assert_eq!(joined["role"], "member");
@@ -3341,27 +3213,13 @@ async fn owner_hard_deletes_member_anonymizes_shared_facts_and_releases_name() {
 
     // The normalized family display name is immediately reusable, but it creates a
     // new identity and cannot recover authorship of the anonymous record.
-    let (_, replacement_invite) = json_request(
+    let replacement = approve_new_member_named(
         &rig.app,
-        Method::POST,
-        "/v1/invite",
-        Some(owner_token),
-        json!({}),
+        owner_token,
+        "replacement-member-device",
+        "  爸爸  ",
     )
     .await;
-    let (replacement_status, replacement) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/join",
-        None,
-        json!({
-            "code": replacement_invite["code"],
-            "device_id": "replacement-member-device",
-            "display_name": "  爸爸  ",
-        }),
-    )
-    .await;
-    assert_eq!(replacement_status, StatusCode::OK, "{replacement}");
     assert_ne!(replacement["membership_id"], member_membership_id);
     let (_, replacement_pull) = get_json(
         &rig.app,
@@ -3407,7 +3265,7 @@ async fn member_leave_hard_deletes_self_but_owner_cannot_leave() {
     )
     .await;
     let owner_token = owner["access_token"].as_str().unwrap();
-    let member = invite_and_join(&rig.app, owner_token, "self-delete-member-device").await;
+    let member = approve_new_member(&rig.app, owner_token, "self-delete-member-device").await;
     let member_token = member["access_token"].as_str().unwrap();
     let member_refresh = member["refresh_token"].as_str().unwrap();
 
@@ -3470,33 +3328,13 @@ async fn membership_id_is_stable_across_restart_and_rejects_role_forgery() {
         "stable-membership-owner-request-001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
     let owner_membership_id = owner["membership_id"].as_str().unwrap().to_owned();
     assert_eq!(owner["role"], "owner");
 
-    let (invite_status, invitation) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/invite",
-        Some(owner_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(invite_status, StatusCode::CREATED);
-    let (join_status, member) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/join",
-        None,
-        json!({
-            "code": invitation["code"],
-            "device_id": "stable-member-device",
-            "display_name": "成员",
-        }),
-    )
-    .await;
-    assert_eq!(join_status, StatusCode::OK, "{member}");
-    let member_token = member["token"].as_str().unwrap();
+    let member =
+        approve_new_member_named(&rig.app, owner_token, "stable-member-device", "成员").await;
+    let member_token = member["access_token"].as_str().unwrap();
     let member_membership_id = member["membership_id"].as_str().unwrap().to_owned();
     assert_eq!(member["role"], "member");
     assert_ne!(member_membership_id, owner_membership_id);
@@ -3523,17 +3361,6 @@ async fn membership_id_is_stable_across_restart_and_rejects_role_forgery() {
     );
 
     // Role and writer authority come only from the authenticated principal.
-    // A member cannot mint invites (owner-only) even if a client claims owner.
-    let (forged_invite, forged_body) = json_request(
-        &restarted,
-        Method::POST,
-        "/v1/invite",
-        Some(member_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(forged_invite, StatusCode::FORBIDDEN);
-    assert_eq!(forged_body, json!({"detail":"Owner role required"}));
     let (forged_rename, _) = json_request(
         &restarted,
         Method::POST,
@@ -3564,7 +3391,7 @@ async fn membership_id_is_stable_across_restart_and_rejects_role_forgery() {
 }
 
 #[tokio::test]
-async fn family_members_normalize_unicode_and_empty_names_and_reject_unsafe_join_names() {
+async fn family_members_normalize_unicode_and_reject_unsafe_request_names() {
     let rig = Rig::new();
     let owner = create_family(
         &rig.app,
@@ -3572,41 +3399,10 @@ async fn family_members_normalize_unicode_and_empty_names_and_reject_unsafe_join
         "member-name-owner-request-000000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
 
-    let join = |code: Value, device_id: &str, display_name: Value| {
-        json!({
-            "code": code,
-            "device_id": device_id,
-            "display_name": display_name,
-        })
-    };
-    let (_, unicode_invite) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/invite",
-        Some(owner_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            "/v1/join",
-            None,
-            join(
-                unicode_invite["code"].clone(),
-                "unicode-member",
-                json!("　李爸爸 👨‍🍼　"),
-            ),
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
+    approve_new_member_named(&rig.app, owner_token, "unicode-member", "　李爸爸 👨‍🍼　").await;
 
-    // Blank / placeholder / unsafe names are hard-rejected (no silent null).
     for (device_id, bad_name) in [
         ("empty-name-member", json!("　  ")),
         ("missing-name-member", json!(null)),
@@ -3615,20 +3411,12 @@ async fn family_members_normalize_unicode_and_empty_names_and_reject_unsafe_join
         ("bidi-member", json!("成员\u{202e}renwo")),
         ("long-member", json!("名".repeat(129))),
     ] {
-        let (_, invitation) = json_request(
-            &rig.app,
-            Method::POST,
-            "/v1/invite",
-            Some(owner_token),
-            json!({}),
-        )
-        .await;
         let (status, _) = json_request(
             &rig.app,
             Method::POST,
-            "/v1/join",
+            "/v1/member/requests",
             None,
-            join(invitation["code"].clone(), device_id, bad_name),
+            json!({"display_name": bad_name, "device_name": device_id}),
         )
         .await;
         assert_eq!(
@@ -3638,43 +3426,25 @@ async fn family_members_normalize_unicode_and_empty_names_and_reject_unsafe_join
         );
     }
 
-    // Omitted display_name field also fails.
-    let (_, omitted_invite) = json_request(
+    let (omitted_status, _) = json_request(
         &rig.app,
         Method::POST,
-        "/v1/invite",
-        Some(owner_token),
-        json!({}),
+        "/v1/member/requests",
+        None,
+        json!({"device_name": "omitted-name-member"}),
     )
     .await;
-    assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            "/v1/join",
-            None,
-            json!({
-                "code": omitted_invite["code"],
-                "device_id": "omitted-name-member",
-            }),
-        )
-        .await
-        .0,
-        StatusCode::UNPROCESSABLE_ENTITY
-    );
+    assert_eq!(omitted_status, StatusCode::UNPROCESSABLE_ENTITY);
 
     let (_, members) = get_json(&rig.app, "/v1/family/members", Some(owner_token)).await;
     assert_eq!(members["members"].as_array().unwrap().len(), 2);
-    assert_eq!(members["members"][0]["role"], "owner");
     assert!(members["members"].as_array().unwrap().iter().any(|member| {
-        member["display_name"] == "李爸爸 👨‍🍼" // placeholder replaced below
-            && member["role"] == "member"
-            && member.get("device_id").is_none()
+        member["display_name"] == "李爸爸 👨‍🍼" && member["role"] == "member"
     }));
 }
 
 #[tokio::test]
-async fn family_create_uses_the_same_display_name_normalization_as_join() {
+async fn family_create_uses_the_same_display_name_normalization_as_member_requests() {
     let unsafe_rig = Rig::new();
     let (unsafe_status, _) = json_request(
         &unsafe_rig.app,
@@ -3731,7 +3501,7 @@ async fn family_create_uses_the_same_display_name_normalization_as_join() {
     let (_, members) = get_json(
         &normalized_rig.app,
         "/v1/family/members",
-        owner["token"].as_str(),
+        owner["access_token"].as_str(),
     )
     .await;
     assert_eq!(members["members"][0]["display_name"], "妈妈");
@@ -3747,29 +3517,10 @@ async fn member_name_change_waits_for_owner_and_owner_manages_member_and_device_
         "rename-owner-request-00000000000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let (_, invitation) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/invite",
-        Some(owner_token),
-        json!({}),
-    )
-    .await;
-    let (join_status, member) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/join",
-        None,
-        json!({
-            "code": invitation["code"],
-            "device_id": "rename-member-device",
-            "display_name": "爸爸",
-        }),
-    )
-    .await;
-    assert_eq!(join_status, StatusCode::OK, "{member}");
-    let member_token = member["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member =
+        approve_new_member_named(&rig.app, owner_token, "rename-member-device", "爸爸").await;
+    let member_token = member["access_token"].as_str().unwrap();
 
     let (status, body) = json_request(
         &rig.app,
@@ -4039,7 +3790,7 @@ async fn device_revoke_and_current_logout_are_idempotent_isolated_and_report_dev
     )
     .await;
     let owner_token = owner["access_token"].as_str().unwrap();
-    let member = invite_and_join(&rig.app, owner_token, "device-revoke-member-phone").await;
+    let member = approve_new_member(&rig.app, owner_token, "device-revoke-member-phone").await;
     let member_token = member["access_token"].as_str().unwrap();
 
     let (_, grant) = json_request(
@@ -4187,7 +3938,7 @@ async fn member_rename_reject_cancel_expiry_and_concurrent_conflict_preserve_ide
     .await;
     let owner_token = owner["access_token"].as_str().unwrap();
     let owner_refresh_token = owner["refresh_token"].as_str().unwrap();
-    let member = invite_and_join(&rig.app, owner_token, "rename-state-member").await;
+    let member = approve_new_member(&rig.app, owner_token, "rename-state-member").await;
     let member_token = member["access_token"].as_str().unwrap();
     let member_refresh_token = member["refresh_token"].as_str().unwrap();
     let membership_id = member["membership_id"].as_str().unwrap();
@@ -4395,7 +4146,7 @@ async fn member_rename_reject_cancel_expiry_and_concurrent_conflict_preserve_ide
 }
 
 #[tokio::test]
-async fn shared_family_name_persists_on_create_join_and_owner_rename() {
+async fn shared_family_name_persists_on_create_member_login_and_owner_rename() {
     let rig = Rig::new();
     let request_id = "family-name-create-request-000000000001";
     let (create_status, owner) = json_request(
@@ -4413,7 +4164,7 @@ async fn shared_family_name_persists_on_create_join_and_owner_rename() {
     .await;
     assert_eq!(create_status, StatusCode::CREATED, "{owner}");
     assert_eq!(owner["family_name"], "乐乐一家");
-    let owner_token = owner["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
 
     // Idempotent retry must match the same family_name (like display_name).
     let (retry_ok, retry_body) = json_request(
@@ -4469,30 +4220,11 @@ async fn shared_family_name_persists_on_create_join_and_owner_rename() {
         "{blank_owner}"
     );
 
-    // Join returns the current shared name.
-    let (_, invitation) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/invite",
-        Some(owner_token),
-        json!({}),
-    )
-    .await;
-    let (join_status, join_body) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/join",
-        None,
-        json!({
-            "code": invitation["code"],
-            "device_id": "family-name-member",
-            "display_name": "爸爸",
-        }),
-    )
-    .await;
-    assert_eq!(join_status, StatusCode::OK, "{join_body}");
-    assert_eq!(join_body["family_name"], "乐乐一家");
-    let member_token = join_body["token"].as_str().unwrap();
+    // An approved member login returns the current shared name.
+    let member_login =
+        approve_new_member_named(&rig.app, owner_token, "family-name-member", "爸爸").await;
+    assert_eq!(member_login["family_name"], "乐乐一家");
+    let member_token = member_login["access_token"].as_str().unwrap();
 
     // Owner may rename; member may not.
     let (rename_status, rename_body) = json_request(
@@ -4520,28 +4252,10 @@ async fn shared_family_name_persists_on_create_join_and_owner_rename() {
         StatusCode::FORBIDDEN
     );
 
-    // After rename, a fresh invite/join sees the new name.
-    let (_, invite2) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/invite",
-        Some(owner_token),
-        json!({}),
-    )
-    .await;
-    let (_, join2) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/join",
-        None,
-        json!({
-            "code": invite2["code"],
-            "device_id": "family-name-member-2",
-            "display_name": "姥姥",
-        }),
-    )
-    .await;
-    assert_eq!(join2["family_name"], "年年的家庭");
+    // After rename, a fresh approved member login sees the new name.
+    let second_member_login =
+        approve_new_member_named(&rig.app, owner_token, "family-name-member-2", "姥姥").await;
+    assert_eq!(second_member_login["family_name"], "年年的家庭");
 
     // Control characters rejected.
     assert_eq!(
@@ -4583,9 +4297,9 @@ async fn zero_entity_pull_keeps_non_empty_family_name_across_restart() {
         "pull-family-name-owner-request-000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let member = invite_and_join(&rig.app, owner_token, "pull-family-name-member").await;
-    let member_token = member["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member = approve_new_member(&rig.app, owner_token, "pull-family-name-member").await;
+    let member_token = member["access_token"].as_str().unwrap();
 
     let (rename_status, rename_body) = json_request(
         &rig.app,
@@ -4657,7 +4371,7 @@ async fn family_members_project_canonical_memberships_without_role_promotion() {
         "duplicate-owner-request-00000000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
     let family_id = owner["family_id"].as_str().unwrap();
     let connection = rusqlite::Connection::open(rig.directory.path().join("lezi.db")).unwrap();
     let duplicate_membership_id = Uuid::new_v4().to_string();
@@ -4749,7 +4463,7 @@ async fn atomic_bundle_lww_cursor_and_generation_recovery_match_current_protocol
         "lww-owner-request-0000000000000001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
     let baby_id = Uuid::new_v4().to_string();
     let first = json!({
         "type":"baby","client_uuid":baby_id,"updated_at":100,
@@ -4821,7 +4535,7 @@ async fn pull_pages_large_bootstrap_without_skipping_the_remaining_entities() {
         "paged-pull-owner-request-00000000001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
     let (rename_status, rename_body) = json_request(
         &rig.app,
         Method::POST,
@@ -4870,7 +4584,7 @@ async fn paged_full_resync_includes_dependencies_that_have_a_later_revision() {
         "paged-reference-owner-request-00000001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
     let baby_id = Uuid::new_v4().to_string();
     let record_ids = (0..201)
         .map(|_| Uuid::new_v4().to_string())
@@ -4942,7 +4656,7 @@ async fn push_rejects_terminal_updated_at() {
         "timestamp-owner-request-00000000001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
 
     let (status, _) = publish_root_bundle(
         &rig.app,
@@ -4969,7 +4683,7 @@ async fn push_rejects_updated_at_more_than_24_hours_ahead() {
         "future-time-owner-request-000000001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
     let server_now_millis = rig.now.load(Ordering::SeqCst) * 1_000;
 
     let (status, _) = publish_root_bundle(
@@ -4997,7 +4711,7 @@ async fn baby_nickname_accepts_20_unicode_chars_and_rejects_21() {
         "nickname-owner-request-0000000000001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
     let baby_id = Uuid::new_v4().to_string();
 
     let nickname_20 = "年".repeat(20);
@@ -5028,7 +4742,7 @@ async fn strict_atomic_entity_contract_rejects_legacy_fields_and_orders_dependen
         "strict-owner-request-0000000000001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
     assert_eq!(
         json_request(&rig.app, Method::POST, "/v1/bundles", None, json!({}),)
             .await
@@ -5157,7 +4871,7 @@ async fn full_pull_includes_deleted_baby_dependency_before_retained_record() {
         "deleted-baby-owner-request-000000001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
     let baby_id = Uuid::new_v4().to_string();
     let record_id = Uuid::new_v4().to_string();
 
@@ -5201,9 +4915,9 @@ async fn media_bytes_size_acl_and_immutable_association_are_enforced() {
         "media-owner-request-00000000000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let member = invite_and_join(&rig.app, owner_token, "member-device").await;
-    let member_token = member["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member = approve_new_member(&rig.app, owner_token, "member-device").await;
+    let member_token = member["access_token"].as_str().unwrap();
     let baby_id = Uuid::new_v4().to_string();
     let second_baby_id = Uuid::new_v4().to_string();
     let record_id = Uuid::new_v4().to_string();
@@ -5344,7 +5058,7 @@ async fn media_metadata_rejects_zero_declared_byte_size() {
         "zero-media-owner-request-000000001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
     let baby_id = Uuid::new_v4().to_string();
     let record_id = Uuid::new_v4().to_string();
     let media_id = Uuid::new_v4().to_string();
@@ -5378,7 +5092,7 @@ async fn media_metadata_enforces_server_byte_limit_and_android_dimension_bounds(
         "bounded-media-owner-request-0000001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
     let baby_id = Uuid::new_v4().to_string();
     let record_id = Uuid::new_v4().to_string();
     let boundary_media_id = Uuid::new_v4().to_string();
@@ -5442,7 +5156,7 @@ async fn media_upload_rejects_empty_or_mismatched_body() {
         "empty-media-owner-request-00000001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
     let baby_id = Uuid::new_v4().to_string();
     let record_id = Uuid::new_v4().to_string();
     let media_id = Uuid::new_v4().to_string();
@@ -5510,9 +5224,9 @@ async fn member_cannot_create_update_or_tombstone_baby() {
         "avatar-owner-request-0000000000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let member = invite_and_join(&rig.app, owner_token, "member-device").await;
-    let member_token = member["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member = approve_new_member(&rig.app, owner_token, "member-device").await;
+    let member_token = member["access_token"].as_str().unwrap();
     let baby_id = Uuid::new_v4().to_string();
     let avatar_id = Uuid::new_v4().to_string();
     assert_eq!(
@@ -5567,9 +5281,9 @@ async fn stale_member_avatar_snapshot_does_not_block_newer_record() {
         "stale-avatar-owner-request-0000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let member = invite_and_join(&rig.app, owner_token, "member-device").await;
-    let member_token = member["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member = approve_new_member(&rig.app, owner_token, "member-device").await;
+    let member_token = member["access_token"].as_str().unwrap();
     let baby_id = Uuid::new_v4().to_string();
     let first_avatar_id = Uuid::new_v4().to_string();
     let current_avatar_id = Uuid::new_v4().to_string();
@@ -5671,7 +5385,7 @@ async fn media_limit_stops_stream_and_family_delete_waits_for_upload() {
         root,
     )
     .await;
-    let token = owner["token"].as_str().unwrap().to_owned();
+    let token = owner["access_token"].as_str().unwrap().to_owned();
     let family_id = owner["family_id"].as_str().unwrap().to_owned();
     let baby_id = Uuid::new_v4().to_string();
     let record_id = Uuid::new_v4().to_string();
@@ -5797,7 +5511,7 @@ async fn family_delete_requires_owner_name_and_root_and_persists_terminal_reason
     .await;
     let owner_access = owner["access_token"].as_str().unwrap();
     let owner_refresh = owner["refresh_token"].as_str().unwrap();
-    let member = invite_and_join(&rig.app, owner_access, "爸爸手机").await;
+    let member = approve_new_member(&rig.app, owner_access, "爸爸手机").await;
     let member_access = member["access_token"].as_str().unwrap();
     let member_refresh = member["refresh_token"].as_str().unwrap();
     let confirmation = json!({"family_name": "  乐乐一家  "});
@@ -5901,7 +5615,7 @@ async fn owner_delete_cleans_family_media_and_allows_replacement() {
         root,
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
     let family_id = owner["family_id"].as_str().unwrap();
     let baby_id = Uuid::new_v4().to_string();
     let record_id = Uuid::new_v4().to_string();
@@ -5965,7 +5679,7 @@ async fn family_delete_keeps_media_when_database_deletion_fails() {
         root,
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
     let family_id = owner["family_id"].as_str().unwrap();
     let baby_id = Uuid::new_v4().to_string();
     let record_id = Uuid::new_v4().to_string();
@@ -6079,7 +5793,7 @@ async fn restart_collects_only_uuid_orphan_family_media_directories() {
         root,
     )
     .await;
-    let deleted_token = deleted["token"].as_str().unwrap();
+    let deleted_token = deleted["access_token"].as_str().unwrap();
     let deleted_family_id = deleted["family_id"].as_str().unwrap();
     assert_eq!(
         json_request_with_headers(
@@ -6201,24 +5915,19 @@ async fn bootstrap_secret_gates_family_create_when_configured() {
 }
 
 #[tokio::test]
-async fn create_and_join_limits_are_scoped_without_losing_global_protection() {
+async fn create_limit_is_scoped_without_losing_global_protection() {
     let rig = Rig::with_config(|config| {
         config.create_rate_limit = RateLimitConfig {
             max_attempts: 2,
             window_seconds: 60,
         };
-        config.join_rate_limit = RateLimitConfig {
-            max_attempts: 2,
-            window_seconds: 60,
-        };
     });
-    let owner = create_family(
+    create_family(
         &rig.app,
         "owner-device",
         "rate-limit-owner-request-0000000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
 
     let second_body = json!({
         "create_request_id": "rate-limit-owner-request-0000000002",
@@ -6250,56 +5959,6 @@ async fn create_and_join_limits_are_scoped_without_losing_global_protection() {
         .0,
         StatusCode::TOO_MANY_REQUESTS,
     );
-
-    let (invite_status, invitation) = json_request(
-        &rig.app,
-        Method::POST,
-        "/v1/invite",
-        Some(owner_token),
-        json!({}),
-    )
-    .await;
-    assert_eq!(invite_status, StatusCode::CREATED);
-    for device in ["attacker-a", "attacker-b"] {
-        assert_eq!(
-            json_request(
-                &rig.app,
-                Method::POST,
-                "/v1/join",
-                None,
-                json!({"code": "WRONGCODE001", "device_id": device, "display_name": "成员"}),
-            )
-            .await
-            .0,
-            StatusCode::NOT_FOUND,
-        );
-    }
-    assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            "/v1/join",
-            None,
-            json!({"code": "WRONGCODE001", "device_id": "attacker-c", "display_name": "成员"}),
-        )
-        .await
-        .0,
-        StatusCode::TOO_MANY_REQUESTS,
-    );
-
-    let code = invitation["code"].as_str().unwrap();
-    assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            "/v1/join",
-            None,
-            json!({"code": code, "device_id": "member-device", "display_name": "成员"}),
-        )
-        .await
-        .0,
-        StatusCode::OK,
-    );
 }
 #[tokio::test]
 async fn pull_omits_the_entire_atomic_bundle_until_media_bytes_are_committed() {
@@ -6310,7 +5969,7 @@ async fn pull_omits_the_entire_atomic_bundle_until_media_bytes_are_committed() {
         "integrity-owner-request-00000000001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
     let baby_id = Uuid::new_v4().to_string();
     let record_id = Uuid::new_v4().to_string();
     let media_id = Uuid::new_v4().to_string();
@@ -6424,7 +6083,7 @@ async fn ordinary_media_upload_retry_is_retired_even_when_bytes_exist() {
         "retry-media-owner-request-000000001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
     let family_id = owner["family_id"].as_str().unwrap();
     let baby_id = Uuid::new_v4().to_string();
     let record_id = Uuid::new_v4().to_string();
@@ -6477,7 +6136,7 @@ async fn corrupt_ready_media_is_removed_and_not_advertised_until_reuploaded() {
         "corrupt-media-owner-request-0000001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
     let family_id = owner["family_id"].as_str().unwrap();
     let baby_id = Uuid::new_v4().to_string();
     let record_id = Uuid::new_v4().to_string();
@@ -6869,7 +6528,7 @@ async fn every_current_entity_root_can_publish_only_through_atomic_bundles() {
         "all-bundle-roots-request-00000001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
 
     let baby_id = Uuid::new_v4().to_string();
     assert_eq!(
@@ -6960,7 +6619,7 @@ async fn atomic_bundle_media_must_match_its_root_kind_and_identity() {
         "bundle-media-matrix-request-00001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
     let baby_id = Uuid::new_v4().to_string();
     assert_eq!(
         publish_root_bundle(
@@ -7106,7 +6765,7 @@ async fn atomic_bundles_wait_for_baby_without_leaving_staging_rows() {
         "bundle-missing-baby-request-00001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
     let baby_id = Uuid::new_v4().to_string();
     let cases = [
         (
@@ -7180,7 +6839,7 @@ async fn atomic_care_plan_waits_for_its_custom_item_definition() {
         "bundle-custom-plan-request-00001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, token).await;
     let custom_item_id = Uuid::new_v4().to_string();
     let other_family_id = Uuid::new_v4().to_string();
@@ -7286,7 +6945,7 @@ async fn atomic_care_plan_requires_a_type_consistent_custom_item_reference() {
         "bundle-custom-shape-request-0001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, token).await;
     let custom_item_id = Uuid::new_v4().to_string();
     let (custom_status, custom_body) = publish_root_bundle(
@@ -7416,7 +7075,7 @@ async fn atomic_bundle_commit_rejects_malformed_or_wrong_shape_json() {
         "bundle-json-owner-request-0000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, owner_token).await;
     let bundle_id = Uuid::new_v4().to_string();
     let record_id = Uuid::new_v4().to_string();
@@ -7474,9 +7133,9 @@ async fn atomic_bundle_stamps_and_freezes_first_record_author() {
         "bundle-author-owner-request-000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let member = invite_and_join(&rig.app, owner_token, "bundle-author-member-device").await;
-    let member_token = member["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member = approve_new_member(&rig.app, owner_token, "bundle-author-member-device").await;
+    let member_token = member["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, owner_token).await;
     let record_id = Uuid::new_v4().to_string();
 
@@ -7576,9 +7235,9 @@ async fn atomic_bundle_commit_is_bound_to_the_staging_membership() {
         "bundle-stager-owner-request-000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let member = invite_and_join(&rig.app, owner_token, "bundle-stager-member-device").await;
-    let member_token = member["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member = approve_new_member(&rig.app, owner_token, "bundle-stager-member-device").await;
+    let member_token = member["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, owner_token).await;
     let record_id = Uuid::new_v4().to_string();
     let media_id = Uuid::new_v4().to_string();
@@ -7699,9 +7358,9 @@ async fn foreign_bundle_commit_cannot_leave_claimable_final_bytes() {
         "foreign-commit-owner-request-00001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let member = invite_and_join(&rig.app, owner_token, "foreign-commit-member-device").await;
-    let member_token = member["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member = approve_new_member(&rig.app, owner_token, "foreign-commit-member-device").await;
+    let member_token = member["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, owner_token).await;
     let record_id = Uuid::new_v4().to_string();
     let media_id = Uuid::new_v4().to_string();
@@ -7845,9 +7504,9 @@ async fn bundle_media_upload_requires_stager_membership_and_open_status() {
         "media-owner-request-000000000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let member = invite_and_join(&rig.app, owner_token, "media-member-device").await;
-    let member_token = member["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member = approve_new_member(&rig.app, owner_token, "media-member-device").await;
+    let member_token = member["access_token"].as_str().unwrap();
     let family_id = owner["family_id"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, owner_token).await;
     let record_id = Uuid::new_v4().to_string();
@@ -7951,9 +7610,9 @@ async fn equal_atomic_publish_before_commit_repairs_the_committed_bundle_package
         "bundle-race-owner-request-000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let member = invite_and_join(&rig.app, owner_token, "bundle-race-member-device").await;
-    let member_token = member["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member = approve_new_member(&rig.app, owner_token, "bundle-race-member-device").await;
+    let member_token = member["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, owner_token).await;
     let record_id = Uuid::new_v4().to_string();
     let owner_bundle = Uuid::new_v4().to_string();
@@ -8064,7 +7723,7 @@ async fn atomic_bundle_requires_uuid_bundle_id_in_body_and_paths() {
         "bundle-uuid-owner-request-00000001",
     )
     .await;
-    let token = created["token"].as_str().unwrap();
+    let token = created["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, token).await;
     let record_id = "11111111-2222-3333-8444-555555555555";
     let invalid_bundle_id = format!("record:{record_id}:2");
@@ -8131,7 +7790,7 @@ async fn atomic_bundle_is_invisible_until_commit_and_publishes_atomically() {
         "bundle-owner-request-000000000001",
     )
     .await;
-    let token = created["token"].as_str().unwrap();
+    let token = created["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, token).await;
     let record_id = Uuid::new_v4().to_string();
     let media_a = Uuid::new_v4().to_string();
@@ -8288,7 +7947,7 @@ async fn atomic_bundle_prepares_durable_media_before_database_publication() {
         "bundle-durability-request-000001",
     )
     .await;
-    let token = created["token"].as_str().unwrap();
+    let token = created["access_token"].as_str().unwrap();
     let family_id = created["family_id"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, token).await;
     let record_id = Uuid::new_v4().to_string();
@@ -8435,7 +8094,7 @@ async fn committed_bundle_retry_revalidates_published_media_after_stage_cleanup(
         "bundle-retry-media-request-000001",
     )
     .await;
-    let token = created["token"].as_str().unwrap();
+    let token = created["access_token"].as_str().unwrap();
     let family_id = created["family_id"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, token).await;
     let record_id = Uuid::new_v4().to_string();
@@ -8584,7 +8243,7 @@ async fn atomic_bundle_rejects_manifest_mismatch_and_oversized_media() {
         "bundle-mismatch-request-00000001",
     )
     .await;
-    let token = created["token"].as_str().unwrap();
+    let token = created["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, token).await;
     let record_id = Uuid::new_v4().to_string();
     let media_id = Uuid::new_v4().to_string();
@@ -8674,7 +8333,7 @@ async fn atomic_bundle_edit_keeps_old_published_version_until_commit() {
         "bundle-edit-request-000000000001",
     )
     .await;
-    let token = created["token"].as_str().unwrap();
+    let token = created["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, token).await;
     let record_id = Uuid::new_v4().to_string();
     let media_v1 = Uuid::new_v4().to_string();
@@ -8802,7 +8461,7 @@ async fn atomic_bundle_tombstone_publishes_without_media_bytes() {
         "bundle-tomb-request-000000000001",
     )
     .await;
-    let token = created["token"].as_str().unwrap();
+    let token = created["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, token).await;
     let record_id = Uuid::new_v4().to_string();
     let media_id = Uuid::new_v4().to_string();
@@ -8926,7 +8585,7 @@ async fn atomic_bundle_supports_generic_care_plan_root() {
         "bundle-plan-request-000000000001",
     )
     .await;
-    let token = created["token"].as_str().unwrap();
+    let token = created["access_token"].as_str().unwrap();
     let owner_membership = created["membership_id"].as_str().unwrap().to_owned();
     let baby_id = seed_baby(&rig.app, token).await;
     let plan_id = Uuid::new_v4().to_string();
@@ -8996,11 +8655,11 @@ async fn care_plan_member_acl_and_owner_override() {
         "care-plan-acl-request-00000000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let member_a = invite_and_join(&rig.app, owner_token, "care-plan-member-a").await;
-    let member_a_token = member_a["token"].as_str().unwrap();
-    let member_b = invite_and_join(&rig.app, owner_token, "care-plan-member-b").await;
-    let member_b_token = member_b["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member_a = approve_new_member(&rig.app, owner_token, "care-plan-member-a").await;
+    let member_a_token = member_a["access_token"].as_str().unwrap();
+    let member_b = approve_new_member(&rig.app, owner_token, "care-plan-member-b").await;
+    let member_b_token = member_b["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, owner_token).await;
     let plan_id = Uuid::new_v4().to_string();
     let bundle_id = Uuid::new_v4().to_string();
@@ -9140,9 +8799,9 @@ async fn completed_care_plan_fulfillment_binding_is_frozen_for_creator_and_owner
         "fulfillment-binding-request-0000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let creator = invite_and_join(&rig.app, owner_token, "fulfillment-binding-creator").await;
-    let creator_token = creator["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let creator = approve_new_member(&rig.app, owner_token, "fulfillment-binding-creator").await;
+    let creator_token = creator["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, owner_token).await;
     let plan_id = Uuid::new_v4().to_string();
     let first_record_id = Uuid::new_v4().to_string();
@@ -9278,12 +8937,12 @@ async fn concurrent_member_next_feed_create_keeps_nas_winner_without_forbidden()
         "next-feed-race-request-0000000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
     let family_id = owner["family_id"].as_str().unwrap();
-    let member_a = invite_and_join(&rig.app, owner_token, "next-feed-race-a").await;
-    let member_b = invite_and_join(&rig.app, owner_token, "next-feed-race-b").await;
-    let member_a_token = member_a["token"].as_str().unwrap();
-    let member_b_token = member_b["token"].as_str().unwrap();
+    let member_a = approve_new_member(&rig.app, owner_token, "next-feed-race-a").await;
+    let member_b = approve_new_member(&rig.app, owner_token, "next-feed-race-b").await;
+    let member_a_token = member_a["access_token"].as_str().unwrap();
+    let member_b_token = member_b["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, owner_token).await;
     let plan_id = Uuid::new_v4().to_string();
     let winner_media_id = Uuid::new_v4().to_string();
@@ -9533,12 +9192,12 @@ async fn later_staged_member_next_feed_create_replays_nas_winner_as_noop() {
         "next-feed-late-request-00000000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
     let family_id = owner["family_id"].as_str().unwrap();
-    let member_a = invite_and_join(&rig.app, owner_token, "next-feed-late-a").await;
-    let member_b = invite_and_join(&rig.app, owner_token, "next-feed-late-b").await;
-    let member_a_token = member_a["token"].as_str().unwrap();
-    let member_b_token = member_b["token"].as_str().unwrap();
+    let member_a = approve_new_member(&rig.app, owner_token, "next-feed-late-a").await;
+    let member_b = approve_new_member(&rig.app, owner_token, "next-feed-late-b").await;
+    let member_a_token = member_a["access_token"].as_str().unwrap();
+    let member_b_token = member_b["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, owner_token).await;
     let plan_id = Uuid::new_v4().to_string();
 
@@ -9657,7 +9316,7 @@ async fn care_plan_rejected_on_ordinary_push() {
         "ordinary-plan-request-000000000001",
     )
     .await;
-    let token = created["token"].as_str().unwrap();
+    let token = created["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, token).await;
     let plan_id = Uuid::new_v4().to_string();
     let (status, body) = json_request(
@@ -9689,7 +9348,7 @@ async fn ordinary_push_rejects_record_roots() {
         "record-ordinary-reject-request-000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, owner_token).await;
     let record_id = Uuid::new_v4().to_string();
     let (push_status, push_body) = json_request(
@@ -9721,9 +9380,9 @@ async fn fulfillment_candidate_stamps_submitter_and_rejects_bad_refs() {
         "fulfill-cand-request-000000000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let member = invite_and_join(&rig.app, owner_token, "fulfill-member").await;
-    let member_token = member["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member = approve_new_member(&rig.app, owner_token, "fulfill-member").await;
+    let member_token = member["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, owner_token).await;
     let plan_id = Uuid::new_v4().to_string();
     let bundle_id = Uuid::new_v4().to_string();
@@ -9836,9 +9495,9 @@ async fn fulfillment_candidate_freeze_is_idempotent_and_arrival_order_independen
         "fulfill-freeze-request-00000000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let member = invite_and_join(&rig.app, owner_token, "fulfill-freeze-member").await;
-    let member_token = member["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member = approve_new_member(&rig.app, owner_token, "fulfill-freeze-member").await;
+    let member_token = member["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, owner_token).await;
     let plan_id = Uuid::new_v4().to_string();
     let bundle_id = Uuid::new_v4().to_string();
@@ -10025,11 +9684,11 @@ async fn care_plan_creator_leave_admin_still_manages_member_does_not() {
         "care-plan-leave-request-000000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let creator = invite_and_join(&rig.app, owner_token, "care-plan-leave-creator").await;
-    let creator_token = creator["token"].as_str().unwrap();
-    let peer = invite_and_join(&rig.app, owner_token, "care-plan-leave-peer").await;
-    let peer_token = peer["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let creator = approve_new_member(&rig.app, owner_token, "care-plan-leave-creator").await;
+    let creator_token = creator["access_token"].as_str().unwrap();
+    let peer = approve_new_member(&rig.app, owner_token, "care-plan-leave-peer").await;
+    let peer_token = peer["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, owner_token).await;
     let plan_id = Uuid::new_v4().to_string();
     let bundle_id = Uuid::new_v4().to_string();
@@ -10154,7 +9813,7 @@ async fn care_plan_media_integrity_rejects_bad_refs_and_baby_mismatch() {
         "care-plan-media-request-00000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, owner_token).await;
     let other_baby = seed_baby(&rig.app, owner_token).await;
     let plan_id = Uuid::new_v4().to_string();
@@ -10291,7 +9950,7 @@ async fn atomic_bundle_rejects_stale_root_when_published_is_newer() {
         "bundle-stale-request-00000000001",
     )
     .await;
-    let token = created["token"].as_str().unwrap();
+    let token = created["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, token).await;
     let record_id = Uuid::new_v4().to_string();
 
@@ -10332,7 +9991,7 @@ async fn pending_bundle_bytes_are_not_claimed_by_ordinary_metadata_or_put_across
         "bundle-stale-media-request-00001",
     )
     .await;
-    let token = created["token"].as_str().unwrap();
+    let token = created["access_token"].as_str().unwrap();
     let family_id = created["family_id"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, token).await;
     let record_id = Uuid::new_v4().to_string();
@@ -10504,7 +10163,7 @@ async fn losing_bundle_media_tombstone_does_not_publish_quarantined_bytes() {
         "bundle-losing-media-request-000001",
     )
     .await;
-    let token = created["token"].as_str().unwrap();
+    let token = created["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, token).await;
     let record_id = Uuid::new_v4().to_string();
     let media_id = Uuid::new_v4().to_string();
@@ -10651,7 +10310,7 @@ async fn atomic_bundle_supports_baby_and_avatar_media() {
         "ordinary-media-request-0000000001",
     )
     .await;
-    let token = created["token"].as_str().unwrap();
+    let token = created["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, token).await;
     let avatar_id = Uuid::new_v4().to_string();
     let (status, body) = publish_bundle_with_media(
@@ -10713,7 +10372,7 @@ async fn ordinary_put_cannot_overwrite_committed_bundle_media() {
         "bundle-owned-media-request-0000001",
     )
     .await;
-    let token = created["token"].as_str().unwrap();
+    let token = created["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, token).await;
     let record_id = Uuid::new_v4().to_string();
     let media_id = Uuid::new_v4().to_string();
@@ -10813,7 +10472,7 @@ async fn tombstoned_custom_item_supports_history_and_fulfillment_but_not_new_roo
         "custom-history-owner-request-00001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
     let baby_id = seed_baby(&rig.app, token).await;
     let custom_item_id = Uuid::new_v4().to_string();
     let historical_record_id = Uuid::new_v4().to_string();
@@ -11042,10 +10701,10 @@ async fn custom_item_create_stamps_creator_and_syncs_to_peer() {
         "custom-item-owner-request-00000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
     let owner_membership = owner["membership_id"].as_str().unwrap().to_owned();
-    let member = invite_and_join(&rig.app, owner_token, "member-device").await;
-    let member_token = member["token"].as_str().unwrap();
+    let member = approve_new_member(&rig.app, owner_token, "member-device").await;
+    let member_token = member["access_token"].as_str().unwrap();
     let member_membership = member["membership_id"].as_str().unwrap().to_owned();
     let item_id = Uuid::new_v4().to_string();
 
@@ -11100,11 +10759,11 @@ async fn custom_item_member_acl_rename_delete_and_owner_override() {
         "custom-item-acl-request-0000000001",
     )
     .await;
-    let owner_token = owner["token"].as_str().unwrap();
-    let member_a = invite_and_join(&rig.app, owner_token, "member-a").await;
-    let member_a_token = member_a["token"].as_str().unwrap();
-    let member_b = invite_and_join(&rig.app, owner_token, "member-b").await;
-    let member_b_token = member_b["token"].as_str().unwrap();
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let member_a = approve_new_member(&rig.app, owner_token, "member-a").await;
+    let member_a_token = member_a["access_token"].as_str().unwrap();
+    let member_b = approve_new_member(&rig.app, owner_token, "member-b").await;
+    let member_b_token = member_b["access_token"].as_str().unwrap();
     let item_id = Uuid::new_v4().to_string();
 
     assert_eq!(
@@ -11213,7 +10872,7 @@ async fn custom_item_rejects_layout_fields_on_wire() {
         "custom-item-layout-request-0000001",
     )
     .await;
-    let token = owner["token"].as_str().unwrap();
+    let token = owner["access_token"].as_str().unwrap();
     let item_id = Uuid::new_v4().to_string();
     let (status, body) = publish_root_bundle(
         &rig.app,

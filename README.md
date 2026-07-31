@@ -49,11 +49,12 @@ CI（GitHub Actions）：push/PR 上跑 unit test；`tools/lezi-sync` 变更另�
 
 ## 同步服务（V2）
 
-规格（门闩、前台策略、NAS 选型与 API）：[`docs/prd/sync-home-lan.md`](docs/prd/sync-home-lan.md)
+规格（可信 endpoint、身份、前台策略与 API）：[`docs/prd/sync-trusted-endpoint.md`](docs/prd/sync-trusted-endpoint.md)
 
 交付实现：Android `:sync` / `:feature:family` +
 [`tools/lezi-sync`](tools/lezi-sync/)（Rust、Axum、Tokio、SQLite、Docker
-单卷）。客户端不内置服务器地址；须在账户页填写家中 NAS 地址或扫描邀请 QR。
+单卷）。客户端不内置服务器地址；须在账户页填写可信 HTTPS 地址，或扫描管理员 App
+生成的普通成员单次登录 QR。
 
 ### 本机开发与测试
 
@@ -131,10 +132,10 @@ Android 模拟器调试本机服务时，在账户页手动填写
 
 - **同步**：Rust 服务端、Android 实现与自动化已完成；发版路径为开发机构建镜像 +
   SSH/zdocker 部署（见上节）。物理双设备长期验收与备份策略仍按运维需要执行
-- **同步策略**：仅家 Wi‑Fi + NAS 可达 + App 前台；无后台轮询和伴侣记录通知；
-  设置/深色**不同步**
-- **家网权限**：首次使用家庭同步时请求位置权限；Android 把当前 SSID 视为
-  位置敏感字段。应用只在本机做 SSID 精确匹配，不读取坐标、不上传 SSID
+- **同步策略**：仅 App 前台连接用户确认的可信 HTTPS endpoint；无后台轮询和伴侣记录
+  通知；设置/深色**不同步**
+- **网络权限**：不读取网络名称，不申请仅为家庭同步存在的位置或 Wi-Fi 权限；连接失败不
+  影响本地记账
 - **成长曲线**：离线内置 WHO 0–24 月、分性别参考数据，**非医疗诊断**
 - **Widget**：需手动添加到桌面
 - **厂商杀后台**：母乳计时依赖 FGS + DataStore

@@ -1,6 +1,6 @@
 # 乐记 — Android 技术说明
 
-> 主 PRD：[`README.md`](./README.md) · 数据：[`data-model.md`](./data-model.md) · 0.3 同步基线：[`sync-home-lan.md`](./sync-home-lan.md) · 下一版目标：[`sync-trusted-endpoint.md`](./sync-trusted-endpoint.md)
+> 主 PRD：[`README.md`](./README.md) · 数据：[`data-model.md`](./data-model.md) · 当前同步合同：[`sync-trusted-endpoint.md`](./sync-trusted-endpoint.md) · 历史处置：[`sync-home-lan.md`](./sync-home-lan.md)
 
 ---
 
@@ -19,7 +19,7 @@
 | 通知 | NotificationCompat + **非精确**本地闹钟 | 护理计划（含下次喂养计划）；**不要求** `SCHEDULE_EXACT_ALARM`；**不为同步/伴侣新记录推送** |
 | 计时 | 前台服务 + 状态持久化 | 关 App 仍跑 |
 | Widget | Glance | |
-| 同步 | `RealSyncPort` + 单一家庭服务器 | 0.3 已实现家网门闩；下一版目标为可信 HTTPS、每设备会话、无 SSID 的仅前台 Outbox/pull/push |
+| 同步 | `RealSyncPort` + 单一家庭服务器 | 可信 HTTPS、每设备会话、无网络名称身份的仅前台 Outbox/pull/push |
 | NAS 后端 | **Rust + Axum + Tokio + SQLite** | 交付物 `tools/lezi-sync`；单二进制、单卷 `DATA_DIR`（db+media） |
 | IAP / 广告 | **不引入** | |
 | 测试 | JUnit + 聚合纯函数单测 + 关键 Compose 测试 | |
@@ -70,14 +70,13 @@
 |----|------|
 | `domain → sync` | 本地写后的同步触发 |
 | `feature:log → sync` | Composer / 日志路径触发 sync |
-| `feature:family → sync` | 账户页 join/create/invite/leave |
+| `feature:family → sync` | 账户页 setup、管理员登录、成员申请/设备管理与退出 |
 
 计时状态落 `core`/`domain`，避免 log ↔ timer 循环依赖。
 
-**运行环境 / 验收状态**：本机 Docker `lezi-sync` 与双模拟器前台交叉可见路径已验证；
-严格 live 服务端路径还完成了建家、邀请码加入、双向协议和头像 ACL。物理 NAS 生产、
-双真机和相机扫码仍 open；完整同步验收边界见
-[sync-home-lan.md](./sync-home-lan.md)。
+**运行环境 / 验收状态**：自动化覆盖可信 endpoint、建家/登录、成员申请审批、独立设备
+会话、撤销与同步协议。物理 NAS 生产、双真机和相机扫码仍需按发布门执行；完整同步验收
+边界见 [sync-trusted-endpoint.md](./sync-trusted-endpoint.md)。
 
 ---
 
@@ -92,8 +91,8 @@ UI 事件
         → push；回前台/下拉 → pull + 媒体字节
 ```
 
-实现继续无后台同步、无推送拉同步。下一版删除单一 host:port + SSID 白名单门闩，改为系统 PKI
-或 TOFU/SPKI 的 HTTPS endpoint 与每设备 opaque session；未登录、断网或等待审批时仍先落 Room
+实现继续无后台同步、无推送拉同步。系统 PKI 或 TOFU/SPKI 验证 HTTPS endpoint，每台设备
+持有独立 opaque session；未登录、断网或等待审批时仍先落 Room
 并保留待同步状态。记录/汇总/成长下拉刷新是唯一显式立即同步动作。
 
 计时器：
@@ -123,8 +122,8 @@ UI 事件
 | FOREGROUND_SERVICE（及合规类型） | 喂奶计时 | 当前 |
 | RECEIVE_BOOT_COMPLETED | 重启恢复本地提醒/计时 | 当前 |
 | 相册 / Photo Picker | 日记照片 | 当前 |
-| INTERNET / ACCESS_NETWORK_STATE | HTTPS setup/login、push/pull 与媒体 | 已声明；下一版网络调用受前台 + transport trust + session 约束，不限 Wi-Fi |
-| ACCESS_FINE_LOCATION | 家庭同步不再需要 | 下一版删除仅为 SSID 存在的声明与运行时申请 |
+| INTERNET / ACCESS_NETWORK_STATE | HTTPS setup/login、push/pull 与媒体 | 已声明；网络调用受前台 + transport trust + session 约束，不限网络类型 |
+| ACCESS_FINE_LOCATION / ACCESS_WIFI_STATE | 家庭同步不需要 | 不声明，不存在运行时申请 |
 | CAMERA | 扫描管理员 App 提供的普通成员单次登录 QR | 可选硬件；拒绝后仍可手动 endpoint + 申请 |
 | SCHEDULE_EXACT_ALARM / USE_EXACT_ALARM | **不申请**；护理计划提醒用非精确闹钟即可 | |
 | 麦克风 / 后台定位 / 附近设备 | **不申请** | |

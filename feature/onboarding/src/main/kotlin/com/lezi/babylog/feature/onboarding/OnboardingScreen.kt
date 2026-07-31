@@ -93,11 +93,10 @@ import com.lezi.babylog.domain.FamilyWizardOutcome
 import com.lezi.babylog.domain.FamilyWizardSnapshot
 import com.lezi.babylog.domain.FamilyWizardState
 import com.lezi.babylog.domain.FamilyWizardStep
-import com.lezi.babylog.domain.JoinFamilyUseCase
 import com.lezi.babylog.domain.SyncFamilyWizardGateway
-import com.lezi.babylog.sync.HomeLanServerConfig
+import com.lezi.babylog.sync.FamilyEndpointConfig
 import com.lezi.babylog.sync.CertificateTrustCandidate
-import com.lezi.babylog.sync.JoinFamilyDraft
+import com.lezi.babylog.sync.FamilyEndpointDraft
 import com.lezi.babylog.sync.MemberLoginQrPayload
 import com.lezi.babylog.sync.MemberLoginQrPayloadCodec
 import com.lezi.babylog.sync.MemberLoginQrTrustChangedException
@@ -171,7 +170,7 @@ internal fun onboardingCreateBabySource(
 internal fun onboardingFamilyWizardSnapshot(
     mode: FamilyWizardMode,
     step: FamilyWizardStep,
-    draft: JoinFamilyDraft,
+    draft: FamilyEndpointDraft,
     displayName: String,
     familyName: String = "",
     deviceName: String = "",
@@ -208,10 +207,6 @@ internal fun onboardingFamilyWizardTransition(
                 nextStep = OnboardingStep.RecoveryPending,
             )
         }
-        is FamilyWizardOutcome.Joined -> OnboardingFamilyTransition(
-            finishRecovery = true,
-            nextStep = OnboardingStep.ChooseFamily,
-        )
         is FamilyWizardOutcome.Reclaimed -> when (outcome.dataRecovery) {
             com.lezi.babylog.sync.InitialFamilyDataRecovery.Complete ->
                 reclaimedFamilyEmpty?.let { empty ->
@@ -278,21 +273,19 @@ internal fun onboardingFamilyWizardTransition(
     -> null
 }
 
-private val JoinFamilyDraftSaver = listSaver<JoinFamilyDraft, String>(
+private val FamilyEndpointDraftSaver = listSaver<FamilyEndpointDraft, String>(
     save = {
         listOf(
-            it.invitation,
             it.host,
             it.portText,
             it.scheme,
         )
     },
     restore = {
-        JoinFamilyDraft(
-            invitation = it[0],
-            host = it[1],
-            portText = it[2],
-            scheme = it[3],
+        FamilyEndpointDraft(
+            host = it[0],
+            portText = it[1],
+            scheme = it[2],
         )
     },
 )
@@ -300,11 +293,10 @@ private val JoinFamilyDraftSaver = listSaver<JoinFamilyDraft, String>(
 @HiltViewModel
 class OnboardingViewModel @Inject constructor(
     private val careLog: CareLog,
-    private val joinFamily: JoinFamilyUseCase,
     private val sync: SyncPort,
 ) : ViewModel() {
     private val familyWizard = FamilyWizardController(
-        gateway = SyncFamilyWizardGateway(sync, joinFamily, careLog),
+        gateway = SyncFamilyWizardGateway(sync, careLog),
         initialSnapshot = FamilyWizardSnapshot.empty(FamilyWizardEntry.Onboarding),
     )
     private val mutableReclaimedFamilyEmpty = MutableStateFlow<Boolean?>(null)
@@ -546,9 +538,9 @@ fun OnboardingRoute(
     val familyWizardBusy = familyWizardState is FamilyWizardState.Submitting ||
         familyWizardState is FamilyWizardState.ProbingEndpoint
     val reclaimedFamilyEmpty by vm.reclaimedFamilyEmpty.collectAsState()
-    val novice = remember { HomeLanServerConfig.noviceUiDefaults() }
-    var joinDraft by rememberSaveable(stateSaver = JoinFamilyDraftSaver) {
-        mutableStateOf(JoinFamilyDraft.fromConfig(novice))
+    val novice = remember { FamilyEndpointConfig.emptyDraft() }
+    var joinDraft by rememberSaveable(stateSaver = FamilyEndpointDraftSaver) {
+        mutableStateOf(FamilyEndpointDraft.fromConfig(novice))
     }
     var endpointDraft by remember { mutableStateOf("") }
     DisposableEffect(step, showOwnerLogin, showOwnerTakeover, context) {
@@ -566,7 +558,7 @@ fun OnboardingRoute(
         if (endpointDraft.isBlank()) endpointDraft = verifiedEndpoint?.origin.orEmpty()
     }
     fun runForegroundAction(action: () -> Unit) = action()
-    fun applyScannedInvite(raw: String) {
+    fun applyScannedMemberLogin(raw: String) {
         val payload = raw.trim()
         if (payload.isEmpty()) return
         val memberLogin = runCatching { MemberLoginQrPayloadCodec.decode(payload) }.getOrNull()
@@ -599,29 +591,20 @@ fun OnboardingRoute(
             }
             return
         }
-        if (payload.contains("member_login")) {
-            formError = "这个二维码已失效，请让管理员重新生成"
-            return
-        }
-        // Prefill the short code and endpoint; persist only after join succeeds.
-        val result = joinDraft.applyInvitationInput(payload)
-        joinDraft = result.draft
-        formError = result.error
-        showJoin = true
+        formError = "这不是可用的成员登录二维码"
     }
-    val scanInvite = rememberLauncherForActivityResult(ScanContract()) { result ->
-        result.contents?.let(::applyScannedInvite)
+    val scanMemberLogin = rememberLauncherForActivityResult(ScanContract()) { result ->
+        result.contents?.let(::applyScannedMemberLogin)
     }
-    fun launchInviteScan() {
+    fun launchMemberLoginScan() {
         if (!CameraCapture.hasCameraHardware(context)) {
-            formError = "此设备没有可用相机，请改用手动输入邀请码"
-            showJoin = true
+            formError = "此设备没有可用相机，请使用家庭服务器地址手动申请加入"
             return
         }
-        scanInvite.launch(
+        scanMemberLogin.launch(
             ScanOptions()
                 .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                .setPrompt("扫描家庭邀请或成员登录二维码")
+                .setPrompt("扫描成员登录二维码")
                 .setBeepEnabled(false)
                 .setOrientationLocked(false)
                 .setBarcodeImageEnabled(false),
@@ -631,16 +614,15 @@ fun OnboardingRoute(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
         if (granted) {
-            launchInviteScan()
+            launchMemberLoginScan()
         } else {
-            formError = "需要相机权限才能扫码，请在系统设置中开启，或改用输入邀请码"
-            showJoin = true
+            formError = "需要相机权限才能扫码，请在系统设置中开启"
         }
     }
-    fun requestOrLaunchInviteScan() {
+    fun requestOrLaunchMemberLoginScan() {
         formError = null
         if (CameraCapture.hasPermission(context)) {
-            launchInviteScan()
+            launchMemberLoginScan()
         } else {
             scanCameraPermission.launch(CameraCapture.PERMISSION)
         }
@@ -648,7 +630,7 @@ fun OnboardingRoute(
     LaunchedEffect(showJoin) {
         if (!showJoin) return@LaunchedEffect
         if (joinDraft.host.isBlank() || joinDraft.portText.isBlank()) {
-            joinDraft = JoinFamilyDraft.fromConfig(novice, joinDraft.invitation)
+            joinDraft = FamilyEndpointDraft.fromConfig(novice)
         }
     }
     LaunchedEffect(familyWizardState, reclaimedFamilyEmpty) {
@@ -746,7 +728,7 @@ fun OnboardingRoute(
                 }
                 if (pendingMemberLogin == null) {
                     OutlinedButton(
-                        onClick = ::requestOrLaunchInviteScan,
+                        onClick = ::requestOrLaunchMemberLoginScan,
                         modifier = Modifier.fillMaxWidth().height(52.dp),
                     ) {
                         Icon(Icons.Outlined.QrCodeScanner, contentDescription = null)
@@ -834,7 +816,7 @@ fun OnboardingRoute(
                             ready == null -> vm.connectEndpoint(endpointDraft)
                             else -> {
                                 endpointDraft = ready.endpoint.origin
-                                joinDraft = JoinFamilyDraft(
+                                joinDraft = FamilyEndpointDraft(
                                     host = ready.endpoint.origin,
                                     portText = "443",
                                     scheme = "https",

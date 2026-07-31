@@ -35,11 +35,9 @@ use members::{
 use model::{
     normalized_display_name_key, BindExistingMemberRequest, BundleCommitRequest,
     BundleStageRequest, ClaimMemberLoginGrantRequest, CreateMemberLoginGrantRequest,
-    DeleteFamilyRequest, EmptyRequest, FamilyCreateRequest, InviteRequest, JoinRequest,
-    MemberLoginRequest, OwnerLoginRequest, PendingSecretRequest, RefreshSessionRequest,
-    RenameFamilyRequest,
+    DeleteFamilyRequest, EmptyRequest, FamilyCreateRequest, MemberLoginRequest, OwnerLoginRequest,
+    PendingSecretRequest, RefreshSessionRequest, RenameFamilyRequest,
 };
-use rand::distributions::{Distribution, Uniform};
 use rand::rngs::OsRng;
 use rand::RngCore;
 pub use rate_limit::RateLimitConfig;
@@ -57,10 +55,8 @@ use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const DEFAULT_INVITE_TTL_HOURS: u16 = 24;
 pub const DEFAULT_MAX_MEDIA_BYTES: usize = 10 * 1024 * 1024;
 pub const DEFAULT_CREATE_RATE_LIMIT: u32 = 20;
-pub const DEFAULT_JOIN_RATE_LIMIT: u32 = 60;
 pub const DEFAULT_MEMBER_REQUEST_RATE_LIMIT: u32 = 10;
 pub const DEFAULT_MEMBER_REQUEST_TTL_HOURS: u16 = 24;
 pub const DEFAULT_MAX_PENDING_MEMBER_REQUESTS: usize = 32;
@@ -72,7 +68,9 @@ pub const CAPABILITY_ATOMIC_BUNDLE: &str = "atomic_bundle";
 /// to servers that accept and canonicalize it.
 pub const CAPABILITY_RECORD_MEMBERSHIP_AUTHOR: &str = "record_membership_author";
 pub const SETUP_PROTOCOL_VERSION: u16 = 1;
-pub const CAPABILITY_SETUP_STATUS: &str = "setup_status";
+pub const CAPABILITY_TRUSTED_HTTPS_ENDPOINT: &str = "trusted_https_endpoint_v1";
+pub const CAPABILITY_DEVICE_SESSIONS: &str = "device_sessions_v1";
+pub const CAPABILITY_MEMBERSHIP_DEVICES: &str = "membership_devices_v1";
 const MAX_ENTITY_FUTURE_SKEW_MILLIS: i64 = 24 * 60 * 60 * 1_000;
 pub(crate) const PULL_PAGE_ENTITY_LIMIT: usize = 200;
 pub(crate) const PULL_PAGE_TARGET_BYTES: usize = 8 * 1024 * 1024;
@@ -83,14 +81,11 @@ const BOOTSTRAP_SECRET_HEADER: HeaderName = HeaderName::from_static("x-lezi-boot
 static PERMISSION_HARDENING_DISABLED: AtomicBool = AtomicBool::new(false);
 
 type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
-type InviteCodeFactory = Arc<dyn Fn() -> String + Send + Sync>;
-
 #[derive(Clone)]
 pub struct ServerConfig {
     pub data_dir: PathBuf,
     pub version: String,
     pub max_media_bytes: usize,
-    pub invite_ttl_hours: u16,
     pub server_secret: Option<Vec<u8>>,
     pub generation: Option<String>,
     /// When set (non-empty), POST /v1/family/create requires matching
@@ -98,12 +93,10 @@ pub struct ServerConfig {
     /// production docs require setting this fail-closed.
     pub bootstrap_secret: Option<String>,
     pub create_rate_limit: RateLimitConfig,
-    pub join_rate_limit: RateLimitConfig,
     pub member_request_rate_limit: RateLimitConfig,
     pub member_request_ttl_hours: u16,
     pub max_pending_member_requests: usize,
     clock: Clock,
-    invite_code_factory: InviteCodeFactory,
 }
 
 impl ServerConfig {
@@ -112,16 +105,11 @@ impl ServerConfig {
             data_dir: data_dir.into(),
             version: VERSION.to_owned(),
             max_media_bytes: DEFAULT_MAX_MEDIA_BYTES,
-            invite_ttl_hours: DEFAULT_INVITE_TTL_HOURS,
             server_secret: None,
             generation: None,
             bootstrap_secret: None,
             create_rate_limit: RateLimitConfig {
                 max_attempts: DEFAULT_CREATE_RATE_LIMIT,
-                window_seconds: DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
-            },
-            join_rate_limit: RateLimitConfig {
-                max_attempts: DEFAULT_JOIN_RATE_LIMIT,
                 window_seconds: DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
             },
             member_request_rate_limit: RateLimitConfig {
@@ -131,7 +119,6 @@ impl ServerConfig {
             member_request_ttl_hours: DEFAULT_MEMBER_REQUEST_TTL_HOURS,
             max_pending_member_requests: DEFAULT_MAX_PENDING_MEMBER_REQUESTS,
             clock: Arc::new(system_epoch_seconds),
-            invite_code_factory: Arc::new(secure_invite_code),
         }
     }
 
@@ -143,7 +130,6 @@ impl ServerConfig {
         );
         config.version = std::env::var("LEZI_SYNC_VERSION").unwrap_or_else(|_| VERSION.to_owned());
         config.max_media_bytes = parse_env("LEZI_MAX_MEDIA_BYTES", DEFAULT_MAX_MEDIA_BYTES)?;
-        config.invite_ttl_hours = parse_env("LEZI_INVITE_TTL_HOURS", DEFAULT_INVITE_TTL_HOURS)?;
         config.bootstrap_secret = match std::env::var("LEZI_BOOTSTRAP_SECRET") {
             Ok(value) if !value.is_empty() => Some(value),
             Ok(_) | Err(std::env::VarError::NotPresent) => {
@@ -153,8 +139,6 @@ impl ServerConfig {
         };
         config.create_rate_limit.max_attempts =
             parse_env("LEZI_CREATE_RATE_LIMIT", DEFAULT_CREATE_RATE_LIMIT)?;
-        config.join_rate_limit.max_attempts =
-            parse_env("LEZI_JOIN_RATE_LIMIT", DEFAULT_JOIN_RATE_LIMIT)?;
         config.member_request_rate_limit.max_attempts = parse_env(
             "LEZI_MEMBER_REQUEST_RATE_LIMIT",
             DEFAULT_MEMBER_REQUEST_RATE_LIMIT,
@@ -172,7 +156,6 @@ impl ServerConfig {
             DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
         )?;
         config.create_rate_limit.window_seconds = window;
-        config.join_rate_limit.window_seconds = window;
         config.member_request_rate_limit.window_seconds = window;
         config.validate()?;
         Ok(config)
@@ -183,29 +166,16 @@ impl ServerConfig {
         self
     }
 
-    pub fn with_invite_code_factory(
-        mut self,
-        factory: impl Fn() -> String + Send + Sync + 'static,
-    ) -> Self {
-        self.invite_code_factory = Arc::new(factory);
-        self
-    }
-
     fn validate(&self) -> Result<(), String> {
-        if !(1..=168).contains(&self.invite_ttl_hours) {
-            return Err("LEZI_INVITE_TTL_HOURS must be between 1 and 168".to_owned());
-        }
         if self.max_media_bytes == 0 {
             return Err("LEZI_MAX_MEDIA_BYTES must be greater than zero".to_owned());
         }
         if self.create_rate_limit.max_attempts == 0
-            || self.join_rate_limit.max_attempts == 0
             || self.member_request_rate_limit.max_attempts == 0
         {
             return Err("rate limit max_attempts must be greater than zero".to_owned());
         }
         if self.create_rate_limit.window_seconds <= 0
-            || self.join_rate_limit.window_seconds <= 0
             || self.member_request_rate_limit.window_seconds <= 0
         {
             return Err("LEZI_RATE_LIMIT_WINDOW_SECONDS must be greater than zero".to_owned());
@@ -234,16 +204,13 @@ struct AppState {
     media_root: PathBuf,
     version: String,
     max_media_bytes: usize,
-    invite_ttl_seconds: i64,
     signing_secret: Arc<Vec<u8>>,
     generation: String,
     clock: Clock,
-    invite_code_factory: InviteCodeFactory,
     family_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     bootstrap_secret: Option<Arc<str>>,
     owner_root_fingerprint: Option<Arc<str>>,
     create_limiter: Arc<RateLimiter>,
-    join_limiter: Arc<RateLimiter>,
     member_request_limiter: Arc<RateLimiter>,
     member_request_ttl_seconds: i64,
     max_pending_member_requests: usize,
@@ -295,24 +262,6 @@ impl AppState {
             derive_token(
                 &self.signing_secret,
                 &format!("owner-login-refresh:{request_hash}:{family_id}:{device_id}"),
-            ),
-        )
-    }
-
-    fn member_tokens(
-        &self,
-        code_hash: &str,
-        family_id: &str,
-        device_name: &str,
-    ) -> (String, String) {
-        (
-            derive_token(
-                &self.signing_secret,
-                &format!("join-access:{code_hash}:{family_id}:{device_name}"),
-            ),
-            derive_token(
-                &self.signing_secret,
-                &format!("join-refresh:{code_hash}:{family_id}:{device_name}"),
             ),
         )
     }
@@ -438,17 +387,14 @@ pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
         media_root,
         version: config.version,
         max_media_bytes: config.max_media_bytes,
-        invite_ttl_seconds: i64::from(config.invite_ttl_hours) * 60 * 60,
         signing_secret: Arc::new(signing_secret),
         generation: config.generation.unwrap_or_else(secure_generation),
         clock: config.clock,
-        invite_code_factory: config.invite_code_factory,
         family_locks: Arc::new(Mutex::new(HashMap::new())),
         bootstrap_secret: bootstrap_secret.map(|value| Arc::from(value.into_boxed_str())),
         owner_root_fingerprint: owner_root_fingerprint
             .map(|value| Arc::from(value.into_boxed_str())),
         create_limiter: Arc::new(RateLimiter::new(config.create_rate_limit)),
-        join_limiter: Arc::new(RateLimiter::new(config.join_rate_limit)),
         member_request_limiter: Arc::new(RateLimiter::new(config.member_request_rate_limit)),
         member_request_ttl_seconds: i64::from(config.member_request_ttl_hours) * 60 * 60,
         max_pending_member_requests: config.max_pending_member_requests,
@@ -531,8 +477,6 @@ pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
         .route("/v1/family/members/remove", post(remove_family_member))
         .route("/v1/family/display-name", post(update_my_display_name))
         .route("/v1/family/name", post(rename_family))
-        .route("/v1/invite", post(create_invite))
-        .route("/v1/join", post(join))
         .route("/v1/leave", post(leave))
         .route("/v1/device/logout", post(logout_current_device))
         .route("/v1/family/delete", post(delete_family))
@@ -578,7 +522,13 @@ async fn setup_status(State(state): State<Arc<AppState>>) -> Result<Response, Ap
     };
     Ok(Json(json!({
         "protocol_version": SETUP_PROTOCOL_VERSION,
-        "capabilities": [CAPABILITY_SETUP_STATUS],
+        "capabilities": [
+            CAPABILITY_TRUSTED_HTTPS_ENDPOINT,
+            CAPABILITY_DEVICE_SESSIONS,
+            CAPABILITY_MEMBERSHIP_DEVICES,
+            CAPABILITY_ATOMIC_BUNDLE,
+            CAPABILITY_RECORD_MEMBERSHIP_AUTHOR,
+        ],
         "family_state": family_state,
     }))
     .into_response())
@@ -628,7 +578,6 @@ async fn create_family(
         Json(json!({
             "family_id": issued.family_id,
             "access_token": issued.access_token,
-            "token": issued.access_token,
             "access_expires_at": issued.access_expires_at,
             "refresh_token": issued.refresh_token,
             "role": "owner",
@@ -698,7 +647,6 @@ async fn issue_owner_device(
         "session_id": issued.session_id,
         "role": "owner",
         "access_token": issued.access_token,
-        "token": issued.access_token,
         "access_expires_at": issued.access_expires_at,
         "refresh_token": issued.refresh_token,
         "generation": state.generation,
@@ -856,7 +804,6 @@ async fn claim_member_login_request(
         "session_id": issued.session_id,
         "role": "member",
         "access_token": issued.access_token,
-        "token": issued.access_token,
         "access_expires_at": issued.access_expires_at,
         "refresh_token": issued.refresh_token,
         "generation": state.generation,
@@ -919,7 +866,6 @@ async fn claim_member_login_grant(
         "session_id": issued.session_id,
         "role": "member",
         "access_token": issued.access_token,
-        "token": issued.access_token,
         "access_expires_at": issued.access_expires_at,
         "refresh_token": issued.refresh_token,
         "generation": state.generation,
@@ -1046,90 +992,6 @@ async fn rename_family(
     Ok(Json(json!({
         "ok": true,
         "family_name": family_name,
-    })))
-}
-
-async fn create_invite(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    body: Result<Json<InviteRequest>, JsonRejection>,
-) -> Result<impl IntoResponse, ApiError> {
-    let principal = require_owner(&state, &headers)?;
-    let _ = json_body(body)?;
-    let code = (state.invite_code_factory)();
-    if !(8..=32).contains(&code.len())
-        || !code
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
-    {
-        return Err(ApiError::internal(
-            "invite code factory returned an invalid code",
-        ));
-    }
-    let expires_at = state.store.create_invite(
-        &principal.family_id,
-        state.now(),
-        state.invite_ttl_seconds,
-        &code,
-    )?;
-    Ok((
-        StatusCode::CREATED,
-        Json(json!({"code": code, "expires_at": expires_at})),
-    ))
-}
-
-async fn join(
-    State(state): State<Arc<AppState>>,
-    body: Result<Json<JoinRequest>, JsonRejection>,
-) -> Result<Json<Value>, ApiError> {
-    let request = json_body(body)?;
-    let display_name = request.validate()?;
-    let display_name_key = normalized_display_name_key(&display_name);
-    let scope = format!("invite:{}", hash_secret(&request.code));
-    if !state.join_limiter.check_and_record(&scope, state.now()) {
-        return Err(ApiError::too_many_requests(
-            "Too many join attempts; try again later",
-        ));
-    }
-    let signing_state = state.clone();
-    let result = state.store.join_family(
-        &request.code,
-        &request.device_id,
-        &display_name,
-        &display_name_key,
-        state.now(),
-        move |code_hash, family_id, device_name| {
-            signing_state.member_tokens(code_hash, family_id, device_name)
-        },
-    );
-    let issued = match result {
-        Ok(value) => value,
-        Err(StoreError::InviteNotFound) => return Err(ApiError::not_found("Invitation not found")),
-        Err(StoreError::InviteExpired) => return Err(ApiError::gone("Invitation expired")),
-        Err(StoreError::InviteAlreadyUsed) => {
-            return Err(ApiError::conflict(
-                "Invitation already used by another device",
-            ))
-        }
-        Err(StoreError::DisplayNameConflict) => {
-            return Err(ApiError::conflict("Family display name is already in use"))
-        }
-        Err(error) => return Err(error.into()),
-    };
-    Ok(Json(json!({
-        "family_id": issued.family_id,
-        "access_token": issued.access_token,
-        "token": issued.access_token,
-        "access_expires_at": issued.access_expires_at,
-        "refresh_token": issued.refresh_token,
-        "role": "member",
-        "membership_id": issued.membership_id,
-        "device_id": issued.device_id,
-        "session_id": issued.session_id,
-        "entities": [],
-        "cursor": 0,
-        "generation": state.generation,
-        "family_name": issued.family_name,
     })))
 }
 
@@ -2000,15 +1862,6 @@ fn secure_session_token() -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn secure_invite_code() -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let range = Uniform::from(0..ALPHABET.len());
-    let mut rng = OsRng;
-    (0..12)
-        .map(|_| ALPHABET[range.sample(&mut rng)] as char)
-        .collect()
-}
-
 fn system_epoch_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2596,18 +2449,14 @@ mod tests {
     #[test]
     fn tokens_match_hmac_contract() {
         let secret = vec![b'S'; 32];
-        assert_eq!(
-            derive_token(&secret, "join:abc:device"),
-            "sLQvpn4ydfRjk66ShZFi8JAWU-pYkN3FV0VWlHBNAuA"
-        );
+        let token = derive_token(&secret, "session:abc:device");
+        assert_eq!(token, derive_token(&secret, "session:abc:device"));
+        assert_ne!(token, derive_token(&secret, "session:abc:other-device"));
     }
 
     #[test]
     fn config_rejects_invalid_limits() {
         let mut config = ServerConfig::new("/tmp/lezi-unused");
-        config.invite_ttl_hours = 0;
-        assert!(config.validate().is_err());
-        config.invite_ttl_hours = 24;
         config.max_media_bytes = 0;
         assert!(config.validate().is_err());
         config.max_media_bytes = DEFAULT_MAX_MEDIA_BYTES;

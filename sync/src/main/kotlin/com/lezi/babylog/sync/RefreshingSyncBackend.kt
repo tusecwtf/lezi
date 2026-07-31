@@ -26,9 +26,6 @@ internal class RefreshingSyncBackend(
     override suspend fun pull(session: SyncSession): PullResult =
         authenticated(session, delegate::pull)
 
-    override suspend fun invite(session: SyncSession): Invite =
-        authenticated(session, delegate::invite)
-
     override suspend fun members(session: SyncSession): List<FamilyMember> =
         authenticated(session, delegate::members)
 
@@ -62,7 +59,7 @@ internal class RefreshingSyncBackend(
         endpoint: TrustedEndpointProfile,
         grant: String,
         deviceName: String,
-    ): JoinResult = delegate.claimMemberLoginGrant(endpoint, grant, deviceName)
+    ): SessionBootstrapResult = delegate.claimMemberLoginGrant(endpoint, grant, deviceName)
 
     override suspend fun updateMyDisplayName(session: SyncSession, displayName: String) =
         authenticated(session) { delegate.updateMyDisplayName(it, displayName) }
@@ -191,7 +188,7 @@ internal class RefreshingSyncBackend(
     }
 
     private fun SyncSession.hasUsableAccess(): Boolean =
-        familyToken.isNotBlank() && accessExpiresAtEpochSeconds > clock.nowMillis() / 1_000L
+        accessToken.isNotBlank() && accessExpiresAtEpochSeconds > clock.nowMillis() / 1_000L
 
     private suspend fun refreshOrRequireReauth(
         session: SyncSession,
@@ -226,7 +223,7 @@ internal class RefreshingSyncBackend(
             requireReauth()
         }
         return session.copy(
-            familyToken = refreshed.accessToken,
+            accessToken = refreshed.accessToken,
             refreshToken = refreshed.refreshToken,
             accessExpiresAtEpochSeconds = refreshed.accessExpiresAtEpochSeconds,
             reauthRequired = false,

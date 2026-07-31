@@ -114,7 +114,7 @@ class HttpSyncBackendTest {
                 assertThat(result.role).isEqualTo(FamilyRole.Owner)
                 assertThat(result.membershipId).isEqualTo("membership-owner")
                 assertThat(result.deviceId).isEqualTo("device-owner")
-                assertThat(result.token).isEqualTo("owner-access")
+                assertThat(result.accessToken).isEqualTo("owner-access")
                 assertThat(result.refreshToken).isEqualTo("owner-refresh")
             } finally {
                 server.close()
@@ -1001,7 +1001,7 @@ class HttpSyncBackendTest {
     }
 
     @Test
-    fun createAndJoinShareSafeDisplayNameNormalization() {
+    fun currentIdentityFieldsShareSafeDisplayNameNormalization() {
         assertThat(requireMemberDisplayName("  爸爸  ")).isEqualTo("爸爸")
         assertThat(requireMemberDisplayName("　爸　 爸　")).isEqualTo("爸 爸")
         assertThat(requireDeviceName("　Ｐｉｘｅｌ　 １０　")).isEqualTo("Pixel 10")
@@ -1019,93 +1019,6 @@ class HttpSyncBackendTest {
             .isInstanceOf(IllegalArgumentException::class.java)
     }
 
-    @Test
-    fun joinSendsTheLocalDisplayName() = runTest {
-        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
-        val captured = CompletableFuture<String>()
-        val responder = thread(name = "lezi-join-name-test-server") {
-            runCatching {
-                server.accept().use { socket ->
-                    captured.complete(readRequest(socket))
-                    val body =
-                        (
-                            """{"family_id":"family","access_token":"member-token","refresh_token":"member-refresh","access_expires_at":1753419300,"device_id":"device-member","role":"member",""" +
-                                """"membership_id":"membership-join-uuid","entities":[],"cursor":0,"generation":"generation-a","family_name":null}"""
-                            ).toByteArray(Charsets.UTF_8)
-                    socket.getOutputStream().use { output ->
-                        output.write(
-                            (
-                                "HTTP/1.1 200 OK\r\n" +
-                                    "Content-Type: application/json\r\n" +
-                                    "Content-Length: ${body.size}\r\n" +
-                                    "Connection: close\r\n\r\n"
-                            ).toByteArray(Charsets.US_ASCII),
-                        )
-                        output.write(body)
-                    }
-                }
-            }.onFailure(captured::completeExceptionally)
-        }
-
-        try {
-            val result = loopbackBackend().join(
-                baseUrl = "http://${server.inetAddress.hostAddress}:${server.localPort}",
-                code = "ABCD1234",
-                deviceId = "device-a",
-                displayName = " Dad ",
-            )
-            val request = captured.get(2, TimeUnit.SECONDS)
-
-            assertThat(result.role).isEqualTo(FamilyRole.Member)
-            assertThat(result.membershipId).isEqualTo("membership-join-uuid")
-            assertThat(request.substringAfter("\n\n")).contains("\"display_name\":\"Dad\"")
-        } finally {
-            server.close()
-            responder.join(2_000)
-        }
-    }
-
-    @Test
-    fun joinRejectsResponseWithoutCurrentMembershipId() = runTest {
-        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
-        val responder = thread(name = "lezi-join-missing-membership-test-server") {
-            runCatching {
-                server.accept().use { socket ->
-                    readRequest(socket)
-                    val body =
-                        """{"family_id":"family","access_token":"member-token","refresh_token":"member-refresh","access_expires_at":1753419300,"device_id":"device-member","role":"member","entities":[],"cursor":0,"generation":"generation-a","family_name":null}"""
-                            .toByteArray(Charsets.UTF_8)
-                    socket.getOutputStream().use { output ->
-                        output.write(
-                            (
-                                "HTTP/1.1 200 OK\r\n" +
-                                    "Content-Type: application/json\r\n" +
-                                    "Content-Length: ${body.size}\r\n" +
-                                    "Connection: close\r\n\r\n"
-                            ).toByteArray(Charsets.US_ASCII),
-                        )
-                        output.write(body)
-                    }
-                }
-            }
-        }
-
-        try {
-            val failure = runCatching {
-                loopbackBackend().join(
-                    baseUrl = "http://${server.inetAddress.hostAddress}:${server.localPort}",
-                    code = "ABCD1234",
-                    deviceId = "device-a",
-                    displayName = "Dad",
-                )
-            }.exceptionOrNull()
-            assertThat(failure).isInstanceOf(IllegalArgumentException::class.java)
-            assertThat(failure).hasMessageThat().contains("membership_id")
-        } finally {
-            server.close()
-            responder.join(2_000)
-        }
-    }
 
     @Test
     fun createSendsOptionalFamilyNameAndParsesResponse() = runTest {
@@ -1342,14 +1255,14 @@ class HttpSyncBackendTest {
     fun capturedDiagnosticLogRedactsAccessRefreshAndAuthorizationValues() {
         val session = SyncSession(
             familyId = "family",
-            familyToken = "access-secret",
+            accessToken = "access-secret",
             refreshToken = "refresh-secret",
             deviceId = "device",
             role = FamilyRole.Owner,
         )
-        val joined = JoinResult(
+        val joined = SessionBootstrapResult(
             familyId = "family",
-            token = "access-secret",
+            accessToken = "access-secret",
             refreshToken = "refresh-secret",
             deviceId = "device",
             role = FamilyRole.Owner,
@@ -1390,7 +1303,7 @@ class HttpSyncBackendTest {
         serverHost = requireNotNull(server.inetAddress.hostAddress),
         serverPort = server.localPort,
         familyId = "family",
-        familyToken = "family-token",
+        accessToken = "family-token",
         deviceId = "device",
         role = FamilyRole.Owner,
         pullGeneration = "generation-a",

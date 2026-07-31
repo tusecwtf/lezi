@@ -82,7 +82,7 @@ class TrustedEndpointTest {
             response = SetupHttpResponse(
                 statusCode = 200,
                 body = (
-                    """{"protocol_version":1,"capabilities":["setup_status"],"family_state":"configured"}"""
+                    currentSetupStatus("configured")
                     ).toByteArray(),
             ),
         )
@@ -115,7 +115,7 @@ class TrustedEndpointTest {
             SetupHttpResponse(503, byteArrayOf()) to SetupProbeResult.Failed.Maintenance,
             SetupHttpResponse(
                 200,
-                """{"protocol_version":2,"capabilities":["setup_status"],"family_state":"empty"}"""
+                currentSetupStatus("empty", protocolVersion = 2)
                     .toByteArray(),
             ) to SetupProbeResult.Failed.Incompatible,
             SetupHttpResponse(
@@ -125,12 +125,15 @@ class TrustedEndpointTest {
             ) to SetupProbeResult.Failed.Incompatible,
             SetupHttpResponse(
                 200,
-                """{"protocol_version":1,"capabilities":["setup_status"],"family_state":"empty","family_name":"secret"}"""
+                (currentSetupStatus("empty").dropLast(1) + ",\"family_name\":\"secret\"}")
                     .toByteArray(),
             ) to SetupProbeResult.Failed.NotLezi,
             SetupHttpResponse(
                 200,
-                """{"protocol_version":1,"capabilities":["setup_status",7],"family_state":"empty"}"""
+                currentSetupStatus("empty").replace(
+                    "\"record_membership_author\"",
+                    "\"record_membership_author\",7",
+                )
                     .toByteArray(),
             ) to SetupProbeResult.Failed.NotLezi,
         )
@@ -143,6 +146,12 @@ class TrustedEndpointTest {
         assertThat(transport.requests).hasSize(cases.size)
     }
 }
+
+private fun currentSetupStatus(
+    familyState: String,
+    protocolVersion: Int = SETUP_PROTOCOL_VERSION,
+): String =
+    """{"protocol_version":$protocolVersion,"capabilities":["trusted_https_endpoint_v1","device_sessions_v1","membership_devices_v1","atomic_bundle","record_membership_author"],"family_state":"$familyState"}"""
 
 private class RecordingSetupHttpTransport(
     var response: SetupHttpResponse = SetupHttpResponse(statusCode = 500, body = byteArrayOf()),
