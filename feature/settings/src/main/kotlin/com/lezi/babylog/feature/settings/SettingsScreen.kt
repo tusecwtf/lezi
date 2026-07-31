@@ -242,7 +242,10 @@ class SettingsViewModel @Inject constructor(
         _appUpdateOutcome.value = null
     }
 
-    /** Download → sha256 verify → PackageInstaller for optional or forced update. */
+    /**
+     * Download → sha256 → staged archive identity (packageName/versionCode/signing)
+     * → PackageInstaller for optional or forced update (see [SyncPort.installAvailableAppUpdate]).
+     */
     fun installOptionalUpdate(metadata: AppUpdateMetadata) {
         if (_installingAppUpdate.value) return
         viewModelScope.launch {

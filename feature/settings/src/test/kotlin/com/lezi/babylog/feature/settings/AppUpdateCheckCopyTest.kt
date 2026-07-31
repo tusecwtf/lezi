@@ -3,6 +3,7 @@ package com.lezi.babylog.feature.settings
 import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.sync.APP_UPDATE_INSTALL_IN_PROGRESS_MESSAGE
 import com.lezi.babylog.sync.APP_UPDATE_INSTALL_IN_PROGRESS_TITLE
+import com.lezi.babylog.sync.APP_UPDATE_PACKAGE_INVALID_MESSAGE
 import com.lezi.babylog.sync.AppUpdateCheckResult
 import com.lezi.babylog.sync.AppUpdateInstallInProgressException
 import com.lezi.babylog.sync.AppUpdateInstallResult
@@ -174,6 +175,24 @@ class AppUpdateCheckCopyTest {
 
         assertEquals(
             AppUpdateUiOutcome.Message(title = "更新失败", body = "校验失败"),
+            outcome,
+        )
+    }
+
+    @Test
+    fun installPackageIdentityFailureSurfacesInvalidPackageCopy() {
+        val outcome = appUpdateInstallUiOutcome(
+            Result.failure(IllegalStateException(APP_UPDATE_PACKAGE_INVALID_MESSAGE)),
+            failureCopy = { error ->
+                productUiError(error, "下载或安装失败，请稍后重试")
+            },
+        )
+
+        assertEquals(
+            AppUpdateUiOutcome.Message(
+                title = "更新失败",
+                body = APP_UPDATE_PACKAGE_INVALID_MESSAGE,
+            ),
             outcome,
         )
     }

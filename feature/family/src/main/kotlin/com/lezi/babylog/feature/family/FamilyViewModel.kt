@@ -261,7 +261,10 @@ class FamilyViewModel @Inject constructor(
         }
     }
 
-    /** Download → sha256 verify → PackageInstaller (same path as settings). */
+    /**
+     * Download → sha256 → staged archive identity (packageName/versionCode/signing)
+     * → PackageInstaller (same path as settings; see [SyncPort.installAvailableAppUpdate]).
+     */
     fun installOptionalUpdate(metadata: AppUpdateMetadata) {
         if (_installingAppUpdate.value) return
         viewModelScope.launch {

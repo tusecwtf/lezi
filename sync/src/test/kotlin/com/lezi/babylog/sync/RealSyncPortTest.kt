@@ -472,6 +472,179 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun installAvailableAppUpdateRejectsArchivePackageNameMismatchWithoutInstalling() = runTest {
+        val apkBytes = "lezi-release-apk-bytes".toByteArray(Charsets.UTF_8)
+        val metadata = sampleAppUpdateMetadata(
+            versionCode = 7,
+            versionName = "0.3.1",
+            sha256 = sha256Hex(apkBytes),
+        )
+        val installer = RecordingAppUpdateInstaller()
+        val identityReader = FakeAppUpdateApkIdentityReader(
+            packageName = "com.evil.other",
+            versionCode = 7,
+        )
+        val cacheDir = createTempDir(prefix = "lezi-app-update-pkg")
+        appUpdateStagingDir(cacheDir).mkdirs()
+        appUpdateStagingApk(cacheDir).writeText("stale")
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+            appUpdateInstaller = installer,
+            apkIdentityReader = identityReader,
+            appUpdateCacheDir = cacheDir,
+        )
+        rig.awaitStartupRecovery()
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+        rig.backend.appUpdateApkBytes = apkBytes
+
+        val failure = rig.port.installAvailableAppUpdate(metadata).exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(IllegalStateException::class.java)
+        assertThat(failure!!.message).isEqualTo(APP_UPDATE_PACKAGE_INVALID_MESSAGE)
+        assertThat(installer.installCalls).isEmpty()
+        assertThat(appUpdateStagingApk(cacheDir).exists()).isFalse()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+    }
+
+    @Test
+    fun installAvailableAppUpdateRejectsMetadataPackageNotEqualLocalApplicationId() = runTest {
+        val metadata = sampleAppUpdateMetadata(versionCode = 7, versionName = "0.3.1")
+            .copy(packageName = "com.evil.other")
+        val installer = RecordingAppUpdateInstaller()
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+            appUpdateInstaller = installer,
+        )
+        rig.awaitStartupRecovery()
+        rig.backend.appUpdateApkBytes = byteArrayOf(1, 2, 3)
+
+        val failure = rig.port.installAvailableAppUpdate(metadata).exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(IllegalStateException::class.java)
+        assertThat(failure!!.message).isEqualTo(APP_UPDATE_METADATA_PACKAGE_MISMATCH_MESSAGE)
+        assertThat(rig.backend.downloadAppUpdateApkCalls).isEqualTo(0)
+        assertThat(installer.installCalls).isEmpty()
+    }
+
+    @Test
+    fun checkAppUpdateRejectsMetadataPackageNotEqualLocalApplicationId() = runTest {
+        val metadata = sampleAppUpdateMetadata(versionCode = 8, versionName = "0.4.0")
+            .copy(packageName = "com.evil.other")
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+        )
+        rig.awaitStartupRecovery()
+        rig.backend.appUpdateMetadata = metadata
+
+        val failure = rig.port.checkAppUpdate().exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(IllegalStateException::class.java)
+        assertThat(failure!!.message).isEqualTo(APP_UPDATE_METADATA_PACKAGE_MISMATCH_MESSAGE)
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
+        assertThat(rig.port.availableForcedAppUpdate().first()).isNull()
+    }
+
+    @Test
+    fun installAvailableAppUpdateRejectsSigningCertMismatchWithoutInstalling() = runTest {
+        val apkBytes = "lezi-release-apk-bytes".toByteArray(Charsets.UTF_8)
+        val metadata = sampleAppUpdateMetadata(
+            versionCode = 7,
+            versionName = "0.3.1",
+            sha256 = sha256Hex(apkBytes),
+        )
+        val installer = RecordingAppUpdateInstaller()
+        val identityReader = FakeAppUpdateApkIdentityReader(
+            archiveCerts = setOf("bb".repeat(32)),
+            installedCerts = setOf(TEST_APP_UPDATE_CERT_SHA256),
+        )
+        val cacheDir = createTempDir(prefix = "lezi-app-update-sig")
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+            appUpdateInstaller = installer,
+            apkIdentityReader = identityReader,
+            appUpdateCacheDir = cacheDir,
+        )
+        rig.awaitStartupRecovery()
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+        rig.backend.appUpdateApkBytes = apkBytes
+
+        val failure = rig.port.installAvailableAppUpdate(metadata).exceptionOrNull()
+
+        assertThat(failure!!.message).isEqualTo(APP_UPDATE_PACKAGE_INVALID_MESSAGE)
+        assertThat(installer.installCalls).isEmpty()
+        assertThat(appUpdateStagingApk(cacheDir).exists()).isFalse()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+    }
+
+    @Test
+    fun installAvailableAppUpdateRejectsArchiveVersionMismatchWithoutInstalling() = runTest {
+        val apkBytes = "lezi-release-apk-bytes".toByteArray(Charsets.UTF_8)
+        val metadata = sampleAppUpdateMetadata(
+            versionCode = 7,
+            versionName = "0.3.1",
+            sha256 = sha256Hex(apkBytes),
+        )
+        val installer = RecordingAppUpdateInstaller()
+        val identityReader = FakeAppUpdateApkIdentityReader(
+            packageName = "com.lezi.babylog",
+            versionCode = 9,
+        )
+        val cacheDir = createTempDir(prefix = "lezi-app-update-ver")
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+            appUpdateInstaller = installer,
+            apkIdentityReader = identityReader,
+            appUpdateCacheDir = cacheDir,
+        )
+        rig.awaitStartupRecovery()
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+        rig.backend.appUpdateApkBytes = apkBytes
+
+        val failure = rig.port.installAvailableAppUpdate(metadata).exceptionOrNull()
+
+        assertThat(failure!!.message).isEqualTo(APP_UPDATE_PACKAGE_INVALID_MESSAGE)
+        assertThat(installer.installCalls).isEmpty()
+        assertThat(appUpdateStagingApk(cacheDir).exists()).isFalse()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+    }
+
+    @Test
+    fun installAvailableAppUpdateRejectsUnreadableArchiveWithoutInstalling() = runTest {
+        val apkBytes = "lezi-release-apk-bytes".toByteArray(Charsets.UTF_8)
+        val metadata = sampleAppUpdateMetadata(
+            versionCode = 7,
+            versionName = "0.3.1",
+            sha256 = sha256Hex(apkBytes),
+        )
+        val installer = RecordingAppUpdateInstaller()
+        val identityReader = FakeAppUpdateApkIdentityReader(unreadable = true)
+        val cacheDir = createTempDir(prefix = "lezi-app-update-unreadable")
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+            appUpdateInstaller = installer,
+            apkIdentityReader = identityReader,
+            appUpdateCacheDir = cacheDir,
+        )
+        rig.awaitStartupRecovery()
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+        rig.backend.appUpdateApkBytes = apkBytes
+
+        val failure = rig.port.installAvailableAppUpdate(metadata).exceptionOrNull()
+
+        assertThat(failure!!.message).isEqualTo(APP_UPDATE_PACKAGE_INVALID_MESSAGE)
+        assertThat(installer.installCalls).isEmpty()
+        assertThat(appUpdateStagingApk(cacheDir).exists()).isFalse()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+    }
+
+    @Test
     fun installAvailableAppUpdateReportsMissingInstallPermissionWithoutDownload() = runTest {
         val metadata = sampleAppUpdateMetadata(versionCode = 7, versionName = "0.3.1")
         val installer = RecordingAppUpdateInstaller(canInstall = false)
@@ -7343,6 +7516,32 @@ private class RecordingAppUpdateInstaller(
         android.content.Intent()
 }
 
+/**
+ * Fake archive identity for JVM install tests (no PackageManager).
+ * Defaults match com.lezi.babylog versionCode 7 with a shared test signer.
+ */
+private class FakeAppUpdateApkIdentityReader(
+    var packageName: String = "com.lezi.babylog",
+    var versionCode: Int = 7,
+    var archiveCerts: Set<String> = setOf(TEST_APP_UPDATE_CERT_SHA256),
+    var installedCerts: Set<String> = setOf(TEST_APP_UPDATE_CERT_SHA256),
+    var unreadable: Boolean = false,
+) : AppUpdateApkIdentityReader {
+    override fun readArchive(apkFile: java.io.File): StagedApkIdentity? {
+        if (unreadable || !apkFile.isFile) return null
+        return StagedApkIdentity(
+            packageName = packageName,
+            versionCode = versionCode,
+            signingCertSha256 = archiveCerts,
+        )
+    }
+
+    override fun installedSigningCertSha256(): Set<String> = installedCerts
+}
+
+private const val TEST_APP_UPDATE_CERT_SHA256 =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 private class SyncRig(
     session: SyncSession,
     carePlanApplied: suspend (List<String>) -> Unit = {},
@@ -7352,6 +7551,7 @@ private class SyncRig(
     removedDeviceLocalClearGate: RemovedDeviceLocalClearGate = NoOpRemovedDeviceLocalClearGate(),
     clientAppVersion: ClientAppVersion = ClientAppVersion.FALLBACK,
     appUpdateInstaller: AppUpdateInstaller = NoOpAppUpdateInstaller,
+    apkIdentityReader: AppUpdateApkIdentityReader = FakeAppUpdateApkIdentityReader(),
     appUpdateCacheDir: java.io.File = createTempDir(prefix = "lezi-app-update-rig"),
 ) {
     val backend = RecordingSyncBackend()
@@ -7403,6 +7603,7 @@ private class SyncRig(
         fulfillmentCandidateDao = fulfillmentCandidates,
         clientAppVersion = clientAppVersion,
         appUpdateInstaller = appUpdateInstaller,
+        apkIdentityReader = apkIdentityReader,
         appUpdateCacheDir = appUpdateCacheDir,
     )
 

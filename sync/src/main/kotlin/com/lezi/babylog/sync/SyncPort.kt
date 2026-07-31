@@ -129,7 +129,14 @@ sealed interface MemberLoginCheckResult {
     ) : MemberLoginCheckResult
 }
 
-/** Local installed app identity used for app-update comparisons (versionCode only). */
+/**
+ * Local installed app identity used for app-update gates.
+ *
+ * - [packageName]: process applicationId; must match server metadata and staged APK
+ *   before an update is offered or installed.
+ * - [versionCode]: dual-tier force/optional comparison and staged-APK version gate.
+ * - [versionName]: display only.
+ */
 data class ClientAppVersion(
     val versionCode: Int,
     val versionName: String,
@@ -209,7 +216,8 @@ sealed interface ForcedAppUpdateState {
 }
 
 /**
- * Outcome of [SyncPort.installAvailableAppUpdate] after download + sha256 verify.
+ * Outcome of [SyncPort.installAvailableAppUpdate] after download, sha256, and
+ * staged-APK identity (packageName / versionCode / signing cert) checks.
  * Does not report final PackageInstaller success (system UI is async).
  */
 sealed interface AppUpdateInstallResult {
@@ -373,17 +381,20 @@ interface SyncPort {
     fun dismissOptionalAppUpdate(versionCode: Int) = Unit
 
     /**
-     * Downloads the release APK for [metadata] from the trusted family server,
-     * verifies sha256, then starts a [android.content.pm.PackageInstaller] session.
+     * Downloads the release APK for [metadata] from the trusted family server and
+     * installs only after a full fail-closed pipeline:
+     * download → sha256 → staged archive identity (packageName / versionCode /
+     * signing cert vs local + metadata) → [android.content.pm.PackageInstaller] commit.
      *
-     * Download, digest, staging write, and session commit run on a background
-     * dispatcher (not the main thread). At most one install pipeline may own the
-     * private staging path at a time; a concurrent call fails with a product-facing
-     * "进行中" error instead of racing half-written APKs.
+     * Download, digest, identity read, staging write, and session commit run on a
+     * background dispatcher (not the main thread). At most one install pipeline may
+     * own the private staging path at a time; a concurrent call fails with a
+     * product-facing "进行中" error instead of racing half-written APKs.
      *
-     * Staging is limited to app-private cache and is always cleaned up after the
-     * attempt (success path after session commit, failure/cancel paths too).
-     * Not joined or foreground/trust gate failures return [Result.failure].
+     * Identity or digest failure never commits PackageInstaller for a foreign or
+     * mismatched package. Staging is limited to app-private cache and is always
+     * cleaned up after the attempt (success path after session commit, failure/cancel
+     * paths too). Not joined or foreground/trust gate failures return [Result.failure].
      */
     suspend fun installAvailableAppUpdate(
         metadata: AppUpdateMetadata,

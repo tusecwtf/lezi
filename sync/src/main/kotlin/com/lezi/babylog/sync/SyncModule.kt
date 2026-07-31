@@ -1,8 +1,6 @@
 package com.lezi.babylog.sync
 
 import android.content.Context
-import android.content.pm.PackageManager
-import android.os.Build
 import dagger.Binds
 import dagger.Module
 import dagger.Provides
@@ -26,6 +24,9 @@ abstract class SyncModule {
     @Binds @Singleton abstract fun syncPort(impl: RealSyncPort): SyncPort
     @Binds @Singleton abstract fun mediaFileStore(impl: AndroidSyncMediaFileStore): SyncMediaFileStore
     @Binds @Singleton abstract fun appUpdateInstaller(impl: AndroidAppUpdateInstaller): AppUpdateInstaller
+    @Binds @Singleton abstract fun appUpdateApkIdentityReader(
+        impl: AndroidAppUpdateApkIdentityReader,
+    ): AppUpdateApkIdentityReader
 
     companion object {
         @Provides
@@ -44,23 +45,12 @@ abstract class SyncModule {
         @Provides
         @Singleton
         fun clientAppVersion(@ApplicationContext context: Context): ClientAppVersion {
-            val packageInfo = if (Build.VERSION.SDK_INT >= 33) {
-                context.packageManager.getPackageInfo(
-                    context.packageName,
-                    PackageManager.PackageInfoFlags.of(0),
-                )
-            } else {
-                @Suppress("DEPRECATION")
-                context.packageManager.getPackageInfo(context.packageName, 0)
-            }
-            val versionCode = if (Build.VERSION.SDK_INT >= 28) {
-                packageInfo.longVersionCode.toInt()
-            } else {
-                @Suppress("DEPRECATION")
-                packageInfo.versionCode
-            }
+            val packageInfo = context.packageManager.getPackageInfoCompat(
+                context.packageName,
+                flags = 0,
+            )
             return ClientAppVersion(
-                versionCode = versionCode.coerceAtLeast(1),
+                versionCode = packageInfo.versionCodeCompat().coerceAtLeast(1),
                 versionName = packageInfo.versionName?.takeIf { it.isNotBlank() }
                     ?: ClientAppVersion.FALLBACK.versionName,
                 packageName = context.packageName,

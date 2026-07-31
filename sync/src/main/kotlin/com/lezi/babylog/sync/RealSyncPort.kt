@@ -66,6 +66,8 @@ class RealSyncPort @Inject constructor(
     private val fulfillmentCandidateDao: FulfillmentCandidateDao,
     private val clientAppVersion: ClientAppVersion = ClientAppVersion.FALLBACK,
     private val appUpdateInstaller: AppUpdateInstaller = NoOpAppUpdateInstaller,
+    private val apkIdentityReader: AppUpdateApkIdentityReader =
+        UnreadableAppUpdateApkIdentityReader,
     @Named("appUpdateCacheDir") private val appUpdateCacheDir: File =
         File(System.getProperty("java.io.tmpdir"), "lezi-app-update-test"),
 ) : SyncPort {
@@ -650,9 +652,7 @@ class RealSyncPort @Inject constructor(
         if (!session.isJoined) {
             return Result.failure(IllegalStateException("请先连接家庭服务器后再更新"))
         }
-        if (metadata.packageName != "com.lezi.babylog") {
-            return Result.failure(IllegalStateException("更新包与本应用不匹配"))
-        }
+        metadataPackageMismatchOrNull(metadata)?.let { return Result.failure(it) }
         if (clientAppVersion.versionCode >= metadata.versionCode) {
             return Result.failure(IllegalStateException("当前已是最新版本"))
         }
@@ -662,7 +662,7 @@ class RealSyncPort @Inject constructor(
             onBusy = { Result.failure(AppUpdateInstallInProgressException()) },
             block = {
                 dismissOptionalAppUpdate(metadata.versionCode)
-                // Download / sha256 / staging write / PackageInstaller stay off the main thread.
+                // Download / sha256 / archive identity / PackageInstaller stay off the main thread.
                 // Failures surface only via Result — never mutate SyncStatus
                 // (mirror checkAppUpdate; do not call requireAllowed / updateFailureStatus).
                 runCatching {
@@ -692,7 +692,20 @@ class RealSyncPort @Inject constructor(
                                 throw IllegalStateException("更新包校验失败，请重试")
                             }
                             stagingFile.outputStream().use { it.write(bytes) }
-                            appUpdateInstaller.installFromFile(stagingFile, metadata.packageName)
+                            // PackageInstaller commit only after archive package/version/signer match.
+                            val identityError = verifyStagedApkIdentity(
+                                archive = apkIdentityReader.readArchive(stagingFile),
+                                installedCerts = apkIdentityReader.installedSigningCertSha256(),
+                                local = clientAppVersion,
+                                metadata = metadata,
+                            )
+                            if (identityError != null) {
+                                throw IllegalStateException(identityError)
+                            }
+                            appUpdateInstaller.installFromFile(
+                                stagingFile,
+                                clientAppVersion.packageName,
+                            )
                             AppUpdateInstallResult.SessionStarted
                         } finally {
                             // Always remove private staging after the attempt so no shareable APK remains.
@@ -729,6 +742,16 @@ class RealSyncPort @Inject constructor(
         }
     }
 
+    /** Reject metadata whose packageName is not this process applicationId. */
+    private fun metadataPackageMismatchOrNull(
+        metadata: AppUpdateMetadata,
+    ): IllegalStateException? {
+        if (metadata.packageName != clientAppVersion.packageName) {
+            return IllegalStateException(APP_UPDATE_METADATA_PACKAGE_MISMATCH_MESSAGE)
+        }
+        return null
+    }
+
     /**
      * Best-effort authenticated metadata check for optional/forced updates.
      * Never throws to callers and never mutates [currentStatus].
@@ -762,11 +785,17 @@ class RealSyncPort @Inject constructor(
     /**
      * Classifies server metadata against the local versionCode and publishes the
      * matching optional/forced flow. Forced always wins over optional.
+     * Rejects metadata whose packageName is not this process applicationId so UI
+     * never offers install of a different app.
      */
     private fun classifyAndPublishAppUpdate(
         metadata: AppUpdateMetadata,
         respectOptionalDismissal: Boolean,
     ): AppUpdateCheckResult {
+        metadataPackageMismatchOrNull(metadata)?.let { mismatch ->
+            optionalAppUpdateState.value = null
+            throw mismatch
+        }
         val local = clientAppVersion.versionCode
         if (local < metadata.minSupportedVersionCode) {
             optionalAppUpdateState.value = null
