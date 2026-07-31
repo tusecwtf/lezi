@@ -27,7 +27,7 @@ pub(crate) fn media_file_relative_path(family_id: &str, media_uuid: &str) -> Pat
 
 /// One-shot offline: v3 data dir (`lezi.db` + optional `media/`) → current data dir.
 ///
-/// - Transforms `source/lezi.db` via [`migrate_v3_database`].
+/// - Transforms `source/lezi.db` via [`migrate_v3_database`] (ops new root password).
 /// - Copies only authority media files into `dest/media/{family}/{uuid}`.
 /// - Validates size (entity `byte_size` and/or bundle_media sizes) and `staged_sha256`
 ///   when present.
@@ -36,6 +36,7 @@ pub(crate) fn media_file_relative_path(family_id: &str, media_uuid: &str) -> Pat
 pub(crate) fn migrate_v3_data_dir(
     source_data_dir: &Path,
     dest_data_dir: &Path,
+    new_root_password: &str,
 ) -> Result<MigrateReport, MigrateError> {
     let source_db = source_data_dir.join("lezi.db");
     let dest_db = dest_data_dir.join("lezi.db");
@@ -50,7 +51,7 @@ pub(crate) fn migrate_v3_data_dir(
     }
 
     fs::create_dir_all(dest_data_dir)?;
-    let mut report = migrate_v3_database(&source_db, &dest_db)?;
+    let mut report = migrate_v3_database(&source_db, &dest_db, new_root_password)?;
 
     match transfer_authority_media(
         &source_media_root,
@@ -358,6 +359,9 @@ fn validate_and_copy_media_file(
 
 #[cfg(test)]
 mod tests {
+
+    /// Matches migrator tests / production LEZI_BOOTSTRAP_SECRET min length.
+    const TEST_NEW_ROOT_PASSWORD: &str = "test-root-password-ok";
     use super::*;
     use crate::model::{
         normalized_display_name_key, Entity, EntityValidationContext, RawEntity,
@@ -615,7 +619,7 @@ mod tests {
         }
         write_source_media(&source, FAM, MEDIA, media_bytes());
 
-        let report = migrate_v3_data_dir(&source, &dest).expect("migrate data dir");
+        let report = migrate_v3_data_dir(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect("migrate data dir");
         assert_eq!(report.media_files_copied, 1);
         assert_eq!(report.committed_bundles, 1);
         assert_eq!(report.families, 1);
@@ -682,7 +686,7 @@ mod tests {
         }
         // No media/ bytes under source.
 
-        let err = migrate_v3_data_dir(&source, &dest).expect_err("must fail");
+        let err = migrate_v3_data_dir(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect_err("must fail");
         assert_eq!(
             err.authoritative(),
             Some(AuthoritativeFailure::MediaFileMissingOrMismatch)
@@ -709,7 +713,7 @@ mod tests {
         }
         write_source_media(&source, FAM, MEDIA, b"wrong-len");
 
-        let err = migrate_v3_data_dir(&source, &dest).expect_err("must fail");
+        let err = migrate_v3_data_dir(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect_err("must fail");
         assert_eq!(
             err.authoritative(),
             Some(AuthoritativeFailure::MediaFileMissingOrMismatch)
@@ -742,7 +746,7 @@ mod tests {
         assert_eq!(wrong.len(), media_bytes().len());
         write_source_media(&source, FAM, MEDIA, &wrong);
 
-        let err = migrate_v3_data_dir(&source, &dest).expect_err("must fail");
+        let err = migrate_v3_data_dir(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect_err("must fail");
         assert_eq!(
             err.authoritative(),
             Some(AuthoritativeFailure::MediaFileMissingOrMismatch)
@@ -805,7 +809,7 @@ mod tests {
         write_source_media(&source, FAM, MEDIA, media_bytes());
         write_source_media(&source, FAM, staging_media, b"orph");
 
-        let report = migrate_v3_data_dir(&source, &dest).expect("migrate");
+        let report = migrate_v3_data_dir(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect("migrate");
         assert_eq!(report.media_files_copied, 1);
         assert_eq!(report.discarded_staging_bundles, 1);
         assert!(dest
@@ -864,7 +868,7 @@ mod tests {
         }
         write_source_media(&source, FAM, ordinary, bytes);
 
-        let report = migrate_v3_data_dir(&source, &dest).expect("migrate");
+        let report = migrate_v3_data_dir(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect("migrate");
         assert_eq!(report.media_files_copied, 1);
         assert_eq!(
             fs::read(dest.join(media_file_relative_path(FAM, ordinary))).unwrap(),
@@ -884,7 +888,7 @@ mod tests {
             seed_family(&conn);
             seed_baby(&conn);
         }
-        let report = migrate_v3_data_dir(&source, &dest).expect("migrate");
+        let report = migrate_v3_data_dir(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect("migrate");
         assert_eq!(report.media_files_copied, 0);
         assert!(dest.join("lezi.db").is_file());
         assert!(!dest.join("media").exists());

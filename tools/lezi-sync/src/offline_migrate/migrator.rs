@@ -3,15 +3,23 @@
 //! **Not** wired into server startup. Reads a backup source read-only; writes an
 //! independent dest via temp+rename so failures leave no copy-back-ready partial.
 //!
-//! Ticket 02 surface is library-level [`migrate_v3_database`] → [`Result`];
-//! process exit codes / CLI wiring are ticket 05. `Err(MigrateError::Authoritative)`
-//! is the fail-closed stand-in for non-zero exit.
+//! Library surface: [`migrate_v3_database`] (requires ops **new root password** —
+//! ticket 04). Process exit codes / CLI wiring are ticket 05.
+//! `Err(MigrateError::Authoritative)` is the fail-closed stand-in for non-zero exit.
+//!
+//! On success the dest data dir (parent of `dest_db`) also receives a freshly
+//! generated `server.secret` (`PathDispositionKind::RegenerateAlways`) and each
+//! family row carries `owner_root_fingerprint` derived with the live product
+//! formula so current lezi-sync can open the data and Owner can re-login with
+//! the same password as `LEZI_BOOTSTRAP_SECRET`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::fs;
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use rand::rngs::OsRng;
+use rand::RngCore;
 use rusqlite::{params, Connection};
 use serde_json::{Map, Value};
 use thiserror::Error;
@@ -21,6 +29,7 @@ use crate::model::{
     normalized_display_name_key, validate_bundle_media_for_root, Entity, EntityValidationContext,
     RawEntity,
 };
+use crate::owner_root_fingerprint;
 use crate::store::{self, CURRENT_SCHEMA_SQL, DATABASE_SCHEMA_VERSION};
 use crate::DEFAULT_MAX_MEDIA_BYTES;
 
@@ -30,6 +39,23 @@ use super::inventory::{
     StagingCascade, ALLOWED_ENTITY_TYPES, ALLOWED_MEDIA_PUBLICATION_SOURCES,
     BUNDLE_STATUS_COMMITTED, SOURCE_USER_VERSION,
 };
+
+/// Minimum length for the migration-time new root password.
+/// Matches production `LEZI_BOOTSTRAP_SECRET` validation (≥16 characters).
+pub(crate) const MIN_NEW_ROOT_PASSWORD_LEN: usize = 16;
+
+/// Server secret size written under out data dir (`server.secret`).
+const SERVER_SECRET_BYTES: usize = 32;
+
+/// Human-readable ops fragment for runbooks / CLI help (ticket 04 / 05 / 06).
+///
+/// Cutover does **not** silently restore sessions: every family member re-auths.
+pub(crate) const REAUTH_OPS_NOTE: &str = "\
+Cutover re-auth (no silent restore):\n\
+- Owner: sign in with the migration-time new root password (same value as LEZI_BOOTSTRAP_SECRET).\n\
+- Members: use the current member request/approve or login-grant flows.\n\
+- All pre-migration membership_credentials, invites, and device sessions are void.\n\
+- server.secret is always regenerated; never copy the backup's HMAC material.\n";
 
 /// Human-oriented counters for the migration report (non-authoritative discards included).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -60,6 +86,9 @@ pub(crate) enum MigrateError {
     Io(#[from] std::io::Error),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    /// Ops-provided new root password fails product length / emptiness gates.
+    #[error("invalid new root password: {0}")]
+    InvalidRootPassword(String),
     /// Target-side / programmer invariant (not a source authoritative failure).
     #[error("internal migration error: {0}")]
     Internal(String),
@@ -99,10 +128,17 @@ impl MigrateError {
 /// - Source is opened read-only and never mutated.
 /// - Destination is written via a sibling temp file and renamed only on full success.
 /// - On failure the temp is deleted; a pre-existing dest is left untouched.
+/// - `new_root_password` is required (ticket 04 / `OwnerReauth::NewRootPasswordAtMigration`):
+///   written into `families.owner_root_fingerprint` using a freshly generated
+///   signing secret; that secret is persisted as `{dest_parent}/server.secret`.
+/// - Legacy membership_credentials / invites are discarded (table absent on target).
 pub(crate) fn migrate_v3_database(
     source_db: &Path,
     dest_db: &Path,
+    new_root_password: &str,
 ) -> Result<MigrateReport, MigrateError> {
+    validate_new_root_password(new_root_password)?;
+
     if !source_db.try_exists()? {
         return Err(MigrateError::Io(io::Error::new(
             io::ErrorKind::NotFound,
@@ -121,6 +157,10 @@ pub(crate) fn migrate_v3_database(
     let temp = temp_dest_path(dest_db);
     remove_db_files(&temp);
 
+    // RegenerateAlways: mint signing material for this out/ — never copy backup.
+    let signing_secret = generate_server_secret_bytes();
+    let fingerprint = owner_root_fingerprint(&signing_secret, new_root_password);
+
     let result = (|| {
         let mut dest = Connection::open(&temp)?;
         dest.execute_batch(
@@ -132,7 +172,7 @@ pub(crate) fn migrate_v3_database(
         dest.execute_batch(CURRENT_SCHEMA_SQL)?;
         dest.pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)?;
 
-        let report = transfer_all(&source, &mut dest)?;
+        let report = transfer_all(&source, &mut dest, &fingerprint)?;
         dest.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         drop(dest);
         Ok::<_, MigrateError>(report)
@@ -148,6 +188,12 @@ pub(crate) fn migrate_v3_database(
             for suffix in ["-wal", "-shm"] {
                 let _ = fs::remove_file(PathBuf::from(format!("{}{suffix}", dest_db.display())));
             }
+            // Fail closed: if secret cannot be written, remove the dest DB so
+            // no copy-back-ready partial without matching server.secret remains.
+            if let Err(error) = write_regenerated_server_secret(parent, &signing_secret) {
+                remove_db_files(dest_db);
+                return Err(error);
+            }
             Ok(report)
         }
         Err(error) => {
@@ -155,6 +201,50 @@ pub(crate) fn migrate_v3_database(
             Err(error)
         }
     }
+}
+
+fn validate_new_root_password(password: &str) -> Result<(), MigrateError> {
+    if password.is_empty() {
+        return Err(MigrateError::InvalidRootPassword(
+            "must not be empty".to_owned(),
+        ));
+    }
+    if password.len() < MIN_NEW_ROOT_PASSWORD_LEN {
+        return Err(MigrateError::InvalidRootPassword(format!(
+            "must be at least {MIN_NEW_ROOT_PASSWORD_LEN} characters (matches LEZI_BOOTSTRAP_SECRET)"
+        )));
+    }
+    Ok(())
+}
+
+fn generate_server_secret_bytes() -> Vec<u8> {
+    let mut secret = vec![0u8; SERVER_SECRET_BYTES];
+    OsRng.fill_bytes(&mut secret);
+    secret
+}
+
+fn write_regenerated_server_secret(data_dir: &Path, secret: &[u8]) -> Result<(), MigrateError> {
+    if secret.len() < SERVER_SECRET_BYTES {
+        return Err(MigrateError::Internal(format!(
+            "server.secret must be at least {SERVER_SECRET_BYTES} bytes"
+        )));
+    }
+    let path = data_dir.join("server.secret");
+    let temporary = data_dir.join(format!(".server.secret.{}.tmp", Uuid::new_v4().simple()));
+    let write = (|| -> Result<(), MigrateError> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(secret)?;
+        file.sync_all()?;
+        fs::rename(&temporary, &path)?;
+        Ok(())
+    })();
+    if write.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    write
 }
 
 pub(crate) fn remove_db_files(path: &Path) {
@@ -276,7 +366,11 @@ fn validate_table_shape(
     Ok(())
 }
 
-fn transfer_all(source: &Connection, dest: &mut Connection) -> Result<MigrateReport, MigrateError> {
+fn transfer_all(
+    source: &Connection,
+    dest: &mut Connection,
+    owner_root_fingerprint: &str,
+) -> Result<MigrateReport, MigrateError> {
     // Staging cascade contract is locked in inventory (not free-form).
     assert_eq!(
         staging_cascade(),
@@ -286,7 +380,7 @@ fn transfer_all(source: &Connection, dest: &mut Connection) -> Result<MigrateRep
     let tx = dest.transaction()?;
     let mut report = MigrateReport::default();
 
-    let family_ids = copy_families(source, &tx, &mut report)?;
+    let family_ids = copy_families(source, &tx, owner_root_fingerprint, &mut report)?;
     let membership_ids = copy_memberships(source, &tx, &family_ids, &mut report)?;
     copy_family_meta(source, &tx, &family_ids, &report)?;
     copy_entities(source, &tx, &family_ids, &mut report)?;
@@ -336,6 +430,7 @@ fn transfer_all(source: &Connection, dest: &mut Connection) -> Result<MigrateRep
 fn copy_families(
     source: &Connection,
     dest: &rusqlite::Transaction<'_>,
+    owner_root_fingerprint: &str,
     report: &mut MigrateReport,
 ) -> Result<BTreeSet<String>, MigrateError> {
     let mut stmt = source
@@ -351,13 +446,19 @@ fn copy_families(
     let mut ids = BTreeSet::new();
     for row in rows {
         let (id, created_at, create_request_hash, name) = row?;
-        // owner_root_fingerprint TargetAdd — left NULL until ticket 04 sets root password.
+        // owner_root_fingerprint TargetAdd — migration-time new root password (ticket 04).
         dest.execute(
             "
             INSERT INTO families(id, created_at, create_request_hash, name, owner_root_fingerprint)
-            VALUES (?1, ?2, ?3, ?4, NULL)
+            VALUES (?1, ?2, ?3, ?4, ?5)
             ",
-            params![id, created_at, create_request_hash, name],
+            params![
+                id,
+                created_at,
+                create_request_hash,
+                name,
+                owner_root_fingerprint
+            ],
         )?;
         ids.insert(id);
         report.families += 1;
@@ -1160,10 +1261,19 @@ mod tests {
     use crate::offline_migrate::inventory::{
         target_only_empty_tables, BUNDLE_STATUS_STAGING, SOURCE_V3_SCHEMA_SQL,
     };
+    use crate::owner_root_fingerprint;
     use crate::store::{Store, DATABASE_SCHEMA_VERSION};
+    use crate::{build_app, ServerConfig};
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode};
+    use axum::Router;
     use rusqlite::Connection;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use tempfile::tempdir;
+    use tower::ServiceExt;
+
+    /// ≥16 chars; known literal for fingerprint / owner-login seams (ticket 04).
+    const TEST_NEW_ROOT_PASSWORD: &str = "ops-new-root-pw!!";
 
     fn open_v3_fixture(path: &Path) -> Connection {
         let conn = Connection::open(path).unwrap();
@@ -1386,7 +1496,7 @@ mod tests {
             seed_committed_record_bundle(&conn);
         }
 
-        let report = migrate_v3_database(&source, &dest).expect("migrate");
+        let report = migrate_v3_database(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect("migrate");
         assert_eq!(report.families, 1);
         assert_eq!(report.memberships, 2);
         assert_eq!(report.entities, 1);
@@ -1459,6 +1569,22 @@ mod tests {
             assert_eq!(n, 0, "{table} must not exist on target");
         }
 
+        // Ticket 04: owner_root_fingerprint + regenerated server.secret.
+        let fingerprint: String = conn
+            .query_row(
+                "SELECT owner_root_fingerprint FROM families WHERE id = 'fam-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let secret_path = dest.parent().unwrap().join("server.secret");
+        let signing_secret = fs::read(&secret_path).expect("server.secret written");
+        assert!(signing_secret.len() >= SERVER_SECRET_BYTES);
+        assert_eq!(
+            fingerprint,
+            owner_root_fingerprint(&signing_secret, TEST_NEW_ROOT_PASSWORD)
+        );
+
         // Retained committed bundle_media + ordinary publication.
         let media_uuid: String = conn
             .query_row(
@@ -1530,7 +1656,8 @@ mod tests {
             .unwrap();
         }
 
-        let err = migrate_v3_database(&source, &dest).expect_err("must fail");
+        let err =
+            migrate_v3_database(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect_err("must fail");
         assert_eq!(
             err.authoritative(),
             Some(AuthoritativeFailure::NotExactlyOneActiveOwner)
@@ -1579,7 +1706,8 @@ mod tests {
             .unwrap();
         }
 
-        let err = migrate_v3_database(&source, &dest).expect_err("must fail");
+        let err =
+            migrate_v3_database(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect_err("must fail");
         assert_eq!(
             err.authoritative(),
             Some(AuthoritativeFailure::NotExactlyOneActiveOwner),
@@ -1639,7 +1767,7 @@ mod tests {
             .unwrap();
         }
 
-        let report = migrate_v3_database(&source, &dest).expect("migrate");
+        let report = migrate_v3_database(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect("migrate");
         // Seed: 1 staging bundle_media + 1 staging pub.
         // Cleanup: 1 pending media on committed + 1 pending pub.
         assert_eq!(report.discarded_bundle_media, 2);
@@ -1706,7 +1834,8 @@ mod tests {
             seed_minimal_family(&conn);
             conn.pragma_update(None, "user_version", 4i64).unwrap();
         }
-        let err = migrate_v3_database(&source, &dest).expect_err("must fail");
+        let err =
+            migrate_v3_database(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect_err("must fail");
         assert_eq!(
             err.authoritative(),
             Some(AuthoritativeFailure::SourceUserVersionNotThree)
@@ -1726,7 +1855,8 @@ mod tests {
             conn.execute_batch("CREATE TABLE unexpected_legacy (id TEXT PRIMARY KEY);")
                 .unwrap();
         }
-        let err = migrate_v3_database(&source, &dest).expect_err("must fail");
+        let err =
+            migrate_v3_database(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect_err("must fail");
         assert_eq!(
             err.authoritative(),
             Some(AuthoritativeFailure::UnknownSourceUserTable)
@@ -1755,7 +1885,8 @@ mod tests {
             )
             .unwrap();
         }
-        let err = migrate_v3_database(&source, &dest).expect_err("must fail");
+        let err =
+            migrate_v3_database(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect_err("must fail");
         assert_eq!(
             err.authoritative(),
             Some(AuthoritativeFailure::PayloadValidationFailed)
@@ -1792,7 +1923,8 @@ mod tests {
             )
             .unwrap();
         }
-        let err = migrate_v3_database(&source, &dest).expect_err("must fail");
+        let err =
+            migrate_v3_database(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect_err("must fail");
         assert_eq!(
             err.authoritative(),
             Some(AuthoritativeFailure::ContentHashMismatchAfterCanonicalize)
@@ -1831,7 +1963,8 @@ mod tests {
             )
             .unwrap();
         }
-        let err = migrate_v3_database(&source, &dest).expect_err("must fail");
+        let err =
+            migrate_v3_database(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect_err("must fail");
         assert_eq!(
             err.authoritative(),
             Some(AuthoritativeFailure::MediaEntitiesJsonInvalid)
@@ -1857,7 +1990,8 @@ mod tests {
             )
             .unwrap();
         }
-        let err = migrate_v3_database(&source, &dest).expect_err("must fail");
+        let err =
+            migrate_v3_database(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect_err("must fail");
         assert_eq!(
             err.authoritative(),
             Some(AuthoritativeFailure::OrphanAuthoritativeForeignKey)
@@ -1887,7 +2021,8 @@ mod tests {
             .unwrap();
             // no family_meta
         }
-        let err = migrate_v3_database(&source, &dest).expect_err("must fail");
+        let err =
+            migrate_v3_database(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect_err("must fail");
         assert_eq!(
             err.authoritative(),
             Some(AuthoritativeFailure::FamilyMetaMissingForFamily)
@@ -1930,7 +2065,8 @@ mod tests {
             )
             .unwrap();
         }
-        let err = migrate_v3_database(&source, &dest).expect_err("must fail");
+        let err =
+            migrate_v3_database(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect_err("must fail");
         assert_eq!(
             err.authoritative(),
             Some(AuthoritativeFailure::ActiveDisplayNameKeyConflict)
@@ -1943,7 +2079,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let source = dir.path().join("absent.db");
         let dest = dir.path().join("lezi.db");
-        let err = migrate_v3_database(&source, &dest).expect_err("must fail");
+        let err =
+            migrate_v3_database(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect_err("must fail");
         assert!(matches!(err, MigrateError::Io(_)));
         assert_eq!(err.authoritative(), None);
         assert!(!dest.exists());
@@ -1960,5 +2097,236 @@ mod tests {
             StagingCascade::DropDependentsReportOrphanBytesIgnore
         );
         assert!(is_discarded_bundle_status(BUNDLE_STATUS_STAGING));
+    }
+
+    // -----------------------------------------------------------------------
+    // Ticket 04 — root password reset + current server open
+    // Public seams: migrate_v3_database(password), server.secret, fingerprint,
+    // build_app ready/setup-status, owner login with new root only.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn migrate_rejects_short_root_password_without_writing_dest() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let dest = dir.path().join("out").join("lezi.db");
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        fs::write(&dest, b"preexisting-sentinel").unwrap();
+        {
+            let conn = open_v3_fixture(&source);
+            seed_minimal_family(&conn);
+        }
+
+        let err = migrate_v3_database(&source, &dest, "short-password")
+            .expect_err("password < 16 must fail");
+        assert!(
+            matches!(err, MigrateError::InvalidRootPassword(_)),
+            "got {err:?}"
+        );
+        assert_eq!(err.authoritative(), None);
+        assert_eq!(fs::read(&dest).unwrap(), b"preexisting-sentinel");
+        assert!(!dest.parent().unwrap().join("server.secret").exists());
+        assert!(!temp_dest_path(&dest).exists());
+    }
+
+    #[test]
+    fn migrate_rejects_empty_root_password() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let dest = dir.path().join("lezi.db");
+        {
+            let conn = open_v3_fixture(&source);
+            seed_minimal_family(&conn);
+        }
+        let err = migrate_v3_database(&source, &dest, "").expect_err("empty password");
+        assert!(matches!(err, MigrateError::InvalidRootPassword(_)));
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn migrate_sets_fingerprint_matching_regenerated_server_secret() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let out = dir.path().join("out");
+        let dest = out.join("lezi.db");
+        {
+            let conn = open_v3_fixture(&source);
+            seed_minimal_family(&conn);
+        }
+
+        migrate_v3_database(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect("migrate");
+
+        let secret = fs::read(out.join("server.secret")).expect("server.secret");
+        assert_eq!(secret.len(), SERVER_SECRET_BYTES);
+        let conn = Connection::open(&dest).unwrap();
+        let stored: String = conn
+            .query_row(
+                "SELECT owner_root_fingerprint FROM families WHERE id = 'fam-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored,
+            owner_root_fingerprint(&secret, TEST_NEW_ROOT_PASSWORD)
+        );
+        // Wrong password must not match stored fingerprint.
+        assert_ne!(
+            stored,
+            owner_root_fingerprint(&secret, "different-root-pw!!")
+        );
+        // Source backup must never gain a server.secret (RegenerateAlways on out/).
+        assert!(!source.parent().unwrap().join("server.secret").exists());
+    }
+
+    #[test]
+    fn reauth_ops_note_states_no_silent_restore() {
+        assert!(REAUTH_OPS_NOTE.contains("no silent restore"));
+        assert!(REAUTH_OPS_NOTE.contains("new root password"));
+        assert!(REAUTH_OPS_NOTE.contains("membership_credentials"));
+        assert!(REAUTH_OPS_NOTE.contains("LEZI_BOOTSTRAP_SECRET"));
+        assert_eq!(MIN_NEW_ROOT_PASSWORD_LEN, 16);
+    }
+
+    async fn oneshot_json(
+        app: &Router,
+        method: Method,
+        uri: &str,
+        body: Option<Value>,
+        extra_headers: &[(&str, &str)],
+    ) -> (StatusCode, Value) {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+        use axum::extract::ConnectInfo;
+        use axum::http::header::CONTENT_TYPE;
+
+        let has_body = body.is_some();
+        let payload = body
+            .map(|v| Body::from(serde_json::to_vec(&v).unwrap()))
+            .unwrap_or_else(Body::empty);
+        let mut builder = Request::builder().method(method).uri(uri);
+        if has_body {
+            builder = builder.header(CONTENT_TYPE, "application/json");
+        }
+        for (name, value) in extra_headers {
+            builder = builder.header(*name, *value);
+        }
+        let mut request = builder.body(payload).unwrap();
+        request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            43210,
+        )));
+        let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+        };
+        (status, value)
+    }
+
+    #[tokio::test]
+    async fn migrated_out_is_ready_configured_and_owner_logs_in_with_new_root_only() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("backup").join("lezi.db");
+        let out = dir.path().join("out");
+        let dest = out.join("lezi.db");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        {
+            let conn = open_v3_fixture(&source);
+            seed_minimal_family(&conn);
+            seed_baby_entity(&conn);
+        }
+
+        migrate_v3_database(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect("migrate");
+        Store::preflight_existing_schema(&dest).expect("preflight");
+
+        let mut config = ServerConfig::new(&out);
+        config.bootstrap_secret = Some(TEST_NEW_ROOT_PASSWORD.to_owned());
+        config.generation = Some("migrate-gen".to_owned());
+        let app = build_app(config).expect("build_app on migrated data");
+
+        let (ready_status, _) = oneshot_json(&app, Method::GET, "/ready", None, &[]).await;
+        assert_eq!(ready_status, StatusCode::OK, "migrated data must be /ready");
+
+        let (setup_status, setup) =
+            oneshot_json(&app, Method::GET, "/v1/setup-status", None, &[]).await;
+        assert_eq!(setup_status, StatusCode::OK, "{setup}");
+        assert_eq!(setup["family_state"], "configured");
+
+        // Wrong root password cannot open owner login.
+        let (bad_status, bad_body) = oneshot_json(
+            &app,
+            Method::POST,
+            "/v1/owner/login",
+            Some(json!({
+                "login_request_id": "migrate-owner-login-wrong-00000001",
+                "device_name": "旧手机",
+            })),
+            &[("x-lezi-bootstrap-secret", "wrong-root-password!")],
+        )
+        .await;
+        assert_eq!(bad_status, StatusCode::UNAUTHORIZED, "{bad_body}");
+        assert!(bad_body.get("access_token").is_none());
+
+        // New root password establishes a device session.
+        let (ok_status, logged_in) = oneshot_json(
+            &app,
+            Method::POST,
+            "/v1/owner/login",
+            Some(json!({
+                "login_request_id": "migrate-owner-login-ok-00000000001",
+                "device_name": "管理员手机",
+            })),
+            &[("x-lezi-bootstrap-secret", TEST_NEW_ROOT_PASSWORD)],
+        )
+        .await;
+        assert_eq!(ok_status, StatusCode::OK, "{logged_in}");
+        let access = logged_in["access_token"]
+            .as_str()
+            .expect("access_token present");
+        assert!(!access.is_empty());
+        assert_eq!(logged_in["membership_id"], "mem-owner");
+        assert!(logged_in["device_id"].as_str().is_some());
+
+        // Session works for an authenticated read.
+        let (members_status, members) = oneshot_json(
+            &app,
+            Method::GET,
+            "/v1/family/members",
+            None,
+            &[("authorization", &format!("Bearer {access}"))],
+        )
+        .await;
+        assert_eq!(members_status, StatusCode::OK, "{members}");
+        assert!(!members["members"].as_array().unwrap().is_empty());
+
+        // Legacy credential material has no session path on the target schema.
+        let conn = Connection::open(&dest).unwrap();
+        let legacy_tables: i64 = conn
+            .query_row(
+                "
+                SELECT COUNT(*) FROM sqlite_master
+                WHERE type = 'table'
+                  AND name IN ('membership_credentials', 'invites')
+                ",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_tables, 0);
+        let active_devices_before_login_only: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM devices WHERE status = 'active'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // Exactly the one device from successful owner login above.
+        assert_eq!(active_devices_before_login_only, 1);
     }
 }

@@ -2197,6 +2197,15 @@ fn derive_token(secret: &[u8], message: &str) -> String {
     URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
 }
 
+/// Keyed fingerprint of the deployment root password.
+///
+/// Matches startup [`Store::reconcile_owner_root_fingerprint`] derivation so the
+/// offline migrator can pre-set `families.owner_root_fingerprint` together with a
+/// regenerated `server.secret` (ticket 04).
+pub(crate) fn owner_root_fingerprint(signing_secret: &[u8], root_password: &str) -> String {
+    derive_token(signing_secret, &format!("owner-root:{root_password}"))
+}
+
 fn secure_generation() -> String {
     let mut bytes = [0u8; 24];
     OsRng.fill_bytes(&mut bytes);
