@@ -115,12 +115,43 @@
   consistently cropped or displaced sensor rows; independent `zbar` decoding also failed on the
   actual preview screenshots, and no grant was claimed. The QR payload/image round-trip and API
   grant lifecycle therefore still do not prove the app's camera-to-claim path.
-- Candidate stabilization used several signed Release rebuilds. Affected reauth, generation-reset,
-  SPKI mismatch, deletion, repository, artifact, and final welcome smoke gates were repeated after
-  their fixes, but the complete two-client matrix was not replayed from zero against the single final
-  APK SHA-256 above. The isolated fixed-point rebuild proves identical production code/resources,
-  but its provenance and signature bytes differ and therefore do not close this exact-artifact gap.
 - Physical network switching and live NAS replacement were not run.
 
 Ticket 16 therefore remains open. Ticket 17 (0.3.1 upgrade) must not start until the missing Must
 evidence is supplied and the complete matrix is accepted on one fixed candidate.
+
+## Exact final-APK two-client replay · 2026-07-31
+
+- Both installed `base.apk` files were streamed back from `emulator-5554` and `emulator-5556`.
+  Each SHA-256 was exactly
+  `10215034bf49f589173877d5904f3b88f3bc6e447470d72b77c19d1151850e83`.
+- A fresh `lezi-sync:0.3.0` synthetic server used `https://10.0.2.2:18765`. Both clients displayed
+  and accepted the same previously unknown certificate SPKI:
+  `EB:CC:59:3F:3E:3B:6C:6D:E0:5E:A9:25:21:69:99:38:85:CB:2E:63:DF:16:E4:10:C4:D8:C5:55:B3:70:9E:55`.
+- Client A created `T16Final`, signed in as `OwnerFinal`, and created baby `年年`. Client B requested
+  `MemberFinal` on `MemberFinalDevice`; A approved a new member, B claimed the session, and B
+  recovered the empty baby history.
+- A then confirmed four urine facts with 0, 1, 2, and 3 photos. B foreground replay rendered four
+  records. A live server snapshot contained four live records, six live media entities, and five
+  committed bundles (one baby plus four record bundles). The bundles declared six media totaling
+  399,914 staged bytes; the media directory contained six blobs and SQLite `integrity_check` was
+  `ok`.
+- B was cleared and reconnected from cursor zero as `MemberFinalDevice2`. A's approval UI offered
+  `绑定到现有「MemberFinal」`; choosing it preserved two family members, added the second device,
+  and B recovered all four records.
+- B created a fifth zero-photo fact. A rendered it with author `MemberFinal`. A revoked only
+  `MemberFinalDevice2`; after reconnect B entered terminal cleanup and returned to Welcome. A then
+  hard-deleted `MemberFinal`; the fifth fact remained and its author changed to `家人`.
+- A permanently deleted `T16Final` using the typed family name and synthetic root password. A
+  returned to Welcome. The server then had zero families, memberships, devices, sessions, entities,
+  bundles, bundle-media rows, media publications, member-login requests, and media files; SQLite
+  `integrity_check` was `ok`.
+- Root-read snapshots of both emulators after cleanup had zero local families, memberships, babies,
+  records, media assets, care plans, fulfillment candidates, outbox rows, and pending cleanup rows.
+  Both local SQLite databases passed `integrity_check`, and both `record-media` directories were
+  empty.
+
+This closes the prior exact-signed-artifact gap for TOFU, family creation, request/approval,
+existing-member second-device binding, full history, 0–3-photo atomicity, device revocation,
+member deletion/anonymization, and family/local cleanup. It does not close the live Android camera
+QR scan gap above, so the third Must and Ticket 16 remain open.
