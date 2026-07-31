@@ -13,6 +13,7 @@ import javax.net.ssl.HttpsURLConnection
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -112,15 +113,31 @@ internal fun interface SyncHttpConnectionFactory {
     fun open(url: URL): HttpURLConnection
 }
 
+internal fun interface TrustedEndpointResolver {
+    suspend fun resolve(baseUrl: String): TrustedEndpointProfile
+}
+
 private object DefaultSyncHttpConnectionFactory : SyncHttpConnectionFactory {
     override fun open(url: URL): HttpURLConnection = url.openConnection() as HttpURLConnection
 }
 
 class HttpSyncBackend internal constructor(
     private val connectionFactory: SyncHttpConnectionFactory,
+    private val trustedEndpointResolver: TrustedEndpointResolver? = null,
 ) : SyncBackend {
     @Inject
-    constructor() : this(DefaultSyncHttpConnectionFactory)
+    constructor(preferences: SyncPreferences) : this(
+        connectionFactory = DefaultSyncHttpConnectionFactory,
+        trustedEndpointResolver = TrustedEndpointResolver { baseUrl ->
+            requireNotNull(preferences.verifiedEndpoint.first()) {
+                "家庭服务器尚未完成安全确认"
+            }.also { endpoint ->
+                require(endpoint.matchesOrigin(baseUrl)) {
+                    "可信服务器与当前家庭会话不一致"
+                }
+            }
+        },
+    )
     override suspend fun create(
         baseUrl: String,
         deviceId: String,
@@ -681,19 +698,22 @@ class HttpSyncBackend internal constructor(
         body: JsonObject?,
         extraHeaders: Map<String, String> = emptyMap(),
         trustedEndpoint: TrustedEndpointProfile? = null,
-    ): JsonObject = withContext(Dispatchers.IO) {
-        val connection = open(base, path, method, token, extraHeaders, trustedEndpoint)
-        try {
-            if (body != null) {
-                connection.doOutput = true
-                connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use {
-                    it.write(body.toString())
+    ): JsonObject {
+        val resolvedEndpoint = trustedEndpoint ?: trustedEndpointResolver?.resolve(base)
+        return withContext(Dispatchers.IO) {
+            val connection = open(base, path, method, token, extraHeaders, resolvedEndpoint)
+            try {
+                if (body != null) {
+                    connection.doOutput = true
+                    connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                    OutputStreamWriter(connection.outputStream, Charsets.UTF_8).use {
+                        it.write(body.toString())
+                    }
                 }
+                readResponse(connection).let { Json.parseToJsonElement(it).jsonObject }
+            } finally {
+                connection.disconnect()
             }
-            readResponse(connection).let { Json.parseToJsonElement(it).jsonObject }
-        } finally {
-            connection.disconnect()
         }
     }
 
@@ -704,25 +724,31 @@ class HttpSyncBackend internal constructor(
         token: String,
         body: ByteArray? = null,
         mime: String? = null,
-    ): ByteArray = withContext(Dispatchers.IO) {
-        val connection = open(base, path, method, token)
-        try {
-            if (body != null) {
-                connection.doOutput = true
-                connection.setRequestProperty("Content-Type", mime ?: "application/octet-stream")
-                connection.outputStream.use { it.write(body) }
+    ): ByteArray {
+        val resolvedEndpoint = trustedEndpointResolver?.resolve(base)
+        return withContext(Dispatchers.IO) {
+            val connection = open(base, path, method, token, trustedEndpoint = resolvedEndpoint)
+            try {
+                if (body != null) {
+                    connection.doOutput = true
+                    connection.setRequestProperty(
+                        "Content-Type",
+                        mime ?: "application/octet-stream",
+                    )
+                    connection.outputStream.use { it.write(body) }
+                }
+                val (code, bytes) = readBoundedBody(
+                    connection = connection,
+                    successLimitBytes = MAX_SYNC_MEDIA_RESPONSE_BYTES,
+                    successResponseKind = "媒体",
+                )
+                if (code !in 200..299) {
+                    throw SyncHttpException(code, bytes.toString(Charsets.UTF_8))
+                }
+                bytes
+            } finally {
+                connection.disconnect()
             }
-            val (code, bytes) = readBoundedBody(
-                connection = connection,
-                successLimitBytes = MAX_SYNC_MEDIA_RESPONSE_BYTES,
-                successResponseKind = "媒体",
-            )
-            if (code !in 200..299) {
-                throw SyncHttpException(code, bytes.toString(Charsets.UTF_8))
-            }
-            bytes
-        } finally {
-            connection.disconnect()
         }
     }
 
@@ -733,49 +759,52 @@ class HttpSyncBackend internal constructor(
         method: String,
         token: String,
         source: SyncMediaUploadSource,
-    ): JsonObject = withContext(Dispatchers.IO) {
-        require(source.contentLength in 1L..RecordPhotoResourcePolicy.maxUploadBytes) {
-            "待上传媒体大小超出支持范围"
-        }
-        val connection = open(base, path, method, token)
-        try {
-            connection.doOutput = true
-            connection.setRequestProperty(
-                "Content-Type",
-                source.mime ?: "application/octet-stream",
-            )
-            connection.setFixedLengthStreamingMode(source.contentLength)
-            source.openStream().use { input ->
-                connection.outputStream.use { output ->
-                    val buffer = ByteArray(RecordPhotoResourcePolicy.streamBufferBytes)
-                    var written = 0L
-                    while (true) {
-                        currentCoroutineContext().ensureActive()
-                        val count = input.read(buffer)
-                        if (count < 0) break
-                        if (count == 0) continue
-                        written += count
-                        require(written <= source.contentLength) {
+    ): JsonObject {
+        val resolvedEndpoint = trustedEndpointResolver?.resolve(base)
+        return withContext(Dispatchers.IO) {
+            require(source.contentLength in 1L..RecordPhotoResourcePolicy.maxUploadBytes) {
+                "待上传媒体大小超出支持范围"
+            }
+            val connection = open(base, path, method, token, trustedEndpoint = resolvedEndpoint)
+            try {
+                connection.doOutput = true
+                connection.setRequestProperty(
+                    "Content-Type",
+                    source.mime ?: "application/octet-stream",
+                )
+                connection.setFixedLengthStreamingMode(source.contentLength)
+                source.openStream().use { input ->
+                    connection.outputStream.use { output ->
+                        val buffer = ByteArray(RecordPhotoResourcePolicy.streamBufferBytes)
+                        var written = 0L
+                        while (true) {
+                            currentCoroutineContext().ensureActive()
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            if (count == 0) continue
+                            written += count
+                            require(written <= source.contentLength) {
+                                "待上传媒体长度与声明不一致"
+                            }
+                            output.write(buffer, 0, count)
+                        }
+                        require(written == source.contentLength) {
                             "待上传媒体长度与声明不一致"
                         }
-                        output.write(buffer, 0, count)
-                    }
-                    require(written == source.contentLength) {
-                        "待上传媒体长度与声明不一致"
                     }
                 }
+                val (code, bytes) = readBoundedBody(
+                    connection = connection,
+                    successLimitBytes = MAX_SYNC_JSON_RESPONSE_BYTES,
+                    successResponseKind = "JSON",
+                )
+                val text = bytes.toString(Charsets.UTF_8)
+                if (code !in 200..299) throw SyncHttpException(code, text)
+                require(text.isNotBlank()) { "家庭服务器 JSON 响应为空" }
+                Json.parseToJsonElement(text).jsonObject
+            } finally {
+                connection.disconnect()
             }
-            val (code, bytes) = readBoundedBody(
-                connection = connection,
-                successLimitBytes = MAX_SYNC_JSON_RESPONSE_BYTES,
-                successResponseKind = "JSON",
-            )
-            val text = bytes.toString(Charsets.UTF_8)
-            if (code !in 200..299) throw SyncHttpException(code, text)
-            require(text.isNotBlank()) { "家庭服务器 JSON 响应为空" }
-            Json.parseToJsonElement(text).jsonObject
-        } finally {
-            connection.disconnect()
         }
     }
 

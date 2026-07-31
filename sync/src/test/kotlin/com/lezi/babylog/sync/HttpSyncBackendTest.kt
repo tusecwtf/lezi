@@ -299,6 +299,82 @@ class HttpSyncBackendTest {
     }
 
     @Test
+    fun verifiedEndpointResolverPinsFamilyCreateBeforeTheRootPasswordCanBeWritten() = runTest {
+        val connection = RejectingPinnedHttpsConnection()
+        val endpoint = TrustedEndpointProfile.tofuSpki(
+            "https://family.example.com:9443",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        )
+        val backend = HttpSyncBackend(
+            connectionFactory = SyncHttpConnectionFactory { connection },
+            trustedEndpointResolver = TrustedEndpointResolver { endpoint },
+        )
+
+        val failure = runCatching {
+            backend.create(
+                baseUrl = endpoint.origin,
+                deviceId = "Pixel Tablet",
+                displayName = "妈妈",
+                createRequestId = "create-request",
+                bootstrapSecret = "root-password-must-not-cross-untrusted-tls",
+                familyName = "乐乐一家",
+            )
+        }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(SSLHandshakeException::class.java)
+        assertThat(connection.outputAttempted).isTrue()
+        assertThat(connection.sslSocketFactory)
+            .isNotSameInstanceAs(HttpsURLConnection.getDefaultSSLSocketFactory())
+    }
+
+    @Test
+    fun verifiedEndpointResolverAlsoPinsAuthenticatedMediaUploadAndDownload() = runTest {
+        val endpoint = TrustedEndpointProfile.tofuSpki(
+            "https://family.example.com:9443",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        )
+        val session = SyncSession(
+            serverHost = "family.example.com",
+            serverPort = 9443,
+            serverScheme = "https",
+            familyId = "family",
+            membershipId = "membership",
+            deviceId = "device",
+            accessToken = "access-token",
+            pullGeneration = "generation",
+        )
+        val upload = RejectingPinnedHttpsConnection()
+        val uploadBackend = HttpSyncBackend(
+            connectionFactory = SyncHttpConnectionFactory { upload },
+            trustedEndpointResolver = TrustedEndpointResolver { endpoint },
+        )
+        val download = RejectingPinnedReadHttpsConnection()
+        val downloadBackend = HttpSyncBackend(
+            connectionFactory = SyncHttpConnectionFactory { download },
+            trustedEndpointResolver = TrustedEndpointResolver { endpoint },
+        )
+
+        val uploadFailure = runCatching {
+            uploadBackend.putBundleMedia(
+                session,
+                bundleId = "bundle",
+                clientUuid = "media",
+                source = TestMediaUploadSource(byteArrayOf(1)),
+            )
+        }.exceptionOrNull()
+        val downloadFailure = runCatching {
+            downloadBackend.getMedia(session, "media")
+        }.exceptionOrNull()
+
+        assertThat(uploadFailure).isInstanceOf(SSLHandshakeException::class.java)
+        assertThat(downloadFailure).isInstanceOf(SSLHandshakeException::class.java)
+        assertThat(upload.sslSocketFactory)
+            .isNotSameInstanceAs(HttpsURLConnection.getDefaultSSLSocketFactory())
+        assertThat(download.sslSocketFactory)
+            .isNotSameInstanceAs(HttpsURLConnection.getDefaultSSLSocketFactory())
+    }
+
+    @Test
     fun commitRejectsMalformedCanonicalRecordAuthors() = runTest {
         val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
         val responder = thread(name = "lezi-push-author-test-server") {
@@ -1380,6 +1456,20 @@ private class RejectingPinnedHttpsConnection : HttpsURLConnection(
         outputAttempted = true
         throw SSLHandshakeException("SPKI mismatch before HTTP body")
     }
+
+    override fun disconnect() = Unit
+    override fun usingProxy(): Boolean = false
+    override fun connect() = Unit
+    override fun getCipherSuite(): String = ""
+    override fun getLocalCertificates(): Array<Certificate>? = null
+    override fun getServerCertificates(): Array<Certificate> = emptyArray()
+}
+
+private class RejectingPinnedReadHttpsConnection : HttpsURLConnection(
+    URL("https://family.example.com:9443/v1/media/media"),
+) {
+    override fun getResponseCode(): Int =
+        throw SSLHandshakeException("SPKI mismatch before HTTP response")
 
     override fun disconnect() = Unit
     override fun usingProxy(): Boolean = false
