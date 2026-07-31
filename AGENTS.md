@@ -73,6 +73,7 @@ ssh -p 10000 13096920600@192.168.50.4 'curl -fsS http://127.0.0.1:8765/health'
 | `LEZI_FORCE_PACKAGE=1` | Rebuild package even if `dist/` exists |
 | `LEZI_SKIP_PACKAGE=1` | Deploy existing package only |
 | `LEZI_PACKAGE_BUILD_IMAGE=1` | `package-nas.sh` builds image if missing |
+| `LEZI_PACKAGE_APP_UPDATE_CHECK_ONLY=1` | Validate release APK + `app-update.json` only (no docker save); CI smoke: `./deploy/test-package-nas-app-update.sh` |
 
 ### Agent workflow: Rust gates → CD → 联调
 

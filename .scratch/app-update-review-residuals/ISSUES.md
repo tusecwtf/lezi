@@ -1,6 +1,6 @@
 # Issues · app-update-review-residuals
 
-**Status:** ready-for-agent · 5/6 done  
+**Status:** complete · 6/6 done  
 **Spec:** [spec.md](./spec.md)  
 **Source review:** app-update commits `8651a9a`…`47828af`（并行 correctness/security/tests/plan）
 
@@ -25,12 +25,13 @@
 | [03](./issues/03-reject-min-supported-gt-version.md) | 拒绝 minSupported > versionCode | — | done · [evidence](./evidence/03/validation.md) |
 | [04](./issues/04-force-shell-when-metadata-missing.md) | client_update_required 后强制 UI 兜底 | — | done · [evidence](./evidence/04/validation.md) |
 | [05](./issues/05-verify-apk-identity-before-install.md) | 装前校验 APK 包名/版本/签名 | — | done · [evidence](./evidence/05/validation.md) |
-| [06](./issues/06-docs-and-gate-test-gaps.md) | 文档诚实门槛 + 关键门禁测试 | 01–05 优先；可部分并行 | ready-for-agent |
+| [06](./issues/06-docs-and-gate-test-gaps.md) | 文档诚实门槛 + 关键门禁测试 | 01–05 优先；可部分并行 | done · [evidence](./evidence/06/validation.md) |
 
 ## Frontier
 
-- **现在可领：** 06（01–05 done）  
-- **收口：** 06  
+- **现在可领：** —（全部 done）  
+- **收口：** complete  
+
 
 ## Explicitly deferred
 

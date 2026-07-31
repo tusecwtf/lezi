@@ -274,6 +274,7 @@ In-App Updates。完整产品合同见 [tech.md §4.2](./tech.md)。
 |----|------|
 | 请求头 | 权威同步与其它需门槛的受保护请求携带 `X-Lezi-Client-Version-Code`（十进制整数） |
 | 门槛判定 | 服务器读取部署元数据 `min_supported_version_code`；头缺失/非法或 `< min` 时拒绝权威 sync 写/拉 |
+| 诚实客户端闸 | 见 [tech.md §4.2 诚实客户端闸](./tech.md)（本表不重复展开，避免双源漂移） |
 | 错误语义 | HTTP 失败 body 含稳定 `code=client_update_required`；客户端映射强制升级，不重试当普通网络错误 |
 | 放行 | 同一有效会话下 `GET /v1/app-update` 与 `GET /v1/app-update/apk` **不**走门槛拒绝，避免升级死锁 |
 | 缺元数据 | 未部署 `app-update.json` 时同步** fail-open**（不砖掉家庭）；元数据/APK 路由对已鉴权调用诚实 404 |

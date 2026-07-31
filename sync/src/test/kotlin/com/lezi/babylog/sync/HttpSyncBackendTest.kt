@@ -570,6 +570,47 @@ class HttpSyncBackendTest {
     }
 
     @Test
+    fun pullSendsClientVersionCodeHeaderOnAuthoritativeSync() = runTest {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val captured = CompletableFuture<String>()
+        val responder = thread(name = "lezi-pull-version-header-test-server") {
+            runCatching {
+                server.accept().use { socket ->
+                    captured.complete(readRequest(socket))
+                    val body =
+                        """{"entities":[],"cursor":0,"generation":"generation-a","has_more":false,"family_name":null}"""
+                            .toByteArray(Charsets.UTF_8)
+                    socket.getOutputStream().use { output ->
+                        output.write(
+                            (
+                                "HTTP/1.1 200 OK\r\n" +
+                                    "Content-Type: application/json\r\n" +
+                                    "Content-Length: ${body.size}\r\n" +
+                                    "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                        )
+                        output.write(body)
+                    }
+                }
+            }.onFailure(captured::completeExceptionally)
+        }
+
+        try {
+            loopbackBackend(clientVersionCode = 6).pull(
+                testSession(server).copy(serverScheme = "http"),
+            )
+            val request = captured.get(2, TimeUnit.SECONDS)
+
+            assertThat(request.lineSequence().first()).startsWith("GET /v1/pull")
+            assertThat(request).contains("Authorization: Bearer family-token")
+            assertThat(request).contains("$CLIENT_VERSION_CODE_HEADER: 6")
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
     fun pullRejectsResponseWithoutRequiredFamilyName() = runTest {
         val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
         val responder = thread(name = "lezi-missing-family-name-pull-test-server") {

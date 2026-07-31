@@ -776,35 +776,53 @@ async fn app_update_apk_missing_file_is_not_found() {
     assert_eq!(body["detail"], json!("App update package is not available"));
 }
 
-#[tokio::test]
-async fn client_update_required_rejects_pull_when_version_header_missing_or_below_min() {
+/// Seeds deploy app-update metadata with min_supported=8 / version_code=9 and creates a family.
+/// Shared by pull / media / allowlist client_update gate tests.
+async fn seed_client_update_gate(
+    device_id: &str,
+    request_id: &str,
+    apk_bytes: &[u8],
+    release_notes: Option<&str>,
+) -> (Rig, String) {
     let rig = Rig::new();
-    let apk_bytes = b"force-update-gate-apk-bytes";
     let sha256 = hex::encode(Sha256::digest(apk_bytes));
-    let metadata = json!({
+    let mut metadata = json!({
         "package_name": "com.lezi.babylog",
         "version_code": 9,
         "version_name": "0.4.0",
         "min_supported_version_code": 8,
         "sha256": sha256,
     });
+    if let Some(notes) = release_notes {
+        metadata
+            .as_object_mut()
+            .unwrap()
+            .insert("release_notes".to_owned(), json!(notes));
+    }
     fs::write(
         rig.directory.path().join("app-update.json"),
         metadata.to_string(),
     )
     .unwrap();
     fs::write(rig.directory.path().join("app-release.apk"), apk_bytes).unwrap();
+    let owner = create_family(&rig.app, device_id, request_id).await;
+    let token = owner["access_token"].as_str().unwrap().to_owned();
+    (rig, token)
+}
 
-    let owner = create_family(
-        &rig.app,
+#[tokio::test]
+async fn client_update_required_rejects_pull_when_version_header_missing_or_below_min() {
+    let (rig, token) = seed_client_update_gate(
         "client-update-gate-owner",
         "client-update-gate-owner-request-00001",
+        b"force-update-gate-apk-bytes",
+        None,
     )
     .await;
-    let token = owner["access_token"].as_str().unwrap();
 
     // Missing header → gate.
-    let (missing_status, missing_body) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    let (missing_status, missing_body) =
+        get_json(&rig.app, "/v1/pull?cursor=0", Some(&token)).await;
     assert_eq!(missing_status, StatusCode::FORBIDDEN, "{missing_body}");
     assert_eq!(missing_body["code"], json!("client_update_required"));
 
@@ -813,7 +831,7 @@ async fn client_update_required_rejects_pull_when_version_header_missing_or_belo
         &rig.app,
         Method::GET,
         "/v1/pull?cursor=0&generation=generation-a",
-        Some(token),
+        Some(&token),
         json!({}),
         &[("x-lezi-client-version-code", "7")],
     )
@@ -826,7 +844,7 @@ async fn client_update_required_rejects_pull_when_version_header_missing_or_belo
         &rig.app,
         Method::GET,
         "/v1/pull?cursor=0&generation=generation-a",
-        Some(token),
+        Some(&token),
         json!({}),
         &[("x-lezi-client-version-code", "8")],
     )
@@ -839,7 +857,7 @@ async fn client_update_required_rejects_pull_when_version_header_missing_or_belo
         &rig.app,
         Method::GET,
         "/v1/pull?cursor=0&generation=generation-a",
-        Some(token),
+        Some(&token),
         json!({}),
         &[("x-lezi-client-version-code", "9")],
     )
@@ -851,7 +869,7 @@ async fn client_update_required_rejects_pull_when_version_header_missing_or_belo
         &rig.app,
         Method::GET,
         "/v1/pull?cursor=0&generation=generation-a",
-        Some(token),
+        Some(&token),
         json!({}),
         &[("x-lezi-client-version-code", "not-a-number")],
     )
@@ -861,32 +879,84 @@ async fn client_update_required_rejects_pull_when_version_header_missing_or_belo
 }
 
 #[tokio::test]
-async fn client_update_required_still_allows_authenticated_app_update_download() {
-    let rig = Rig::new();
-    let apk_bytes = b"force-update-allowlist-apk-bytes";
-    let sha256 = hex::encode(Sha256::digest(apk_bytes));
-    let metadata = json!({
-        "package_name": "com.lezi.babylog",
-        "version_code": 9,
-        "version_name": "0.4.0",
-        "min_supported_version_code": 8,
-        "sha256": sha256,
-        "release_notes": "破坏性同步合同",
-    });
-    fs::write(
-        rig.directory.path().join("app-update.json"),
-        metadata.to_string(),
-    )
-    .unwrap();
-    fs::write(rig.directory.path().join("app-release.apk"), apk_bytes).unwrap();
-
-    let owner = create_family(
-        &rig.app,
-        "client-update-allow-owner",
-        "client-update-allow-owner-request-0001",
+async fn client_update_required_rejects_media_get_when_version_header_missing_or_below_min() {
+    let (rig, token) = seed_client_update_gate(
+        "client-update-media-gate-owner",
+        "client-update-media-gate-owner-req01",
+        b"force-update-media-gate-apk-bytes",
+        None,
     )
     .await;
-    let token = owner["access_token"].as_str().unwrap();
+    let media_path = format!("/v1/media/{}", Uuid::new_v4());
+
+    // Missing header → gate before media lookup.
+    let (missing_status, missing_body) = get_json(&rig.app, &media_path, Some(&token)).await;
+    assert_eq!(missing_status, StatusCode::FORBIDDEN, "{missing_body}");
+    assert_eq!(missing_body["code"], json!("client_update_required"));
+
+    // Below minSupported → same gate.
+    let (low_status, low_body) = raw_json_request_with_headers(
+        &rig.app,
+        Method::GET,
+        &media_path,
+        Some(&token),
+        json!({}),
+        &[("x-lezi-client-version-code", "7")],
+    )
+    .await;
+    assert_eq!(low_status, StatusCode::FORBIDDEN, "{low_body}");
+    assert_eq!(low_body["code"], json!("client_update_required"));
+
+    // Invalid header → same gate as pull (not a generic 422).
+    let (invalid_status, invalid_body) = raw_json_request_with_headers(
+        &rig.app,
+        Method::GET,
+        &media_path,
+        Some(&token),
+        json!({}),
+        &[("x-lezi-client-version-code", "not-a-number")],
+    )
+    .await;
+    assert_eq!(invalid_status, StatusCode::FORBIDDEN, "{invalid_body}");
+    assert_eq!(invalid_body["code"], json!("client_update_required"));
+
+    // At minSupported → not client_update_required (missing media is 404, not force-update).
+    let (ok_status, ok_body) = raw_json_request_with_headers(
+        &rig.app,
+        Method::GET,
+        &media_path,
+        Some(&token),
+        json!({}),
+        &[("x-lezi-client-version-code", "8")],
+    )
+    .await;
+    assert_eq!(ok_status, StatusCode::NOT_FOUND, "{ok_body}");
+    assert_ne!(ok_body["code"], json!("client_update_required"));
+
+    // Above minSupported → same non-force path for unknown media.
+    let (high_status, high_body) = raw_json_request_with_headers(
+        &rig.app,
+        Method::GET,
+        &media_path,
+        Some(&token),
+        json!({}),
+        &[("x-lezi-client-version-code", "9")],
+    )
+    .await;
+    assert_eq!(high_status, StatusCode::NOT_FOUND, "{high_body}");
+    assert_ne!(high_body["code"], json!("client_update_required"));
+}
+
+#[tokio::test]
+async fn client_update_required_still_allows_authenticated_app_update_download() {
+    let apk_bytes = b"force-update-allowlist-apk-bytes";
+    let (rig, token) = seed_client_update_gate(
+        "client-update-allow-owner",
+        "client-update-allow-owner-request-0001",
+        apk_bytes,
+        Some("破坏性同步合同"),
+    )
+    .await;
     let low_version = [("x-lezi-client-version-code", "1")];
 
     // Metadata and APK stay open for a below-min client so force-upgrade is not deadlocked.
@@ -894,7 +964,7 @@ async fn client_update_required_still_allows_authenticated_app_update_download()
         &rig.app,
         Method::GET,
         "/v1/app-update",
-        Some(token),
+        Some(&token),
         json!({}),
         &low_version,
     )
@@ -907,7 +977,7 @@ async fn client_update_required_still_allows_authenticated_app_update_download()
         &rig.app,
         Method::GET,
         "/v1/app-update/apk",
-        Some(token),
+        Some(&token),
         Body::empty(),
         None,
         &low_version,
@@ -922,7 +992,7 @@ async fn client_update_required_still_allows_authenticated_app_update_download()
         &rig.app,
         Method::POST,
         "/v1/bundles",
-        Some(token),
+        Some(&token),
         json!({
             "generation": "generation-a",
             "bundle_id": "11111111-1111-4111-8111-111111111111",

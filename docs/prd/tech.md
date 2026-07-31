@@ -166,6 +166,7 @@ Google Play In-App Updates / Play Core；若未来上架 Play，须另 flavor，
 | 请求头 | 受保护同步请求携带 `X-Lezi-Client-Version-Code`（整数） |
 | 服务端 API | 鉴权 `GET /v1/app-update`（JSON）与 `GET /v1/app-update/apk`（APK 字节）；与同步共用会话与 TLS/信任 |
 | 门槛 | 头缺失或 `< minSupported` 时权威 sync 写/拉（pull / bundle / media 等）返回 `code=client_update_required`；**仍放行**更新元数据与 APK 下载 |
+| 诚实客户端闸 | `X-Lezi-Client-Version-Code` / `minSupported` 是对**诚实官方 App** 的兼容闸：阻止半兼容旧客户端脏写，**不是**防篡改安全根。头可被非官方客户端伪造；**真协议硬闸**仍靠 setup-status **capabilities**、wire schema/payload 校验与已验证会话。服务端不对「伪造高 version 头」做强绑定证明（权威叙述；同步合同见 [sync-trusted-endpoint.md §7.4](./sync-trusted-endpoint.md)） |
 | 强制壳兜底 | `client_update_required` 后：元数据成功且 local &lt; min → `ForcedAppUpdateState.WithPackage`（可安装）；元数据失败或与门槛分歧 → **`PackageUnknown` 强制壳**（说明 +「重试检查更新」），`SyncStatus` 保持 Idle，**不得**呈现为泛同步/NAS 故障或「假正常」无强制层 |
 | 部署 | `package-nas` **fail-closed**：须 release APK + 合法 `app-update.json` 且 sha256 一致；随包部署到数据卷由 lezi-sync 提供，不另开匿名静态站 |
 | 客户端缝 | `SyncPort`：`checkAppUpdate`、`availableOptionalAppUpdate` / `availableForcedAppUpdate`（`ForcedAppUpdateState?`）、`installAvailableAppUpdate`、会话内 dismiss；UI 不直连 PackageInstaller |
@@ -240,6 +241,9 @@ PackageInstaller；失败清理私有暂存且**不** commit 异包。账户区�
 - Room 只注册 fresh-current 建库路径；非当前 payload/计时状态不得进入正常业务路径
 - 应用内更新：SyncPort 检查结果（NotJoined / UpToDate / Optional / Forced）、校验失败不安装、
   同步被 `client_update_required` 映射为强制态；lezi-sync HTTP 鉴权元数据/APK 与门槛
+  （pull / media GET 在低或缺 `X-Lezi-Client-Version-Code` 时 `client_update_required`；
+  客户端权威 pull 携带 version 头；`package-nas` check-only 缺 APK / sha 错 fail-closed 烟测
+  `tools/lezi-sync/deploy/test-package-nas-app-update.sh`，CI 随 lezi-sync workflow 跑）
 
 **冒烟（当前 APK）**
 

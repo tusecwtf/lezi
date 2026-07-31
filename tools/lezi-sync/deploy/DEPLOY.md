@@ -87,7 +87,17 @@ Optional path overrides on the server process: `LEZI_APP_UPDATE_METADATA_PATH`, 
 Quick local checks (from `tools/lezi-sync`):
 
 ```bash
-# fail-closed: missing APK
+# Lightweight CI smoke (no docker save): missing APK / wrong sha fail; matching inputs pass
+./deploy/test-package-nas-app-update.sh
+
+# App-update inputs only (set LEZI_PACKAGE_APP_UPDATE_CHECK_ONLY=1 on package-nas.sh)
+LEZI_PACKAGE_APP_UPDATE_CHECK_ONLY=1 \
+  LEZI_RELEASE_APK=/nonexistent/app-release.apk \
+  LEZI_APP_UPDATE_JSON=deploy/app-update.json \
+  ./deploy/package-nas.sh
+# expect non-zero exit
+
+# fail-closed: missing APK (full package path still aborts early)
 LEZI_FORCE_PACKAGE=1 LEZI_RELEASE_APK=/nonexistent/app-release.apk ./deploy/package-nas.sh
 # expect non-zero exit
 

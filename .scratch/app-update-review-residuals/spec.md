@@ -1,6 +1,6 @@
 # Spec · 自托管应用内更新 — 审查残差
 
-**Status:** ready-for-agent  
+**Status:** complete · 6/6  
 **Parent:** [`.scratch/self-hosted-app-update/`](../self-hosted-app-update/spec.md)（complete · 5/5）  
 **Review:** parallel review of commits `04f7282..47828af` (2026-07-31)  
 **Merged notes:** session review `grok-review-27b5de6e-merged.md`（correctness / security / tests / plan）

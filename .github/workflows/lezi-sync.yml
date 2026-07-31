@@ -44,3 +44,8 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # Lightweight fail-closed smoke (no docker save / full NAS package matrix).
+      # Invoke via bash so a non-executable commit mode still runs on Actions.
+      - name: package-nas app-update inputs
+        run: bash deploy/test-package-nas-app-update.sh

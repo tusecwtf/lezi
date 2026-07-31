@@ -139,6 +139,21 @@ PY
 
 require_app_update_inputs
 
+# Lightweight gate for CI / local smoke without docker save (see test-package-nas-app-update.sh).
+if [[ "${LEZI_PACKAGE_APP_UPDATE_CHECK_ONLY:-0}" == "1" ]]; then
+  check_root="$(mktemp -d "${TMPDIR:-/tmp}/lezi-app-update-check.XXXXXX")"
+  cleanup_check_root() {
+    rm -rf -- "${check_root}"
+  }
+  trap cleanup_check_root EXIT HUP INT TERM
+  echo "==> app-update check only (no docker package)"
+  validate_and_stage_app_update "${check_root}/app-update"
+  test -s "${check_root}/app-update/app-release.apk"
+  test -s "${check_root}/app-update/app-update.json"
+  echo "app-update inputs OK"
+  exit 0
+fi
+
 if ! docker image inspect "${image}" >/dev/null 2>&1; then
   if [[ "${build_image}" == "1" ]]; then
     echo "==> image missing; building via build-image.sh"
