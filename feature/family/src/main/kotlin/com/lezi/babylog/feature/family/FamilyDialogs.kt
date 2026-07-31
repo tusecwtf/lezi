@@ -172,81 +172,30 @@ private fun FamilyWizardStepHeader(
     }
 }
 
-/** Wizard endpoint step: trusted HTTPS host and port. */
+/** Read-only wizard handoff after the endpoint has passed a trusted HTTPS probe. */
 @Composable
-internal fun FamilyWizardEndpointDialog(
+internal fun FamilyVerifiedEndpointDialog(
     mode: FamilyWizardMode,
-    host: String,
-    onHostChange: (String) -> Unit,
-    port: String,
-    onPortChange: (String) -> Unit,
-    endpointReady: Boolean,
-    feedback: String?,
-    endpointInfoHint: String? = null,
-    saving: Boolean,
+    endpoint: String,
     onContinue: () -> Unit,
+    onChangeEndpoint: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
-        onDismissRequest = { if (!saving) onDismiss() },
-        modifier = Modifier.imePadding(),
-        properties = DialogProperties(decorFitsSystemWindows = false),
+        onDismissRequest = onDismiss,
         title = { Text(familyWizardTitle(mode, FamilyWizardStep.Endpoint)) },
         text = {
-            Column(
-                modifier = Modifier
-                    .heightIn(max = 480.dp)
-                    .verticalScroll(rememberScrollState())
-                    .dismissKeyboardOnTap(),
-                verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
-            ) {
-                FamilyWizardStepHeader(mode, FamilyWizardStep.Endpoint, endpointReady)
+            Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
+                FamilyWizardStepHeader(mode, FamilyWizardStep.Endpoint, endpoint.isNotBlank())
                 FamilyScopeRow("本机", "家庭服务器", "受信任的 HTTPS 地址仅存本机，可中断后继续")
-                if (endpointInfoHint != null) {
-                    Text(
-                        endpointInfoHint,
-                        style = LeziTypography.Meta,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                OutlinedTextField(
-                    value = host,
-                    onValueChange = onHostChange,
-                    label = { Text("家庭服务器主机（IP 或域名）") },
-                    placeholder = { Text("192.168.50.4") },
-                    singleLine = true,
-                    enabled = !saving,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = port,
-                    onValueChange = { onPortChange(it.filter(Char::isDigit).take(5)) },
-                    label = { Text("端口") },
-                    placeholder = { Text("8765") },
-                    singleLine = true,
-                    enabled = !saving,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                if (feedback != null) {
-                    Text(feedback, color = MaterialTheme.colorScheme.error, style = LeziTypography.Meta)
-                }
+                Text(endpoint.ifBlank { "尚未确认家庭服务器" })
+                TextButton(onClick = onChangeEndpoint) { Text("重新确认家庭服务器") }
             }
         },
         confirmButton = {
-            TextButton(onClick = onContinue, enabled = !saving) {
-                Text(
-                    when {
-                        saving -> "保存中…"
-                        mode == FamilyWizardMode.Join -> "下一步"
-                        else -> "下一步"
-                    },
-                )
-            }
+            TextButton(onClick = onContinue, enabled = endpoint.isNotBlank()) { Text("下一步") }
         },
-        dismissButton = {
-            TextButton(onClick = onDismiss, enabled = !saving) { Text("稍后再说") }
-        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("稍后再说") } },
     )
 }
 
@@ -455,6 +404,7 @@ internal fun MemberLoginRequestDialog(
 internal fun MemberApprovalWaitingDialog(
     request: PendingMemberLogin,
     checking: Boolean,
+    feedback: String? = null,
     onCheck: () -> Unit,
     onCancel: () -> Unit,
     onKeepOffline: () -> Unit,
@@ -471,6 +421,9 @@ internal fun MemberApprovalWaitingDialog(
                     style = LeziTypography.Meta,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                feedback?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error)
+                }
                 TextButton(onClick = onCancel, enabled = !checking) { Text("取消申请") }
                 TextButton(onClick = onKeepOffline, enabled = !checking) {
                     Text("暂不连接，保持离线")
@@ -622,7 +575,7 @@ internal fun RenameFamilyDialog(
                     value = familyName,
                     onValueChange = onFamilyNameChange,
                     label = { Text("共享家庭名") },
-                    placeholder = { Text("留空则显示兜底名") },
+                    placeholder = { Text("家庭名（必填）") },
                     supportingText = {
                         Text(feedback ?: "仅管理员可改；全员设备看到同一个名字")
                     },
@@ -740,13 +693,16 @@ internal fun MemberLoginQrConfirmDialog(
     onDeviceNameChange: (String) -> Unit,
     feedback: String?,
     submitting: Boolean,
+    verificationInProgress: Boolean = false,
+    recoveryRetryRequired: Boolean = false,
     onLogin: () -> Unit,
+    onRetryRecovery: () -> Unit = {},
     onManualJoin: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
         onDismissRequest = { if (!submitting) onDismiss() },
-        title = { Text("登录家庭") },
+        title = { Text(if (verificationInProgress) "正在确认家庭服务器…" else "登录家庭") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
                 payload.familyName?.let { Text(it, style = LeziTypography.TitleSm) }
@@ -754,7 +710,7 @@ internal fun MemberLoginQrConfirmDialog(
                 OutlinedTextField(
                     value = deviceName,
                     onValueChange = onDeviceNameChange,
-                    enabled = !submitting,
+                    enabled = !submitting && !verificationInProgress,
                     label = { Text("这台设备的名称 *") },
                     singleLine = true,
                     isError = feedback != null,
@@ -770,8 +726,19 @@ internal fun MemberLoginQrConfirmDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onLogin, enabled = !submitting) {
-                Text(if (submitting) "登录中…" else "在这台设备登录")
+            if (!verificationInProgress) {
+                TextButton(
+                    onClick = if (recoveryRetryRequired) onRetryRecovery else onLogin,
+                    enabled = !submitting,
+                ) {
+                    Text(
+                        when {
+                            submitting -> "同步中…"
+                            recoveryRetryRequired -> "重试首次同步"
+                            else -> "在这台设备登录"
+                        },
+                    )
+                }
             }
         },
         dismissButton = {
@@ -874,7 +841,12 @@ internal fun DeleteFamilyDialog(
                         "这会影响全部家庭成员，并删除服务器上的全部家庭数据。服务器确认前不会清除本机。"
                     },
                 )
-                if (final) {
+                if (final && expectedFamilyName.isBlank()) {
+                    Text(
+                        "家庭名尚未同步，暂时不能安全确认删除。请返回账户页刷新家庭信息后重试。",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                } else if (final) {
                     OutlinedTextField(
                         value = familyNameInput,
                         onValueChange = onFamilyNameInputChange,
@@ -908,8 +880,12 @@ internal fun DeleteFamilyDialog(
         },
         confirmButton = {
             TextButton(
-                onClick = if (final) onConfirm else onContinue,
-                enabled = !deleting && (
+                onClick = when {
+                    final && expectedFamilyName.isBlank() -> onDismiss
+                    final -> onConfirm
+                    else -> onContinue
+                },
+                enabled = !deleting && (expectedFamilyName.isBlank() ||
                     !final || canConfirmFamilyDeletion(
                         expectedFamilyName,
                         familyNameInput,
@@ -919,7 +895,11 @@ internal fun DeleteFamilyDialog(
             ) {
                 Text(
                     if (final) {
-                        if (deleting) "正在删除…" else "永久删除家庭"
+                        when {
+                            expectedFamilyName.isBlank() -> "返回刷新"
+                            deleting -> "正在删除…"
+                            else -> "永久删除家庭"
+                        }
                     } else {
                         "继续"
                     },

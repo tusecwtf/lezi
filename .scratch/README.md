@@ -13,6 +13,7 @@ post-0.3.0 独立审查残差另开 tracker；使用方式见
 | Post-0.3.0 code-review 残差 | [spec](./post-0.3.0-code-review-remediation/spec.md) | [票索引](./post-0.3.0-code-review-remediation/ISSUES.md) | complete · 9/9 · fixed-point gates passed |
 | 0.3.0 APK 逐页验收整改 | [spec](./apk-0.3.0-page-acceptance-remediation/spec.md) | [票索引](./apk-0.3.0-page-acceptance-remediation/ISSUES.md) | complete · 1/1 · fixed-point gates passed |
 | 可信同步 endpoint、鉴权与 NAS→VPS 迁移 | [spec](./trusted-sync-endpoint-auth/spec.md) | [ISSUES](./trusted-sync-endpoint-auth/ISSUES.md)（17 票） | active · 14/17 · frontier 15 |
+| Trusted-sync 实现后 code-review 残差 | [spec](./trusted-sync-review-residuals/spec.md) | [ISSUES](./trusted-sync-review-residuals/ISSUES.md)（13 票） | complete · 13/13 Must · fixed-point gates passed |
 | 离线模式（先本机记账，账户再连家庭） | [spec](./offline-mode/spec.md) | [票索引](./offline-mode/ISSUES.md) | complete · 6/6 |
 | 审查残差 P1（domain/composer + 网络层 0.3.1 复核） | [spec](./p1-review-residuals/spec.md) | [ISSUES](./p1-review-residuals/ISSUES.md)（8 票） | ready-for-agent · frontier 01/02/04；05–08 planned 等 0.3.1 |
 | 自托管应用内更新（侧载 APK + NAS 部署带包） | [spec](./self-hosted-app-update/spec.md) | [ISSUES](./self-hosted-app-update/ISSUES.md)（5 票 · 垂直切片） | complete · 5/5 · [evidence/05](./self-hosted-app-update/evidence/05/validation.md) |

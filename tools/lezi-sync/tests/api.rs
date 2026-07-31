@@ -12,7 +12,7 @@ use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{Method, Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
-use lezi_sync::{build_app, RateLimitConfig, ServerConfig, VERSION};
+use lezi_sync::{build_app, build_apps, RateLimitConfig, ServerConfig, VERSION};
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -478,6 +478,32 @@ async fn liveness_and_readiness_initialize_private_single_data_root() {
 }
 
 #[tokio::test]
+async fn internal_router_exposes_only_health_and_readiness() {
+    let directory = TempDir::new().unwrap();
+    let (public, internal) = build_apps(ServerConfig::new(directory.path())).unwrap();
+
+    assert_eq!(get_json(&internal, "/health", None).await.0, StatusCode::OK);
+    assert_eq!(get_json(&internal, "/ready", None).await.0, StatusCode::OK);
+    assert_eq!(
+        request(
+            &internal,
+            Method::GET,
+            "/v1/setup-status",
+            None,
+            Body::empty(),
+            None,
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND,
+    );
+    assert_eq!(
+        get_json(&public, "/v1/setup-status", None).await.0,
+        StatusCode::OK,
+    );
+}
+
+#[tokio::test]
 async fn setup_status_exposes_only_the_empty_instance_contract() {
     let rig = Rig::new();
 
@@ -710,10 +736,7 @@ async fn app_update_apk_missing_file_is_not_found() {
     let token = owner["access_token"].as_str().unwrap();
     let (status, body) = get_json(&rig.app, "/v1/app-update/apk", Some(token)).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
-    assert_eq!(
-        body["detail"],
-        json!("App update package is not available")
-    );
+    assert_eq!(body["detail"], json!("App update package is not available"));
 }
 
 #[tokio::test]
@@ -744,8 +767,7 @@ async fn client_update_required_rejects_pull_when_version_header_missing_or_belo
     let token = owner["access_token"].as_str().unwrap();
 
     // Missing header → gate.
-    let (missing_status, missing_body) =
-        get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    let (missing_status, missing_body) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
     assert_eq!(missing_status, StatusCode::FORBIDDEN, "{missing_body}");
     assert_eq!(missing_body["code"], json!("client_update_required"));
 
@@ -1553,7 +1575,7 @@ async fn owner_login_adds_one_device_to_the_existing_owner_and_retries_idempoten
         Method::POST,
         "/v1/family/create",
         None,
-        create_body,
+        create_body.clone(),
         &[("x-lezi-bootstrap-secret", root)],
     )
     .await;
@@ -1588,6 +1610,18 @@ async fn owner_login_adds_one_device_to_the_existing_owner_and_retries_idempoten
     assert_eq!(retry["device_id"], logged_in["device_id"]);
     assert_eq!(retry["access_token"], logged_in["access_token"]);
     assert_eq!(retry["refresh_token"], logged_in["refresh_token"]);
+    let (create_retry_status, original_create_retry) = json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/family/create",
+        None,
+        create_body,
+        &[("x-lezi-bootstrap-secret", root)],
+    )
+    .await;
+    assert_eq!(create_retry_status, StatusCode::CONFLICT);
+    assert!(original_create_retry.get("access_token").is_none());
+    assert!(original_create_retry.get("refresh_token").is_none());
     for token in [
         original["access_token"].as_str(),
         logged_in["access_token"].as_str(),
@@ -1908,7 +1942,7 @@ async fn member_request_has_no_family_authority_and_owner_approval_claims_once()
         .as_str()
         .is_some_and(|it| !it.is_empty()));
 
-    let (claimed_again, _) = json_request(
+    let (claimed_again, replayed_member) = json_request(
         &rig.app,
         Method::POST,
         "/v1/member/requests/claim",
@@ -1916,17 +1950,41 @@ async fn member_request_has_no_family_authority_and_owner_approval_claims_once()
         json!({"pending_secret": pending_secret}),
     )
     .await;
-    assert_eq!(claimed_again, StatusCode::CONFLICT);
+    assert_eq!(claimed_again, StatusCode::OK);
+    assert_eq!(replayed_member["device_id"], member["device_id"]);
+    assert_eq!(replayed_member["access_token"], member["access_token"]);
+    assert_eq!(replayed_member["refresh_token"], member["refresh_token"]);
+    let (rotate_status, rotated_member) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": member["refresh_token"]}),
+    )
+    .await;
+    assert_eq!(rotate_status, StatusCode::OK, "{rotated_member}");
     assert_eq!(
-        get_json(
+        json_request(
             &rig.app,
-            "/v1/pull?cursor=0",
-            member["access_token"].as_str(),
+            Method::POST,
+            "/v1/member/requests/claim",
+            None,
+            json!({"pending_secret": pending_secret}),
         )
         .await
         .0,
-        StatusCode::OK,
+        StatusCode::CONFLICT,
     );
+    let (pull_status, pull_body) = get_json(
+        &rig.app,
+        &format!(
+            "/v1/pull?cursor=0&generation={}",
+            rotated_member["generation"].as_str().unwrap(),
+        ),
+        rotated_member["access_token"].as_str(),
+    )
+    .await;
+    assert_eq!(pull_status, StatusCode::OK, "{pull_body}");
 
     let (_, duplicate) = json_request(
         &rig.app,
@@ -2301,17 +2359,22 @@ async fn owner_explicitly_binds_a_pending_device_to_an_existing_member() {
         .unwrap()
         .iter()
         .any(|member| member["display_name"] == "绝不能意外新建"));
+    let (replay_status, replayed_second_device) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/requests/claim",
+        None,
+        json!({"pending_secret": pending_secret}),
+    )
+    .await;
+    assert_eq!(replay_status, StatusCode::OK, "{replayed_second_device}");
     assert_eq!(
-        json_request(
-            &rig.app,
-            Method::POST,
-            "/v1/member/requests/claim",
-            None,
-            json!({"pending_secret": pending_secret}),
-        )
-        .await
-        .0,
-        StatusCode::CONFLICT,
+        replayed_second_device["device_id"],
+        second_device["device_id"]
+    );
+    assert_eq!(
+        replayed_second_device["access_token"],
+        second_device["access_token"]
     );
 }
 
@@ -2438,6 +2501,21 @@ async fn owner_member_login_grant_is_ten_minutes_single_use_and_target_bound() {
         .0,
         StatusCode::OK,
     );
+    let (replay_status, replayed_device) = json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/member/login-grants/claim",
+        None,
+        json!({"grant": grant, "device_name": "妈妈的新平板"}),
+    )
+    .await;
+    assert_eq!(replay_status, StatusCode::OK, "{replayed_device}");
+    assert_eq!(replayed_device["device_id"], new_device["device_id"]);
+    assert_eq!(replayed_device["access_token"], new_device["access_token"]);
+    assert_eq!(
+        replayed_device["refresh_token"],
+        new_device["refresh_token"]
+    );
     assert_eq!(
         json_request(
             &rig.app,
@@ -2445,6 +2523,26 @@ async fn owner_member_login_grant_is_ten_minutes_single_use_and_target_bound() {
             "/v1/member/login-grants/claim",
             None,
             json!({"grant": grant, "device_name": "重放设备"}),
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT,
+    );
+    json_request(
+        &rig.app,
+        Method::POST,
+        "/v1/session/refresh",
+        None,
+        json!({"refresh_token": new_device["refresh_token"]}),
+    )
+    .await;
+    assert_eq!(
+        json_request(
+            &rig.app,
+            Method::POST,
+            "/v1/member/login-grants/claim",
+            None,
+            json!({"grant": grant, "device_name": "妈妈的新平板"}),
         )
         .await
         .0,
@@ -2810,21 +2908,38 @@ async fn family_create_requires_the_root_password_and_never_reopens_configured_s
         "the one-time root password must never become a daily Bearer credential",
     );
 
-    let (second_status, _) = json_request_with_headers(
+    let configured_request = json!({
+        "create_request_id": "bootstrap-create-request-bbbb00000002",
+        "display_name": "爸爸",
+        "device_name": "爸爸的手机",
+        "family_name": "第二家庭",
+    });
+    let (second_status, second_body) = json_request_with_headers(
         &rig.app,
         Method::POST,
         "/v1/family/create",
         None,
-        json!({
-            "create_request_id": "bootstrap-create-request-bbbb00000002",
-            "display_name": "爸爸",
-            "device_name": "爸爸的手机",
-            "family_name": "第二家庭",
-        }),
+        configured_request.clone(),
         &[("x-lezi-bootstrap-secret", secret)],
     )
     .await;
     assert_eq!(second_status, StatusCode::CONFLICT);
+    for headers in [
+        Vec::new(),
+        vec![("x-lezi-bootstrap-secret", "wrong-secret!!!!!!")],
+    ] {
+        let (status, body) = json_request_with_headers(
+            &rig.app,
+            Method::POST,
+            "/v1/family/create",
+            None,
+            configured_request.clone(),
+            &headers,
+        )
+        .await;
+        assert_eq!(status, second_status);
+        assert_eq!(body, second_body);
+    }
 }
 
 #[tokio::test]
@@ -6258,7 +6373,7 @@ async fn bootstrap_secret_gates_family_create_when_configured() {
         &[("x-lezi-bootstrap-secret", "wrong-bootstrap-secret!!")],
     )
     .await;
-    assert_eq!(wrong, StatusCode::UNAUTHORIZED);
+    assert_eq!(wrong, StatusCode::TOO_MANY_REQUESTS);
     let (created, family) = json_request_with_headers(
         &rig.app,
         Method::POST,
@@ -6285,7 +6400,85 @@ async fn bootstrap_secret_gates_family_create_when_configured() {
         &[("x-lezi-bootstrap-secret", secret)],
     )
     .await;
-    assert_eq!(limited, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(limited, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn failed_root_passwords_share_a_per_source_budget_across_admin_endpoints() {
+    let root = "production-root-password";
+    let rig = Rig::with_config(|config| {
+        config.bootstrap_secret = Some(root.to_owned());
+        config.create_rate_limit = RateLimitConfig {
+            max_attempts: 2,
+            window_seconds: 60,
+        };
+    });
+    let owner = create_family_with_root(
+        &rig.app,
+        "owner-device",
+        "root-rate-owner-request-0000000001",
+        root,
+    )
+    .await;
+    let owner_token = owner["access_token"].as_str().unwrap();
+    let login = json!({
+        "login_request_id": "root-rate-login-request-0000000001",
+        "device_name": "second owner device",
+    });
+
+    assert_eq!(
+        json_request_with_headers(
+            &rig.app,
+            Method::POST,
+            "/v1/owner/login",
+            None,
+            login.clone(),
+            &[("x-lezi-bootstrap-secret", "wrong-root-password")],
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED,
+    );
+    assert_eq!(
+        json_request_with_headers(
+            &rig.app,
+            Method::POST,
+            "/v1/owner/takeover",
+            None,
+            login.clone(),
+            &[("x-lezi-bootstrap-secret", "wrong-root-password")],
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED,
+    );
+    assert_eq!(
+        json_request_with_headers(
+            &rig.app,
+            Method::POST,
+            "/v1/family/delete",
+            Some(owner_token),
+            json!({"confirmed_family_name": "测试家庭"}),
+            &[("x-lezi-bootstrap-secret", "wrong-root-password")],
+        )
+        .await
+        .0,
+        StatusCode::TOO_MANY_REQUESTS,
+    );
+    assert_eq!(
+        json_request_with_headers(
+            &rig.app,
+            Method::POST,
+            "/v1/owner/login",
+            None,
+            login,
+            &[("x-lezi-bootstrap-secret", root)],
+        )
+        .await
+        .0,
+        StatusCode::OK,
+        "a correct password is not locked out by failed-guess throttling",
+    );
 }
 
 #[tokio::test]

@@ -14,12 +14,19 @@ internal sealed interface FamilySessionCommand {
         val deviceName: String = "Android 设备",
         val bootstrapSecret: String,
         val familyName: String?,
-    ) : FamilySessionCommand
+    ) : FamilySessionCommand {
+        override fun toString(): String =
+            "CreateFamily(displayName=$displayName, deviceName=$deviceName, " +
+                "familyName=$familyName, bootstrapSecret=<redacted>)"
+    }
     data class OwnerLogin(
         val deviceName: String,
         val rootPassword: String,
         val takeover: Boolean,
-    ) : FamilySessionCommand
+    ) : FamilySessionCommand {
+        override fun toString(): String =
+            "OwnerLogin(deviceName=$deviceName, takeover=$takeover, rootPassword=<redacted>)"
+    }
     data class RequestMemberLogin(
         val displayName: String,
         val deviceName: String,
@@ -337,13 +344,9 @@ internal class FamilySessionCoordinator(
             MemberLoginStatus.Approved -> {
                 val joined = backend.claimMemberLogin(current.endpointConfig.baseUrl, secret)
                 require(joined.role == FamilyRole.Member) { "成员登录响应角色无效" }
-                // A claim is single-use: make the session durable before any replica work.
-                val session = persistClaimedMemberSession(current, joined)
+                val session = claimedMemberSession(current, joined)
                 val dataRecovery = try {
-                    replica.resetLocalSyncReceipts(
-                        current,
-                        crossingFamilyBoundary = true,
-                    )
+                    persistClaimedMemberSession(current, session)
                     recoverReclaimedSession(session)
                 } catch (cancelled: CancellationException) {
                     throw cancelled
@@ -449,18 +452,14 @@ internal class FamilySessionCoordinator(
             deviceName = requireDeviceName(deviceName),
         )
         require(joined.role == FamilyRole.Member) { "成员登录响应角色无效" }
-        // The grant is single-use: publish the new session before fallible replica recovery.
         val previous = preferences.session.first()
-        val session = persistClaimedMemberSession(
+        val session = claimedMemberSession(
             previous = previous,
             joined = joined.copy(cursor = 0L),
             baseUrl = payload.endpoint.origin,
         )
         val dataRecovery = try {
-            replica.resetLocalSyncReceipts(
-                previous,
-                crossingFamilyBoundary = true,
-            )
+            persistClaimedMemberSession(previous, session)
             recoverReclaimedSession(session)
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -666,13 +665,7 @@ internal class FamilySessionCoordinator(
             familyName = joined.familyName?.trim()?.takeIf { it.isNotEmpty() },
             membershipId = joined.membershipId.trim(),
         )
-        val replicaIdentityUnchanged =
-            previous.familyId.isNotBlank() &&
-                previous.familyId == session.familyId &&
-                previous.membershipId.isNotBlank() &&
-                previous.membershipId == session.membershipId &&
-                previous.role == session.role
-        if (!replicaIdentityUnchanged) {
+        if (!replicaIdentityUnchanged(previous, session)) {
             replica.resetLocalSyncReceipts(
                 previous,
                 crossingFamilyBoundary = previous.familyId != session.familyId,
@@ -686,7 +679,7 @@ internal class FamilySessionCoordinator(
         return session
     }
 
-    private suspend fun persistClaimedMemberSession(
+    private fun claimedMemberSession(
         previous: SyncSession,
         joined: SessionBootstrapResult,
         baseUrl: String = previous.endpointConfig.baseUrl,
@@ -707,9 +700,38 @@ internal class FamilySessionCoordinator(
             familyName = joined.familyName?.trim()?.takeIf(String::isNotEmpty),
             membershipId = joined.membershipId.trim(),
         )
-        preferences.saveSession(session)
-        onSessionChanged(session)
         return session
+    }
+
+    /**
+     * A single-use claim is durable before fallible reset work, but the saved
+     * session remains non-pushable behind a durable replica-reset marker. Same
+     * replica identity is the only path that can activate without a reset.
+     */
+    private suspend fun persistClaimedMemberSession(
+        previous: SyncSession,
+        session: SyncSession,
+    ) {
+        if (replicaIdentityUnchanged(previous, session)) {
+            preferences.saveSession(session)
+            onSessionChanged(session)
+            return
+        }
+        preferences.saveSessionPendingReplicaReset(session, previous)
+        onSessionChanged(preferences.session.first())
+        recoverPendingReplicaReset()
+    }
+
+    /** Caller owns [barrier]. Safe to call during process/start-of-operation recovery. */
+    suspend fun recoverPendingReplicaReset() {
+        val previous = preferences.pendingReplicaResetPrevious() ?: return
+        val pending = preferences.session.first()
+        replica.resetLocalSyncReceipts(
+            previous,
+            crossingFamilyBoundary = previous.familyId != pending.familyId,
+        )
+        preferences.completePendingReplicaReset()
+        onSessionChanged(preferences.session.first())
     }
 
     private suspend fun <T> withAllowedSession(
@@ -732,6 +754,13 @@ internal class FamilySessionCoordinator(
 private fun requirePendingRequestId(requestId: String): String = requestId.trim().also {
     require(it.matches(Regex("[A-Za-z0-9_-]{32,128}"))) { "待确认申请 ID 无效" }
 }
+
+private fun replicaIdentityUnchanged(previous: SyncSession, next: SyncSession): Boolean =
+    previous.familyId.isNotBlank() &&
+        previous.familyId == next.familyId &&
+        previous.membershipId.isNotBlank() &&
+        previous.membershipId == next.membershipId &&
+        previous.role == next.role
 
 private fun requireTargetMembershipId(membershipId: String): String = membershipId.trim().also {
     require(it.isNotEmpty() && it.length <= 128 && it.none(Char::isWhitespace)) {

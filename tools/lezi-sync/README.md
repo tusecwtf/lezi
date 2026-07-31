@@ -210,15 +210,16 @@ lezi-sync healthcheck
 `/v1/owner/takeover`、`/v1/session/refresh` 以及成员申请方使用 pending
 secret 的 request/status/cancel/claim 外，接口都要求
 `Authorization: Bearer <device-session-access-token>`。`create` 与成员申请受进程内速率限制；
-生产启动必须配置 `LEZI_BOOTSTRAP_SECRET`，`create` 还要求匹配的 bootstrap 头。局部分桶达到
-上限时只阻断同一 device 或来源地址；轮换标识仍受局部上限 10 倍的全局兜底限制。
-无效 bootstrap 或格式错误的请求不消耗有效建家调用的额度。
+生产启动必须配置高熵随机 `LEZI_BOOTSTRAP_SECRET`，`create` 还要求匹配的 bootstrap 头。
+错误根密码/bootstrap 进入按来源分桶的失败预算，达到上限后返回 429；成功建家另有独立
+预算和局部上限 10 倍的全局兜底。无效凭据不消耗成功建家预算。家庭已配置后，create 对
+正确、错误或缺失口令返回同一冲突，避免口令 oracle。
 
 | 方法 | 路径 | 摘要 |
 |---|---|---|
 | GET | `/health` | 廉价进程存活检查，正常 `{ok, version, capabilities:["atomic_bundle","record_membership_author"]}`，不访问 DB/文件系统 |
 | GET | `/ready` | DB 与数据目录就绪检查；结果缓存 5 秒，异常返回 `503 {ok:false,status:"degraded",version}` |
-| GET | `/v1/setup-status` | 可信连接后的最小无鉴权探测；就绪时只返回 `protocol_version`、`capabilities:["setup_status"]` 与 `family_state:empty\|configured`，维护中返回无正文 503 |
+| GET | `/v1/setup-status` | 可信连接后的最小无鉴权探测；就绪时只返回 `protocol_version`、完整 trusted-sync capabilities（`trusted_https_endpoint_v1`、`device_sessions_v1`、`membership_devices_v1`、`atomic_bundle`、`record_membership_author`）与 `family_state:empty\|configured`，维护中返回无正文 503 |
 | POST | `/v1/family/create` | 仅空服务器可用；根密码幂等创建唯一家庭、Owner membership、首台 Device 与 DeviceSession |
 | POST | `/v1/owner/login` | configured 家庭用根密码幂等新增一个 Device 到唯一 Owner membership；旧 Owner Device 不受影响 |
 | POST | `/v1/owner/takeover` | 明确接管：原子撤销全部旧 Owner DeviceSession 后为当前 Device 签发 session；Member session 不受影响 |
@@ -379,6 +380,8 @@ pull 响应包含当前字段 `has_more`。每页最多扫描 200 个实体，�
 `GET /health` 广告
 `capabilities: ["atomic_bundle", "record_membership_author"]`。当前客户端要求 health
 为 `ok` 且 capabilities 至少包含这两项；允许增加能力，`version` 仅展示、不参与门闩。
+公网 `8765` 只提供 HTTPS；容器健康检查使用仅绑定 `127.0.0.1:8766` 的明文
+`/health`、`/ready` 路由，该内部 listener 不挂载任何 `/v1/*` 业务接口。
 所有实体发布前必须确认 `atomic_bundle`；不存在 metadata-first 回退路径。
 `record_membership_author` 表示服务端接受并回执 membership
 作者字段。

@@ -482,6 +482,35 @@ class SyncPreferencesTest {
     }
 
     @Test
+    fun terminalClearMarkerMakesCredentialsUnusableBeforeDomainClearStarts() = runTest {
+        val file = File.createTempFile("lezi-terminal-gate-", ".preferences_pb")
+            .also { it.delete() }
+        val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
+        val preferences = preferences(store)
+        preferences.saveSession(
+            SyncSession(
+                serverHost = "family.home",
+                familyId = "family-id",
+                accessToken = "access-token",
+                refreshToken = "refresh-token",
+                deviceId = "device-id",
+                membershipId = "membership-id",
+                role = FamilyRole.Member,
+            ),
+        )
+
+        preferences.markPendingDeviceRemovalClear()
+
+        val gated = preferences.session.first()
+        assertThat(gated.familyId).isEqualTo("family-id")
+        assertThat(gated.accessToken).isEmpty()
+        assertThat(gated.refreshToken).isEmpty()
+        assertThat(gated.reauthRequired).isTrue()
+        assertThat(gated.isJoined).isFalse()
+        file.delete()
+    }
+
+    @Test
     fun pendingMembershipDeletionClearMarkerSurvivesRestartUntilExplicitCompletion() = runTest {
         val file = File.createTempFile("lezi-membership-deletion-", ".preferences_pb")
             .also { it.delete() }
@@ -558,6 +587,56 @@ class SyncPreferencesTest {
         assertThat(preferences.session.first().pullGeneration).isEmpty()
         assertThat(preferences.session.first().accessToken).isEqualTo("new-token")
     }
+
+    @Test
+    fun interruptedSessionReplacementPersistsNewIdentityAsReauthBeforeWritingRefreshToken() =
+        runTest {
+            val file = File.createTempFile("lezi-session-replace-", ".preferences_pb")
+                .also { it.delete() }
+            val tokens = FailOnceSetTokenStore()
+            val store = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
+            val preferences = preferences(store, tokens)
+            preferences.saveSession(
+                SyncSession(
+                    serverHost = "old.home",
+                    familyId = "old-family",
+                    accessToken = "old-access",
+                    refreshToken = "old-refresh",
+                    deviceId = "old-device",
+                    membershipId = "old-membership",
+                    role = FamilyRole.Owner,
+                ),
+            )
+            tokens.failNextSet = true
+
+            val failure = runCatching {
+                preferences.saveSession(
+                    SyncSession(
+                        serverHost = "new.home",
+                        familyId = "new-family",
+                        accessToken = "new-access",
+                        refreshToken = "new-refresh",
+                        deviceId = "new-device",
+                        membershipId = "new-membership",
+                        role = FamilyRole.Member,
+                    ),
+                )
+            }.exceptionOrNull()
+
+            assertThat(failure).hasMessageThat().contains("secure set interrupted")
+            assertThat(tokens.getToken()).isEqualTo("old-refresh")
+            val gated = preferences.session.first()
+            assertThat(gated.familyId).isEqualTo("new-family")
+            assertThat(gated.deviceId).isEqualTo("new-device")
+            assertThat(gated.accessToken).isEmpty()
+            assertThat(gated.refreshToken).isEmpty()
+            assertThat(gated.reauthRequired).isTrue()
+
+            preferences.recoverPendingCredentialClear()
+            assertThat(tokens.getToken()).isEmpty()
+            assertThat(preferences.session.first().familyId).isEqualTo("new-family")
+            file.delete()
+        }
 
     @Test
     fun httpsSchemeSurvivesSessionPersistence() = runTest {
@@ -738,4 +817,21 @@ private class FailOnceClearTokenStore : SecureRefreshTokenStore {
         }
         delegate.clearToken()
     }
+}
+
+private class FailOnceSetTokenStore : SecureRefreshTokenStore {
+    private val delegate = InMemorySecureRefreshTokenStore()
+    var failNextSet = false
+
+    override fun getToken(): String = delegate.getToken()
+
+    override fun setToken(token: String) {
+        if (failNextSet) {
+            failNextSet = false
+            throw IllegalStateException("secure set interrupted")
+        }
+        delegate.setToken(token)
+    }
+
+    override fun clearToken() = delegate.clearToken()
 }

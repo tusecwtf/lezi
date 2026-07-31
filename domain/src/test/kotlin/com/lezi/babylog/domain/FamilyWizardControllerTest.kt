@@ -555,6 +555,75 @@ class FamilyWizardControllerTest {
         assertThat(cancelledGateway.cancelMemberCalls).isEqualTo(1)
     }
 
+    @Test
+    fun pendingApprovalRestoreOnlyClaimsIdleOrExistingWaitingState() = runTest {
+        val endpoint = TrustedEndpointProfile.systemPki("https://nas.home")
+        val gateway = RecordingFamilyWizardGateway(
+            probeResult = SetupProbeResult.Ready(endpoint, SetupFamilyState.Empty),
+        )
+        val controller = FamilyWizardController(gateway)
+        val pendingSnapshot = snapshot(FamilyWizardEntry.Account, FamilyWizardMode.Join).copy(
+            joinRole = FamilyWizardJoinRole.Member,
+        )
+
+        controller.connectEndpoint(FamilyWizardEntry.Account, endpoint.origin)
+        val ready = controller.state.value
+        controller.restorePendingMemberApproval(pendingSnapshot, gateway.pendingRequest)
+        assertThat(controller.state.value).isEqualTo(ready)
+
+        controller.begin(snapshot(FamilyWizardEntry.Account, FamilyWizardMode.Create))
+        controller.submit(snapshot(FamilyWizardEntry.Account, FamilyWizardMode.Create), "once")
+        val completed = controller.state.value
+        controller.restorePendingMemberApproval(pendingSnapshot, gateway.pendingRequest)
+        assertThat(controller.state.value).isEqualTo(completed)
+
+        controller.begin(FamilyWizardSnapshot.empty(FamilyWizardEntry.Account))
+        controller.restorePendingMemberApproval(pendingSnapshot, gateway.pendingRequest)
+        assertThat(controller.state.value)
+            .isInstanceOf(FamilyWizardState.WaitingForMemberApproval::class.java)
+    }
+
+    @Test
+    fun submitUsesOnlyTheVerifiedOriginAndNeverCallsGatewayForAMutatedDraft() = runTest {
+        val endpoint = TrustedEndpointProfile.systemPki("https://nas.home")
+        val gateway = RecordingFamilyWizardGateway(
+            probeResult = SetupProbeResult.Ready(endpoint, SetupFamilyState.Empty),
+        )
+        val controller = FamilyWizardController(gateway)
+        controller.connectEndpoint(FamilyWizardEntry.Account, endpoint.origin)
+        controller.begin(snapshot(FamilyWizardEntry.Account, FamilyWizardMode.Create))
+
+        controller.submit(
+            snapshot(FamilyWizardEntry.Account, FamilyWizardMode.Create).copy(
+                host = "attacker.example.com",
+            ),
+            "must-not-leave-device",
+        )
+
+        val failure = controller.state.value as FamilyWizardState.RetryableFailure
+        assertThat(failure.message).contains("重新确认家庭服务器")
+        assertThat(gateway.createCalls).isEqualTo(0)
+        assertThat(gateway.events).doesNotContain("save")
+        assertThat(gateway.events).doesNotContain("create")
+    }
+
+    @Test
+    fun failedManualApprovalCheckKeepsPendingRequestAndShowsRetryableFeedback() = runTest {
+        val gateway = RecordingFamilyWizardGateway()
+        val controller = FamilyWizardController(gateway)
+        val input = snapshot(FamilyWizardEntry.Account, FamilyWizardMode.Join).copy(
+            joinRole = FamilyWizardJoinRole.Member,
+        )
+        controller.submit(input)
+        gateway.memberCheckResult = Result.failure(IllegalStateException("offline"))
+
+        controller.checkMemberApproval()
+
+        val waiting = controller.state.value as FamilyWizardState.WaitingForMemberApproval
+        assertThat(waiting.request.requestId).isEqualTo(gateway.pendingRequest.requestId)
+        assertThat(waiting.feedback).contains("检查失败")
+    }
+
 
     private fun snapshot(
         entry: FamilyWizardEntry,
@@ -619,6 +688,8 @@ private class RecordingFamilyWizardGateway(
     var rememberStarted: CompletableDeferred<Unit>? = null
     var rememberRelease: CompletableDeferred<Unit>? = null
     val rememberedEndpoints = mutableListOf<TrustedEndpointProfile>()
+    var verifiedEndpoint: TrustedEndpointProfile? =
+        TrustedEndpointProfile.systemPki("https://nas.home")
 
     override suspend fun probeEndpoint(endpointDraft: String): SetupProbeResult {
         events += "probe"
@@ -637,13 +708,17 @@ private class RecordingFamilyWizardGateway(
         rememberStarted?.complete(Unit)
         rememberRelease?.await()
         rememberedEndpoints += endpoint
+        verifiedEndpoint = endpoint
         return Result.success(Unit)
     }
 
     override suspend fun forgetEndpoint(): Result<Unit> {
         events += "forget"
+        verifiedEndpoint = null
         return Result.success(Unit)
     }
+
+    override suspend fun currentVerifiedEndpoint(): TrustedEndpointProfile? = verifiedEndpoint
 
     override suspend fun saveEndpointConfig(config: FamilyEndpointConfig): Result<Unit> {
         events += "save"
@@ -715,6 +790,9 @@ private class BlockingFamilyWizardGateway : FamilyWizardGateway {
         Result.success(Unit)
 
     override suspend fun forgetEndpoint(): Result<Unit> = Result.success(Unit)
+
+    override suspend fun currentVerifiedEndpoint(): TrustedEndpointProfile =
+        TrustedEndpointProfile.systemPki("https://nas.home")
 
     override suspend fun saveEndpointConfig(config: FamilyEndpointConfig): Result<Unit> =
         Result.success(Unit)

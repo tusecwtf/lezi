@@ -27,6 +27,7 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.filter
@@ -459,7 +460,6 @@ class RealSyncPortTest {
             removedDeviceLocalClearGate = resumedGate,
         )
         resumedGate.firstCall.await()
-        withTimeout(2_000) { preferences.session.filter { !it.isJoined }.first() }
         withTimeout(2_000) { preferences.familyDeletionClearCompleted.await() }
         assertThat(preferences.current()).isEqualTo(SyncSession())
         assertThat(preferences.pendingFamilyDeletionClear).isFalse()
@@ -609,6 +609,33 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun terminalIdentityClearBlocksConcurrentSyncUntilLocalDataAndCredentialsAreRetired() =
+        runTest {
+            val clearGate = TestRemovedDeviceLocalClearGate().apply {
+                release = CompletableDeferred()
+            }
+            val rig = SyncRig(
+                session = joinedSession("family-a").copy(role = FamilyRole.Owner),
+                removedDeviceLocalClearGate = clearGate,
+            )
+            rig.awaitStartupRecovery()
+
+            val clearing = async { rig.port.logoutCurrentDevice() }
+            clearGate.firstCall.await()
+            val syncing = async { rig.port.sync(SyncTrigger.PullToRefresh) }
+            runCurrent()
+
+            assertThat(syncing.isCompleted).isFalse()
+            assertThat(rig.backend.pullCursors).isEmpty()
+
+            clearGate.release!!.complete(Unit)
+            assertThat(clearing.await().isSuccess).isTrue()
+            assertThat(syncing.await().isSuccess).isTrue()
+            assertThat(rig.backend.pullCursors).isEmpty()
+            assertThat(rig.preferences.current()).isEqualTo(SyncSession())
+        }
+
+    @Test
     fun failedLogoutPreservesEverythingWhileInterruptedCleanupResumesFromDurableMarker() = runTest {
         val original = joinedSession("family-a").copy(role = FamilyRole.Member)
         val preferences = MemorySyncPreferences(original)
@@ -721,9 +748,10 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun certificateAcceptancePersistsThePinBeforeProbeAndPreservesTheExistingSession() = runTest {
+    fun certificateAcceptancePersistsThePinOnlyAfterReadyAndPreservesTheExistingSession() = runTest {
         val session = joinedSession("family-a")
         val preferences = MemorySyncPreferences(session)
+        val previousEndpoint = TrustedEndpointProfile.systemPki(session.baseUrl)
         val candidate = CertificateTrustCandidate.fromSpki(
             TrustedEndpointProfile.systemPki("https://192.168.50.4:8765"),
             "stable-nas-public-key".toByteArray(),
@@ -734,7 +762,7 @@ class RealSyncPortTest {
             session = session,
             syncPreferences = preferences,
             setupProbe = SetupProbe { _, suppliedTrust ->
-                assertThat(preferences.verifiedEndpoint.first()).isEqualTo(trusted)
+                assertThat(preferences.verifiedEndpoint.first()).isEqualTo(previousEndpoint)
                 endpointSeenDuringProbe = suppliedTrust
                 SetupProbeResult.Ready(trusted, SetupFamilyState.Empty)
             },
@@ -749,6 +777,46 @@ class RealSyncPortTest {
         assertThat(preferences.verifiedEndpoint.first()).isEqualTo(trusted)
         assertThat(preferences.current()).isEqualTo(session)
         assertThat(rig.backend.createRequestIds).isEmpty()
+    }
+
+    @Test
+    fun failedTrustedProbeDoesNotLeaveADurableResumeEndpoint() = runTest {
+        val preferences = MemorySyncPreferences(SyncSession())
+        val candidate = CertificateTrustCandidate.fromSpki(
+            TrustedEndpointProfile.systemPki("https://192.168.50.4:8765"),
+            "unstable-nas-public-key".toByteArray(),
+        )
+        val rig = SyncRig(
+            session = SyncSession(),
+            syncPreferences = preferences,
+            setupProbe = SetupProbe { _, _ -> SetupProbeResult.Failed.NotLezi },
+        )
+
+        assertThat(rig.port.trustCertificate(candidate)).isEqualTo(SetupProbeResult.Failed.NotLezi)
+        assertThat(preferences.verifiedEndpoint.first()).isNull()
+    }
+
+    @Test
+    fun qrEndpointVerificationCanBeCancelledWithoutPersistingTrust() = runTest {
+        val endpoint = TrustedEndpointProfile.systemPki("https://family.example.com")
+        val started = CompletableDeferred<Unit>()
+        val preferences = MemorySyncPreferences(SyncSession())
+        val rig = SyncRig(
+            session = SyncSession(),
+            syncPreferences = preferences,
+            setupProbe = SetupProbe { _, _ ->
+                started.complete(Unit)
+                awaitCancellation()
+            },
+        )
+        val verification = async { rig.port.verifyEndpoint(endpoint) }
+        started.await()
+
+        verification.cancel()
+
+        assertThat(runCatching { verification.await() }.exceptionOrNull())
+            .isInstanceOf(CancellationException::class.java)
+        assertThat(preferences.verifiedEndpoint.first()).isNull()
     }
 
     @Test
@@ -1097,6 +1165,34 @@ class RealSyncPortTest {
         assertThat(restarted.backend.pullCursors).containsExactly(0L)
         assertThat(restarted.port.session().first().pullCursor).isEqualTo(9L)
         assertThat(restarted.port.status().first()).isEqualTo(SyncStatus.Idle)
+    }
+
+    @Test
+    fun qrMemberLoginExposesRetryableInitialDataRecovery() = runTest {
+        val endpoint = TrustedEndpointProfile.systemPki("https://192.168.1.20:8787")
+        val preferences = MemorySyncPreferences(SyncSession()).apply {
+            rememberEndpoint(endpoint)
+        }
+        val rig = SyncRig(
+            session = SyncSession(),
+            syncPreferences = preferences,
+        )
+        rig.awaitStartupRecovery()
+        rig.backend.pullFailures += SyncHttpException(503)
+        val payload = MemberLoginQrPayload(
+            endpoint = endpoint,
+            grant = "grant-0000000000000000000000000000000000000",
+            familyName = "乐乐一家",
+            memberDisplayName = "妈妈",
+            expiresAtEpochSeconds = 1_753_419_000,
+        )
+
+        val result = rig.port.claimMemberLoginQr(payload, "Pixel Tablet").getOrThrow()
+
+        assertThat(result.session.isJoined).isTrue()
+        assertThat(result.dataRecovery).isEqualTo(InitialFamilyDataRecovery.RetryRequired)
+        assertThat(rig.backend.memberLoginGrantClaims)
+            .containsExactly(Triple(endpoint, payload.grant, "Pixel Tablet"))
     }
 
     @Test
@@ -6581,6 +6677,8 @@ internal class MemorySyncPreferences(
     var pendingDeviceRemovalClear = false
     var pendingMembershipDeletionClear = false
     var pendingFamilyDeletionClear = false
+    private var pendingReplicaResetPrevious: SyncSession? = null
+    private var pendingReplicaResetSession: SyncSession? = null
     val familyDeletionClearCompleted = CompletableDeferred<Unit>()
     override val session: Flow<SyncSession> = state
     override val verifiedEndpoint: Flow<TrustedEndpointProfile?> = endpointState
@@ -6650,6 +6748,8 @@ internal class MemorySyncPreferences(
         ownerLoginRequestId = null
         pendingMemberState.value = null
         memberPendingSecret = ""
+        pendingReplicaResetPrevious = null
+        pendingReplicaResetSession = null
         val previous = state.value
         state.value = session.copy(
             pendingCreatorAcknowledgements = if (previous.familyId == session.familyId) {
@@ -6658,6 +6758,35 @@ internal class MemorySyncPreferences(
                 emptySet()
             },
         )
+    }
+
+    override suspend fun saveSessionPendingReplicaReset(
+        session: SyncSession,
+        previous: SyncSession,
+    ) {
+        saveSessionCalls += 1
+        createRequestId = null
+        ownerLoginRequestId = null
+        pendingMemberState.value = null
+        memberPendingSecret = ""
+        pendingReplicaResetPrevious = previous
+        pendingReplicaResetSession = session
+        state.value = session.copy(
+            accessToken = "",
+            refreshToken = "",
+            accessExpiresAtEpochSeconds = 0,
+            reauthRequired = true,
+        )
+    }
+
+    override suspend fun pendingReplicaResetPrevious(): SyncSession? =
+        pendingReplicaResetPrevious
+
+    override suspend fun completePendingReplicaReset() {
+        val session = pendingReplicaResetSession ?: return
+        pendingReplicaResetPrevious = null
+        pendingReplicaResetSession = null
+        state.value = session
     }
 
     override suspend fun recoverPendingCredentialClear() {
@@ -6753,6 +6882,8 @@ internal class MemorySyncPreferences(
         state.value = SyncSession()
         pendingMemberState.value = null
         memberPendingSecret = ""
+        pendingReplicaResetPrevious = null
+        pendingReplicaResetSession = null
     }
 
     override suspend fun clearDeviceCredentialsForReauth() {
@@ -6814,10 +6945,12 @@ private class TestRemovedDeviceLocalClearGate : RemovedDeviceLocalClearGate {
     var calls = 0
     val failures = ArrayDeque<Throwable>()
     val firstCall = CompletableDeferred<Unit>()
+    var release: CompletableDeferred<Unit>? = null
 
     override suspend fun clearAllLocalFamilyData() {
         calls++
         firstCall.complete(Unit)
+        release?.await()
         failures.removeFirstOrNull()?.let { throw it }
     }
 }

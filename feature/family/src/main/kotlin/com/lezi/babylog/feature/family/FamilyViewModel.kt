@@ -20,6 +20,7 @@ import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.CertificateTrustCandidate
 import com.lezi.babylog.sync.DisplayNameUpdateResult
 import com.lezi.babylog.sync.FamilyRole
+import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.MemberLoginQrPayload
 import com.lezi.babylog.sync.MemberLoginQrTrustChangedException
 import com.lezi.babylog.sync.MemberLoginQrUnavailableException
@@ -28,10 +29,12 @@ import com.lezi.babylog.sync.PendingMemberLogin
 import com.lezi.babylog.sync.PendingMemberLoginRequest
 import com.lezi.babylog.sync.PendingMemberRenameRequest
 import com.lezi.babylog.sync.SyncPort
+import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.sync.appUpdateInstallUiOutcome
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -101,6 +104,7 @@ class FamilyViewModel @Inject constructor(
     private val careLog: CareLog,
     private val avatarFileStore: BabyAvatarFileStore,
 ) : ViewModel() {
+    private var memberLoginQrVerificationJob: Job? = null
     private val profileSaveMutex = Mutex()
     private val memberRefreshMutex = Mutex()
     private val familyMembers = MutableStateFlow(FamilyMembersState())
@@ -534,28 +538,50 @@ class FamilyViewModel @Inject constructor(
         payload: MemberLoginQrPayload,
         onResult: (SetupProbeResult) -> Unit,
     ) {
-        viewModelScope.launch { onResult(sync.verifyEndpoint(payload.endpoint)) }
+        memberLoginQrVerificationJob?.cancel()
+        memberLoginQrVerificationJob = viewModelScope.launch {
+            onResult(sync.verifyEndpoint(payload.endpoint))
+        }
+    }
+
+    fun cancelMemberLoginQrVerification() {
+        memberLoginQrVerificationJob?.cancel()
+        memberLoginQrVerificationJob = null
     }
 
     fun claimMemberLoginQr(
         payload: MemberLoginQrPayload,
         deviceName: String,
-        onDone: (String?) -> Unit,
+        onDone: (InitialFamilyDataRecovery?, String?) -> Unit,
     ) {
         viewModelScope.launch {
             val trusted = sync.rememberEndpoint(payload.endpoint)
             if (trusted.isFailure) {
-                onDone("无法保存家庭服务器信任信息，请重试")
+                onDone(null, "无法保存家庭服务器信任信息，请重试")
                 return@launch
             }
             val result = sync.claimMemberLoginQr(payload, deviceName)
-            onDone(
-                result.exceptionOrNull()?.let { error ->
+            result.fold(
+                onSuccess = { onDone(it.dataRecovery, null) },
+                onFailure = { error ->
+                    onDone(
+                        null,
                     when (error) {
                         is MemberLoginQrUnavailableException -> error.message
                         is MemberLoginQrTrustChangedException -> error.message
                         else -> familySyncError(error, "登录失败，请稍后重试")
-                    }
+                        },
+                    )
+                },
+            )
+        }
+    }
+
+    fun retryMemberLoginQrRecovery(onDone: (String?) -> Unit) {
+        viewModelScope.launch {
+            onDone(
+                sync.sync(SyncTrigger.PullToRefresh).exceptionOrNull()?.let {
+                    familySyncError(it, "首次同步仍未完成，请稍后重试")
                 },
             )
         }

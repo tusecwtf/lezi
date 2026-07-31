@@ -42,13 +42,16 @@ Authoritative runbook: `tools/lezi-sync/deploy/DEPLOY.md`. Product overview: roo
 
 ```bash
 cd tools/lezi-sync
+cargo fmt --all -- --check
 cargo test --locked
 cargo clippy --all-targets --all-features -- -D warnings
 ./build-image.sh
 ./deploy/push-and-deploy.sh
-# verify from LAN or SSH:
-# curl -fsS http://127.0.0.1:8765/health
-# curl -fsS http://127.0.0.1:8765/ready
+# internal loopback health (not exposed to LAN):
+# curl -fsS http://127.0.0.1:8766/health
+# curl -fsS http://127.0.0.1:8766/ready
+# public endpoint uses HTTPS; trust the deployed certificate explicitly:
+# curl --cacert <data-bind>/tls/server.crt -fsS https://<host>:8765/health
 ```
 
 | Variable | Role |

@@ -15,5 +15,6 @@ class FamilyMemberDecisionPolicyTest {
         assertThat(canConfirmFamilyDeletion("乐乐一家", "  乐乐一家  ", "root-secret")).isTrue()
         assertThat(canConfirmFamilyDeletion("Lezi Home", "lezi home", "root-secret")).isFalse()
         assertThat(canConfirmFamilyDeletion("乐乐一家", "乐乐一家", "   ")).isFalse()
+        assertThat(canConfirmFamilyDeletion("", "", "root-secret")).isFalse()
     }
 }

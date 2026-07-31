@@ -95,6 +95,12 @@ interface SyncPreferences {
     suspend fun saveServer(baseUrl: String)
     suspend fun saveEndpointConfig(config: FamilyEndpointConfig, clearSessionIfServerChanged: Boolean = true)
     suspend fun saveSession(session: SyncSession)
+    /** Durably stores a claimed session but keeps it non-pushable until old receipts reset. */
+    suspend fun saveSessionPendingReplicaReset(session: SyncSession, previous: SyncSession) {
+        saveSession(session)
+    }
+    suspend fun pendingReplicaResetPrevious(): SyncSession? = null
+    suspend fun completePendingReplicaReset() {}
     suspend fun updateCursor(cursor: Long, generation: String = "")
     suspend fun updatePullCheckpoint(
         cursor: Long,
@@ -207,13 +213,22 @@ class DataStoreSyncPreferences @Inject constructor(
             ?: DEFAULT_SERVER_PORT
         val scheme = if (schemeIsValid) rawScheme.lowercase() else DEFAULT_SERVER_SCHEME
         val credentialClearPending = prefs[Keys.PENDING_FAMILY_CREDENTIAL_CLEAR] == true
+        val replicaResetPending = prefs[Keys.PENDING_REPLICA_RESET] == true
         return SyncSession(
             familyId = prefs[Keys.FAMILY_ID].orEmpty(),
-            accessToken = if (credentialClearPending) "" else processAccessToken.get(),
-            refreshToken = if (credentialClearPending) "" else secureTokenStore.getToken(),
+            accessToken = if (credentialClearPending || replicaResetPending) {
+                ""
+            } else {
+                processAccessToken.get()
+            },
+            refreshToken = if (credentialClearPending || replicaResetPending) {
+                ""
+            } else {
+                secureTokenStore.getToken()
+            },
             accessExpiresAtEpochSeconds =
-                if (credentialClearPending) 0 else processAccessExpiry.get(),
-            reauthRequired = prefs[Keys.REAUTH_REQUIRED] == true,
+                if (credentialClearPending || replicaResetPending) 0 else processAccessExpiry.get(),
+            reauthRequired = prefs[Keys.REAUTH_REQUIRED] == true || replicaResetPending,
             deviceId = prefs[Keys.DEVICE_ID].orEmpty(),
             role = prefs[Keys.ROLE]?.let { runCatching { FamilyRole.valueOf(it) }.getOrNull() }
                 ?: FamilyRole.None,
@@ -265,13 +280,28 @@ class DataStoreSyncPreferences @Inject constructor(
     }
 
     override suspend fun saveSession(session: SyncSession) {
-        secureTokenStore.setToken(session.refreshToken)
-        processAccessToken.set(session.accessToken)
-        processAccessExpiry.set(session.accessExpiresAtEpochSeconds)
+        persistSession(session, pendingReplicaResetPrevious = null)
+    }
+
+    override suspend fun saveSessionPendingReplicaReset(
+        session: SyncSession,
+        previous: SyncSession,
+    ) {
+        persistSession(session, pendingReplicaResetPrevious = previous)
+    }
+
+    private suspend fun persistSession(
+        session: SyncSession,
+        pendingReplicaResetPrevious: SyncSession?,
+    ) {
         val config = session.endpointConfig.withNormalized()
         dataStore.edit { prefs ->
-            prefs.remove(Keys.REAUTH_REQUIRED)
-            prefs.remove(Keys.PENDING_FAMILY_CREDENTIAL_CLEAR)
+            // DataStore identity changes before the separate Keystore write, but
+            // this durable marker suppresses both old and new credentials until
+            // every durability domain agrees. A crash therefore resumes reauth,
+            // never a mixed-family pushable session.
+            prefs[Keys.REAUTH_REQUIRED] = true
+            prefs[Keys.PENDING_FAMILY_CREDENTIAL_CLEAR] = true
             val previousFamilyId = prefs[Keys.FAMILY_ID].orEmpty()
             if (config.host.isNotBlank()) {
                 prefs[Keys.SERVER_HOST] = config.host
@@ -313,8 +343,41 @@ class DataStoreSyncPreferences @Inject constructor(
             } else {
                 prefs[Keys.MEMBERSHIP_ID] = membershipId
             }
+            if (pendingReplicaResetPrevious == null) {
+                clearPendingReplicaReset(prefs)
+            } else {
+                writePendingReplicaReset(prefs, pendingReplicaResetPrevious)
+            }
+        }
+        secureTokenStore.setToken(session.refreshToken)
+        processAccessToken.set(session.accessToken)
+        processAccessExpiry.set(session.accessExpiresAtEpochSeconds)
+        dataStore.edit { prefs ->
+            prefs.remove(Keys.PENDING_FAMILY_CREDENTIAL_CLEAR)
+            prefs.remove(Keys.REAUTH_REQUIRED)
         }
         secureTokenStore.clearPendingMemberSecret()
+    }
+
+    override suspend fun pendingReplicaResetPrevious(): SyncSession? {
+        val prefs = dataStore.data.first()
+        if (prefs[Keys.PENDING_REPLICA_RESET] != true) return null
+        return SyncSession(
+            familyId = prefs[Keys.PENDING_REPLICA_FAMILY_ID].orEmpty(),
+            deviceId = prefs[Keys.PENDING_REPLICA_DEVICE_ID].orEmpty(),
+            role = prefs[Keys.PENDING_REPLICA_ROLE]
+                ?.let { runCatching { FamilyRole.valueOf(it) }.getOrNull() }
+                ?: FamilyRole.None,
+            serverHost = prefs[Keys.PENDING_REPLICA_SERVER_HOST].orEmpty(),
+            serverPort = prefs[Keys.PENDING_REPLICA_SERVER_PORT] ?: DEFAULT_SERVER_PORT,
+            serverScheme = prefs[Keys.PENDING_REPLICA_SERVER_SCHEME].orEmpty(),
+            membershipId = prefs[Keys.PENDING_REPLICA_MEMBERSHIP_ID].orEmpty(),
+            reauthRequired = true,
+        )
+    }
+
+    override suspend fun completePendingReplicaReset() {
+        dataStore.edit(::clearPendingReplicaReset)
     }
 
     override suspend fun updateCursor(cursor: Long, generation: String) {
@@ -464,7 +527,10 @@ class DataStoreSyncPreferences @Inject constructor(
     }
 
     override suspend fun markPendingDeviceRemovalClear() {
-        dataStore.edit { it[Keys.PENDING_DEVICE_REMOVAL_CLEAR] = true }
+        dataStore.edit {
+            it[Keys.PENDING_DEVICE_REMOVAL_CLEAR] = true
+            markCredentialsTerminal(it)
+        }
     }
 
     override suspend fun hasPendingDeviceRemovalClear(): Boolean =
@@ -475,7 +541,10 @@ class DataStoreSyncPreferences @Inject constructor(
     }
 
     override suspend fun markPendingMembershipDeletionClear() {
-        dataStore.edit { it[Keys.PENDING_MEMBERSHIP_DELETION_CLEAR] = true }
+        dataStore.edit {
+            it[Keys.PENDING_MEMBERSHIP_DELETION_CLEAR] = true
+            markCredentialsTerminal(it)
+        }
     }
 
     override suspend fun hasPendingMembershipDeletionClear(): Boolean =
@@ -486,7 +555,10 @@ class DataStoreSyncPreferences @Inject constructor(
     }
 
     override suspend fun markPendingFamilyDeletionClear() {
-        dataStore.edit { it[Keys.PENDING_FAMILY_DELETION_CLEAR] = true }
+        dataStore.edit {
+            it[Keys.PENDING_FAMILY_DELETION_CLEAR] = true
+            markCredentialsTerminal(it)
+        }
     }
 
     override suspend fun hasPendingFamilyDeletionClear(): Boolean =
@@ -510,6 +582,44 @@ class DataStoreSyncPreferences @Inject constructor(
         }
     }
 
+    private fun markCredentialsTerminal(
+        prefs: androidx.datastore.preferences.core.MutablePreferences,
+    ) {
+        // Commit the terminal marker and credential gate together before domain
+        // clearing starts. A racing sync therefore observes an unjoined reauth
+        // projection and cannot publish with credentials from the retired identity.
+        prefs[Keys.REAUTH_REQUIRED] = true
+        prefs[Keys.PENDING_FAMILY_CREDENTIAL_CLEAR] = true
+    }
+
+    private fun writePendingReplicaReset(
+        prefs: androidx.datastore.preferences.core.MutablePreferences,
+        previous: SyncSession,
+    ) {
+        val config = previous.endpointConfig.withNormalized()
+        prefs[Keys.PENDING_REPLICA_RESET] = true
+        prefs[Keys.PENDING_REPLICA_FAMILY_ID] = previous.familyId
+        prefs[Keys.PENDING_REPLICA_DEVICE_ID] = previous.deviceId
+        prefs[Keys.PENDING_REPLICA_ROLE] = previous.role.name
+        prefs[Keys.PENDING_REPLICA_SERVER_HOST] = config.host
+        prefs[Keys.PENDING_REPLICA_SERVER_PORT] = config.port
+        prefs[Keys.PENDING_REPLICA_SERVER_SCHEME] = config.scheme
+        prefs[Keys.PENDING_REPLICA_MEMBERSHIP_ID] = previous.membershipId
+    }
+
+    private fun clearPendingReplicaReset(
+        prefs: androidx.datastore.preferences.core.MutablePreferences,
+    ) {
+        prefs.remove(Keys.PENDING_REPLICA_RESET)
+        prefs.remove(Keys.PENDING_REPLICA_FAMILY_ID)
+        prefs.remove(Keys.PENDING_REPLICA_DEVICE_ID)
+        prefs.remove(Keys.PENDING_REPLICA_ROLE)
+        prefs.remove(Keys.PENDING_REPLICA_SERVER_HOST)
+        prefs.remove(Keys.PENDING_REPLICA_SERVER_PORT)
+        prefs.remove(Keys.PENDING_REPLICA_SERVER_SCHEME)
+        prefs.remove(Keys.PENDING_REPLICA_MEMBERSHIP_ID)
+    }
+
     private fun clearFamilyValues(prefs: androidx.datastore.preferences.core.MutablePreferences) {
         prefs.remove(Keys.FAMILY_ID)
         prefs.remove(Keys.ROLE)
@@ -523,6 +633,7 @@ class DataStoreSyncPreferences @Inject constructor(
         prefs.remove(Keys.MEMBERSHIP_ID)
         prefs.remove(Keys.PENDING_CREATOR_ACKNOWLEDGEMENTS)
         prefs.remove(Keys.REAUTH_REQUIRED)
+        clearPendingReplicaReset(prefs)
     }
 
     private fun clearPendingMemberValues(
@@ -600,6 +711,17 @@ class DataStoreSyncPreferences @Inject constructor(
             stringPreferencesKey("sync_pending_creator_acknowledgements")
         val PENDING_FAMILY_CREDENTIAL_CLEAR =
             booleanPreferencesKey("sync_pending_family_credential_clear")
+        val PENDING_REPLICA_RESET = booleanPreferencesKey("sync_pending_replica_reset")
+        val PENDING_REPLICA_FAMILY_ID = stringPreferencesKey("sync_pending_replica_family_id")
+        val PENDING_REPLICA_DEVICE_ID = stringPreferencesKey("sync_pending_replica_device_id")
+        val PENDING_REPLICA_ROLE = stringPreferencesKey("sync_pending_replica_role")
+        val PENDING_REPLICA_SERVER_HOST =
+            stringPreferencesKey("sync_pending_replica_server_host")
+        val PENDING_REPLICA_SERVER_PORT = intPreferencesKey("sync_pending_replica_server_port")
+        val PENDING_REPLICA_SERVER_SCHEME =
+            stringPreferencesKey("sync_pending_replica_server_scheme")
+        val PENDING_REPLICA_MEMBERSHIP_ID =
+            stringPreferencesKey("sync_pending_replica_membership_id")
         val PENDING_DEVICE_REMOVAL_CLEAR =
             booleanPreferencesKey("sync_pending_device_removal_clear")
         val PENDING_MEMBERSHIP_DELETION_CLEAR =

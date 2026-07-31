@@ -509,6 +509,75 @@ fn active_device_name_conflicts(
         .is_some())
 }
 
+fn replay_active_device_session<F>(
+    transaction: &Transaction<'_>,
+    family_id: &str,
+    membership_id: &str,
+    device_id: &str,
+    expected_device_name: &str,
+    request_hash: &str,
+    derive_tokens: &F,
+) -> Result<Option<CreatedDeviceSession>, StoreError>
+where
+    F: Fn(&str, &str, &str) -> (String, String),
+{
+    let stored = transaction
+        .query_row(
+            "
+            SELECT devices.device_name, device_sessions.session_id,
+                   device_sessions.access_expires_at,
+                   device_sessions.access_token_hash,
+                   device_sessions.refresh_token_hash, families.name
+            FROM devices
+            JOIN memberships ON memberships.membership_id = devices.membership_id
+            JOIN families ON families.id = memberships.family_id
+            JOIN device_sessions ON device_sessions.device_id = devices.device_id
+            WHERE memberships.family_id = ?1
+              AND memberships.membership_id = ?2
+              AND memberships.left_at IS NULL
+              AND devices.device_id = ?3
+              AND devices.status = 'active'
+              AND device_sessions.revoked_at IS NULL
+            ",
+            params![family_id, membership_id, device_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((device_name, session_id, access_expires_at, access_hash, refresh_hash, family_name)) =
+        stored
+    else {
+        return Ok(None);
+    };
+    if device_name != expected_device_name {
+        return Ok(None);
+    }
+    let (access_token, refresh_token) = derive_tokens(request_hash, family_id, device_id);
+    if crate::hash_secret(&access_token) != access_hash
+        || crate::hash_secret(&refresh_token) != refresh_hash
+    {
+        return Ok(None);
+    }
+    Ok(Some(CreatedDeviceSession {
+        family_id: family_id.to_owned(),
+        membership_id: membership_id.to_owned(),
+        device_id: device_id.to_owned(),
+        session_id,
+        access_token,
+        access_expires_at,
+        refresh_token,
+        family_name,
+    }))
+}
+
 fn normalized_schema_objects(
     connection: &Connection,
 ) -> Result<BTreeMap<(String, String), String>, StoreError> {
@@ -672,8 +741,8 @@ impl Store {
         let create_request_hash = crate::hash_secret(create_request_id);
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let retry = transaction
-            .query_row(
+        let retries = {
+            let mut statement = transaction.prepare(
                 "
                 SELECT families.id, families.name, memberships.display_name,
                        memberships.membership_id, devices.device_id,
@@ -691,10 +760,10 @@ impl Store {
                 JOIN device_sessions ON device_sessions.device_id = devices.device_id
                   AND device_sessions.revoked_at IS NULL
                 WHERE families.create_request_hash = ?1
-                LIMIT 1
                 ",
-                params![create_request_hash],
-                |row| {
+            )?;
+            let rows = statement
+                .query_map(params![create_request_hash], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, Option<String>>(1)?,
@@ -707,48 +776,48 @@ impl Store {
                         row.get::<_, String>(8)?,
                         row.get::<_, String>(9)?,
                     ))
-                },
-            )
-            .optional()?;
-        if let Some((
-            family_id,
-            stored_family_name,
-            stored_name,
-            membership_id,
-            device_id,
-            stored_device_name,
-            session_id,
-            access_expires_at,
-            stored_access_hash,
-            stored_refresh_hash,
-        )) = retry
-        {
-            if stored_name != display_name
-                || stored_family_name.as_deref() != Some(family_name)
-                || stored_device_name != device_name
-            {
-                return Err(StoreError::FamilyAlreadyExists);
-            }
-            let (access_token, refresh_token) =
-                derive_tokens(&create_request_hash, &family_id, &device_id);
-            // Creation idempotency may replay only the still-current original
-            // response. Once the session rotates, the create request id must
-            // never become a credential recovery or login mechanism.
-            if crate::hash_secret(&access_token) != stored_access_hash
-                || crate::hash_secret(&refresh_token) != stored_refresh_hash
-            {
-                return Err(StoreError::FamilyAlreadyExists);
-            }
-            return Ok(CreatedDeviceSession {
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        if !retries.is_empty() {
+            for (
                 family_id,
+                stored_family_name,
+                stored_name,
                 membership_id,
                 device_id,
+                stored_device_name,
                 session_id,
-                access_token,
                 access_expires_at,
-                refresh_token,
-                family_name: stored_family_name,
-            });
+                stored_access_hash,
+                stored_refresh_hash,
+            ) in retries
+            {
+                if stored_name != display_name
+                    || stored_family_name.as_deref() != Some(family_name)
+                    || stored_device_name != device_name
+                {
+                    continue;
+                }
+                let (access_token, refresh_token) =
+                    derive_tokens(&create_request_hash, &family_id, &device_id);
+                if crate::hash_secret(&access_token) == stored_access_hash
+                    && crate::hash_secret(&refresh_token) == stored_refresh_hash
+                {
+                    return Ok(CreatedDeviceSession {
+                        family_id,
+                        membership_id,
+                        device_id,
+                        session_id,
+                        access_token,
+                        access_expires_at,
+                        refresh_token,
+                        family_name: stored_family_name,
+                    });
+                }
+            }
+            return Err(StoreError::FamilyAlreadyExists);
         }
 
         if transaction
@@ -2165,7 +2234,8 @@ impl Store {
                 SELECT requests.status, requests.expires_at, requests.family_id,
                        requests.display_name, requests.display_name_key,
                        requests.device_name, families.name,
-                       requests.approval_kind, requests.membership_id
+                       requests.approval_kind, requests.membership_id,
+                       requests.device_id
                 FROM member_login_requests AS requests
                 JOIN families ON families.id = requests.family_id
                 WHERE requests.pending_secret_hash = ?1
@@ -2182,6 +2252,7 @@ impl Store {
                         row.get::<_, Option<String>>(6)?,
                         row.get::<_, Option<String>>(7)?,
                         row.get::<_, Option<String>>(8)?,
+                        row.get::<_, Option<String>>(9)?,
                     ))
                 },
             )
@@ -2197,6 +2268,7 @@ impl Store {
             family_name,
             approval_kind,
             approved_membership_id,
+            claimed_device_id,
         ) = request;
         if expires_at <= now && matches!(status.as_str(), "pending" | "approved") {
             transaction.execute(
@@ -2208,6 +2280,24 @@ impl Store {
         }
         if status == "expired" {
             return Err(StoreError::MemberRequestExpired);
+        }
+        if status == "claimed" {
+            let membership_id = approved_membership_id
+                .as_deref()
+                .ok_or(StoreError::MemberRequestStateConflict)?;
+            let device_id = claimed_device_id
+                .as_deref()
+                .ok_or(StoreError::MemberRequestStateConflict)?;
+            return replay_active_device_session(
+                &transaction,
+                &family_id,
+                membership_id,
+                device_id,
+                &device_name,
+                &secret_hash,
+                &derive_tokens,
+            )?
+            .ok_or(StoreError::MemberRequestStateConflict);
         }
         if status != "approved" {
             return Err(StoreError::MemberRequestStateConflict);
@@ -2362,7 +2452,7 @@ impl Store {
             .query_row(
                 "
                 SELECT grants.family_id, grants.membership_id, grants.expires_at,
-                       grants.used_at, families.name
+                       grants.used_at, families.name, grants.claimed_device_id
                 FROM member_login_grants AS grants
                 JOIN families ON families.id = grants.family_id
                 WHERE grants.grant_hash = ?1
@@ -2375,14 +2465,28 @@ impl Store {
                         row.get::<_, i64>(2)?,
                         row.get::<_, Option<i64>>(3)?,
                         row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
                     ))
                 },
             )
             .optional()?
             .ok_or(StoreError::MemberLoginGrantNotFound)?;
-        let (family_id, membership_id, expires_at, used_at, family_name) = stored;
+        let (family_id, membership_id, expires_at, used_at, family_name, claimed_device_id) =
+            stored;
         if used_at.is_some() {
-            return Err(StoreError::MemberLoginGrantAlreadyUsed);
+            let Some(device_id) = claimed_device_id.as_deref() else {
+                return Err(StoreError::MemberLoginGrantAlreadyUsed);
+            };
+            return replay_active_device_session(
+                &transaction,
+                &family_id,
+                &membership_id,
+                device_id,
+                device_name,
+                &grant_hash,
+                &derive_tokens,
+            )?
+            .ok_or(StoreError::MemberLoginGrantAlreadyUsed);
         }
         if expires_at <= now {
             return Err(StoreError::MemberLoginGrantExpired);

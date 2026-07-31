@@ -235,16 +235,20 @@ class RealSyncPort @Inject constructor(
         candidate: CertificateTrustCandidate,
     ): SetupProbeResult {
         val endpoint = candidate.trustedEndpoint()
+        val result = setupProbe.probe(endpoint.origin, endpoint)
+        if (result !is SetupProbeResult.Ready) {
+            return result
+        }
         try {
             withContext(NonCancellable) {
-                preferences.rememberEndpoint(endpoint)
+                preferences.rememberEndpoint(result.endpoint)
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Throwable) {
             return SetupProbeResult.Failed.Unreachable
         }
-        return setupProbe.probe(endpoint.origin, endpoint)
+        return result
     }
 
     override suspend fun rememberEndpoint(endpoint: TrustedEndpointProfile): Result<Unit> =
@@ -390,12 +394,20 @@ class RealSyncPort @Inject constructor(
     override suspend fun claimMemberLoginQr(
         payload: MemberLoginQrPayload,
         deviceName: String,
-    ): Result<SyncSession> {
+    ): Result<MemberLoginQrResult> {
         val result = executeFamily(
             FamilySessionCommand.ClaimMemberLoginGrant(payload, deviceName),
         )
         return result.fold(
-            onSuccess = { Result.success((it as FamilySessionOutcome.Joined).session) },
+            onSuccess = {
+                val joined = it as FamilySessionOutcome.Joined
+                Result.success(
+                    MemberLoginQrResult(
+                        session = joined.session,
+                        dataRecovery = joined.dataRecovery,
+                    ),
+                )
+            },
             onFailure = { error ->
                 Result.failure(
                     when {
@@ -773,6 +785,7 @@ class RealSyncPort @Inject constructor(
     /** Caller owns [syncMutex]; lock order is sync mutex then domain mutation guard. */
     private suspend fun recoverPendingLocalClearLocked(): LocalDataClearScope? {
         preferences.recoverPendingCredentialClear()
+        familySessionCoordinator.recoverPendingReplicaReset()
         val resumedDomain = localClearRecoveryGate.recoverPendingLocalClear()
         val resumedReplica = localReplicaClearCoordinator.recoverPendingLocked()
         return LocalDataClearScope.widest(resumedDomain, resumedReplica)
@@ -857,8 +870,11 @@ class RealSyncPort @Inject constructor(
     }
 
     private suspend fun finishPendingTerminalIdentityClear() {
-        removedDeviceLocalClearGate.clearAllLocalFamilyData()
         syncMutex.withLock {
+            // Terminal identity and every local family projection converge under
+            // the same barrier used by foreground sync. Credentials are already
+            // made unusable by the durable terminal marker before this method.
+            removedDeviceLocalClearGate.clearAllLocalFamilyData()
             preferences.clearAllLocalSyncConfig()
             preferences.clearPendingDeviceRemovalClear()
             preferences.clearPendingMembershipDeletionClear()

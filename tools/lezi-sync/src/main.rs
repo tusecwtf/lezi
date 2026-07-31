@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use axum_server::tls_rustls::RustlsConfig;
 use axum_server::Handle;
-use lezi_sync::{build_app, ServerConfig};
+use lezi_sync::{build_apps, ServerConfig};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
@@ -47,7 +47,7 @@ async fn main() {
     });
     let internal_port = env_port("LEZI_INTERNAL_PORT", DEFAULT_INTERNAL_PORT);
     let internal_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), internal_port);
-    let app = build_app(config).unwrap_or_else(|error| {
+    let (public_app, internal_app) = build_apps(config).unwrap_or_else(|error| {
         eprintln!("startup error: {error:?}");
         std::process::exit(1);
     });
@@ -66,13 +66,10 @@ async fn main() {
 
     let public_server = axum_server::bind_rustls(address, tls)
         .handle(tls_handle)
-        .serve(
-            app.clone()
-                .into_make_service_with_connect_info::<SocketAddr>(),
-        );
+        .serve(public_app.into_make_service_with_connect_info::<SocketAddr>());
     let internal_server = axum::serve(
         internal_listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
+        internal_app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_requested(shutdown_rx));
     let (public_result, internal_result) = tokio::join!(public_server, internal_server);

@@ -19,6 +19,49 @@ import org.junit.Test
 
 class ReplicaSyncEngineTest {
     @Test
+    fun reauthRequiredPreviousIdentityStillOwnsItsStableMediaReceipt() = runTest {
+        val active = joinedReplicaSession()
+        val previous = active.copy(
+            accessToken = "",
+            refreshToken = "",
+            reauthRequired = true,
+        )
+        val rig = ReplicaEngineRig(previous)
+        val babyId = rig.babies.seed(localReplicaBaby().copy(syncDirty = false))
+        val recordId = rig.records.seed(
+            RecordEntity(
+                clientUuid = "reauth-record",
+                babyId = babyId,
+                type = "formula",
+                timestamp = 100,
+                payloadJson = "{\"amount_ml\":90}",
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+        val mediaUuid = "76767676-7676-7676-7676-767676767676"
+        rig.media.seed(
+            MediaAssetEntity(
+                recordId = recordId,
+                clientUuid = mediaUuid,
+                localUri = "photos/reauth.jpg",
+                remoteUri = active.receiptFor(mediaUuid),
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+
+        rig.engine.resetLocalSyncReceipts(
+            previous = previous,
+            invalidateCurrentReceipts = false,
+            crossingFamilyBoundary = false,
+        )
+
+        assertThat(rig.media.getByClientUuid(mediaUuid)?.remoteUri)
+            .isEqualTo(active.receiptFor(mediaUuid))
+    }
+    @Test
     fun pullAcceptsServerAnonymizedRecordAndPlanAuthorsAsFamilyFallback() = runTest {
         val session = joinedReplicaSession().copy(role = FamilyRole.Owner)
         val rig = ReplicaEngineRig(session)

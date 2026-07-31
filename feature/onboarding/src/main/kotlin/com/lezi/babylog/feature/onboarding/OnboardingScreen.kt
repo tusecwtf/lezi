@@ -97,6 +97,7 @@ import com.lezi.babylog.domain.SyncFamilyWizardGateway
 import com.lezi.babylog.sync.FamilyEndpointConfig
 import com.lezi.babylog.sync.CertificateTrustCandidate
 import com.lezi.babylog.sync.FamilyEndpointDraft
+import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.MemberLoginQrPayload
 import com.lezi.babylog.sync.MemberLoginQrPayloadCodec
 import com.lezi.babylog.sync.MemberLoginQrTrustChangedException
@@ -104,6 +105,7 @@ import com.lezi.babylog.sync.MemberLoginQrUnavailableException
 import com.lezi.babylog.sync.SetupFamilyState
 import com.lezi.babylog.sync.SetupProbeResult
 import com.lezi.babylog.sync.SyncPort
+import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.sync.defaultAndroidDeviceName
 import com.lezi.babylog.sync.requireDeviceName
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -113,6 +115,7 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
@@ -295,6 +298,7 @@ class OnboardingViewModel @Inject constructor(
     private val careLog: CareLog,
     private val sync: SyncPort,
 ) : ViewModel() {
+    private var memberLoginQrVerificationJob: Job? = null
     private val familyWizard = FamilyWizardController(
         gateway = SyncFamilyWizardGateway(sync, careLog),
         initialSnapshot = FamilyWizardSnapshot.empty(FamilyWizardEntry.Onboarding),
@@ -384,27 +388,49 @@ class OnboardingViewModel @Inject constructor(
         payload: MemberLoginQrPayload,
         onResult: (SetupProbeResult) -> Unit,
     ) {
-        viewModelScope.launch { onResult(sync.verifyEndpoint(payload.endpoint)) }
+        memberLoginQrVerificationJob?.cancel()
+        memberLoginQrVerificationJob = viewModelScope.launch {
+            onResult(sync.verifyEndpoint(payload.endpoint))
+        }
+    }
+
+    fun cancelMemberLoginQrVerification() {
+        memberLoginQrVerificationJob?.cancel()
+        memberLoginQrVerificationJob = null
     }
 
     fun claimMemberLoginQr(
         payload: MemberLoginQrPayload,
         deviceName: String,
-        onDone: (String?) -> Unit,
+        onDone: (InitialFamilyDataRecovery?, String?) -> Unit,
     ) {
         viewModelScope.launch {
             if (sync.rememberEndpoint(payload.endpoint).isFailure) {
-                onDone("无法保存家庭服务器信任信息，请重试")
+                onDone(null, "无法保存家庭服务器信任信息，请重试")
                 return@launch
             }
-            onDone(
-                sync.claimMemberLoginQr(payload, deviceName).exceptionOrNull()?.let { error ->
+            sync.claimMemberLoginQr(payload, deviceName).fold(
+                onSuccess = { onDone(it.dataRecovery, null) },
+                onFailure = { error ->
+                    onDone(
+                        null,
                     when (error) {
                         is MemberLoginQrUnavailableException,
                         is MemberLoginQrTrustChangedException,
                         -> error.message
                         else -> productUiError(error, "登录失败，请稍后重试")
-                    }
+                        },
+                    )
+                },
+            )
+        }
+    }
+
+    fun retryMemberLoginQrRecovery(onDone: (String?) -> Unit) {
+        viewModelScope.launch {
+            onDone(
+                sync.sync(SyncTrigger.PullToRefresh).exceptionOrNull()?.let {
+                    productUiError(it, "首次同步仍未完成，请稍后重试")
                 },
             )
         }
@@ -532,6 +558,7 @@ fun OnboardingRoute(
     var memberQrVerifying by remember { mutableStateOf(false) }
     var memberQrTrustReady by remember { mutableStateOf(false) }
     var memberQrSubmitting by remember { mutableStateOf(false) }
+    var memberQrRecoveryRequired by remember { mutableStateOf(false) }
     val familyWizardState by vm.familyWizardState.collectAsState()
     val pendingMemberLogin by vm.pendingMemberLogin.collectAsState()
     val verifiedEndpoint by vm.verifiedEndpoint.collectAsState(initial = null)
@@ -572,6 +599,7 @@ fun OnboardingRoute(
             memberQrFeedback = null
             memberQrVerifying = true
             memberQrTrustReady = false
+            memberQrRecoveryRequired = false
             vm.verifyMemberLoginQr(memberLogin) { result ->
                 if (memberQrPayload != memberLogin) return@verifyMemberLoginQr
                 memberQrVerifying = false
@@ -863,22 +891,10 @@ fun OnboardingRoute(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                OutlinedTextField(
-                    value = joinDraft.host,
-                    onValueChange = { joinDraft = joinDraft.copy(host = it) },
-                    label = { Text("服务器主机（IP/域名）") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = joinDraft.portText,
-                    onValueChange = {
-                        joinDraft = joinDraft.copy(portText = it.filter(Char::isDigit).take(5))
-                    },
-                    label = { Text("端口") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    modifier = Modifier.fillMaxWidth(),
+                Text("已确认的家庭服务器", style = MaterialTheme.typography.labelMedium)
+                Text(
+                    verifiedEndpoint?.origin ?: "尚未确认家庭服务器，请返回重新连接",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 OutlinedTextField(
                     value = createFamilyName,
@@ -1148,6 +1164,7 @@ fun OnboardingRoute(
             verifying = memberQrVerifying,
             submitting = memberQrSubmitting,
             trustReady = memberQrTrustReady,
+            recoveryRetryRequired = memberQrRecoveryRequired,
             onLogin = {
                 runCatching { requireDeviceName(memberQrDeviceName) }
                     .exceptionOrNull()?.message?.let {
@@ -1155,10 +1172,26 @@ fun OnboardingRoute(
                         return@OnboardingMemberLoginQrDialog
                     }
                 memberQrSubmitting = true
-                vm.claimMemberLoginQr(payload, memberQrDeviceName) { error ->
+                vm.claimMemberLoginQr(payload, memberQrDeviceName) { recovery, error ->
+                    memberQrSubmitting = false
+                    if (recovery == InitialFamilyDataRecovery.RetryRequired) {
+                        memberQrRecoveryRequired = true
+                        memberQrFeedback = "已登录；首次同步失败，请重试"
+                    } else if (error == null) {
+                        memberQrPayload = null
+                        onFinished()
+                    } else {
+                        memberQrFeedback = error
+                    }
+                }
+            },
+            onRetryRecovery = {
+                memberQrSubmitting = true
+                vm.retryMemberLoginQrRecovery { error ->
                     memberQrSubmitting = false
                     if (error == null) {
                         memberQrPayload = null
+                        memberQrRecoveryRequired = false
                         onFinished()
                     } else {
                         memberQrFeedback = error
@@ -1174,8 +1207,10 @@ fun OnboardingRoute(
             },
             onDismiss = {
                 if (!memberQrSubmitting) {
+                    vm.cancelMemberLoginQrVerification()
                     memberQrPayload = null
                     memberQrFeedback = null
+                    memberQrRecoveryRequired = false
                 }
             },
         )
@@ -1484,6 +1519,9 @@ fun OnboardingRoute(
                         style = LeziTypography.Meta,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    (familyWizardState as? FamilyWizardState.WaitingForMemberApproval)
+                        ?.feedback
+                        ?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                     TextButton(
                         onClick = {
                             vm.cancelMemberApproval()
@@ -1521,12 +1559,14 @@ private fun OnboardingMemberLoginQrDialog(
     verifying: Boolean,
     submitting: Boolean,
     trustReady: Boolean,
+    recoveryRetryRequired: Boolean,
     onLogin: () -> Unit,
+    onRetryRecovery: () -> Unit,
     onManualJoin: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
-        onDismissRequest = { if (!verifying && !submitting) onDismiss() },
+        onDismissRequest = { if (!submitting) onDismiss() },
         title = { Text(if (verifying) "正在确认家庭服务器…" else "登录家庭") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm)) {
@@ -1554,17 +1594,21 @@ private fun OnboardingMemberLoginQrDialog(
         confirmButton = {
             if (!verifying) {
                 TextButton(
-                    onClick = onLogin,
-                    enabled = trustReady && !submitting,
+                    onClick = if (recoveryRetryRequired) onRetryRecovery else onLogin,
+                    enabled = (trustReady || recoveryRetryRequired) && !submitting,
                 ) {
-                    Text(if (submitting) "登录中…" else "在这台设备登录")
+                    Text(
+                        when {
+                            submitting -> "同步中…"
+                            recoveryRetryRequired -> "重试首次同步"
+                            else -> "在这台设备登录"
+                        },
+                    )
                 }
             }
         },
         dismissButton = {
-            if (!verifying) {
-                TextButton(onClick = onDismiss, enabled = !submitting) { Text("取消") }
-            }
+            TextButton(onClick = onDismiss, enabled = !submitting) { Text("取消") }
         },
     )
 }

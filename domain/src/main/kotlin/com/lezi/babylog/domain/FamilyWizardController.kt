@@ -26,6 +26,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 
 /** The two UI entries that project the same family wizard. Entry never changes a request. */
@@ -154,6 +155,7 @@ sealed interface FamilyWizardState {
     data class WaitingForMemberApproval(
         override val snapshot: FamilyWizardSnapshot,
         val request: PendingMemberLogin,
+        val feedback: String? = null,
     ) : FamilyWizardState
 
     data class Completed(
@@ -171,6 +173,8 @@ interface FamilyWizardGateway {
     suspend fun rememberEndpoint(endpoint: TrustedEndpointProfile): Result<Unit>
 
     suspend fun forgetEndpoint(): Result<Unit>
+
+    suspend fun currentVerifiedEndpoint(): TrustedEndpointProfile?
 
     suspend fun saveEndpointConfig(config: FamilyEndpointConfig): Result<Unit>
 
@@ -251,6 +255,9 @@ class SyncFamilyWizardGateway private constructor(
         sync.rememberEndpoint(endpoint)
 
     override suspend fun forgetEndpoint(): Result<Unit> = sync.forgetEndpoint()
+
+    override suspend fun currentVerifiedEndpoint(): TrustedEndpointProfile? =
+        sync.verifiedEndpoint().first()
 
     override suspend fun saveEndpointConfig(config: FamilyEndpointConfig): Result<Unit> =
         sync.saveEndpointConfig(config)
@@ -468,7 +475,7 @@ class FamilyWizardController(
         }
         if (!submission.tryLock()) return
         try {
-            val config = validateEndpoint(snapshot) ?: return
+            val config = validateVerifiedEndpoint(snapshot) ?: return
             when (snapshot.mode) {
                 FamilyWizardMode.Create -> submitCreate(snapshot, config, bootstrapSecret)
                 FamilyWizardMode.Join -> when (snapshot.joinRole) {
@@ -678,6 +685,7 @@ class FamilyWizardController(
             mutableState.value = FamilyWizardState.WaitingForMemberApproval(
                 current.snapshot,
                 current.request,
+                familySyncError(error, "检查失败，请稍后重试"),
             )
         } finally {
             submission.unlock()
@@ -710,7 +718,12 @@ class FamilyWizardController(
         snapshot: FamilyWizardSnapshot,
         request: PendingMemberLogin,
     ) {
-        if (mutableState.value is FamilyWizardState.Submitting) return
+        val current = mutableState.value
+        if (current !is FamilyWizardState.Editing &&
+            current !is FamilyWizardState.WaitingForMemberApproval
+        ) {
+            return
+        }
         mutableState.value = FamilyWizardState.WaitingForMemberApproval(
             snapshot.copy(
                 mode = FamilyWizardMode.Join,
@@ -871,6 +884,30 @@ class FamilyWizardController(
             explicitPort = snapshot.portText.toIntOrNull(),
             fallbackScheme = snapshot.scheme,
         )
+    }
+
+    private suspend fun validateVerifiedEndpoint(
+        snapshot: FamilyWizardSnapshot,
+    ): FamilyEndpointConfig? {
+        val draftConfig = validateEndpoint(snapshot) ?: return null
+        val verified = try {
+            gateway.currentVerifiedEndpoint()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            null
+        }
+        val matches = verified != null && runCatching {
+            TrustedEndpointProfile.systemPki(draftConfig.baseUrl).origin == verified.origin
+        }.getOrDefault(false)
+        if (!matches) {
+            mutableState.value = FamilyWizardState.RetryableFailure(
+                snapshot = snapshot.copy(step = FamilyWizardStep.Endpoint),
+                message = "家庭服务器地址已变化，请重新确认家庭服务器",
+            )
+            return null
+        }
+        return FamilyEndpointConfig.fromBaseUrl(verified.origin).withNormalized()
     }
 
     @Synchronized

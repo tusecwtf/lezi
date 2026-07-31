@@ -30,12 +30,26 @@
 | [16](./issues/16-cross-device-release-acceptance.md) | 跨设备发布候选验收 | 15 | ready-for-agent |
 | [17](./issues/17-release-0.3.1.md) | 升级并交付 0.3.1 | 16 | ready-for-agent |
 
+## 实现后审查残差（独立 tracker）
+
+2026-07-31 对 `e19c385`…`5f9aa3c` 的多 agent code review 残差**不重开 01–15**，
+另开：
+
+- [trusted-sync-review-residuals](../trusted-sync-review-residuals/ISSUES.md)（13 票）
+- 全文归档：[REVIEW.md](../trusted-sync-review-residuals/REVIEW.md)
+
+**与 16/17 的关系：** 13/13 residual Must 已于 2026-07-31 完成；01–06 release blocker
+已关闭。修复发生在旧的 16 固定 HEAD 之后，因此 16 必须刷新候选 HEAD 并重跑跨端门禁，
+17 仍不得仅凭本 tracker 的静态/自动化证据关闭。
+
 ## 执行顺序
 
 - 初始 frontier 只有 01。
 - 04 完成后，05 与 06 可并行；其余票须按表中的全部 blocking 关系推进。
 - 15 是 expand-contract 的 contract 阶段：新路径完整可用后，才删除旧 HTTP、SSID、邀请和长期 token 路径。
-- 16 在固定候选 HEAD 上完成跨端验收；17 仅在 16 的证据全部通过后升级版本并重新构建最终 0.3.1 产物。
+- 16 在固定候选 HEAD 上完成跨端验收；17 仅在 16 的证据全部通过、且
+  [review-residuals 01–06](../trusted-sync-review-residuals/ISSUES.md) 已关闭后，
+  才升级版本并重新构建最终 0.3.1 产物。
 - 每次实现从当前无阻塞票中选取，完成代码、测试和票内证据后再更新状态；不要仅凭部分测试关闭 ticket。
 
 ## 明确不拆票

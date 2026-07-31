@@ -32,11 +32,11 @@ import com.lezi.babylog.core.ui.CameraCapture
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.domain.FamilyWizardState
-import com.lezi.babylog.domain.familyWizardEndpointValidationError
 import com.lezi.babylog.sync.AppUpdateUiOutcome
 import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.sync.FamilyEndpointConfig
 import com.lezi.babylog.sync.FamilyEndpointDraft
+import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.MemberLoginQrPayloadCodec
 import com.lezi.babylog.sync.SetupFamilyState
 import com.lezi.babylog.sync.SetupProbeResult
@@ -103,6 +103,7 @@ fun FamilyRoute(
     var memberQrDeviceName by remember { mutableStateOf(defaultAndroidDeviceName(context)) }
     var memberQrFeedback by remember { mutableStateOf<String?>(null) }
     var memberQrSubmitting by remember { mutableStateOf(false) }
+    var memberQrRecoveryRequired by remember { mutableStateOf(false) }
     // Destructive confirmation, including the root password, is process-memory only.
     var deleteFamilyName by remember { mutableStateOf("") }
     var deleteFamilyRootPassword by remember { mutableStateOf("") }
@@ -194,36 +195,6 @@ fun FamilyRoute(
         if (ui.enabled) vm.refreshMembers(showErrors = false)
     }
 
-    fun openWizard(mode: FamilyWizardMode) {
-        wizardNetworkFeedback = null
-        val prefsConfigured = isEndpointConfigured(
-            ui.serverHost,
-            ui.baseUrl,
-        )
-        val step = if (mode == FamilyWizardMode.Join && prefsConfigured) {
-            FamilyWizardStep.Role
-        } else {
-            familyWizardInitialStep(endpointConfigured = prefsConfigured)
-        }
-        if (mode == FamilyWizardMode.Join) joinRoleName = null
-        vm.beginFamilyWizard(
-            accountFamilyWizardSnapshot(
-                mode = mode,
-                step = step,
-                draft = joinDraft,
-                displayName = if (mode == FamilyWizardMode.Create) {
-                    createDisplayName
-                } else {
-                    joinDisplayName
-                },
-                familyName = createFamilyName,
-                deviceName = createDeviceName,
-                joinRole = joinRoleName?.let(FamilyWizardJoinRole::valueOf),
-            ),
-        )
-        showWizard(mode, step)
-    }
-
     fun openEndpointConnection() {
         if (pendingMemberLogin != null) {
             retainedWizardMode = FamilyWizardMode.Join.name
@@ -308,32 +279,6 @@ fun FamilyRoute(
     val primary = remember(ui.enabled, ui.role, endpointConfigured) {
         familyPrimarySurface(ui.enabled, ui.role, endpointConfigured)
     }
-    /** Both entries validate the same retained draft; submit owns the only config write. */
-    fun advanceWizardNetwork(mode: FamilyWizardMode) {
-        val snapshot = accountFamilyWizardSnapshot(
-            mode = mode,
-            step = FamilyWizardStep.Endpoint,
-            draft = joinDraft,
-            displayName = if (mode == FamilyWizardMode.Create) {
-                createDisplayName
-            } else {
-                joinDisplayName
-            },
-            familyName = createFamilyName,
-            deviceName = createDeviceName,
-        )
-        familyWizardEndpointValidationError(snapshot)?.let { message ->
-            wizardNetworkFeedback = message
-            showWizard(mode, FamilyWizardStep.Endpoint)
-            return
-        }
-        wizardNetworkFeedback = null
-        showWizard(
-            mode,
-            if (mode == FamilyWizardMode.Join) FamilyWizardStep.Role else FamilyWizardStep.Identity,
-        )
-    }
-
     LaunchedEffect(familyWizardState) {
         when (val state = familyWizardState) {
             is FamilyWizardState.RetryableFailure -> {
@@ -439,6 +384,7 @@ fun FamilyRoute(
                 onLeaveFamily = { dialog = FamilyDialog.ConfirmLeave },
                 onDeleteFamily = {
                     resetDeleteFamilyConfirmation()
+                    vm.refreshMembers(showErrors = true)
                     dialog = FamilyDialog.DeleteFamily(FamilyDialog.DeleteStage.Warning)
                 },
                 onOpenOptionalAppUpdate = vm::openOptionalAppUpdate,
@@ -672,10 +618,14 @@ fun FamilyRoute(
             deviceName = memberQrDeviceName,
             onDeviceNameChange = {},
             feedback = "正在确认家庭服务器…",
-            submitting = true,
+            submitting = false,
+            verificationInProgress = true,
             onLogin = {},
             onManualJoin = {},
-            onDismiss = {},
+            onDismiss = {
+                vm.cancelMemberLoginQrVerification()
+                dialog = null
+            },
         )
         is FamilyDialog.ConfirmMemberLoginQr -> MemberLoginQrConfirmDialog(
             payload = active.payload,
@@ -686,6 +636,7 @@ fun FamilyRoute(
             },
             feedback = memberQrFeedback,
             submitting = memberQrSubmitting,
+            recoveryRetryRequired = memberQrRecoveryRequired,
             onLogin = {
                 runCatching { requireDeviceName(memberQrDeviceName) }
                     .exceptionOrNull()?.message?.let {
@@ -693,10 +644,25 @@ fun FamilyRoute(
                         return@MemberLoginQrConfirmDialog
                     }
                 memberQrSubmitting = true
-                vm.claimMemberLoginQr(active.payload, memberQrDeviceName) { error ->
+                vm.claimMemberLoginQr(active.payload, memberQrDeviceName) { recovery, error ->
+                    memberQrSubmitting = false
+                    if (recovery == InitialFamilyDataRecovery.RetryRequired) {
+                        memberQrRecoveryRequired = true
+                        memberQrFeedback = "已登录；首次同步失败，请重试"
+                    } else if (error == null) {
+                        dialog = FamilyDialog.Message("已在这台设备登录家庭")
+                    } else {
+                        memberQrFeedback = error
+                    }
+                }
+            },
+            onRetryRecovery = {
+                memberQrSubmitting = true
+                vm.retryMemberLoginQrRecovery { error ->
                     memberQrSubmitting = false
                     if (error == null) {
-                        dialog = FamilyDialog.Message("已在这台设备登录家庭")
+                        memberQrRecoveryRequired = false
+                        dialog = FamilyDialog.Message("已在这台设备登录家庭，首次同步完成")
                     } else {
                         memberQrFeedback = error
                     }
@@ -705,12 +671,14 @@ fun FamilyRoute(
             onManualJoin = {
                 memberQrSubmitting = false
                 memberQrFeedback = null
+                memberQrRecoveryRequired = false
                 endpointDraft = active.payload.endpoint.origin
                 dialog = FamilyDialog.ConnectEndpoint
             },
             onDismiss = {
                 if (!memberQrSubmitting) {
                     memberQrFeedback = null
+                    memberQrRecoveryRequired = false
                     dialog = null
                 }
             },
@@ -783,6 +751,8 @@ fun FamilyRoute(
             MemberApprovalWaitingDialog(
                 request = pendingMemberLogin,
                 checking = familyWizardState is FamilyWizardState.Submitting,
+                feedback = (familyWizardState as? FamilyWizardState.WaitingForMemberApproval)
+                    ?.feedback,
                 onCheck = {
                     runForegroundAction { vm.checkMemberApproval() }
                 },
@@ -793,22 +763,29 @@ fun FamilyRoute(
                 onKeepOffline = ::finalWizardDismiss,
             )
         } else when (active.step) {
-            FamilyWizardStep.Endpoint -> FamilyWizardEndpointDialog(
+            FamilyWizardStep.Endpoint -> FamilyVerifiedEndpointDialog(
                 mode = active.mode,
-                host = joinDraft.host,
-                onHostChange = {
-                    joinDraft = joinDraft.copy(host = it)
-                    wizardNetworkFeedback = null
+                endpoint = verifiedEndpoint?.origin.orEmpty(),
+                onContinue = {
+                    val origin = verifiedEndpoint?.origin.orEmpty()
+                    joinDraft = FamilyEndpointDraft(
+                        host = origin,
+                        portText = "443",
+                        scheme = "https",
+                    )
+                    showWizard(
+                        active.mode,
+                        if (active.mode == FamilyWizardMode.Join) {
+                            FamilyWizardStep.Role
+                        } else {
+                            FamilyWizardStep.Identity
+                        },
+                    )
                 },
-                port = joinDraft.portText,
-                onPortChange = {
-                    joinDraft = joinDraft.copy(portText = it)
-                    wizardNetworkFeedback = null
+                onChangeEndpoint = {
+                    endpointDraft = verifiedEndpoint?.origin.orEmpty()
+                    dialog = FamilyDialog.ConnectEndpoint
                 },
-                endpointReady = draftEndpointReady,
-                feedback = wizardNetworkFeedback,
-                saving = false,
-                onContinue = { advanceWizardNetwork(active.mode) },
                 onDismiss = {
                     finalWizardDismiss()
                 },

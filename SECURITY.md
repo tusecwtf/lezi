@@ -14,16 +14,16 @@ Please report:
 - Authz bypass on `tools/lezi-sync` (join, pull/push, media, member admin)
 - Cross-family or cross-device data exposure
 - Unsafe defaults that would publish the sync port to the public internet
-- Client bugs that exfiltrate care records, photos, or SSID data off-device
+- Client bugs that exfiltrate care records, photos, or endpoint credentials off-device
   without user intent
 
 Out of scope for a private family app (unless they enable remote compromise):
 
 - Physical access to an unlocked phone
 - Rooted device / debuggable sideload on the reporter's own handset
-- LAN attacker on an already-trusted home Wi‑Fi **without** further privilege
-  beyond what the documented threat model allows — still useful to hear about
-  if it escalates to other homes or the public internet
+- Network attacker who cannot defeat the explicitly trusted HTTPS endpoint or
+  obtain a device session — still useful to hear about if the behavior weakens
+  those boundaries or enables public-internet exposure
 
 ## How to report
 
@@ -54,10 +54,12 @@ remote, and treat any published APK signed with a leaked keystore as untrusted.
 
 ## Sync threat model (short)
 
-- Home-LAN only by product intent: SSID allowlist + reachable NAS + app
-  foreground. No cloud account is required for core logging.
-- Do not map port `8765` to the public internet without TLS reverse proxy and
-  operator-reviewed exposure.
+- Sync trusts an explicit HTTPS endpoint (system PKI or a user-confirmed SPKI
+  pin) and uses independent, revocable device sessions. SSID/BSSID is not read
+  or used as an identity boundary; synchronization remains foreground-only.
+- Do not map port `8765` to the public internet without an operator-reviewed
+  firewall and certificate setup. The loopback-only plaintext health port is
+  operational infrastructure, not a business API.
 - Details: [`docs/prd/sync-home-lan.md`](docs/prd/sync-home-lan.md).
 
 ## Medical disclaimer

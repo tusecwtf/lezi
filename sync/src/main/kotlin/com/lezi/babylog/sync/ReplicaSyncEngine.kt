@@ -1033,7 +1033,9 @@ internal class ReplicaSyncEngine(
                 fulfillmentCandidateDao.markAllPendingSync()
             }
             mediaDao.listAllIncludingDeleted().forEach { media ->
-                val hasCurrentReceipt = previous.isJoined && media.hasReceiptFor(previous)
+                val hasCurrentReceipt = previous.familyId.isNotBlank() &&
+                    previous.baseUrl.isNotBlank() &&
+                    media.hasReceiptFor(previous)
                 val preserveCurrentReceipt = !invalidateCurrentReceipts ||
                     (previous.role == FamilyRole.Member && media.kind == "avatar")
                 val nextReceipt = when {

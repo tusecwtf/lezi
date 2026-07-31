@@ -108,6 +108,11 @@ data class OwnerLoginResult(
     val dataRecovery: InitialFamilyDataRecovery,
 )
 
+data class MemberLoginQrResult(
+    val session: SyncSession,
+    val dataRecovery: InitialFamilyDataRecovery,
+)
+
 data class PendingMemberLogin(
     val requestId: String,
     val displayName: String,
@@ -256,7 +261,7 @@ interface SyncPort {
     suspend fun claimMemberLoginQr(
         payload: MemberLoginQrPayload,
         deviceName: String,
-    ): Result<SyncSession> = Result.failure(SyncNotEnabledException())
+    ): Result<MemberLoginQrResult> = Result.failure(SyncNotEnabledException())
     /** Owner-only rename of the shared family name; current wire requires non-empty. */
     suspend fun renameFamily(familyName: String?): Result<Unit>
     suspend fun sync(trigger: SyncTrigger): Result<Unit>

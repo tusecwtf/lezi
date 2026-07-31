@@ -75,7 +75,11 @@ data class MemberLoginReceipt(
     val requestId: String,
     val pendingSecret: String,
     val expiresAtEpochSeconds: Long,
-)
+) {
+    override fun toString(): String =
+        "MemberLoginReceipt(requestId=$requestId, " +
+            "expiresAtEpochSeconds=$expiresAtEpochSeconds, pendingSecret=<redacted>)"
+}
 
 enum class MemberLoginStatus { Pending, Approved, Rejected, Cancelled, Expired, Claimed }
 

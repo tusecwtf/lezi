@@ -230,6 +230,7 @@ struct AppState {
     bootstrap_secret: Option<Arc<str>>,
     owner_root_fingerprint: Option<Arc<str>>,
     create_limiter: Arc<RateLimiter>,
+    root_auth_limiter: Arc<RateLimiter>,
     member_request_limiter: Arc<RateLimiter>,
     member_request_ttl_seconds: i64,
     max_pending_member_requests: usize,
@@ -371,7 +372,12 @@ impl AppState {
 }
 
 pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
+    build_apps(config).map(|(public, _internal)| public)
+}
+
+pub fn build_apps(config: ServerConfig) -> Result<(Router, Router), ApiError> {
     config.validate().map_err(ApiError::internal)?;
+    let root_auth_rate_limit = config.create_rate_limit.clone();
     let database_path = config.data_dir.join("lezi.db");
     Store::preflight_existing_schema(&database_path)?;
     set_private_umask();
@@ -422,6 +428,7 @@ pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
         owner_root_fingerprint: owner_root_fingerprint
             .map(|value| Arc::from(value.into_boxed_str())),
         create_limiter: Arc::new(RateLimiter::new(config.create_rate_limit)),
+        root_auth_limiter: Arc::new(RateLimiter::new(root_auth_rate_limit)),
         member_request_limiter: Arc::new(RateLimiter::new(config.member_request_rate_limit)),
         member_request_ttl_seconds: i64::from(config.member_request_ttl_hours) * 60 * 60,
         max_pending_member_requests: config.max_pending_member_requests,
@@ -430,7 +437,8 @@ pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
         app_update_apk_path,
     };
     let body_limit = state.max_media_bytes.max(16 * 1024 * 1024);
-    Ok(Router::new()
+    let state = Arc::new(state);
+    let public = Router::new()
         .route("/health", get(health))
         .route("/ready", get(readiness))
         .route("/v1/setup-status", get(setup_status))
@@ -526,7 +534,13 @@ pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
         .route("/v1/bundles/{bundle_id}/commit", post(commit_bundle))
         .layer(DefaultBodyLimit::max(body_limit))
         .layer(TraceLayer::new_for_http())
-        .with_state(Arc::new(state)))
+        .with_state(state.clone());
+    let internal = Router::new()
+        .route("/health", get(health))
+        .route("/ready", get(readiness))
+        .layer(TraceLayer::new_for_http())
+        .with_state(state);
+    Ok((public, internal))
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
@@ -551,7 +565,9 @@ async fn get_app_update(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let _principal = authenticate(&state, &headers)?;
-    Ok(Json(load_app_update_metadata(&state.app_update_metadata_path)?))
+    Ok(Json(load_app_update_metadata(
+        &state.app_update_metadata_path,
+    )?))
 }
 
 /// Authenticated release APK download for already-joined family devices.
@@ -612,9 +628,8 @@ fn load_app_update_metadata(path: &Path) -> Result<Value, ApiError> {
             return Err(ApiError::internal("Failed to read app update metadata"));
         }
     };
-    let parsed: Value = serde_json::from_str(&raw).map_err(|_| {
-        ApiError::internal("App update metadata is invalid JSON")
-    })?;
+    let parsed: Value = serde_json::from_str(&raw)
+        .map_err(|_| ApiError::internal("App update metadata is invalid JSON"))?;
     normalize_app_update_metadata(&parsed)
 }
 
@@ -635,8 +650,7 @@ fn normalize_app_update_metadata(value: &Value) -> Result<Value, ApiError> {
         ));
     }
     let version_name = required_metadata_string(object, "version_name")?;
-    let min_supported_version_code =
-        required_metadata_u64(object, "min_supported_version_code")?;
+    let min_supported_version_code = required_metadata_u64(object, "min_supported_version_code")?;
     if min_supported_version_code > i32::MAX as u64 {
         return Err(ApiError::internal(
             "App update metadata min_supported_version_code is out of range",
@@ -663,7 +677,10 @@ fn normalize_app_update_metadata(value: &Value) -> Result<Value, ApiError> {
                 if !trimmed.is_empty() {
                     body.as_object_mut()
                         .expect("app update body is object")
-                        .insert("release_notes".to_owned(), Value::String(trimmed.to_owned()));
+                        .insert(
+                            "release_notes".to_owned(),
+                            Value::String(trimmed.to_owned()),
+                        );
                 }
             }
             _ => {
@@ -703,7 +720,9 @@ fn required_metadata_u64(
 ) -> Result<u64, ApiError> {
     match object.get(key) {
         Some(Value::Number(number)) => number.as_u64().ok_or_else(|| {
-            ApiError::internal(format!("App update metadata {key} must be a non-negative integer"))
+            ApiError::internal(format!(
+                "App update metadata {key} must be a non-negative integer"
+            ))
         }),
         _ => Err(ApiError::internal(format!(
             "App update metadata {key} must be a non-negative integer"
@@ -743,17 +762,21 @@ async fn setup_status(State(state): State<Arc<AppState>>) -> Result<Response, Ap
 
 async fn create_family(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(source): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     body: Result<Json<FamilyCreateRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // Invalid bootstrap credentials and malformed requests must not consume the
-    // allowance reserved for callers that can actually create a family.
-    require_bootstrap_secret(&state, &headers)?;
+    // Once configured, every create request has the same response regardless
+    // of whether the caller guessed the administrator secret.
+    if state.bootstrap_secret.is_some() && !state.store.family_ids()?.is_empty() {
+        return Err(ApiError::conflict("Family already exists"));
+    }
+    require_bootstrap_secret(&state, &headers, source)?;
     let request = json_body(body)?;
     let (display_name, family_name, device_name) = request.validate()?;
     let display_name_key = normalized_display_name_key(&display_name);
-    let scope = "family-create";
-    if !state.create_limiter.check_and_record(scope, state.now()) {
+    let scope = format!("family-create-source:{}", source.ip());
+    if !state.create_limiter.check_and_record(&scope, state.now()) {
         return Err(ApiError::too_many_requests(
             "Too many family create attempts; try again later",
         ));
@@ -800,27 +823,30 @@ async fn create_family(
 
 async fn owner_login_device(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(source): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     body: Result<Json<OwnerLoginRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    issue_owner_device(state, headers, body, false).await
+    issue_owner_device(state, source, headers, body, false).await
 }
 
 async fn owner_takeover(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(source): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     body: Result<Json<OwnerLoginRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
-    issue_owner_device(state, headers, body, true).await
+    issue_owner_device(state, source, headers, body, true).await
 }
 
 async fn issue_owner_device(
     state: Arc<AppState>,
+    source: SocketAddr,
     headers: HeaderMap,
     body: Result<Json<OwnerLoginRequest>, JsonRejection>,
     takeover: bool,
 ) -> Result<Json<Value>, ApiError> {
-    require_owner_root_password(&state, &headers)?;
+    require_owner_root_password(&state, &headers, source)?;
     let request = json_body(body)?;
     let (login_request_id, device_name) = request.validate()?;
     let signing_state = state.clone();
@@ -1237,11 +1263,12 @@ async fn logout_current_device(
 
 async fn delete_family(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(source): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     body: Result<Json<DeleteFamilyRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let principal = require_owner(&state, &headers)?;
-    require_owner_root_password(&state, &headers)?;
+    require_owner_root_password(&state, &headers, source)?;
     let confirmed_family_name = json_body(body)?.validate()?;
     let family_lock = state.family_lock(&principal.family_id).await;
     let _guard = family_lock.lock().await;
@@ -1911,7 +1938,11 @@ fn parse_client_version_code(headers: &HeaderMap) -> Option<u64> {
     raw.parse::<u64>().ok().filter(|value| *value > 0)
 }
 
-fn require_bootstrap_secret(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+fn require_bootstrap_secret(
+    state: &AppState,
+    headers: &HeaderMap,
+    source: SocketAddr,
+) -> Result<(), ApiError> {
     let Some(expected) = state.bootstrap_secret.as_deref() else {
         return Ok(());
     };
@@ -1920,16 +1951,24 @@ fn require_bootstrap_secret(state: &AppState, headers: &HeaderMap) -> Result<(),
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
     if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
-        return Err(ApiError::unauthorized_detail(
+        return Err(root_auth_rejection(
+            state,
+            source,
             "Bootstrap secret required or invalid",
         ));
     }
     Ok(())
 }
 
-fn require_owner_root_password(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+fn require_owner_root_password(
+    state: &AppState,
+    headers: &HeaderMap,
+    source: SocketAddr,
+) -> Result<(), ApiError> {
     let Some(expected) = state.bootstrap_secret.as_deref() else {
-        return Err(ApiError::unauthorized_detail(
+        return Err(root_auth_rejection(
+            state,
+            source,
             "Administrator authentication failed",
         ));
     };
@@ -1938,17 +1977,30 @@ fn require_owner_root_password(state: &AppState, headers: &HeaderMap) -> Result<
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
     if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
-        return Err(ApiError::unauthorized_detail(
+        return Err(root_auth_rejection(
+            state,
+            source,
             "Administrator authentication failed",
         ));
     }
     Ok(())
 }
 
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
+fn root_auth_rejection(state: &AppState, source: SocketAddr, detail: &str) -> ApiError {
+    let scope = format!("root-auth-source:{}", source.ip());
+    if state
+        .root_auth_limiter
+        .check_and_record(&scope, state.now())
+    {
+        ApiError::unauthorized_detail(detail)
+    } else {
+        ApiError::too_many_requests("Too many administrator authentication attempts")
     }
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let left = Sha256::digest(left);
+    let right = Sha256::digest(right);
     left.iter()
         .zip(right.iter())
         .fold(0u8, |acc, (a, b)| acc | (a ^ b))

@@ -907,7 +907,7 @@ class FamilySessionCoordinatorTest {
     }
 
     @Test
-    fun approvedMemberClaimPersistsSessionBeforeReplicaRecoveryAndNeverClaimsTwice() = runTest {
+    fun approvedMemberClaimGatesTheNewSessionUntilReplicaResetAndNeverClaimsTwice() = runTest {
         val initial = SyncSession(
             serverHost = "family.home",
             serverPort = 8765,
@@ -922,13 +922,13 @@ class FamilySessionCoordinatorTest {
             displayName = "爸爸",
             deviceName = "Pixel 9",
         )
-        var resetSawDurableSession = false
+        var resetSawPushBlockedSession = false
         val coordinator = coordinator(
             preferences = preferences,
             backend = backend,
             replica = RecordingFamilySessionReplica(
                 onReset = {
-                    resetSawDurableSession = preferences.current().isJoined
+                    resetSawPushBlockedSession = !preferences.current().isJoined
                 },
             ),
             recoverReclaimedSession = {
@@ -941,7 +941,7 @@ class FamilySessionCoordinatorTest {
             .getOrThrow() as FamilySessionOutcome.MemberLoginChecked
         val joined = checked.result as MemberLoginCheckResult.Joined
 
-        assertThat(resetSawDurableSession).isTrue()
+        assertThat(resetSawPushBlockedSession).isTrue()
         assertThat(joined.session).isEqualTo(preferences.current())
         assertThat(joined.dataRecovery).isEqualTo(InitialFamilyDataRecovery.RetryRequired)
         assertThat(preferences.pendingMemberLogin.first()).isNull()
@@ -950,6 +950,42 @@ class FamilySessionCoordinatorTest {
 
         assertThat(coordinator.execute(FamilySessionCommand.CheckMemberLogin).isFailure).isTrue()
         assertThat(backend.memberLoginClaimCalls).isEqualTo(1)
+    }
+
+    @Test
+    fun memberReauthWithTheSameReplicaIdentitySkipsReceiptReset() = runTest {
+        val previous = joinedFamilySession(FamilyRole.Member).copy(
+            accessToken = "",
+            refreshToken = "",
+            reauthRequired = true,
+            membershipId = "membership-member-approved",
+        )
+        val preferences = MemorySyncPreferences(previous)
+        val backend = RecordingSyncBackend().apply {
+            memberLoginStatuses += MemberLoginStatus.Approved
+            nextMemberLoginClaim = nextMemberLoginClaim.copy(
+                familyId = previous.familyId,
+                membershipId = previous.membershipId,
+                role = previous.role,
+            )
+        }
+        preferences.savePendingMemberLogin(
+            backend.nextMemberLoginReceipt,
+            displayName = "妈妈",
+            deviceName = "新手机",
+        )
+        val replica = RecordingFamilySessionReplica()
+
+        val checked = coordinator(
+            preferences = preferences,
+            backend = backend,
+            replica = replica,
+        ).execute(FamilySessionCommand.CheckMemberLogin)
+            .getOrThrow() as FamilySessionOutcome.MemberLoginChecked
+
+        assertThat(checked.result).isInstanceOf(MemberLoginCheckResult.Joined::class.java)
+        assertThat(replica.resetCalls).isEmpty()
+        assertThat(preferences.current().isJoined).isTrue()
     }
 
     @Test
@@ -1073,7 +1109,7 @@ class FamilySessionCoordinatorTest {
     }
 
     @Test
-    fun qrGrantClaimRequiresExactPersistedTrustAndPersistsSessionBeforeRecovery() = runTest {
+    fun qrGrantClaimRequiresExactPersistedTrustAndGatesSessionBeforeRecovery() = runTest {
         val endpoint = TrustedEndpointProfile.tofuSpki(
             "https://family.example.com:9443",
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
@@ -1089,12 +1125,12 @@ class FamilySessionCoordinatorTest {
             rememberEndpoint(endpoint)
         }
         val backend = RecordingSyncBackend()
-        var recoverySawDurableSession = false
+        var recoverySawActiveSession = false
         val coordinator = coordinator(
             preferences = preferences,
             backend = backend,
             recoverReclaimedSession = {
-                recoverySawDurableSession = preferences.current().isJoined
+                recoverySawActiveSession = preferences.current().isJoined
                 error("first pull offline")
             },
         )
@@ -1103,7 +1139,7 @@ class FamilySessionCoordinatorTest {
             FamilySessionCommand.ClaimMemberLoginGrant(payload, "  Pixel Tablet  "),
         ).getOrThrow() as FamilySessionOutcome.Joined
 
-        assertThat(recoverySawDurableSession).isTrue()
+        assertThat(recoverySawActiveSession).isTrue()
         assertThat(outcome.session).isEqualTo(preferences.current())
         assertThat(outcome.dataRecovery).isEqualTo(InitialFamilyDataRecovery.RetryRequired)
         assertThat(backend.memberLoginGrantClaims).containsExactly(
@@ -1120,6 +1156,43 @@ class FamilySessionCoordinatorTest {
         )
         assertThat(mismatch.isFailure).isTrue()
         assertThat(mismatchBackend.memberLoginGrantClaims).isEmpty()
+    }
+
+    @Test
+    fun secretBearingFamilyCommandsNeverRenderPlaintext() {
+        val payload = MemberLoginQrPayload(
+            endpoint = TrustedEndpointProfile.systemPki("https://family.example.com"),
+            grant = "grant-0000000000000000000000000000000000000",
+            familyName = "乐乐一家",
+            memberDisplayName = "妈妈",
+            expiresAtEpochSeconds = 1_753_419_000,
+        )
+
+        val rendered = listOf(
+            FamilySessionCommand.CreateFamily("妈妈", "Pixel", "root-create-secret", "乐乐一家"),
+            FamilySessionCommand.OwnerLogin("Pixel", "root-login-secret", false),
+            FamilySessionCommand.ClaimMemberLoginGrant(payload, "Pixel"),
+            MemberLoginReceipt(
+                requestId = "request-id",
+                pendingSecret = "pending-member-secret",
+                expiresAtEpochSeconds = 1_753_419_000,
+            ),
+            SessionBootstrapResult(
+                familyId = "family-id",
+                accessToken = "bootstrap-access-token",
+                refreshToken = "bootstrap-refresh-token",
+                role = FamilyRole.Member,
+                generation = "generation",
+                membershipId = "membership-id",
+            ),
+        ).joinToString()
+
+        assertThat(rendered).doesNotContain("root-create-secret")
+        assertThat(rendered).doesNotContain("root-login-secret")
+        assertThat(rendered).doesNotContain(payload.grant)
+        assertThat(rendered).doesNotContain("pending-member-secret")
+        assertThat(rendered).doesNotContain("bootstrap-access-token")
+        assertThat(rendered).doesNotContain("bootstrap-refresh-token")
     }
 
     @Test
