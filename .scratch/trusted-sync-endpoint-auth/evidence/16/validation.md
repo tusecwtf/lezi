@@ -16,6 +16,10 @@
   tasks). The first full run exposed a test-only race: it observed the deliberately safe
   session-clear-before-marker-clear order too early. Commit `5f9aa3c` waits for the durable marker's
   completion; focused Debug/Release tests and the full gate then passed.
+- `./gradlew connectedDebugAndroidTest` — PASS on `emulator-5554` (API 35, x86_64): 93 tests,
+  zero failures/errors/skips. The executed suites were designsystem=7, core database=6,
+  log=45, family=21, and settings=14; the remaining Android-test modules reported zero tests.
+  Gradle completed in 2m52s with 936 actionable tasks (108 executed, 13 from cache, 815 up-to-date).
 - `./gradlew :app:assembleRelease --rerun-tasks` — PASS (`679/679` tasks executed); the build's
   signature hook also passed.
 - Release APK: `app/build/outputs/apk/release/app-release.apk`, 5,519,958 bytes, SHA-256
@@ -105,7 +109,7 @@
   SPKI mismatch, deletion, repository, artifact, and final welcome smoke gates were repeated after
   their fixes, but the complete two-client matrix was not replayed from zero against the single final
   APK SHA-256 above.
-- `connectedDebugAndroidTest`, physical network switching, and live NAS replacement were not run.
+- Physical network switching and live NAS replacement were not run.
 
 Ticket 16 therefore remains open. Ticket 17 (0.3.1 upgrade) must not start until the missing Must
 evidence is supplied and the complete matrix is accepted on one fixed candidate.
