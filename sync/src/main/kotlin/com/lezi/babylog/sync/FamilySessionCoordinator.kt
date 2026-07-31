@@ -668,7 +668,7 @@ internal class FamilySessionCoordinator(
         )
         replica.resetLocalSyncReceipts(
             previous,
-            crossingFamilyBoundary = true,
+            crossingFamilyBoundary = previous.familyId != session.familyId,
         )
         if (joined.entities.isNotEmpty()) {
             replica.applyInitialEntities(session, joined.entities)

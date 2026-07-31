@@ -311,6 +311,45 @@ class FamilySessionCoordinatorTest {
     }
 
     @Test
+    fun ownerReauthResetsReceiptsOnlyWhenTheServerReturnsADifferentFamily() = runTest {
+        listOf(
+            "family-a" to false,
+            "family-b" to true,
+        ).forEach { (joinedFamilyId, expectedBoundaryCrossing) ->
+            val previous = joinedFamilySession().copy(
+                accessToken = "",
+                refreshToken = "",
+                reauthRequired = true,
+            )
+            val preferences = MemorySyncPreferences(previous)
+            val backend = RecordingSyncBackend().apply {
+                nextOwnerLoginFamilyId = joinedFamilyId
+            }
+            val replica = RecordingFamilySessionReplica()
+
+            coordinator(
+                preferences = preferences,
+                backend = backend,
+                replica = replica,
+            ).execute(
+                FamilySessionCommand.OwnerLogin(
+                    deviceName = "Pixel 9",
+                    rootPassword = "root-password-secret",
+                    takeover = false,
+                ),
+            ).getOrThrow()
+
+            assertThat(replica.resetCalls).containsExactly(
+                ReceiptResetCall(
+                    previous = previous,
+                    invalidateCurrentReceipts = false,
+                    crossingFamilyBoundary = expectedBoundaryCrossing,
+                ),
+            )
+        }
+    }
+
+    @Test
     fun ownerLoginWrongRootMapsToProductErrorWithoutPublishingSession() = runTest {
         listOf(401, 403).forEach { statusCode ->
             val previous = SyncSession(
@@ -1125,11 +1164,18 @@ private class RecordingFamilySessionReplica(
     private val onPersistMembership:
         suspend (SyncSession, List<FamilyMember>) -> SyncSession = { session, _ -> session },
 ) : FamilySessionReplica {
+    val resetCalls = mutableListOf<ReceiptResetCall>()
+
     override suspend fun resetLocalSyncReceipts(
         previous: SyncSession,
         invalidateCurrentReceipts: Boolean,
         crossingFamilyBoundary: Boolean,
     ) {
+        resetCalls += ReceiptResetCall(
+            previous = previous,
+            invalidateCurrentReceipts = invalidateCurrentReceipts,
+            crossingFamilyBoundary = crossingFamilyBoundary,
+        )
         onReset(previous)
     }
 
@@ -1145,6 +1191,12 @@ private class RecordingFamilySessionReplica(
         members: List<FamilyMember>,
     ): SyncSession = onPersistMembership(session, members)
 }
+
+private data class ReceiptResetCall(
+    val previous: SyncSession,
+    val invalidateCurrentReceipts: Boolean,
+    val crossingFamilyBoundary: Boolean,
+)
 
 private fun joinedFamilySession(
     role: FamilyRole = FamilyRole.Owner,

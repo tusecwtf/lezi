@@ -5647,6 +5647,7 @@ internal class RecordingSyncBackend : SyncBackend {
     val ownerLoginRootPasswords = mutableListOf<String>()
     val ownerLoginTakeovers = mutableListOf<Boolean>()
     var ownerLoginFailure: Throwable? = null
+    var nextOwnerLoginFamilyId = "family-owner-login"
     val memberLoginRequests = mutableListOf<Triple<String, String, String>>()
     var nextMemberLoginReceipt = MemberLoginReceipt(
         requestId = "99999999-9999-9999-9999-999999999999",
@@ -5738,7 +5739,7 @@ internal class RecordingSyncBackend : SyncBackend {
         ownerLoginTakeovers += takeover
         ownerLoginFailure?.let { throw it }
         return SessionBootstrapResult(
-            familyId = "family-owner-login",
+            familyId = nextOwnerLoginFamilyId,
             accessToken = "owner-login-access",
             refreshToken = "owner-login-refresh",
             accessExpiresAtEpochSeconds = 1_753_419_300,
