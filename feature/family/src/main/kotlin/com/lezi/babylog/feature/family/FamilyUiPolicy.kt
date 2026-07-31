@@ -46,6 +46,15 @@ internal fun accountFamilyWizardSnapshot(
     deviceName = deviceName,
 ).copy(joinRole = joinRole)
 
+/**
+ * Whether the account family card should show the optional self-hosted update banner.
+ * Pure policy for unit tests: joined + non-null metadata only.
+ */
+internal fun shouldShowOptionalAppUpdateBanner(
+    isJoined: Boolean,
+    optionalAppUpdate: com.lezi.babylog.sync.AppUpdateMetadata?,
+): Boolean = isJoined && optionalAppUpdate != null
+
 internal fun familyWizardOutcomeCopy(outcome: FamilyWizardOutcome): String = when (outcome) {
     is FamilyWizardOutcome.Created -> when (outcome.dataRecovery) {
         InitialFamilyDataRecovery.Complete -> "家庭已创建"

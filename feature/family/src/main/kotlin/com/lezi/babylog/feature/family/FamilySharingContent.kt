@@ -46,6 +46,8 @@ internal fun FamilySharingContent(
     onLogoutCurrentDevice: () -> Unit = {},
     onLeaveFamily: () -> Unit = {},
     onDeleteFamily: () -> Unit = {},
+    onOpenOptionalAppUpdate: (com.lezi.babylog.sync.AppUpdateMetadata) -> Unit = {},
+    onDismissOptionalAppUpdate: (versionCode: Int) -> Unit = {},
 ) {
     val visibleMembers = if (ui.enabled) {
         familyMembersForDisplay(
@@ -146,6 +148,15 @@ internal fun FamilySharingContent(
                 formatLastSuccessAt(ui.lastSuccessAt),
                 style = LeziTypography.Meta,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        val optionalUpdate = ui.optionalAppUpdate
+        if (ui.enabled && optionalUpdate != null) {
+            Spacer(Modifier.height(LeziSpacing.Sm))
+            OptionalAppUpdateBanner(
+                versionName = optionalUpdate.versionName,
+                onOpen = { onOpenOptionalAppUpdate(optionalUpdate) },
+                onDismiss = { onDismissOptionalAppUpdate(optionalUpdate.versionCode) },
             )
         }
     }
@@ -264,4 +275,64 @@ internal fun FamilySyncStatusEntry(
                 traversalIndex = 1f
             },
     )
+}
+
+/**
+ * Non-blocking optional-update affordance on the account family card.
+ * Style matches existing menu/account panel language (no second design system).
+ */
+@Composable
+internal fun OptionalAppUpdateBanner(
+    versionName: String,
+    onOpen: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val label = com.lezi.babylog.sync.optionalAppUpdateBannerLabel(versionName)
+    val description =
+        com.lezi.babylog.sync.optionalAppUpdateBannerContentDescription(versionName)
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = LeziSpacing.Touch)
+            .semantics {
+                contentDescription = description
+                traversalIndex = 1.5f
+            },
+        shape = MaterialTheme.shapes.small,
+        color = MaterialTheme.colorScheme.primaryContainer,
+        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = LeziSpacing.Sm, vertical = LeziSpacing.Xs),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                label,
+                style = LeziTypography.BodyStrong,
+                modifier = Modifier
+                    .weight(1f)
+                    .clickable(
+                        onClickLabel = "查看更新",
+                        role = Role.Button,
+                        onClick = onOpen,
+                    )
+                    .padding(vertical = LeziSpacing.Xs),
+            )
+            Text(
+                "稍后",
+                style = LeziTypography.Meta,
+                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f),
+                modifier = Modifier
+                    .clickable(
+                        onClickLabel = "稍后提醒",
+                        role = Role.Button,
+                        onClick = onDismiss,
+                    )
+                    .padding(start = LeziSpacing.Sm, top = LeziSpacing.Xs, bottom = LeziSpacing.Xs),
+            )
+        }
+    }
 }

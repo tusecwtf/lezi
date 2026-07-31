@@ -85,8 +85,13 @@ import com.lezi.babylog.domain.LocalDataClearScope
 import com.lezi.babylog.domain.SystemCalendarConfigurationCoordinator
 import com.lezi.babylog.domain.SystemCalendarPort
 import com.lezi.babylog.sync.AppUpdateMetadata
+import com.lezi.babylog.sync.AppUpdateUiOutcome
 import com.lezi.babylog.sync.ClientAppVersion
 import com.lezi.babylog.sync.SyncPort
+import com.lezi.babylog.sync.appUpdateInstallUiOutcome
+import com.lezi.babylog.sync.appUpdateUiOutcome
+import com.lezi.babylog.sync.localAppVersionLabel
+import com.lezi.babylog.sync.optionalUpdateDialogBody
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate
@@ -221,6 +226,11 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun dismissAppUpdateOutcome() {
+        val current = _appUpdateOutcome.value
+        if (current is AppUpdateUiOutcome.OptionalUpdate) {
+            // "稍后" / dismiss: process-session suppress for handshake banner.
+            syncPort.dismissOptionalAppUpdate(current.metadata.versionCode)
+        }
         _appUpdateOutcome.value = null
     }
 

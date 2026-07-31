@@ -2,12 +2,18 @@ package com.lezi.babylog.feature.family
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -27,6 +33,7 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.domain.FamilyWizardState
 import com.lezi.babylog.domain.familyWizardEndpointValidationError
+import com.lezi.babylog.sync.AppUpdateUiOutcome
 import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.sync.FamilyEndpointConfig
 import com.lezi.babylog.sync.FamilyEndpointDraft
@@ -34,6 +41,7 @@ import com.lezi.babylog.sync.MemberLoginQrPayloadCodec
 import com.lezi.babylog.sync.SetupFamilyState
 import com.lezi.babylog.sync.SetupProbeResult
 import com.lezi.babylog.sync.defaultAndroidDeviceName
+import com.lezi.babylog.sync.optionalUpdateDialogBody
 import com.lezi.babylog.sync.requireDeviceName
 
 private val FamilyEndpointDraftSaver = listSaver<FamilyEndpointDraft, String>(
@@ -55,6 +63,8 @@ fun FamilyRoute(
     vm: FamilyViewModel = hiltViewModel(),
 ) {
     val ui by vm.ui.collectAsStateWithLifecycle()
+    val appUpdateOutcome by vm.appUpdateOutcome.collectAsStateWithLifecycle()
+    val installingAppUpdate by vm.installingAppUpdate.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var dialog by remember { mutableStateOf<FamilyDialog?>(null) }
     var retainedWizardMode by rememberSaveable { mutableStateOf<String?>(null) }
@@ -428,8 +438,84 @@ fun FamilyRoute(
                     resetDeleteFamilyConfirmation()
                     dialog = FamilyDialog.DeleteFamily(FamilyDialog.DeleteStage.Warning)
                 },
+                onOpenOptionalAppUpdate = vm::openOptionalAppUpdate,
+                onDismissOptionalAppUpdate = vm::dismissOptionalAppUpdate,
             )
         }
+    }
+
+    when (val outcome = appUpdateOutcome) {
+        is AppUpdateUiOutcome.Message -> {
+            AlertDialog(
+                onDismissRequest = {
+                    if (!installingAppUpdate) vm.dismissAppUpdateOutcome()
+                },
+                title = { Text(outcome.title) },
+                text = { Text(outcome.body) },
+                confirmButton = {
+                    TextButton(
+                        onClick = vm::dismissAppUpdateOutcome,
+                        enabled = !installingAppUpdate,
+                    ) {
+                        Text(if (installingAppUpdate) "请稍候" else "知道了")
+                    }
+                },
+            )
+        }
+        is AppUpdateUiOutcome.OptionalUpdate -> {
+            AlertDialog(
+                onDismissRequest = {
+                    if (!installingAppUpdate) vm.dismissAppUpdateOutcome()
+                },
+                title = { Text("发现新版本") },
+                text = { Text(optionalUpdateDialogBody(outcome.metadata)) },
+                confirmButton = {
+                    TextButton(
+                        onClick = { vm.installOptionalUpdate(outcome.metadata) },
+                        enabled = !installingAppUpdate,
+                    ) {
+                        Text(if (installingAppUpdate) "安装中…" else "立即更新")
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = vm::dismissAppUpdateOutcome,
+                        enabled = !installingAppUpdate,
+                    ) {
+                        Text("稍后")
+                    }
+                },
+            )
+        }
+        AppUpdateUiOutcome.NeedsInstallPermission -> {
+            AlertDialog(
+                onDismissRequest = vm::dismissAppUpdateOutcome,
+                title = { Text("需要安装权限") },
+                text = {
+                    Text("请允许乐记安装应用，然后再试一次立即更新。")
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            val intent = Intent(
+                                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                Uri.parse("package:${context.packageName}"),
+                            )
+                            runCatching { context.startActivity(intent) }
+                            vm.dismissAppUpdateOutcome()
+                        },
+                    ) {
+                        Text("去设置")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = vm::dismissAppUpdateOutcome) {
+                        Text("取消")
+                    }
+                },
+            )
+        }
+        null -> Unit
     }
 
     when (val active = dialog) {

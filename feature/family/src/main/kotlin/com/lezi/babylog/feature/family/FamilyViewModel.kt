@@ -14,6 +14,8 @@ import com.lezi.babylog.domain.FamilyWizardSnapshot
 import com.lezi.babylog.domain.FamilyWizardState
 import com.lezi.babylog.domain.SyncFamilyWizardGateway
 import com.lezi.babylog.domain.UpdateBabyInput
+import com.lezi.babylog.sync.AppUpdateMetadata
+import com.lezi.babylog.sync.AppUpdateUiOutcome
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.CertificateTrustCandidate
 import com.lezi.babylog.sync.DisplayNameUpdateResult
@@ -26,6 +28,7 @@ import com.lezi.babylog.sync.PendingMemberLogin
 import com.lezi.babylog.sync.PendingMemberLoginRequest
 import com.lezi.babylog.sync.PendingMemberRenameRequest
 import com.lezi.babylog.sync.SyncPort
+import com.lezi.babylog.sync.appUpdateInstallUiOutcome
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
@@ -34,6 +37,8 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.collect
@@ -69,6 +74,11 @@ data class FamilyUi(
     val pendingMemberLogin: PendingMemberLogin? = null,
     val pendingMemberRequests: List<PendingMemberLoginRequest> = emptyList(),
     val pendingMemberRenameRequests: List<PendingMemberRenameRequest> = emptyList(),
+    /**
+     * Optional self-hosted app update from handshake/sync discovery.
+     * Null when none, not joined, up-to-date, or dismissed for this process session.
+     */
+    val optionalAppUpdate: AppUpdateMetadata? = null,
 ) {
     /** Resolved label when the current optional family name is empty. */
     val familyNameLabel: String
@@ -167,8 +177,12 @@ class FamilyViewModel @Inject constructor(
         )
     }
 
-    val ui = combine(baseUi, familyMembers) { family, memberState ->
-        if (family.enabled && memberState.familyId == family.familyId) {
+    val ui = combine(
+        baseUi,
+        familyMembers,
+        sync.availableOptionalAppUpdate(),
+    ) { family, memberState, optionalUpdate ->
+        val withMembers = if (family.enabled && memberState.familyId == family.familyId) {
             family.copy(
                 members = memberState.members,
                 membersLoaded = memberState.loaded,
@@ -180,7 +194,61 @@ class FamilyViewModel @Inject constructor(
         } else {
             family
         }
+        // Only show the banner when the account is joined; never for offline/unjoined.
+        withMembers.copy(
+            optionalAppUpdate = optionalUpdate.takeIf { withMembers.enabled },
+        )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), FamilyUi())
+
+    private val _appUpdateOutcome = MutableStateFlow<AppUpdateUiOutcome?>(null)
+    val appUpdateOutcome: StateFlow<AppUpdateUiOutcome?> = _appUpdateOutcome.asStateFlow()
+    private val _installingAppUpdate = MutableStateFlow(false)
+    val installingAppUpdate: StateFlow<Boolean> = _installingAppUpdate.asStateFlow()
+
+    /** Open the same optional confirm flow as the settings about path. */
+    fun openOptionalAppUpdate(metadata: AppUpdateMetadata) {
+        if (_installingAppUpdate.value) return
+        _appUpdateOutcome.value = AppUpdateUiOutcome.OptionalUpdate(metadata)
+    }
+
+    /** Banner "稍后" or dialog dismiss: suppress this versionCode for the process session. */
+    fun dismissOptionalAppUpdate(versionCode: Int) {
+        sync.dismissOptionalAppUpdate(versionCode)
+        val current = _appUpdateOutcome.value
+        if (current is AppUpdateUiOutcome.OptionalUpdate &&
+            current.metadata.versionCode == versionCode
+        ) {
+            _appUpdateOutcome.value = null
+        }
+    }
+
+    fun dismissAppUpdateOutcome() {
+        val current = _appUpdateOutcome.value
+        if (current is AppUpdateUiOutcome.OptionalUpdate) {
+            sync.dismissOptionalAppUpdate(current.metadata.versionCode)
+        }
+        _appUpdateOutcome.value = null
+    }
+
+    /** Download → sha256 verify → PackageInstaller (same path as settings). */
+    fun installOptionalUpdate(metadata: AppUpdateMetadata) {
+        if (_installingAppUpdate.value) return
+        viewModelScope.launch {
+            _installingAppUpdate.value = true
+            _appUpdateOutcome.value = AppUpdateUiOutcome.Message(
+                title = "正在下载",
+                body = "正在从家庭服务器下载更新包…",
+            )
+            try {
+                val result = sync.installAvailableAppUpdate(metadata)
+                _appUpdateOutcome.value = appUpdateInstallUiOutcome(result) { error ->
+                    familySyncError(error, "下载或安装失败，请稍后重试")
+                }
+            } finally {
+                _installingAppUpdate.value = false
+            }
+        }
+    }
 
     fun refreshMembers(showErrors: Boolean = true) {
         viewModelScope.launch { refreshMembersNow(showErrors) }

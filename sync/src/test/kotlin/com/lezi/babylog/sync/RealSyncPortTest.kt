@@ -52,6 +52,7 @@ class RealSyncPortTest {
 
         assertThat(result).isEqualTo(AppUpdateCheckResult.NotJoined)
         assertThat(rig.backend.getAppUpdateMetadataCalls).isEqualTo(0)
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
     }
 
     @Test
@@ -67,6 +68,7 @@ class RealSyncPortTest {
         assertThat(rig.port.checkAppUpdate().getOrThrow())
             .isEqualTo(AppUpdateCheckResult.UpToDate)
         assertThat(rig.backend.getAppUpdateMetadataCalls).isEqualTo(1)
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
     }
 
     @Test
@@ -85,6 +87,121 @@ class RealSyncPortTest {
 
         assertThat(rig.port.checkAppUpdate().getOrThrow())
             .isEqualTo(AppUpdateCheckResult.OptionalUpdate(metadata))
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isEqualTo(metadata)
+    }
+
+    @Test
+    fun foregroundSyncDiscoversOptionalAppUpdateWithoutFcmOrColdStartPoller() = runTest {
+        val metadata = sampleAppUpdateMetadata(versionCode = 8, versionName = "0.3.2")
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+        )
+        rig.awaitStartupRecovery()
+        rig.backend.appUpdateMetadata = metadata
+
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+
+        assertThat(rig.backend.getAppUpdateMetadataCalls).isEqualTo(1)
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isEqualTo(metadata)
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+    }
+
+    @Test
+    fun localWriteSyncDoesNotPiggybackAppUpdateCheck() = runTest {
+        val metadata = sampleAppUpdateMetadata(versionCode = 8, versionName = "0.3.2")
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+        )
+        rig.awaitStartupRecovery()
+        rig.backend.appUpdateMetadata = metadata
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        assertThat(rig.backend.getAppUpdateMetadataCalls).isEqualTo(0)
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
+    }
+
+    @Test
+    fun dismissOptionalAppUpdateSuppressesBannerForSameVersionInProcessSession() = runTest {
+        val metadata = sampleAppUpdateMetadata(versionCode = 9, versionName = "0.4.0")
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+        )
+        rig.awaitStartupRecovery()
+        rig.backend.appUpdateMetadata = metadata
+
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isEqualTo(metadata)
+
+        rig.port.dismissOptionalAppUpdate(metadata.versionCode)
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
+
+        // Second handshake must not re-show the same version after "稍后".
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+        assertThat(rig.backend.getAppUpdateMetadataCalls).isEqualTo(2)
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
+
+        // Explicit manual check still reports optional update for the confirm dialog path.
+        assertThat(rig.port.checkAppUpdate().getOrThrow())
+            .isEqualTo(AppUpdateCheckResult.OptionalUpdate(metadata))
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
+    }
+
+    @Test
+    fun optionalAppUpdateCheckFailureDoesNotPoisonSyncStatus() = runTest {
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+        )
+        rig.awaitStartupRecovery()
+        // Successful sync first so status is Idle.
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+
+        rig.backend.getAppUpdateMetadataFailure =
+            SyncHttpException(500, """{"detail":"update store unavailable"}""")
+        val check = rig.port.checkAppUpdate()
+        assertThat(check.isFailure).isTrue()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
+
+        // Handshake piggyback also swallows failures without marking Error.
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+    }
+
+    @Test
+    fun unjoinedForegroundSyncDoesNotDiscoverOptionalAppUpdate() = runTest {
+        val rig = SyncRig(session = SyncSession())
+        rig.awaitStartupRecovery()
+        rig.backend.appUpdateMetadata =
+            sampleAppUpdateMetadata(versionCode = 99, versionName = "9.9.9")
+
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+
+        assertThat(rig.backend.getAppUpdateMetadataCalls).isEqualTo(0)
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
+    }
+
+    @Test
+    fun upToDateHandshakeClearsOptionalAppUpdateBanner() = runTest {
+        val newer = sampleAppUpdateMetadata(versionCode = 7, versionName = "0.3.1")
+        val current = sampleAppUpdateMetadata(versionCode = 6, versionName = "0.3.0")
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+        )
+        rig.awaitStartupRecovery()
+        rig.backend.appUpdateMetadata = newer
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isEqualTo(newer)
+
+        rig.backend.appUpdateMetadata = current
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
     }
 
     @Test

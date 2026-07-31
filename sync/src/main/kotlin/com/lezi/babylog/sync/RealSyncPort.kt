@@ -70,6 +70,11 @@ class RealSyncPort @Inject constructor(
         File(System.getProperty("java.io.tmpdir"), "lezi-app-update-test"),
 ) : SyncPort {
     private val currentStatus = MutableStateFlow(SyncStatus.Disabled)
+    private val optionalAppUpdateState =
+        MutableStateFlow<AppUpdateMetadata?>(null)
+    /** Process-session "稍后" suppressions keyed by server package versionCode. */
+    private val dismissedOptionalUpdateVersionCodes =
+        java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
     private val memberLoginCheckEvents = MutableSharedFlow<MemberLoginCheckResult>(
         extraBufferCapacity = 1,
     )
@@ -155,6 +160,8 @@ class RealSyncPort @Inject constructor(
                     currentStatus.value = SyncStatus.ReauthRequired
                 } else if (!session.isJoined) {
                     currentStatus.value = SyncStatus.Disabled
+                    // Unjoined devices never show optional-update banners.
+                    optionalAppUpdateState.value = null
                 } else if (currentStatus.value == SyncStatus.Disabled) {
                     currentStatus.value = SyncStatus.Idle
                 }
@@ -209,6 +216,8 @@ class RealSyncPort @Inject constructor(
     override fun verifiedEndpoint(): Flow<TrustedEndpointProfile?> = preferences.verifiedEndpoint
     override fun pendingMemberLogin(): Flow<PendingMemberLogin?> = preferences.pendingMemberLogin
     override fun memberLoginChecks(): Flow<MemberLoginCheckResult> = memberLoginCheckEvents
+    override fun availableOptionalAppUpdate(): Flow<AppUpdateMetadata?> =
+        optionalAppUpdateState
     override suspend fun probeEndpoint(endpointDraft: String): SetupProbeResult =
         setupProbe.probe(endpointDraft, preferences.verifiedEndpoint.first())
 
@@ -463,12 +472,18 @@ class RealSyncPort @Inject constructor(
             }
         }
         val failure = result.exceptionOrNull()
-        return when (failure) {
+        val mapped = when (failure) {
             is RemoteDeviceRemovedException -> handleRemoteDeviceRemoved(failure)
             is RemoteMembershipDeletedException -> handleRemoteMembershipDeleted(failure)
             is RemoteFamilyDeletedException -> handleRemoteFamilyDeleted(failure)
             else -> result.onFailure(::updateFailureStatus)
         }
+        // Piggyback optional-update discovery on user-facing sync/handshake only
+        // (not LocalWrite spam). Failures never change SyncStatus.
+        if (trigger != SyncTrigger.LocalWrite) {
+            discoverOptionalAppUpdateBestEffort(publishWhenDismissed = false)
+        }
+        return mapped
     }
 
     override suspend fun push(familyId: String) = sync(SyncTrigger.LocalWrite)
@@ -528,22 +543,39 @@ class RealSyncPort @Inject constructor(
         cleanupAppUpdateStaging()
         val session = preferences.session.first()
         if (!session.isJoined) {
+            optionalAppUpdateState.value = null
             return Result.success(AppUpdateCheckResult.NotJoined)
         }
+        // Manual check must never mutate SyncStatus — surface failures only to the UI.
         return runCatching {
             val decision = foregroundSyncGate.evaluate(
                 session.endpointConfig,
                 preferences.verifiedEndpoint.first(),
                 foregroundState.isForeground(),
             )
-            requireAllowed(decision)
+            if (decision != ForegroundSyncDecision.Allowed) {
+                throw ForegroundSyncBlockedException(decision)
+            }
             val metadata = backend.getAppUpdateMetadata(session)
             if (clientAppVersion.versionCode >= metadata.versionCode) {
+                optionalAppUpdateState.value = null
                 AppUpdateCheckResult.UpToDate
             } else {
+                // Manual path still returns OptionalUpdate even after "稍后"; banner stays suppressed.
+                publishOptionalAppUpdateIfEligible(metadata, respectDismissal = true)
                 AppUpdateCheckResult.OptionalUpdate(metadata)
             }
-        }.onFailure(::updateFailureStatus)
+        }
+    }
+
+    override fun dismissOptionalAppUpdate(versionCode: Int) {
+        if (versionCode > 0) {
+            dismissedOptionalUpdateVersionCodes.add(versionCode)
+        }
+        val current = optionalAppUpdateState.value
+        if (current != null && current.versionCode == versionCode) {
+            optionalAppUpdateState.value = null
+        }
     }
 
     override suspend fun installAvailableAppUpdate(
@@ -559,6 +591,8 @@ class RealSyncPort @Inject constructor(
         if (clientAppVersion.versionCode >= metadata.versionCode) {
             return Result.failure(IllegalStateException("当前已是最新版本"))
         }
+        // Starting install hides the optional banner for this version for the rest of the process.
+        dismissOptionalAppUpdate(metadata.versionCode)
         return runCatching {
             val decision = foregroundSyncGate.evaluate(
                 session.endpointConfig,
@@ -594,6 +628,55 @@ class RealSyncPort @Inject constructor(
 
     override suspend fun cleanupAppUpdateStaging(): Result<Unit> = runCatching {
         cleanupAppUpdateStagingFiles(appUpdateCacheDir)
+    }
+
+    /**
+     * Best-effort authenticated metadata check for optional updates.
+     * Never throws to callers and never mutates [currentStatus].
+     */
+    private suspend fun discoverOptionalAppUpdateBestEffort(
+        publishWhenDismissed: Boolean,
+    ) {
+        try {
+            val session = preferences.session.first()
+            if (!session.isJoined) {
+                optionalAppUpdateState.value = null
+                return
+            }
+            val decision = foregroundSyncGate.evaluate(
+                session.endpointConfig,
+                preferences.verifiedEndpoint.first(),
+                foregroundState.isForeground(),
+            )
+            if (decision != ForegroundSyncDecision.Allowed) return
+            val metadata = backend.getAppUpdateMetadata(session)
+            if (clientAppVersion.versionCode >= metadata.versionCode) {
+                optionalAppUpdateState.value = null
+                return
+            }
+            publishOptionalAppUpdateIfEligible(
+                metadata = metadata,
+                respectDismissal = !publishWhenDismissed,
+            )
+        } catch (_: Throwable) {
+            // Swallow: handshake piggyback must not fail sync or mark SyncStatus.Error.
+        }
+    }
+
+    private fun publishOptionalAppUpdateIfEligible(
+        metadata: AppUpdateMetadata,
+        respectDismissal: Boolean,
+    ) {
+        if (respectDismissal &&
+            metadata.versionCode in dismissedOptionalUpdateVersionCodes
+        ) {
+            val current = optionalAppUpdateState.value
+            if (current?.versionCode == metadata.versionCode) {
+                optionalAppUpdateState.value = null
+            }
+            return
+        }
+        optionalAppUpdateState.value = metadata
     }
 
     /** Caller owns [syncMutex]; lock order is sync mutex then domain mutation guard. */

@@ -4,17 +4,19 @@
 
 **Blocked by:** 01 — 已加入设备能检查是否有新版本
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Acceptance criteria
 
-- [ ] 已加入且前台握手/同步路径会触发更新检查（无 FCM、无后台常驻推送）
-- [ ] 可选更新时账户或同步区出现非阻塞横幅，风格与现有菜单/账户一致
-- [ ] 「稍后」后同一 versionCode 本会话不再自动刷屏
-- [ ] 点横幅进入与 01（及已实现时的 02）相同的确认/更新流
-- [ ] 已最新或未加入时不误显可选横幅
-- [ ] 行为可在端口或 UI 测中验证「发现 → 横幅 / 稍后」主路径
+- [x] 已加入且前台握手/同步路径会触发更新检查（无 FCM、无后台常驻推送）
+- [x] 可选更新时账户或同步区出现非阻塞横幅，风格与现有菜单/账户一致
+- [x] 「稍后」后同一 versionCode 本会话不再自动刷屏
+- [x] 点横幅进入与 01（及已实现时的 02）相同的确认/更新流
+- [x] 已最新或未加入时不误显可选横幅
+- [x] 行为可在端口或 UI 测中验证「发现 → 横幅 / 稍后」主路径
 
 ## Comments
 
--
+- Client: `RealSyncPort.sync(Foreground|PullToRefresh)` piggybacks best-effort `GET` metadata; publishes `availableOptionalAppUpdate()`; `dismissOptionalAppUpdate(versionCode)` process-session suppress; check failures never poison `SyncStatus`.
+- UI: `feature/family` account card `OptionalAppUpdateBanner` → same optional confirm / install as settings; shared copy on `sync.AppUpdateUiCopy`.
+- Tests: `RealSyncPortTest` discover/dismiss/no-poison/unjoined/up-to-date; `OptionalAppUpdateBannerPolicyTest`; settings copy tests still green.

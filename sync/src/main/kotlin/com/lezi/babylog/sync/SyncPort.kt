@@ -296,9 +296,24 @@ interface SyncPort {
      *
      * Not joined → [AppUpdateCheckResult.NotJoined] without network I/O.
      * Joined → authenticated metadata fetch; compares integer versionCode only.
+     * Failures do not change [status] (update checks must not look like sync errors).
      */
     suspend fun checkAppUpdate(): Result<AppUpdateCheckResult> =
         Result.success(AppUpdateCheckResult.NotJoined)
+
+    /**
+     * Optional update discovered by foreground handshake/sync (or published after a
+     * successful manual check). Null when none, not joined, up-to-date, or the user
+     * dismissed that versionCode for this process session ("稍后").
+     */
+    fun availableOptionalAppUpdate(): Flow<AppUpdateMetadata?> =
+        kotlinx.coroutines.flow.flowOf(null)
+
+    /**
+     * Process-session "稍后": hide the optional banner for [versionCode] until the
+     * process dies. Does not block a later explicit [checkAppUpdate] dialog path.
+     */
+    fun dismissOptionalAppUpdate(versionCode: Int) = Unit
 
     /**
      * Downloads the release APK for [metadata] from the trusted family server,
@@ -369,6 +384,11 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
 
     override suspend fun checkAppUpdate(): Result<AppUpdateCheckResult> =
         Result.success(AppUpdateCheckResult.NotJoined)
+
+    override fun availableOptionalAppUpdate(): Flow<AppUpdateMetadata?> =
+        kotlinx.coroutines.flow.flowOf(null)
+
+    override fun dismissOptionalAppUpdate(versionCode: Int) = Unit
 
     override suspend fun installAvailableAppUpdate(
         metadata: AppUpdateMetadata,

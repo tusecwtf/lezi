@@ -3,6 +3,11 @@ package com.lezi.babylog.feature.settings
 import com.lezi.babylog.sync.AppUpdateCheckResult
 import com.lezi.babylog.sync.AppUpdateInstallResult
 import com.lezi.babylog.sync.AppUpdateMetadata
+import com.lezi.babylog.sync.AppUpdateUiOutcome
+import com.lezi.babylog.sync.appUpdateInstallUiOutcome
+import com.lezi.babylog.sync.appUpdateUiOutcome
+import com.lezi.babylog.sync.localAppVersionLabel
+import com.lezi.babylog.sync.optionalUpdateDialogBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
