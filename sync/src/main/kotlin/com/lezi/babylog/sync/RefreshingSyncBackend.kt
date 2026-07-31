@@ -11,6 +11,13 @@ class RemoteMembershipDeletedException : IllegalStateException("你的家庭成�
 class RemoteFamilyDeletedException : IllegalStateException("这个家庭已被删除")
 
 /**
+ * Server rejected authoritative sync because the client is below minSupported
+ * (`code=client_update_required`). Must surface force-update UI, not a vague network error.
+ */
+class ClientUpdateRequiredException :
+    IllegalStateException("需要更新乐记后才能继续同步家庭数据")
+
+/**
  * One authentication seam for every protected server call.
  *
  * It serializes refresh rotation, keeps access credentials process-local via
@@ -163,6 +170,7 @@ internal class RefreshingSyncBackend(
             throw cancelled
         } catch (failure: SyncHttpException) {
             failure.remoteTerminalRemovalOrNull()?.let { throw it }
+            failure.clientUpdateRequiredOrNull()?.let { throw it }
             if (failure.statusCode != 401) throw failure
             if (refreshed) {
                 requireReauth()
@@ -174,6 +182,7 @@ internal class RefreshingSyncBackend(
                 throw cancelled
             } catch (retryFailure: SyncHttpException) {
                 retryFailure.remoteTerminalRemovalOrNull()?.let { throw it }
+                retryFailure.clientUpdateRequiredOrNull()?.let { throw it }
                 if (retryFailure.statusCode == 401) requireReauth()
                 throw retryFailure
             }
@@ -251,4 +260,9 @@ private fun SyncHttpException.remoteTerminalRemovalOrNull(): IllegalStateExcepti
         "family_deleted" -> RemoteFamilyDeletedException()
         else -> null
     }
+}
+
+internal fun SyncHttpException.clientUpdateRequiredOrNull(): ClientUpdateRequiredException? {
+    if (syncHttpCodeOrNull(responseBody) != "client_update_required") return null
+    return ClientUpdateRequiredException()
 }

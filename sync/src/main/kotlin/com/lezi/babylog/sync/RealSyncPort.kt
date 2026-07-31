@@ -72,6 +72,8 @@ class RealSyncPort @Inject constructor(
     private val currentStatus = MutableStateFlow(SyncStatus.Disabled)
     private val optionalAppUpdateState =
         MutableStateFlow<AppUpdateMetadata?>(null)
+    private val forcedAppUpdateState =
+        MutableStateFlow<AppUpdateMetadata?>(null)
     /** Process-session "稍后" suppressions keyed by server package versionCode. */
     private val dismissedOptionalUpdateVersionCodes =
         java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
@@ -160,8 +162,9 @@ class RealSyncPort @Inject constructor(
                     currentStatus.value = SyncStatus.ReauthRequired
                 } else if (!session.isJoined) {
                     currentStatus.value = SyncStatus.Disabled
-                    // Unjoined devices never show optional-update banners.
+                    // Unjoined devices never show optional/forced update surfaces.
                     optionalAppUpdateState.value = null
+                    forcedAppUpdateState.value = null
                 } else if (currentStatus.value == SyncStatus.Disabled) {
                     currentStatus.value = SyncStatus.Idle
                 }
@@ -218,6 +221,10 @@ class RealSyncPort @Inject constructor(
     override fun memberLoginChecks(): Flow<MemberLoginCheckResult> = memberLoginCheckEvents
     override fun availableOptionalAppUpdate(): Flow<AppUpdateMetadata?> =
         optionalAppUpdateState
+
+    override fun availableForcedAppUpdate(): Flow<AppUpdateMetadata?> =
+        forcedAppUpdateState
+
     override suspend fun probeEndpoint(endpointDraft: String): SetupProbeResult =
         setupProbe.probe(endpointDraft, preferences.verifiedEndpoint.first())
 
@@ -476,12 +483,22 @@ class RealSyncPort @Inject constructor(
             is RemoteDeviceRemovedException -> handleRemoteDeviceRemoved(failure)
             is RemoteMembershipDeletedException -> handleRemoteMembershipDeleted(failure)
             is RemoteFamilyDeletedException -> handleRemoteFamilyDeleted(failure)
-            else -> result.onFailure(::updateFailureStatus)
+            is ClientUpdateRequiredException -> handleClientUpdateRequired(failure)
+            else -> {
+                // Wire code may still arrive as SyncHttpException if a backend skips mapping.
+                if (failure is SyncHttpException &&
+                    syncHttpCodeOrNull(failure.responseBody) == "client_update_required"
+                ) {
+                    handleClientUpdateRequired(ClientUpdateRequiredException())
+                } else {
+                    result.onFailure(::updateFailureStatus)
+                }
+            }
         }
-        // Piggyback optional-update discovery on user-facing sync/handshake only
+        // Piggyback update discovery on user-facing sync/handshake only
         // (not LocalWrite spam). Failures never change SyncStatus.
         if (trigger != SyncTrigger.LocalWrite) {
-            discoverOptionalAppUpdateBestEffort(publishWhenDismissed = false)
+            discoverAppUpdateBestEffort(publishWhenDismissed = false)
         }
         return mapped
     }
@@ -544,6 +561,7 @@ class RealSyncPort @Inject constructor(
         val session = preferences.session.first()
         if (!session.isJoined) {
             optionalAppUpdateState.value = null
+            forcedAppUpdateState.value = null
             return Result.success(AppUpdateCheckResult.NotJoined)
         }
         // Manual check must never mutate SyncStatus — surface failures only to the UI.
@@ -557,13 +575,27 @@ class RealSyncPort @Inject constructor(
                 throw ForegroundSyncBlockedException(decision)
             }
             val metadata = backend.getAppUpdateMetadata(session)
-            if (clientAppVersion.versionCode >= metadata.versionCode) {
-                optionalAppUpdateState.value = null
-                AppUpdateCheckResult.UpToDate
+            classifyAndPublishAppUpdate(metadata, respectOptionalDismissal = true)
+        }.recoverCatching { error ->
+            // Map wire gate failures out of generic check-update "network" copy.
+            val required = when (error) {
+                is ClientUpdateRequiredException -> error
+                is SyncHttpException -> error.clientUpdateRequiredOrNull()
+                else -> null
+            }
+            if (required != null) {
+                // Best-effort: still try to load metadata so force UI has a package to install.
+                runCatching {
+                    val sessionNow = preferences.session.first()
+                    if (sessionNow.isJoined) {
+                        val metadata = backend.getAppUpdateMetadata(sessionNow)
+                        classifyAndPublishAppUpdate(metadata, respectOptionalDismissal = false)
+                    } else {
+                        throw required
+                    }
+                }.getOrElse { throw required }
             } else {
-                // Manual path still returns OptionalUpdate even after "稍后"; banner stays suppressed.
-                publishOptionalAppUpdateIfEligible(metadata, respectDismissal = true)
-                AppUpdateCheckResult.OptionalUpdate(metadata)
+                throw error
             }
         }
     }
@@ -631,16 +663,17 @@ class RealSyncPort @Inject constructor(
     }
 
     /**
-     * Best-effort authenticated metadata check for optional updates.
+     * Best-effort authenticated metadata check for optional/forced updates.
      * Never throws to callers and never mutates [currentStatus].
      */
-    private suspend fun discoverOptionalAppUpdateBestEffort(
+    private suspend fun discoverAppUpdateBestEffort(
         publishWhenDismissed: Boolean,
     ) {
         try {
             val session = preferences.session.first()
             if (!session.isJoined) {
                 optionalAppUpdateState.value = null
+                forcedAppUpdateState.value = null
                 return
             }
             val decision = foregroundSyncGate.evaluate(
@@ -650,17 +683,39 @@ class RealSyncPort @Inject constructor(
             )
             if (decision != ForegroundSyncDecision.Allowed) return
             val metadata = backend.getAppUpdateMetadata(session)
-            if (clientAppVersion.versionCode >= metadata.versionCode) {
-                optionalAppUpdateState.value = null
-                return
-            }
-            publishOptionalAppUpdateIfEligible(
+            classifyAndPublishAppUpdate(
                 metadata = metadata,
-                respectDismissal = !publishWhenDismissed,
+                respectOptionalDismissal = !publishWhenDismissed,
             )
         } catch (_: Throwable) {
             // Swallow: handshake piggyback must not fail sync or mark SyncStatus.Error.
         }
+    }
+
+    /**
+     * Classifies server metadata against the local versionCode and publishes the
+     * matching optional/forced flow. Forced always wins over optional.
+     */
+    private fun classifyAndPublishAppUpdate(
+        metadata: AppUpdateMetadata,
+        respectOptionalDismissal: Boolean,
+    ): AppUpdateCheckResult {
+        val local = clientAppVersion.versionCode
+        if (local < metadata.minSupportedVersionCode) {
+            optionalAppUpdateState.value = null
+            forcedAppUpdateState.value = metadata
+            return AppUpdateCheckResult.ForcedUpdate(metadata)
+        }
+        forcedAppUpdateState.value = null
+        if (local >= metadata.versionCode) {
+            optionalAppUpdateState.value = null
+            return AppUpdateCheckResult.UpToDate
+        }
+        publishOptionalAppUpdateIfEligible(
+            metadata = metadata,
+            respectDismissal = respectOptionalDismissal,
+        )
+        return AppUpdateCheckResult.OptionalUpdate(metadata)
     }
 
     private fun publishOptionalAppUpdateIfEligible(
@@ -677,6 +732,42 @@ class RealSyncPort @Inject constructor(
             return
         }
         optionalAppUpdateState.value = metadata
+    }
+
+    /**
+     * After the server rejects sync with client_update_required, load metadata so
+     * the force-upgrade UI can still download/install (avoid deadlock).
+     */
+    private suspend fun handleClientUpdateRequired(
+        error: ClientUpdateRequiredException,
+    ): Result<Unit> {
+        try {
+            val session = preferences.session.first()
+            if (session.isJoined) {
+                val decision = foregroundSyncGate.evaluate(
+                    session.endpointConfig,
+                    preferences.verifiedEndpoint.first(),
+                    foregroundState.isForeground(),
+                )
+                if (decision == ForegroundSyncDecision.Allowed) {
+                    val metadata = backend.getAppUpdateMetadata(session)
+                    classifyAndPublishAppUpdate(
+                        metadata = metadata,
+                        respectOptionalDismissal = false,
+                    )
+                }
+            }
+        } catch (_: Throwable) {
+            // Keep forced state empty if metadata cannot load; error still surfaces below.
+        }
+        // Do not leave a vague SyncStatus.Error — force UI is the primary recovery path.
+        // Keep Idle when joined so the status line is not "sync failed / NAS down".
+        if (cachedSession.isJoined && !cachedSession.reauthRequired) {
+            currentStatus.value = SyncStatus.Idle
+        } else {
+            updateFailureStatus(error)
+        }
+        return Result.failure(error)
     }
 
     /** Caller owns [syncMutex]; lock order is sync mutex then domain mutation guard. */

@@ -41,8 +41,11 @@ import com.lezi.babylog.sync.MemberLoginQrPayloadCodec
 import com.lezi.babylog.sync.SetupFamilyState
 import com.lezi.babylog.sync.SetupProbeResult
 import com.lezi.babylog.sync.defaultAndroidDeviceName
+import com.lezi.babylog.sync.forcedUpdateDialogBody
+import com.lezi.babylog.sync.forcedUpdateTitle
 import com.lezi.babylog.sync.optionalUpdateDialogBody
 import com.lezi.babylog.sync.requireDeviceName
+import androidx.compose.ui.window.DialogProperties
 
 private val FamilyEndpointDraftSaver = listSaver<FamilyEndpointDraft, String>(
     save = {
@@ -483,6 +486,25 @@ fun FamilyRoute(
                         enabled = !installingAppUpdate,
                     ) {
                         Text("稍后")
+                    }
+                },
+            )
+        }
+        is AppUpdateUiOutcome.ForcedUpdate -> {
+            AlertDialog(
+                onDismissRequest = {},
+                properties = DialogProperties(
+                    dismissOnBackPress = false,
+                    dismissOnClickOutside = false,
+                ),
+                title = { Text(forcedUpdateTitle()) },
+                text = { Text(forcedUpdateDialogBody(outcome.metadata)) },
+                confirmButton = {
+                    TextButton(
+                        onClick = { vm.installOptionalUpdate(outcome.metadata) },
+                        enabled = !installingAppUpdate,
+                    ) {
+                        Text(if (installingAppUpdate) "安装中…" else "立即更新")
                     }
                 },
             )

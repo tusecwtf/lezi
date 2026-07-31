@@ -76,6 +76,11 @@ pub(crate) const PULL_PAGE_ENTITY_LIMIT: usize = 200;
 pub(crate) const PULL_PAGE_TARGET_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const PULL_ENTITY_TARGET_BYTES: usize = PULL_PAGE_TARGET_BYTES / 3;
 const BOOTSTRAP_SECRET_HEADER: HeaderName = HeaderName::from_static("x-lezi-bootstrap-secret");
+/// Integer versionCode from authenticated clients; used to gate minSupported on sync paths.
+const CLIENT_VERSION_CODE_HEADER: HeaderName =
+    HeaderName::from_static("x-lezi-client-version-code");
+/// Stable wire code when the client is below min_supported_version_code (or omits the header).
+pub const CLIENT_UPDATE_REQUIRED_CODE: &str = "client_update_required";
 
 #[cfg(unix)]
 static PERMISSION_HARDENING_DISABLED: AtomicBool = AtomicBool::new(false);
@@ -1297,6 +1302,7 @@ async fn pull_entities(
     query: Result<Query<PullQuery>, QueryRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let principal = authenticate(&state, &headers)?;
+    require_supported_client(&state, &headers)?;
     let query = query
         .map(|Query(value)| value)
         .map_err(|error| ApiError::unprocessable(error.body_text()))?;
@@ -1367,6 +1373,7 @@ async fn get_media(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let principal = authenticate(&state, &headers)?;
+    require_supported_client(&state, &headers)?;
     let family_lock = state.family_lock(&principal.family_id).await;
     let _guard = family_lock.lock().await;
     let metadata = state
@@ -1398,6 +1405,7 @@ async fn stage_bundle(
     body: Result<Json<BundleStageRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
     let principal = authenticate(&state, &headers)?;
+    require_supported_client(&state, &headers)?;
     let request = json_body(body)?.validate(state.max_media_bytes)?;
     if request.generation != state.generation {
         return Err(ApiError::conflict_value(
@@ -1487,6 +1495,7 @@ async fn get_bundle(
     AxumPath(bundle_id): AxumPath<Uuid>,
 ) -> Result<Json<store::BundleStageStatus>, ApiError> {
     let principal = authenticate(&state, &headers)?;
+    require_supported_client(&state, &headers)?;
     let family_lock = state.family_lock(&principal.family_id).await;
     let _guard = family_lock.lock().await;
     state
@@ -1502,6 +1511,7 @@ async fn put_bundle_media(
     request: Request,
 ) -> Result<Json<store::BundleStageStatus>, ApiError> {
     let principal = authenticate(&state, request.headers())?;
+    require_supported_client(&state, request.headers())?;
     let family_lock = state.family_lock(&principal.family_id).await;
     let _guard = family_lock.lock().await;
     let bundle = state
@@ -1628,6 +1638,7 @@ async fn commit_bundle(
     body: Result<Json<BundleCommitRequest>, JsonRejection>,
 ) -> Result<Json<store::BundleCommitResult>, ApiError> {
     let principal = authenticate(&state, &headers)?;
+    require_supported_client(&state, &headers)?;
     let request = json_body(body)?;
     request.validate()?;
     if request.generation != state.generation {
@@ -1853,6 +1864,51 @@ fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<Principal, ApiE
         return Err(ApiError::unauthorized());
     }
     Ok(principal)
+}
+
+/// Reject authoritative sync write/pull when the client omits or is below minSupported.
+///
+/// Fail-open when deploy metadata is missing so an unfinished app-update channel does not
+/// brick an otherwise healthy family server. App-update metadata/APK routes never call this.
+fn require_supported_client(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let min_supported = match load_app_update_metadata(&state.app_update_metadata_path) {
+        Ok(metadata) => metadata
+            .get("min_supported_version_code")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        // No deploy package / unreadable metadata → do not gate sync.
+        Err(_) => return Ok(()),
+    };
+    let client_version = match parse_client_version_code(headers) {
+        Some(value) => value,
+        None => {
+            return Err(ApiError::client_update_required(
+                "Client version is missing or invalid; update the app to continue sync",
+            ));
+        }
+    };
+    if client_version < min_supported {
+        return Err(ApiError::client_update_required(
+            "Client version is below the minimum supported by this family server",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_client_version_code(headers: &HeaderMap) -> Option<u64> {
+    let raw = headers
+        .get(CLIENT_VERSION_CODE_HEADER)?
+        .to_str()
+        .ok()?
+        .trim();
+    if raw.is_empty() {
+        return None;
+    }
+    // Strict decimal integer only; reject signs, decimals, and overflow noise.
+    if !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    raw.parse::<u64>().ok().filter(|value| *value > 0)
 }
 
 fn require_bootstrap_secret(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
@@ -2579,6 +2635,16 @@ impl ApiError {
 
     fn forbidden(detail: impl Into<Value>) -> Self {
         Self::new(StatusCode::FORBIDDEN, detail)
+    }
+
+    /// Authenticated client is too old for authoritative sync; update endpoints stay open.
+    fn client_update_required(detail: impl Into<Value>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            detail: detail.into(),
+            authenticate: false,
+            code: Some(CLIENT_UPDATE_REQUIRED_CODE),
+        }
     }
 
     fn too_many_requests(detail: impl Into<Value>) -> Self {

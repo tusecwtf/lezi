@@ -165,16 +165,23 @@ data class AppUpdateMetadata(
 /**
  * High-level outcome of [SyncPort.checkAppUpdate].
  *
- * Forced-upgrade UX is ticket 03; this wave only surfaces optional updates when
- * the server package is newer than the local [ClientAppVersion.versionCode].
+ * Dual tier on integer versionCode only:
+ * - local &lt; minSupported → [ForcedUpdate]
+ * - minSupported ≤ local &lt; latest → [OptionalUpdate]
+ * - local ≥ latest → [UpToDate]
  */
 sealed interface AppUpdateCheckResult {
     /** Device has no usable family session; no anonymous update request is made. */
     data object NotJoined : AppUpdateCheckResult
     /** Local versionCode is at least the server package versionCode. */
     data object UpToDate : AppUpdateCheckResult
-    /** Server advertises a newer package; user may download and install. */
+    /** Server advertises a newer package; user may download and install later. */
     data class OptionalUpdate(val metadata: AppUpdateMetadata) : AppUpdateCheckResult
+    /**
+     * Local versionCode is below [AppUpdateMetadata.minSupportedVersionCode].
+     * Must surface non-dismissible force UI; optional "稍后" is not allowed.
+     */
+    data class ForcedUpdate(val metadata: AppUpdateMetadata) : AppUpdateCheckResult
 }
 
 /**
@@ -303,15 +310,24 @@ interface SyncPort {
 
     /**
      * Optional update discovered by foreground handshake/sync (or published after a
-     * successful manual check). Null when none, not joined, up-to-date, or the user
-     * dismissed that versionCode for this process session ("稍后").
+     * successful manual check). Null when none, not joined, up-to-date, forced, or the
+     * user dismissed that versionCode for this process session ("稍后").
      */
     fun availableOptionalAppUpdate(): Flow<AppUpdateMetadata?> =
         kotlinx.coroutines.flow.flowOf(null)
 
     /**
+     * Forced update when local versionCode is below minSupported (from check, handshake,
+     * or a server `client_update_required` rejection). Null when not forced.
+     * UI must not offer "稍后" for this state.
+     */
+    fun availableForcedAppUpdate(): Flow<AppUpdateMetadata?> =
+        kotlinx.coroutines.flow.flowOf(null)
+
+    /**
      * Process-session "稍后": hide the optional banner for [versionCode] until the
      * process dies. Does not block a later explicit [checkAppUpdate] dialog path.
+     * Does not apply to forced updates.
      */
     fun dismissOptionalAppUpdate(versionCode: Int) = Unit
 
@@ -386,6 +402,9 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
         Result.success(AppUpdateCheckResult.NotJoined)
 
     override fun availableOptionalAppUpdate(): Flow<AppUpdateMetadata?> =
+        kotlinx.coroutines.flow.flowOf(null)
+
+    override fun availableForcedAppUpdate(): Flow<AppUpdateMetadata?> =
         kotlinx.coroutines.flow.flowOf(null)
 
     override fun dismissOptionalAppUpdate(versionCode: Int) = Unit

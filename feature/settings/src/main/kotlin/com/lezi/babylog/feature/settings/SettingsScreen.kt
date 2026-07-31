@@ -90,6 +90,8 @@ import com.lezi.babylog.sync.ClientAppVersion
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.appUpdateInstallUiOutcome
 import com.lezi.babylog.sync.appUpdateUiOutcome
+import com.lezi.babylog.sync.forcedUpdateDialogBody
+import com.lezi.babylog.sync.forcedUpdateTitle
 import com.lezi.babylog.sync.localAppVersionLabel
 import com.lezi.babylog.sync.optionalUpdateDialogBody
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -227,6 +229,8 @@ class SettingsViewModel @Inject constructor(
 
     fun dismissAppUpdateOutcome() {
         val current = _appUpdateOutcome.value
+        // Forced updates cannot be dismissed ("稍后" is not allowed).
+        if (current is AppUpdateUiOutcome.ForcedUpdate) return
         if (current is AppUpdateUiOutcome.OptionalUpdate) {
             // "稍后" / dismiss: process-session suppress for handshake banner.
             syncPort.dismissOptionalAppUpdate(current.metadata.versionCode)
@@ -234,7 +238,7 @@ class SettingsViewModel @Inject constructor(
         _appUpdateOutcome.value = null
     }
 
-    /** Download → sha256 verify → PackageInstaller for an optional update. */
+    /** Download → sha256 verify → PackageInstaller for optional or forced update. */
     fun installOptionalUpdate(metadata: AppUpdateMetadata) {
         if (_installingAppUpdate.value) return
         viewModelScope.launch {
@@ -600,6 +604,26 @@ fun SettingsRoute(
                         enabled = !installingAppUpdate,
                     ) {
                         Text("稍后")
+                    }
+                },
+            )
+        }
+        is AppUpdateUiOutcome.ForcedUpdate -> {
+            // Non-dismissible: no "稍后", back/outside dismiss ignored.
+            AlertDialog(
+                onDismissRequest = {},
+                properties = DialogProperties(
+                    dismissOnBackPress = false,
+                    dismissOnClickOutside = false,
+                ),
+                title = { Text(forcedUpdateTitle()) },
+                text = { Text(forcedUpdateDialogBody(outcome.metadata)) },
+                confirmButton = {
+                    TextButton(
+                        onClick = { vm.installOptionalUpdate(outcome.metadata) },
+                        enabled = !installingAppUpdate,
+                    ) {
+                        Text(if (installingAppUpdate) "安装中…" else "立即更新")
                     }
                 },
             )

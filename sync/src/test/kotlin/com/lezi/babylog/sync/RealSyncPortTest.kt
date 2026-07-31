@@ -77,6 +77,7 @@ class RealSyncPortTest {
             versionCode = 7,
             versionName = "0.3.1",
             releaseNotes = "修复同步",
+            minSupportedVersionCode = 6,
         )
         val rig = SyncRig(
             session = joinedSession("family-a"),
@@ -88,6 +89,118 @@ class RealSyncPortTest {
         assertThat(rig.port.checkAppUpdate().getOrThrow())
             .isEqualTo(AppUpdateCheckResult.OptionalUpdate(metadata))
         assertThat(rig.port.availableOptionalAppUpdate().first()).isEqualTo(metadata)
+        assertThat(rig.port.availableForcedAppUpdate().first()).isNull()
+    }
+
+    @Test
+    fun checkAppUpdateReturnsForcedUpdateWhenLocalBelowMinSupported() = runTest {
+        val metadata = sampleAppUpdateMetadata(
+            versionCode = 9,
+            versionName = "0.4.0",
+            minSupportedVersionCode = 8,
+            releaseNotes = "破坏性同步合同",
+        )
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+        )
+        rig.awaitStartupRecovery()
+        rig.backend.appUpdateMetadata = metadata
+
+        assertThat(rig.port.checkAppUpdate().getOrThrow())
+            .isEqualTo(AppUpdateCheckResult.ForcedUpdate(metadata))
+        // Forced wins: optional banner must not also fire.
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
+        assertThat(rig.port.availableForcedAppUpdate().first()).isEqualTo(metadata)
+    }
+
+    @Test
+    fun forcedUpdateTakesPrecedenceOverOptionalEvenWhenLatestEqualsMinSupported() = runTest {
+        val metadata = sampleAppUpdateMetadata(
+            versionCode = 8,
+            versionName = "0.3.2",
+            minSupportedVersionCode = 8,
+        )
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 7, versionName = "0.3.1"),
+        )
+        rig.awaitStartupRecovery()
+        rig.backend.appUpdateMetadata = metadata
+
+        assertThat(rig.port.checkAppUpdate().getOrThrow())
+            .isEqualTo(AppUpdateCheckResult.ForcedUpdate(metadata))
+        assertThat(rig.port.availableForcedAppUpdate().first()).isEqualTo(metadata)
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
+    }
+
+    @Test
+    fun syncClientUpdateRequiredPublishesForcedUpdateWithoutVagueNetworkStatus() = runTest {
+        val metadata = sampleAppUpdateMetadata(
+            versionCode = 9,
+            versionName = "0.4.0",
+            minSupportedVersionCode = 8,
+        )
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+        )
+        rig.awaitStartupRecovery()
+        // First establish Idle so we can assert the gate does not leave Error as "NAS down".
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+
+        rig.backend.appUpdateMetadata = metadata
+        rig.backend.pullFailures += ClientUpdateRequiredException()
+
+        val result = rig.port.sync(SyncTrigger.PullToRefresh)
+        assertThat(result.isFailure).isTrue()
+        assertThat(result.exceptionOrNull())
+            .isInstanceOf(ClientUpdateRequiredException::class.java)
+        assertThat(rig.port.availableForcedAppUpdate().first()).isEqualTo(metadata)
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
+        // Status stays Idle so UI leads with force-upgrade, not a generic sync error.
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+    }
+
+    @Test
+    fun familySyncErrorMapsClientUpdateRequiredOutOfGenericHttpFailure() {
+        val mapped = familySyncError(
+            ClientUpdateRequiredException(),
+            fallback = "网络错误",
+        )
+        assertThat(mapped).isEqualTo("需要更新乐记后才能继续同步家庭数据")
+
+        val wire = familySyncError(
+            SyncHttpException(
+                statusCode = 403,
+                responseBody = """{"code":"client_update_required","detail":"too old"}""",
+            ),
+            fallback = "网络错误",
+        )
+        assertThat(wire).isEqualTo("需要更新乐记后才能继续同步家庭数据")
+    }
+
+    @Test
+    fun foregroundSyncDiscoversForcedAppUpdateWhenLocalBelowMinSupported() = runTest {
+        val metadata = sampleAppUpdateMetadata(
+            versionCode = 9,
+            versionName = "0.4.0",
+            minSupportedVersionCode = 8,
+        )
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+        )
+        rig.awaitStartupRecovery()
+        rig.backend.appUpdateMetadata = metadata
+
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+
+        assertThat(rig.backend.getAppUpdateMetadataCalls).isEqualTo(1)
+        assertThat(rig.port.availableForcedAppUpdate().first()).isEqualTo(metadata)
+        assertThat(rig.port.availableOptionalAppUpdate().first()).isNull()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
     }
 
     @Test
@@ -7212,11 +7325,12 @@ private fun sampleAppUpdateMetadata(
     versionName: String,
     releaseNotes: String? = null,
     sha256: String = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    minSupportedVersionCode: Int = 1,
 ) = AppUpdateMetadata(
     packageName = "com.lezi.babylog",
     versionCode = versionCode,
     versionName = versionName,
-    minSupportedVersionCode = 6,
+    minSupportedVersionCode = minSupportedVersionCode,
     sha256 = sha256,
     releaseNotes = releaseNotes,
 )

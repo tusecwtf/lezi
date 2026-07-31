@@ -717,6 +717,194 @@ async fn app_update_apk_missing_file_is_not_found() {
 }
 
 #[tokio::test]
+async fn client_update_required_rejects_pull_when_version_header_missing_or_below_min() {
+    let rig = Rig::new();
+    let apk_bytes = b"force-update-gate-apk-bytes";
+    let sha256 = hex::encode(Sha256::digest(apk_bytes));
+    let metadata = json!({
+        "package_name": "com.lezi.babylog",
+        "version_code": 9,
+        "version_name": "0.4.0",
+        "min_supported_version_code": 8,
+        "sha256": sha256,
+    });
+    fs::write(
+        rig.directory.path().join("app-update.json"),
+        metadata.to_string(),
+    )
+    .unwrap();
+    fs::write(rig.directory.path().join("app-release.apk"), apk_bytes).unwrap();
+
+    let owner = create_family(
+        &rig.app,
+        "client-update-gate-owner",
+        "client-update-gate-owner-request-00001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+
+    // Missing header → gate.
+    let (missing_status, missing_body) =
+        get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    assert_eq!(missing_status, StatusCode::FORBIDDEN, "{missing_body}");
+    assert_eq!(missing_body["code"], json!("client_update_required"));
+
+    // Below minSupported → gate.
+    let (low_status, low_body) = raw_json_request_with_headers(
+        &rig.app,
+        Method::GET,
+        "/v1/pull?cursor=0&generation=generation-a",
+        Some(token),
+        json!({}),
+        &[("x-lezi-client-version-code", "7")],
+    )
+    .await;
+    assert_eq!(low_status, StatusCode::FORBIDDEN, "{low_body}");
+    assert_eq!(low_body["code"], json!("client_update_required"));
+
+    // At minSupported → pull allowed.
+    let (ok_status, ok_body) = raw_json_request_with_headers(
+        &rig.app,
+        Method::GET,
+        "/v1/pull?cursor=0&generation=generation-a",
+        Some(token),
+        json!({}),
+        &[("x-lezi-client-version-code", "8")],
+    )
+    .await;
+    assert_eq!(ok_status, StatusCode::OK, "{ok_body}");
+    assert!(ok_body.get("entities").is_some(), "{ok_body}");
+
+    // Above minSupported → pull allowed.
+    let (high_status, high_body) = raw_json_request_with_headers(
+        &rig.app,
+        Method::GET,
+        "/v1/pull?cursor=0&generation=generation-a",
+        Some(token),
+        json!({}),
+        &[("x-lezi-client-version-code", "9")],
+    )
+    .await;
+    assert_eq!(high_status, StatusCode::OK, "{high_body}");
+
+    // Invalid header → same gate (not a generic 422).
+    let (invalid_status, invalid_body) = raw_json_request_with_headers(
+        &rig.app,
+        Method::GET,
+        "/v1/pull?cursor=0&generation=generation-a",
+        Some(token),
+        json!({}),
+        &[("x-lezi-client-version-code", "not-a-number")],
+    )
+    .await;
+    assert_eq!(invalid_status, StatusCode::FORBIDDEN, "{invalid_body}");
+    assert_eq!(invalid_body["code"], json!("client_update_required"));
+}
+
+#[tokio::test]
+async fn client_update_required_still_allows_authenticated_app_update_download() {
+    let rig = Rig::new();
+    let apk_bytes = b"force-update-allowlist-apk-bytes";
+    let sha256 = hex::encode(Sha256::digest(apk_bytes));
+    let metadata = json!({
+        "package_name": "com.lezi.babylog",
+        "version_code": 9,
+        "version_name": "0.4.0",
+        "min_supported_version_code": 8,
+        "sha256": sha256,
+        "release_notes": "破坏性同步合同",
+    });
+    fs::write(
+        rig.directory.path().join("app-update.json"),
+        metadata.to_string(),
+    )
+    .unwrap();
+    fs::write(rig.directory.path().join("app-release.apk"), apk_bytes).unwrap();
+
+    let owner = create_family(
+        &rig.app,
+        "client-update-allow-owner",
+        "client-update-allow-owner-request-0001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let low_version = [("x-lezi-client-version-code", "1")];
+
+    // Metadata and APK stay open for a below-min client so force-upgrade is not deadlocked.
+    let (meta_status, meta_body) = raw_json_request_with_headers(
+        &rig.app,
+        Method::GET,
+        "/v1/app-update",
+        Some(token),
+        json!({}),
+        &low_version,
+    )
+    .await;
+    assert_eq!(meta_status, StatusCode::OK, "{meta_body}");
+    assert_eq!(meta_body["version_code"], json!(9));
+    assert_eq!(meta_body["min_supported_version_code"], json!(8));
+
+    let apk_response = request_with_headers(
+        &rig.app,
+        Method::GET,
+        "/v1/app-update/apk",
+        Some(token),
+        Body::empty(),
+        None,
+        &low_version,
+    )
+    .await;
+    assert_eq!(apk_response.status(), StatusCode::OK);
+    let body = apk_response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.as_ref(), apk_bytes.as_slice());
+
+    // Bundle stage is gated the same as pull (gate runs before body validation).
+    let (bundle_status, bundle_body) = raw_json_request_with_headers(
+        &rig.app,
+        Method::POST,
+        "/v1/bundles",
+        Some(token),
+        json!({
+            "generation": "generation-a",
+            "bundle_id": "11111111-1111-4111-8111-111111111111",
+            "root": {
+                "client_uuid": "22222222-2222-4222-8222-222222222222",
+                "entity_type": "record",
+                "updated_at": 1,
+                "deleted_at": null,
+                "payload": {
+                    "type": "formula",
+                    "occurred_at": 1,
+                    "baby_client_uuid": "33333333-3333-4333-8333-333333333333",
+                    "amount_ml": 30
+                }
+            },
+            "media": []
+        }),
+        &low_version,
+    )
+    .await;
+    assert_eq!(bundle_status, StatusCode::FORBIDDEN, "{bundle_body}");
+    assert_eq!(bundle_body["code"], json!("client_update_required"));
+}
+
+#[tokio::test]
+async fn client_version_gate_fail_open_without_app_update_metadata() {
+    let rig = Rig::new();
+    let owner = create_family(
+        &rig.app,
+        "client-update-failopen-owner",
+        "client-update-failopen-owner-req-0001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+
+    // No app-update.json → do not brick sync for older deploys without an update channel.
+    let (status, body) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
 async fn legacy_invite_and_join_routes_are_absent() {
     let rig = Rig::new();
 

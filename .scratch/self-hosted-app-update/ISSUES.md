@@ -20,14 +20,13 @@
 |---|--------|------------|--------|
 | [01](./issues/01-check-update-metadata-about.md) | 已加入设备能检查是否有新版本 | — | done |
 | [02](./issues/02-optional-download-install-no-residue.md) | 可选更新：下载安装与无残留 | 01 | done |
-| [03](./issues/03-force-update-min-supported.md) | 强制升级：minSupported 与全屏 | 02 | ready-for-agent |
+| [03](./issues/03-force-update-min-supported.md) | 强制升级：minSupported 与全屏 | 02 | done |
 | [04](./issues/04-handshake-optional-banner.md) | 握手发现与可选横幅 | 01 | done |
 | [05](./issues/05-docs-and-e2e-acceptance.md) | 合同写回与 E2E 验收 | 02, 03, 04 | ready-for-agent |
 
 ## Frontier
 
-- **现在可领：** 03 与 04（∥）  
-- **02+03+04 完成后：** 05  
+- **现在可领：** 05（02+03+04 已完成）
 
 ## Explicitly deferred
 

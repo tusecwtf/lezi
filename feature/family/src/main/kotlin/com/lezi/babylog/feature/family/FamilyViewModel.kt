@@ -224,6 +224,8 @@ class FamilyViewModel @Inject constructor(
 
     fun dismissAppUpdateOutcome() {
         val current = _appUpdateOutcome.value
+        // Forced updates cannot be dismissed ("稍后" is not allowed).
+        if (current is AppUpdateUiOutcome.ForcedUpdate) return
         if (current is AppUpdateUiOutcome.OptionalUpdate) {
             sync.dismissOptionalAppUpdate(current.metadata.versionCode)
         }

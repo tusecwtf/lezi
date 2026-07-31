@@ -4,8 +4,11 @@ import com.lezi.babylog.sync.AppUpdateCheckResult
 import com.lezi.babylog.sync.AppUpdateInstallResult
 import com.lezi.babylog.sync.AppUpdateMetadata
 import com.lezi.babylog.sync.AppUpdateUiOutcome
+import com.lezi.babylog.sync.ClientUpdateRequiredException
 import com.lezi.babylog.sync.appUpdateInstallUiOutcome
 import com.lezi.babylog.sync.appUpdateUiOutcome
+import com.lezi.babylog.sync.forcedUpdateDialogBody
+import com.lezi.babylog.sync.forcedUpdateTitle
 import com.lezi.babylog.sync.localAppVersionLabel
 import com.lezi.babylog.sync.optionalUpdateDialogBody
 import org.junit.Assert.assertEquals
@@ -72,6 +75,42 @@ class AppUpdateCheckCopyTest {
             "发现新版本 0.3.1\n修复同步",
             optionalUpdateDialogBody(metadata),
         )
+    }
+
+    @Test
+    fun forcedUpdateSurfacesNonDismissibleCopy() {
+        val metadata = AppUpdateMetadata(
+            packageName = "com.lezi.babylog",
+            versionCode = 9,
+            versionName = "0.4.0",
+            minSupportedVersionCode = 8,
+            sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            releaseNotes = "破坏性同步合同",
+        )
+
+        val outcome = appUpdateUiOutcome(
+            Result.success(AppUpdateCheckResult.ForcedUpdate(metadata)),
+            failureCopy = { "网络错误" },
+        )
+
+        assertEquals(AppUpdateUiOutcome.ForcedUpdate(metadata), outcome)
+        assertEquals("必须更新乐记", forcedUpdateTitle())
+        assertEquals(
+            "当前版本过旧，须升级到 0.4.0 后才能继续同步家庭数据。\n破坏性同步合同",
+            forcedUpdateDialogBody(metadata),
+        )
+    }
+
+    @Test
+    fun clientUpdateRequiredFailureMapsToForceCopyNotNetworkFailure() {
+        val outcome = appUpdateUiOutcome(
+            Result.failure(ClientUpdateRequiredException()),
+            failureCopy = { "网络错误" },
+        )
+
+        assertTrue(outcome is AppUpdateUiOutcome.Message)
+        assertEquals("必须更新乐记", (outcome as AppUpdateUiOutcome.Message).title)
+        assertTrue(outcome.body.contains("需要更新乐记"))
     }
 
     @Test

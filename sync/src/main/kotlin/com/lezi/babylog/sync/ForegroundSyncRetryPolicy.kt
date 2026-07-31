@@ -10,10 +10,15 @@ internal object ForegroundSyncRetryPolicy {
     fun delayMillis(failure: Throwable, consecutiveFailures: Int): Long? {
         if (failure is CancellationException) return null
         val retryable = when (failure) {
+            // Force-upgrade is terminal until the user installs a newer APK.
+            is ClientUpdateRequiredException -> false
             is SyncHttpException ->
-                failure.statusCode == 408 ||
-                    failure.statusCode == 429 ||
-                    failure.statusCode in 500..599
+                syncHttpCodeOrNull(failure.responseBody) != "client_update_required" &&
+                    (
+                        failure.statusCode == 408 ||
+                            failure.statusCode == 429 ||
+                            failure.statusCode in 500..599
+                        )
             else -> failure.hasIoCause()
         }
         if (!retryable) return null
