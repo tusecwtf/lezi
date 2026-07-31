@@ -597,10 +597,10 @@ internal fun LogTimelineList(
                                     ),
                                 )
                                 .semantics {
-                                    contentDescription = if (publishLabel != null) {
-                                        "同步状态$title"
-                                    } else {
-                                        "编辑$title"
+                                    contentDescription = when {
+                                        publishLabel != null -> "同步状态$title"
+                                        canEditRecord -> "编辑$title"
+                                        else -> "无权编辑$title"
                                     }
                                 },
                         )

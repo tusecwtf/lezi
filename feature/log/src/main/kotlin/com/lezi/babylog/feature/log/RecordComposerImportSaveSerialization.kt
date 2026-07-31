@@ -85,6 +85,26 @@ internal class RecordComposerImportSaveSerialization {
     }
 
     /**
+     * Late produce under superseded/preempted epochs (not [activeEpoch]).
+     * Used after joining a cancelled prior import so the active epoch is preserved.
+     */
+    fun drainNonCurrentUnattached(): List<String> {
+        if (unattachedByEpoch.isEmpty()) return emptyList()
+        val current = activeEpoch
+        if (current == null) return drainUnattached()
+        val drained = mutableListOf<String>()
+        val iterator = unattachedByEpoch.entries.iterator()
+        while (iterator.hasNext()) {
+            val (epoch, paths) = iterator.next()
+            if (epoch != current) {
+                drained += paths
+                iterator.remove()
+            }
+        }
+        return drained
+    }
+
+    /**
      * Reclaim one import epoch's unattached paths (cancel, failure, stale late-produce).
      * Clears [activeEpoch] when it still matches.
      */

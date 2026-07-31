@@ -40,27 +40,39 @@ internal suspend fun runComposerPhotoImport(
     }
     // Prefer the successful return; fall back to callback accumulation if empty.
     val paths = if (imported.isNotEmpty()) imported else produced.toList()
-    importSave.markProduced(epoch, paths)
-    currentCoroutineContext().ensureActive()
-    if (!importSave.isCurrent(epoch)) {
+    try {
+        importSave.markProduced(epoch, paths)
+        // Cancel after write+markProduced must reclaim: ensureActive/attach can throw CE
+        // outside the import{} catch above (ticket 04 cancel-without-orphans).
+        currentCoroutineContext().ensureActive()
+        if (!importSave.isCurrent(epoch)) {
+            withContext(NonCancellable) {
+                val reclaim = importSave.reclaimEpoch(epoch).ifEmpty { paths }
+                if (reclaim.isNotEmpty()) delete(reclaim)
+            }
+            return
+        }
+        val attached = attach(paths)
+        if (!attached) {
+            withContext(NonCancellable) {
+                val reclaim = importSave.reclaimEpoch(epoch).ifEmpty { paths }
+                if (reclaim.isNotEmpty()) delete(reclaim)
+            }
+            return
+        }
+        // Attach may have markAttached; any leftover is still an orphan.
+        val leftover = importSave.reclaimEpoch(epoch)
+        if (leftover.isNotEmpty()) {
+            withContext(NonCancellable) { delete(leftover) }
+        }
+    } catch (cancelled: CancellationException) {
+        // Reclaim only map-tracked unattached paths. Do not fall back to [paths]:
+        // empty map means already attached or already reclaimed (avoid deleting draft).
         withContext(NonCancellable) {
-            val reclaim = importSave.reclaimEpoch(epoch).ifEmpty { paths }
+            val reclaim = importSave.reclaimEpoch(epoch)
             if (reclaim.isNotEmpty()) delete(reclaim)
         }
-        return
-    }
-    val attached = attach(paths)
-    if (!attached) {
-        withContext(NonCancellable) {
-            val reclaim = importSave.reclaimEpoch(epoch).ifEmpty { paths }
-            if (reclaim.isNotEmpty()) delete(reclaim)
-        }
-        return
-    }
-    // Attach may have markAttached; any leftover is still an orphan.
-    val leftover = importSave.reclaimEpoch(epoch)
-    if (leftover.isNotEmpty()) {
-        withContext(NonCancellable) { delete(leftover) }
+        throw cancelled
     }
 }
 

@@ -96,4 +96,24 @@ class RecordComposerImportSaveSerializationTest {
         assertEquals(listOf("/cache/late.jpg"), gate.reclaimEpoch(begin.epoch))
         assertTrue(gate.drainUnattached().isEmpty())
     }
+
+    @Test
+    fun drainNonCurrentUnattachedLeavesActiveEpochPaths() {
+        val first = requireNotNull(gate.beginImport())
+        // Supersede without prior produce.
+        val second = requireNotNull(gate.beginImport())
+        assertTrue(second.supersededUnattached.isEmpty())
+
+        // Late produce under superseded epoch + produce under active epoch.
+        gate.markProduced(first.epoch, listOf("/cache/late-superseded.jpg"))
+        gate.markProduced(second.epoch, listOf("/cache/current.jpg"))
+
+        assertEquals(
+            listOf("/cache/late-superseded.jpg"),
+            gate.drainNonCurrentUnattached(),
+        )
+        assertTrue(gate.isCurrent(second.epoch))
+        // Active epoch paths remain for attach or later preempt.
+        assertEquals(listOf("/cache/current.jpg"), gate.drainUnattached())
+    }
 }

@@ -323,8 +323,13 @@ class RecordComposerViewModel @Inject constructor(
         val slots = uris.take(RecordPhotoChrome.remainingSlots(draft.photos.size))
         importJob = viewModelScope.launch {
             previousImport?.join()
-            if (begin.supersededUnattached.isNotEmpty()) {
-                photoStore.delete(begin.supersededUnattached)
+            // beginImport already handed prior unattached via supersededUnattached; after
+            // join, also drain late produce that landed under a non-current epoch (e.g.
+            // markProduced after reclaimEpoch emptied the superseded slot).
+            val lateUnattached = importSave.drainNonCurrentUnattached()
+            val supersededOrphans = (begin.supersededUnattached + lateUnattached).distinct()
+            if (supersededOrphans.isNotEmpty()) {
+                photoStore.delete(supersededOrphans)
             }
             try {
                 runComposerPhotoImport(

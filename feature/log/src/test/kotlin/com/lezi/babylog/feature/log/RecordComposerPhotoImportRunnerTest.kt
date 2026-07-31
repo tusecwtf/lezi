@@ -2,10 +2,12 @@ package com.lezi.babylog.feature.log
 
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -153,6 +155,84 @@ class RecordComposerPhotoImportRunnerTest {
 
         assertEquals(listOf("/cache/first.jpg"), deleted)
         assertTrue(gate.drainUnattached().isEmpty())
+    }
+
+    @Test
+    fun cancellationAfterMarkProducedBeforeAttachReclaimsUnattachedPaths() = runBlocking {
+        val gate = RecordComposerImportSaveSerialization()
+        val begin = requireNotNull(gate.beginImport())
+        val deleted = mutableListOf<String>()
+        val parent = Job()
+
+        val failure = runCatching {
+            withContext(parent) {
+                runComposerPhotoImport(
+                    importSave = gate,
+                    epoch = begin.epoch,
+                    import = { onPath ->
+                        onPath("/cache/post-mark.jpg")
+                        // Cancel after disk write so import returns, markProduced runs,
+                        // then ensureActive throws CE outside the import{} catch.
+                        parent.cancel(CancellationException("cancel after write return"))
+                        listOf("/cache/post-mark.jpg")
+                    },
+                    delete = { deleted += it },
+                    attach = { error("must not attach after cancellation") },
+                )
+            }
+        }.exceptionOrNull()
+
+        assertTrue(failure is CancellationException)
+        assertEquals(listOf("/cache/post-mark.jpg"), deleted)
+        assertTrue(gate.drainUnattached().isEmpty())
+    }
+
+    @Test
+    fun supersededImportAfterJoinLeavesNoUnattachedOrphans() = runBlocking {
+        val gate = RecordComposerImportSaveSerialization()
+        val first = requireNotNull(gate.beginImport())
+        val deleted = mutableListOf<String>()
+        val allowFinish = Job()
+        val parent = Job()
+
+        val firstJob = async {
+            withContext(parent) {
+                runComposerPhotoImport(
+                    importSave = gate,
+                    epoch = first.epoch,
+                    import = { onPath ->
+                        // Stay suspended until a newer import has begun (map reclaimed empty).
+                        allowFinish.join()
+                        onPath("/cache/late-first.jpg")
+                        // Last-wins cancel after disk write: CE at ensureActive post-markProduced.
+                        parent.cancel(CancellationException("superseded by newer import"))
+                        listOf("/cache/late-first.jpg")
+                    },
+                    delete = { deleted += it },
+                    attach = { error("superseded must not attach") },
+                )
+            }
+        }
+
+        // Supersede before first write — beginImport reclaims empty map.
+        val second = requireNotNull(gate.beginImport())
+        assertTrue(second.supersededUnattached.isEmpty())
+        allowFinish.complete()
+        firstJob.join()
+
+        // ViewModel contract after join: also drain non-current late produce.
+        val late = gate.drainNonCurrentUnattached()
+        val orphans = (second.supersededUnattached + late).distinct()
+        if (orphans.isNotEmpty()) {
+            deleted += orphans
+        }
+
+        assertTrue(
+            "expected late-first reclaimed via runner and/or drainNonCurrent, deleted=$deleted",
+            deleted.contains("/cache/late-first.jpg"),
+        )
+        assertTrue(gate.drainUnattached().isEmpty())
+        assertTrue(gate.isCurrent(second.epoch))
     }
 
     @Test
