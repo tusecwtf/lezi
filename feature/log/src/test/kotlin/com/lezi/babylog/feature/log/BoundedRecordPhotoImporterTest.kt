@@ -175,6 +175,23 @@ class BoundedRecordPhotoImporterTest {
     }
 
     @Test
+    fun onPathCommittedFiresBeforeReturnSoCallerCanReclaimAfterDiscardedResult() = runBlocking {
+        val committed = mutableListOf<String>()
+        val importer = importer(temporaryFolder.root) {
+            RecordPhotoFileInspection("image/jpeg", 40, 30)
+        }
+
+        val paths = importer.import(
+            inputs = listOf(source("image/jpeg", 1), source("image/jpeg", 2)),
+            onPathCommitted = { committed += it },
+        )
+
+        assertEquals(paths, committed)
+        assertEquals(2, committed.size)
+        committed.forEach { assertTrue(File(it).isFile) }
+    }
+
+    @Test
     fun cancellationCleansEveryBatchFileAndTheSameImporterCanRetry() {
         val cancellation = CancellationException("picker closed")
         var shouldCancel = true

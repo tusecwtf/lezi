@@ -27,6 +27,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @HiltViewModel
 class RecordComposerViewModel @Inject constructor(
@@ -40,8 +41,10 @@ class RecordComposerViewModel @Inject constructor(
     private val sessionGate = RecordComposerSessionGate()
     private val savedState = RecordComposerSavedState(savedStateHandle)
     private val photoLifecycle = RecordComposerPhotoLifecycle(photoStore::delete)
+    private val importSave = RecordComposerImportSaveSerialization()
     private var loadJob: Job? = null
     private var actionJob: Job? = null
+    private var importJob: Job? = null
     private var settingsObserveJob: Job? = null
 
     internal fun open(request: RecordComposerRequest) {
@@ -50,11 +53,24 @@ class RecordComposerViewModel @Inject constructor(
         val restoredDraft = savedState.restore(request)
         val restoredInitialDraft = savedState.restoreInitial(request)
         val session = sessionGate.open()
+        val (openOrphans, previousImport) = beginImportPreemption()
+        importJob = null
         loadJob?.cancel()
         actionJob?.cancel()
         settingsObserveJob?.cancel()
         _state.value = RecordComposerUiState(activeRequest = request, loading = true)
         loadJob = viewModelScope.launch {
+            // Mirror save: join cancelled import before reset so late produce is reclaimed.
+            // NonCancellable so a rapid re-open cannot drop orphan cleanup mid-join.
+            withContext(NonCancellable) {
+                joinAndReclaimCancelledImport(
+                    importSave = importSave,
+                    preemptedOrphans = openOrphans,
+                    importJob = previousImport,
+                    delete = photoStore::delete,
+                )
+                importSave.reset()
+            }
             val settings = try {
                 settingsStore.settings.first()
             } catch (cancelled: CancellationException) {
@@ -249,7 +265,9 @@ class RecordComposerViewModel @Inject constructor(
     }
 
     internal fun close() {
-        cleanupUnpersistedPhotos(_state.value.draft ?: savedState.draftForCleanup())
+        val draftForCleanup = _state.value.draft ?: savedState.draftForCleanup()
+        val (preemptedOrphans, previousImport) = beginImportPreemption()
+        importJob = null
         savedState.clear()
         sessionGate.close()
         loadJob?.cancel()
@@ -259,6 +277,19 @@ class RecordComposerViewModel @Inject constructor(
         actionJob = null
         settingsObserveJob = null
         _state.value = RecordComposerUiState()
+        // Join import before reset/drain so cancel-after-write paths are not dropped.
+        viewModelScope.launch(NonCancellable) {
+            joinAndReclaimCancelledImport(
+                importSave = importSave,
+                preemptedOrphans = preemptedOrphans,
+                importJob = previousImport,
+                delete = photoStore::delete,
+            )
+            importSave.reset()
+            if (draftForCleanup != null) {
+                photoLifecycle.cleanupAbandoned(draftForCleanup)
+            }
+        }
     }
 
     internal fun updateDraft(draft: QuickRecordDraft) {
@@ -283,11 +314,44 @@ class RecordComposerViewModel @Inject constructor(
     internal fun importPhotos(uris: List<Uri>) {
         val draft = _state.value.draft ?: return
         if (uris.isEmpty()) return
+        if (!importSave.allowImport()) return
         val session = sessionGate.current() ?: return
-        actionJob = viewModelScope.launch {
-            val imported = try {
-                photoStore.import(
-                    uris.take(RecordPhotoChrome.remainingSlots(draft.photos.size)),
+        val begin = importSave.beginImport() ?: return
+        // Last-wins: cancel any prior in-flight import before starting this one.
+        val previousImport = importJob
+        previousImport?.cancel()
+        val slots = uris.take(RecordPhotoChrome.remainingSlots(draft.photos.size))
+        importJob = viewModelScope.launch {
+            previousImport?.join()
+            if (begin.supersededUnattached.isNotEmpty()) {
+                photoStore.delete(begin.supersededUnattached)
+            }
+            try {
+                runComposerPhotoImport(
+                    importSave = importSave,
+                    epoch = begin.epoch,
+                    import = { onPathCommitted ->
+                        photoStore.import(slots, onPathCommitted = onPathCommitted)
+                    },
+                    delete = photoStore::delete,
+                    attach = { imported ->
+                        var attached = false
+                        sessionGate.deliver(session) {
+                            if (!importSave.isCurrent(begin.epoch)) return@deliver
+                            val current = _state.value.draft ?: return@deliver
+                            _state.update {
+                                it.copy(
+                                    draft = photoLifecycle.imported(current, imported),
+                                    error = null,
+                                )
+                            }
+                            if (importSave.markAttached(begin.epoch)) {
+                                persistCurrentDraft()
+                                attached = true
+                            }
+                        }
+                        attached
+                    },
                 )
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -296,18 +360,6 @@ class RecordComposerViewModel @Inject constructor(
                 sessionGate.deliver(session) {
                     _state.update { it.copy(error = productUiError(error, "图片导入失败")) }
                 }
-                return@launch
-            }
-            currentCoroutineContext().ensureActive()
-            sessionGate.deliver(session) {
-                _state.update { state ->
-                    val current = state.draft ?: return@update state
-                    state.copy(
-                        draft = photoLifecycle.imported(current, imported),
-                        error = null,
-                    )
-                }
-                persistCurrentDraft()
             }
         }
     }
@@ -322,19 +374,35 @@ class RecordComposerViewModel @Inject constructor(
 
     internal fun save(onSaved: (message: String, suggestedNextFeedAt: Long?) -> Unit) {
         val snapshot = _state.value
-        val draft = snapshot.draft ?: return
+        val draftForValidation = snapshot.draft ?: return
         val babyId = snapshot.babyId ?: return
         if (snapshot.saving || snapshot.deleting) return
         val nowMillis = RecordTime.currentTimeMillis()
-        val validation = draft.validationError(nowMillis)
+        val validation = draftForValidation.validationError(nowMillis)
         if (validation != null) {
             _state.update { it.copy(error = validation) }
             return
         }
-        val writeDecision = draft.writeDecision(nowMillis)
         val session = sessionGate.current() ?: return
+        // Save-priority: lock imports, cancel in-flight import, then join+reclaim in the job.
+        val (preemptedOrphans, cancelledImport) = beginExclusiveCommit()
         _state.update { it.copy(saving = true, error = null) }
         actionJob = viewModelScope.launch {
+            joinAndReclaimCancelledImport(
+                importSave = importSave,
+                preemptedOrphans = preemptedOrphans,
+                importJob = cancelledImport,
+                delete = photoStore::delete,
+            )
+            importJob = null
+            // Re-read draft after import preemption so we never commit a half-applied import.
+            val draft = _state.value.draft
+            if (draft == null) {
+                importSave.endCommit()
+                _state.update { it.copy(saving = false) }
+                return@launch
+            }
+            val writeDecision = draft.writeDecision(RecordTime.currentTimeMillis())
             val message = try {
                 val command = draft.toSaveCommand()
                 when (writeDecision) {
@@ -477,9 +545,11 @@ class RecordComposerViewModel @Inject constructor(
                 }
                 message to suggestedNextFeedAt
             } catch (cancelled: CancellationException) {
+                importSave.endCommit()
                 throw cancelled
             } catch (error: Throwable) {
                 currentCoroutineContext().ensureActive()
+                importSave.endCommit()
                 sessionGate.deliver(session) {
                     _state.update {
                         it.copy(
@@ -506,6 +576,9 @@ class RecordComposerViewModel @Inject constructor(
                 savedState.clear()
                 onSaved(message.first, message.second)
             }
+            // Always clear commit lock — sheet close also resets, but a missed deliver
+            // must not leave import blocked.
+            importSave.endCommit()
         }
     }
 
@@ -555,8 +628,17 @@ class RecordComposerViewModel @Inject constructor(
         if (editPlanId == null && recordId == null) return
         if (snapshot.saving || snapshot.deleting) return
         val session = sessionGate.current() ?: return
+        // Same save-priority rule: delete preempts in-flight import and reclaims orphans.
+        val (preemptedOrphans, cancelledImport) = beginExclusiveCommit()
         _state.update { it.copy(deleting = true, error = null) }
         actionJob = viewModelScope.launch {
+            joinAndReclaimCancelledImport(
+                importSave = importSave,
+                preemptedOrphans = preemptedOrphans,
+                importJob = cancelledImport,
+                delete = photoStore::delete,
+            )
+            importJob = null
             try {
                 val deleted = if (editPlanId != null) {
                     careLog.deleteCarePlan(editPlanId)
@@ -567,9 +649,11 @@ class RecordComposerViewModel @Inject constructor(
                     if (editPlanId != null) "护理计划不存在或已删除" else "记录不存在或已删除"
                 }
             } catch (cancelled: CancellationException) {
+                importSave.endCommit()
                 throw cancelled
             } catch (error: Throwable) {
                 currentCoroutineContext().ensureActive()
+                importSave.endCommit()
                 sessionGate.deliver(session) {
                     _state.update {
                         it.copy(
@@ -585,12 +669,25 @@ class RecordComposerViewModel @Inject constructor(
                 savedState.clear()
                 onDeleted(if (editPlanId != null) "已删除护理计划" else "已删除记录")
             }
+            importSave.endCommit()
         }
     }
 
-    private fun cleanupUnpersistedPhotos(draft: QuickRecordDraft?) {
-        if (draft == null) return
-        viewModelScope.launch(NonCancellable) { photoLifecycle.cleanupAbandoned(draft) }
+    /**
+     * Cancel the active import job and return (orphans known so far, cancelled job).
+     * Does not join — callers must [joinAndReclaimCancelledImport] before reset/commit body.
+     */
+    private fun beginImportPreemption(): Pair<List<String>, Job?> {
+        val orphans = importSave.preemptImport()
+        val job = importJob
+        job?.cancel()
+        return orphans to job
+    }
+
+    /** Save/delete: lock imports + preempt import job. */
+    private fun beginExclusiveCommit(): Pair<List<String>, Job?> {
+        importSave.beginCommit()
+        return beginImportPreemption()
     }
 
     private fun persistCurrentDraft() {

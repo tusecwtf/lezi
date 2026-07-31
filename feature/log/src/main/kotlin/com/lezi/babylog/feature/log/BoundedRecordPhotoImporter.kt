@@ -28,7 +28,15 @@ class BoundedRecordPhotoImporter(
     private val ioContext: CoroutineContext = Dispatchers.IO,
     private val nextName: () -> String = { UUID.randomUUID().toString() },
 ) {
-    suspend fun import(inputs: List<RecordPhotoImportSource>): List<String> =
+    /**
+     * @param onPathCommitted invoked as soon as each absolute path is finalized on disk,
+     *   before the suspending return. Callers that must survive prompt cancellation of
+     *   [withContext] should accumulate these paths and reclaim them on [CancellationException].
+     */
+    suspend fun import(
+        inputs: List<RecordPhotoImportSource>,
+        onPathCommitted: ((String) -> Unit)? = null,
+    ): List<String> =
         withContext(ioContext) {
             require(inputs.size <= MAX_RECORD_PHOTOS) { "每条记录最多只能导入 $MAX_RECORD_PHOTOS 张图片" }
             if (inputs.isEmpty()) return@withContext emptyList()
@@ -66,7 +74,10 @@ class BoundedRecordPhotoImporter(
                     }
                     temporaryFiles.remove(temporary)
                     completedFiles += completed
-                    importedPaths += completed.absolutePath
+                    val absolutePath = completed.absolutePath
+                    importedPaths += absolutePath
+                    // Report before any further suspension so cancel-after-write still sees paths.
+                    onPathCommitted?.invoke(absolutePath)
                 }
                 importedPaths
             } catch (failure: Throwable) {

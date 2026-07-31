@@ -28,7 +28,7 @@ Post-0.3.1 re-verify only (no implement before gate)
 | [01](./issues/01-record-membership-acl.md) | 护理记录 membership ACL | immediate | — | done |
 | [02](./issues/02-close-future-fact-writes.md) | 事实写入关闭未来时间 | immediate | — | done |
 | [03](./issues/03-strip-next-feed-marker-on-fulfill.md) | 履行时剥离 next-feed note marker | immediate | 02 | ready-for-agent |
-| [04](./issues/04-composer-import-save-serialization.md) | Composer 选图与保存串行 | immediate | — | ready-for-agent |
+| [04](./issues/04-composer-import-save-serialization.md) | Composer 选图与保存串行 | immediate | — | done |
 | [05](./issues/05-join-session-durability-reverify.md) | Join 会话耐久顺序 | post-0.3.1 | 0.3.1 发布 | planned |
 | [06](./issues/06-auth-failure-taxonomy-reverify.md) | 鉴权失败与 leave 401 分类 | post-0.3.1 | 0.3.1 发布 | planned |
 | [07](./issues/07-leave-wipe-cross-family-reverify.md) | 离开/删家擦除与跨家庭隔离 | post-0.3.1 | 0.3.1 发布 | planned |
@@ -36,7 +36,7 @@ Post-0.3.1 re-verify only (no implement before gate)
 
 ## Frontier
 
-- **现在可领：** 03、04  
+- **现在可领：** 03  
 - **不要领：** 05–08（直至 0.3.1 复核）
 
 ## Explicitly deferred elsewhere

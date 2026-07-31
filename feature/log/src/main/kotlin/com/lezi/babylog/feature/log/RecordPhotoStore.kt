@@ -14,13 +14,20 @@ import kotlinx.coroutines.withContext
 class RecordPhotoStore @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
-    suspend fun import(uris: List<Uri>): List<String> = withContext(Dispatchers.IO) {
+    /**
+     * @param onPathCommitted see [BoundedRecordPhotoImporter.import] — used so Composer can
+     *   reclaim paths if this suspending call is cancelled after files land on disk.
+     */
+    suspend fun import(
+        uris: List<Uri>,
+        onPathCommitted: ((String) -> Unit)? = null,
+    ): List<String> = withContext(Dispatchers.IO) {
         val directory = File(context.filesDir, "record-media").apply { mkdirs() }
         BoundedRecordPhotoImporter(
             directory = directory,
             sniff = ::inspectImportedPhoto,
         ).import(
-            uris.map { uri ->
+            inputs = uris.map { uri ->
                 RecordPhotoImportSource(
                     declaredMime = context.contentResolver.getType(uri),
                     openStream = {
@@ -30,6 +37,7 @@ class RecordPhotoStore @Inject constructor(
                     },
                 )
             },
+            onPathCommitted = onPathCommitted,
         )
     }
 
