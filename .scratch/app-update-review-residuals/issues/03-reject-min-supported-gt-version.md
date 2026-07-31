@@ -4,15 +4,18 @@
 
 **Blocked by:** None — can start immediately
 
-**Status:** ready-for-agent
+**Status:** done
 
 ## Acceptance criteria
 
-- [ ] `package-nas`（或校验函数）在 `min_supported > version_code` 时非 0 退出；`version_code >= 1` 与服务器 normalize 一致
-- [ ] lezi-sync 加载/normalize 元数据时同样拒绝不一致组合（或启动/热加载失败并有明确日志）
-- [ ] 集成或单元测试覆盖：非法元数据不可作为有效更新通道启用
-- [ ] DEPLOY/runbook 一句说明该不变量
+- [x] `package-nas`（或校验函数）在 `min_supported > version_code` 时非 0 退出；`version_code >= 1` 与服务器 normalize 一致
+- [x] lezi-sync 加载/normalize 元数据时同样拒绝不一致组合（或启动/热加载失败并有明确日志）
+- [x] 集成或单元测试覆盖：非法元数据不可作为有效更新通道启用
+- [x] DEPLOY/runbook 一句说明该不变量
 
 ## Comments
 
 - Review: B3（correctness + security）
+- Implement: `normalize_app_update_metadata` rejects `min_supported > version_code` (500 detail); package-nas python validator fails closed with same rule + `version_code`/`min_supported` i32 bounds; unit + API tests; DEPLOY invariant sentence; load-path `tracing::error` on reject.
+- Evidence: [evidence/03/validation.md](../evidence/03/validation.md)
+- Fix r1: package-nas i32::MAX parity; normalize/load logging; get_app_update docs; evidence note. PRD tech.md line deferred to 06.

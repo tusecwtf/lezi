@@ -66,6 +66,10 @@ Metadata contract (`app-update.json`, snake_case):
 ```
 
 - `package_name` must be `com.lezi.babylog` (release applicationId only; **not** debug suffix).
+- `version_code` must be a positive 32-bit integer (`1..=2147483647`); `min_supported_version_code`
+  must be `0..=2147483647` and **must not exceed** `version_code` (package-nas and lezi-sync
+  both reject out-of-range codes and the deadlock case `min_supported > version_code` so
+  clients are never forced above the package on the channel).
 - `sha256` must match `sha256sum` of the APK byte-for-byte (64 lowercase hex).
 - Raise `min_supported_version_code` only for **breaking** client contracts; clients below that
   value get `code=client_update_required` on authoritative sync paths, but can still call the

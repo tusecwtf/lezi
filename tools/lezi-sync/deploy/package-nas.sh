@@ -90,6 +90,23 @@ for key in ("version_code", "min_supported_version_code"):
     value = data[key]
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise SystemExit(f"{key} must be a non-negative integer")
+# Align with lezi-sync normalize_app_update_metadata:
+# - version_code is a positive 32-bit integer (1..=i32::MAX)
+# - min_supported is 0..=i32::MAX and must not exceed version_code
+I32_MAX = 2**31 - 1
+if data["version_code"] < 1 or data["version_code"] > I32_MAX:
+    raise SystemExit(
+        f"version_code must be a positive 32-bit integer (1..={I32_MAX})"
+    )
+if data["min_supported_version_code"] > I32_MAX:
+    raise SystemExit(
+        f"min_supported_version_code is out of range (max {I32_MAX})"
+    )
+if data["min_supported_version_code"] > data["version_code"]:
+    raise SystemExit(
+        "min_supported_version_code must not exceed version_code "
+        f"({data['min_supported_version_code']} > {data['version_code']})"
+    )
 if not isinstance(data["version_name"], str) or not data["version_name"].strip():
     raise SystemExit("version_name must be a non-empty string")
 sha = data["sha256"]

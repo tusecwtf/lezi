@@ -558,8 +558,10 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<Value> {
 
 /// Authenticated app-update metadata for already-joined family devices.
 /// Loads deploy-readable JSON from [AppState::app_update_metadata_path]
-/// (default `{data_dir}/app-update.json`). Unauthenticated callers receive 401;
-/// missing or unreadable metadata is 404 so clients can fail honestly.
+/// (default `{data_dir}/app-update.json`). Unauthenticated callers receive 401.
+/// Missing file → 404 so clients can fail honestly; unreadable I/O, invalid JSON,
+/// or structurally illegal metadata (including `min_supported > version_code`) → 500
+/// as server misconfiguration (not a valid update channel).
 async fn get_app_update(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -624,13 +626,39 @@ fn load_app_update_metadata(path: &Path) -> Result<Value, ApiError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(ApiError::not_found("App update metadata is not available"));
         }
-        Err(_) => {
+        Err(error) => {
+            tracing::error!(
+                path = %path.display(),
+                error = %error,
+                "failed to read app update metadata"
+            );
             return Err(ApiError::internal("Failed to read app update metadata"));
         }
     };
-    let parsed: Value = serde_json::from_str(&raw)
-        .map_err(|_| ApiError::internal("App update metadata is invalid JSON"))?;
-    normalize_app_update_metadata(&parsed)
+    let parsed: Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(
+                path = %path.display(),
+                error = %error,
+                "app update metadata is invalid JSON"
+            );
+            return Err(ApiError::internal("App update metadata is invalid JSON"));
+        }
+    };
+    match normalize_app_update_metadata(&parsed) {
+        Ok(body) => Ok(body),
+        Err(error) => {
+            // Hand-edited /data/app-update.json misconfig (deadlock min>version, bad
+            // package_name, out-of-range codes, …) must show up in server logs.
+            tracing::error!(
+                path = %path.display(),
+                detail = %error.detail,
+                "app update metadata rejected"
+            );
+            Err(error)
+        }
+    }
 }
 
 fn normalize_app_update_metadata(value: &Value) -> Result<Value, ApiError> {
@@ -654,6 +682,13 @@ fn normalize_app_update_metadata(value: &Value) -> Result<Value, ApiError> {
     if min_supported_version_code > i32::MAX as u64 {
         return Err(ApiError::internal(
             "App update metadata min_supported_version_code is out of range",
+        ));
+    }
+    // Force floor above the package on the channel deadlocks clients: they must upgrade
+    // yet the "latest" APK cannot satisfy min_supported. Reject at load/normalize.
+    if min_supported_version_code > version_code {
+        return Err(ApiError::internal(
+            "App update metadata min_supported_version_code must not exceed version_code",
         ));
     }
     let sha256 = required_metadata_string(object, "sha256")?;
@@ -3016,5 +3051,34 @@ mod tests {
             Some(value) => std::env::set_var(key, value),
             None => std::env::remove_var(key),
         }
+    }
+
+    fn sample_app_update_metadata(version_code: u64, min_supported: u64) -> Value {
+        json!({
+            "package_name": "com.lezi.babylog",
+            "version_code": version_code,
+            "version_name": "0.3.1",
+            "min_supported_version_code": min_supported,
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        })
+    }
+
+    #[test]
+    fn normalize_app_update_metadata_rejects_min_supported_above_version_code() {
+        let error = normalize_app_update_metadata(&sample_app_update_metadata(7, 8))
+            .expect_err("min_supported > version_code must not load");
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            error.detail,
+            json!("App update metadata min_supported_version_code must not exceed version_code")
+        );
+    }
+
+    #[test]
+    fn normalize_app_update_metadata_allows_min_supported_equal_to_version_code() {
+        let body = normalize_app_update_metadata(&sample_app_update_metadata(7, 7))
+            .expect("min_supported == version_code is a legal force floor");
+        assert_eq!(body["version_code"], json!(7));
+        assert_eq!(body["min_supported_version_code"], json!(7));
     }
 }

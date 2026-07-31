@@ -618,6 +618,43 @@ async fn app_update_metadata_missing_file_is_not_found_for_authenticated_session
 }
 
 #[tokio::test]
+async fn app_update_metadata_rejects_min_supported_above_version_code() {
+    let rig = Rig::new();
+    // Deadlock config: force floor above the package on the channel — must not serve as
+    // a valid update channel (no 200 body clients would treat as installable latest).
+    let metadata = json!({
+        "package_name": "com.lezi.babylog",
+        "version_code": 7,
+        "version_name": "0.3.1",
+        "min_supported_version_code": 8,
+        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    });
+    fs::write(
+        rig.directory.path().join("app-update.json"),
+        metadata.to_string(),
+    )
+    .unwrap();
+
+    let owner = create_family(
+        &rig.app,
+        "app-update-min-gt-owner",
+        "app-update-min-gt-owner-request-00001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let (status, body) = get_json(&rig.app, "/v1/app-update", Some(token)).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(
+        body["detail"],
+        json!("App update metadata min_supported_version_code must not exceed version_code")
+    );
+
+    // Invalid channel also fail-opens the client version gate (do not brick sync forever).
+    let (pull_status, pull_body) = get_json(&rig.app, "/v1/pull?cursor=0", Some(token)).await;
+    assert_eq!(pull_status, StatusCode::OK, "{pull_body}");
+}
+
+#[tokio::test]
 async fn app_update_apk_requires_session_and_matches_metadata_sha256() {
     let rig = Rig::new();
     let apk_bytes = b"fake-lezi-release-apk-bytes-for-test";
