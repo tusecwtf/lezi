@@ -41,6 +41,8 @@ pub(crate) struct MigrateReport {
     pub discarded_staging_bundles: u64,
     pub discarded_bundle_media: u64,
     pub discarded_publications: u64,
+    /// Authority media files copied under dest `media/` (ticket 03 data-dir path).
+    pub media_files_copied: u64,
 }
 
 #[derive(Debug, Error)]
@@ -79,7 +81,7 @@ impl MigrateError {
         }
     }
 
-    fn authoritative_failure(
+    pub(crate) fn authoritative_failure(
         kind: AuthoritativeFailure,
         detail: impl Into<String>,
         report: MigrateReport,
@@ -155,7 +157,7 @@ pub(crate) fn migrate_v3_database(
     }
 }
 
-fn remove_db_files(path: &Path) {
+pub(crate) fn remove_db_files(path: &Path) {
     let _ = fs::remove_file(path);
     for suffix in ["-wal", "-shm"] {
         let _ = fs::remove_file(PathBuf::from(format!("{}{suffix}", path.display())));
