@@ -311,15 +311,19 @@ class FamilySessionCoordinatorTest {
     }
 
     @Test
-    fun ownerReauthResetsReceiptsOnlyWhenTheServerReturnsADifferentFamily() = runTest {
+    fun ownerReauthSkipsReceiptResetOnlyWhenReplicaIdentityIsUnchanged() = runTest {
         listOf(
-            "family-a" to false,
-            "family-b" to true,
-        ).forEach { (joinedFamilyId, expectedBoundaryCrossing) ->
+            Triple("family-a", "membership-owner" to FamilyRole.Owner, null),
+            Triple("family-a", "membership-prior" to FamilyRole.Owner, false),
+            Triple("family-a", "membership-owner" to FamilyRole.Member, false),
+            Triple("family-b", "membership-owner" to FamilyRole.Owner, true),
+        ).forEach { (joinedFamilyId, previousIdentity, expectedBoundaryCrossing) ->
             val previous = joinedFamilySession().copy(
                 accessToken = "",
                 refreshToken = "",
                 reauthRequired = true,
+                membershipId = previousIdentity.first,
+                role = previousIdentity.second,
             )
             val preferences = MemorySyncPreferences(previous)
             val backend = RecordingSyncBackend().apply {
@@ -339,13 +343,17 @@ class FamilySessionCoordinatorTest {
                 ),
             ).getOrThrow()
 
-            assertThat(replica.resetCalls).containsExactly(
-                ReceiptResetCall(
-                    previous = previous,
-                    invalidateCurrentReceipts = false,
-                    crossingFamilyBoundary = expectedBoundaryCrossing,
-                ),
-            )
+            if (expectedBoundaryCrossing == null) {
+                assertThat(replica.resetCalls).isEmpty()
+            } else {
+                assertThat(replica.resetCalls).containsExactly(
+                    ReceiptResetCall(
+                        previous = previous,
+                        invalidateCurrentReceipts = false,
+                        crossingFamilyBoundary = expectedBoundaryCrossing,
+                    ),
+                )
+            }
         }
     }
 

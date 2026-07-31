@@ -666,10 +666,18 @@ internal class FamilySessionCoordinator(
             familyName = joined.familyName?.trim()?.takeIf { it.isNotEmpty() },
             membershipId = joined.membershipId.trim(),
         )
-        replica.resetLocalSyncReceipts(
-            previous,
-            crossingFamilyBoundary = previous.familyId != session.familyId,
-        )
+        val replicaIdentityUnchanged =
+            previous.familyId.isNotBlank() &&
+                previous.familyId == session.familyId &&
+                previous.membershipId.isNotBlank() &&
+                previous.membershipId == session.membershipId &&
+                previous.role == session.role
+        if (!replicaIdentityUnchanged) {
+            replica.resetLocalSyncReceipts(
+                previous,
+                crossingFamilyBoundary = previous.familyId != session.familyId,
+            )
+        }
         if (joined.entities.isNotEmpty()) {
             replica.applyInitialEntities(session, joined.entities)
         }
