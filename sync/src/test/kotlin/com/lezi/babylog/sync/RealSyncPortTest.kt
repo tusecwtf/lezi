@@ -368,6 +368,9 @@ class RealSyncPortTest {
             appUpdateCacheDir = cacheDir,
         )
         rig.awaitStartupRecovery()
+        // Successful sync first so status is Idle (install failure must not poison it).
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
         rig.backend.appUpdateApkBytes = "tampered-or-corrupt-apk".toByteArray()
 
         val failure = rig.port.installAvailableAppUpdate(metadata).exceptionOrNull()
@@ -376,6 +379,8 @@ class RealSyncPortTest {
         assertThat(failure!!.message).contains("校验失败")
         assertThat(installer.installCalls).isEmpty()
         assertThat(appUpdateStagingApk(cacheDir).exists()).isFalse()
+        // Update install/verify failures surface only to update UI — not SyncStatus.Error.
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
     }
 
     @Test
@@ -395,6 +400,88 @@ class RealSyncPortTest {
         assertThat(result).isEqualTo(AppUpdateInstallResult.RequiresInstallPermission)
         assertThat(rig.backend.downloadAppUpdateApkCalls).isEqualTo(0)
         assertThat(installer.installCalls).isEmpty()
+    }
+
+    @Test
+    fun installAvailableAppUpdateDownloadFailureDoesNotPoisonSyncStatus() = runTest {
+        val metadata = sampleAppUpdateMetadata(versionCode = 7, versionName = "0.3.1")
+        val installer = RecordingAppUpdateInstaller()
+        val cacheDir = createTempDir(prefix = "lezi-app-update-dl-fail")
+        appUpdateStagingDir(cacheDir).mkdirs()
+        appUpdateStagingApk(cacheDir).writeText("stale")
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+            appUpdateInstaller = installer,
+            appUpdateCacheDir = cacheDir,
+        )
+        rig.awaitStartupRecovery()
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+        rig.backend.downloadAppUpdateApkFailure =
+            SyncHttpException(503, """{"detail":"update store unavailable"}""")
+
+        val failure = rig.port.installAvailableAppUpdate(metadata).exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(SyncHttpException::class.java)
+        assertThat(installer.installCalls).isEmpty()
+        assertThat(appUpdateStagingApk(cacheDir).exists()).isFalse()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+    }
+
+    @Test
+    fun installAvailableAppUpdateInstallerFailureDoesNotPoisonSyncStatus() = runTest {
+        val apkBytes = "lezi-release-apk-bytes".toByteArray(Charsets.UTF_8)
+        val metadata = sampleAppUpdateMetadata(
+            versionCode = 7,
+            versionName = "0.3.1",
+            sha256 = sha256Hex(apkBytes),
+        )
+        val installer = RecordingAppUpdateInstaller(
+            installFailure = IllegalStateException("PackageInstaller session failed"),
+        )
+        val cacheDir = createTempDir(prefix = "lezi-app-update-pi-fail")
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+            appUpdateInstaller = installer,
+            appUpdateCacheDir = cacheDir,
+        )
+        rig.awaitStartupRecovery()
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+        rig.backend.appUpdateApkBytes = apkBytes
+
+        val failure = rig.port.installAvailableAppUpdate(metadata).exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(IllegalStateException::class.java)
+        assertThat(failure!!.message).contains("PackageInstaller")
+        assertThat(installer.installCalls).hasSize(1)
+        assertThat(appUpdateStagingApk(cacheDir).exists()).isFalse()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+    }
+
+    @Test
+    fun installAvailableAppUpdateGateBlockedDoesNotMutateSyncStatus() = runTest {
+        val metadata = sampleAppUpdateMetadata(versionCode = 7, versionName = "0.3.1")
+        val installer = RecordingAppUpdateInstaller()
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+            appUpdateInstaller = installer,
+        )
+        rig.awaitStartupRecovery()
+        assertThat(rig.port.sync(SyncTrigger.Foreground).isSuccess).isTrue()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
+        // Background gate blocks install; must not flip joined chrome to Disabled/Error.
+        rig.foreground.setForeground(false)
+
+        val failure = rig.port.installAvailableAppUpdate(metadata).exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(ForegroundSyncBlockedException::class.java)
+        assertThat(rig.backend.downloadAppUpdateApkCalls).isEqualTo(0)
+        assertThat(installer.installCalls).isEmpty()
+        assertThat(rig.port.status().first()).isEqualTo(SyncStatus.Idle)
     }
 
     @Test
@@ -7003,6 +7090,7 @@ private fun realPortClearWorkflow(
 
 private class RecordingAppUpdateInstaller(
     private val canInstall: Boolean = true,
+    private val installFailure: Throwable? = null,
 ) : AppUpdateInstaller {
     data class InstallCall(
         val expectedPackageName: String,
@@ -7020,6 +7108,7 @@ private class RecordingAppUpdateInstaller(
             fileExistedAtCall = apkFile.isFile,
             byteSize = apkFile.length(),
         )
+        installFailure?.let { throw it }
     }
 
     override fun createManageUnknownSourcesIntent(): android.content.Intent =

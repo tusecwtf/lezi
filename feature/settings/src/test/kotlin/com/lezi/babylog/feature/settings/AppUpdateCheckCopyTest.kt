@@ -1,5 +1,6 @@
 package com.lezi.babylog.feature.settings
 
+import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.sync.AppUpdateCheckResult
 import com.lezi.babylog.sync.AppUpdateInstallResult
 import com.lezi.babylog.sync.AppUpdateMetadata
@@ -7,11 +8,13 @@ import com.lezi.babylog.sync.AppUpdateUiOutcome
 import com.lezi.babylog.sync.ClientUpdateRequiredException
 import com.lezi.babylog.sync.appUpdateInstallUiOutcome
 import com.lezi.babylog.sync.appUpdateUiOutcome
+import com.lezi.babylog.sync.familySyncError
 import com.lezi.babylog.sync.forcedUpdateDialogBody
 import com.lezi.babylog.sync.forcedUpdateTitle
 import com.lezi.babylog.sync.localAppVersionLabel
 import com.lezi.babylog.sync.optionalUpdateDialogBody
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -159,5 +162,29 @@ class AppUpdateCheckCopyTest {
             AppUpdateUiOutcome.Message(title = "更新失败", body = "校验失败"),
             outcome,
         )
+    }
+
+    @Test
+    fun installFailureTechnicalDetailUsesUpdateFallbackNotFamilySyncCopy() {
+        val technical = IllegalStateException("Failed to connect to /10.0.2.2:8765")
+        // Family/Settings install paths inject productUiError, not familySyncError.
+        val outcome = appUpdateInstallUiOutcome(
+            Result.failure(technical),
+            failureCopy = { error -> productUiError(error, "下载或安装失败，请稍后重试") },
+        )
+
+        assertEquals(
+            AppUpdateUiOutcome.Message(
+                title = "更新失败",
+                body = "下载或安装失败，请稍后重试",
+            ),
+            outcome,
+        )
+        // Contrasting family-session mapper still says NAS/sync is down — not for updates.
+        assertEquals(
+            "家庭同步服务暂未连接，请稍后重试",
+            familySyncError(technical, "下载或安装失败，请稍后重试"),
+        )
+        assertFalse((outcome as AppUpdateUiOutcome.Message).body.contains("家庭同步"))
     }
 }

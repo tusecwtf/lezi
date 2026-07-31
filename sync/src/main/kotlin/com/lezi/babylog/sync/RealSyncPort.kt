@@ -649,13 +649,17 @@ class RealSyncPort @Inject constructor(
         }
         // Starting install hides the optional banner for this version for the rest of the process.
         dismissOptionalAppUpdate(metadata.versionCode)
+        // Install/download/verify/gate failures surface only via Result — never mutate SyncStatus
+        // (mirror checkAppUpdate; do not call requireAllowed / updateFailureStatus).
         return runCatching {
             val decision = foregroundSyncGate.evaluate(
                 session.endpointConfig,
                 preferences.verifiedEndpoint.first(),
                 foregroundState.isForeground(),
             )
-            requireAllowed(decision)
+            if (decision != ForegroundSyncDecision.Allowed) {
+                throw ForegroundSyncBlockedException(decision)
+            }
             if (!appUpdateInstaller.canRequestPackageInstalls()) {
                 return@runCatching AppUpdateInstallResult.RequiresInstallPermission
             }
@@ -679,7 +683,7 @@ class RealSyncPort @Inject constructor(
                 // Always remove private staging after the attempt so no shareable APK remains.
                 cleanupAppUpdateStagingFiles(appUpdateCacheDir)
             }
-        }.onFailure(::updateFailureStatus)
+        }
     }
 
     override suspend fun cleanupAppUpdateStaging(): Result<Unit> = runCatching {

@@ -2,6 +2,7 @@ package com.lezi.babylog.feature.family
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.domain.BabyMergePreview
@@ -247,8 +248,9 @@ class FamilyViewModel @Inject constructor(
             )
             try {
                 val result = sync.installAvailableAppUpdate(metadata)
+                // Update install failures must not use family-sync/NAS copy (productUiError only).
                 _appUpdateOutcome.value = appUpdateInstallUiOutcome(result) { error ->
-                    familySyncError(error, "下载或安装失败，请稍后重试")
+                    productUiError(error, "下载或安装失败，请稍后重试")
                 }
             } finally {
                 _installingAppUpdate.value = false
