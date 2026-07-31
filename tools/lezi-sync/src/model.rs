@@ -508,7 +508,11 @@ impl BundleStageRequest {
     }
 }
 
-fn validate_bundle_media_for_root(root: &Entity, media: &[Entity]) -> Result<(), ApiError> {
+/// Shared by wire bundle validation and offline v3→current migrator.
+pub(crate) fn validate_bundle_media_for_root(
+    root: &Entity,
+    media: &[Entity],
+) -> Result<(), ApiError> {
     if matches!(
         root.entity_type.as_str(),
         "custom_item" | "fulfillment_candidate"

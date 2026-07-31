@@ -21,9 +21,11 @@ use crate::{PULL_ENTITY_TARGET_BYTES, PULL_PAGE_ENTITY_LIMIT, PULL_PAGE_TARGET_B
 
 const ENTITY_QUERY_CHUNK_SIZE: usize = 400;
 const NEXT_FEED_PLAN_MARKER: &str = "[[lezi:next-feed:v1]]";
-const DATABASE_SCHEMA_VERSION: i64 = 11;
+/// Current SQLite `PRAGMA user_version` / schema contract version.
+/// Offline migration inventory couples to this constant (must not drift).
+pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 11;
 const ACCESS_TOKEN_TTL_SECONDS: i64 = 15 * 60;
-const CURRENT_SCHEMA_SQL: &str = "
+pub(crate) const CURRENT_SCHEMA_SQL: &str = "
     CREATE TABLE families (
         id TEXT PRIMARY KEY,
         created_at INTEGER NOT NULL,
@@ -3941,7 +3943,10 @@ fn required_live_media_uuids(media: &[Entity]) -> Vec<String> {
         .collect()
 }
 
-fn bundle_content_hash(root: &Entity, media: &[Entity]) -> Result<String, StoreError> {
+/// Content hash for an atomic bundle (root + media entities).
+/// Shared by live commit paths and the offline v3→current migrator so integrity
+/// gates cannot drift.
+pub(crate) fn bundle_content_hash(root: &Entity, media: &[Entity]) -> Result<String, StoreError> {
     let payload = serde_json::json!({
         "root": root,
         "media": media,

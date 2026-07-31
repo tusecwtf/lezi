@@ -1,0 +1,1962 @@
+//! One-shot offline migrator: measured v3 `lezi.db` → current schema `lezi.db`.
+//!
+//! **Not** wired into server startup. Reads a backup source read-only; writes an
+//! independent dest via temp+rename so failures leave no copy-back-ready partial.
+//!
+//! Ticket 02 surface is library-level [`migrate_v3_database`] → [`Result`];
+//! process exit codes / CLI wiring are ticket 05. `Err(MigrateError::Authoritative)`
+//! is the fail-closed stand-in for non-zero exit.
+
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+use rusqlite::{params, Connection};
+use serde_json::{Map, Value};
+use thiserror::Error;
+use uuid::Uuid;
+
+use crate::model::{
+    normalized_display_name_key, validate_bundle_media_for_root, Entity, EntityValidationContext,
+    RawEntity,
+};
+use crate::store::{self, CURRENT_SCHEMA_SQL, DATABASE_SCHEMA_VERSION};
+use crate::DEFAULT_MAX_MEDIA_BYTES;
+
+use super::inventory::{
+    entity_validation_context, is_discarded_bundle_status, payload_validation_policy,
+    source_v3_tables, staging_cascade, target_only_empty_tables, AuthoritativeFailure,
+    StagingCascade, ALLOWED_ENTITY_TYPES, ALLOWED_MEDIA_PUBLICATION_SOURCES,
+    BUNDLE_STATUS_COMMITTED, SOURCE_USER_VERSION,
+};
+
+/// Human-oriented counters for the migration report (non-authoritative discards included).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct MigrateReport {
+    pub families: u64,
+    pub memberships: u64,
+    pub entities: u64,
+    pub committed_bundles: u64,
+    pub discarded_staging_bundles: u64,
+    pub discarded_bundle_media: u64,
+    pub discarded_publications: u64,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum MigrateError {
+    /// Authoritative abort: no copy-back-ready dest; includes partial report counters.
+    #[error("authoritative migration failure {kind:?}: {detail}")]
+    Authoritative {
+        kind: AuthoritativeFailure,
+        detail: String,
+        report: MigrateReport,
+    },
+    #[error("sqlite: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("json: {0}")]
+    Json(#[from] serde_json::Error),
+    /// Target-side / programmer invariant (not a source authoritative failure).
+    #[error("internal migration error: {0}")]
+    Internal(String),
+}
+
+impl MigrateError {
+    pub(crate) fn authoritative(&self) -> Option<AuthoritativeFailure> {
+        match self {
+            Self::Authoritative { kind, .. } => Some(*kind),
+            _ => None,
+        }
+    }
+
+    /// Partial report fragment when failure mode is authoritative abort.
+    pub(crate) fn report(&self) -> Option<&MigrateReport> {
+        match self {
+            Self::Authoritative { report, .. } => Some(report),
+            _ => None,
+        }
+    }
+
+    fn authoritative_failure(
+        kind: AuthoritativeFailure,
+        detail: impl Into<String>,
+        report: MigrateReport,
+    ) -> Self {
+        Self::Authoritative {
+            kind,
+            detail: detail.into(),
+            report,
+        }
+    }
+}
+
+/// Transform a v3 source database into a current-schema destination database.
+///
+/// - Source is opened read-only and never mutated.
+/// - Destination is written via a sibling temp file and renamed only on full success.
+/// - On failure the temp is deleted; a pre-existing dest is left untouched.
+pub(crate) fn migrate_v3_database(
+    source_db: &Path,
+    dest_db: &Path,
+) -> Result<MigrateReport, MigrateError> {
+    if !source_db.try_exists()? {
+        return Err(MigrateError::Io(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("source database missing: {}", source_db.display()),
+        )));
+    }
+
+    let source = Connection::open_with_flags(
+        source_db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    validate_source(&source)?;
+
+    let parent = dest_db.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let temp = temp_dest_path(dest_db);
+    remove_db_files(&temp);
+
+    let result = (|| {
+        let mut dest = Connection::open(&temp)?;
+        dest.execute_batch(
+            "
+            PRAGMA foreign_keys = ON;
+            PRAGMA journal_mode = DELETE;
+            ",
+        )?;
+        dest.execute_batch(CURRENT_SCHEMA_SQL)?;
+        dest.pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)?;
+
+        let report = transfer_all(&source, &mut dest)?;
+        dest.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        drop(dest);
+        Ok::<_, MigrateError>(report)
+    })();
+
+    match result {
+        Ok(report) => {
+            if let Err(error) = fs::rename(&temp, dest_db) {
+                remove_db_files(&temp);
+                return Err(MigrateError::Io(error));
+            }
+            // Best-effort cleanup of any leftover WAL beside dest.
+            for suffix in ["-wal", "-shm"] {
+                let _ = fs::remove_file(PathBuf::from(format!("{}{suffix}", dest_db.display())));
+            }
+            Ok(report)
+        }
+        Err(error) => {
+            remove_db_files(&temp);
+            Err(error)
+        }
+    }
+}
+
+fn remove_db_files(path: &Path) {
+    let _ = fs::remove_file(path);
+    for suffix in ["-wal", "-shm"] {
+        let _ = fs::remove_file(PathBuf::from(format!("{}{suffix}", path.display())));
+    }
+}
+
+fn temp_dest_path(dest_db: &Path) -> PathBuf {
+    let parent = dest_db.parent().unwrap_or_else(|| Path::new("."));
+    let name = dest_db
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("lezi.db");
+    parent.join(format!(".{name}.migrating"))
+}
+
+fn validate_source(source: &Connection) -> Result<(), MigrateError> {
+    let empty = MigrateReport::default();
+    let version: i64 = source.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version != SOURCE_USER_VERSION {
+        return Err(MigrateError::authoritative_failure(
+            AuthoritativeFailure::SourceUserVersionNotThree,
+            format!("found user_version={version}, expected {SOURCE_USER_VERSION}"),
+            empty,
+        ));
+    }
+
+    let mut stmt = source.prepare(
+        "
+        SELECT name FROM sqlite_master
+        WHERE type = 'table'
+          AND name NOT LIKE 'sqlite_%'
+        ",
+    )?;
+    let names: BTreeSet<String> = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    let allow: BTreeSet<&str> = source_v3_tables().iter().map(|t| t.name).collect();
+    for name in &names {
+        if !allow.contains(name.as_str()) {
+            return Err(MigrateError::authoritative_failure(
+                AuthoritativeFailure::UnknownSourceUserTable,
+                format!("unexpected user table `{name}`"),
+                empty,
+            ));
+        }
+    }
+    for table in source_v3_tables() {
+        if !names.contains(table.name) {
+            return Err(MigrateError::authoritative_failure(
+                AuthoritativeFailure::SourceShapeMismatch,
+                format!("missing allowlisted table `{}`", table.name),
+                empty,
+            ));
+        }
+        validate_table_shape(source, table.name, table.columns)?;
+    }
+    Ok(())
+}
+
+fn validate_table_shape(
+    source: &Connection,
+    table: &str,
+    expected: &[super::inventory::SourceColumn],
+) -> Result<(), MigrateError> {
+    let empty = MigrateReport::default();
+    let mut statement = source.prepare(&format!("PRAGMA table_info('{table}')"))?;
+    let rows: Vec<(String, String, bool, bool)> = statement
+        .query_map([], |row| {
+            let name: String = row.get(1)?;
+            let sql_type: String = row.get(2)?;
+            let not_null: i64 = row.get(3)?;
+            let pk: i64 = row.get(5)?;
+            Ok((name, sql_type, not_null != 0, pk != 0))
+        })?
+        .collect::<Result<_, _>>()?;
+    let found: BTreeSet<&str> = rows.iter().map(|(n, _, _, _)| n.as_str()).collect();
+    let want: BTreeSet<&str> = expected.iter().map(|c| c.name).collect();
+    if found != want {
+        return Err(MigrateError::authoritative_failure(
+            AuthoritativeFailure::SourceShapeMismatch,
+            format!("table `{table}` columns {found:?} != {want:?}"),
+            empty,
+        ));
+    }
+    for col in expected {
+        let row = rows
+            .iter()
+            .find(|(n, _, _, _)| n == col.name)
+            .expect("column present");
+        if row.1.to_uppercase() != col.sql_type.to_uppercase() {
+            return Err(MigrateError::authoritative_failure(
+                AuthoritativeFailure::SourceShapeMismatch,
+                format!(
+                    "table `{table}` column `{}` type {} != {}",
+                    col.name, row.1, col.sql_type
+                ),
+                empty,
+            ));
+        }
+        let effective_not_null = row.2 || row.3;
+        if effective_not_null != col.not_null {
+            return Err(MigrateError::authoritative_failure(
+                AuthoritativeFailure::SourceShapeMismatch,
+                format!("table `{table}` column `{}` not_null mismatch", col.name),
+                empty,
+            ));
+        }
+        if row.3 != col.primary_key {
+            return Err(MigrateError::authoritative_failure(
+                AuthoritativeFailure::SourceShapeMismatch,
+                format!("table `{table}` column `{}` pk mismatch", col.name),
+                empty,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn transfer_all(source: &Connection, dest: &mut Connection) -> Result<MigrateReport, MigrateError> {
+    // Staging cascade contract is locked in inventory (not free-form).
+    assert_eq!(
+        staging_cascade(),
+        StagingCascade::DropDependentsReportOrphanBytesIgnore
+    );
+
+    let tx = dest.transaction()?;
+    let mut report = MigrateReport::default();
+
+    let family_ids = copy_families(source, &tx, &mut report)?;
+    let membership_ids = copy_memberships(source, &tx, &family_ids, &mut report)?;
+    copy_family_meta(source, &tx, &family_ids, &report)?;
+    copy_entities(source, &tx, &family_ids, &mut report)?;
+
+    let BundlePartition {
+        retained,
+        discarded_staging,
+    } = partition_bundles(source, &family_ids, &membership_ids, &report)?;
+    report.discarded_staging_bundles = discarded_staging.len() as u64;
+    // Cleanup evidence: bundle_pending pubs on retained committed bundles (and
+    // matching sync_bundle_media) are report-only discards — never file authority.
+    let committed_pending_cleanup = collect_committed_pending_cleanup(source, &retained)?;
+    copy_sync_bundles(source, &tx, &retained, &membership_ids, &mut report)?;
+    report.discarded_bundle_media = copy_sync_bundle_media(
+        source,
+        &tx,
+        &retained,
+        &discarded_staging,
+        &committed_pending_cleanup,
+        &report,
+    )?;
+    report.discarded_publications = copy_media_publications(
+        source,
+        &tx,
+        &family_ids,
+        &retained,
+        &discarded_staging,
+        &committed_pending_cleanup,
+        &report,
+    )?;
+
+    // TargetOnlyEmpty session shells must remain empty (inventory-driven list).
+    for table in target_only_empty_tables() {
+        let count: i64 =
+            tx.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?;
+        if count != 0 {
+            return Err(MigrateError::Internal(format!(
+                "target session table `{table}` unexpectedly non-empty after migrate"
+            )));
+        }
+    }
+
+    tx.commit()?;
+    Ok(report)
+}
+
+fn copy_families(
+    source: &Connection,
+    dest: &rusqlite::Transaction<'_>,
+    report: &mut MigrateReport,
+) -> Result<BTreeSet<String>, MigrateError> {
+    let mut stmt = source
+        .prepare("SELECT id, created_at, create_request_hash, name FROM families ORDER BY id")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    let mut ids = BTreeSet::new();
+    for row in rows {
+        let (id, created_at, create_request_hash, name) = row?;
+        // owner_root_fingerprint TargetAdd — left NULL until ticket 04 sets root password.
+        dest.execute(
+            "
+            INSERT INTO families(id, created_at, create_request_hash, name, owner_root_fingerprint)
+            VALUES (?1, ?2, ?3, ?4, NULL)
+            ",
+            params![id, created_at, create_request_hash, name],
+        )?;
+        ids.insert(id);
+        report.families += 1;
+    }
+    Ok(ids)
+}
+
+fn copy_memberships(
+    source: &Connection,
+    dest: &rusqlite::Transaction<'_>,
+    family_ids: &BTreeSet<String>,
+    report: &mut MigrateReport,
+) -> Result<BTreeSet<String>, MigrateError> {
+    let mut stmt = source.prepare(
+        "
+        SELECT membership_id, family_id, role, display_name, left_at
+        FROM memberships
+        ORDER BY membership_id
+        ",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<i64>>(4)?,
+        ))
+    })?;
+
+    let mut membership_ids = BTreeSet::new();
+    let mut active_keys: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut active_owners: HashMap<String, u32> = HashMap::new();
+
+    for row in rows {
+        let (membership_id, family_id, role, display_name, left_at) = row?;
+        if !family_ids.contains(&family_id) {
+            return Err(MigrateError::authoritative_failure(
+                AuthoritativeFailure::OrphanAuthoritativeForeignKey,
+                format!("membership `{membership_id}` family `{family_id}` missing"),
+                report.clone(),
+            ));
+        }
+        if role != "owner" && role != "member" {
+            return Err(MigrateError::authoritative_failure(
+                AuthoritativeFailure::InvalidMembershipRole,
+                format!("membership `{membership_id}` role `{role}`"),
+                report.clone(),
+            ));
+        }
+        let display_name_key = normalized_display_name_key(&display_name);
+        if left_at.is_none() {
+            let keys = active_keys.entry(family_id.clone()).or_default();
+            if !keys.insert(display_name_key.clone()) {
+                return Err(MigrateError::authoritative_failure(
+                    AuthoritativeFailure::ActiveDisplayNameKeyConflict,
+                    format!(
+                        "family `{family_id}` active display_name_key `{display_name_key}` conflict"
+                    ),
+                    report.clone(),
+                ));
+            }
+            if role == "owner" {
+                // Pre-check before INSERT: target UNIQUE memberships_one_owner would
+                // otherwise surface dual-owner as MigrateError::Sqlite (non-authoritative).
+                let owners = active_owners.entry(family_id.clone()).or_default();
+                *owners += 1;
+                if *owners > 1 {
+                    return Err(MigrateError::authoritative_failure(
+                        AuthoritativeFailure::NotExactlyOneActiveOwner,
+                        format!("family `{family_id}` has {owners} active owners"),
+                        report.clone(),
+                    ));
+                }
+            }
+        }
+        dest.execute(
+            "
+            INSERT INTO memberships(
+                membership_id, family_id, role, display_name, display_name_key, left_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ",
+            params![
+                membership_id,
+                family_id,
+                role,
+                display_name,
+                display_name_key,
+                left_at
+            ],
+        )?;
+        membership_ids.insert(membership_id);
+        report.memberships += 1;
+    }
+
+    for family_id in family_ids {
+        let owners = active_owners.get(family_id).copied().unwrap_or(0);
+        if owners != 1 {
+            return Err(MigrateError::authoritative_failure(
+                AuthoritativeFailure::NotExactlyOneActiveOwner,
+                format!("family `{family_id}` has {owners} active owners"),
+                report.clone(),
+            ));
+        }
+    }
+    Ok(membership_ids)
+}
+
+fn copy_family_meta(
+    source: &Connection,
+    dest: &rusqlite::Transaction<'_>,
+    family_ids: &BTreeSet<String>,
+    report: &MigrateReport,
+) -> Result<(), MigrateError> {
+    let mut stmt = source.prepare("SELECT family_id, rev FROM family_meta")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    let mut seen = BTreeSet::new();
+    for row in rows {
+        let (family_id, rev) = row?;
+        if !family_ids.contains(&family_id) {
+            return Err(MigrateError::authoritative_failure(
+                AuthoritativeFailure::OrphanAuthoritativeForeignKey,
+                format!("family_meta for missing family `{family_id}`"),
+                report.clone(),
+            ));
+        }
+        dest.execute(
+            "INSERT INTO family_meta(family_id, rev) VALUES (?1, ?2)",
+            params![family_id, rev],
+        )?;
+        seen.insert(family_id);
+    }
+    for family_id in family_ids {
+        if !seen.contains(family_id) {
+            return Err(MigrateError::authoritative_failure(
+                AuthoritativeFailure::FamilyMetaMissingForFamily,
+                format!("family `{family_id}` lacks family_meta"),
+                report.clone(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn copy_entities(
+    source: &Connection,
+    dest: &rusqlite::Transaction<'_>,
+    family_ids: &BTreeSet<String>,
+    report: &mut MigrateReport,
+) -> Result<(), MigrateError> {
+    let policy = payload_validation_policy();
+    let known: BTreeSet<&str> = ALLOWED_ENTITY_TYPES.iter().copied().collect();
+    let mut stmt = source.prepare(
+        "
+        SELECT family_id, entity_type, client_uuid, updated_at, deleted_at, payload_json, rev
+        FROM entities
+        ORDER BY family_id, entity_type, client_uuid
+        ",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, Option<i64>>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, i64>(6)?,
+        ))
+    })?;
+
+    for row in rows {
+        let (family_id, entity_type, client_uuid, updated_at, deleted_at, payload_json, rev) = row?;
+        if !family_ids.contains(&family_id) {
+            return Err(MigrateError::authoritative_failure(
+                AuthoritativeFailure::OrphanAuthoritativeForeignKey,
+                format!("entity family `{family_id}` missing"),
+                report.clone(),
+            ));
+        }
+        if !known.contains(entity_type.as_str()) {
+            return Err(MigrateError::authoritative_failure(
+                AuthoritativeFailure::UnknownEntityType,
+                format!("entity_type `{entity_type}`"),
+                report.clone(),
+            ));
+        }
+        let client_uuid_parsed = Uuid::parse_str(&client_uuid).map_err(|e| {
+            MigrateError::authoritative_failure(
+                AuthoritativeFailure::PayloadValidationFailed,
+                format!("entity client_uuid `{client_uuid}`: {e}"),
+                report.clone(),
+            )
+        })?;
+        let payload: Map<String, Value> = serde_json::from_str(&payload_json).map_err(|e| {
+            MigrateError::authoritative_failure(
+                AuthoritativeFailure::PayloadValidationFailed,
+                format!("entity `{entity_type}/{client_uuid}` payload parse: {e}"),
+                report.clone(),
+            )
+        })?;
+
+        let is_tombstone = deleted_at.is_some();
+        let out_payload = if is_tombstone && !policy.validate_tombstones {
+            // Inventory can flip this only by amending payload_validation_policy.
+            payload_json
+        } else {
+            let raw = RawEntity {
+                entity_type: entity_type.clone(),
+                client_uuid: client_uuid_parsed,
+                updated_at,
+                deleted_at,
+                payload,
+            };
+            let context = entity_validation_context(&entity_type);
+            let validated = raw
+                .validate_as(DEFAULT_MAX_MEDIA_BYTES, context)
+                .map_err(|e| {
+                    MigrateError::authoritative_failure(
+                        AuthoritativeFailure::PayloadValidationFailed,
+                        format!("entity `{entity_type}/{client_uuid}`: {e:?}"),
+                        report.clone(),
+                    )
+                })?;
+            if policy.persist_canonical_payload {
+                serde_json::to_string(&validated.payload)?
+            } else {
+                payload_json
+            }
+        };
+
+        dest.execute(
+            "
+            INSERT INTO entities(
+                family_id, entity_type, client_uuid, updated_at, deleted_at, payload_json, rev
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ",
+            params![
+                family_id,
+                entity_type,
+                client_uuid,
+                updated_at,
+                deleted_at,
+                out_payload,
+                rev
+            ],
+        )?;
+        report.entities += 1;
+    }
+    Ok(())
+}
+
+struct BundlePartition {
+    retained: BTreeSet<(String, String)>,
+    discarded_staging: BTreeSet<(String, String)>,
+}
+
+/// Single scan: partition sync_bundles by inventory row filter.
+fn partition_bundles(
+    source: &Connection,
+    family_ids: &BTreeSet<String>,
+    membership_ids: &BTreeSet<String>,
+    report: &MigrateReport,
+) -> Result<BundlePartition, MigrateError> {
+    let mut stmt = source.prepare(
+        "
+        SELECT family_id, bundle_id, status, staged_membership_id
+        FROM sync_bundles
+        ",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    let mut retained = BTreeSet::new();
+    let mut discarded_staging = BTreeSet::new();
+    for row in rows {
+        let (family_id, bundle_id, status, staged_membership_id) = row?;
+        if !family_ids.contains(&family_id) {
+            return Err(MigrateError::authoritative_failure(
+                AuthoritativeFailure::OrphanAuthoritativeForeignKey,
+                format!("bundle `{bundle_id}` family `{family_id}` missing"),
+                report.clone(),
+            ));
+        }
+        if is_discarded_bundle_status(&status) {
+            discarded_staging.insert((family_id, bundle_id));
+            continue;
+        }
+        if status != BUNDLE_STATUS_COMMITTED {
+            return Err(MigrateError::authoritative_failure(
+                AuthoritativeFailure::SourceConstrainedValueInvalid,
+                format!("bundle `{bundle_id}` status `{status}`"),
+                report.clone(),
+            ));
+        }
+        if !membership_ids.contains(&staged_membership_id) {
+            return Err(MigrateError::authoritative_failure(
+                AuthoritativeFailure::OrphanAuthoritativeForeignKey,
+                format!(
+                    "bundle `{bundle_id}` staged_membership_id `{staged_membership_id}` missing"
+                ),
+                report.clone(),
+            ));
+        }
+        retained.insert((family_id, bundle_id));
+    }
+    Ok(BundlePartition {
+        retained,
+        discarded_staging,
+    })
+}
+
+fn copy_sync_bundles(
+    source: &Connection,
+    dest: &rusqlite::Transaction<'_>,
+    retained: &BTreeSet<(String, String)>,
+    membership_ids: &BTreeSet<String>,
+    report: &mut MigrateReport,
+) -> Result<(), MigrateError> {
+    let policy = payload_validation_policy();
+    let mut stmt = source.prepare(
+        "
+        SELECT family_id, bundle_id, staged_membership_id, status, root_type,
+               root_client_uuid, root_updated_at, root_deleted_at, root_payload_json,
+               media_entities_json, content_hash, created_at, committed_at,
+               committed_cursor, committed_applied
+        FROM sync_bundles
+        WHERE status = ?1
+        ORDER BY family_id, bundle_id
+        ",
+    )?;
+    let rows = stmt.query_map(params![BUNDLE_STATUS_COMMITTED], |row| {
+        Ok(BundleRow {
+            family_id: row.get(0)?,
+            bundle_id: row.get(1)?,
+            staged_membership_id: row.get(2)?,
+            status: row.get(3)?,
+            root_type: row.get(4)?,
+            root_client_uuid: row.get(5)?,
+            root_updated_at: row.get(6)?,
+            root_deleted_at: row.get(7)?,
+            root_payload_json: row.get(8)?,
+            media_entities_json: row.get(9)?,
+            content_hash: row.get(10)?,
+            created_at: row.get(11)?,
+            committed_at: row.get(12)?,
+            committed_cursor: row.get(13)?,
+            committed_applied: row.get(14)?,
+        })
+    })?;
+
+    for row in rows {
+        let row = row?;
+        if !retained.contains(&(row.family_id.clone(), row.bundle_id.clone())) {
+            continue;
+        }
+        if !membership_ids.contains(&row.staged_membership_id) {
+            return Err(MigrateError::authoritative_failure(
+                AuthoritativeFailure::OrphanAuthoritativeForeignKey,
+                format!(
+                    "bundle `{}` staged_membership_id `{}`",
+                    row.bundle_id, row.staged_membership_id
+                ),
+                report.clone(),
+            ));
+        }
+
+        let root_uuid = Uuid::parse_str(&row.root_client_uuid).map_err(|e| {
+            MigrateError::authoritative_failure(
+                AuthoritativeFailure::PayloadValidationFailed,
+                format!("bundle `{}` root uuid: {e}", row.bundle_id),
+                report.clone(),
+            )
+        })?;
+        let root_payload: Map<String, Value> = serde_json::from_str(&row.root_payload_json)
+            .map_err(|e| {
+                MigrateError::authoritative_failure(
+                    AuthoritativeFailure::PayloadValidationFailed,
+                    format!("bundle `{}` root payload: {e}", row.bundle_id),
+                    report.clone(),
+                )
+            })?;
+        let root_raw = RawEntity {
+            entity_type: row.root_type.clone(),
+            client_uuid: root_uuid,
+            updated_at: row.root_updated_at,
+            deleted_at: row.root_deleted_at,
+            payload: root_payload,
+        };
+        let context = entity_validation_context(&row.root_type);
+        if matches!(context, EntityValidationContext::AtomicBundleMedia) {
+            return Err(MigrateError::authoritative_failure(
+                AuthoritativeFailure::UnknownEntityType,
+                format!("bundle `{}` root_type media", row.bundle_id),
+                report.clone(),
+            ));
+        }
+        let canonical_root = root_raw
+            .validate_as(
+                DEFAULT_MAX_MEDIA_BYTES,
+                EntityValidationContext::AtomicBundleRoot,
+            )
+            .map_err(|e| {
+                MigrateError::authoritative_failure(
+                    AuthoritativeFailure::PayloadValidationFailed,
+                    format!("bundle `{}` root: {e:?}", row.bundle_id),
+                    report.clone(),
+                )
+            })?;
+
+        let media_value: Value = serde_json::from_str(&row.media_entities_json).map_err(|e| {
+            MigrateError::authoritative_failure(
+                AuthoritativeFailure::MediaEntitiesJsonInvalid,
+                format!("bundle `{}` media_entities_json parse: {e}", row.bundle_id),
+                report.clone(),
+            )
+        })?;
+        let media_arr = media_value.as_array().ok_or_else(|| {
+            MigrateError::authoritative_failure(
+                AuthoritativeFailure::MediaEntitiesJsonInvalid,
+                format!("bundle `{}` media_entities_json not array", row.bundle_id),
+                report.clone(),
+            )
+        })?;
+        let mut canonical_media = Vec::with_capacity(media_arr.len());
+        for (idx, item) in media_arr.iter().enumerate() {
+            let entity: Entity = serde_json::from_value(item.clone()).map_err(|e| {
+                MigrateError::authoritative_failure(
+                    AuthoritativeFailure::MediaEntitiesJsonInvalid,
+                    format!("bundle `{}` media[{idx}]: {e}", row.bundle_id),
+                    report.clone(),
+                )
+            })?;
+            let media_uuid = Uuid::parse_str(&entity.client_uuid).map_err(|e| {
+                MigrateError::authoritative_failure(
+                    AuthoritativeFailure::MediaEntitiesJsonInvalid,
+                    format!("bundle `{}` media uuid: {e}", row.bundle_id),
+                    report.clone(),
+                )
+            })?;
+            let raw = RawEntity {
+                entity_type: entity.entity_type.clone(),
+                client_uuid: media_uuid,
+                updated_at: entity.updated_at,
+                deleted_at: entity.deleted_at,
+                payload: entity.payload,
+            };
+            let validated = raw
+                .validate_as(
+                    DEFAULT_MAX_MEDIA_BYTES,
+                    EntityValidationContext::AtomicBundleMedia,
+                )
+                .map_err(|e| {
+                    MigrateError::authoritative_failure(
+                        AuthoritativeFailure::MediaEntitiesJsonInvalid,
+                        format!("bundle `{}` media: {e:?}", row.bundle_id),
+                        report.clone(),
+                    )
+                })?;
+            canonical_media.push(validated);
+        }
+        if policy.validate_media_entities_json {
+            validate_bundle_media_for_root(&canonical_root, &canonical_media).map_err(|e| {
+                MigrateError::authoritative_failure(
+                    AuthoritativeFailure::MediaEntitiesJsonInvalid,
+                    format!("bundle `{}` media/root consistency: {e:?}", row.bundle_id),
+                    report.clone(),
+                )
+            })?;
+        }
+
+        let root_payload_out = if policy.persist_canonical_payload {
+            serde_json::to_string(&canonical_root.payload)?
+        } else {
+            row.root_payload_json.clone()
+        };
+        let media_out = if policy.persist_canonical_payload {
+            serde_json::to_string(&canonical_media)?
+        } else {
+            row.media_entities_json.clone()
+        };
+
+        if policy.recompute_content_hash {
+            let recomputed = store::bundle_content_hash(&canonical_root, &canonical_media)
+                .map_err(|e| MigrateError::Internal(format!("content hash: {e}")))?;
+            if recomputed != row.content_hash {
+                return Err(MigrateError::authoritative_failure(
+                    AuthoritativeFailure::ContentHashMismatchAfterCanonicalize,
+                    format!(
+                        "bundle `{}` content_hash stored={} recomputed={}",
+                        row.bundle_id, row.content_hash, recomputed
+                    ),
+                    report.clone(),
+                ));
+            }
+        }
+
+        dest.execute(
+            "
+            INSERT INTO sync_bundles(
+                family_id, bundle_id, staged_membership_id, status, root_type,
+                root_client_uuid, root_updated_at, root_deleted_at, root_payload_json,
+                media_entities_json, content_hash, created_at, committed_at,
+                committed_cursor, committed_applied
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5,
+                ?6, ?7, ?8, ?9,
+                ?10, ?11, ?12, ?13,
+                ?14, ?15
+            )
+            ",
+            params![
+                row.family_id,
+                row.bundle_id,
+                row.staged_membership_id,
+                row.status,
+                row.root_type,
+                row.root_client_uuid,
+                row.root_updated_at,
+                row.root_deleted_at,
+                root_payload_out,
+                media_out,
+                row.content_hash,
+                row.created_at,
+                row.committed_at,
+                row.committed_cursor,
+                row.committed_applied,
+            ],
+        )?;
+        report.committed_bundles += 1;
+    }
+    Ok(())
+}
+
+struct BundleRow {
+    family_id: String,
+    bundle_id: String,
+    staged_membership_id: String,
+    status: String,
+    root_type: String,
+    root_client_uuid: String,
+    root_updated_at: i64,
+    root_deleted_at: Option<i64>,
+    root_payload_json: String,
+    media_entities_json: String,
+    content_hash: String,
+    created_at: i64,
+    committed_at: Option<i64>,
+    committed_cursor: Option<i64>,
+    committed_applied: Option<i64>,
+}
+
+/// `(family_id, bundle_id, media_uuid)` triples for `source=bundle_pending`
+/// publications whose bundle is a retained committed bundle — cleanup evidence
+/// only (mirrors live `finalize_committed_pending_bundle_media`).
+fn collect_committed_pending_cleanup(
+    source: &Connection,
+    retained_bundles: &BTreeSet<(String, String)>,
+) -> Result<BTreeSet<(String, String, String)>, MigrateError> {
+    let mut stmt = source.prepare(
+        "
+        SELECT family_id, media_uuid, source, bundle_id
+        FROM media_publications
+        ",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    let mut cleanup = BTreeSet::new();
+    for row in rows {
+        let (family_id, media_uuid, source_kind, bundle_id) = row?;
+        if source_kind != "bundle_pending" {
+            continue;
+        }
+        let Some(bid) = bundle_id else {
+            // NULL bundle_id for bundle_pending fails later in copy_media_publications.
+            continue;
+        };
+        if retained_bundles.contains(&(family_id.clone(), bid.clone())) {
+            cleanup.insert((family_id, bid, media_uuid));
+        }
+    }
+    Ok(cleanup)
+}
+
+fn copy_sync_bundle_media(
+    source: &Connection,
+    dest: &rusqlite::Transaction<'_>,
+    retained: &BTreeSet<(String, String)>,
+    discarded_staging: &BTreeSet<(String, String)>,
+    committed_pending_cleanup: &BTreeSet<(String, String, String)>,
+    report: &MigrateReport,
+) -> Result<u64, MigrateError> {
+    let mut stmt = source.prepare(
+        "
+        SELECT family_id, bundle_id, media_uuid, declared_byte_size,
+               staged_byte_size, staged_sha256, staged_at
+        FROM sync_bundle_media
+        ",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<i64>>(3)?,
+            row.get::<_, Option<i64>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<i64>>(6)?,
+        ))
+    })?;
+    let mut discarded = 0u64;
+    for row in rows {
+        let (family_id, bundle_id, media_uuid, declared, staged_size, staged_sha, staged_at) = row?;
+        let key = (family_id.clone(), bundle_id.clone());
+        if discarded_staging.contains(&key) {
+            discarded += 1;
+            continue;
+        }
+        if committed_pending_cleanup.contains(&(
+            family_id.clone(),
+            bundle_id.clone(),
+            media_uuid.clone(),
+        )) {
+            // Matching loser / incomplete-cleanup pending on committed: report-only.
+            discarded += 1;
+            continue;
+        }
+        if !retained.contains(&key) {
+            return Err(MigrateError::authoritative_failure(
+                AuthoritativeFailure::OrphanAuthoritativeForeignKey,
+                format!("sync_bundle_media for missing bundle `{bundle_id}`"),
+                report.clone(),
+            ));
+        }
+        dest.execute(
+            "
+            INSERT INTO sync_bundle_media(
+                family_id, bundle_id, media_uuid, declared_byte_size,
+                staged_byte_size, staged_sha256, staged_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ",
+            params![
+                family_id,
+                bundle_id,
+                media_uuid,
+                declared,
+                staged_size,
+                staged_sha,
+                staged_at
+            ],
+        )?;
+    }
+    Ok(discarded)
+}
+
+/// StagingCascade steps 3–5:
+/// - discard publications whose bundle_id is in discarded-staging (any source);
+/// - discard `source=bundle_pending` on retained committed (cleanup evidence);
+/// - keep `source=ordinary`;
+/// - keep `source=bundle` only when bundle_id points at a retained committed bundle;
+/// - fail closed on orphan bundle references and on bundle* with NULL bundle_id.
+fn copy_media_publications(
+    source: &Connection,
+    dest: &rusqlite::Transaction<'_>,
+    family_ids: &BTreeSet<String>,
+    retained_bundles: &BTreeSet<(String, String)>,
+    discarded_staging: &BTreeSet<(String, String)>,
+    committed_pending_cleanup: &BTreeSet<(String, String, String)>,
+    report: &MigrateReport,
+) -> Result<u64, MigrateError> {
+    let allowed_sources: BTreeSet<&str> =
+        ALLOWED_MEDIA_PUBLICATION_SOURCES.iter().copied().collect();
+    let mut stmt = source.prepare(
+        "
+        SELECT family_id, media_uuid, source, bundle_id
+        FROM media_publications
+        ",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    let mut discarded = 0u64;
+    for row in rows {
+        let (family_id, media_uuid, source_kind, bundle_id) = row?;
+        if !family_ids.contains(&family_id) {
+            return Err(MigrateError::authoritative_failure(
+                AuthoritativeFailure::OrphanAuthoritativeForeignKey,
+                format!("publication family `{family_id}` missing"),
+                report.clone(),
+            ));
+        }
+        if !allowed_sources.contains(source_kind.as_str()) {
+            return Err(MigrateError::authoritative_failure(
+                AuthoritativeFailure::SourceConstrainedValueInvalid,
+                format!("publication source `{source_kind}`"),
+                report.clone(),
+            ));
+        }
+
+        if let Some(ref bid) = bundle_id {
+            let key = (family_id.clone(), bid.clone());
+            if discarded_staging.contains(&key) {
+                discarded += 1;
+                continue;
+            }
+            if source_kind == "bundle_pending"
+                && committed_pending_cleanup.contains(&(
+                    family_id.clone(),
+                    bid.clone(),
+                    media_uuid.clone(),
+                ))
+            {
+                discarded += 1;
+                continue;
+            }
+        }
+
+        let keep = if source_kind == "ordinary" {
+            true
+        } else if source_kind == "bundle_pending" {
+            // Remaining bundle_pending must not land on retained committed (handled above).
+            // Orphan / non-retained non-staging → fail closed.
+            match &bundle_id {
+                Some(bid) => {
+                    // Staging already continued; committed pending already continued.
+                    // Any other retained status is impossible (only committed retained).
+                    // Non-retained non-staging is orphan.
+                    let _ = bid;
+                    false
+                }
+                None => {
+                    return Err(MigrateError::authoritative_failure(
+                        AuthoritativeFailure::OrphanAuthoritativeForeignKey,
+                        format!(
+                            "publication `{media_uuid}` source `{source_kind}` missing bundle_id"
+                        ),
+                        report.clone(),
+                    ));
+                }
+            }
+        } else {
+            // source=bundle: require retained committed bundle_id
+            match &bundle_id {
+                Some(bid) => retained_bundles.contains(&(family_id.clone(), bid.clone())),
+                None => {
+                    return Err(MigrateError::authoritative_failure(
+                        AuthoritativeFailure::OrphanAuthoritativeForeignKey,
+                        format!(
+                            "publication `{media_uuid}` source `{source_kind}` missing bundle_id"
+                        ),
+                        report.clone(),
+                    ));
+                }
+            }
+        };
+        if !keep {
+            return Err(MigrateError::authoritative_failure(
+                AuthoritativeFailure::OrphanAuthoritativeForeignKey,
+                format!("publication `{media_uuid}` source `{source_kind}` bundle_id not retained"),
+                report.clone(),
+            ));
+        }
+
+        dest.execute(
+            "
+            INSERT INTO media_publications(family_id, media_uuid, source, bundle_id)
+            VALUES (?1, ?2, ?3, ?4)
+            ",
+            params![family_id, media_uuid, source_kind, bundle_id],
+        )?;
+    }
+    Ok(discarded)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::offline_migrate::inventory::{
+        target_only_empty_tables, BUNDLE_STATUS_STAGING, SOURCE_V3_SCHEMA_SQL,
+    };
+    use crate::store::{Store, DATABASE_SCHEMA_VERSION};
+    use rusqlite::Connection;
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    fn open_v3_fixture(path: &Path) -> Connection {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute_batch(SOURCE_V3_SCHEMA_SQL).unwrap();
+        conn.pragma_update(None, "user_version", 3i64).unwrap();
+        conn
+    }
+
+    fn seed_minimal_family(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO families(id, created_at, create_request_hash, name) VALUES (?1, 100, NULL, '我家')",
+            params!["fam-1"],
+        )
+        .unwrap();
+        conn.execute(
+            "
+            INSERT INTO memberships(membership_id, family_id, role, device_id, display_name, left_at)
+            VALUES ('mem-owner', 'fam-1', 'owner', 'dev-old-1', '爸爸', NULL)
+            ",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "
+            INSERT INTO memberships(membership_id, family_id, role, device_id, display_name, left_at)
+            VALUES ('mem-member', 'fam-1', 'member', 'dev-old-2', '妈妈', NULL)
+            ",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO family_meta(family_id, rev) VALUES ('fam-1', 7)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO membership_credentials(token_hash, membership_id, revoked_at) VALUES ('th1', 'mem-owner', NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO invites(code_hash, family_id, expires_at, used_at, joined_device_id) VALUES ('ih1', 'fam-1', 999, NULL, NULL)",
+            [],
+        )
+        .unwrap();
+    }
+
+    fn baby_payload() -> String {
+        serde_json::to_string(&json!({
+            "nickname": "年年",
+            "sex": null,
+            "birthday": "2025-01-02",
+            "avatar_media_uuid": null,
+            "birth_weight_grams": null,
+        }))
+        .unwrap()
+    }
+
+    fn seed_baby_entity(conn: &Connection) {
+        conn.execute(
+            "
+            INSERT INTO entities(
+                family_id, entity_type, client_uuid, updated_at, deleted_at, payload_json, rev
+            ) VALUES (
+                'fam-1', 'baby', '11111111-1111-1111-1111-111111111111',
+                200, NULL, ?1, 1
+            )
+            ",
+            params![baby_payload()],
+        )
+        .unwrap();
+    }
+
+    fn record_payload(baby_uuid: &str) -> Map<String, Value> {
+        json!({
+            "baby_client_uuid": baby_uuid,
+            "type": "formula",
+            "custom_item_client_uuid": null,
+            "timestamp": 300,
+            "end_timestamp": null,
+            "note": null,
+            "payload_json": {"amount_ml": 120},
+            "schema_version": 2,
+        })
+        .as_object()
+        .unwrap()
+        .clone()
+    }
+
+    fn canonical_record_bundle_parts() -> (Entity, Vec<Entity>, String, String, String) {
+        let baby = "11111111-1111-1111-1111-111111111111";
+        let root_uuid = "22222222-2222-2222-2222-222222222222";
+        let raw = RawEntity {
+            entity_type: "record".to_owned(),
+            client_uuid: Uuid::parse_str(root_uuid).unwrap(),
+            updated_at: 300,
+            deleted_at: None,
+            payload: record_payload(baby),
+        };
+        let canonical = raw
+            .validate_as(
+                DEFAULT_MAX_MEDIA_BYTES,
+                EntityValidationContext::AtomicBundleRoot,
+            )
+            .unwrap();
+        let media: Vec<Entity> = vec![];
+        let content_hash = store::bundle_content_hash(&canonical, &media).unwrap();
+        let root_payload_json = serde_json::to_string(&canonical.payload).unwrap();
+        let media_json = serde_json::to_string(&media).unwrap();
+        (
+            canonical,
+            media,
+            content_hash,
+            root_payload_json,
+            media_json,
+        )
+    }
+
+    fn seed_committed_record_bundle(conn: &Connection) {
+        let root_uuid = "22222222-2222-2222-2222-222222222222";
+        let (_canonical, _media, content_hash, root_payload_json, media_json) =
+            canonical_record_bundle_parts();
+
+        conn.execute(
+            "
+            INSERT INTO sync_bundles(
+                family_id, bundle_id, staged_membership_id, status, root_type,
+                root_client_uuid, root_updated_at, root_deleted_at, root_payload_json,
+                media_entities_json, content_hash, created_at, committed_at,
+                committed_cursor, committed_applied
+            ) VALUES (
+                'fam-1', 'bundle-committed', 'mem-owner', 'committed', 'record',
+                ?1, 300, NULL, ?2,
+                ?3, ?4, 300, 301,
+                2, 1
+            )
+            ",
+            params![root_uuid, root_payload_json, media_json, content_hash],
+        )
+        .unwrap();
+        // Committed bundle_media retained.
+        conn.execute(
+            "
+            INSERT INTO sync_bundle_media(
+                family_id, bundle_id, media_uuid, declared_byte_size,
+                staged_byte_size, staged_sha256, staged_at
+            ) VALUES ('fam-1', 'bundle-committed', '33333333-3333-3333-3333-333333333333', 12, 12, 'abc', 300)
+            ",
+            [],
+        )
+        .unwrap();
+        // Ordinary publication kept (null bundle_id).
+        conn.execute(
+            "
+            INSERT INTO media_publications(family_id, media_uuid, source, bundle_id)
+            VALUES ('fam-1', '44444444-4444-4444-4444-444444444444', 'ordinary', NULL)
+            ",
+            [],
+        )
+        .unwrap();
+        // Staging cascade discards.
+        conn.execute(
+            "
+            INSERT INTO sync_bundles(
+                family_id, bundle_id, staged_membership_id, status, root_type,
+                root_client_uuid, root_updated_at, root_deleted_at, root_payload_json,
+                media_entities_json, content_hash, created_at, committed_at,
+                committed_cursor, committed_applied
+            ) VALUES (
+                'fam-1', 'bundle-staging', 'mem-owner', ?1, 'record',
+                ?2, 400, NULL, ?3,
+                '[]', 'deadbeef', 400, NULL,
+                NULL, NULL
+            )
+            ",
+            params![BUNDLE_STATUS_STAGING, root_uuid, root_payload_json],
+        )
+        .unwrap();
+        conn.execute(
+            "
+            INSERT INTO sync_bundle_media(
+                family_id, bundle_id, media_uuid, declared_byte_size,
+                staged_byte_size, staged_sha256, staged_at
+            ) VALUES ('fam-1', 'bundle-staging', 'm-stage', 1, NULL, NULL, NULL)
+            ",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "
+            INSERT INTO media_publications(family_id, media_uuid, source, bundle_id)
+            VALUES ('fam-1', 'm-stage', 'bundle_pending', 'bundle-staging')
+            ",
+            [],
+        )
+        .unwrap();
+    }
+
+    fn assert_dest_unwritten(dest: &Path) {
+        assert!(
+            !dest.exists() || {
+                // sentinel-only case handled by callers
+                true
+            }
+        );
+        assert!(!temp_dest_path(dest).exists());
+    }
+
+    #[test]
+    fn migrate_success_opens_with_current_preflight_and_keeps_business_rows() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let dest = dir.path().join("out").join("lezi.db");
+
+        {
+            let conn = open_v3_fixture(&source);
+            seed_minimal_family(&conn);
+            seed_baby_entity(&conn);
+            seed_committed_record_bundle(&conn);
+        }
+
+        let report = migrate_v3_database(&source, &dest).expect("migrate");
+        assert_eq!(report.families, 1);
+        assert_eq!(report.memberships, 2);
+        assert_eq!(report.entities, 1);
+        assert_eq!(report.committed_bundles, 1);
+        assert_eq!(report.discarded_staging_bundles, 1);
+        assert_eq!(report.discarded_bundle_media, 1);
+        assert_eq!(report.discarded_publications, 1);
+
+        Store::preflight_existing_schema(&dest).expect("preflight");
+        let store = Store::open(&dest).expect("open");
+        store.health_check().expect("health");
+
+        let conn = Connection::open(&dest).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, DATABASE_SCHEMA_VERSION);
+
+        let family_name: String = conn
+            .query_row("SELECT name FROM families WHERE id = 'fam-1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(family_name, "我家");
+
+        let (role, display_name, display_name_key): (String, String, String) = conn
+            .query_row(
+                "SELECT role, display_name, display_name_key FROM memberships WHERE membership_id = 'mem-owner'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(role, "owner");
+        assert_eq!(display_name, "爸爸");
+        assert_eq!(display_name_key, normalized_display_name_key("爸爸"));
+
+        let has_device_id: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('memberships') WHERE name = 'device_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_device_id, 0);
+
+        let bundle_statuses: Vec<String> = conn
+            .prepare("SELECT status FROM sync_bundles")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(bundle_statuses, vec!["committed".to_owned()]);
+
+        // Inventory TargetOnlyEmpty shells all empty.
+        for table in target_only_empty_tables() {
+            let n: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{table} must be empty");
+        }
+        for table in ["invites", "membership_credentials"] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    params![table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 0, "{table} must not exist on target");
+        }
+
+        // Retained committed bundle_media + ordinary publication.
+        let media_uuid: String = conn
+            .query_row(
+                "SELECT media_uuid FROM sync_bundle_media WHERE bundle_id = 'bundle-committed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(media_uuid, "33333333-3333-3333-3333-333333333333");
+        let ordinary: (String, Option<String>) = conn
+            .query_row(
+                "SELECT source, bundle_id FROM media_publications WHERE media_uuid = '44444444-4444-4444-4444-444444444444'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(ordinary.0, "ordinary");
+        assert!(ordinary.1.is_none());
+        // Staging pub discarded.
+        let staging_pubs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM media_publications WHERE media_uuid = 'm-stage'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(staging_pubs, 0);
+
+        let src = Connection::open(&source).unwrap();
+        let src_version: i64 = src
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(src_version, 3);
+        let creds: i64 = src
+            .query_row("SELECT COUNT(*) FROM membership_credentials", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(creds, 1);
+    }
+
+    #[test]
+    fn migrate_fail_closed_on_missing_active_owner_does_not_write_dest() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let dest = dir.path().join("out").join("lezi.db");
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        fs::write(&dest, b"preexisting-sentinel").unwrap();
+
+        {
+            let conn = open_v3_fixture(&source);
+            conn.execute(
+                "INSERT INTO families(id, created_at, create_request_hash, name) VALUES ('fam-1', 1, NULL, 'x')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "
+                INSERT INTO memberships(membership_id, family_id, role, device_id, display_name, left_at)
+                VALUES ('mem-1', 'fam-1', 'member', 'd1', 'A', NULL)
+                ",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO family_meta(family_id, rev) VALUES ('fam-1', 0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let err = migrate_v3_database(&source, &dest).expect_err("must fail");
+        assert_eq!(
+            err.authoritative(),
+            Some(AuthoritativeFailure::NotExactlyOneActiveOwner)
+        );
+        assert!(err.report().is_some());
+        assert!(!temp_dest_path(&dest).exists());
+        assert_eq!(fs::read(&dest).unwrap(), b"preexisting-sentinel");
+    }
+
+    #[test]
+    fn migrate_fail_closed_on_dual_active_owner_is_authoritative_not_sqlite() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let dest = dir.path().join("out").join("lezi.db");
+        fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        fs::write(&dest, b"preexisting-sentinel").unwrap();
+
+        {
+            let conn = open_v3_fixture(&source);
+            // Source v3 has no memberships_one_owner UNIQUE — dual active owners possible.
+            conn.execute(
+                "INSERT INTO families(id, created_at, create_request_hash, name) VALUES ('fam-1', 1, NULL, 'x')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "
+                INSERT INTO memberships(membership_id, family_id, role, device_id, display_name, left_at)
+                VALUES ('mem-owner-a', 'fam-1', 'owner', 'd1', '爸爸', NULL)
+                ",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "
+                INSERT INTO memberships(membership_id, family_id, role, device_id, display_name, left_at)
+                VALUES ('mem-owner-b', 'fam-1', 'owner', 'd2', '妈妈', NULL)
+                ",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO family_meta(family_id, rev) VALUES ('fam-1', 0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let err = migrate_v3_database(&source, &dest).expect_err("must fail");
+        assert_eq!(
+            err.authoritative(),
+            Some(AuthoritativeFailure::NotExactlyOneActiveOwner),
+            "dual owner must not surface as MigrateError::Sqlite: {err:?}"
+        );
+        assert!(err.report().is_some());
+        assert!(!temp_dest_path(&dest).exists());
+        assert_eq!(fs::read(&dest).unwrap(), b"preexisting-sentinel");
+    }
+
+    #[test]
+    fn migrate_discards_committed_bundle_pending_cleanup_evidence_without_failing() {
+        // Leftover LWW-loser / incomplete-cleanup: source=bundle_pending on a
+        // retained committed bundle (+ matching sync_bundle_media). Live server
+        // treats these as non-servable cleanup; migrate report-only discards them
+        // so ticket 03 does not treat them as file authority.
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let dest = dir.path().join("out").join("lezi.db");
+
+        let pending_media = "55555555-5555-5555-5555-555555555555";
+        let authority_media = "33333333-3333-3333-3333-333333333333";
+
+        {
+            let conn = open_v3_fixture(&source);
+            seed_minimal_family(&conn);
+            seed_baby_entity(&conn);
+            seed_committed_record_bundle(&conn);
+            // Extra cleanup leftover on the committed bundle (in addition to
+            // the retained authority media + staging cascade rows from seed).
+            conn.execute(
+                "
+                INSERT INTO sync_bundle_media(
+                    family_id, bundle_id, media_uuid, declared_byte_size,
+                    staged_byte_size, staged_sha256, staged_at
+                ) VALUES ('fam-1', 'bundle-committed', ?1, 4, 4, 'dead', 301)
+                ",
+                params![pending_media],
+            )
+            .unwrap();
+            conn.execute(
+                "
+                INSERT INTO media_publications(family_id, media_uuid, source, bundle_id)
+                VALUES ('fam-1', ?1, 'bundle_pending', 'bundle-committed')
+                ",
+                params![pending_media],
+            )
+            .unwrap();
+            // Real authority publication on the same committed bundle stays.
+            conn.execute(
+                "
+                INSERT INTO media_publications(family_id, media_uuid, source, bundle_id)
+                VALUES ('fam-1', ?1, 'bundle', 'bundle-committed')
+                ",
+                params![authority_media],
+            )
+            .unwrap();
+        }
+
+        let report = migrate_v3_database(&source, &dest).expect("migrate");
+        // Seed: 1 staging bundle_media + 1 staging pub.
+        // Cleanup: 1 pending media on committed + 1 pending pub.
+        assert_eq!(report.discarded_bundle_media, 2);
+        assert_eq!(report.discarded_publications, 2);
+        assert_eq!(report.committed_bundles, 1);
+
+        let conn = Connection::open(&dest).unwrap();
+        let pending_pubs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM media_publications WHERE media_uuid = ?1",
+                params![pending_media],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            pending_pubs, 0,
+            "bundle_pending on committed must be discarded"
+        );
+        let pending_bm: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_bundle_media WHERE media_uuid = ?1",
+                params![pending_media],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            pending_bm, 0,
+            "matching pending bundle_media must be discarded"
+        );
+
+        let authority_pub: String = conn
+            .query_row(
+                "SELECT source FROM media_publications WHERE media_uuid = ?1",
+                params![authority_media],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(authority_pub, "bundle");
+        let authority_bm: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sync_bundle_media WHERE media_uuid = ?1 AND bundle_id = 'bundle-committed'",
+                params![authority_media],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(authority_bm, 1);
+        let any_pending_source: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM media_publications WHERE source = 'bundle_pending'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(any_pending_source, 0);
+    }
+
+    #[test]
+    fn migrate_fail_closed_on_wrong_user_version() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let dest = dir.path().join("lezi.db");
+        {
+            let conn = open_v3_fixture(&source);
+            seed_minimal_family(&conn);
+            conn.pragma_update(None, "user_version", 4i64).unwrap();
+        }
+        let err = migrate_v3_database(&source, &dest).expect_err("must fail");
+        assert_eq!(
+            err.authoritative(),
+            Some(AuthoritativeFailure::SourceUserVersionNotThree)
+        );
+        assert!(!dest.exists());
+        assert_dest_unwritten(&dest);
+    }
+
+    #[test]
+    fn migrate_fail_closed_on_unknown_source_table() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let dest = dir.path().join("lezi.db");
+        {
+            let conn = open_v3_fixture(&source);
+            seed_minimal_family(&conn);
+            conn.execute_batch("CREATE TABLE unexpected_legacy (id TEXT PRIMARY KEY);")
+                .unwrap();
+        }
+        let err = migrate_v3_database(&source, &dest).expect_err("must fail");
+        assert_eq!(
+            err.authoritative(),
+            Some(AuthoritativeFailure::UnknownSourceUserTable)
+        );
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn migrate_fail_closed_on_invalid_entity_payload() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let dest = dir.path().join("lezi.db");
+        {
+            let conn = open_v3_fixture(&source);
+            seed_minimal_family(&conn);
+            conn.execute(
+                "
+                INSERT INTO entities(
+                    family_id, entity_type, client_uuid, updated_at, deleted_at, payload_json, rev
+                ) VALUES (
+                    'fam-1', 'baby', '11111111-1111-1111-1111-111111111111',
+                    1, NULL, '{}', 1
+                )
+                ",
+                [],
+            )
+            .unwrap();
+        }
+        let err = migrate_v3_database(&source, &dest).expect_err("must fail");
+        assert_eq!(
+            err.authoritative(),
+            Some(AuthoritativeFailure::PayloadValidationFailed)
+        );
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn migrate_fail_closed_on_content_hash_mismatch() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let dest = dir.path().join("lezi.db");
+        {
+            let conn = open_v3_fixture(&source);
+            seed_minimal_family(&conn);
+            seed_baby_entity(&conn);
+            let root_uuid = "22222222-2222-2222-2222-222222222222";
+            let (_c, _m, _hash, root_payload_json, media_json) = canonical_record_bundle_parts();
+            conn.execute(
+                "
+                INSERT INTO sync_bundles(
+                    family_id, bundle_id, staged_membership_id, status, root_type,
+                    root_client_uuid, root_updated_at, root_deleted_at, root_payload_json,
+                    media_entities_json, content_hash, created_at, committed_at,
+                    committed_cursor, committed_applied
+                ) VALUES (
+                    'fam-1', 'bundle-bad-hash', 'mem-owner', 'committed', 'record',
+                    ?1, 300, NULL, ?2,
+                    ?3, '0000000000000000000000000000000000000000000000000000000000000000',
+                    300, 301, 2, 1
+                )
+                ",
+                params![root_uuid, root_payload_json, media_json],
+            )
+            .unwrap();
+        }
+        let err = migrate_v3_database(&source, &dest).expect_err("must fail");
+        assert_eq!(
+            err.authoritative(),
+            Some(AuthoritativeFailure::ContentHashMismatchAfterCanonicalize)
+        );
+        assert!(!dest.exists());
+        assert!(!temp_dest_path(&dest).exists());
+    }
+
+    #[test]
+    fn migrate_fail_closed_on_media_entities_json_invalid() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let dest = dir.path().join("lezi.db");
+        {
+            let conn = open_v3_fixture(&source);
+            seed_minimal_family(&conn);
+            seed_baby_entity(&conn);
+            let root_uuid = "22222222-2222-2222-2222-222222222222";
+            let (_c, _m, content_hash, root_payload_json, _media_json) =
+                canonical_record_bundle_parts();
+            // Not a JSON array → MediaEntitiesJsonInvalid
+            conn.execute(
+                "
+                INSERT INTO sync_bundles(
+                    family_id, bundle_id, staged_membership_id, status, root_type,
+                    root_client_uuid, root_updated_at, root_deleted_at, root_payload_json,
+                    media_entities_json, content_hash, created_at, committed_at,
+                    committed_cursor, committed_applied
+                ) VALUES (
+                    'fam-1', 'bundle-bad-media', 'mem-owner', 'committed', 'record',
+                    ?1, 300, NULL, ?2,
+                    '{}', ?3, 300, 301, 2, 1
+                )
+                ",
+                params![root_uuid, root_payload_json, content_hash],
+            )
+            .unwrap();
+        }
+        let err = migrate_v3_database(&source, &dest).expect_err("must fail");
+        assert_eq!(
+            err.authoritative(),
+            Some(AuthoritativeFailure::MediaEntitiesJsonInvalid)
+        );
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn migrate_fail_closed_on_orphan_bundle_publication() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let dest = dir.path().join("lezi.db");
+        {
+            let conn = open_v3_fixture(&source);
+            seed_minimal_family(&conn);
+            // bundle source pointing at non-existent (non-staging) bundle
+            conn.execute(
+                "
+                INSERT INTO media_publications(family_id, media_uuid, source, bundle_id)
+                VALUES ('fam-1', 'orphan-media', 'bundle', 'no-such-bundle')
+                ",
+                [],
+            )
+            .unwrap();
+        }
+        let err = migrate_v3_database(&source, &dest).expect_err("must fail");
+        assert_eq!(
+            err.authoritative(),
+            Some(AuthoritativeFailure::OrphanAuthoritativeForeignKey)
+        );
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn migrate_fail_closed_on_missing_family_meta() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let dest = dir.path().join("lezi.db");
+        {
+            let conn = open_v3_fixture(&source);
+            conn.execute(
+                "INSERT INTO families(id, created_at, create_request_hash, name) VALUES ('fam-1', 1, NULL, 'x')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "
+                INSERT INTO memberships(membership_id, family_id, role, device_id, display_name, left_at)
+                VALUES ('mem-1', 'fam-1', 'owner', 'd1', 'A', NULL)
+                ",
+                [],
+            )
+            .unwrap();
+            // no family_meta
+        }
+        let err = migrate_v3_database(&source, &dest).expect_err("must fail");
+        assert_eq!(
+            err.authoritative(),
+            Some(AuthoritativeFailure::FamilyMetaMissingForFamily)
+        );
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn migrate_fail_closed_on_active_display_name_key_conflict() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let dest = dir.path().join("lezi.db");
+        {
+            let conn = open_v3_fixture(&source);
+            conn.execute(
+                "INSERT INTO families(id, created_at, create_request_hash, name) VALUES ('fam-1', 1, NULL, 'x')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "
+                INSERT INTO memberships(membership_id, family_id, role, device_id, display_name, left_at)
+                VALUES ('mem-1', 'fam-1', 'owner', 'd1', '爸爸', NULL)
+                ",
+                [],
+            )
+            .unwrap();
+            // Same NFKC key as 爸爸 after normalization — use exact same display_name
+            conn.execute(
+                "
+                INSERT INTO memberships(membership_id, family_id, role, device_id, display_name, left_at)
+                VALUES ('mem-2', 'fam-1', 'member', 'd2', '爸爸', NULL)
+                ",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO family_meta(family_id, rev) VALUES ('fam-1', 0)",
+                [],
+            )
+            .unwrap();
+        }
+        let err = migrate_v3_database(&source, &dest).expect_err("must fail");
+        assert_eq!(
+            err.authoritative(),
+            Some(AuthoritativeFailure::ActiveDisplayNameKeyConflict)
+        );
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn migrate_missing_source_is_io_not_shape_mismatch() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("absent.db");
+        let dest = dir.path().join("lezi.db");
+        let err = migrate_v3_database(&source, &dest).expect_err("must fail");
+        assert!(matches!(err, MigrateError::Io(_)));
+        assert_eq!(err.authoritative(), None);
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn migrator_session_shells_match_inventory_target_only_empty() {
+        let shells = target_only_empty_tables();
+        assert!(shells.contains(&"devices"));
+        assert!(shells.contains(&"member_rename_requests"));
+        assert!(shells.contains(&"terminal_credential_denials"));
+        assert_eq!(
+            staging_cascade(),
+            StagingCascade::DropDependentsReportOrphanBytesIgnore
+        );
+        assert!(is_discarded_bundle_status(BUNDLE_STATUS_STAGING));
+    }
+}

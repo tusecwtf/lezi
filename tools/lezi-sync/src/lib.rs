@@ -1,5 +1,7 @@
 mod members;
 mod model;
+/// Private offline v3→current migration contract (crate-internal; not a public server API).
+pub(crate) mod offline_migrate;
 mod rate_limit;
 mod readiness;
 mod store;
