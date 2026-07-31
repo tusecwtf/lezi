@@ -1,157 +1,192 @@
-# Ticket 16 partial fixed-point acceptance · 2026-07-31
+# Ticket 16 acceptance · candidate HEAD refresh · 2026-07-31
 
 ## Fixed points and devices
 
-- Product code HEAD: `a4dbe07143d7dc51ac0e24111653902866adf4ec`.
-- Evidence/artifact HEAD: `5f9aa3cc13a4ace207d4f15946ed80559705563e`; this adds only a
-  deterministic terminal-cleanup test wait and does not change packaged production sources.
-- Client A: `emulator-5554`, API 35, Android SDK x86_64, app 0.3.0 (versionCode 6).
-- Client B: `emulator-5556`, API 35, Android SDK x86_64, app 0.3.0 (versionCode 6).
-- Server acceptance used local `linux/amd64` Docker containers and synthetic families only. No
-  real family data, production secret, or live NAS was used.
+- **Current candidate product HEAD:** `ed99c762ecde214b279b9d64427e0ece3148fd21`
+  (`fix(sync): harden trusted sync recovery paths`). This supersedes the prior
+  product fixed point `a4dbe07` / evidence HEAD `5f9aa3c` after review-residuals
+  (`1d6e839` / `ed99c76`) and self-hosted app-update work landed on the same line.
+- Client A: `emulator-5554` (`lezi_api35`), API 35, x86_64, app 0.3.0 (versionCode 6).
+- Client B: `emulator-5556` (`lezi_api35_b`), API 35, x86_64, app 0.3.0 (versionCode 6).
+- Synthetic acceptance server: Docker `lezi-sync:0.3.0` on host `https://127.0.0.1:18765`
+  (emulator alias `https://10.0.2.2:18765`), TLS data dir `/tmp/lezi-t16-accept-data`,
+  container user `10001:10001`. **No live family data and no production NAS deploy.**
 
-## Android repository and artifact gates
+## Android repository and artifact gates (HEAD `ed99c76`)
 
-- `./gradlew test lintDebug` — PASS at `5f9aa3c` (`BUILD SUCCESSFUL`; 1,317 actionable
-  tasks). The first full run exposed a test-only race: it observed the deliberately safe
-  session-clear-before-marker-clear order too early. Commit `5f9aa3c` waits for the durable marker's
-  completion; focused Debug/Release tests and the full gate then passed.
-- `./gradlew connectedDebugAndroidTest` — PASS on `emulator-5554` (API 35, x86_64): 93 tests,
-  zero failures/errors/skips. The executed suites were designsystem=7, core database=6,
-  log=45, family=21, and settings=14; the remaining Android-test modules reported zero tests.
-  Gradle completed in 2m52s with 936 actionable tasks (108 executed, 13 from cache, 815 up-to-date).
-- `./gradlew :app:assembleRelease --rerun-tasks` — PASS (`679/679` tasks executed); the build's
-  signature hook also passed.
-- Release APK: `app/build/outputs/apk/release/app-release.apk`, 5,519,958 bytes, SHA-256
-  `10215034bf49f589173877d5904f3b88f3bc6e447470d72b77c19d1151850e83`.
-- `apksigner verify --verbose --print-certs` — PASS; v2 and v3 are true. Signer certificate SHA-256:
+- `./gradlew test lintDebug` — PASS (`BUILD SUCCESSFUL`, 1,317 actionable tasks).
+- `./gradlew :app:assembleRelease --rerun-tasks` — PASS (679/679 executed); signature
+  hook verified `app-release.apk`.
+- Release APK: `app/build/outputs/apk/release/app-release.apk`, 5,536,437 bytes,
+  SHA-256 `8ff39b3f04d668f5312d540a0527a25557e0e600d5493a2c66678d3d3986e960`.
+- `apksigner verify --verbose --print-certs` — PASS; v2 and v3 true. Signer cert SHA-256:
   `ce1438c8c50fe75f04f89ae2092631a46660480764cd52071cc5c08707462211`.
-- Final APK streamed installation on both Client A and Client B passed. Launch returned the welcome
-  route with Connect, scan-member-QR, and Offline actions; both installed packages reported
-  versionName 0.3.0, versionCode 6, minSdk 26, targetSdk 35.
-- An isolated `a4dbe07` rebuild with the same signing inputs also produced 5,519,958 bytes, but SHA-256
-  `8129d1faf762da69c2fa2bcb165808daaee26c54219df8d1971c06ebaadfac92`, so it is not byte-identical
-  to the final APK. All 1,539 non-provenance/signature entries were identical; the only extracted
-  differences among 1,543 entries were `META-INF/version-control-info.textproto`, `MANIFEST.MF`,
-  `CERT.SF`, and `CERT.RSA`. In particular, `classes.dex` SHA-256 was
-  `7128648bd4c2eedde4164edf810bdf01708318bb64915841a1fdd1ba3ef89542` and `resources.arsc` was
-  `ea6b99cec3dde50eca11b24c967fcd843beec904914b31c4ed6aa6244510df14` in both APKs. The isolated
-  worktree emitted `NO_VALID_GIT_FOUND`, while the final APK records revision `5f9aa3c`; the resulting
-  provenance and signature differences mean payload equivalence cannot substitute for testing the
-  exact final signed bytes.
+- Streamed install on both AVDs succeeded. Pulled `base.apk` hashes on both devices were
+  **byte-identical** to the Release artifact:
+  `8ff39b3f04d668f5312d540a0527a25557e0e600d5493a2c66678d3d3986e960`.
+- Launch smoke: both devices resumed `com.lezi.babylog/.MainActivity` Welcome with
+  「连接家庭服务器」「扫描成员登录二维码」「离线模式」. Client B launched production
+  `com.journeyapps.barcodescanner.CaptureActivity` from the scan action (camera permission
+  granted).
 
-## Rust, image, and NAS package gates
+### Packaging pin vs fixed commit (hygiene · fix r2)
+
+- Working-tree `tools/lezi-sync/deploy/app-update.json` pins the **current** Release APK
+  `8ff39b3f04d668f5312d540a0527a25557e0e600d5493a2c66678d3d3986e960` (verified against
+  `app/build/outputs/apk/release/app-release.apk`).
+- Clean commit `ed99c76` still has the **previous** pin
+  `10215034bf49f589173877d5904f3b88f3bc6e447470d72b77c19d1151850e83`.
+- **Commit requirement:** include this pin (and ticket-16 evidence) on the same HEAD that
+  freezes the candidate so `package-nas.sh` is self-sufficient on a clean checkout.
+  Until Commit, packaging success is **dirty-tree only** (already demonstrated with the
+  working-tree pin). Do not claim clean-`ed99c76` packaging against APK `8ff39b3f…`.
+
+## Rust, image, and NAS package gates (HEAD `ed99c76` + working-tree pin)
 
 - `cargo fmt --all -- --check` — PASS.
-- `cargo test --locked` — PASS: 38 library/store tests, 106 HTTP API/current-wire tests, one TLS
-  black-box test, and zero doc tests. The TLS test required loopback socket permission; the same
-  command passed after leaving the restricted network sandbox.
+- `cargo test --locked` — PASS: library + **116** HTTP API/current-wire tests + TLS black-box.
 - `cargo clippy --all-targets --all-features -- -D warnings` — PASS.
-- `./build-image.sh` — PASS. `lezi-sync:0.3.0` is `linux/amd64`, user `10001:10001`, image ID
-  `sha256:10773e9a246fa5a3a2ef8554034984d7bacece90626cb311605699100f6e55e6`.
-- `LEZI_FORCE_PACKAGE=1 ./deploy/package-nas.sh` — PASS. Package:
-  `dist/lezi-sync-0.3.0-nas/`; `MANIFEST.json` records `git_sha=5f9aa3c` and all entries in
-  `SHA256SUMS` verified.
-- Image tar: `lezi-sync-0.3.0-linux-amd64.tar`, 34,975,232 bytes, mode 0600, owner
-  `zhangtianshu:zhangtianshu`, SHA-256
-  `b8e6527a873895d7ac6e84171d5e6d3447862335ed5155ac4ede93c4877b326f`. `docker load` succeeded
-  and restored the same image ID/platform/user.
-- Final-image runtime: with the host data directory owned by uid/gid 10001, `/health` returned
-  version 0.3.0 plus `atomic_bundle` and `record_membership_author`; `/ready` returned `ok=true`;
-  the internal binary healthcheck and Docker health were healthy. `/data` became 0700 and the DB
-  and server secret 0600, all owned by 10001:10001.
-- Permission negatives: a root-owned 0777 bind failed closed because uid10001 could not harden
-  `/data`; this matches the deploy requirement to chown the directory to 10001. A read-only bind
-  still exited 1 with SQLite unable to open, even with permission-hardening skip enabled.
-- No production NAS deployment was run: the runbook requires a confirmed maintenance window.
+- `./build-image.sh` — PASS. `lezi-sync:0.3.0` is `linux/amd64`, user `10001:10001`,
+  image ID `sha256:8b451e4158ba48d7436ace06d7b1fcb7dd043a564098b8281a9c4f265fd82d34`.
+- `LEZI_FORCE_PACKAGE=1 ./deploy/package-nas.sh` — PASS (with working-tree
+  `app-update.json` pin). Package: `dist/lezi-sync-0.3.0-nas/`; `MANIFEST.json` records
+  `git_sha=ed99c76` and app-update SHA matching the Release APK above.
+- Image tar: `lezi-sync-0.3.0-linux-amd64.tar`, SHA-256
+  `68cf6d54f45a4b02fc7be5a1c9b9041186faabc9fa7eff89bdd8fd61327e3370` (mode 0600).
+- Runtime on synthetic bind: `/health` → version `0.3.0` + `atomic_bundle` /
+  `record_membership_author`; `/ready` → `ok=true`; Docker health **healthy**;
+  `lezi-sync healthcheck` exit 0. Loopback internal readiness path is present in the
+  image (container listens on 8766 inside the netns; published probe used HTTPS 18765).
 
-## Cross-client and security acceptance during candidate stabilization
+## Cross-client wire matrix (supporting — not dual-client E2E closeout)
 
-- System-PKI trust used `https://cachyos.tail8a083b.ts.net:38765` over the host's private Tailscale
-  network. The temporary certificate was issued by Let's Encrypt YE2 for that DNS name and was valid
-  from 2026-07-31 through 2026-10-29; the port was not exposed with Funnel or to the public internet.
-  Both final-APK clients connected without a TOFU/fingerprint confirmation. Client A created the
-  synthetic `T16Pki` family and baby `年年`; Client B requested membership, Client A approved it,
-  and Client B claimed the session and recovered the baby. Client A then confirmed a synthetic
-  12:49 urine record, which Client B fetched and rendered as the same one-record history.
-- Client A permanently deleted `T16Pki`. Both final-APK clients returned to Welcome after the member
-  reconnected. A post-delete database snapshot had zero families, memberships, devices, device
-  sessions, entities, bundles, bundle-media rows, and media publications; SQLite integrity was `ok`.
-- Self-signed trust used `https://10.0.2.2:18765`. The accepted SPKI pin was
-  `qZt5MCIaAn+NQoUXERn3kh9Xa0A4ywknHRBd+Dlphk8=`. Owner create, baby recovery, member request and
-  Owner approval completed across both AVDs.
-- Existing-member second-device binding began from cursor zero and recovered full history.
-  Synthetic records exercised 0, 1, 2, and 3 photos; the final family had five records and six
-  media, with exact cross-client attachment semantics.
-- Access expiry/refresh rotation passed. Replaying the previous refresh credential terminated only
-  the presenting device. Single-device revoke, current-client terminal cleanup, member hard delete,
-  retained-fact author anonymization, and cross-role access negatives passed.
-- QR payload encoding and image decoding round-tripped with `qrencode`/`zbar`; grant claim and replay
-  were verified through the API. A live Android camera scan was not run.
-- Owner add/takeover, wrong root secret, root rotation, non-Owner root submission, and cross-member
-  privilege attempts failed or converged as specified. Same-family takeover retained five records
-  and all clean publication receipts.
-- SPKI mismatch used an alternate certificate/key. Android reported a sync error; the TLS server saw
-  only `certificate unknown` alerts and no HTTP request. Restoring the original certificate recovered
-  `/health` and `/ready`.
-- Restarting the server changed generation. A pre-fix Release requeued six already-published media
-  after full resync. Commit `a4dbe07` makes equal authoritative media acknowledge the existing local
-  bytes while keeping content edits protected. On its signed Release, generation changed from
-  `nSOr...` to `r3vr...`; records=5/media=6/babies=1 were all clean, outbox=0, all six media receipts
-  remained, and SQLite integrity was `ok`.
-- Owner permanently deleted synthetic family `T16Family`. Client A returned to Welcome; its local
-  family, membership, baby, record, media, plan, outbox, and pending-cleanup counts became zero and
-  its media directory was empty. A surviving member's access and refresh both returned
-  `401 family_deleted`. Server family, membership, device, and entity counts became zero; integrity
-  remained `ok`. The synthetic family is not recoverable from the app or server.
-- Fresh-only was preserved: an old schema database failed closed and a fresh database started; no
-  Android migration was introduced.
+Host black-box against `https://127.0.0.1:18765` with the data-dir CA (emulator origin in
+QR payloads: `https://10.0.2.2:18765`). TOFU SPKI pin (Base64 SHA-256 of SPKI):
 
-## Remaining Must evidence
+`lxIAoiP8+7kr9qInJ/wx0G1DfaVy+krJJ8EQN/3qlSg=`
 
-- Both clients were emulators, not physical phones, and no live Android camera QR scan passed. A
-  final-APK `CaptureActivity` was exercised with Emulator 37.2 `imagefile:` and `videofile:` camera
-  inputs, including padded, repositioned, and lossless tiled QR frames. The AVD camera backend
-  consistently cropped or displaced sensor rows; independent `zbar` decoding also failed on the
-  actual preview screenshots, and no grant was claimed. The QR payload/image round-trip and API
-  grant lifecycle therefore still do not prove the app's camera-to-claim path.
-- Physical network switching and live NAS replacement were not run.
+Fingerprint (cert SHA-256):
+`F4:EB:48:04:94:3C:73:49:58:84:1E:02:E3:BF:32:76:70:60:73:7D:62:C3:40:81:CE:A4:9C:8A:06:A3:6A:62`.
 
-Ticket 16 therefore remains open. Ticket 17 (0.3.1 upgrade) must not start until the missing Must
-evidence is supplied and the complete matrix is accepted on one fixed candidate.
+**Result: 31/31 checks PASS** in durable
+[`api-matrix.json`](./api-matrix.json) (original 29 + fix-r2 Owner-add rows; hard-delete
+row amended with full `membership_deleted` body; QR row points at tracker evidence, not
+`/var/tmp`).
 
-## Exact final-APK two-client replay · 2026-07-31
+| Area | Wire result | Dual Android on APK `8ff39b3f…`? |
+|------|-------------|----------------------------------|
+| health/ready 0.3.0 | PASS | n/a (ops) |
+| setup-status empty → configured | PASS | open (UI probe) |
+| Owner create + second create fail-closed | PASS | open (UI create) |
+| Wrong root secret rejected | PASS | open (UI) |
+| Member request → approve-new → claim | PASS | open (dual UI) |
+| **Owner add zero-device membership + QR grant (US-22)** | PASS (fix-r2) | open (dual UI) |
+| Member cannot create login grant | PASS | open (UI ACL) |
+| Bind existing → second device claim | PASS | open (dual UI) |
+| Baby + 0/1/2/3 photo atomic bundles | PASS | open (dual UI + photos) |
+| Second-device full history pull | PASS (one writer → pull) | open; also need **双向记录** |
+| Refresh rotation + replay isolation | PASS | open (device sessions) |
+| QR JSON encode/decode + grant claim + single-use | PASS; durable PNG under `evidence/16/` | open (US-17 **camera** path) |
+| Server `device_removed` / `membership_deleted` anonymize / `family_deleted` | PASS (hard-delete body re-probed fix-r2) | open (**local** clear US-28/30/33/39) |
+| Owner takeover | PASS | open (UI/device) |
 
-- Both installed `base.apk` files were streamed back from `emulator-5554` and `emulator-5556`.
-  Each SHA-256 was exactly
-  `10215034bf49f589173877d5904f3b88f3bc6e447470d72b77c19d1151850e83`.
-- A fresh `lezi-sync:0.3.0` synthetic server used `https://10.0.2.2:18765`. Both clients displayed
-  and accepted the same previously unknown certificate SPKI:
-  `EB:CC:59:3F:3E:3B:6C:6D:E0:5E:A9:25:21:69:99:38:85:CB:2E:63:DF:16:E4:10:C4:D8:C5:55:B3:70:9E:55`.
-- Client A created `T16Final`, signed in as `OwnerFinal`, and created baby `年年`. Client B requested
-  `MemberFinal` on `MemberFinalDevice`; A approved a new member, B claimed the session, and B
-  recovered the empty baby history.
-- A then confirmed four urine facts with 0, 1, 2, and 3 photos. B foreground replay rendered four
-  records. A live server snapshot contained four live records, six live media entities, and five
-  committed bundles (one baby plus four record bundles). The bundles declared six media totaling
-  399,914 staged bytes; the media directory contained six blobs and SQLite `integrity_check` was
-  `ok`.
-- B was cleared and reconnected from cursor zero as `MemberFinalDevice2`. A's approval UI offered
-  `绑定到现有「MemberFinal」`; choosing it preserved two family members, added the second device,
-  and B recovered all four records.
-- B created a fifth zero-photo fact. A rendered it with author `MemberFinal`. A revoked only
-  `MemberFinalDevice2`; after reconnect B entered terminal cleanup and returned to Welcome. A then
-  hard-deleted `MemberFinal`; the fifth fact remained and its author changed to `家人`.
-- A permanently deleted `T16Final` using the typed family name and synthetic root password. A
-  returned to Welcome. The server then had zero families, memberships, devices, sessions, entities,
-  bundles, bundle-media rows, media publications, member-login requests, and media files; SQLite
-  `integrity_check` was `ok`.
-- Root-read snapshots of both emulators after cleanup had zero local families, memberships, babies,
-  records, media assets, care plans, fulfillment candidates, outbox rows, and pending cleanup rows.
-  Both local SQLite databases passed `integrity_check`, and both `record-media` directories were
-  empty.
+**Not in the 31/31 matrix:** root password rotation (see Host security probes below).
 
-This closes the prior exact-signed-artifact gap for TOFU, family creation, request/approval,
-existing-member second-device binding, full history, 0–3-photo atomicity, device revocation,
-member deletion/anonymization, and family/local cleanup. It does not close the live Android camera
-QR scan gap above, so the third Must and Ticket 16 remain open.
+Interpretation: wire matrix supports server contracts after residuals. Spec
+「两个 Android client + 最终 TLS server」and Testing Decisions E2E are **not** closed by
+this table alone. Prior dual-AVD UI on APK `10215034…` is **not** reusable for
+`8ff39b3f…`.
+
+### Host security probes (supporting only — outside matrix count)
+
+- **Alternate cert / CA fail-closed (not US-06):** alternate self-signed server on `:18775`
+  presented SPKI `HRoLkI7fQHMg/TkFGb6HlnzKD5i1kRTLogN82njU10o=` (≠ TOFU pin above). Curl
+  with the original CA failed at TLS with no HTTP body. This shows wrong trust material
+  fails closed at the **host CA** layer. It does **not** prove Android **pinned-SPKI**
+  hard-block (US-06: zero secrets/sync after pin mismatch, no ignore-and-continue) on the
+  current Release APK.
+- **Supporting JVM (not Release E2E):** tree at `ed99c76` includes
+  `TrustedEndpointTlsTest` / `TrustedEndpointTest` paths that map SPKI mismatch to
+  `SetupProbeResult.Failed.CertificateChanged` and related handshake failures. These
+  remain unit/integration evidence, not dual-device Release acceptance.
+- **Root password rotation (wire, not a matrix row):** restart container on the same data
+  bind with a new `LEZI_BOOTSTRAP_SECRET`. Prior Owner access → `401 Invalid or revoked
+  token`. Ordinary member access remained valid (`200` pull after `generation_changed`
+  recovery). Still needs client-visible convergence on the Release APK for checklist
+  closeout. **Do not count this under the 31/31 durable matrix.**
+
+### Fix-r2 matrix amendments (2026-07-31)
+
+Re-probed on synthetic `lezi-t16-accept` (`https://127.0.0.1:18765`) with the live
+container bootstrap secret:
+
+1. **Owner add (US-22 supporting):** `POST /v1/family/members` → `201` with
+   `membership_id`; subsequent `POST /v1/member/login-grants` → `201` grant; claim →
+   session. Rows added to durable matrix.
+2. **Hard-delete terminal code:** after `POST /v1/family/members/remove`, member
+   `GET /v1/family/members` and `GET /v1/pull` both returned
+   `401 {"code":"membership_deleted","detail":"This family membership was deleted"}`.
+   Matrix row detail amended to match `device_removed` / `family_deleted` style.
+3. **QR artifact:** `qr-encode-sample.png` + redacted `qr-encode-sample.json` under
+   `evidence/16/` (no absolute `/var/tmp` path in durable matrix detail).
+
+## Live Android camera QR (still open — US-17)
+
+- Client B Release APK successfully opened ZXing `CaptureActivity` with prompt
+  「扫描成员登录二维码」and held an active camera client (`dumpsys media.camera`).
+- Emulator back camera remains `hw.camera.back=emulated`. Virtual-scene `poster.png`
+  swap and a host-generated QR MP4 were prepared; independent `zbarimg` on CaptureActivity
+  screenshots still returned no decode. No grant was claimed through the camera path.
+- Host encode/decode + API claim is **supporting** only. Close US-17 only after current
+  Release APK camera (or physical device) verify + claim.
+
+## Prior dual-UI evidence (explicitly non-closing for this candidate)
+
+Earlier work under `a4dbe07`/`5f9aa3c` exercised dual-AVD UI for System-PKI, self-signed
+TOFU, create/approve/bind, photos, revoke, hard delete, family delete on signed APK
+`10215034bf49f589173877d5904f3b88f3bc6e447470d72b77c19d1151850e83`. That APK is **not**
+byte-identical to `8ff39b3f…`. Cite only as historical context.
+
+## Remaining Must evidence (expanded — Spec E2E / checklist)
+
+All of the following on **one** fixed candidate, **current** Release APK `8ff39b3f…`
+(or a later rebuild whose hashes replace this fixed point), and final TLS server:
+
+1. **Dual-client self-signed TOFU UI** — trust before secrets; setup-status routing.
+2. **Dual-client System-PKI UI** — hostname/chain validation path (no TOFU dialog).
+3. **Create family** on client A; **member request/approval** and **bind existing
+   second device** across A/B.
+4. **Owner add (US-22)** — admin creates zero-device membership in UI, then can QR.
+5. **Full history + 双向记录** — each client authors at least one record (and exercise
+   0–3 photo atomic bundles) and the peer pulls them.
+6. **Member QR login (US-17)** — camera/physical scan → verify + claim (not host codec).
+7. **Refresh rotation / replay isolation** observed from device sessions.
+8. **Single-device revoke, membership hard-delete + anonymization, family delete** with
+   **local** Room/Outbox/media/endpoint cleanup on affected clients (server reason codes
+   alone are insufficient).
+9. **Android SPKI mismatch hard-block (US-06)** on the Release APK — pin, rotate cert/key,
+   assert zero secret/sync traffic and no ignore path (host curl CA fail is not enough).
+10. Client-visible paths for non-owner root secret, owner takeover, and root rotation
+    convergence (wire / host probes already supporting; root rotation is **not** a matrix
+    row).
+
+Out of synthetic scope for this ticket unless product ops requests it: production NAS
+container replace (needs explicit maintenance-window confirmation per `AGENTS.md`).
+
+Ticket 16 stays **partial**. Ticket 17 must remain **blocked** until every open Must
+above is closed on one fixed candidate HEAD—do not start version bump on wire-only partial.
+
+## Artifact summary (candidate)
+
+| Artifact | Value |
+|----------|--------|
+| git HEAD | `ed99c762ecde214b279b9d64427e0ece3148fd21` |
+| Release APK SHA-256 | `8ff39b3f04d668f5312d540a0527a25557e0e600d5493a2c66678d3d3986e960` |
+| Image ID | `sha256:8b451e4158ba48d7436ace06d7b1fcb7dd043a564098b8281a9c4f265fd82d34` |
+| Image tar SHA-256 | `68cf6d54f45a4b02fc7be5a1c9b9041186faabc9fa7eff89bdd8fd61327e3370` |
+| Package | `dist/lezi-sync-0.3.0-nas/` (`git_sha=ed99c76`) |
+| Wire matrix log | [`api-matrix.json`](./api-matrix.json) (31/31) |
+| QR sample | [`qr-encode-sample.png`](./qr-encode-sample.png) + [`qr-encode-sample.json`](./qr-encode-sample.json) |
+| Synthetic HTTPS | `https://127.0.0.1:18765` / `https://10.0.2.2:18765` |
+| TOFU SPKI | `lxIAoiP8+7kr9qInJ/wx0G1DfaVy+krJJ8EQN/3qlSg=` |
+| app-update pin | working tree `8ff39b3f…` (must land with candidate freeze commit; clean `ed99c76` still `10215034…`) |

@@ -3,6 +3,6 @@
   "version_code": 6,
   "version_name": "0.3.0",
   "min_supported_version_code": 1,
-  "sha256": "10215034bf49f589173877d5904f3b88f3bc6e447470d72b77c19d1151850e83",
+  "sha256": "8ff39b3f04d668f5312d540a0527a25557e0e600d5493a2c66678d3d3986e960",
   "release_notes": "自托管应用内更新通道"
 }

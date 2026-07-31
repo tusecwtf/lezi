@@ -4,7 +4,12 @@
 
 **Blocked by:** 16 — 跨设备发布候选验收
 
-**Status:** ready-for-agent
+**Status:** blocked
+
+**Do not start.** Ticket 16 is still `partial` (dual Android clients on the current
+Release APK, camera member-QR, local cleanup, and Android SPKI hard-block remain open).
+Agents must not select this ticket as frontier while Status is `blocked` or while 16 is
+incomplete—even if historical index text once said `ready-for-agent`.
 
 - [ ] Android `versionName` 与 Rust crate/package 版本统一为 `0.3.1`，Android `versionCode` 单调递增，用户可见版本文档保持一致。
 - [ ] 基于最终版本 HEAD 重新运行 Android 全量 JVM 测试、lint、Release APK 构建、签名检查、哈希、安装、启动和关键页面 smoke。

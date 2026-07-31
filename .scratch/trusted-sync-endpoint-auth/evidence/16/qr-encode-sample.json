@@ -1,0 +1,16 @@
+{
+  "file": "qr-encode-sample.png",
+  "png_sha256": "bec68cc18f497f45b587126600b38ca965e865e31ee1a4f493d8a9b7a634f4a0",
+  "payload_redacted": {
+    "v": 1,
+    "type": "member_login",
+    "endpoint": "https://10.0.2.2:18765",
+    "trust": "tofu_spki",
+    "spki_sha256": "lxIAoiP8+7kr9qInJ/wx0G1DfaVy+krJJ8EQN/3qlSg=",
+    "grant": "<redacted sha256[:16]=9dfdba9844bd3f3f>",
+    "family_name": "T16Refresh",
+    "member_display_name": "MemberT16",
+    "expires_at": 1785496466
+  },
+  "note": "Supporting host encode/decode sample from acceptance QR path; grant redacted."
+}
