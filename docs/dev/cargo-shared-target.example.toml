@@ -1,0 +1,9 @@
+# Shared Cargo target across main tree and git worktrees.
+# Copy to tools/lezi-sync/.cargo/config.toml and/or repo .cargo/config.toml
+# (both are gitignored), or export:
+#   export CARGO_TARGET_DIR=$HOME/.cache/cargo-target
+#
+# Android/Gradle: use GRADLE_USER_HOME=$HOME/.cache/gradle-user-home for global
+# caches; project app/build/ remains per-worktree.
+[build]
+target-dir = "/home/YOU/.cache/cargo-target"
