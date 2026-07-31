@@ -95,8 +95,12 @@
 
 ## Remaining Must evidence
 
-- Both clients were emulators, not physical phones, and no live Android camera QR scan was possible.
-  The QR payload/image round-trip and API grant lifecycle do not prove the app's camera-to-claim path.
+- Both clients were emulators, not physical phones, and no live Android camera QR scan passed. A
+  final-APK `CaptureActivity` was exercised with Emulator 37.2 `imagefile:` and `videofile:` camera
+  inputs, including padded, repositioned, and lossless tiled QR frames. The AVD camera backend
+  consistently cropped or displaced sensor rows; independent `zbar` decoding also failed on the
+  actual preview screenshots, and no grant was claimed. The QR payload/image round-trip and API
+  grant lifecycle therefore still do not prove the app's camera-to-claim path.
 - Candidate stabilization used several signed Release rebuilds. Affected reauth, generation-reset,
   SPKI mismatch, deletion, repository, artifact, and final welcome smoke gates were repeated after
   their fixes, but the complete two-client matrix was not replayed from zero against the single final
