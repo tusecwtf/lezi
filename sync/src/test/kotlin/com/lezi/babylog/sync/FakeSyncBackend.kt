@@ -204,10 +204,18 @@ class FakeSyncBackend : SyncBackend {
 
     /** When null, [getAppUpdateMetadata] fails as if the server has no package. */
     var appUpdateMetadata: AppUpdateMetadata? = null
+    var appUpdateApkBytes: ByteArray? = null
+    var downloadAppUpdateApkCalls = 0
 
     override suspend fun getAppUpdateMetadata(session: SyncSession): AppUpdateMetadata =
         appUpdateMetadata
             ?: throw SyncHttpException(404, """{"detail":"App update metadata is not available"}""")
+
+    override suspend fun downloadAppUpdateApk(session: SyncSession): ByteArray {
+        downloadAppUpdateApkCalls += 1
+        return appUpdateApkBytes
+            ?: throw SyncHttpException(404, """{"detail":"App update package is not available"}""")
+    }
 
     override suspend fun stageBundle(
         session: SyncSession,

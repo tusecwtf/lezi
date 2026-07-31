@@ -592,6 +592,131 @@ async fn app_update_metadata_missing_file_is_not_found_for_authenticated_session
 }
 
 #[tokio::test]
+async fn app_update_apk_requires_session_and_matches_metadata_sha256() {
+    let rig = Rig::new();
+    let apk_bytes = b"fake-lezi-release-apk-bytes-for-test";
+    let sha256 = hex::encode(Sha256::digest(apk_bytes));
+    let metadata = json!({
+        "package_name": "com.lezi.babylog",
+        "version_code": 7,
+        "version_name": "0.3.1",
+        "min_supported_version_code": 6,
+        "sha256": sha256,
+    });
+    fs::write(
+        rig.directory.path().join("app-update.json"),
+        metadata.to_string(),
+    )
+    .unwrap();
+    fs::write(rig.directory.path().join("app-release.apk"), apk_bytes).unwrap();
+
+    let response = request(
+        &rig.app,
+        Method::GET,
+        "/v1/app-update/apk",
+        None,
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let owner = create_family(
+        &rig.app,
+        "app-update-apk-owner",
+        "app-update-apk-owner-request-00001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let response = request(
+        &rig.app,
+        Method::GET,
+        "/v1/app-update/apk",
+        Some(token),
+        Body::empty(),
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/vnd.android.package-archive")
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.as_ref(), apk_bytes.as_slice());
+}
+
+#[tokio::test]
+async fn app_update_apk_rejects_sha256_mismatch() {
+    let rig = Rig::new();
+    let metadata = json!({
+        "package_name": "com.lezi.babylog",
+        "version_code": 7,
+        "version_name": "0.3.1",
+        "min_supported_version_code": 6,
+        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    });
+    fs::write(
+        rig.directory.path().join("app-update.json"),
+        metadata.to_string(),
+    )
+    .unwrap();
+    fs::write(
+        rig.directory.path().join("app-release.apk"),
+        b"bytes-that-do-not-match-sha256",
+    )
+    .unwrap();
+
+    let owner = create_family(
+        &rig.app,
+        "app-update-apk-mismatch-owner",
+        "app-update-apk-mismatch-req-0001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let (status, body) = get_json(&rig.app, "/v1/app-update/apk", Some(token)).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(
+        body["detail"],
+        json!("App update package integrity check failed")
+    );
+}
+
+#[tokio::test]
+async fn app_update_apk_missing_file_is_not_found() {
+    let rig = Rig::new();
+    let metadata = json!({
+        "package_name": "com.lezi.babylog",
+        "version_code": 7,
+        "version_name": "0.3.1",
+        "min_supported_version_code": 6,
+        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    });
+    fs::write(
+        rig.directory.path().join("app-update.json"),
+        metadata.to_string(),
+    )
+    .unwrap();
+
+    let owner = create_family(
+        &rig.app,
+        "app-update-apk-missing-owner",
+        "app-update-apk-missing-request-00001",
+    )
+    .await;
+    let token = owner["access_token"].as_str().unwrap();
+    let (status, body) = get_json(&rig.app, "/v1/app-update/apk", Some(token)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(
+        body["detail"],
+        json!("App update package is not available")
+    );
+}
+
+#[tokio::test]
 async fn legacy_invite_and_join_routes_are_absent() {
     let rig = Rig::new();
 

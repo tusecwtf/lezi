@@ -88,6 +88,85 @@ class RealSyncPortTest {
     }
 
     @Test
+    fun installAvailableAppUpdateDownloadsVerifiesAndStartsInstaller() = runTest {
+        val apkBytes = "lezi-release-apk-bytes".toByteArray(Charsets.UTF_8)
+        val metadata = sampleAppUpdateMetadata(
+            versionCode = 7,
+            versionName = "0.3.1",
+            sha256 = sha256Hex(apkBytes),
+        )
+        val installer = RecordingAppUpdateInstaller()
+        val cacheDir = createTempDir(prefix = "lezi-app-update-ok")
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+            appUpdateInstaller = installer,
+            appUpdateCacheDir = cacheDir,
+        )
+        rig.awaitStartupRecovery()
+        rig.backend.appUpdateApkBytes = apkBytes
+
+        val result = rig.port.installAvailableAppUpdate(metadata).getOrThrow()
+
+        assertThat(result).isEqualTo(AppUpdateInstallResult.SessionStarted)
+        assertThat(rig.backend.downloadAppUpdateApkCalls).isEqualTo(1)
+        assertThat(installer.installCalls).hasSize(1)
+        assertThat(installer.installCalls.single().expectedPackageName)
+            .isEqualTo("com.lezi.babylog")
+        assertThat(installer.installCalls.single().fileExistedAtCall).isTrue()
+        assertThat(appUpdateStagingDir(cacheDir).exists()).isFalse()
+        assertThat(appUpdateStagingApk(cacheDir).exists()).isFalse()
+    }
+
+    @Test
+    fun installAvailableAppUpdateRejectsSha256MismatchWithoutInstalling() = runTest {
+        val metadata = sampleAppUpdateMetadata(
+            versionCode = 7,
+            versionName = "0.3.1",
+            sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        val installer = RecordingAppUpdateInstaller()
+        val cacheDir = createTempDir(prefix = "lezi-app-update-bad")
+        // Leave a stale staging file to prove cleanup on failure.
+        appUpdateStagingDir(cacheDir).mkdirs()
+        appUpdateStagingApk(cacheDir).writeText("stale")
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+            appUpdateInstaller = installer,
+            appUpdateCacheDir = cacheDir,
+        )
+        rig.awaitStartupRecovery()
+        rig.backend.appUpdateApkBytes = "tampered-or-corrupt-apk".toByteArray()
+
+        val failure = rig.port.installAvailableAppUpdate(metadata).exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(IllegalStateException::class.java)
+        assertThat(failure!!.message).contains("校验失败")
+        assertThat(installer.installCalls).isEmpty()
+        assertThat(appUpdateStagingApk(cacheDir).exists()).isFalse()
+    }
+
+    @Test
+    fun installAvailableAppUpdateReportsMissingInstallPermissionWithoutDownload() = runTest {
+        val metadata = sampleAppUpdateMetadata(versionCode = 7, versionName = "0.3.1")
+        val installer = RecordingAppUpdateInstaller(canInstall = false)
+        val rig = SyncRig(
+            session = joinedSession("family-a"),
+            clientAppVersion = ClientAppVersion(versionCode = 6, versionName = "0.3.0"),
+            appUpdateInstaller = installer,
+        )
+        rig.awaitStartupRecovery()
+        rig.backend.appUpdateApkBytes = byteArrayOf(1, 2, 3)
+
+        val result = rig.port.installAvailableAppUpdate(metadata).getOrThrow()
+
+        assertThat(result).isEqualTo(AppUpdateInstallResult.RequiresInstallPermission)
+        assertThat(rig.backend.downloadAppUpdateApkCalls).isEqualTo(0)
+        assertThat(installer.installCalls).isEmpty()
+    }
+
+    @Test
     fun confirmedFamilyDeleteStagesFullClearAndRetiresEveryLocalFamilyTrace() = runTest {
         val clearGate = TestRemovedDeviceLocalClearGate()
         val rig = SyncRig(
@@ -6122,12 +6201,22 @@ internal class RecordingSyncBackend : SyncBackend {
     var appUpdateMetadata: AppUpdateMetadata? = null
     var getAppUpdateMetadataFailure: Throwable? = null
     var getAppUpdateMetadataCalls = 0
+    var appUpdateApkBytes: ByteArray? = null
+    var downloadAppUpdateApkFailure: Throwable? = null
+    var downloadAppUpdateApkCalls = 0
 
     override suspend fun getAppUpdateMetadata(session: SyncSession): AppUpdateMetadata {
         getAppUpdateMetadataCalls += 1
         getAppUpdateMetadataFailure?.let { throw it }
         return appUpdateMetadata
             ?: throw SyncHttpException(404, """{"detail":"App update metadata is not available"}""")
+    }
+
+    override suspend fun downloadAppUpdateApk(session: SyncSession): ByteArray {
+        downloadAppUpdateApkCalls += 1
+        downloadAppUpdateApkFailure?.let { throw it }
+        return appUpdateApkBytes
+            ?: throw SyncHttpException(404, """{"detail":"App update package is not available"}""")
     }
 
     val stagedBundles = mutableListOf<AtomicBundleDraft>()
@@ -6543,6 +6632,31 @@ private fun realPortClearWorkflow(
     override suspend fun finishCommitted() = finishCommitted.invoke()
 }
 
+private class RecordingAppUpdateInstaller(
+    private val canInstall: Boolean = true,
+) : AppUpdateInstaller {
+    data class InstallCall(
+        val expectedPackageName: String,
+        val fileExistedAtCall: Boolean,
+        val byteSize: Long,
+    )
+
+    val installCalls = mutableListOf<InstallCall>()
+
+    override fun canRequestPackageInstalls(): Boolean = canInstall
+
+    override fun installFromFile(apkFile: java.io.File, expectedPackageName: String) {
+        installCalls += InstallCall(
+            expectedPackageName = expectedPackageName,
+            fileExistedAtCall = apkFile.isFile,
+            byteSize = apkFile.length(),
+        )
+    }
+
+    override fun createManageUnknownSourcesIntent(): android.content.Intent =
+        android.content.Intent()
+}
+
 private class SyncRig(
     session: SyncSession,
     carePlanApplied: suspend (List<String>) -> Unit = {},
@@ -6551,6 +6665,8 @@ private class SyncRig(
     setupProbe: SetupProbe = SetupProbe { _, _ -> SetupProbeResult.Failed.Unreachable },
     removedDeviceLocalClearGate: RemovedDeviceLocalClearGate = NoOpRemovedDeviceLocalClearGate(),
     clientAppVersion: ClientAppVersion = ClientAppVersion.FALLBACK,
+    appUpdateInstaller: AppUpdateInstaller = NoOpAppUpdateInstaller,
+    appUpdateCacheDir: java.io.File = createTempDir(prefix = "lezi-app-update-rig"),
 ) {
     val backend = RecordingSyncBackend()
     val preferences = (syncPreferences ?: MemorySyncPreferences(session)).also {
@@ -6600,6 +6716,8 @@ private class SyncRig(
         carePlanAppliedListener = CarePlanFamilyAppliedListener { carePlanApplied(it) },
         fulfillmentCandidateDao = fulfillmentCandidates,
         clientAppVersion = clientAppVersion,
+        appUpdateInstaller = appUpdateInstaller,
+        appUpdateCacheDir = appUpdateCacheDir,
     )
 
     suspend fun awaitStartupRecovery() {
@@ -6976,12 +7094,13 @@ private fun sampleAppUpdateMetadata(
     versionCode: Int,
     versionName: String,
     releaseNotes: String? = null,
+    sha256: String = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 ) = AppUpdateMetadata(
     packageName = "com.lezi.babylog",
     versionCode = versionCode,
     versionName = versionName,
     minSupportedVersionCode = 6,
-    sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    sha256 = sha256,
     releaseNotes = releaseNotes,
 )
 

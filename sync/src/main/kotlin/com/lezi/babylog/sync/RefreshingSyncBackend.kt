@@ -118,6 +118,9 @@ internal class RefreshingSyncBackend(
     override suspend fun getAppUpdateMetadata(session: SyncSession): AppUpdateMetadata =
         authenticated(session, delegate::getAppUpdateMetadata)
 
+    override suspend fun downloadAppUpdateApk(session: SyncSession): ByteArray =
+        authenticated(session, delegate::downloadAppUpdateApk)
+
     override suspend fun stageBundle(
         session: SyncSession,
         draft: AtomicBundleDraft,

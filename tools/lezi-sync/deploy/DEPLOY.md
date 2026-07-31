@@ -37,9 +37,39 @@ Environment overrides:
 
 ## Stages
 
-1. **package-nas.sh** — `docker save` + render `docker-compose.yml` + `MANIFEST.json` + `SHA256SUMS` → `dist/lezi-sync-<ver>-nas/`
+1. **package-nas.sh** — `docker save` + render `docker-compose.yml` + **fail-closed app-update artifacts** + `MANIFEST.json` + `SHA256SUMS` → `dist/lezi-sync-<ver>-nas/`
 2. **push-and-deploy.sh** — scp package to `~/lezi-sync-releases/...` on NAS
-3. **remote-deploy.sh** (on NAS) — `docker load` → inherit secret → initialize/validate persistent TLS → stop/rm old container → **zdocker compose up** → HTTPS `/health` + `/ready`
+3. **remote-deploy.sh** (on NAS) — `docker load` → inherit secret → initialize/validate persistent TLS → **copy APK + metadata into data bind** → stop/rm old container → **zdocker compose up** → HTTPS `/health` + `/ready`
+
+## Self-hosted app update (release APK)
+
+Packaging is **fail-closed**: missing release APK, missing metadata, or sha256 mismatch aborts with non-zero exit. No “empty update channel” package is produced.
+
+| Input | Default | Override |
+|---|---|---|
+| Release APK | `app/build/outputs/apk/release/app-release.apk` | `LEZI_RELEASE_APK` |
+| Metadata JSON | `tools/lezi-sync/deploy/app-update.json` | `LEZI_APP_UPDATE_JSON` |
+
+Metadata contract (`app-update.json`, snake_case):
+
+```json
+{
+  "package_name": "com.lezi.babylog",
+  "version_code": 6,
+  "version_name": "0.3.0",
+  "min_supported_version_code": 1,
+  "sha256": "<64 lowercase hex of the APK file>",
+  "release_notes": "可选"
+}
+```
+
+- `package_name` must be `com.lezi.babylog` (release applicationId only).
+- `sha256` must match `sha256sum` of the APK byte-for-byte.
+- Package layout: `app-update/app-release.apk` + `app-update/app-update.json`.
+- On deploy, files are installed to the data bind as `/data/app-release.apk` and `/data/app-update.json` (container uid `10001`).
+- Authenticated clients: `GET /v1/app-update` (JSON) and `GET /v1/app-update/apk` (APK; integrity re-checked server-side).
+
+Optional path overrides on the server process: `LEZI_APP_UPDATE_METADATA_PATH`, `LEZI_APP_UPDATE_APK_PATH`.
 
 ## Secret handling
 

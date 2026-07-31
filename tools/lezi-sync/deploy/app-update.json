@@ -1,0 +1,8 @@
+{
+  "package_name": "com.lezi.babylog",
+  "version_code": 6,
+  "version_name": "0.3.0",
+  "min_supported_version_code": 1,
+  "sha256": "10215034bf49f589173877d5904f3b88f3bc6e447470d72b77c19d1151850e83",
+  "release_notes": "自托管应用内更新通道"
+}

@@ -9,6 +9,8 @@ import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
+import java.io.File
+import javax.inject.Named
 import javax.inject.Singleton
 
 @Module
@@ -23,6 +25,7 @@ abstract class SyncModule {
     @Binds @Singleton abstract fun foregroundState(impl: ProcessForegroundState): ForegroundState
     @Binds @Singleton abstract fun syncPort(impl: RealSyncPort): SyncPort
     @Binds @Singleton abstract fun mediaFileStore(impl: AndroidSyncMediaFileStore): SyncMediaFileStore
+    @Binds @Singleton abstract fun appUpdateInstaller(impl: AndroidAppUpdateInstaller): AppUpdateInstaller
 
     companion object {
         @Provides
@@ -32,6 +35,11 @@ abstract class SyncModule {
             preferences: SyncPreferences,
             clock: PolicyClock,
         ): SyncBackend = RefreshingSyncBackend(http, preferences, clock)
+
+        @Provides
+        @Singleton
+        @Named("appUpdateCacheDir")
+        fun appUpdateCacheDir(@ApplicationContext context: Context): File = context.cacheDir
 
         @Provides
         @Singleton

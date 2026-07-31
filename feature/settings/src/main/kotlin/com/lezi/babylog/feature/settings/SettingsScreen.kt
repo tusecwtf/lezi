@@ -1,5 +1,8 @@
 package com.lezi.babylog.feature.settings
 
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -45,6 +48,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
@@ -80,6 +84,7 @@ import com.lezi.babylog.domain.LocalDataClearCoordinator
 import com.lezi.babylog.domain.LocalDataClearScope
 import com.lezi.babylog.domain.SystemCalendarConfigurationCoordinator
 import com.lezi.babylog.domain.SystemCalendarPort
+import com.lezi.babylog.sync.AppUpdateMetadata
 import com.lezi.babylog.sync.ClientAppVersion
 import com.lezi.babylog.sync.SyncPort
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -197,9 +202,11 @@ class SettingsViewModel @Inject constructor(
     val appUpdateOutcome: StateFlow<AppUpdateUiOutcome?> = _appUpdateOutcome.asStateFlow()
     private val _checkingAppUpdate = MutableStateFlow(false)
     val checkingAppUpdate: StateFlow<Boolean> = _checkingAppUpdate.asStateFlow()
+    private val _installingAppUpdate = MutableStateFlow(false)
+    val installingAppUpdate: StateFlow<Boolean> = _installingAppUpdate.asStateFlow()
 
     fun checkAppUpdate() {
-        if (_checkingAppUpdate.value) return
+        if (_checkingAppUpdate.value || _installingAppUpdate.value) return
         viewModelScope.launch {
             _checkingAppUpdate.value = true
             try {
@@ -217,15 +224,24 @@ class SettingsViewModel @Inject constructor(
         _appUpdateOutcome.value = null
     }
 
-    /**
-     * Ticket 01 only reaches optional confirmation. Download/install is ticket 02;
-     * acknowledge so the user is not stuck on a dead-end action.
-     */
-    fun acknowledgeOptionalUpdateInstallStub() {
-        _appUpdateOutcome.value = AppUpdateUiOutcome.Message(
-            title = "检查更新",
-            body = "下载安装即将推出，请稍后在关于中再试",
-        )
+    /** Download → sha256 verify → PackageInstaller for an optional update. */
+    fun installOptionalUpdate(metadata: AppUpdateMetadata) {
+        if (_installingAppUpdate.value) return
+        viewModelScope.launch {
+            _installingAppUpdate.value = true
+            _appUpdateOutcome.value = AppUpdateUiOutcome.Message(
+                title = "正在下载",
+                body = "正在从家庭服务器下载更新包…",
+            )
+            try {
+                val result = syncPort.installAvailableAppUpdate(metadata)
+                _appUpdateOutcome.value = appUpdateInstallUiOutcome(result) { error ->
+                    productUiError(error, "下载或安装失败，请稍后重试")
+                }
+            } finally {
+                _installingAppUpdate.value = false
+            }
+        }
     }
 
     fun setDark(mode: String) = viewModelScope.launch { settingsStore.setDarkMode(mode) }
@@ -373,6 +389,8 @@ fun SettingsRoute(
     val ui by vm.ui.collectAsStateWithLifecycle()
     val appUpdateOutcome by vm.appUpdateOutcome.collectAsStateWithLifecycle()
     val checkingAppUpdate by vm.checkingAppUpdate.collectAsStateWithLifecycle()
+    val installingAppUpdate by vm.installingAppUpdate.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     val clearRecordsCopy = clearRecordsConfirmationCopy(ui.isFamilyJoined)
     var showAdd by remember(initiallyShowAddBaby) { mutableStateOf(initiallyShowAddBaby) }
     var clearStep by remember { mutableIntStateOf(0) }
@@ -536,29 +554,70 @@ fun SettingsRoute(
     when (val outcome = appUpdateOutcome) {
         is AppUpdateUiOutcome.Message -> {
             AlertDialog(
-                onDismissRequest = vm::dismissAppUpdateOutcome,
+                onDismissRequest = {
+                    if (!installingAppUpdate) vm.dismissAppUpdateOutcome()
+                },
                 title = { Text(outcome.title) },
                 text = { Text(outcome.body) },
                 confirmButton = {
-                    TextButton(onClick = vm::dismissAppUpdateOutcome) {
-                        Text("知道了")
+                    TextButton(
+                        onClick = vm::dismissAppUpdateOutcome,
+                        enabled = !installingAppUpdate,
+                    ) {
+                        Text(if (installingAppUpdate) "请稍候" else "知道了")
                     }
                 },
             )
         }
         is AppUpdateUiOutcome.OptionalUpdate -> {
             AlertDialog(
-                onDismissRequest = vm::dismissAppUpdateOutcome,
+                onDismissRequest = {
+                    if (!installingAppUpdate) vm.dismissAppUpdateOutcome()
+                },
                 title = { Text("发现新版本") },
                 text = { Text(optionalUpdateDialogBody(outcome.metadata)) },
                 confirmButton = {
-                    TextButton(onClick = vm::acknowledgeOptionalUpdateInstallStub) {
-                        Text("立即更新")
+                    TextButton(
+                        onClick = { vm.installOptionalUpdate(outcome.metadata) },
+                        enabled = !installingAppUpdate,
+                    ) {
+                        Text(if (installingAppUpdate) "安装中…" else "立即更新")
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = vm::dismissAppUpdateOutcome,
+                        enabled = !installingAppUpdate,
+                    ) {
+                        Text("稍后")
+                    }
+                },
+            )
+        }
+        AppUpdateUiOutcome.NeedsInstallPermission -> {
+            AlertDialog(
+                onDismissRequest = vm::dismissAppUpdateOutcome,
+                title = { Text("需要安装权限") },
+                text = {
+                    Text("请允许乐记安装应用，然后再试一次立即更新。")
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            val intent = Intent(
+                                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                Uri.parse("package:${context.packageName}"),
+                            )
+                            runCatching { context.startActivity(intent) }
+                            vm.dismissAppUpdateOutcome()
+                        },
+                    ) {
+                        Text("去设置")
                     }
                 },
                 dismissButton = {
                     TextButton(onClick = vm::dismissAppUpdateOutcome) {
-                        Text("稍后")
+                        Text("取消")
                     }
                 },
             )

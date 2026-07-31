@@ -1,6 +1,7 @@
 package com.lezi.babylog.feature.settings
 
 import com.lezi.babylog.sync.AppUpdateCheckResult
+import com.lezi.babylog.sync.AppUpdateInstallResult
 import com.lezi.babylog.sync.AppUpdateMetadata
 
 /** About-panel subtitle for the installed app. */
@@ -16,11 +17,14 @@ sealed interface AppUpdateUiOutcome {
     data class OptionalUpdate(
         val metadata: AppUpdateMetadata,
     ) : AppUpdateUiOutcome
+
+    /** Prompt the user to grant install-unknown-apps for this package. */
+    data object NeedsInstallPermission : AppUpdateUiOutcome
 }
 
 /**
  * Maps high-level [AppUpdateCheckResult] (and transport failures) to settings
- * dialog copy. Install itself is ticket 02 — optional update only confirms.
+ * dialog copy.
  */
 internal fun appUpdateUiOutcome(
     result: Result<AppUpdateCheckResult>,
@@ -53,5 +57,25 @@ internal fun optionalUpdateDialogBody(metadata: AppUpdateMetadata): String {
             append('\n')
             append(notes)
         }
+    }
+}
+
+internal fun appUpdateInstallUiOutcome(
+    result: Result<AppUpdateInstallResult>,
+    failureCopy: (Throwable) -> String,
+): AppUpdateUiOutcome {
+    val value = result.getOrElse { error ->
+        return AppUpdateUiOutcome.Message(
+            title = "更新失败",
+            body = failureCopy(error),
+        )
+    }
+    return when (value) {
+        AppUpdateInstallResult.SessionStarted -> AppUpdateUiOutcome.Message(
+            title = "正在安装",
+            body = "请在系统界面确认安装。安装结束后可删除通知；乐记不会在本机留下更新包。",
+        )
+        AppUpdateInstallResult.RequiresInstallPermission ->
+            AppUpdateUiOutcome.NeedsInstallPermission
     }
 }

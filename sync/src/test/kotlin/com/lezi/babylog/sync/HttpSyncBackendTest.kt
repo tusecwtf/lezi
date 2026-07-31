@@ -883,13 +883,14 @@ class HttpSyncBackendTest {
         }
 
         try {
-            val metadata = loopbackBackend().getAppUpdateMetadata(
+            val metadata = loopbackBackend(clientVersionCode = 6).getAppUpdateMetadata(
                 testSession(server).copy(serverScheme = "http"),
             )
             val request = captured.get(2, TimeUnit.SECONDS)
 
             assertThat(request.lineSequence().first()).startsWith("GET /v1/app-update")
             assertThat(request).contains("Authorization: Bearer family-token")
+            assertThat(request).contains("$CLIENT_VERSION_CODE_HEADER: 6")
             assertThat(metadata).isEqualTo(
                 AppUpdateMetadata(
                     packageName = "com.lezi.babylog",
@@ -900,6 +901,46 @@ class HttpSyncBackendTest {
                     releaseNotes = "修复同步",
                 ),
             )
+        } finally {
+            server.close()
+            responder.join(2_000)
+        }
+    }
+
+    @Test
+    fun downloadAppUpdateApkUsesAuthenticatedGetAndReturnsBytes() = runTest {
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+        val captured = CompletableFuture<String>()
+        val apkBytes = "lezi-apk-payload".toByteArray(Charsets.UTF_8)
+        val responder = thread(name = "lezi-app-update-apk-test-server") {
+            runCatching {
+                server.accept().use { socket ->
+                    captured.complete(readRequest(socket))
+                    socket.getOutputStream().use { output ->
+                        output.write(
+                            (
+                                "HTTP/1.1 200 OK\r\n" +
+                                    "Content-Type: application/vnd.android.package-archive\r\n" +
+                                    "Content-Length: ${apkBytes.size}\r\n" +
+                                    "Connection: close\r\n\r\n"
+                            ).toByteArray(Charsets.US_ASCII),
+                        )
+                        output.write(apkBytes)
+                    }
+                }
+            }.onFailure(captured::completeExceptionally)
+        }
+
+        try {
+            val downloaded = loopbackBackend(clientVersionCode = 6).downloadAppUpdateApk(
+                testSession(server).copy(serverScheme = "http"),
+            )
+            val request = captured.get(2, TimeUnit.SECONDS)
+
+            assertThat(request.lineSequence().first()).startsWith("GET /v1/app-update/apk")
+            assertThat(request).contains("Authorization: Bearer family-token")
+            assertThat(request).contains("$CLIENT_VERSION_CODE_HEADER: 6")
+            assertThat(downloaded.toString(Charsets.UTF_8)).isEqualTo("lezi-apk-payload")
         } finally {
             server.close()
             responder.join(2_000)
@@ -1440,8 +1481,8 @@ class HttpSyncBackendTest {
      * tiny plain-HTTP loopback fixture, so redirect only loopback HTTPS opens
      * through the existing injectable connection seam.
      */
-    private fun loopbackBackend() = HttpSyncBackend(
-        SyncHttpConnectionFactory { requested ->
+    private fun loopbackBackend(clientVersionCode: Int? = null) = HttpSyncBackend(
+        connectionFactory = SyncHttpConnectionFactory { requested ->
             val connectionUrl = if (
                 requested.protocol == "https" &&
                 requested.host in setOf("127.0.0.1", "localhost", "::1")
@@ -1452,6 +1493,7 @@ class HttpSyncBackendTest {
             }
             connectionUrl.openConnection() as HttpURLConnection
         },
+        clientVersionCode = clientVersionCode,
     )
 
     private fun readRequest(socket: Socket): String {

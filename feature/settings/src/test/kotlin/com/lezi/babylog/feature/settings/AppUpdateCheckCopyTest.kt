@@ -1,6 +1,7 @@
 package com.lezi.babylog.feature.settings
 
 import com.lezi.babylog.sync.AppUpdateCheckResult
+import com.lezi.babylog.sync.AppUpdateInstallResult
 import com.lezi.babylog.sync.AppUpdateMetadata
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -79,6 +80,40 @@ class AppUpdateCheckCopyTest {
         assertEquals(
             "暂时无法连接家庭服务器",
             (outcome as AppUpdateUiOutcome.Message).body,
+        )
+    }
+
+    @Test
+    fun installSessionStartedMapsToSystemConfirmCopy() {
+        val outcome = appUpdateInstallUiOutcome(
+            Result.success(AppUpdateInstallResult.SessionStarted),
+            failureCopy = { "unused" },
+        )
+
+        assertTrue(outcome is AppUpdateUiOutcome.Message)
+        assertEquals("正在安装", (outcome as AppUpdateUiOutcome.Message).title)
+    }
+
+    @Test
+    fun installPermissionRequiredMapsToNeedsInstallPermission() {
+        val outcome = appUpdateInstallUiOutcome(
+            Result.success(AppUpdateInstallResult.RequiresInstallPermission),
+            failureCopy = { "unused" },
+        )
+
+        assertEquals(AppUpdateUiOutcome.NeedsInstallPermission, outcome)
+    }
+
+    @Test
+    fun installFailureUsesInjectedProductCopy() {
+        val outcome = appUpdateInstallUiOutcome(
+            Result.failure(IllegalStateException("校验失败")),
+            failureCopy = { error -> error.message ?: "failed" },
+        )
+
+        assertEquals(
+            AppUpdateUiOutcome.Message(title = "更新失败", body = "校验失败"),
+            outcome,
         )
     }
 }

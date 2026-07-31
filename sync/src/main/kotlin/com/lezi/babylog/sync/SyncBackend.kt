@@ -300,4 +300,11 @@ interface SyncBackend {
      */
     suspend fun getAppUpdateMetadata(session: SyncSession): AppUpdateMetadata =
         throw UnsupportedOperationException("App update metadata is not implemented")
+
+    /**
+     * Authenticated GET of the release APK bytes advertised by app-update metadata.
+     * Requires a usable device session; no anonymous access.
+     */
+    suspend fun downloadAppUpdateApk(session: SyncSession): ByteArray =
+        throw UnsupportedOperationException("App update APK download is not implemented")
 }

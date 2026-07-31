@@ -13,8 +13,10 @@ import com.lezi.babylog.core.database.PendingReplicaCleanupStore
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.model.RootPublicationState
 import com.lezi.babylog.core.model.SyncStatus
+import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
+import javax.inject.Named
 import javax.inject.Singleton
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -63,6 +65,9 @@ class RealSyncPort @Inject constructor(
         NoOpFamilyBabyAuthorityAppliedListener(),
     private val fulfillmentCandidateDao: FulfillmentCandidateDao,
     private val clientAppVersion: ClientAppVersion = ClientAppVersion.FALLBACK,
+    private val appUpdateInstaller: AppUpdateInstaller = NoOpAppUpdateInstaller,
+    @Named("appUpdateCacheDir") private val appUpdateCacheDir: File =
+        File(System.getProperty("java.io.tmpdir"), "lezi-app-update-test"),
 ) : SyncPort {
     private val currentStatus = MutableStateFlow(SyncStatus.Disabled)
     private val memberLoginCheckEvents = MutableSharedFlow<MemberLoginCheckResult>(
@@ -519,6 +524,8 @@ class RealSyncPort @Inject constructor(
         .onFailure(::updateFailureStatus)
 
     override suspend fun checkAppUpdate(): Result<AppUpdateCheckResult> {
+        // Opportunistic staging cleanup whenever the user opens the check path.
+        cleanupAppUpdateStaging()
         val session = preferences.session.first()
         if (!session.isJoined) {
             return Result.success(AppUpdateCheckResult.NotJoined)
@@ -537,6 +544,56 @@ class RealSyncPort @Inject constructor(
                 AppUpdateCheckResult.OptionalUpdate(metadata)
             }
         }.onFailure(::updateFailureStatus)
+    }
+
+    override suspend fun installAvailableAppUpdate(
+        metadata: AppUpdateMetadata,
+    ): Result<AppUpdateInstallResult> {
+        val session = preferences.session.first()
+        if (!session.isJoined) {
+            return Result.failure(IllegalStateException("请先连接家庭服务器后再更新"))
+        }
+        if (metadata.packageName != "com.lezi.babylog") {
+            return Result.failure(IllegalStateException("更新包与本应用不匹配"))
+        }
+        if (clientAppVersion.versionCode >= metadata.versionCode) {
+            return Result.failure(IllegalStateException("当前已是最新版本"))
+        }
+        return runCatching {
+            val decision = foregroundSyncGate.evaluate(
+                session.endpointConfig,
+                preferences.verifiedEndpoint.first(),
+                foregroundState.isForeground(),
+            )
+            requireAllowed(decision)
+            if (!appUpdateInstaller.canRequestPackageInstalls()) {
+                return@runCatching AppUpdateInstallResult.RequiresInstallPermission
+            }
+            cleanupAppUpdateStagingFiles(appUpdateCacheDir)
+            val stagingDir = appUpdateStagingDir(appUpdateCacheDir)
+            require(stagingDir.mkdirs() || stagingDir.isDirectory) { "无法创建更新暂存目录" }
+            val stagingFile = appUpdateStagingApk(appUpdateCacheDir)
+            try {
+                val bytes = backend.downloadAppUpdateApk(session)
+                require(bytes.isNotEmpty()) { "更新包下载为空" }
+                val digest = sha256Hex(bytes)
+                if (digest != metadata.sha256) {
+                    throw IllegalStateException("更新包校验失败，请重试")
+                }
+                withContext(Dispatchers.IO) {
+                    stagingFile.outputStream().use { it.write(bytes) }
+                }
+                appUpdateInstaller.installFromFile(stagingFile, metadata.packageName)
+                AppUpdateInstallResult.SessionStarted
+            } finally {
+                // Always remove private staging after the attempt so no shareable APK remains.
+                cleanupAppUpdateStagingFiles(appUpdateCacheDir)
+            }
+        }.onFailure(::updateFailureStatus)
+    }
+
+    override suspend fun cleanupAppUpdateStaging(): Result<Unit> = runCatching {
+        cleanupAppUpdateStagingFiles(appUpdateCacheDir)
     }
 
     /** Caller owns [syncMutex]; lock order is sync mutex then domain mutation guard. */
@@ -700,6 +757,14 @@ class RealSyncPort @Inject constructor(
             else -> SyncStatus.Error
         }
     }
+}
+
+/** Test / default installer so JVM unit tests need no PackageInstaller. */
+internal object NoOpAppUpdateInstaller : AppUpdateInstaller {
+    override fun canRequestPackageInstalls(): Boolean = true
+    override fun installFromFile(apkFile: File, expectedPackageName: String) = Unit
+    override fun createManageUnknownSourcesIntent(): android.content.Intent =
+        android.content.Intent()
 }
 
 private inline fun <reified T : Throwable> Throwable.causeChainContains(): Boolean =

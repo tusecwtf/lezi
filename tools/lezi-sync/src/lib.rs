@@ -99,6 +99,9 @@ pub struct ServerConfig {
     /// Deploy-readable app-update metadata JSON (`app-update.json` by default).
     /// When unset, defaults to `{data_dir}/app-update.json`.
     pub app_update_metadata_path: Option<PathBuf>,
+    /// Deploy-readable release APK (`app-release.apk` by default).
+    /// When unset, defaults to `{data_dir}/app-release.apk`.
+    pub app_update_apk_path: Option<PathBuf>,
     clock: Clock,
 }
 
@@ -122,6 +125,7 @@ impl ServerConfig {
             member_request_ttl_hours: DEFAULT_MEMBER_REQUEST_TTL_HOURS,
             max_pending_member_requests: DEFAULT_MAX_PENDING_MEMBER_REQUESTS,
             app_update_metadata_path: None,
+            app_update_apk_path: None,
             clock: Arc::new(system_epoch_seconds),
         }
     }
@@ -156,6 +160,9 @@ impl ServerConfig {
             DEFAULT_MAX_PENDING_MEMBER_REQUESTS,
         )?;
         config.app_update_metadata_path = std::env::var_os("LEZI_APP_UPDATE_METADATA_PATH")
+            .map(PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty());
+        config.app_update_apk_path = std::env::var_os("LEZI_APP_UPDATE_APK_PATH")
             .map(PathBuf::from)
             .filter(|path| !path.as_os_str().is_empty());
         let window = parse_env(
@@ -223,6 +230,7 @@ struct AppState {
     max_pending_member_requests: usize,
     readiness_cache: Arc<Mutex<Option<CachedReadiness>>>,
     app_update_metadata_path: PathBuf,
+    app_update_apk_path: PathBuf,
 }
 
 impl AppState {
@@ -392,6 +400,9 @@ pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
     let app_update_metadata_path = config
         .app_update_metadata_path
         .unwrap_or_else(|| config.data_dir.join("app-update.json"));
+    let app_update_apk_path = config
+        .app_update_apk_path
+        .unwrap_or_else(|| config.data_dir.join("app-release.apk"));
     let state = AppState {
         store,
         data_root: config.data_dir,
@@ -411,6 +422,7 @@ pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
         max_pending_member_requests: config.max_pending_member_requests,
         readiness_cache: Arc::new(Mutex::new(None)),
         app_update_metadata_path,
+        app_update_apk_path,
     };
     let body_limit = state.max_media_bytes.max(16 * 1024 * 1024);
     Ok(Router::new()
@@ -418,6 +430,7 @@ pub fn build_app(config: ServerConfig) -> Result<Router, ApiError> {
         .route("/ready", get(readiness))
         .route("/v1/setup-status", get(setup_status))
         .route("/v1/app-update", get(get_app_update))
+        .route("/v1/app-update/apk", get(get_app_update_apk))
         .route("/v1/family/create", post(create_family))
         .route("/v1/owner/login", post(owner_login_device))
         .route("/v1/owner/takeover", post(owner_takeover))
@@ -534,6 +547,54 @@ async fn get_app_update(
 ) -> Result<Json<Value>, ApiError> {
     let _principal = authenticate(&state, &headers)?;
     Ok(Json(load_app_update_metadata(&state.app_update_metadata_path)?))
+}
+
+/// Authenticated release APK download for already-joined family devices.
+/// Bytes are served only when the on-disk APK sha256 matches deploy metadata.
+async fn get_app_update_apk(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let _principal = authenticate(&state, &headers)?;
+    let metadata = load_app_update_metadata(&state.app_update_metadata_path)?;
+    let expected_sha256 = metadata
+        .get("sha256")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::internal("App update metadata is missing sha256"))?;
+    let bytes = match fs::read(&state.app_update_apk_path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ApiError::not_found("App update package is not available"));
+        }
+        Err(_) => {
+            return Err(ApiError::internal("Failed to read app update package"));
+        }
+    };
+    if bytes.is_empty() {
+        return Err(ApiError::internal("App update package is empty"));
+    }
+    let actual_sha256 = hex_sha256(&bytes);
+    if actual_sha256 != expected_sha256 {
+        tracing::error!(
+            expected = %expected_sha256,
+            actual = %actual_sha256,
+            path = %state.app_update_apk_path.display(),
+            "app update APK sha256 does not match metadata"
+        );
+        return Err(ApiError::internal(
+            "App update package integrity check failed",
+        ));
+    }
+    let mut response = Response::new(Body::from(bytes));
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/vnd.android.package-archive"),
+    );
+    Ok(response)
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn load_app_update_metadata(path: &Path) -> Result<Value, ApiError> {

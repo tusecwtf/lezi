@@ -173,8 +173,19 @@ sealed interface AppUpdateCheckResult {
     data object NotJoined : AppUpdateCheckResult
     /** Local versionCode is at least the server package versionCode. */
     data object UpToDate : AppUpdateCheckResult
-    /** Server advertises a newer package; install is handled by a later ticket. */
+    /** Server advertises a newer package; user may download and install. */
     data class OptionalUpdate(val metadata: AppUpdateMetadata) : AppUpdateCheckResult
+}
+
+/**
+ * Outcome of [SyncPort.installAvailableAppUpdate] after download + sha256 verify.
+ * Does not report final PackageInstaller success (system UI is async).
+ */
+sealed interface AppUpdateInstallResult {
+    /** PackageInstaller session committed; system may show confirm UI. */
+    data object SessionStarted : AppUpdateInstallResult
+    /** App lacks permission to request package installs; open unknown-sources settings. */
+    data object RequiresInstallPermission : AppUpdateInstallResult
 }
 
 interface SyncPort {
@@ -288,6 +299,22 @@ interface SyncPort {
      */
     suspend fun checkAppUpdate(): Result<AppUpdateCheckResult> =
         Result.success(AppUpdateCheckResult.NotJoined)
+
+    /**
+     * Downloads the release APK for [metadata] from the trusted family server,
+     * verifies sha256, then starts a [android.content.pm.PackageInstaller] session.
+     *
+     * Staging is limited to app-private cache and is always cleaned up after the
+     * attempt (success path after session commit, failure/cancel paths too).
+     * Not joined or foreground/trust gate failures return [Result.failure].
+     */
+    suspend fun installAvailableAppUpdate(
+        metadata: AppUpdateMetadata,
+    ): Result<AppUpdateInstallResult> =
+        Result.failure(SyncNotEnabledException())
+
+    /** Best-effort delete of private app-update staging APKs. */
+    suspend fun cleanupAppUpdateStaging(): Result<Unit> = Result.success(Unit)
 }
 
 @Singleton
@@ -342,4 +369,10 @@ class NoOpSyncPort @Inject constructor() : SyncPort {
 
     override suspend fun checkAppUpdate(): Result<AppUpdateCheckResult> =
         Result.success(AppUpdateCheckResult.NotJoined)
+
+    override suspend fun installAvailableAppUpdate(
+        metadata: AppUpdateMetadata,
+    ): Result<AppUpdateInstallResult> = Result.failure(SyncNotEnabledException())
+
+    override suspend fun cleanupAppUpdateStaging(): Result<Unit> = Result.success(Unit)
 }

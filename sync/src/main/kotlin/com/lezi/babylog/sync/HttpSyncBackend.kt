@@ -32,8 +32,12 @@ import kotlinx.serialization.json.put
 private const val BOOTSTRAP_SECRET_HEADER = "X-Lezi-Bootstrap-Secret"
 internal const val MAX_SYNC_JSON_RESPONSE_BYTES = 16 * 1024 * 1024
 internal const val MAX_SYNC_MEDIA_RESPONSE_BYTES = 10 * 1024 * 1024
+/** Self-hosted release APK download bound (full package, not media). */
+internal const val MAX_SYNC_APP_UPDATE_APK_BYTES = 100 * 1024 * 1024
 private const val MAX_SYNC_ERROR_RESPONSE_BYTES = 64 * 1024
 private const val MILLIS_PER_SECOND = 1_000L
+/** Attached on authenticated family requests so the server can gate minSupported later. */
+internal const val CLIENT_VERSION_CODE_HEADER = "X-Lezi-Client-Version-Code"
 
 /** Local-only UI placeholder; must never be uploaded as a real family 称呼. */
 /** Local-only display placeholder; never treated as a real caregiver name. */
@@ -124,9 +128,13 @@ private object DefaultSyncHttpConnectionFactory : SyncHttpConnectionFactory {
 class HttpSyncBackend internal constructor(
     private val connectionFactory: SyncHttpConnectionFactory,
     private val trustedEndpointResolver: TrustedEndpointResolver? = null,
+    private val clientVersionCode: Int? = null,
 ) : SyncBackend {
     @Inject
-    constructor(preferences: SyncPreferences) : this(
+    constructor(
+        preferences: SyncPreferences,
+        clientAppVersion: ClientAppVersion,
+    ) : this(
         connectionFactory = DefaultSyncHttpConnectionFactory,
         trustedEndpointResolver = TrustedEndpointResolver { baseUrl ->
             requireNotNull(preferences.verifiedEndpoint.first()) {
@@ -137,6 +145,7 @@ class HttpSyncBackend internal constructor(
                 }
             }
         },
+        clientVersionCode = clientAppVersion.versionCode,
     )
     override suspend fun create(
         baseUrl: String,
@@ -625,6 +634,19 @@ class HttpSyncBackend internal constructor(
         return json.toAppUpdateMetadata()
     }
 
+    override suspend fun downloadAppUpdateApk(session: SyncSession): ByteArray {
+        session.requireCurrentReplicaTransport()
+        return requestBytes(
+            session.baseUrl,
+            "/v1/app-update/apk",
+            "GET",
+            session.accessToken,
+            successLimitBytes = MAX_SYNC_APP_UPDATE_APK_BYTES,
+            successResponseKind = "更新包",
+            readTimeoutMillis = 120_000,
+        )
+    }
+
     override suspend fun stageBundle(
         session: SyncSession,
         draft: AtomicBundleDraft,
@@ -730,11 +752,17 @@ class HttpSyncBackend internal constructor(
         token: String,
         body: ByteArray? = null,
         mime: String? = null,
+        successLimitBytes: Int = MAX_SYNC_MEDIA_RESPONSE_BYTES,
+        successResponseKind: String = "媒体",
+        readTimeoutMillis: Int? = null,
     ): ByteArray {
         val resolvedEndpoint = trustedEndpointResolver?.resolve(base)
         return withContext(Dispatchers.IO) {
             val connection = open(base, path, method, token, trustedEndpoint = resolvedEndpoint)
             try {
+                if (readTimeoutMillis != null) {
+                    connection.readTimeout = readTimeoutMillis
+                }
                 if (body != null) {
                     connection.doOutput = true
                     connection.setRequestProperty(
@@ -745,8 +773,8 @@ class HttpSyncBackend internal constructor(
                 }
                 val (code, bytes) = readBoundedBody(
                     connection = connection,
-                    successLimitBytes = MAX_SYNC_MEDIA_RESPONSE_BYTES,
-                    successResponseKind = "媒体",
+                    successLimitBytes = successLimitBytes,
+                    successResponseKind = successResponseKind,
                 )
                 if (code !in 200..299) {
                     throw SyncHttpException(code, bytes.toString(Charsets.UTF_8))
@@ -834,7 +862,13 @@ class HttpSyncBackend internal constructor(
             readTimeout = 8_000
             useCaches = false
             instanceFollowRedirects = false
-            if (!token.isNullOrBlank()) setRequestProperty("Authorization", "Bearer $token")
+            if (!token.isNullOrBlank()) {
+                setRequestProperty("Authorization", "Bearer $token")
+                // Protected family requests: advertise local versionCode for server gates.
+                clientVersionCode?.takeIf { it > 0 }?.let { code ->
+                    setRequestProperty(CLIENT_VERSION_CODE_HEADER, code.toString())
+                }
+            }
             extraHeaders.forEach(::setRequestProperty)
         }
 

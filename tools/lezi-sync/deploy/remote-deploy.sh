@@ -101,6 +101,22 @@ echo "==> initialize or validate persistent TLS identity"
 "${DIR}/init-tls.sh" "${data_path}" "${image}" "${TLS_HOST}"
 tls_certificate="${data_path}/tls/server.crt"
 
+# Self-hosted app update: copy release APK + metadata into the data bind mount
+# so lezi-sync can serve GET /v1/app-update and /v1/app-update/apk.
+if [[ ! -f "${DIR}/app-update/app-release.apk" || ! -f "${DIR}/app-update/app-update.json" ]]; then
+  echo "error: package missing app-update/app-release.apk or app-update/app-update.json" >&2
+  echo "  repackage with package-nas.sh (fail-closed on release APK + metadata)" >&2
+  exit 1
+fi
+echo "==> install app-update artifacts into ${data_path}"
+mkdir -p "${data_path}"
+install -m 644 "${DIR}/app-update/app-update.json" "${data_path}/app-update.json"
+install -m 644 "${DIR}/app-update/app-release.apk" "${data_path}/app-release.apk"
+# Container runs as 10001:10001; best-effort ownership when deploy user can chown.
+if command -v chown >/dev/null 2>&1; then
+  chown 10001:10001 "${data_path}/app-update.json" "${data_path}/app-release.apk" 2>/dev/null || true
+fi
+
 echo "==> stop/remove existing container ${CONTAINER_NAME} (data bind kept)"
 if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
   docker stop "${CONTAINER_NAME}" >/dev/null || true
