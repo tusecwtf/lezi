@@ -22,9 +22,9 @@
   `10215034bf49f589173877d5904f3b88f3bc6e447470d72b77c19d1151850e83`.
 - `apksigner verify --verbose --print-certs` — PASS; v2 and v3 are true. Signer certificate SHA-256:
   `ce1438c8c50fe75f04f89ae2092631a46660480764cd52071cc5c08707462211`.
-- Final APK streamed installation on Client A passed. Launch returned the welcome route with
-  Connect, scan-member-QR, and Offline actions; installed package reported versionName 0.3.0,
-  versionCode 6, minSdk 26, targetSdk 35.
+- Final APK streamed installation on both Client A and Client B passed. Launch returned the welcome
+  route with Connect, scan-member-QR, and Offline actions; both installed packages reported
+  versionName 0.3.0, versionCode 6, minSdk 26, targetSdk 35.
 
 ## Rust, image, and NAS package gates
 
@@ -53,6 +53,16 @@
 
 ## Cross-client and security acceptance during candidate stabilization
 
+- System-PKI trust used `https://cachyos.tail8a083b.ts.net:38765` over the host's private Tailscale
+  network. The temporary certificate was issued by Let's Encrypt YE2 for that DNS name and was valid
+  from 2026-07-31 through 2026-10-29; the port was not exposed with Funnel or to the public internet.
+  Both final-APK clients connected without a TOFU/fingerprint confirmation. Client A created the
+  synthetic `T16Pki` family and baby `年年`; Client B requested membership, Client A approved it,
+  and Client B claimed the session and recovered the baby. Client A then confirmed a synthetic
+  12:49 urine record, which Client B fetched and rendered as the same one-record history.
+- Client A permanently deleted `T16Pki`. Both final-APK clients returned to Welcome after the member
+  reconnected. A post-delete database snapshot had zero families, memberships, devices, device
+  sessions, entities, bundles, bundle-media rows, and media publications; SQLite integrity was `ok`.
 - Self-signed trust used `https://10.0.2.2:18765`. The accepted SPKI pin was
   `qZt5MCIaAn+NQoUXERn3kh9Xa0A4ywknHRBd+Dlphk8=`. Owner create, baby recovery, member request and
   Owner approval completed across both AVDs.
@@ -85,8 +95,8 @@
 
 ## Remaining Must evidence
 
-- No System-PKI endpoint was available; only the self-signed TOFU/SPKI path was exercised end to end.
-- Both clients were emulators, not physical phones, and no live camera QR scan was possible.
+- Both clients were emulators, not physical phones, and no live Android camera QR scan was possible.
+  The QR payload/image round-trip and API grant lifecycle do not prove the app's camera-to-claim path.
 - Candidate stabilization used several signed Release rebuilds. Affected reauth, generation-reset,
   SPKI mismatch, deletion, repository, artifact, and final welcome smoke gates were repeated after
   their fixes, but the complete two-client matrix was not replayed from zero against the single final
