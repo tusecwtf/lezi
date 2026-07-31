@@ -414,11 +414,11 @@ class OnboardingViewModel @Inject constructor(
                 onFailure = { error ->
                     onDone(
                         null,
-                    when (error) {
-                        is MemberLoginQrUnavailableException,
-                        is MemberLoginQrTrustChangedException,
-                        -> error.message
-                        else -> productUiError(error, "登录失败，请稍后重试")
+                        when (error) {
+                            is MemberLoginQrUnavailableException,
+                            is MemberLoginQrTrustChangedException,
+                            -> error.message
+                            else -> productUiError(error, "登录失败，请稍后重试")
                         },
                     )
                 },

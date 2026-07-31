@@ -257,4 +257,41 @@ class MemberApprovalWaitingDeviceTest {
             assertThat(manualFallback).isEqualTo(1)
         }
     }
+
+    @Test
+    fun failedMemberQrVerificationOffersRetryAndManualJoinWithoutLogin() {
+        var retried = 0
+        var manualFallback = 0
+        val payload = MemberLoginQrPayload(
+            endpoint = TrustedEndpointProfile.systemPki("https://family.example.com"),
+            grant = "grant-0000000000000000000000000000000000000",
+            familyName = "乐乐一家",
+            memberDisplayName = "妈妈",
+            expiresAtEpochSeconds = 1_753_419_000,
+        )
+        compose.setContent {
+            LeziTheme {
+                MemberLoginQrConfirmDialog(
+                    payload = payload,
+                    deviceName = "Pixel 10",
+                    onDeviceNameChange = {},
+                    feedback = "暂时无法确认二维码中的家庭服务器",
+                    submitting = false,
+                    verificationRetryRequired = true,
+                    onLogin = { throw AssertionError("unverified QR must not log in") },
+                    onRetryVerification = { retried += 1 },
+                    onManualJoin = { manualFallback += 1 },
+                    onDismiss = {},
+                )
+            }
+        }
+
+        compose.onNodeWithText("重新确认").performClick()
+        compose.onNodeWithText("改用加入家庭").performClick()
+
+        compose.runOnIdle {
+            assertThat(retried).isEqualTo(1)
+            assertThat(manualFallback).isEqualTo(1)
+        }
+    }
 }

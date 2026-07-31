@@ -260,6 +260,13 @@ class FamilyViewModel @Inject constructor(
         viewModelScope.launch { refreshMembersNow(showErrors) }
     }
 
+    fun refreshFamilyForDeletion() {
+        viewModelScope.launch {
+            sync.sync(SyncTrigger.PullToRefresh)
+            refreshMembersNow(showErrors = true)
+        }
+    }
+
     private suspend fun refreshMembersNow(showErrors: Boolean) = memberRefreshMutex.withLock {
         val session = sync.session().first()
         if (!session.isJoined) {
@@ -566,10 +573,10 @@ class FamilyViewModel @Inject constructor(
                 onFailure = { error ->
                     onDone(
                         null,
-                    when (error) {
-                        is MemberLoginQrUnavailableException -> error.message
-                        is MemberLoginQrTrustChangedException -> error.message
-                        else -> familySyncError(error, "登录失败，请稍后重试")
+                        when (error) {
+                            is MemberLoginQrUnavailableException -> error.message
+                            is MemberLoginQrTrustChangedException -> error.message
+                            else -> familySyncError(error, "登录失败，请稍后重试")
                         },
                     )
                 },

@@ -780,8 +780,14 @@ class RealSyncPortTest {
     }
 
     @Test
-    fun failedTrustedProbeDoesNotLeaveADurableResumeEndpoint() = runTest {
+    fun failedTrustedProbeClearsAStaleDurableResumeEndpoint() = runTest {
         val preferences = MemorySyncPreferences(SyncSession())
+        preferences.rememberEndpoint(
+            TrustedEndpointProfile.tofuSpki(
+                "https://192.168.50.4:8765",
+                "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+            ),
+        )
         val candidate = CertificateTrustCandidate.fromSpki(
             TrustedEndpointProfile.systemPki("https://192.168.50.4:8765"),
             "unstable-nas-public-key".toByteArray(),

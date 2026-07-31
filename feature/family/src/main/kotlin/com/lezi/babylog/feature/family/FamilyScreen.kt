@@ -37,6 +37,7 @@ import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.sync.FamilyEndpointConfig
 import com.lezi.babylog.sync.FamilyEndpointDraft
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
+import com.lezi.babylog.sync.MemberLoginQrPayload
 import com.lezi.babylog.sync.MemberLoginQrPayloadCodec
 import com.lezi.babylog.sync.SetupFamilyState
 import com.lezi.babylog.sync.SetupProbeResult
@@ -206,6 +207,46 @@ fun FamilyRoute(
         dialog = FamilyDialog.ConnectEndpoint
     }
 
+    fun verifyScannedMemberLogin(memberLogin: MemberLoginQrPayload) {
+        memberQrFeedback = null
+        dialog = FamilyDialog.VerifyingMemberLoginQr(memberLogin)
+        vm.verifyMemberLoginQr(memberLogin) { result ->
+            if ((dialog as? FamilyDialog.VerifyingMemberLoginQr)?.payload != memberLogin) {
+                return@verifyMemberLoginQr
+            }
+            dialog = when (result) {
+                is SetupProbeResult.Ready -> if (
+                    result.endpoint == memberLogin.endpoint &&
+                    result.familyState == SetupFamilyState.Configured
+                ) {
+                    FamilyDialog.ConfirmMemberLoginQr(memberLogin)
+                } else {
+                    FamilyDialog.RetryMemberLoginQrVerification(
+                        memberLogin,
+                        "这个二维码对应的服务器尚未配置家庭",
+                    )
+                }
+                SetupProbeResult.Failed.CertificateChanged ->
+                    FamilyDialog.RetryMemberLoginQrVerification(
+                        memberLogin,
+                        "家庭服务器安全信息不一致，登录已停止",
+                    )
+                else -> FamilyDialog.RetryMemberLoginQrVerification(
+                    memberLogin,
+                    "暂时无法确认二维码中的家庭服务器，请稍后重试",
+                )
+            }
+        }
+    }
+
+    fun useManualJoinFor(memberLogin: MemberLoginQrPayload) {
+        vm.cancelMemberLoginQrVerification()
+        memberQrFeedback = null
+        memberQrRecoveryRequired = false
+        endpointDraft = memberLogin.endpoint.origin
+        dialog = FamilyDialog.ConnectEndpoint
+    }
+
     fun applyScannedMemberLogin(raw: String) {
         val payload = raw.trim()
         if (payload.isEmpty()) return
@@ -215,28 +256,8 @@ fun FamilyRoute(
                 showMessage("这个二维码已失效，请让管理员重新生成")
                 return
             }
-            memberQrFeedback = null
             memberQrDeviceName = defaultAndroidDeviceName(context)
-            dialog = FamilyDialog.VerifyingMemberLoginQr(memberLogin)
-            vm.verifyMemberLoginQr(memberLogin) { result ->
-                if ((dialog as? FamilyDialog.VerifyingMemberLoginQr)?.payload != memberLogin) {
-                    return@verifyMemberLoginQr
-                }
-                dialog = when (result) {
-                    is SetupProbeResult.Ready -> if (
-                        result.endpoint == memberLogin.endpoint &&
-                        result.familyState == SetupFamilyState.Configured
-                    ) {
-                        FamilyDialog.ConfirmMemberLoginQr(memberLogin)
-                    } else {
-                        FamilyDialog.Message("这个二维码对应的服务器尚未配置家庭")
-                    }
-                    SetupProbeResult.Failed.CertificateChanged -> FamilyDialog.Message(
-                        "家庭服务器安全信息不一致，登录已停止",
-                    )
-                    else -> FamilyDialog.Message("暂时无法确认二维码中的家庭服务器，请稍后重试")
-                }
-            }
+            verifyScannedMemberLogin(memberLogin)
             return
         }
         showMessage("这不是可用的成员登录二维码")
@@ -621,11 +642,23 @@ fun FamilyRoute(
             submitting = false,
             verificationInProgress = true,
             onLogin = {},
-            onManualJoin = {},
+            onManualJoin = { useManualJoinFor(active.payload) },
             onDismiss = {
                 vm.cancelMemberLoginQrVerification()
                 dialog = null
             },
+        )
+        is FamilyDialog.RetryMemberLoginQrVerification -> MemberLoginQrConfirmDialog(
+            payload = active.payload,
+            deviceName = memberQrDeviceName,
+            onDeviceNameChange = { memberQrDeviceName = it },
+            feedback = active.feedback,
+            submitting = false,
+            verificationRetryRequired = true,
+            onLogin = {},
+            onRetryVerification = { verifyScannedMemberLogin(active.payload) },
+            onManualJoin = { useManualJoinFor(active.payload) },
+            onDismiss = { dialog = null },
         )
         is FamilyDialog.ConfirmMemberLoginQr -> MemberLoginQrConfirmDialog(
             payload = active.payload,
@@ -670,10 +703,7 @@ fun FamilyRoute(
             },
             onManualJoin = {
                 memberQrSubmitting = false
-                memberQrFeedback = null
-                memberQrRecoveryRequired = false
-                endpointDraft = active.payload.endpoint.origin
-                dialog = FamilyDialog.ConnectEndpoint
+                useManualJoinFor(active.payload)
             },
             onDismiss = {
                 if (!memberQrSubmitting) {
@@ -1274,6 +1304,11 @@ fun FamilyRoute(
                         }
                     }
                 }
+            },
+            onRefreshFamilyInfo = {
+                resetDeleteFamilyConfirmation()
+                dialog = null
+                vm.refreshFamilyForDeletion()
             },
             onDismiss = {
                 resetDeleteFamilyConfirmation()

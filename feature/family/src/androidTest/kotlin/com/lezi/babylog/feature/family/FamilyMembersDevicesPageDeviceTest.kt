@@ -282,6 +282,7 @@ class FamilyMembersDevicesPageDeviceTest {
                     deleting = false,
                     onContinue = {},
                     onConfirm = {},
+                    onRefreshFamilyInfo = {},
                     onDismiss = {},
                 )
             }
@@ -302,6 +303,33 @@ class FamilyMembersDevicesPageDeviceTest {
         compose.onNodeWithText("输入家庭名：乐乐一家").performTextInput("乐乐一家")
         compose.onNodeWithText("管理员根密码").performTextInput("root-password-secret")
         compose.onNodeWithText("永久删除家庭").assertIsEnabled()
+    }
+
+    @Test
+    fun blankDeleteFamilyNameProvidesARealRefreshAction() {
+        var refreshed = 0
+        compose.setContent {
+            LeziTheme {
+                DeleteFamilyDialog(
+                    stage = FamilyDialog.DeleteStage.Final,
+                    expectedFamilyName = "",
+                    familyNameInput = "",
+                    onFamilyNameInputChange = {},
+                    rootPassword = "",
+                    onRootPasswordChange = {},
+                    errorMessage = null,
+                    deleting = false,
+                    onContinue = {},
+                    onConfirm = { throw AssertionError("blank name must not delete") },
+                    onRefreshFamilyInfo = { refreshed += 1 },
+                    onDismiss = {},
+                )
+            }
+        }
+
+        compose.onNodeWithText("返回并刷新").performClick()
+
+        compose.runOnIdle { assertThat(refreshed).isEqualTo(1) }
     }
 
     private fun familyUi(

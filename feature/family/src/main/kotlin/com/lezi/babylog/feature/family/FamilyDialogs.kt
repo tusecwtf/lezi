@@ -694,8 +694,10 @@ internal fun MemberLoginQrConfirmDialog(
     feedback: String?,
     submitting: Boolean,
     verificationInProgress: Boolean = false,
+    verificationRetryRequired: Boolean = false,
     recoveryRetryRequired: Boolean = false,
     onLogin: () -> Unit,
+    onRetryVerification: () -> Unit = {},
     onRetryRecovery: () -> Unit = {},
     onManualJoin: () -> Unit,
     onDismiss: () -> Unit,
@@ -728,12 +730,17 @@ internal fun MemberLoginQrConfirmDialog(
         confirmButton = {
             if (!verificationInProgress) {
                 TextButton(
-                    onClick = if (recoveryRetryRequired) onRetryRecovery else onLogin,
+                    onClick = when {
+                        verificationRetryRequired -> onRetryVerification
+                        recoveryRetryRequired -> onRetryRecovery
+                        else -> onLogin
+                    },
                     enabled = !submitting,
                 ) {
                     Text(
                         when {
                             submitting -> "同步中…"
+                            verificationRetryRequired -> "重新确认"
                             recoveryRetryRequired -> "重试首次同步"
                             else -> "在这台设备登录"
                         },
@@ -825,6 +832,7 @@ internal fun DeleteFamilyDialog(
     deleting: Boolean,
     onContinue: () -> Unit,
     onConfirm: () -> Unit,
+    onRefreshFamilyInfo: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val final = stage == FamilyDialog.DeleteStage.Final
@@ -881,7 +889,7 @@ internal fun DeleteFamilyDialog(
         confirmButton = {
             TextButton(
                 onClick = when {
-                    final && expectedFamilyName.isBlank() -> onDismiss
+                    final && expectedFamilyName.isBlank() -> onRefreshFamilyInfo
                     final -> onConfirm
                     else -> onContinue
                 },
@@ -896,7 +904,7 @@ internal fun DeleteFamilyDialog(
                 Text(
                     if (final) {
                         when {
-                            expectedFamilyName.isBlank() -> "返回刷新"
+                            expectedFamilyName.isBlank() -> "返回并刷新"
                             deleting -> "正在删除…"
                             else -> "永久删除家庭"
                         }

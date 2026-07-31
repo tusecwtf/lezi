@@ -237,6 +237,18 @@ class RealSyncPort @Inject constructor(
         val endpoint = candidate.trustedEndpoint()
         val result = setupProbe.probe(endpoint.origin, endpoint)
         if (result !is SetupProbeResult.Ready) {
+            val staleEndpoint = preferences.verifiedEndpoint.first()
+            if (staleEndpoint?.origin == endpoint.origin) {
+                try {
+                    withContext(NonCancellable) {
+                        preferences.forgetEndpoint()
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Throwable) {
+                    return SetupProbeResult.Failed.Unreachable
+                }
+            }
             return result
         }
         try {

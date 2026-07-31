@@ -87,6 +87,10 @@ internal sealed interface FamilyDialog {
     data object MembersList : FamilyDialog
     data class ReviewPendingMember(val request: PendingMemberLoginRequest) : FamilyDialog
     data class VerifyingMemberLoginQr(val payload: MemberLoginQrPayload) : FamilyDialog
+    data class RetryMemberLoginQrVerification(
+        val payload: MemberLoginQrPayload,
+        val feedback: String,
+    ) : FamilyDialog
     data class ConfirmMemberLoginQr(val payload: MemberLoginQrPayload) : FamilyDialog
     data class MemberLoginQrCode(val payload: MemberLoginQrPayload) : FamilyDialog
     data object EditMyDisplayName : FamilyDialog
