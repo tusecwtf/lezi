@@ -130,6 +130,24 @@ class TimelineWindowRepositoryTest {
         assertThat(otherRecord.uploaderLabel).isEqualTo("爸爸")
         assertThat(selfRecord.capabilities.canEdit).isTrue()
         assertThat(selfRecord.capabilities.canDelete).isTrue()
+        // Record ACL matches care-plan creator-or-owner (not hard-coded true).
+        assertThat(otherRecord.capabilities.canEdit).isFalse()
+        assertThat(otherRecord.capabilities.canDelete).isFalse()
+        // Same pure rule used by domain mutation entries.
+        assertThat(
+            canManageCreatorOwnedFamilyEntity(
+                creatorMembershipId = otherRecord.record.createdByMembershipId,
+                actorMembershipId = "self",
+                actorIsAdmin = false,
+            ),
+        ).isFalse()
+        assertThat(
+            canManageCreatorOwnedFamilyEntity(
+                creatorMembershipId = selfRecord.record.createdByMembershipId,
+                actorMembershipId = "self",
+                actorIsAdmin = false,
+            ),
+        ).isTrue()
 
         val selfPlan = snapshot.planRows.single { it.carePlan.id == 3L }.capabilities
         val otherPlan = snapshot.planRows.single { it.carePlan.id == 4L }.capabilities
@@ -150,12 +168,19 @@ class TimelineWindowRepositoryTest {
             syncPort = TimelineSyncPort(joinedSession(FamilyRole.Owner, "owner")),
         ).observe(request(day, at)).first()
         assertThat(owner.planRows.single { it.carePlan.id == 4L }.capabilities.canEdit).isTrue()
+        assertThat(owner.recordRows.single { it.record.id == 2L }.capabilities.canEdit).isTrue()
+        assertThat(owner.recordRows.single { it.record.id == 2L }.capabilities.canDelete).isTrue()
 
         val offline = TimelineWindowRepository(
-            timelineWindowDao = database.copy(plans = listOf(plan(6, at, 100, null, creator = ""))),
+            timelineWindowDao = database.copy(
+                records = listOf(record(7, at, 100, null, creator = "")),
+                plans = listOf(plan(6, at, 100, null, creator = "")),
+            ),
             syncPort = TimelineSyncPort(),
         ).observe(request(day, at)).first()
         assertThat(offline.planRows.single().capabilities.canEdit).isTrue()
+        assertThat(offline.recordRows.single().capabilities.canEdit).isTrue()
+        assertThat(offline.recordRows.single().capabilities.canDelete).isTrue()
     }
 
     @Test

@@ -1951,6 +1951,10 @@ class CareLogTest {
                 entityType = "care_plan",
                 clientUuid = "plan-local-pending",
             ),
+            com.lezi.babylog.sync.CreatorAcknowledgementRef(
+                entityType = "record",
+                clientUuid = "record-local-pending",
+            ),
         )
         val sync = RecordingSyncPort(
             membershipId = "m-canonical",
@@ -1987,11 +1991,27 @@ class CareLogTest {
             id = 2,
             clientUuid = "plan-legacy-unknown",
         )
+        val localRecord = com.lezi.babylog.core.model.Record(
+            id = 1,
+            clientUuid = "record-local-pending",
+            babyId = 1,
+            type = RecordType.PEE,
+            timestamp = 10_000,
+            payloadJson = """{"pee_amount":1}""",
+            createdByMembershipId = "",
+            updatedAt = 1,
+        )
+        val unknownRecord = localRecord.copy(
+            id = 2,
+            clientUuid = "record-legacy-unknown",
+        )
 
         assertThat(care.canManageCustomItem(localItem)).isTrue()
         assertThat(care.canManageCarePlan(localPlan)).isTrue()
+        assertThat(care.canManageRecord(localRecord)).isTrue()
         assertThat(care.canManageCustomItem(unknownItem)).isFalse()
         assertThat(care.canManageCarePlan(unknownPlan)).isFalse()
+        assertThat(care.canManageRecord(unknownRecord)).isFalse()
 
         sync.replaceSession(
             sync.currentSession().copy(pendingCreatorAcknowledgements = emptySet()),
@@ -1999,6 +2019,7 @@ class CareLogTest {
 
         assertThat(care.canManageCustomItem(localItem)).isFalse()
         assertThat(care.canManageCarePlan(localPlan)).isFalse()
+        assertThat(care.canManageRecord(localRecord)).isFalse()
     }
 
     @Test
@@ -2633,6 +2654,154 @@ class CareLogTest {
         assertThat(care.getCarePlan(planId)!!.status).isEqualTo(CarePlanStatus.PENDING)
         assertThat(care.listCarePlanPhotoPaths(planId)).containsExactlyElementsIn(planPhotos).inOrder()
         assertThat(fakes.media.listAllIncludingDeleted()).containsExactlyElementsIn(mediaBefore)
+    }
+
+    @Test
+    fun recordManagePermissionMatchesMembershipAcl() = runTest {
+        val creatorSync = RecordingSyncPort(
+            membershipId = "m-creator",
+            role = com.lezi.babylog.sync.FamilyRole.Member,
+            familyId = "fam-1",
+            deviceId = "dev-1",
+        )
+        val fakes = Fakes(creatorSync)
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = fakes.seedFamilyAuthorityBaby()
+        val now = 4_000_000L
+        val recordId = care.addRecord(
+            babyId = babyId,
+            type = RecordType.PEE,
+            timestamp = now,
+            payloadJson = """{"pee_amount":1}""",
+        )
+        val owned = care.getRecord(recordId)!!
+        assertThat(owned.createdByMembershipId).isEqualTo("m-creator")
+        assertThat(care.canManageRecord(owned)).isTrue()
+
+        // Foreign ordinary member cannot update/delete/convert.
+        val foreignSync = RecordingSyncPort(
+            membershipId = "m-other",
+            role = com.lezi.babylog.sync.FamilyRole.Member,
+            familyId = "fam-1",
+            deviceId = "dev-2",
+        )
+        val foreignCare = Fakes(foreignSync).let { f ->
+            f.wireTransactionalSnapshots()
+            f.records.upsert(fakes.records.get(recordId)!!)
+            f.babies.upsert(
+                BabyEntity(
+                    id = babyId,
+                    familyId = 1L,
+                    clientUuid = "b",
+                    nickname = "年年",
+                    birthdayEpochDay = 1,
+                    themeColorArgb = 0,
+                    updatedAt = 1L,
+                    familyAuthority = true,
+                ),
+            )
+            f.careLog()
+        }
+        val foreignView = foreignCare.getRecord(recordId)!!
+        assertThat(foreignCare.canManageRecord(foreignView)).isFalse()
+        // Timeline capabilities and mutation share the pure membership rule.
+        assertThat(
+            canManageCreatorOwnedFamilyEntity(
+                creatorMembershipId = foreignView.createdByMembershipId,
+                actorMembershipId = "m-other",
+                actorIsAdmin = false,
+            ),
+        ).isFalse()
+        assertThat(
+            runCatching {
+                foreignCare.updateRecord(
+                    id = recordId,
+                    timestamp = now,
+                    endTimestamp = null,
+                    note = "篡改",
+                    payloadJson = """{"pee_amount":2}""",
+                    nowMillis = now,
+                )
+            }.exceptionOrNull(),
+        ).isInstanceOf(RecordPermissionException::class.java)
+        assertThat(
+            runCatching { foreignCare.deleteRecord(recordId) }.exceptionOrNull(),
+        ).isInstanceOf(RecordPermissionException::class.java)
+        assertThat(
+            runCatching {
+                foreignCare.convertRecordToCarePlan(
+                    recordId = recordId,
+                    scheduledAt = now + 60_000L,
+                    nowMillis = now,
+                )
+            }.exceptionOrNull(),
+        ).isInstanceOf(RecordPermissionException::class.java)
+        // Unauthorized paths leave the fact intact.
+        assertThat(foreignCare.getRecord(recordId)!!.note).isNull()
+        assertThat(foreignCare.getRecord(recordId)!!.deletedAt).isNull()
+
+        // Owner may manage others' records.
+        val adminSync = RecordingSyncPort(
+            membershipId = "m-admin",
+            role = com.lezi.babylog.sync.FamilyRole.Owner,
+            familyId = "fam-1",
+            deviceId = "dev-admin",
+        )
+        val adminCare = Fakes(adminSync).let { f ->
+            f.wireTransactionalSnapshots()
+            f.records.upsert(fakes.records.get(recordId)!!)
+            f.babies.upsert(
+                BabyEntity(
+                    id = babyId,
+                    familyId = 1L,
+                    clientUuid = "b",
+                    nickname = "年年",
+                    birthdayEpochDay = 1,
+                    themeColorArgb = 0,
+                    updatedAt = 1L,
+                    familyAuthority = true,
+                ),
+            )
+            f.careLog()
+        }
+        assertThat(adminCare.canManageRecord(adminCare.getRecord(recordId)!!)).isTrue()
+        adminCare.updateRecord(
+            id = recordId,
+            timestamp = now,
+            endTimestamp = null,
+            note = "管理员接管",
+            payloadJson = """{"pee_amount":1}""",
+            nowMillis = now,
+        )
+        assertThat(adminCare.getRecord(recordId)!!.note).isEqualTo("管理员接管")
+
+        // Offline dual-empty membership still manages local records.
+        val offline = Fakes()
+        offline.wireTransactionalSnapshots()
+        val offlineCare = offline.careLog()
+        val offlineBaby = offlineCare.createBaby(
+            CreateBabyInput(nickname = "离线宝", birthdayEpochDay = 1),
+        )
+        val offlineId = offlineCare.addRecord(
+            babyId = offlineBaby,
+            type = RecordType.PEE,
+            timestamp = now,
+            payloadJson = """{"pee_amount":1}""",
+        )
+        val offlineRecord = offlineCare.getRecord(offlineId)!!
+        assertThat(offlineRecord.createdByMembershipId).isEmpty()
+        assertThat(offlineCare.canManageRecord(offlineRecord)).isTrue()
+        offlineCare.updateRecord(
+            id = offlineId,
+            timestamp = now,
+            endTimestamp = null,
+            note = "离线可改",
+            payloadJson = """{"pee_amount":1}""",
+            nowMillis = now,
+        )
+        assertThat(offlineCare.getRecord(offlineId)!!.note).isEqualTo("离线可改")
+        assertThat(offlineCare.deleteRecord(offlineId)).isTrue()
     }
 
     @Test

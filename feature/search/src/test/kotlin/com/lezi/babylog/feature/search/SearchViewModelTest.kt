@@ -57,8 +57,8 @@ class SearchViewModelTest {
     fun cancelledEarlierQueryCannotClearSearchingForReplacementQuery() =
         runTest(mainDispatcherRule.testDispatcher) {
             val releaseCancelledQuery = CompletableDeferred<Unit>()
-            val completeReplacementQuery = CompletableDeferred<List<Record>>()
-            val staleResult = searchRecord(id = 99)
+            val completeReplacementQuery = CompletableDeferred<List<SearchResult>>()
+            val staleResult = searchHit(id = 99)
             val viewModel = SearchViewModel(
                 repository = SearchRepository { query ->
                     if (query == "A") {
@@ -102,7 +102,7 @@ class SearchViewModelTest {
     @Test
     fun laterQueryRecoversAfterRepositoryFailure() =
         runTest(mainDispatcherRule.testDispatcher) {
-            val recovered = searchRecord(id = 7)
+            val recovered = searchHit(id = 7)
             val viewModel = SearchViewModel(
                 repository = SearchRepository { query ->
                     if (query == "发烧") error("database unavailable")
@@ -131,7 +131,7 @@ class SearchViewModelTest {
     @Test
     fun retryRecoversTheSameQueryAfterRepositoryFailure() =
         runTest(mainDispatcherRule.testDispatcher) {
-            val recovered = searchRecord(id = 9)
+            val recovered = searchHit(id = 9)
             var firstAttempt = true
             val viewModel = SearchViewModel(
                 repository = SearchRepository {
@@ -160,6 +160,37 @@ class SearchViewModelTest {
             assertThat(viewModel.ui.value.errorMessage).isNull()
             assertThat(viewModel.ui.value.results).containsExactly(recovered)
         }
+
+    @Test
+    fun requestOpenEditGatesNonManagersWithSameDenialCopyAsDomain() =
+        runTest(mainDispatcherRule.testDispatcher) {
+            val editable = searchHit(id = 1, canEdit = true)
+            val foreign = searchHit(id = 2, canEdit = false)
+            val viewModel = SearchViewModel(
+                repository = SearchRepository { listOf(editable, foreign) },
+            )
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+                viewModel.ui.collect {}
+            }
+
+            viewModel.onQuery("药")
+            advanceTimeBy(200)
+            runCurrent()
+
+            assertThat(viewModel.requestOpenEdit(editable)).isEqualTo(1L)
+            runCurrent()
+            assertThat(viewModel.ui.value.noticeMessage).isNull()
+
+            assertThat(viewModel.requestOpenEdit(foreign)).isNull()
+            runCurrent()
+            assertThat(viewModel.ui.value.noticeMessage)
+                .isEqualTo(RECORD_MANAGE_DENIED_MESSAGE)
+            assertThat(RECORD_MANAGE_DENIED_MESSAGE).isEqualTo("无权管理此护理记录")
+
+            viewModel.clearNotice()
+            runCurrent()
+            assertThat(viewModel.ui.value.noticeMessage).isNull()
+        }
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -175,12 +206,15 @@ class SearchMainDispatcherRule(
     }
 }
 
-private fun searchRecord(id: Long) = Record(
-    id = id,
-    clientUuid = "record-$id",
-    babyId = 1,
-    type = RecordType.MEDICINE,
-    timestamp = 1_700_000_000_000L,
-    note = "布洛芬",
-    updatedAt = 1_700_000_000_000L,
+private fun searchHit(id: Long, canEdit: Boolean = true) = SearchResult(
+    record = Record(
+        id = id,
+        clientUuid = "record-$id",
+        babyId = 1,
+        type = RecordType.MEDICINE,
+        timestamp = 1_700_000_000_000L,
+        note = "布洛芬",
+        updatedAt = 1_700_000_000_000L,
+    ),
+    canEdit = canEdit,
 )

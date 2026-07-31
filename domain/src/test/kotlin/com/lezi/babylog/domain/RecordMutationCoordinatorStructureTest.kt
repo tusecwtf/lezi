@@ -20,6 +20,7 @@ class RecordMutationCoordinatorStructureTest {
             "updateRecord",
             "convertRecordToCarePlan",
             "deleteRecord",
+            "canManageRecord",
             "completeNursing",
             "confirmSleep",
             "sleepDown",
@@ -29,6 +30,14 @@ class RecordMutationCoordinatorStructureTest {
             assertTrue("CareLog.$name must delegate", "recordMutations.$name(" in facade)
             assertTrue("coordinator must own $name", "fun $name(" in coordinator)
         }
+        assertTrue(
+            "record mutation entries must gate creator-or-owner ACL",
+            "requireCanManageRecord(" in coordinator,
+        )
+        assertTrue(
+            "record ACL must reuse shared creator-owned membership rule",
+            "canManageCreatorOwnedFamilyEntity(" in coordinator,
+        )
 
         listOf(
             "insertRecord",

@@ -94,6 +94,9 @@ class CustomItemLimitException :
 class CarePlanPermissionException :
     IllegalStateException("无权管理此护理计划")
 
+class RecordPermissionException :
+    IllegalStateException("无权管理此护理记录")
+
 /** Thrown when a non-admin tries to read or convert conflict-not-adopted audits. */
 class ConflictAuditPermissionException :
     IllegalStateException("仅家庭管理员可查看冲突未采纳履行或转为独立记录")
@@ -421,6 +424,19 @@ class CareLog @Inject constructor(
     )
 
     suspend fun deleteRecord(id: Long): Boolean = recordMutations.deleteRecord(id)
+
+    /**
+     * Whether the actor may edit/delete/convert this nursing record.
+     * Same membership rule as care plans and custom items: creator or family owner.
+     */
+    fun canManageRecord(
+        record: Record,
+        actorMembershipId: String,
+        actorIsAdmin: Boolean,
+    ): Boolean = recordMutations.canManageRecord(record, actorMembershipId, actorIsAdmin)
+
+    suspend fun canManageRecord(record: Record): Boolean =
+        recordMutations.canManageRecord(record)
 
 
     /** Active record photo paths. MediaAsset is the sole current photo source. */
@@ -834,8 +850,8 @@ internal fun CarePlanEntity.toModel(): CarePlan =
     )
 
 /**
- * Pure ownership rule for creator-owned family entities (custom item definitions
- * and care plans share the same membership ACL — ADR 0001 / 0006).
+ * Pure ownership rule for creator-owned family entities (nursing records, custom
+ * item definitions, and care plans share the same membership ACL — ADR 0001 / 0006).
  *
  * Empty creator + empty actor → offline single-device local owner.
  * Empty creator + exact local pending acknowledgement → temporarily allow.

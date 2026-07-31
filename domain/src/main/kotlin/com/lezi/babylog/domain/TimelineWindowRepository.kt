@@ -186,6 +186,13 @@ class TimelineWindowRepository @Inject constructor(
         val allRecordRows = database.records.map { entity ->
             context.ensureActive()
             val record = entity.toModel()
+            val canManageRecord = canManageCreatorOwnedFamilyEntity(
+                creatorMembershipId = record.createdByMembershipId,
+                actorMembershipId = audience.membershipId,
+                actorIsAdmin = audience.role == FamilyRole.Owner,
+                creatorAcknowledgementPending = audienceSeed.key.pendingCreatorAcknowledgements
+                    .contains(CreatorAcknowledgementRef("record", record.clientUuid)),
+            )
             TimelineRecordRow(
                 revision = revision,
                 record = record,
@@ -200,7 +207,13 @@ class TimelineWindowRepository @Inject constructor(
                     createdByMembershipId = record.createdByMembershipId,
                     selfMembershipId = audience.membershipId,
                 ),
-                capabilities = recordCapabilities(revision),
+                capabilities = TimelineRowCapabilities(
+                    revision = revision,
+                    canEdit = canManageRecord,
+                    canDelete = canManageRecord,
+                    canFulfill = false,
+                    canSkip = false,
+                ),
             )
         }
         val selectedRows = allRecordRows.filter { row ->
@@ -310,10 +323,4 @@ private fun recordOverlapsWindow(
         )
 }
 
-private fun recordCapabilities(revision: Long) = TimelineRowCapabilities(
-    revision = revision,
-    canEdit = true,
-    canDelete = true,
-    canFulfill = false,
-    canSkip = false,
-)
+

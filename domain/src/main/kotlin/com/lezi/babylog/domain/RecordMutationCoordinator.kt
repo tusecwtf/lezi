@@ -13,6 +13,7 @@ import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.CustomPayload
 import com.lezi.babylog.core.model.NursingPayload
 import com.lezi.babylog.core.model.OpenSleepCandidate
+import com.lezi.babylog.core.model.Record
 import com.lezi.babylog.core.model.RecordPayloadCodec
 import com.lezi.babylog.core.model.RecordPayloadDocument
 import com.lezi.babylog.core.model.RecordTime
@@ -20,9 +21,11 @@ import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SleepPayload
 import com.lezi.babylog.core.model.isPlanableCarePlanType
 import com.lezi.babylog.core.model.normalizeOpenSleeps
+import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.sync.PolicyClock
 import com.lezi.babylog.sync.SyncPort
 import java.time.ZoneId
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -131,6 +134,7 @@ internal class RecordMutationCoordinator(
         val cleanupCandidates = sleepMutationMutex.withLock {
             transactionRunner.run {
                 val existing = recordDao.get(id) ?: return@run emptySet<String>()
+                requireCanManageRecord(existing)
                 requireActiveBaby(existing.babyId)
                 val type = RecordType.fromKey(existing.type) ?: error("未知记录类型")
                 requireCurrentPayloadDocument(type, existing.payloadJson, existing.schemaVersion)
@@ -207,6 +211,7 @@ internal class RecordMutationCoordinator(
         suspend fun writeConvert(): Pair<Long, Set<String>> = transactionRunner.run {
             val existing = recordDao.get(recordId) ?: error("记录不存在")
             if (existing.deletedAt != null) error("记录已删除")
+            requireCanManageRecord(existing)
             requireActiveBaby(existing.babyId)
             val resolvedType = RecordType.fromKey(existing.type) ?: error("未知记录类型")
             requireCurrentPayloadDocument(
@@ -313,6 +318,7 @@ internal class RecordMutationCoordinator(
             transactionRunner.run {
                 val existing = recordDao.get(id)
                 if (existing != null && existing.deletedAt == null) {
+                    requireCanManageRecord(existing)
                     val deletedAt = nextSyncUpdatedAt(
                         existing.updatedAt,
                         System.currentTimeMillis(),
@@ -332,6 +338,50 @@ internal class RecordMutationCoordinator(
         cleanupCommittedPhotoTombstones(cleanupCandidates)
         requestLocalSync()
         return true
+    }
+
+    /**
+     * Whether the actor may edit/delete/convert this nursing record.
+     * Same membership rule as care plans: creator or family owner/admin.
+     */
+    fun canManageRecord(
+        record: Record,
+        actorMembershipId: String,
+        actorIsAdmin: Boolean,
+    ): Boolean = canManageCreatorOwnedFamilyEntity(
+        creatorMembershipId = record.createdByMembershipId,
+        actorMembershipId = actorMembershipId,
+        actorIsAdmin = actorIsAdmin,
+    )
+
+    suspend fun canManageRecord(record: Record): Boolean {
+        val session = syncPort.session().first()
+        return canManageCreatorOwnedFamilyEntity(
+            creatorMembershipId = record.createdByMembershipId,
+            actorMembershipId = session.membershipId.trim(),
+            actorIsAdmin = session.role == FamilyRole.Owner,
+            creatorAcknowledgementPending = session.isCreatorAcknowledgementPending(
+                entityType = "record",
+                clientUuid = record.clientUuid,
+            ),
+        )
+    }
+
+    private suspend fun actorCanManageRecord(record: RecordEntity): Boolean {
+        val session = syncPort.session().first()
+        return canManageCreatorOwnedFamilyEntity(
+            creatorMembershipId = record.createdByMembershipId,
+            actorMembershipId = session.membershipId.trim(),
+            actorIsAdmin = session.role == FamilyRole.Owner,
+            creatorAcknowledgementPending = session.isCreatorAcknowledgementPending(
+                entityType = "record",
+                clientUuid = record.clientUuid,
+            ),
+        )
+    }
+
+    private suspend fun requireCanManageRecord(record: RecordEntity) {
+        if (!actorCanManageRecord(record)) throw RecordPermissionException()
     }
 
 
