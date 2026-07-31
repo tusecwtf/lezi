@@ -29,6 +29,16 @@
 - Final APK streamed installation on both Client A and Client B passed. Launch returned the welcome
   route with Connect, scan-member-QR, and Offline actions; both installed packages reported
   versionName 0.3.0, versionCode 6, minSdk 26, targetSdk 35.
+- An isolated `a4dbe07` rebuild with the same signing inputs also produced 5,519,958 bytes, but SHA-256
+  `8129d1faf762da69c2fa2bcb165808daaee26c54219df8d1971c06ebaadfac92`, so it is not byte-identical
+  to the final APK. All 1,539 non-provenance/signature entries were identical; the only extracted
+  differences among 1,543 entries were `META-INF/version-control-info.textproto`, `MANIFEST.MF`,
+  `CERT.SF`, and `CERT.RSA`. In particular, `classes.dex` SHA-256 was
+  `7128648bd4c2eedde4164edf810bdf01708318bb64915841a1fdd1ba3ef89542` and `resources.arsc` was
+  `ea6b99cec3dde50eca11b24c967fcd843beec904914b31c4ed6aa6244510df14` in both APKs. The isolated
+  worktree emitted `NO_VALID_GIT_FOUND`, while the final APK records revision `5f9aa3c`; the resulting
+  provenance and signature differences mean payload equivalence cannot substitute for testing the
+  exact final signed bytes.
 
 ## Rust, image, and NAS package gates
 
@@ -108,7 +118,8 @@
 - Candidate stabilization used several signed Release rebuilds. Affected reauth, generation-reset,
   SPKI mismatch, deletion, repository, artifact, and final welcome smoke gates were repeated after
   their fixes, but the complete two-client matrix was not replayed from zero against the single final
-  APK SHA-256 above.
+  APK SHA-256 above. The isolated fixed-point rebuild proves identical production code/resources,
+  but its provenance and signature bytes differ and therefore do not close this exact-artifact gap.
 - Physical network switching and live NAS replacement were not run.
 
 Ticket 16 therefore remains open. Ticket 17 (0.3.1 upgrade) must not start until the missing Must
