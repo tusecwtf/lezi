@@ -404,13 +404,23 @@ internal class CarePlanCoordinator(
                 plan.customItemId,
             )
             val recordClientUuid = newClientUuid()
+            // Next-feed plans store an internal protocol marker on the plan row. The
+            // fulfilled care-record fact must never carry that prefix: omit note derives
+            // the visible part; explicit notes are still fail-closed stripped when the
+            // plan is a next-feed plan (never invent a marker; never leave one on the fact).
+            // Non-next-feed plans keep note ?: plan.note without incidental trim/null.
+            val recordNote = if (isNextFeedPlanNote(plan.note)) {
+                visibleCarePlanNote(note ?: plan.note)
+            } else {
+                note ?: plan.note
+            }
             val record = RecordEntity(
                 clientUuid = recordClientUuid,
                 babyId = plan.babyId,
                 type = type.key,
                 timestamp = actualTimestamp,
                 endTimestamp = resolvedEnd,
-                note = note ?: plan.note,
+                note = recordNote,
                 payloadJson = persistedPayload,
                 schemaVersion = schemaVersion,
                 updatedAt = now,

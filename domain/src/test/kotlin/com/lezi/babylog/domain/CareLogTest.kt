@@ -378,6 +378,101 @@ class CareLogTest {
     }
 
     @Test
+    fun fulfillNextFeedCarePlanStripsInternalMarkerFromRecordNote() = runTest {
+        val fakes = Fakes()
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        val babyId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val now = 1_800_000_000_000L
+
+        // Marker-only next-feed plan: omit note on fulfill → record has no marker.
+        val markerOnlyId = care.scheduleNextFeedCarePlan(
+            babyId = babyId,
+            feedType = RecordType.NURSING,
+            scheduledAt = now + 60_000L,
+            zone = zone,
+            nowMillis = now,
+        )
+        val markerOnlyPlanNote = fakes.carePlans.get(markerOnlyId)!!.note
+        assertThat(markerOnlyPlanNote).startsWith(NEXT_FEED_PLAN_MARKER)
+        val markerOnlyRecordId = care.fulfillCarePlan(
+            carePlanId = markerOnlyId,
+            actualTimestamp = now,
+            nowMillis = now + 1L,
+        )
+        val markerOnlyRecord = care.getRecord(markerOnlyRecordId)!!
+        assertThat(markerOnlyRecord.note).isNull()
+        assertThat(markerOnlyRecord.note.orEmpty()).doesNotContain(NEXT_FEED_PLAN_MARKER)
+        // Non-goal: completed plan row keeps storage marker (no scrub rewrite).
+        assertThat(fakes.carePlans.get(markerOnlyId)!!.note).isEqualTo(markerOnlyPlanNote)
+        assertThat(fakes.carePlans.get(markerOnlyId)!!.status)
+            .isEqualTo(CarePlanStatus.COMPLETED.storageKey)
+
+        // Plan with user-visible note under marker: omit note → only visible text on record.
+        val withVisibleId = care.scheduleNextFeedCarePlan(
+            babyId = babyId,
+            feedType = RecordType.FORMULA,
+            scheduledAt = now + 120_000L,
+            zone = zone,
+            nowMillis = now + 2L,
+        )
+        care.updateCarePlan(
+            carePlanId = withVisibleId,
+            scheduledAt = now + 120_000L,
+            note = "带奶瓶",
+            nowMillis = now + 3L,
+        )
+        val withVisiblePlanNote = fakes.carePlans.get(withVisibleId)!!.note
+        assertThat(withVisiblePlanNote).isEqualTo("$NEXT_FEED_PLAN_MARKER 带奶瓶")
+        val visibleRecordId = care.fulfillCarePlan(
+            carePlanId = withVisibleId,
+            actualTimestamp = now + 10L,
+            nowMillis = now + 4L,
+        )
+        assertThat(care.getRecord(visibleRecordId)!!.note).isEqualTo("带奶瓶")
+        assertThat(fakes.carePlans.get(withVisibleId)!!.note).isEqualTo(withVisiblePlanNote)
+
+        // Explicit clean note is kept; no marker invented.
+        val explicitPlanId = care.scheduleNextFeedCarePlan(
+            babyId = babyId,
+            feedType = RecordType.PUMPED_FEED,
+            scheduledAt = now + 180_000L,
+            zone = zone,
+            nowMillis = now + 5L,
+        )
+        val explicitPlanNote = fakes.carePlans.get(explicitPlanId)!!.note
+        assertThat(explicitPlanNote).startsWith(NEXT_FEED_PLAN_MARKER)
+        val explicitRecordId = care.fulfillCarePlan(
+            carePlanId = explicitPlanId,
+            actualTimestamp = now + 20L,
+            note = "现场备注",
+            nowMillis = now + 6L,
+        )
+        assertThat(care.getRecord(explicitRecordId)!!.note).isEqualTo("现场备注")
+        assertThat(care.getRecord(explicitRecordId)!!.note.orEmpty())
+            .doesNotContain(NEXT_FEED_PLAN_MARKER)
+        assertThat(fakes.carePlans.get(explicitPlanId)!!.note).isEqualTo(explicitPlanNote)
+
+        // Fail-closed: explicit note that still carries the protocol prefix is stripped.
+        val leakyPlanId = care.scheduleNextFeedCarePlan(
+            babyId = babyId,
+            feedType = RecordType.NURSING,
+            scheduledAt = now + 240_000L,
+            zone = zone,
+            nowMillis = now + 7L,
+        )
+        val leakyPlanNote = fakes.carePlans.get(leakyPlanId)!!.note
+        val leakyRecordId = care.fulfillCarePlan(
+            carePlanId = leakyPlanId,
+            actualTimestamp = now + 30L,
+            note = "$NEXT_FEED_PLAN_MARKER 泄漏备注",
+            nowMillis = now + 8L,
+        )
+        assertThat(care.getRecord(leakyRecordId)!!.note).isEqualTo("泄漏备注")
+        assertThat(fakes.carePlans.get(leakyPlanId)!!.note).isEqualTo(leakyPlanNote)
+    }
+
+    @Test
     fun localFamilyIdentityUsesReadOnlyDefaultsBeforeBootstrap() = runTest {
         val care = Fakes().careLog()
 
