@@ -440,10 +440,44 @@ docker compose start
 恢复时同样替换整个数据根并重启容器。数据库回滚会由 cursor/generation
 恢复协议通知 Android 执行全量重新汇合。
 
-### 离线 v3→current 迁移（`lezi-sync offline-migrate`）
+### 离线 v3→current 切割（`lezi-sync offline-migrate`）
 
-一次性 NAS 运维 CLI（**非**服务启动自动升级）。机器可读 inventory 在
-`src/offline_migrate/inventory.rs`。与 live `hard_delete_membership` 对齐：
+**架构边界（权威）：** [ADR-0013](../../docs/adr/0013-offline-migrate-is-maintenance-window-cutover.md)
+——已授权**维护窗**中的离线切割工具；**不是** server startup / runtime 自动迁移，也
+**不**推翻 [ADR-0008](../../docs/adr/0008-support-only-fresh-current-product-contracts.md)
+的 NAS fresh-current / fail-closed 合同。日常启动仍只接受精确 current schema
+（`user_version` = `DATABASE_SCHEMA_VERSION` 且形状匹配）；探测旧库后自动迁移、
+destructive fallback 或部分原地改写均被禁止。
+
+发布二进制可包含该子命令；**不**表示支持一般滚动 schema 兼容。**普通 CD**
+（`package-nas` / `push-and-deploy` / 容器重启）**不得执行** `offline-migrate`。
+
+| 主题 | 合同 |
+|------|------|
+| 唯一流水线 | 显式 CLI → 停服 → 固定源 v3→current → 独立临时 `--out` → `validate` 后切换 data bind |
+| Secret | 运维选定 `LEZI_MIGRATE_NEW_ROOT_PASSWORD` / `--new-root-password`（≥16）；cutover 后作 `LEZI_BOOTSTRAP_SECRET`；**禁止**文档/日志打印明文；目标 `server.secret` 始终重生成 |
+| Data bind | 宿主路径 bind → `/data`；uid `10001:10001`；stop/rm **不**删宿主目录 |
+| 备份 / 回滚 | 本地 copy-out + NAS 侧双备份；失败恢复 **v3 copy-out** 与 pre-cutover 镜像，非半成品 `out/` |
+| 目标校验 | `offline-migrate validate --out`（current preflight + `server.secret` 长度；≠ 完整 `/ready`） |
+
+**权威运维 runbook（步骤与回滚）：**
+[`deploy/copy-back-tls-cutover-runbook.md`](deploy/copy-back-tls-cutover-runbook.md)
+copy-out / copy-back 脚本：[`deploy/copy-out-nas-data.sh`](deploy/copy-out-nas-data.sh)、
+[`deploy/copy-back-nas-data.sh`](deploy/copy-back-nas-data.sh)。
+普通发版 CD（不含 offline-migrate）：[`deploy/DEPLOY.md`](deploy/DEPLOY.md)。
+
+```bash
+# 与 `lezi-sync offline-migrate help` 一致；勿在命令中嵌入真实 secret
+export LEZI_MIGRATE_NEW_ROOT_PASSWORD='…ops-chosen ≥16 chars…'
+lezi-sync offline-migrate dry-run  --in "$BACKUP_DIR"
+lezi-sync offline-migrate migrate  --in "$BACKUP_DIR" --out "$OUT_DIR"
+lezi-sync offline-migrate validate --out "$OUT_DIR"
+# 维护窗 copy-back / TLS CD：见权威 runbook；help 指针：
+# lezi-sync offline-migrate copy-out-help | copy-back-help | live-cutover-help
+```
+
+机器可读 inventory 在 `src/offline_migrate/inventory.rs`。与 live
+`hard_delete_membership` 对齐的 **departed membership** 变换（hard-delete disposition）：
 
 - **Active membership**（`left_at IS NULL`）才复制到目标库。
 - **Departed membership**（v3 `left_at IS NOT NULL`）按 hard-delete 丢弃：不复制

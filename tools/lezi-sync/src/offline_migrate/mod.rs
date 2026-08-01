@@ -37,6 +37,7 @@
 
 #![allow(dead_code)]
 
+pub(crate) mod boundary;
 pub(crate) mod cli;
 pub(crate) mod cutover;
 pub(crate) mod inventory;

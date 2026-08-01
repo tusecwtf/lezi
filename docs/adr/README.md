@@ -11,11 +11,12 @@ Hard-to-reverse decisions, written by `/domain-modeling` (via `/grill-with-docs`
 | [0005](./0005-sync-records-and-photos-atomically.md) | 护理记录、护理计划与照片原子同步 | superseded by ADR-0008 |
 | [0006](./0006-share-custom-item-definitions-not-layout.md) | 家庭共享自定义项目定义但不共享布局 | accepted |
 | [0007](./0007-separate-family-membership-from-credentials.md) | 家庭 membership 与访问凭证分离 | superseded by ADR-0008 |
-| [0008](./0008-support-only-fresh-current-product-contracts.md) | 全产品只支持 fresh-current 契约 | partially superseded by ADR-0012 |
+| [0008](./0008-support-only-fresh-current-product-contracts.md) | 全产品只支持 fresh-current 契约 | partially superseded by ADR-0012; NAS offline cutover exception in ADR-0013 |
 | [0009](./0009-family-identity-and-account-overview.md) | 家庭身份用设备 membership 称呼，账户首屏只做家庭概览 | superseded by ADR-0011 |
 | [0010](./0010-trust-server-identity-not-network-name.md) | 家庭同步信任服务器身份而不是网络名称 | superseded by ADR-0011 |
 | [0011](./0011-root-admin-and-multi-device-membership.md) | 根密码声索唯一管理员，成员与设备分层 | accepted |
 | [0012](./0012-preserve-android-local-data-across-in-place-upgrades.md) | Android 原地升级永久保留已承诺的本地数据 | accepted |
+| [0013](./0013-offline-migrate-is-maintenance-window-cutover.md) | offline-migrate 是已授权维护窗中的离线切割工具 | accepted |
 
 ## Numbering
 

@@ -115,6 +115,26 @@ LEZI_FORCE_PACKAGE=1 \
 - Never committed. Deploy writes `~/.../.env` mode `600` on NAS only.
 - Source order: `LEZI_BOOTSTRAP_SECRET` env → else `docker inspect lezi-sync` env.
 - App create/reclaim must keep using the same value.
+- **Never print** bootstrap secrets from `docker inspect`, logs, or report paste.
+
+## offline-migrate 架构边界（非普通 CD）
+
+`lezi-sync offline-migrate` 是已授权**维护窗**中的 v3→current **离线切割** CLI，
+**不是**服务启动/runtime 自动迁移，也**不**推翻 NAS fresh-current / fail-closed
+（[ADR-0008](../../../docs/adr/0008-support-only-fresh-current-product-contracts.md)）。
+架构 disposition 见
+[ADR-0013](../../../docs/adr/0013-offline-migrate-is-maintenance-window-cutover.md)。
+
+| 规则 | 说明 |
+|------|------|
+| 普通 CD | `package-nas` / `push-and-deploy` / 容器重启 **不得执行** `offline-migrate` |
+| 启动合同 | 现网进程只打开精确 current schema；旧库 fail closed，无自动迁移 |
+| 切割流水线 | 显式 CLI、停服、固定源 v3→current、独立临时 `out/`、`validate` 后再 copy-back |
+| 权威 runbook | [`copy-back-tls-cutover-runbook.md`](./copy-back-tls-cutover-runbook.md)（步骤、双备份、回滚、secret 转发） |
+| Cutover secret | 仅维护窗：迁移期新根密码 → `LEZI_BOOTSTRAP_SECRET`；可用 `LEZI_FORWARD_BOOTSTRAP_SECRET=1`；**普通 CD 勿设** |
+| 发布二进制 | 可含该子命令 ≠ 滚动 schema 兼容产品承诺 |
+
+产品 README 摘要：[`../README.md`](../README.md) § 离线 v3→current 切割。
 
 ## TLS identity
 

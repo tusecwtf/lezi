@@ -3,7 +3,7 @@
 家庭育儿日志 · Android · Kotlin + Jetpack Compose
 包名：`com.lezi.babylog` · minSdk 26 · targetSdk 35 · 显示名「乐记」 · version `0.3.1`
 
-产品规格：[`docs/prd/`](docs/prd/) · 领域术语：[`CONTEXT.md`](CONTEXT.md) · 文档索引：[`docs/README.md`](docs/README.md) · 安全：[`SECURITY.md`](SECURITY.md)  
+产品规格：[`docs/prd/`](docs/prd/) · 领域术语：[`CONTEXT.md`](CONTEXT.md) · 文档索引：[`docs/README.md`](docs/README.md) · 安全：[`SECURITY.md`](SECURITY.md)
 许可：[MIT](LICENSE) · 贡献 / PR：[`CONTRIBUTING.md`](CONTRIBUTING.md)
 
 ## 环境
@@ -131,6 +131,15 @@ curl --cacert /path/to/data/tls/server.crt -fsS https://192.168.50.4:8765/ready
 
 仅打包不部署：`./deploy/package-nas.sh`。回滚：在 NAS 上进入旧版包目录再跑 `./remote-deploy.sh`。
 
+**离线 v3→current 切割（`offline-migrate`）**：仅已授权**维护窗**使用的离线切割 CLI，
+**不是**服务启动自动迁移，也**不**构成一般滚动 schema 兼容。日常 NAS 仍
+fresh-current / fail-closed（[ADR-0008](docs/adr/0008-support-only-fresh-current-product-contracts.md)）；
+边界见 [ADR-0013](docs/adr/0013-offline-migrate-is-maintenance-window-cutover.md)。
+**普通 CD 不执行**该子命令。权威步骤：
+[`tools/lezi-sync/deploy/copy-back-tls-cutover-runbook.md`](tools/lezi-sync/deploy/copy-back-tls-cutover-runbook.md)；
+摘要：[`tools/lezi-sync/README.md`](tools/lezi-sync/README.md) § 离线切割、
+[`tools/lezi-sync/deploy/DEPLOY.md`](tools/lezi-sync/deploy/DEPLOY.md) § offline-migrate。
+
 开发机通用 Compose（变量/build，非 zdocker 专用）仍见
 [`tools/lezi-sync/docker-compose.yml`](tools/lezi-sync/docker-compose.yml) 与
 [`tools/lezi-sync/README.md`](tools/lezi-sync/README.md)。
@@ -184,7 +193,7 @@ tools/lezi-sync
 | GitHub Issues | **不是**工作流入口 |
 
 开 PR：`git push -u github HEAD` 后 `gh pr create --base master`；模板见
-[`.github/pull_request_template.md`](.github/pull_request_template.md)。  
+[`.github/pull_request_template.md`](.github/pull_request_template.md)。
 同步契约变更对照 [`docs/prd/sync-trusted-endpoint.md`](docs/prd/sync-trusted-endpoint.md)。
 
 ## 许可

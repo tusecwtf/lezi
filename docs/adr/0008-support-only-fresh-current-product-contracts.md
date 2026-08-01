@@ -1,11 +1,14 @@
 ---
-status: partially superseded by ADR-0012
+status: partially superseded by ADR-0012; NAS offline cutover exception in ADR-0013
 ---
 
 # 全产品只支持 fresh-current 契约
 
 > Android 本地持久化部分自 0.3.0 基线起由 [ADR-0012](./0012-preserve-android-local-data-across-in-place-upgrades.md)
 > 取代；NAS schema 与家庭同步 wire 仍按本文 fresh-current、fail-closed。
+> 已授权维护窗中的 **offline-migrate** 离线切割是本文的唯一 NAS 例外，见
+> [ADR-0013](./0013-offline-migrate-is-maintenance-window-cutover.md)；它不是服务启动
+> 自动迁移，也不构成一般滚动 schema 兼容。
 
 Android、家庭同步协议与 NAS 服务只支持当前版本创建的数据和当前版本之间的交互，
 不再维护从旧 Room schema、旧 payload、旧计时/提醒状态、旧 NAS schema 或旧 wire
@@ -24,9 +27,12 @@ ADR-0002 对历史 `memo`、`other` 与裸 `custom` Record/快捷引用的保留
   `custom_item_id` 创建 current `custom` Record。照片只使用当前 Record/MediaAsset 关联。
 - 护理记录表示已发生事实，护理计划表示未来意图。乐记日历只展示 `CarePlan`，系统日历
   只保存当前设备授权后的单向副本；不再提供 `CalendarEvent` 的显示、编辑、提醒或转换入口。
-- NAS 只初始化空目录、不存在或零字节的数据库为精确 SQLite schema v3。已有数据库只有
-  在 `user_version=3` 且 schema 形状完全匹配时才可重启并保留家庭、凭证、实体与媒体；
+- NAS 只初始化空目录、不存在或零字节的数据库为**精确 current schema**
+  （`PRAGMA user_version` 等于当前 `DATABASE_SCHEMA_VERSION` 且表、索引、约束形状完全
+  匹配）。已有数据库只有在精确 current 时才可重启并保留家庭、凭证、实体与媒体；
   非空旧版、未来版或形状不匹配的数据库在任何目录、权限或 sidecar 变更前 fail closed。
+  服务启动 / `Store::open` **不得**探测旧库后自动迁移、destructive fallback 或部分原地
+  改写；拒绝前不得创建 `media/`、`server.secret` 或 SQLite sidecar。
 - HTTP 只接受当前 wire。所有 Record（含零照片）、CarePlan、Baby、CustomItemDef 与
   FulfillmentCandidate 都只经 atomic bundle 发布；`/v1/push` 和普通媒体上传已退役，
   `log` 只能作为 Record/CarePlan 包成员，`avatar` 只能作为 Baby 包成员。pull 发出 live
@@ -58,3 +64,12 @@ fresh-current 不取消已声明的平台兼容：Android 继续支持 `minSdk` 
 当前提醒与计时状态的进程重启恢复、游标/generation 全量校准、权限撤销与 provider 失败
 恢复。NAS/wire Release 证据仍来自 fresh-current 端到端；Android Release 另须证明从已承诺
 本地数据契约原地替换后数据保持、失败无破坏，以及目标 APK 的契约兼容门禁。
+
+## NAS 离线切割例外（非启动路径）
+
+家庭 NAS 上若仍存在历史 **v3** 数据根，**不得**靠服务启动自动升级。唯一允许的出路是
+[ADR-0013](./0013-offline-migrate-is-maintenance-window-cutover.md) 规定的已授权维护窗
+离线流水线：显式 `lezi-sync offline-migrate` CLI、停服、固定源 schema→current、独立临时
+目标、`validate` 后再切换 data bind。发布二进制可包含该子命令，**不**表示支持一般滚动
+兼容；普通 CD **不得**执行该子命令。权威步骤见
+[`tools/lezi-sync/deploy/copy-back-tls-cutover-runbook.md`](../../tools/lezi-sync/deploy/copy-back-tls-cutover-runbook.md)。

@@ -1,12 +1,16 @@
 # Copy-back + TLS cutover runbook (ticket 06)
 
-**Status:** ops runbook only — **does not** execute the live maintenance window.  
-**Live execution + APK smoke:** ticket 07 (`.scratch/nas-v3-offline-migrate/issues/07-live-cutover-and-apk-smoke.md`).  
+**Status:** ops runbook only — **does not** execute the live maintenance window.
+**Architecture boundary:** [ADR-0013](../../../docs/adr/0013-offline-migrate-is-maintenance-window-cutover.md)
+(`offline-migrate` = authorized maintenance-window offline cutover; **not** startup
+migration; does **not** overturn NAS fresh-current / [ADR-0008](../../../docs/adr/0008-support-only-fresh-current-product-contracts.md)).
+Ordinary CD does **not** run `offline-migrate`.
+**Live execution + APK smoke:** ticket 07 (`.scratch/nas-v3-offline-migrate/issues/07-live-cutover-and-apk-smoke.md`).
 **Do not claim the family NAS is cut over until ticket 07 evidence exists.**
 
-Machine-readable step order: `offline_migrate::cutover::cutover_maintenance_steps()`.  
-CLI pointer: `lezi-sync offline-migrate copy-back-help` (alias `cutover-help`).  
-Copy-back step script: [`copy-back-nas-data.sh`](./copy-back-nas-data.sh).  
+Machine-readable step order: `offline_migrate::cutover::cutover_maintenance_steps()`.
+CLI pointer: `lezi-sync offline-migrate copy-back-help` (alias `cutover-help`).
+Copy-back step script: [`copy-back-nas-data.sh`](./copy-back-nas-data.sh).
 CD narrative: [`DEPLOY.md`](./DEPLOY.md) and root `AGENTS.md` § lezi-sync NAS CD.
 
 ## Fixed step order (do not reorder)
@@ -164,7 +168,7 @@ Requires **explicit operator confirmation** (family may briefly lose sync; proto
 
 ### Mandatory bootstrap secret (cutover-specific)
 
-Because Step 1 already **removed** the live container, `remote-deploy` **cannot** inherit a live env.  
+Because Step 1 already **removed** the live container, `remote-deploy` **cannot** inherit a live env.
 Even if a container were still present, **inheriting the pre-cutover secret is wrong**: migrate wrote `families.owner_root_fingerprint` for the **migration-time new root password**. Starting with the old secret rewrites the fingerprint back and voids owner re-login with the migration password (`OwnerReauth::NewRootPasswordAtMigration`).
 
 **Fail-closed for this cutover:**
@@ -195,12 +199,12 @@ export LEZI_FORWARD_BOOTSTRAP_SECRET=1
 
 `remote-deploy.sh` on the NAS will:
 
-- `docker load` the image tar  
-- use forwarded `LEZI_BOOTSTRAP_SECRET` (migration password) — **not** pre-cutover inherit for this path  
-- `init-tls.sh` under the data bind (`tls/` create-or-reuse)  
-- install app-update artifacts  
-- stop/rm + compose up project `lezi` (container already absent after Step 1)  
-- probe HTTPS health/ready inside the deploy script  
+- `docker load` the image tar
+- use forwarded `LEZI_BOOTSTRAP_SECRET` (migration password) — **not** pre-cutover inherit for this path
+- `init-tls.sh` under the data bind (`tls/` create-or-reuse)
+- install app-update artifacts
+- stop/rm + compose up project `lezi` (container already absent after Step 1)
+- probe HTTPS health/ready inside the deploy script
 
 **Protocol cutover risk:** a measured live NAS ran **plaintext HTTP on 8765**. Current tree publishes **HTTPS on 8765**, adds loopback **HTTP on 8766**, and creates persistent TLS under the data bind. Clients must switch scheme and may need TOFU/SPKI.
 
