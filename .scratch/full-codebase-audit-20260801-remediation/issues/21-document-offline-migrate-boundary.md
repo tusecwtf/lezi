@@ -4,7 +4,7 @@
 
 **Source:** `AUDIT-20260801-P2-07`  
 **Blocked by:** 14 — document the corrected departed-membership transform  
-**Status:** ready-for-agent  
+**Status:** blocked
 **Size:** S
 
 ## Acceptance criteria

@@ -4,7 +4,7 @@
 
 **Source:** `AUDIT-20260801-P1-05`  
 **Blocked by:** 04 — serialize the fulfillment-evidence server seam  
-**Status:** ready-for-agent  
+**Status:** blocked
 **Size:** S–M
 
 ## Acceptance criteria

@@ -1,84 +1,128 @@
-# Spec: 2026-08-01 全库审计整改
+# Spec: 2026-08-01 全库整改统一程序
 
 **Status:** ready-for-agent
 
 Feature: `full-codebase-audit-20260801-remediation`  
-Audit baseline: `3df1c3ebcbee0b582621405e1510ecb9deea1d8c`  
-Current validation HEAD: `0aa225bf25b21315dec3a84983124086ff9858d1`  
-Source: `docs/reviews/2026-08-01-full-codebase-audit.md`
+Product validation baseline: `0aa225bf25b21315dec3a84983124086ff9858d1`
+Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
+Published sources:
 
-## Current-HEAD disposition
+- `docs/reviews/2026-08-01-full-codebase-audit.md`（gitignored local audit）
+- merged tracker `architecture-readability-optimization`
+- merged tracker `directory-structure-clarity`
 
-本轮逐项回到当前源码，并对照 `CONTEXT.md`、`docs/prd/`、相关 ADR、现存
-`.scratch` tracker 与审计基线后的提交：
+## Problem statement
 
-- 审计问题：**21**（P1 14、P2 7）。
-- 当前仍存在：**21**。
-- 已在 `3df1c3e..0aa225b` 修复：**0**。
-- 被 current contract 否定或无法成立：**0**。
-- 与当前 active tracker 重复：**0**。
+当前程序同时存在三类需要在一个依赖图中协调的工作：
 
-审计基线后只有 `0aa225b fix(android): preserve local data across APK upgrades`；它没有修复
-这 21 个触发条件。该提交改过 `SyncPort.kt`、`tech.md` 与 ADR-0008，但死 `familyId` 门面、
-模块依赖文档缺口和 offline-migrate 架构边界仍原样存在；其余问题对应的生产路径没有变化。
+1. 审计确认的正确性、并发、恢复与协议问题；
+2. 无产品契约价值的结构守卫、重复 host 逻辑和已死公开表面；
+3. Android/Rust 模块内部文件平铺、巨型私有实现难定位的问题。
 
-## Confirmed problem statement
+三类工作会反复触碰 `RealSyncPort`、媒体发布、Family/Onboarding、Composer、
+`tools/lezi-sync` 等同一 seam。继续分成三个 tracker 会造成重复票、错误并行和状态双写，
+因此本目录是唯一 active/canonical tracker。
 
-1. 强制更新壳、媒体 commit 回写与合成根回执存在可触发的状态倒退或 LWW 水印缺口。
-2. FulfillmentCandidate 与 completed CarePlan 的服务端冻结条件不足，家庭内成员可造成证据失真或残缺绑定。
-3. 本机清空、删除宝宝、计时履行、Composer→Timer 交接遗漏计时状态或照片所有权。
-4. Timer/Composer 的一次性回调与 composition-local 状态不能跨配置重建可靠交付结果。
-5. 今日聚合可提前计算合法 `now + 5m` 的履行事实；离线 NAS 迁移会保留已离开 membership。
-6. 媒体 GC、同步门面/端口、跨语言 marker、布局 undo 与架构文档保留七项明确结构债。
+## Merge disposition
 
-## Locked product boundaries
+| 输入 | 原始记录 | 归并结果 |
+|------|----------|----------|
+| full-codebase audit | 21 findings | 20 个可执行；P2-04 保留为 18 `wontfix` |
+| architecture readability | 6 tickets | 04→16、05→17；其余进入 22–25 |
+| directory structure | 12 tickets | 8 个独立票进入 26–33；B3→17/33；C4→24 |
 
-- `Record` 只表示已发生事实；`CarePlan` 只表示未来意图，显式履行才创建事实。
-- Record/CarePlan/Baby 与 0–3 张照片继续以完整 atomic bundle 家庭可见；失败不得半确认。
-- 根发布回执、媒体回执与本地 `updatedAt` 必须分别表达真实状态，旧回执不得清除新本地写。
-- FulfillmentCandidate 是可审计冲突证据；提交者戳与业务字段不能组合成不存在的历史。
-- 本机清空和设备/成员/家庭终止清理复用同一路径；不得遗留可运行的旧宝宝计时器。
-- Composer→Timer 交接不得静默丢弃草稿；照片必须转移所有权或在显式放弃后才回收。
-- 下次喂养 offer 属于“事实已保存后的可恢复流程”，配置重建不能把它变成静默结束。
-- 成员删除是 hard delete + 事实作者匿名化；offline-migrate 不得重新引入 `left_at` 身份墓碑。
-- 当前只做前台同步、可信 HTTPS、每设备会话；不引入后台轮询或旧 wire 降级。
+目录草案 B1/B2 不进入 backlog：live tree 已证明 `core/image` 只有被 `**/build/`
+忽略的构建残骸，`backup/` 已被 `/.gitignore` 忽略，且不存在无内容的 `.agents/.codex/.grok`
+源码目录。这些是本机卫生检查，不是可版本化的实现工作。
 
-## Delivery shape
+最终记录数：**33**；其中 **32 个可执行 ticket + 1 个 wontfix disposition**。
 
-21 个 ticket 与审计 ID 一一对应。行为缺陷先修，结构拆分最后做；同一高冲突文件上的票按依赖串行：
+## Locked product and architecture boundaries
+
+- 护理记录只表示已发生事实；护理计划只表示未来意图，显式履行才创建事实。
+- Record/CarePlan/Baby 与 0–3 张照片继续以完整 atomic bundle 家庭可见。
+- FulfillmentCandidate 是不可拼接改写的审计证据；成员删除保持 hard delete + 作者匿名化。
+- 本机清空与家庭终止清理不得遗留可运行计时器或旧家庭状态。
+- 当前仍是前台同步、可信 HTTPS、每设备会话；不恢复旧 wire 或后台轮询。
+- Gradle 模块图保持稳定；feature 互不依赖，分区只发生在现有模块的 package/file 内。
+- 保留 `CareLog`、`SyncPort/RealSyncPort`、lezi-sync `Store` 的 deep façade；不造浅 capability port。
+- 不以行数或文件名 StructureTest 固化目录；既有行为测试才是重构合同。
+- 文档只描述 current tree 或稳定规则，不把 `.scratch` 目标路径写成已交付事实。
+- NAS schema/wire 继续遵守 ADR-0008 fresh-current；Android 本地升级遵守 ADR-0012。
+
+## Locality target
+
+| Ticket | Stable target |
+|--------|---------------|
+| 24 | Family 按 Overview / MembersDevices / Wizard(+QR) 调用流分 host 与目录 |
+| 26 | `feature/log` 按 timeline/dock/composer/layout/photo 分区 |
+| 27 | `domain` 按 carelog/careplan/family/timeline 等能力分区；`CareLog` 留根 |
+| 28 | `sync` 按 engine/backend/session/media/appupdate 等能力分区；三件 façade 留根 |
+| 29 | Onboarding 拆导航壳、wizard 步态和 QR UI；逻辑复用 FamilyWizardController |
+| 30 | Settings 按 calendar/record 分区 |
+| 31 | lezi-sync `lib.rs` handler 迁入私有 `handlers::*` |
+| 32 | lezi-sync `store.rs` 实现迁入私有 `store::*`；单一 Store 事务面不变 |
+
+所有目录名以 ticket 验收中的职责为准；不得为了达到任意文件数而制造单实现 adapter。
+
+## Dependency graph
 
 ```text
-01 强制更新壳 ───────────────────────────────► 16 删除死 pull/push 门面 ──┐
-02 媒体条件回执 ──► 03 合成根回执 ────────────────────────────────────────┼─► 18 拆同步能力端口
-02 ───────────────► 07 删宝宝头像 tombstone ──┐                         │
-02 + 07 ───────────────────────────────────────► 15 GC 事务外删           │
-04 candidate 冻结 ──► 05 completed pair 完整性                            │
-08 计时履行计划照片 ──► 09 Composer→Timer 安全交接                         │
-10 Timer 异常总覆盖 ──► 11 完成态跨重建                                    │
-14 迁移 departed membership ──► 21 写清离线迁移架构例外                    │
-06、12、13、17、19、20 为独立 tracer
+01 ─► 16
+02 ─► 03
+02 ─► 07 ─► 15
+04 ─► 05
+08 ─► 09
+10 ─► 11
+14 ─► 21
+23 ─► 24
+
+09 + 12 + 20 + 22 ─► 26 log locality
+05 + 06 + 07 + 08 + 13 + 22 ─► 27 domain locality
+01 + 03 + 06 + 15 + 16 + 19 ─► 28 sync locality
+23 ─► 29 onboarding locality
+06 + 25 ─► 30 settings locality
+05 ─► 31 handlers ─► 32 store locality
+05 + 19 ─────────────────► 32
+
+17 + 22 + 24 + 26..32 ─► 33 codify current layout
 ```
 
-初始 frontier：**01、02、04、06、08、10、12、13、14、17、19、20**。
+Initial frontier: **01、02、04、06、08、10、12、13、14、17、19、20、22、23、25**。
 
-## Global acceptance gates
+只有 frontier ticket 使用 `ready-for-agent`。依赖票保持 `blocked`，由 coordinator 在固定
+current HEAD 上确认 blocker 已闭合后再激活，不能仅因另一个分支“正在做”而提前领取。
 
-- 每票先加入能击中审计触发条件的回归，再修复；happy path 或注释不能闭票。
-- Android 票至少运行相关模块测试、`:app:assembleDebug` 与 `lintDebug`；Compose 重建/交互票补设备或 instrumentation 证据。
-- Rust/wire 票运行 `cargo fmt --all -- --check`、`cargo test --locked`、Clippy `-D warnings`。
-- 触及 `tools/lezi-sync/` 或需 current wire 实证的票，在 Rust gates 后按根 `AGENTS.md` 提议 NAS CD；未经用户确认不得替换现网容器。
-- 并发、崩溃恢复与回执票必须验证 stale ack、进程/配置重建、网络失败或崩溃注入，不能只断言最终 happy-path 行。
-- 文档票以实际 Gradle/source/运维命令为真源；ADR/PRD 不得把一次性离线 CLI 写成运行时自动迁移。
-- Release 声明仍需签名 Release APK、hash、安装启动、页面 smoke 和 current-wire/NAS 证据；目标测试不等于发版验收。
+## Ticket design rules
+
+- 一个 ticket 只有一个可独立验收的行为或结构结果；重复 finding 只保留一个 canonical owner。
+- 行为修复先加能击中原触发条件的回归；结构票必须证明行为合同未变化。
+- 同一高冲突 seam 串行；不同模块可在 frontier 中并行，但每个实现使用独立提交。
+- 只修改 ticket owned 文件；不得顺手修改论坛设计稿、构建缓存或本机发版物。
+- 票的 `Status`、blocker、验收和验证必须在实现提交后回写；ticket 发布不等于产品完成。
+- 关闭 tracker 时保留必要 PRD/ADR/commit 证据，再按 `.scratch` 规则删除 active 目录。
+
+## Global validation gates
+
+- Android 行为票：相关模块 JVM tests、`:app:assembleDebug`、`lintDebug`。
+- Compose 重建/交互票：补 instrumentation 或设备证据；静态测试不能替代交互验收。
+- Android 纯 package/file move：对应模块 compile/test + `:app:assembleDebug`；diff 不得混入逻辑改写。
+- Rust/wire 票：`cargo fmt --all -- --check`、`cargo test --locked`、
+  `cargo clippy --all-targets --all-features -- -D warnings`。
+- 31/32 即使声称行为不变，也修改 `tools/lezi-sync` runtime：Rust gates 后必须按根
+  `AGENTS.md` 提议 NAS CD，说明 HTTPS cutover/容器替换风险并等待用户确认；不得自动部署。
+- Release 声明仍需签名 Release APK、hash、安装启动、页面 smoke 和 current-wire/NAS 证据。
 
 ## Non-goals
 
-- 不在这些 ticket 中部署 NAS、升级版本号或生成发行物。
-- 不引入云同步、后台同步、旧 HTTP/SSID/长期 token 兼容路径。
-- 不借 P2 拆分改写业务合同；P2-04 必须在行为回归固定后 expand–migrate–contract。
-- 不把被修复触及到的无关未跟踪设计稿或其它 WIP 纳入提交。
+- 不在票单规划提交中修改产品代码、部署 NAS、升级版本或生成发行物。
+- 不新增 Gradle module，不合并现有 feature module，不拆 `AppUpdatePort`。
+- 不拆 lezi-sync 公开 HTTP/Store 合同，不改路由、schema、状态码或 wire JSON。
+- 不把 `core/image/build`、`backup/` 或空目录作为跨机器产品 ticket。
+- 不清理 `prototype/`、`design/` 或无关 `docs/design/2026-08-01-community-forum-design.md`。
 
 ## Closure rule
 
-只有 21 个 ticket 在同一 current HEAD 上满足各自 Must、验证门与必要文档门，tracker 才可标记
-complete。审计文件中的“OPEN”与 ticket 的 `ready-for-agent` 都只表示待实施，不是产品验收证据。
+只有 32 个可执行 ticket 在同一 current HEAD 上满足各自 Must、验证门和文档门，18 保持
+grill-locked `wontfix`，且不存在重复 active tracker/票时，本 tracker 才可 complete。
+历史审计 OPEN、规划提交或目标目录图都不是实现验收证据。

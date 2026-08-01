@@ -1,31 +1,28 @@
-# 18 — 按能力拆分 SyncPort/RealSyncPort
+# 18 — 全面拆 SyncPort/RealSyncPort（grill rejected）
 
-**What to build:** 在行为回归固定后，以 expand–migrate–contract 把更新、账户/家庭会话、replica trigger/status 与媒体/本机清理拆成窄端口，降低 feature 对整个 `RealSyncPort` 的依赖。
+**Disposition:** 审计观察到宽接口与大文件属实，但 2026-08-01 architecture grill + adversarial review 判定现有对象仍是有深度的 façade；当前没有足够 shotgun-change 证据支持能力端口大拆。只实施 Ticket 16 的死表面修剪。
 
 **Source:** `AUDIT-20260801-P2-04`  
-**Blocked by:** 01、02、03、16  
-**Status:** ready-for-agent  
-**Size:** L
+**Blocked by:** Not executable
+**Status:** wontfix
+**Size:** —
 
-## Acceptance criteria
+## Reopen criteria
 
-- [ ] 先以现有 public behavior tests 固定强制更新、家庭会话、同步触发、媒体 cleanup 与 local clear 合同。
-- [ ] 至少形成独立的 AppUpdate、FamilySession/Account、ReplicaSync、Media/LocalClear 能力接口；命名可按实际 ownership 调整，但禁止一个新 facade 继续聚合全部方法。
-- [ ] domain 只依赖写后触发、session/clear 等所需最小 seam；各 feature 只注入自身使用的能力。
-- [ ] Real 实现可共享内部 coordinator/mutex，但锁顺序、CUR、terminal clear 与 foreground gate 保持单一 owner。
-- [ ] 迁移期适配器有删除条件；所有调用者归零后删除旧宽 `SyncPort`，不长期保留双 API。
-- [ ] Hilt bindings、NoOp/offline 实现和 tests 按能力拆分；不增加 feature↔feature 依赖。
-- [ ] 文件体量下降只是结果，闭票依据是职责/调用边界和回归，不以任意行数阈值替代。
-- [ ] current client/server wire、错误映射、outbox/cursor 与用户文案无行为漂移。
+- [ ] 至少三次独立产品变化必须修改互不相关能力并反复触碰同一 façade，形成可引用的 shotgun-change 证据。
+- [ ] 新 grill 证明拆分后的端口拥有不同调用者、生命周期或策略 owner，而不是一对一浅 adapter。
+- [ ] 新方案保持共享 `syncMutex`、terminal clear、CUR 与 foreground gate 的单一协调者。
+- [ ] 用户明确重新选择全面能力拆分范围；否则保持 `wontfix`。
 
-## Validation
+## Current evidence
 
-运行全量 JVM tests、`lintDebug`、`:app:assembleDebug`；同步行为做 current server 集成。若触及 live wire 证明，按 AGENTS.md 提议 CD。
+- 统一 `spec.md` 的 Locked boundaries 保留 grill Q4：只删除死公开表面，保留 app-update seam。
+- Ticket 16 承担 prune-only；Tickets 28/31/32 只改善私有 locality，不增加 capability port。
 
 ## Documentation Gate
 
-更新模块图、DI ownership 与关键锁顺序；如形成稳定架构决策，补 ADR。
+无；本文件只保留审计 disposition，不能作为实现票领取。
 
 ## Out of scope
 
-不改 wire、数据库 schema、产品权限或同步时机。
+不实施 AppUpdatePort 或其它能力拆分；P2-02 由 canonical Ticket 16 修剪。

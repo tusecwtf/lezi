@@ -4,7 +4,7 @@
 
 **Source:** `AUDIT-20260801-P1-07`  
 **Blocked by:** 02 — media tombstone/receipt CAS first  
-**Status:** ready-for-agent  
+**Status:** blocked
 **Size:** M
 
 ## Acceptance criteria

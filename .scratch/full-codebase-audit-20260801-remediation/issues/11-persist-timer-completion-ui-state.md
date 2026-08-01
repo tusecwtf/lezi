@@ -4,7 +4,7 @@
 
 **Source:** `AUDIT-20260801-P1-11`  
 **Blocked by:** 10 — transition failure state must be total first  
-**Status:** ready-for-agent  
+**Status:** blocked
 **Size:** M
 
 ## Acceptance criteria

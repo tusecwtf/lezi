@@ -7,8 +7,7 @@
 
 | Tracker | 说明 |
 |---------|------|
-| [`full-codebase-audit-20260801-remediation`](./full-codebase-audit-20260801-remediation/) | 全库审计 P1/P2 正确性与结构债 |
-| [`architecture-readability-optimization`](./architecture-readability-optimization/) | 架构可读性：StructureTest 删除、Family 三缝、QR 下沉、SyncPort 死表面、tech.md 边（与审计 16/17 协调；不做 18 大拆） |
+| [`full-codebase-audit-20260801-remediation`](./full-codebase-audit-20260801-remediation/) | 统一全库整改：正确性、架构可读性、Android/Rust 私有 locality；32 个可执行票 + 1 个 wontfix |
 
 `local-data-upgrade-protection` 已完成实现与本机验收，保留到下一次严格清理。
 
@@ -63,8 +62,7 @@
 
 | Tracker | 状态 | Frontier | 说明 |
 |---------|------|----------|------|
-| [`full-codebase-audit-20260801-remediation`](./full-codebase-audit-20260801-remediation/) | ready-for-agent | 见该目录 ISSUES | 21 票 P1/P2；与本表下一行在 16/17 上 once-only |
-| [`architecture-readability-optimization`](./architecture-readability-optimization/) | ready-for-agent | 01、02、04、05、06 | 审查面压缩；03 依赖 02；lezi-sync 文件拆分 Later |
+| [`full-codebase-audit-20260801-remediation`](./full-codebase-audit-20260801-remediation/) | ready-for-agent | 01、02、04、06、08、10、12、13、14、17、19、20、22、23、25 | 三个 tracker 已归一；依赖票只在 blocker current-HEAD 验收后激活 |
 
 **未自动做的运维：** 家庭 NAS 上的 `push-and-deploy.sh` 容器替换仍须按根目录
 `AGENTS.md` 维护窗确认后再跑。
