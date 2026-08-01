@@ -9,7 +9,7 @@
 | Rust `lezi-sync` | `0.3.1` (`CARGO_PKG_VERSION`) |
 | Image tag | `lezi-sync:0.3.1` |
 | Working tree base HEAD (pre-release commits) | `72c090e8556843cdec59198ccfb4ac578de71d55` |
-
+| Working tree release commit | `aa7d3df32bc3a7d13155da5e1e364a86cffe3430` |
 Version sources: `app/build.gradle.kts`, `tools/lezi-sync/Cargo.toml` + `Cargo.lock`,
 `tools/lezi-sync/Dockerfile` / `build-image.sh` / `docker-compose.yml` defaults,
 `tools/lezi-sync/deploy/app-update.json`.
