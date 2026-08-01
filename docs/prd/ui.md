@@ -215,12 +215,14 @@ Owner。详细页面、错误和删除恢复见
 - 左右圆钮发起计时后，系统真实确认前台服务才显示运行；通知权限开启时还须确认通知已发布，通知权限关闭不伪造失败。系统拒绝时保留累计值和目标侧，明确显示已暂停并提供“重试启动”。
 - 重开 App 不把未确认或已失联的服务伪装成运行中；这类会话显示为可恢复暂停态，由用户显式重试。
 - 设置关闭后：记录页不显示计时入口。
+- **计时完成态恢复（VM/`SavedState` 单主）**：确认面板的 draft、Saving/error 与提交中身份由 `TimerViewModel.completionUi` 驱动并写入 `SavedState`；配置重建后任意新 composition 只订阅该状态恢复 sheet 与 busy，不依赖旧 composition 的 `remember` 或一次性 `onDone`/`onError` 回调。保存进行中再次确认保持同一 Saving，不启动第二个 coroutine/Record。domain 成功后立刻发布可消费的 next-feed offer 或 pendingExit；失败回到可重试 sheet。进程死亡后靠稳定 `completionClientUuid` 幂等恢复，不重复 Record、候选、照片或 next-feed offer。Host 确认消费 exit/offer 后重新订阅不得重复导航。
 
 #### 事实后的下次喂养安排（唯一权威流程）
 
 - 普通母乳、配方奶、挤出乳 Composer 与喂奶计时完成入口只在喂养事实事务成功后，进入同一套可选“安排下次喂养”流程；履行已有护理计划产生的事实不再递归提示。
 - 事实与计划是两个保存边界：此时 Record 已经发生并持久化；“不安排”、计划保存失败或退出提示均不得删除、回滚或改写该 Record。
 - **Composer 恢复顺序（先事实成功，再可恢复地选择计划）**：domain 写事实成功后立刻（1）把 fact message、baby/type、suggested time 写入 ViewModel/`SavedState` 统一 pending offer，（2）消费 restorable Composer request/draft，使进程重建不会重放 New 写事实；随后任意新 composition 只订阅该 observable post-save 阶段呈现/消费 offer，不依赖旧 composition 闭包改本地 `rememberSaveable`。非喂养保存同样经 observable finish message 只展示一次结果。共享 `LeziNextFeedPlanFlow` 仍负责 schedule 成功丢失后的核对、Skip 与配置重建相位。
+- **计时入口**与 Composer 共用同一 `LeziNextFeedPlanFlow`；计时侧 pending offer / baby 身份挂在 `completionUi` + `TimerCompletionSavedState`，与确认 sheet 同一 observable 阶段，不另起 Compose 本地 `rememberSaveable` 双主。
 - 默认时间按“护理间隔”设置从当前时刻推算。两个入口共用同一日期/时钟输入和未来时间校验；用户可调整后安排，也可明确选择“不安排”。
 - 计划保存中禁用调整、重复提交与退出动作。保存回调失败、丢失，或重组/进程重建恢复到
   未决写入时，不得直接把它当作“未安排”：两个入口通过同一持久化核对 seam 查询该宝宝的

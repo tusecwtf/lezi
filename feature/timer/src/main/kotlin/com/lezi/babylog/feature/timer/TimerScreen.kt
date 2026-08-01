@@ -35,7 +35,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -95,6 +94,7 @@ fun TimerRoute(
     vm: TimerViewModel = hiltViewModel(),
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
+    val completionUi by vm.completionUi.collectAsStateWithLifecycle()
     LaunchedEffect(handoffSeed?.handoffId) {
         val seed = handoffSeed ?: return@LaunchedEffect
         when (vm.acceptHandoffSeed(seed)) {
@@ -124,11 +124,7 @@ fun TimerRoute(
     }
     val leftMs = state.leftMs(tick)
     val rightMs = state.rightMs(tick)
-    var completionDraft by remember { mutableStateOf<NursingCompletionDraft?>(null) }
-    var completionSaving by remember { mutableStateOf(false) }
-    var completionSaveError by remember { mutableStateOf<String?>(null) }
     var showDiscardConfirmation by remember { mutableStateOf(false) }
-    var suggestedNextFeedAt by rememberSaveable { mutableStateOf<Long?>(null) }
     val context = LocalContext.current
     val completionSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val configuration = LocalConfiguration.current
@@ -137,6 +133,15 @@ fun TimerRoute(
         fontScale = LocalDensity.current.fontScale,
     )
     val timerScrollState = rememberScrollState()
+
+    // Consumable exit after success without next-feed: navigate first, then acknowledge so a
+    // process death mid-exit still rehydrates pendingExit; re-subscribe after ack does not re-fire.
+    LaunchedEffect(completionUi.pendingExit) {
+        if (completionUi.pendingExit) {
+            onDone()
+            vm.acknowledgeCompletionExit()
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -232,8 +237,7 @@ fun TimerRoute(
             Column(Modifier.fillMaxWidth()) {
                 Button(
                     onClick = {
-                        completionSaveError = null
-                        completionDraft = vm.freezeCompletion(
+                        vm.openCompletion(
                             initialNote = initialNote,
                             initialAmountMl = initialAmountMl,
                         )
@@ -282,58 +286,34 @@ fun TimerRoute(
         )
     }
 
-    completionDraft?.let { draft ->
+    completionUi.draft?.let { draft ->
         ModalBottomSheet(
             onDismissRequest = {
-                if (!completionSaving) {
-                    completionDraft = null
-                    completionSaveError = null
+                if (!completionUi.saving) {
+                    vm.dismissCompletion()
                 }
             },
             sheetState = completionSheetState,
         ) {
             NursingCompletionSheet(
                 draft = draft,
-                saving = completionSaving,
-                saveError = completionSaveError,
+                saving = completionUi.saving,
+                saveError = completionUi.saveError,
                 timeStepMin = timeStepMin,
                 timePickerStyle = timePickerStyle,
                 preferredHand = preferredHand,
-                onDraftChange = {
-                    completionSaveError = null
-                    completionDraft = it
-                },
+                onDraftChange = vm::updateCompletionDraft,
                 onDismiss = {
-                    if (!completionSaving) {
-                        completionDraft = null
-                        completionSaveError = null
+                    if (!completionUi.saving) {
+                        vm.dismissCompletion()
                     }
                 },
-                onConfirm = { confirmed ->
-                    completionSaving = true
-                    completionSaveError = null
-                    vm.complete(
-                        draft = confirmed,
-                        onDone = { suggestedAt ->
-                            completionSaving = false
-                            completionDraft = null
-                            if (suggestedAt != null) {
-                                suggestedNextFeedAt = suggestedAt
-                            } else {
-                                onDone()
-                            }
-                        },
-                        onError = {
-                            completionSaving = false
-                            completionSaveError = it
-                        },
-                    )
-                },
+                onConfirm = vm::confirmCompletion,
             )
         }
     }
 
-    suggestedNextFeedAt?.let { suggestedAt ->
+    completionUi.pendingNextFeedSuggestedAt?.let { suggestedAt ->
         val permissionGranted =
             Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
                 ContextCompat.checkSelfPermission(
@@ -353,12 +333,10 @@ fun TimerRoute(
             onReconcile = vm::reconcileNextFeedPlan,
             onFinishedScheduled = {
                 vm.dismissNextFeedPlan()
-                suggestedNextFeedAt = null
                 onDone()
             },
             onFinishedWithoutPlan = {
                 vm.dismissNextFeedPlan()
-                suggestedNextFeedAt = null
                 onDone()
             },
         )

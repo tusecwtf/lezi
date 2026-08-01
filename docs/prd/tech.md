@@ -105,17 +105,23 @@ UI 事件
        停 FGS 与通知，收口 FAILED（先尝试 durable FAILED，再 memory；保留侧别、累计值、session）
      → 持久化类失败原因 `STORAGE`（文案「状态保存失败」）；服务启动类仍用 RUNTIME/权限/通知/超时
      → FAILED 再持久化失败时仍先更新内存态，UI 不得长期停在 STARTING/RUNNING 假象
-完成 → domain completeNursing：写 nursing Record；若绑定 carePlanId，同事务读取计划当前
-       active 照片并 clone 为 Record 独立 MediaAsset 行，再 complete 计划 + 候选 → 停服务
+完成 → 冻结 draft 打开确认 sheet（`TimerCompletionUiState`，SavedState 可恢复）
+     → 确认 → Saving（单飞；再确认 no-op）→ domain completeNursing：写 nursing Record；
+       若绑定 carePlanId，同事务读取计划当前 active 照片并 clone 为 Record 独立 MediaAsset 行，
+       再 complete 计划 + 候选
      → Composer→Timer handoff（Ticket 09）：显式 TimerHandoffSeed（baby/carePlan/note/amount/
        有序照片+borrowed|composer_owned）写入 TimerState 并随 DataStore 恢复；Timer accept 后
        Composer 才 close 且不删除已转移 owned 文件；完成时 merge seed 路径与 Ticket 08 直播
        plan media（去重 0–3）经 photoLocalPaths 写入 Record；丢弃只回收 composer_owned
+     → 成功：先 durable 发布 next-feed offer 或 pendingExit，再清空 TimerState / 停服；
+       失败：Saving→可重试 sheet + error（结果不经旧 composition 回调唯一交付）
      → 完成 / 暂停 / 清空：先持久化非运行快照再停服；持久化失败同样停服；
        仅当存在真实可重试侧别（lastSide / 曾运行侧）时内存 `FAILED`；
        护理计划 bind 或无侧别会话保持内存 `PAUSED`，不得伪造 `"L"`
 进程被杀 / 坏存储读 → 冻结或 **init fail-closed 清空** 并停服（强于 transition 的 keep-session FAILED）；
        仅进程内同 session 见证可保留 RUNNING；不自动重复启动
+     → 完成态 SavedState：Saving+draft 且 session 仍在 → 幂等 resume completeNursing；
+       已发布 post-save 但 TimerState 未清 → 只补 clear；已有 next-feed/exit → 只恢复 UI
 CancellationException / Error → 先停服再原样重抛，不得吞成产品错误
 ```
 
@@ -126,6 +132,14 @@ CancellationException / Error → 先停服再原样重抛，不得吞成产品�
 | `RUNNING` | 仅服务 ack 后；UI 走秒 | ack 后写盘失败 → 停服 + `FAILED`（非假 RUNNING） |
 | `FAILED` | 已安全暂停，保留 side/累计/session | 写盘再失败仍先更新内存 `FAILED` |
 | `RECOVERABLE` | 进程恢复未见服务见证 | 与 transition 相同：停服，可重试启动 |
+
+| 完成 UI 态 | 含义 | 配置/进程重建 |
+|------------|------|----------------|
+| sheet + draft | 确认面板打开 | SavedState 恢复 draft；可改可取消 |
+| Saving | 单飞提交中 | 恢复 busy sheet；同 `completionClientUuid` 幂等 resume |
+| saveError | 可重试失败 | 恢复 error + draft |
+| next-feed offer | 事实已落，待安排 | 恢复 suggestedAt + baby 身份；不重复写事实 |
+| pendingExit | 无 offer，待 Host 退出 | 可确认消费一次；再订阅不重复导航 |
 
 绑定护理计划的计时完成以事务内 plan media 为准（不是打开计时/Composer 时的 UI 快照）；
 计划照片所有权与顺序不变，Record 行独立 `client_uuid`、可共享 `local_uri`；幂等

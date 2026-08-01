@@ -24,7 +24,11 @@ internal data class NursingCompletionDraft(
     val endedAt: Long,
     val capturedAt: Long,
     val carePlanId: Long? = null,
-) {
+) : java.io.Serializable {
+    companion object {
+        private const val serialVersionUID: Long = 1L
+    }
+
     fun actualTimeMaxFutureSkewMillis(): Long =
         if (carePlanId != null) {
             RecordTime.FULFILLMENT_ACTUAL_TIME_SKEW_MILLIS

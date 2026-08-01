@@ -26,9 +26,11 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -47,6 +49,13 @@ class TimerViewModel @Inject constructor(
 ) : ViewModel() {
     private val _state = MutableStateFlow(TimerState())
     val state: StateFlow<TimerState> = _state
+    private val completionSaved = TimerCompletionSavedState(savedStateHandle)
+    private val _completionUi = MutableStateFlow(completionSaved.restore())
+    /**
+     * Single source of truth for completion sheet, Saving, errors, next-feed offer, and
+     * consumable exit. Host compositions subscribe — no Compose-local dual master.
+     */
+    internal val completionUi: StateFlow<TimerCompletionUiState> = _completionUi.asStateFlow()
     private val completionInFlight = AtomicBoolean(false)
     private val serviceStartInFlight = AtomicBoolean(false)
     /** Serializes L/R toggles so concurrent launches cannot clobber either side. */
@@ -103,7 +112,48 @@ class TimerViewModel @Inject constructor(
                     serviceController.stop()
                 }
             }
+            // After timer restore: converge completion stage (process death).
+            // Config change keeps the same VM job; only durable Saving without a live job needs this.
+            val stage = rehydrateTimerCompletionUi(_completionUi.value, completionSaved)
+            publishCompletion(stage)
+            when {
+                stage.hasPostSaveStage && _state.value.hasTimerData() -> {
+                    // Domain already committed and success was published, but DataStore clear
+                    // did not finish — finish the clear without rewriting the Record.
+                    applyTransition(TimerState())
+                }
+                shouldResumeTimerCompletionSave(stage) -> {
+                    val draft = requireNotNull(stage.draft)
+                    when {
+                        _state.value.completionClientUuid != null -> {
+                            // Mid-save: replay is idempotent on completionClientUuid.
+                            launchCompletionSave(draft, markBegin = false)
+                        }
+                        completionSaved.pendingNextFeedBabyId() != null -> {
+                            // Clear finished and identity keys exist; promote to offer.
+                            val suggested = completionSaved.pendingNextFeedSuggestedAt()
+                            publishCompletion(
+                                timerCompletionSucceeded(
+                                    stage,
+                                    suggestedNextFeedAt = suggested,
+                                ),
+                            )
+                        }
+                        else -> {
+                            // Clear finished without next-feed identity → consumable exit.
+                            publishCompletion(
+                                timerCompletionSucceeded(stage, suggestedNextFeedAt = null),
+                            )
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    private fun publishCompletion(next: TimerCompletionUiState) {
+        completionSaved.persist(next)
+        _completionUi.value = next
     }
 
     private suspend fun persistLocal(s: TimerState) {
@@ -238,24 +288,65 @@ class TimerViewModel @Inject constructor(
         )
     }
 
-    internal fun complete(
-        draft: NursingCompletionDraft,
-        onDone: (suggestedNextFeedAt: Long?) -> Unit,
-        onError: (String) -> Unit,
+    /** Freeze current timer and open the completion sheet (VM-owned draft). */
+    internal fun openCompletion(
+        initialNote: String = "",
+        initialAmountMl: String = "",
     ) {
+        val draft = freezeCompletion(
+            initialNote = initialNote,
+            initialAmountMl = initialAmountMl,
+        )
+        publishCompletion(openTimerCompletionSheet(_completionUi.value, draft))
+    }
+
+    internal fun updateCompletionDraft(draft: NursingCompletionDraft) {
+        publishCompletion(updateTimerCompletionDraft(_completionUi.value, draft))
+    }
+
+    internal fun dismissCompletion() {
+        publishCompletion(dismissTimerCompletionSheet(_completionUi.value))
+    }
+
+    /**
+     * Confirm the completion sheet. Results are published on [completionUi] — not via
+     * composition-captured callbacks — so any subscriber after config change consumes them.
+     * When already Saving, this is a no-op (same busy state; no second coroutine/Record).
+     */
+    internal fun confirmCompletion(draft: NursingCompletionDraft) {
+        if (!mayStartTimerCompletionSave(_completionUi.value.saving)) return
         if (!completionInFlight.compareAndSet(false, true)) return
+        draft.validationError(System.currentTimeMillis())?.let { error ->
+            completionInFlight.set(false)
+            val withDraft = _completionUi.value.copy(draft = draft, saving = false)
+            publishCompletion(timerCompletionSaveFailed(withDraft, error))
+            return
+        }
+        publishCompletion(beginTimerCompletionSave(_completionUi.value, draft))
+        launchCompletionSave(draft, markBegin = true)
+    }
+
+    /**
+     * @param markBegin when false, caller already published Saving (process-death resume);
+     *   still takes [completionInFlight] so a second confirm cannot start a parallel job.
+     */
+    private fun launchCompletionSave(draft: NursingCompletionDraft, markBegin: Boolean) {
+        if (markBegin) {
+            // compareAndSet already held by confirmCompletion
+        } else if (!completionInFlight.compareAndSet(false, true)) {
+            return
+        }
         viewModelScope.launch {
-            var suggestedNextFeedAt: Long? = null
             try {
-                draft.validationError(System.currentTimeMillis())?.let {
-                    onError(it)
-                    return@launch
-                }
+                var suggestedNextFeedAt: Long? = null
+                var babyIdForOffer: Long? = null
                 toggleMutex.withLock {
                     val stableState = _state.value
                     val babyId = stableState.babyId ?: careLog.getCurrentBaby()?.id
                     if (babyId == null) {
-                        onError("请先添加宝宝")
+                        publishCompletion(
+                            timerCompletionSaveFailed(_completionUi.value, "请先添加宝宝"),
+                        )
                         return@launch
                     }
                     val completionClientUuid = requireNotNull(stableState.completionClientUuid) {
@@ -298,34 +389,57 @@ class TimerViewModel @Inject constructor(
                             nowMillis = RecordTime.currentTimeMillis(),
                             intervalMinutes = currentSettings.nursingIntervalMin,
                         )
-                        savedStateHandle[PENDING_NEXT_FEED_BABY_KEY] = babyId
-                        savedStateHandle[PENDING_NEXT_FEED_SUGGESTED_AT_KEY] =
-                            suggestedNextFeedAt
-                    } else {
-                        savedStateHandle.remove<Long>(PENDING_NEXT_FEED_BABY_KEY)
-                        savedStateHandle.remove<Long>(PENDING_NEXT_FEED_SUGGESTED_AT_KEY)
+                        babyIdForOffer = babyId
                     }
-                    // Await the DataStore clear. If the process dies before it commits, replay uses
-                    // the same completionClientUuid and CareLog returns the existing record.
-                    applyTransition(TimerState())
+                    // Domain commit succeeded. Durable post-save stage first so process death
+                    // rehydrates next-feed/exit (not Saving), then clear timer snapshot.
+                    withContext(NonCancellable) {
+                        if (suggestedNextFeedAt != null && babyIdForOffer != null) {
+                            completionSaved.savePendingNextFeedIdentity(
+                                babyId = babyIdForOffer!!,
+                                suggestedAt = suggestedNextFeedAt!!,
+                            )
+                        } else {
+                            completionSaved.clearPendingNextFeedIdentity()
+                        }
+                        publishCompletion(
+                            timerCompletionSucceeded(
+                                _completionUi.value,
+                                suggestedNextFeedAt = suggestedNextFeedAt,
+                            ),
+                        )
+                        // If the process dies before this commits, replay uses the same
+                        // completionClientUuid and CareLog returns the existing record; init also
+                        // finishes the clear when post-save stage is already published.
+                        applyTransition(TimerState())
+                    }
                 }
-                onDone(suggestedNextFeedAt)
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 throw cancelled
             } catch (throwable: Throwable) {
-                onError(productUiError(throwable, "保存失败"))
+                publishCompletion(
+                    timerCompletionSaveFailed(
+                        _completionUi.value,
+                        productUiError(throwable, "保存失败"),
+                    ),
+                )
             } finally {
                 completionInFlight.set(false)
             }
         }
     }
 
+    /** Host acknowledged one-shot exit after success without next-feed. */
+    internal fun acknowledgeCompletionExit() {
+        publishCompletion(consumeTimerPendingExit(_completionUi.value))
+    }
+
     internal fun scheduleNextFeedPlan(atMillis: Long, onResult: (Boolean) -> Unit) {
         viewModelScope.launch {
             val success = try {
-                val babyId = requireNotNull(
-                    savedStateHandle.get<Long>(PENDING_NEXT_FEED_BABY_KEY),
-                ) { "待安排的喂养记录已失效" }
+                val babyId = requireNotNull(completionSaved.pendingNextFeedBabyId()) {
+                    "待安排的喂养记录已失效"
+                }
                 careLog.scheduleNextFeedCarePlan(
                     babyId = babyId,
                     feedType = RecordType.NURSING,
@@ -347,9 +461,9 @@ class TimerViewModel @Inject constructor(
         viewModelScope.launch {
             onResult(
                 runNextFeedPlanReconciliation {
-                    val babyId = requireNotNull(
-                        savedStateHandle.get<Long>(PENDING_NEXT_FEED_BABY_KEY),
-                    ) { "待核对的喂养记录已失效" }
+                    val babyId = requireNotNull(completionSaved.pendingNextFeedBabyId()) {
+                        "待核对的喂养记录已失效"
+                    }
                     careLog.reconcileNextFeedPlan(babyId)
                 },
             )
@@ -357,8 +471,8 @@ class TimerViewModel @Inject constructor(
     }
 
     internal fun dismissNextFeedPlan() {
-        savedStateHandle.remove<Long>(PENDING_NEXT_FEED_BABY_KEY)
-        savedStateHandle.remove<Long>(PENDING_NEXT_FEED_SUGGESTED_AT_KEY)
+        completionSaved.clearPendingNextFeedIdentity()
+        publishCompletion(consumeTimerPendingNextFeed(_completionUi.value))
     }
 
     fun clear(onCleared: () -> Unit = {}) {
@@ -451,10 +565,5 @@ class TimerViewModel @Inject constructor(
                 }
             }
         }
-    }
-
-    private companion object {
-        const val PENDING_NEXT_FEED_BABY_KEY = "timer_pending_next_feed_baby"
-        const val PENDING_NEXT_FEED_SUGGESTED_AT_KEY = "timer_pending_next_feed_suggested_at"
     }
 }
