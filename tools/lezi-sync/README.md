@@ -54,11 +54,11 @@ SSH 自动部署（打包 + scp + 极空间 **zdocker 自带 compose**，secret 
 
 ```bash
 # 可选：先构建镜像
-LEZI_SYNC_VERSION=0.3.1 ./build-image.sh
+LEZI_SYNC_VERSION=0.3.2 ./build-image.sh
 ./deploy/push-and-deploy.sh
 ```
 
-默认镜像为 `lezi-sync:0.3.1`。**默认安全基线：**
+默认镜像为 `lezi-sync:0.3.2`。**默认安全基线：**
 
 | 项 | 默认 | 说明 |
 |---|---|---|
@@ -80,7 +80,7 @@ export LEZI_BOOTSTRAP_SECRET="$(openssl rand -hex 24)"
 export LEZI_DATA_HOST_PATH=/volume1/docker/lezi
 
 # 首次生成、以后验证并复用同一 SPKI；生产默认在镜像内调用 openssl。
-./deploy/init-tls.sh "${LEZI_DATA_HOST_PATH}" lezi-sync:0.3.1 nas.example.lan
+./deploy/init-tls.sh "${LEZI_DATA_HOST_PATH}" lezi-sync:0.3.2 nas.example.lan
 
 docker compose up -d
 docker compose ps
@@ -131,7 +131,7 @@ Synology、QNAP 或其它 NAS 的数据路径不同，只需把 `LEZI_DATA_HOST_
 如果 NAS 不适合本机编译，可在开发机导出镜像：
 
 ```bash
-docker save lezi-sync:0.3.1 | gzip > lezi-sync-0.3.1.tar.gz
+docker save lezi-sync:0.3.2 | gzip > lezi-sync-0.3.1.tar.gz
 # 把 tar.gz 复制到 NAS 后：
 gzip -dc lezi-sync-0.3.1.tar.gz | docker load
 ```
@@ -146,8 +146,8 @@ gzip -dc lezi-sync-0.3.1.tar.gz | docker load
 ```bash
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  --build-arg LEZI_SYNC_VERSION=0.3.1 \
-  -t your-registry/lezi-sync:0.3.1 \
+  --build-arg LEZI_SYNC_VERSION=0.3.2 \
+  -t your-registry/lezi-sync:0.3.2 \
   --push .
 ```
 
