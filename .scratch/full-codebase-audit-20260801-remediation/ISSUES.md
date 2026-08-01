@@ -8,9 +8,9 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 ## Disposition
 
 - Canonical records: **33**
-- Executable: **32**
-- Done: **30**
-- Current frontier (ready-for-agent): **1**
+- Executable: **0**
+- Done: **31**
+- Current frontier (ready-for-agent): **0**
 - Blocked by dependency: **1**
 - Grill rejected: **1**（18，全面拆 SyncPort capability ports）
 - `architecture-readability-optimization` 与 `directory-structure-clarity` 已并入本 tracker，
@@ -34,7 +34,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 ## Frontier
 
-**32**
+**33** (blocked until batch review closes 32)
 
 ## Tickets
 
@@ -71,7 +71,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 | [29](./issues/29-split-onboarding-shell-and-steps.md) | directory C5 | Onboarding 拆壳、向导步和 QR UI | 23 | M | done |
 | [30](./issues/30-partition-settings-package.md) | directory C6 | Settings 按 calendar/record 分包 | 06、25 | M | done |
 | [31](./issues/31-extract-lezi-sync-handler-modules.md) | directory D1 | lezi-sync handler 私有模块化 | 05 | L | done |
-| [32](./issues/32-extract-lezi-sync-store-modules.md) | directory D2 | lezi-sync Store 私有模块化 | 05、19、31 | L | ready-for-agent |
+| [32](./issues/32-extract-lezi-sync-store-modules.md) | directory D2 | lezi-sync Store 私有模块化 | 05、19、31 | L | done |
 | [33](./issues/33-codify-implemented-layout-conventions.md) | directory E1 | 固化已落地目录约定并收口 | 17、22、24、26–32 | S | blocked |
 
 ## Batch closeout (operator instruction 2026-08-01)

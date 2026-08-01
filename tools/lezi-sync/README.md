@@ -16,8 +16,8 @@ Docker 容器和一个持久化目录。
 | `src/handlers/{health,app_update,identity,sync,media}.rs` | `/health`、app-update、建家/登录/会话、pull、media/bundle；`media` 另含 media-root 启动清理 |
 | `src/members.rs` | 家庭成员与设备管理路由（既有内聚，不回并） |
 | `src/readiness.rs` | `/ready` 与 readiness 缓存 |
-| `src/store.rs` | SQLite 持久化（Store 再拆见后续票） |
-| `src/offline_migrate/` | 离线 v3→current 维护工具（非 live HTTP API） |
+| `src/store/{mod,schema,identity/*,pull,media,bundles}.rs` | SQLite 持久化；单一 `Store` 事务 façade；identity 再按 session/login/membership_admin/anonymize 分区；bundle 行与 LWW 加载器在 `bundles` |
+| `src/offline_migrate/` | 离线 v3→current 维护工具（非 live HTTP API；不并入 runtime store） |
 
 公开 HTTP 合同（路径、方法、鉴权、状态码、JSON）不变；本 README 不宣称 live NAS 已验证。
 
