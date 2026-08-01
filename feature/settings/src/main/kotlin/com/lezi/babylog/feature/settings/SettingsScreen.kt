@@ -63,7 +63,6 @@ import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.RecordItemIdentity
-import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SettingsLocal
 import com.lezi.babylog.core.model.deviceLayoutSnapshot
 import com.lezi.babylog.core.model.limitBabyNicknameInput
@@ -74,7 +73,6 @@ import com.lezi.babylog.designsystem.LeziDatePicker
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.PageScaffoldBackground
-import com.lezi.babylog.designsystem.SectionHeading
 import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.domain.CareLog
 import com.lezi.babylog.domain.CreateBabyInput

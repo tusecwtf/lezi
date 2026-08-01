@@ -18,7 +18,7 @@ import org.junit.Test
 /**
  * Record-settings catalog knobs via public core.ui seams (no production test helpers).
  */
-class RecordAndShortcutSettingsTest {
+class RecordSettingsTest {
     @Test
     fun crossCategoryMoveIsNoOp() {
         // No public reassignment API: in-section move cannot place excretion key in feeding.
