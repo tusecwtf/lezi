@@ -32,7 +32,7 @@ class ContractSupersededSurfacesTest {
             .isEqualTo(3) // declaration plus the local and sync adapters
 
         val onboarding = source(
-            "feature/onboarding/src/main/kotlin/com/lezi/babylog/feature/onboarding/OnboardingScreen.kt",
+            "feature/onboarding/src/main/kotlin/com/lezi/babylog/feature/onboarding/OnboardingViewModel.kt",
         )
         val account = source(
             "feature/family/src/main/kotlin/com/lezi/babylog/feature/family/wizard/AccountFamilyWizardHost.kt",

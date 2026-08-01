@@ -9,8 +9,8 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 - Canonical records: **33**
 - Executable: **32**
-- Done: **27**（01–28 excluding wontfix 18）
-- Current frontier (ready-for-agent): **3**
+- Done: **28**（01–29 excluding wontfix 18）
+- Current frontier (ready-for-agent): **2**
 - Blocked by dependency: **2**
 - Grill rejected: **1**（18，全面拆 SyncPort capability ports）
 - `architecture-readability-optimization` 与 `directory-structure-clarity` 已并入本 tracker，
@@ -34,7 +34,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 ## Frontier
 
-**29、30、31**
+**30、31**
 
 ## Tickets
 
@@ -68,7 +68,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 | [26](./issues/26-partition-log-package-by-flow.md) | directory C1 | feature/log 按调用流分包 | 09、12、20、22 | M–L | done |
 | [27](./issues/27-partition-domain-package-by-capability.md) | directory C2 | domain 按能力分包并保留 CareLog façade | 05、06、07、08、13、22 | M–L | done |
 | [28](./issues/28-partition-sync-package-by-capability.md) | directory C3 | sync 按能力分包并保留 Sync façade | 01、03、06、15、16、19 | M–L | done |
-| [29](./issues/29-split-onboarding-shell-and-steps.md) | directory C5 | Onboarding 拆壳、向导步和 QR UI | 23 | M | ready-for-agent |
+| [29](./issues/29-split-onboarding-shell-and-steps.md) | directory C5 | Onboarding 拆壳、向导步和 QR UI | 23 | M | done |
 | [30](./issues/30-partition-settings-package.md) | directory C6 | Settings 按 calendar/record 分包 | 06、25 | M | ready-for-agent |
 | [31](./issues/31-extract-lezi-sync-handler-modules.md) | directory D1 | lezi-sync handler 私有模块化 | 05 | L | ready-for-agent |
 | [32](./issues/32-extract-lezi-sync-store-modules.md) | directory D2 | lezi-sync Store 私有模块化 | 05、19、31 | L | blocked |
