@@ -272,6 +272,24 @@ Record→CarePlan 转换和同步 tombstone 只把精确媒体行标记删除；
 tombstone 或 Outbox 元数据。删除失败或中断时保留该路径作为重启重试 marker；live 行若有
 `remote_uri` 但本机路径为空，继续按既有下载恢复规则补齐。
 
+#### 原子包 prepare / commit 与 domain revision 的 CAS 边界
+
+推送 Record/CarePlan/Baby 原子媒体包时，客户端对每条 live 媒体先做本机探测
+（prepare：`mime` / `width` / `height` / `byte_size`），再上传字节并 `commit` 根包。
+**探测结果与 commit 回执不得用 prepare 时的整行快照回写 Room。**
+
+| 写回 | 允许字段 | CAS 匹配键（全部相等才写入） | 不匹配时 |
+|------|----------|------------------------------|----------|
+| prepare 探测元数据 | `mime`、`width`、`height`、`byte_size` | `client_uuid` + 被发布修订的 `updated_at` + 源 `local_uri` + `deleted_at`（含双方均为 null） | 保持当前行；wire 仍可携带本次包的探测值 |
+| root commit receipt | 仅 `remote_uri` | 同上 | 不写 receipt；当前行的 tombstone / 复活 / 新路径 / 更高 `updated_at` 全部保留 |
+| `markSynced` | `sync_dirty = 0` | `client_uuid` + 被发布修订的 `updated_at` | 不清新修订的 dirty |
+| outbox 删除 | 删除本次入队行 id | 按 id；新修订若另有 outbox 行则保留 | 新修订待同步证据可重入 |
+
+长上传期间同一 MediaAsset 被 tombstone、复活、替换 `local_uri` 或产生更高 `updated_at`
+时，旧 prepare 快照不得覆盖任何新字段。commit 失败、取消或上传失败不写 receipt，并关闭
+已打开的媒体 source。未发生并发写时，探测元数据、receipt、`markSynced` 与 outbox 删除
+仍一次收敛。
+
 ### 3.8 SettingsLocal（**不同步**）
 
 | 字段 | 说明 |

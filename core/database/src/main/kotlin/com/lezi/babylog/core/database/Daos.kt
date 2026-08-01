@@ -818,6 +818,63 @@ interface MediaAssetDao {
     @Update
     suspend fun update(asset: MediaAssetEntity)
 
+    /**
+     * Merge prepare-time probe fields only when the published domain revision is
+     * still current: same client UUID, updatedAt, localUri, and deletedAt.
+     * Never rewrites ownership, tombstone, remoteUri, syncDirty, or paths.
+     */
+    @Query(
+        """
+        UPDATE media_assets
+        SET mime = :mime,
+            width = :width,
+            height = :height,
+            byteSize = :byteSize
+        WHERE clientUuid = :clientUuid
+          AND updatedAt = :expectedUpdatedAt
+          AND localUri = :expectedLocalUri
+          AND (
+              (deletedAt IS NULL AND :expectedDeletedAt IS NULL)
+              OR deletedAt = :expectedDeletedAt
+          )
+        """,
+    )
+    suspend fun mergePreparedMetadata(
+        clientUuid: String,
+        expectedUpdatedAt: Long,
+        expectedLocalUri: String,
+        expectedDeletedAt: Long?,
+        mime: String?,
+        width: Int?,
+        height: Int?,
+        byteSize: Long,
+    ): Int
+
+    /**
+     * Write a root-commit receipt only when the published domain revision is
+     * still current. Does not re-apply a prepare-time row snapshot.
+     */
+    @Query(
+        """
+        UPDATE media_assets
+        SET remoteUri = :remoteUri
+        WHERE clientUuid = :clientUuid
+          AND updatedAt = :expectedUpdatedAt
+          AND localUri = :expectedLocalUri
+          AND (
+              (deletedAt IS NULL AND :expectedDeletedAt IS NULL)
+              OR deletedAt = :expectedDeletedAt
+          )
+        """,
+    )
+    suspend fun writeCommitReceipt(
+        clientUuid: String,
+        expectedUpdatedAt: Long,
+        expectedLocalUri: String,
+        expectedDeletedAt: Long?,
+        remoteUri: String,
+    ): Int
+
     @Query("UPDATE media_assets SET remoteUri = NULL, syncDirty = 1")
     suspend fun clearRemoteUris()
 

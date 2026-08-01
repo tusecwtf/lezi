@@ -10,6 +10,13 @@ import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
 
+/**
+ * Public seams:
+ * - [AtomicMediaBundlePublisher.publish] stages probe metadata on the wire,
+ *   uploads, commits, then CAS-writes prepare fields / receipt only.
+ * - Concurrent tombstone / revive / localUri replace / higher updatedAt during
+ *   a long upload must keep the current row (no full prepare snapshot rewrite).
+ */
 class AtomicMediaBundlePublisherTest {
     @Test
     fun zeroMediaStillStagesAndCommitsTheRootWithoutPreparingAFile() = runTest {
@@ -18,7 +25,12 @@ class AtomicMediaBundlePublisherTest {
             backend = backend,
             mediaFiles = QueueMediaFileStore(),
             loadMedia = { error("zero media must not load metadata") },
-            updateMedia = { error("zero media must not update metadata") },
+            mergePreparedMetadata = { _, _, _, _, _, _, _, _ ->
+                error("zero media must not merge metadata")
+            },
+            writeCommitReceipt = { _, _, _, _, _ ->
+                error("zero media must not write receipt")
+            },
             requireRemoteAllowed = { backend.operations += "gate" },
         )
 
@@ -38,8 +50,8 @@ class AtomicMediaBundlePublisherTest {
     @Test
     fun publishPreparesManifestUploadsMissingMediaWritesReceiptThenCommits() = runTest {
         val backend = RecordingAtomicBundleBackend()
-        val stored = mutableMapOf(
-            "media-1" to mediaAsset(
+        val store = CasMediaStore(
+            mediaAsset(
                 clientUuid = "media-1",
                 mime = "image/png",
                 width = 80,
@@ -47,20 +59,12 @@ class AtomicMediaBundlePublisherTest {
                 byteSize = 99,
             ),
         )
-        val publisher = AtomicMediaBundlePublisher(
-            backend = backend,
-            mediaFiles = StubMediaFileStore(
-                preparedMedia(
-                    bytes = byteArrayOf(1, 2, 3),
-                    mime = "image/jpeg",
-                    width = 40,
-                    height = 30,
-                ),
-            ),
-            loadMedia = stored::get,
-            updateMedia = { stored[it.clientUuid] = it },
-            requireRemoteAllowed = { backend.operations += "gate" },
-        )
+        val publisher = publisher(backend, store, preparedMedia(
+            bytes = byteArrayOf(1, 2, 3),
+            mime = "image/jpeg",
+            width = 40,
+            height = 30,
+        ))
 
         val result = publisher.publish(
             session = session,
@@ -81,7 +85,7 @@ class AtomicMediaBundlePublisherTest {
         )
         assertThat(backend.uploads.single().bytes).isEqualTo(byteArrayOf(1, 2, 3))
         assertThat(backend.uploads.single().mime).isEqualTo("image/jpeg")
-        assertThat(stored.getValue("media-1")).isEqualTo(
+        assertThat(store.get("media-1")).isEqualTo(
             mediaAsset(
                 clientUuid = "media-1",
                 mime = "image/jpeg",
@@ -107,8 +111,8 @@ class AtomicMediaBundlePublisherTest {
         val backend = RecordingAtomicBundleBackend().apply {
             putFailure = IllegalStateException("upload failed")
         }
-        val stored = mutableMapOf(
-            "media-1" to mediaAsset(
+        val store = CasMediaStore(
+            mediaAsset(
                 clientUuid = "media-1",
                 mime = null,
                 width = null,
@@ -116,14 +120,10 @@ class AtomicMediaBundlePublisherTest {
                 byteSize = 0,
             ),
         )
-        val publisher = AtomicMediaBundlePublisher(
-            backend = backend,
-            mediaFiles = StubMediaFileStore(
-                preparedMedia(byteArrayOf(1, 2, 3), "image/jpeg", 40, 30),
-            ),
-            loadMedia = stored::get,
-            updateMedia = { stored[it.clientUuid] = it },
-            requireRemoteAllowed = { backend.operations += "gate" },
+        val publisher = publisher(
+            backend,
+            store,
+            preparedMedia(byteArrayOf(1, 2, 3), "image/jpeg", 40, 30),
         )
 
         val failure = runCatching {
@@ -137,8 +137,9 @@ class AtomicMediaBundlePublisherTest {
 
         assertThat(failure).isInstanceOf(IllegalStateException::class.java)
         assertThat(failure).hasMessageThat().isEqualTo("upload failed")
-        assertThat(stored.getValue("media-1").remoteUri).isNull()
-        assertThat(stored.getValue("media-1").byteSize).isEqualTo(3)
+        assertThat(store.get("media-1").remoteUri).isNull()
+        // Prepare CAS still merges probe fields when the published revision holds.
+        assertThat(store.get("media-1").byteSize).isEqualTo(3)
         assertThat(backend.operations).containsExactly(
             "gate",
             "stage",
@@ -153,15 +154,17 @@ class AtomicMediaBundlePublisherTest {
             putFailureClientUuid = "media-2"
             putFailure = IllegalStateException("middle upload failed")
         }
-        val stored = (1..3).associate { index ->
-            "media-$index" to mediaAsset(
-                clientUuid = "media-$index",
-                mime = null,
-                width = null,
-                height = null,
-                byteSize = 0,
-            )
-        }.toMutableMap()
+        val store = CasMediaStore(
+            *(1..3).map { index ->
+                mediaAsset(
+                    clientUuid = "media-$index",
+                    mime = null,
+                    width = null,
+                    height = null,
+                    byteSize = 0,
+                )
+            }.toTypedArray(),
+        )
         val firstAttempt = (1..3).map { index ->
             preparedMedia(byteArrayOf(index.toByte()), "image/jpeg", 40, 30)
         }
@@ -172,8 +175,9 @@ class AtomicMediaBundlePublisherTest {
         val publisher = AtomicMediaBundlePublisher(
             backend = backend,
             mediaFiles = mediaFiles,
-            loadMedia = stored::get,
-            updateMedia = { stored[it.clientUuid] = it },
+            loadMedia = store::getOrNull,
+            mergePreparedMetadata = store::mergePreparedMetadata,
+            writeCommitReceipt = store::writeCommitReceipt,
             requireRemoteAllowed = { backend.operations += "gate" },
         )
         val rows = (1..3).map { mediaOutboxRow("media-$it") }
@@ -189,7 +193,7 @@ class AtomicMediaBundlePublisherTest {
 
         assertThat(firstFailure).hasMessageThat().isEqualTo("middle upload failed")
         assertThat(backend.operations).doesNotContain("commit")
-        assertThat(stored.values.map { it.remoteUri }).containsExactly(null, null, null)
+        assertThat(store.all().map { it.remoteUri }).containsExactly(null, null, null)
         assertThat(firstAttempt.map { it.file.exists() }).containsExactly(false, false, false)
 
         backend.operations.clear()
@@ -207,7 +211,7 @@ class AtomicMediaBundlePublisherTest {
         assertThat(backend.uploads.map { it.clientUuid })
             .containsExactly("media-1", "media-2", "media-3").inOrder()
         assertThat(backend.operations.last()).isEqualTo("commit")
-        assertThat(stored.values.map { it.remoteUri }).containsExactly(
+        assertThat(store.all().map { it.remoteUri }).containsExactly(
             session.receiptFor("media-1"),
             session.receiptFor("media-2"),
             session.receiptFor("media-3"),
@@ -221,23 +225,26 @@ class AtomicMediaBundlePublisherTest {
             putFailureClientUuid = "media-2"
             putFailure = CancellationException("sync cancelled")
         }
-        val stored = (1..3).associate { index ->
-            "media-$index" to mediaAsset(
-                clientUuid = "media-$index",
-                mime = null,
-                width = null,
-                height = null,
-                byteSize = 0,
-            )
-        }.toMutableMap()
+        val store = CasMediaStore(
+            *(1..3).map { index ->
+                mediaAsset(
+                    clientUuid = "media-$index",
+                    mime = null,
+                    width = null,
+                    height = null,
+                    byteSize = 0,
+                )
+            }.toTypedArray(),
+        )
         val prepared = (1..3).map { index ->
             preparedMedia(byteArrayOf(index.toByte()), "image/jpeg", 40, 30)
         }
         val publisher = AtomicMediaBundlePublisher(
             backend = backend,
             mediaFiles = QueueMediaFileStore(*prepared.toTypedArray()),
-            loadMedia = stored::get,
-            updateMedia = { stored[it.clientUuid] = it },
+            loadMedia = store::getOrNull,
+            mergePreparedMetadata = store::mergePreparedMetadata,
+            writeCommitReceipt = store::writeCommitReceipt,
             requireRemoteAllowed = { backend.operations += "gate" },
         )
 
@@ -255,9 +262,250 @@ class AtomicMediaBundlePublisherTest {
 
         assertThat(failure).isInstanceOf(CancellationException::class.java)
         assertThat(backend.operations).doesNotContain("commit")
-        assertThat(stored.values.map { it.remoteUri }).containsExactly(null, null, null)
+        assertThat(store.all().map { it.remoteUri }).containsExactly(null, null, null)
         assertThat(prepared.map { it.file.exists() }).containsExactly(false, false, false)
     }
+
+    @Test
+    fun concurrentTombstoneDuringUploadKeepsTombstoneAndRejectsStaleReceipt() = runTest {
+        val store = CasMediaStore(
+            mediaAsset(
+                clientUuid = "media-1",
+                mime = null,
+                width = null,
+                height = null,
+                byteSize = 0,
+                updatedAt = 2,
+                localUri = "/local/media-1",
+            ),
+        )
+        val backend = RecordingAtomicBundleBackend().apply {
+            onPut = {
+                store.replace(
+                    mediaAsset(
+                        clientUuid = "media-1",
+                        mime = null,
+                        width = null,
+                        height = null,
+                        byteSize = 0,
+                        updatedAt = 99,
+                        localUri = "/local/media-1",
+                        deletedAt = 99,
+                        syncDirty = true,
+                    ),
+                )
+            }
+        }
+        val publisher = publisher(
+            backend,
+            store,
+            preparedMedia(byteArrayOf(1, 2, 3), "image/jpeg", 40, 30),
+        )
+
+        publisher.publish(
+            session = session,
+            bundleId = "record:record-1:10",
+            root = SyncEntity("record", "record-1", "{}", 10),
+            mediaRows = listOf(mediaOutboxRow("media-1", updatedAt = 2)),
+        )
+
+        val after = store.get("media-1")
+        assertThat(after.deletedAt).isEqualTo(99)
+        assertThat(after.updatedAt).isEqualTo(99)
+        assertThat(after.remoteUri).isNull()
+        assertThat(after.syncDirty).isTrue()
+        assertThat(after.mime).isNull()
+        assertThat(after.byteSize).isEqualTo(0)
+        assertThat(backend.operations).contains("commit")
+    }
+
+    @Test
+    fun concurrentLocalUriReplaceDuringUploadKeepsNewPathAndRejectsStaleReceipt() = runTest {
+        val store = CasMediaStore(
+            mediaAsset(
+                clientUuid = "media-1",
+                mime = "image/png",
+                width = 10,
+                height = 10,
+                byteSize = 4,
+                updatedAt = 2,
+                localUri = "/local/old.jpg",
+            ),
+        )
+        val backend = RecordingAtomicBundleBackend().apply {
+            onPut = {
+                store.replace(
+                    mediaAsset(
+                        clientUuid = "media-1",
+                        mime = "image/png",
+                        width = 10,
+                        height = 10,
+                        byteSize = 4,
+                        updatedAt = 50,
+                        localUri = "/local/new.jpg",
+                        syncDirty = true,
+                    ),
+                )
+            }
+        }
+        val publisher = publisher(
+            backend,
+            store,
+            preparedMedia(byteArrayOf(9, 9, 9), "image/jpeg", 40, 30),
+        )
+
+        publisher.publish(
+            session = session,
+            bundleId = "record:record-1:10",
+            root = SyncEntity("record", "record-1", "{}", 10),
+            mediaRows = listOf(mediaOutboxRow("media-1", updatedAt = 2)),
+        )
+
+        val after = store.get("media-1")
+        assertThat(after.localUri).isEqualTo("/local/new.jpg")
+        assertThat(after.updatedAt).isEqualTo(50)
+        assertThat(after.remoteUri).isNull()
+        assertThat(after.mime).isEqualTo("image/png")
+        assertThat(after.byteSize).isEqualTo(4)
+        assertThat(after.syncDirty).isTrue()
+    }
+
+    @Test
+    fun concurrentReviveWithHigherRevisionRejectsStalePrepareAndReceipt() = runTest {
+        val store = CasMediaStore(
+            mediaAsset(
+                clientUuid = "media-1",
+                mime = "image/png",
+                width = 8,
+                height = 8,
+                byteSize = 2,
+                updatedAt = 2,
+                localUri = "/local/media-1",
+                deletedAt = 1,
+            ),
+        )
+        // Live outbox row is a non-tombstone package for a resurrected path that
+        // still matches prepare-time identity until upload mutates the row.
+        store.replace(
+            mediaAsset(
+                clientUuid = "media-1",
+                mime = "image/png",
+                width = 8,
+                height = 8,
+                byteSize = 2,
+                updatedAt = 2,
+                localUri = "/local/media-1",
+            ),
+        )
+        val backend = RecordingAtomicBundleBackend().apply {
+            onPut = {
+                // Domain revived again with a newer path and revision while upload runs.
+                store.replace(
+                    mediaAsset(
+                        clientUuid = "media-1",
+                        mime = "image/webp",
+                        width = 64,
+                        height = 64,
+                        byteSize = 128,
+                        updatedAt = 77,
+                        localUri = "/local/revived.jpg",
+                        syncDirty = true,
+                    ),
+                )
+            }
+        }
+        val publisher = publisher(
+            backend,
+            store,
+            preparedMedia(byteArrayOf(1, 2, 3), "image/jpeg", 40, 30),
+        )
+
+        publisher.publish(
+            session = session,
+            bundleId = "record:record-1:10",
+            root = SyncEntity("record", "record-1", "{}", 10),
+            mediaRows = listOf(mediaOutboxRow("media-1", updatedAt = 2)),
+        )
+
+        val after = store.get("media-1")
+        assertThat(after.updatedAt).isEqualTo(77)
+        assertThat(after.localUri).isEqualTo("/local/revived.jpg")
+        assertThat(after.mime).isEqualTo("image/webp")
+        assertThat(after.width).isEqualTo(64)
+        assertThat(after.height).isEqualTo(64)
+        assertThat(after.byteSize).isEqualTo(128)
+        assertThat(after.remoteUri).isNull()
+        assertThat(after.syncDirty).isTrue()
+        assertThat(after.deletedAt).isNull()
+    }
+
+    @Test
+    fun higherUpdatedAtAloneBlocksStalePrepareMetadataAndReceipt() = runTest {
+        val store = CasMediaStore(
+            mediaAsset(
+                clientUuid = "media-1",
+                mime = "image/png",
+                width = 1,
+                height = 1,
+                byteSize = 1,
+                updatedAt = 2,
+                localUri = "/local/media-1",
+            ),
+        )
+        val backend = RecordingAtomicBundleBackend().apply {
+            onPut = {
+                store.replace(
+                    mediaAsset(
+                        clientUuid = "media-1",
+                        mime = "image/png",
+                        width = 1,
+                        height = 1,
+                        byteSize = 1,
+                        updatedAt = 100,
+                        localUri = "/local/media-1",
+                        syncDirty = true,
+                    ),
+                )
+            }
+        }
+        val publisher = publisher(
+            backend,
+            store,
+            preparedMedia(byteArrayOf(5, 5, 5), "image/jpeg", 99, 88),
+        )
+
+        // Prepare succeeds against revision 2 before the concurrent edit.
+        // Put mutates to 100; receipt CAS must not land.
+        publisher.publish(
+            session = session,
+            bundleId = "record:record-1:10",
+            root = SyncEntity("record", "record-1", "{}", 10),
+            mediaRows = listOf(mediaOutboxRow("media-1", updatedAt = 2)),
+        )
+
+        val after = store.get("media-1")
+        assertThat(after.updatedAt).isEqualTo(100)
+        assertThat(after.remoteUri).isNull()
+        // Prepare ran before the concurrent edit and CAS-merged probe fields onto
+        // revision 2; the concurrent write then replaced the row with revision 100
+        // that never received those probe fields or a receipt.
+        assertThat(after.mime).isEqualTo("image/png")
+        assertThat(after.byteSize).isEqualTo(1)
+        assertThat(after.syncDirty).isTrue()
+    }
+
+    private fun publisher(
+        backend: RecordingAtomicBundleBackend,
+        store: CasMediaStore,
+        prepared: PreparedMedia,
+    ) = AtomicMediaBundlePublisher(
+        backend = backend,
+        mediaFiles = StubMediaFileStore(prepared),
+        loadMedia = store::getOrNull,
+        mergePreparedMetadata = store::mergePreparedMetadata,
+        writeCommitReceipt = store::writeCommitReceipt,
+        requireRemoteAllowed = { backend.operations += "gate" },
+    )
 
     private companion object {
         val session = SyncSession(
@@ -277,28 +525,98 @@ class AtomicMediaBundlePublisherTest {
             height: Int?,
             byteSize: Long,
             remoteUri: String? = null,
+            updatedAt: Long = 2,
+            localUri: String = "/local/$clientUuid",
+            deletedAt: Long? = null,
+            syncDirty: Boolean = true,
         ) = MediaAssetEntity(
             id = 1,
             recordId = 1,
             clientUuid = clientUuid,
-            localUri = "/local/$clientUuid",
+            localUri = localUri,
             remoteUri = remoteUri,
             mime = mime,
             width = width,
             height = height,
             byteSize = byteSize,
             createdAt = 1,
-            updatedAt = 2,
+            updatedAt = updatedAt,
+            deletedAt = deletedAt,
+            syncDirty = syncDirty,
         )
 
-        fun mediaOutboxRow(clientUuid: String) = OutboxEntity(
+        fun mediaOutboxRow(clientUuid: String, updatedAt: Long = 2) = OutboxEntity(
             id = 2,
             familyId = "family-1",
             entityType = "media",
             clientUuid = clientUuid,
             payloadJson = "{\"kind\":\"log\"}",
-            updatedAt = 2,
+            updatedAt = updatedAt,
         )
+    }
+}
+
+/**
+ * In-memory CAS surface matching [com.lezi.babylog.core.database.MediaAssetDao]
+ * mergePreparedMetadata / writeCommitReceipt predicates (not a full-row @Update).
+ */
+private class CasMediaStore(vararg initial: MediaAssetEntity) {
+    private val stored = initial.associateBy { it.clientUuid }.toMutableMap()
+
+    fun get(clientUuid: String): MediaAssetEntity = stored.getValue(clientUuid)
+
+    fun getOrNull(clientUuid: String): MediaAssetEntity? = stored[clientUuid]
+
+    fun all(): List<MediaAssetEntity> = stored.values.toList()
+
+    fun replace(entity: MediaAssetEntity) {
+        stored[entity.clientUuid] = entity
+    }
+
+    fun mergePreparedMetadata(
+        clientUuid: String,
+        expectedUpdatedAt: Long,
+        expectedLocalUri: String,
+        expectedDeletedAt: Long?,
+        mime: String?,
+        width: Int?,
+        height: Int?,
+        byteSize: Long,
+    ): Int {
+        val current = stored[clientUuid] ?: return 0
+        if (
+            current.updatedAt != expectedUpdatedAt ||
+            current.localUri != expectedLocalUri ||
+            current.deletedAt != expectedDeletedAt
+        ) {
+            return 0
+        }
+        stored[clientUuid] = current.copy(
+            mime = mime,
+            width = width,
+            height = height,
+            byteSize = byteSize,
+        )
+        return 1
+    }
+
+    fun writeCommitReceipt(
+        clientUuid: String,
+        expectedUpdatedAt: Long,
+        expectedLocalUri: String,
+        expectedDeletedAt: Long?,
+        remoteUri: String,
+    ): Int {
+        val current = stored[clientUuid] ?: return 0
+        if (
+            current.updatedAt != expectedUpdatedAt ||
+            current.localUri != expectedLocalUri ||
+            current.deletedAt != expectedDeletedAt
+        ) {
+            return 0
+        }
+        stored[clientUuid] = current.copy(remoteUri = remoteUri)
+        return 1
     }
 }
 
@@ -317,6 +635,7 @@ private class RecordingAtomicBundleBackend(
     val operations = mutableListOf<String>()
     var putFailure: Throwable? = null
     var putFailureClientUuid: String? = null
+    var onPut: (() -> Unit)? = null
     val commitResult = BundleCommitResult(
         bundleId = "record:record-1:10",
         status = "committed",
@@ -344,6 +663,7 @@ private class RecordingAtomicBundleBackend(
         source: SyncMediaUploadSource,
     ): BundleStageStatus {
         operations += "put:$clientUuid"
+        onPut?.invoke()
         if (putFailureClientUuid == null || putFailureClientUuid == clientUuid) {
             putFailure?.let { throw it }
         }

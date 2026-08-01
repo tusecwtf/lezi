@@ -13,12 +13,33 @@ import kotlinx.serialization.json.jsonObject
  * Root mapping, ownership selection, acknowledgement, and outbox cleanup remain
  * caller responsibilities so a failed upload or commit cannot partially drain
  * the local root package.
+ *
+ * Prepare metadata and commit receipts are conditional writes against the domain
+ * revision that entered the package (clientUuid + updatedAt + localUri +
+ * deletedAt). A concurrent tombstone, revive, path replace, or newer revision
+ * keeps the current row; CAS miss does not invent a full-row prepare snapshot.
  */
 internal class AtomicMediaBundlePublisher(
     private val backend: SyncBackend,
     private val mediaFiles: SyncMediaFileStore,
     private val loadMedia: suspend (clientUuid: String) -> MediaAssetEntity?,
-    private val updateMedia: suspend (MediaAssetEntity) -> Unit,
+    private val mergePreparedMetadata: suspend (
+        clientUuid: String,
+        expectedUpdatedAt: Long,
+        expectedLocalUri: String,
+        expectedDeletedAt: Long?,
+        mime: String?,
+        width: Int?,
+        height: Int?,
+        byteSize: Long,
+    ) -> Int,
+    private val writeCommitReceipt: suspend (
+        clientUuid: String,
+        expectedUpdatedAt: Long,
+        expectedLocalUri: String,
+        expectedDeletedAt: Long?,
+        remoteUri: String,
+    ) -> Int,
     private val requireRemoteAllowed: suspend (SyncSession) -> Unit,
 ) {
     suspend fun publish(
@@ -53,7 +74,13 @@ internal class AtomicMediaBundlePublisher(
             requireRemoteAllowed(session)
             val result = backend.commitBundle(session, bundleId)
             for ((media, _) in prepared.sources) {
-                updateMedia(media.copy(remoteUri = session.receiptFor(media.clientUuid)))
+                writeCommitReceipt(
+                    media.clientUuid,
+                    media.updatedAt,
+                    media.localUri,
+                    media.deletedAt,
+                    session.receiptFor(media.clientUuid),
+                )
             }
             return result
         } catch (failure: Throwable) {
@@ -77,22 +104,32 @@ internal class AtomicMediaBundlePublisher(
             if (row.deletedAt == null && media.localUri.isNotBlank()) {
                 val prepared = mediaFiles.prepareUpload(media.localUri)
                 ownedSources += prepared
-                val updated = media.copy(
-                    mime = prepared.mime,
-                    width = prepared.width ?: media.width,
-                    height = prepared.height ?: media.height,
-                    byteSize = prepared.contentLength,
+                val mime = prepared.mime
+                val width = prepared.width ?: media.width
+                val height = prepared.height ?: media.height
+                val byteSize = prepared.contentLength
+                // Probe fields ride the wire for this package even when the local
+                // row advanced; only merge into Room when the published revision
+                // is still current.
+                mergePreparedMetadata(
+                    media.clientUuid,
+                    media.updatedAt,
+                    media.localUri,
+                    media.deletedAt,
+                    mime,
+                    width,
+                    height,
+                    byteSize,
                 )
-                updateMedia(updated)
-                mediaSources += updated to prepared
+                mediaSources += media to prepared
                 val rawObject = Json.parseToJsonElement(payload).jsonObject
                 payload = JsonObject(
                     rawObject +
-                        ("mime" to JsonPrimitive(updated.mime)) +
-                        ("byte_size" to JsonPrimitive(updated.byteSize)) +
+                        ("mime" to JsonPrimitive(mime)) +
+                        ("byte_size" to JsonPrimitive(byteSize)) +
                         listOfNotNull(
-                            updated.width?.let { "width" to JsonPrimitive(it) },
-                            updated.height?.let { "height" to JsonPrimitive(it) },
+                            width?.let { "width" to JsonPrimitive(it) },
+                            height?.let { "height" to JsonPrimitive(it) },
                         ).toMap(),
                 ).toString()
             }

@@ -41,7 +41,8 @@ internal class OutboxPushPipeline(
         backend = backend,
         mediaFiles = mediaFiles,
         loadMedia = mediaDao::getByClientUuid,
-        updateMedia = mediaDao::update,
+        mergePreparedMetadata = mediaDao::mergePreparedMetadata,
+        writeCommitReceipt = mediaDao::writeCommitReceipt,
         requireRemoteAllowed = requireRemoteAllowed,
     )
 

@@ -8631,6 +8631,57 @@ internal class MemoryMediaDao : MediaAssetDao {
         rows.replaceAll { if (it.id == asset.id) asset else it }
     }
 
+    override suspend fun mergePreparedMetadata(
+        clientUuid: String,
+        expectedUpdatedAt: Long,
+        expectedLocalUri: String,
+        expectedDeletedAt: Long?,
+        mime: String?,
+        width: Int?,
+        height: Int?,
+        byteSize: Long,
+    ): Int {
+        var changed = 0
+        rows.replaceAll {
+            if (
+                it.clientUuid == clientUuid &&
+                it.updatedAt == expectedUpdatedAt &&
+                it.localUri == expectedLocalUri &&
+                it.deletedAt == expectedDeletedAt
+            ) {
+                changed = 1
+                it.copy(mime = mime, width = width, height = height, byteSize = byteSize)
+            } else {
+                it
+            }
+        }
+        return changed
+    }
+
+    override suspend fun writeCommitReceipt(
+        clientUuid: String,
+        expectedUpdatedAt: Long,
+        expectedLocalUri: String,
+        expectedDeletedAt: Long?,
+        remoteUri: String,
+    ): Int {
+        var changed = 0
+        rows.replaceAll {
+            if (
+                it.clientUuid == clientUuid &&
+                it.updatedAt == expectedUpdatedAt &&
+                it.localUri == expectedLocalUri &&
+                it.deletedAt == expectedDeletedAt
+            ) {
+                changed = 1
+                it.copy(remoteUri = remoteUri)
+            } else {
+                it
+            }
+        }
+        return changed
+    }
+
     override suspend fun clearRemoteUris() {
         rows.replaceAll { it.copy(remoteUri = null, syncDirty = true) }
     }
