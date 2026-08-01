@@ -827,6 +827,17 @@ mod tests {
             "stdout={}",
             outcome.stdout
         );
+        // format_report_counters always emits these (fixture has no departed rows).
+        assert!(
+            outcome.stdout.contains("discarded_departed_memberships=0"),
+            "stdout={}",
+            outcome.stdout
+        );
+        assert!(
+            outcome.stdout.contains("anonymized_membership_refs=0"),
+            "stdout={}",
+            outcome.stdout
+        );
 
         assert_eq!(
             before,

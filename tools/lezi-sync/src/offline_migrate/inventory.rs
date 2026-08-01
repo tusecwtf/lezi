@@ -1088,8 +1088,9 @@ pub(crate) fn field_mappings() -> &'static [FieldMapping] {
             table: "memberships",
             source_field: Some("left_at"),
             target_field: Some("left_at"),
-            disposition: FieldDisposition::Keep,
-            note: "Retained active rows only (row filter drops left_at IS NOT NULL); always NULL on target — never keep departed identity tombstones",
+            // Not Keep: retained rows force NULL (row filter already dropped departed).
+            disposition: FieldDisposition::Derive,
+            note: "Retained active rows only (row filter drops left_at IS NOT NULL); target always NULL — never preserve left_at tombstones",
         },
         FieldMapping {
             table: "memberships",
@@ -1139,7 +1140,7 @@ pub(crate) fn field_mappings() -> &'static [FieldMapping] {
             source_field: Some("payload_json"),
             target_field: Some("payload_json"),
             disposition: FieldDisposition::Validate,
-            note: "entity_validation_context(type); persist canonical post-validate JSON",
+            note: "entity_validation_context(type); persist canonical post-validate JSON; null created_by_membership_id/submitter_membership_id when membership is departed (see memberships hard-delete disposition)",
         },
         FieldMapping {
             table: "entities",
@@ -1168,7 +1169,7 @@ pub(crate) fn field_mappings() -> &'static [FieldMapping] {
             source_field: Some("staged_membership_id"),
             target_field: Some("staged_membership_id"),
             disposition: FieldDisposition::Validate,
-            note: "Must reference a kept membership",
+            note: "Source membership must exist in active∪departed partition; if departed, target empty string (hard_delete stager blank)",
         },
         FieldMapping {
             table: "sync_bundles",
@@ -1210,7 +1211,7 @@ pub(crate) fn field_mappings() -> &'static [FieldMapping] {
             source_field: Some("root_payload_json"),
             target_field: Some("root_payload_json"),
             disposition: FieldDisposition::Validate,
-            note: "AtomicBundleRoot for root_type; persist canonical payload",
+            note: "AtomicBundleRoot for root_type; persist canonical payload; null created_by_membership_id/submitter_membership_id when membership is departed (see memberships hard-delete disposition); recompute content_hash when anonymized",
         },
         FieldMapping {
             table: "sync_bundles",
@@ -1659,6 +1660,12 @@ mod tests {
         assert!(field_mappings().iter().any(|row| {
             row.table == "memberships"
                 && row.target_field == Some("display_name_key")
+                && row.disposition == FieldDisposition::Derive
+        }));
+        assert!(field_mappings().iter().any(|row| {
+            row.table == "memberships"
+                && row.source_field == Some("left_at")
+                && row.target_field == Some("left_at")
                 && row.disposition == FieldDisposition::Derive
         }));
         assert!(field_mappings().iter().any(|row| {

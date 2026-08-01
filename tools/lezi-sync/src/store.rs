@@ -3818,15 +3818,37 @@ fn staged_media_uuids(
         .map_err(StoreError::from)
 }
 
-fn anonymize_membership_fields(payload: &mut Map<String, Value>, membership_id: &str) -> bool {
-    let mut changed = false;
-    for key in ["created_by_membership_id", "submitter_membership_id"] {
-        if payload.get(key).and_then(Value::as_str) == Some(membership_id) {
-            payload.insert(key.to_owned(), Value::Null);
-            changed = true;
+/// Payload JSON keys that attribute a care fact to a membership.
+///
+/// Cleared on hard-delete and offline-migrate when the membership is removed
+/// (current contract: null author/submitter, not rewrite to another member).
+/// Future authorship fields must be added here so hard-delete and migrate stay aligned.
+pub(crate) const MEMBERSHIP_AUTHORSHIP_PAYLOAD_KEYS: &[&str] =
+    &["created_by_membership_id", "submitter_membership_id"];
+
+/// Null authorship fields whose string value is accepted by `should_clear`.
+/// Returns how many fields were cleared.
+pub(crate) fn anonymize_membership_authorship_fields(
+    payload: &mut Map<String, Value>,
+    should_clear: impl Fn(&str) -> bool,
+) -> u64 {
+    let mut cleared = 0u64;
+    for key in MEMBERSHIP_AUTHORSHIP_PAYLOAD_KEYS {
+        let points = payload
+            .get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(&should_clear);
+        if points {
+            payload.insert((*key).to_owned(), Value::Null);
+            cleared += 1;
         }
     }
-    changed
+    cleared
+}
+
+/// Null authorship fields that point at a single membership (hard-delete path).
+fn anonymize_membership_fields(payload: &mut Map<String, Value>, membership_id: &str) -> bool {
+    anonymize_membership_authorship_fields(payload, |id| id == membership_id) > 0
 }
 
 fn anonymize_membership_entity_references(

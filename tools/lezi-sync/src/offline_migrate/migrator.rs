@@ -505,19 +505,23 @@ fn copy_memberships(
                 report.clone(),
             ));
         }
+
+        // Inventory: DiscardRowsWhenNotNull { left_at } — non-authoritative discard
+        // alone must not fail the run. Apply before role/display-name/owner gates so a
+        // departed row with a corrupt role becomes discarded_departed_memberships, not
+        // InvalidMembershipRole.
+        if is_departed_membership_left_at(left_at) {
+            departed_ids.insert(membership_id);
+            report.discarded_departed_memberships += 1;
+            continue;
+        }
+
         if role != "owner" && role != "member" {
             return Err(MigrateError::authoritative_failure(
                 AuthoritativeFailure::InvalidMembershipRole,
                 format!("membership `{membership_id}` role `{role}`"),
                 report.clone(),
             ));
-        }
-
-        // Inventory: DiscardRowsWhenNotNull { left_at } — same disposition as dry-run.
-        if is_departed_membership_left_at(left_at) {
-            departed_ids.insert(membership_id);
-            report.discarded_departed_memberships += 1;
-            continue;
         }
 
         let display_name_key = normalized_display_name_key(&display_name);
@@ -580,24 +584,13 @@ fn copy_memberships(
     })
 }
 
-/// Null `created_by_membership_id` / `submitter_membership_id` when they point at a
-/// departed membership (current hard-delete contract). Returns how many fields cleared.
+/// Null authorship fields that point at a departed membership (same keys/contract as
+/// [`store::anonymize_membership_authorship_fields`] / hard-delete). Returns count cleared.
 fn anonymize_departed_membership_fields(
     payload: &mut Map<String, Value>,
     departed_ids: &BTreeSet<String>,
 ) -> u64 {
-    let mut cleared = 0u64;
-    for key in ["created_by_membership_id", "submitter_membership_id"] {
-        let points_at_departed = payload
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|id| departed_ids.contains(id));
-        if points_at_departed {
-            payload.insert(key.to_owned(), Value::Null);
-            cleared += 1;
-        }
-    }
-    cleared
+    store::anonymize_membership_authorship_fields(payload, |id| departed_ids.contains(id))
 }
 
 fn copy_family_meta(
@@ -2097,6 +2090,7 @@ mod tests {
         let candidate_uuid = "cccccccc-cccc-cccc-cccc-cccccccccccc";
         let custom_uuid = "dddddddd-dddd-dddd-dddd-dddddddddddd";
         let left_at: i64 = 1_700_000_000;
+        let source_bundle_content_hash;
 
         {
             let conn = open_v3_fixture(&source);
@@ -2217,6 +2211,7 @@ mod tests {
                 .unwrap();
             let media: Vec<Entity> = vec![];
             let content_hash = store::bundle_content_hash(&canonical, &media).unwrap();
+            source_bundle_content_hash = content_hash.clone();
             let root_payload_json = serde_json::to_string(&canonical.payload).unwrap();
             let media_json = serde_json::to_string(&media).unwrap();
             conn.execute(
@@ -2247,11 +2242,11 @@ mod tests {
         // seed_minimal: owner + mem-member + active_same_name = 3 active; 1 departed dropped.
         assert_eq!(report.memberships, 3);
         assert_eq!(report.discarded_departed_memberships, 1);
-        // record + plan + candidate + custom + bundle root author + bundle stager
-        assert!(
-            report.anonymized_membership_refs >= 5,
-            "expected anonymized refs, got {}",
-            report.anonymized_membership_refs
+        // Exact contract lock: record + plan + candidate + custom entity fields
+        // + bundle root author + bundle stager blank = 6 anonymized refs.
+        assert_eq!(
+            report.anonymized_membership_refs, 6,
+            "expected 6 cleared authorship/stager refs"
         );
         assert_eq!(report.entities, 5); // baby + record + plan + candidate + custom
         assert_eq!(report.committed_bundles, 1);
@@ -2326,19 +2321,54 @@ mod tests {
             .unwrap();
         assert!(custom_author.is_none(), "custom_item author anonymized");
 
-        let (stager, root_author): (String, Option<String>) = conn
+        let (stager, root_author, dest_content_hash, root_payload_json, media_entities_json): (
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+        ) = conn
             .query_row(
                 "
                 SELECT staged_membership_id,
-                       json_extract(root_payload_json, '$.created_by_membership_id')
+                       json_extract(root_payload_json, '$.created_by_membership_id'),
+                       content_hash,
+                       root_payload_json,
+                       media_entities_json
                 FROM sync_bundles WHERE bundle_id = 'bundle-departed-author'
                 ",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .unwrap();
         assert_eq!(stager, "", "departed stager blanked like hard_delete");
         assert!(root_author.is_none(), "bundle root author anonymized");
+
+        // Dest content_hash must equal post-anonymize recompute (not the pre-anonymize source hash).
+        let dest_root_payload: Map<String, Value> =
+            serde_json::from_str(&root_payload_json).unwrap();
+        let dest_root = RawEntity {
+            entity_type: "record".to_owned(),
+            client_uuid: Uuid::parse_str(record_uuid).unwrap(),
+            updated_at: 400,
+            deleted_at: None,
+            payload: dest_root_payload,
+        }
+        .validate_as(
+            DEFAULT_MAX_MEDIA_BYTES,
+            EntityValidationContext::AtomicBundleRoot,
+        )
+        .unwrap();
+        let dest_media: Vec<Entity> = serde_json::from_str(&media_entities_json).unwrap();
+        let expected_hash = store::bundle_content_hash(&dest_root, &dest_media).unwrap();
+        assert_eq!(
+            dest_content_hash, expected_hash,
+            "committed bundle content_hash must match post-anonymize recompute"
+        );
+        assert_ne!(
+            dest_content_hash, source_bundle_content_hash,
+            "anonymize must change content_hash from source when root author is cleared"
+        );
 
         // Current hard_delete / members API must not need to re-clean departed rows.
         Store::preflight_existing_schema(&dest).expect("preflight");
@@ -2399,6 +2429,64 @@ mod tests {
             assert_eq!(report.memberships, 1); // member copied before owner count fails
         }
         assert!(!dest.exists());
+    }
+
+    #[test]
+    fn migrate_discards_departed_even_when_role_is_corrupt() {
+        // Non-authoritative departed discard must not become InvalidMembershipRole.
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let dest = dir.path().join("out").join("lezi.db");
+        {
+            let conn = open_v3_fixture(&source);
+            conn.execute(
+                "INSERT INTO families(id, created_at, create_request_hash, name) VALUES ('fam-1', 1, NULL, 'x')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "
+                INSERT INTO memberships(membership_id, family_id, role, device_id, display_name, left_at)
+                VALUES ('mem-owner', 'fam-1', 'owner', 'd1', '爸爸', NULL)
+                ",
+                [],
+            )
+            .unwrap();
+            // Bypass CHECK so we can simulate a corrupt historical role on a departed row.
+            conn.execute("PRAGMA ignore_check_constraints = 1", [])
+                .unwrap();
+            conn.execute(
+                "
+                INSERT INTO memberships(membership_id, family_id, role, device_id, display_name, left_at)
+                VALUES ('mem-left-bad-role', 'fam-1', 'not-a-role', 'd2', '奶奶', 1_700_000_000)
+                ",
+                [],
+            )
+            .unwrap();
+            conn.execute("PRAGMA ignore_check_constraints = 0", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO family_meta(family_id, rev) VALUES ('fam-1', 0)",
+                [],
+            )
+            .unwrap();
+        }
+        let report = migrate_v3_database(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect("migrate");
+        assert_eq!(report.memberships, 1);
+        assert_eq!(report.discarded_departed_memberships, 1);
+        assert_eq!(report.anonymized_membership_refs, 0);
+        let conn = Connection::open(&dest).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memberships WHERE membership_id = 'mem-left-bad-role'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            n, 0,
+            "corrupt-role departed row must be discarded, not copied"
+        );
     }
 
     #[test]
