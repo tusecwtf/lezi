@@ -167,7 +167,11 @@ internal class OutboxPushPipeline(
             val baby = babyDao.getByClientUuid(babyRow.clientUuid)
                 ?: error("本地宝宝档案不存在")
             val babyAvatarRows = avatarRows.filter { row ->
-                mediaDao.getByClientUuid(row.clientUuid)?.babyId == baby.id
+                mediaDao.getByClientUuid(row.clientUuid)?.let { media ->
+                    media.babyId == baby.id &&
+                        // Tombstone packages only attach already-deleted avatar media.
+                        (baby.deletedAt == null || media.deletedAt != null)
+                } == true
             }
             pushBabyAtomicBundle(session, baby, babyRow, babyAvatarRows)
             consumed += babyRow.id
@@ -178,6 +182,10 @@ internal class OutboxPushPipeline(
                 ?: error("本地媒体元数据不存在")
             val baby = media.babyId?.let { babyDao.getIncludingDeleted(it) }
                 ?: error("头像缺少本地宝宝根")
+            // Do not package a live avatar against a deleted baby root (orphan / bypass defense).
+            if (baby.deletedAt != null && media.deletedAt == null) {
+                continue
+            }
             pushBabyAtomicBundle(session, baby, babyRow = null, listOf(avatarRow))
             consumed += avatarRow.id
         }
@@ -216,12 +224,14 @@ internal class OutboxPushPipeline(
             babyRow?.updatedAt ?: nextPackageVersion(baby.updatedAt),
             avatarRows.maxOfOrNull(OutboxEntity::updatedAt) ?: baby.updatedAt,
         )
+        val deletedAt = babyRow?.deletedAt ?: baby.deletedAt
         val root = SyncWireMapper.baby(
             entity = baby,
-            avatarMediaUuid = baby.avatarMediaUuid,
+            // Deleted roots never republish a live avatar pointer (defense vs pre-fix orphans).
+            avatarMediaUuid = if (deletedAt != null) null else baby.avatarMediaUuid,
         ).copy(
             updatedAt = rootUpdatedAt,
-            deletedAt = babyRow?.deletedAt ?: baby.deletedAt,
+            deletedAt = deletedAt,
         )
         publishRootWithMedia(
             session = session,

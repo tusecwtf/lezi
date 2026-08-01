@@ -570,44 +570,18 @@ class CareLogTest {
 
     @Test
     fun deleteBabyTombstonesAvatarClearsPointersAndHandsCleanupAfterCommit() = runTest {
-        val sync = RecordingSyncPort()
-        val fakes = Fakes(sync)
-        val care = fakes.careLog()
-        care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
-        val targetId = care.addBaby(
-            CreateBabyInput(
-                nickname = "待删",
-                birthdayEpochDay = 2,
-                avatarPath = "baby_avatars/target.jpg",
-            ),
-        )
-        val avatarUuid = "avatar-delete-primary"
         val avatarUpdatedAt = 5_000L
-        fakes.babies.update(
-            fakes.babies.get(targetId)!!.copy(
-                avatarMediaUuid = avatarUuid,
-                avatarPath = "baby_avatars/target.jpg",
-                updatedAt = avatarUpdatedAt,
-                syncDirty = false,
-            ),
-        )
-        fakes.media.seed(
-            MediaAssetEntity(
-                clientUuid = avatarUuid,
-                kind = "avatar",
-                babyId = targetId,
-                localUri = "baby_avatars/target.jpg",
-                mime = "image/jpeg",
-                byteSize = 128,
-                createdAt = avatarUpdatedAt,
-                updatedAt = avatarUpdatedAt,
-                syncDirty = false,
-            ),
+        val fixture = seedDeleteBabyAvatarFixture(
+            primaryAvatarUuid = "avatar-delete-primary",
+            avatarPath = "baby_avatars/target.jpg",
+            avatarUpdatedAt = avatarUpdatedAt,
+            mime = "image/jpeg",
+            byteSize = 128,
         )
 
-        assertThat(care.deleteBaby(targetId)).isTrue()
+        assertThat(fixture.care.deleteBaby(fixture.targetId)).isTrue()
 
-        val tombstone = fakes.babies.getIncludingDeleted(targetId)!!
+        val tombstone = fixture.fakes.babies.getIncludingDeleted(fixture.targetId)!!
         assertThat(tombstone.deletedAt).isNotNull()
         assertThat(tombstone.updatedAt).isEqualTo(tombstone.deletedAt)
         assertThat(tombstone.updatedAt).isGreaterThan(avatarUpdatedAt)
@@ -615,159 +589,182 @@ class CareLogTest {
         assertThat(tombstone.avatarPath).isNull()
         assertThat(tombstone.syncDirty).isTrue()
 
-        val avatar = fakes.media.getByClientUuid(avatarUuid)!!
+        val avatar = fixture.fakes.media.getByClientUuid(fixture.primaryAvatarUuid)!!
         assertThat(avatar.deletedAt).isNotNull()
         assertThat(avatar.updatedAt).isEqualTo(avatar.deletedAt)
         assertThat(avatar.updatedAt).isAtLeast(tombstone.updatedAt)
         assertThat(avatar.syncDirty).isTrue()
         assertThat(avatar.localUri).isEqualTo("baby_avatars/target.jpg")
-        assertThat(sync.mediaCleanupCandidates).containsExactly(setOf(avatarUuid))
-        assertThat(sync.requests).isGreaterThan(0)
+        assertThat(fixture.sync.mediaCleanupCandidates)
+            .containsExactly(setOf(fixture.primaryAvatarUuid))
+        assertThat(fixture.sync.requests).isGreaterThan(0)
     }
 
     @Test
     fun deleteBabyTombstonesEveryActiveAvatarNotOnlyPointer() = runTest {
-        val sync = RecordingSyncPort()
-        val fakes = Fakes(sync)
-        val care = fakes.careLog()
-        care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
-        val targetId = care.addBaby(CreateBabyInput(nickname = "待删", birthdayEpochDay = 2))
         val pointedUuid = "avatar-pointed"
         val legacyUuid = "avatar-legacy-active"
-        fakes.babies.update(
-            fakes.babies.get(targetId)!!.copy(
-                avatarMediaUuid = pointedUuid,
-                avatarPath = "baby_avatars/pointed.jpg",
-                updatedAt = 10L,
-                syncDirty = false,
-            ),
-        )
-        fakes.media.seed(
-            MediaAssetEntity(
-                clientUuid = pointedUuid,
-                kind = "avatar",
-                babyId = targetId,
-                localUri = "baby_avatars/pointed.jpg",
-                createdAt = 10L,
-                updatedAt = 10L,
-                syncDirty = false,
-            ),
-        )
-        fakes.media.seed(
-            MediaAssetEntity(
-                clientUuid = legacyUuid,
-                kind = "avatar",
-                babyId = targetId,
-                localUri = "baby_avatars/legacy.jpg",
-                createdAt = 8L,
-                updatedAt = 8L,
-                syncDirty = false,
-            ),
-        )
-        // Unrelated baby avatar must stay live.
-        val keepId = care.addBaby(CreateBabyInput(nickname = "保留", birthdayEpochDay = 3))
-        fakes.media.seed(
-            MediaAssetEntity(
-                clientUuid = "avatar-other-baby",
-                kind = "avatar",
-                babyId = keepId,
-                localUri = "baby_avatars/other.jpg",
-                createdAt = 1L,
-                updatedAt = 1L,
-                syncDirty = false,
-            ),
+        val fixture = seedDeleteBabyAvatarFixture(
+            primaryAvatarUuid = pointedUuid,
+            avatarPath = "baby_avatars/pointed.jpg",
+            avatarUpdatedAt = 10L,
+            extraActiveAvatarUuids = listOf(legacyUuid to "baby_avatars/legacy.jpg"),
+            otherBabyAvatarUuid = "avatar-other-baby",
         )
 
-        assertThat(care.deleteBaby(targetId)).isTrue()
+        assertThat(fixture.care.deleteBaby(fixture.targetId)).isTrue()
 
-        assertThat(fakes.media.getByClientUuid(pointedUuid)?.deletedAt).isNotNull()
-        assertThat(fakes.media.getByClientUuid(legacyUuid)?.deletedAt).isNotNull()
-        assertThat(fakes.media.getByClientUuid("avatar-other-baby")?.deletedAt).isNull()
-        assertThat(sync.mediaCleanupCandidates.single())
+        assertThat(fixture.fakes.media.getByClientUuid(pointedUuid)?.deletedAt).isNotNull()
+        assertThat(fixture.fakes.media.getByClientUuid(legacyUuid)?.deletedAt).isNotNull()
+        assertThat(fixture.fakes.media.getByClientUuid("avatar-other-baby")?.deletedAt).isNull()
+        assertThat(fixture.sync.mediaCleanupCandidates.single())
             .containsExactly(pointedUuid, legacyUuid)
     }
 
     @Test
     fun deleteBabyKeepsBabyAvatarAndFilesWhenTransactionFails() = runTest {
-        val sync = RecordingSyncPort()
-        val fakes = Fakes(sync)
-        fakes.wireTransactionalSnapshots()
-        val care = fakes.careLog()
-        care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
-        val targetId = care.addBaby(CreateBabyInput(nickname = "待删", birthdayEpochDay = 2))
         val avatarUuid = "avatar-tx-fail"
-        val beforeBaby = fakes.babies.get(targetId)!!.copy(
-            avatarMediaUuid = avatarUuid,
+        val fixture = seedDeleteBabyAvatarFixture(
+            primaryAvatarUuid = avatarUuid,
             avatarPath = "baby_avatars/tx.jpg",
-            updatedAt = 42L,
-            syncDirty = false,
+            avatarUpdatedAt = 42L,
+            wireTransactionalSnapshots = true,
         )
-        fakes.babies.update(beforeBaby)
-        fakes.media.seed(
-            MediaAssetEntity(
-                clientUuid = avatarUuid,
-                kind = "avatar",
-                babyId = targetId,
-                localUri = "baby_avatars/tx.jpg",
-                createdAt = 42L,
-                updatedAt = 42L,
-                syncDirty = false,
-            ),
-        )
-        val mediaBefore = fakes.media.listAllIncludingDeleted()
-        val requestsBefore = sync.requests
-        fakes.media.failUpdateAfterSuccessfulUpdates(0)
+        val beforeBaby = fixture.fakes.babies.get(fixture.targetId)!!
+        val mediaBefore = fixture.fakes.media.listAllIncludingDeleted()
+        val requestsBefore = fixture.sync.requests
+        fixture.fakes.media.failUpdateAfterSuccessfulUpdates(0)
 
-        val error = runCatching { care.deleteBaby(targetId) }.exceptionOrNull()
+        val error = runCatching { fixture.care.deleteBaby(fixture.targetId) }.exceptionOrNull()
 
         assertThat(error).isInstanceOf(IllegalStateException::class.java)
         assertThat(error).hasMessageThat().contains("media update failed")
-        assertThat(fakes.babies.getIncludingDeleted(targetId)).isEqualTo(beforeBaby)
-        assertThat(fakes.media.listAllIncludingDeleted()).containsExactlyElementsIn(mediaBefore)
-        assertThat(sync.mediaCleanupCandidates).isEmpty()
-        assertThat(sync.requests).isEqualTo(requestsBefore)
+        assertThat(fixture.fakes.babies.getIncludingDeleted(fixture.targetId)).isEqualTo(beforeBaby)
+        assertThat(fixture.fakes.media.listAllIncludingDeleted()).containsExactlyElementsIn(mediaBefore)
+        assertThat(fixture.sync.mediaCleanupCandidates).isEmpty()
+        assertThat(fixture.sync.requests).isEqualTo(requestsBefore)
     }
 
     @Test
     fun deleteBabyCleanupFailureKeepsCommittedTombstonesAndRetryMarker() = runTest {
+        // Domain only asserts cleanup Result.failure does not roll back logical tombstones;
+        // durable file-marker retry is owned by ReferenceAwareMediaFileCleanup.
+        val path = "baby_avatars/retry.jpg"
+        val fixture = seedDeleteBabyAvatarFixture(
+            primaryAvatarUuid = "avatar-cleanup-retry",
+            avatarPath = path,
+            avatarUpdatedAt = 7L,
+            cleanupFailure = IllegalStateException("gc retry required"),
+        )
+
+        assertThat(fixture.care.deleteBaby(fixture.targetId)).isTrue()
+
+        assertThat(fixture.fakes.babies.getIncludingDeleted(fixture.targetId)?.deletedAt).isNotNull()
+        assertThat(fixture.fakes.babies.getIncludingDeleted(fixture.targetId)?.avatarMediaUuid).isNull()
+        val avatar = fixture.fakes.media.getByClientUuid(fixture.primaryAvatarUuid)!!
+        assertThat(avatar.deletedAt).isNotNull()
+        assertThat(avatar.localUri).isEqualTo(path)
+        assertThat(fixture.sync.mediaCleanupCandidates)
+            .containsExactly(setOf(fixture.primaryAvatarUuid))
+        assertThat(fixture.sync.requests).isGreaterThan(0)
+    }
+
+    /**
+     * Keeper + deletable baby with optional multi-avatar seeds for deleteBaby regressions.
+     */
+    private data class DeleteBabyAvatarFixture(
+        val care: CareLog,
+        val fakes: Fakes,
+        val sync: RecordingSyncPort,
+        val keeperId: Long,
+        val targetId: Long,
+        val primaryAvatarUuid: String,
+    )
+
+    private suspend fun seedDeleteBabyAvatarFixture(
+        primaryAvatarUuid: String,
+        avatarPath: String,
+        avatarUpdatedAt: Long,
+        mime: String? = null,
+        byteSize: Long = 0L,
+        extraActiveAvatarUuids: List<Pair<String, String>> = emptyList(),
+        otherBabyAvatarUuid: String? = null,
+        wireTransactionalSnapshots: Boolean = false,
+        cleanupFailure: Throwable? = null,
+    ): DeleteBabyAvatarFixture {
         val sync = RecordingSyncPort().apply {
-            mediaCleanupFailures += IllegalStateException("gc retry required")
+            cleanupFailure?.let { mediaCleanupFailures += it }
         }
         val fakes = Fakes(sync)
+        if (wireTransactionalSnapshots) {
+            fakes.wireTransactionalSnapshots()
+        }
         val care = fakes.careLog()
-        care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
-        val targetId = care.addBaby(CreateBabyInput(nickname = "待删", birthdayEpochDay = 2))
-        val avatarUuid = "avatar-cleanup-retry"
-        val path = "baby_avatars/retry.jpg"
+        val keeperId = care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val targetId = care.addBaby(
+            CreateBabyInput(
+                nickname = "待删",
+                birthdayEpochDay = 2,
+                avatarPath = avatarPath,
+            ),
+        )
         fakes.babies.update(
             fakes.babies.get(targetId)!!.copy(
-                avatarMediaUuid = avatarUuid,
-                avatarPath = path,
-                updatedAt = 7L,
+                avatarMediaUuid = primaryAvatarUuid,
+                avatarPath = avatarPath,
+                updatedAt = avatarUpdatedAt,
                 syncDirty = false,
             ),
         )
         fakes.media.seed(
             MediaAssetEntity(
-                clientUuid = avatarUuid,
+                clientUuid = primaryAvatarUuid,
                 kind = "avatar",
                 babyId = targetId,
-                localUri = path,
-                createdAt = 7L,
-                updatedAt = 7L,
+                localUri = avatarPath,
+                mime = mime,
+                byteSize = byteSize,
+                createdAt = avatarUpdatedAt,
+                updatedAt = avatarUpdatedAt,
                 syncDirty = false,
             ),
         )
-
-        assertThat(care.deleteBaby(targetId)).isTrue()
-
-        assertThat(fakes.babies.getIncludingDeleted(targetId)?.deletedAt).isNotNull()
-        assertThat(fakes.babies.getIncludingDeleted(targetId)?.avatarMediaUuid).isNull()
-        val avatar = fakes.media.getByClientUuid(avatarUuid)!!
-        assertThat(avatar.deletedAt).isNotNull()
-        assertThat(avatar.localUri).isEqualTo(path)
-        assertThat(sync.mediaCleanupCandidates).containsExactly(setOf(avatarUuid))
-        assertThat(sync.requests).isGreaterThan(0)
+        extraActiveAvatarUuids.forEachIndexed { index, (uuid, path) ->
+            val at = avatarUpdatedAt - 1L - index
+            fakes.media.seed(
+                MediaAssetEntity(
+                    clientUuid = uuid,
+                    kind = "avatar",
+                    babyId = targetId,
+                    localUri = path,
+                    createdAt = at,
+                    updatedAt = at,
+                    syncDirty = false,
+                ),
+            )
+        }
+        if (otherBabyAvatarUuid != null) {
+            val otherId = care.addBaby(CreateBabyInput(nickname = "保留", birthdayEpochDay = 3))
+            fakes.media.seed(
+                MediaAssetEntity(
+                    clientUuid = otherBabyAvatarUuid,
+                    kind = "avatar",
+                    babyId = otherId,
+                    localUri = "baby_avatars/other.jpg",
+                    createdAt = 1L,
+                    updatedAt = 1L,
+                    syncDirty = false,
+                ),
+            )
+        }
+        return DeleteBabyAvatarFixture(
+            care = care,
+            fakes = fakes,
+            sync = sync,
+            keeperId = keeperId,
+            targetId = targetId,
+            primaryAvatarUuid = primaryAvatarUuid,
+        )
     }
 
     @Test
@@ -6689,6 +6686,10 @@ internal class FakeMediaAssetDao : MediaAssetDao {
     override suspend fun activeAvatarForBaby(babyId: Long): MediaAssetEntity? =
         items.filter { it.babyId == babyId && it.kind == "avatar" && it.deletedAt == null }
             .maxWithOrNull(compareBy<MediaAssetEntity> { it.updatedAt }.thenBy { it.id })
+
+    override suspend fun listActiveAvatarsForBaby(babyId: Long): List<MediaAssetEntity> =
+        items.filter { it.babyId == babyId && it.kind == "avatar" && it.deletedAt == null }
+            .sortedBy { it.id }
 
     override suspend fun listAllIncludingDeleted(): List<MediaAssetEntity> =
         items.sortedBy { it.id }

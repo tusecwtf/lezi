@@ -1261,7 +1261,10 @@ internal class ReplicaSyncEngine(
         }
         val referencedMedia = buildList {
             babies.forEach { baby ->
-                mediaDao.activeAvatarForBaby(baby.id)?.let(::add)
+                // Deleted roots must never pull a live avatar into the tombstone package.
+                if (baby.deletedAt == null) {
+                    mediaDao.activeAvatarForBaby(baby.id)?.let(::add)
+                }
             }
             records.forEach { record ->
                 addAll(mediaDao.listForRecord(record.id))
@@ -1274,25 +1277,30 @@ internal class ReplicaSyncEngine(
             (directlyChangedMedia + referencedMedia).distinctBy(MediaAssetEntity::id),
         )
         babies.forEach { baby ->
-            val eligibleAvatars = media.filter {
-                it.kind == "avatar" &&
-                    it.babyId == baby.id &&
-                    it.deletedAt == null &&
-                    (session.role != FamilyRole.Member || it.hasReceiptFor(session))
+            // Tombstone packages always publish a null avatar pointer; never repair to live media.
+            val avatarMediaUuid = if (baby.deletedAt != null) {
+                null
+            } else {
+                val eligibleAvatars = media.filter {
+                    it.kind == "avatar" &&
+                        it.babyId == baby.id &&
+                        it.deletedAt == null &&
+                        (session.role != FamilyRole.Member || it.hasReceiptFor(session))
+                }
+                baby.avatarMediaUuid
+                    ?.let { pointer ->
+                        eligibleAvatars.firstOrNull { it.clientUuid == pointer }?.clientUuid
+                    }
+                    ?: if (session.role == FamilyRole.Member) {
+                        null
+                    } else {
+                        eligibleAvatars
+                            .maxWithOrNull(
+                                compareBy<MediaAssetEntity> { it.updatedAt }.thenBy { it.id },
+                            )
+                            ?.clientUuid
+                    }
             }
-            val avatarMediaUuid = baby.avatarMediaUuid
-                ?.let { pointer ->
-                    eligibleAvatars.firstOrNull { it.clientUuid == pointer }?.clientUuid
-                }
-                ?: if (session.role == FamilyRole.Member) {
-                    null
-                } else {
-                    eligibleAvatars
-                        .maxWithOrNull(
-                            compareBy<MediaAssetEntity> { it.updatedAt }.thenBy { it.id },
-                        )
-                        ?.clientUuid
-                }
             enqueue(
                 session,
                 SyncWireMapper.baby(
@@ -1365,8 +1373,12 @@ internal class ReplicaSyncEngine(
                 ?.let { recordDao.getIncludingDeleted(it)?.clientUuid }
             val carePlanUuid = asset.carePlanId
                 ?.let { carePlanDao.get(it)?.clientUuid }
-            val babyUuid = asset.babyId
-                ?.let { babyDao.getIncludingDeleted(it)?.clientUuid }
+            val ownerBaby = asset.babyId?.let { babyDao.getIncludingDeleted(it) }
+            val babyUuid = ownerBaby?.clientUuid
+            // Pre-fix orphans / soft-delete bypass: never ship a live avatar with a deleted Baby.
+            if (asset.kind == "avatar" && asset.deletedAt == null && ownerBaby?.deletedAt != null) {
+                return@forEach
+            }
             if (asset.kind == "log") {
                 // XOR ownership: record OR care_plan, never both, never neither.
                 if (recordUuid == null && carePlanUuid == null) return@forEach

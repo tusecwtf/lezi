@@ -886,6 +886,19 @@ interface MediaAssetDao {
     )
     suspend fun activeAvatarForBaby(babyId: Long): MediaAssetEntity?
 
+    /**
+     * Every active avatar row for [babyId] (no LIMIT). Used by deleteBaby to
+     * tombstone legacy multi-active rows, not only the pointer target.
+     */
+    @Query(
+        """
+        SELECT * FROM media_assets
+        WHERE babyId = :babyId AND kind = 'avatar' AND deletedAt IS NULL
+        ORDER BY id ASC
+        """,
+    )
+    suspend fun listActiveAvatarsForBaby(babyId: Long): List<MediaAssetEntity>
+
     @Query("SELECT * FROM media_assets ORDER BY id ASC")
     suspend fun listAllIncludingDeleted(): List<MediaAssetEntity>
 

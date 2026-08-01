@@ -56,6 +56,8 @@ internal class BabyFamilyProfileCoordinator(
     private val reminderProjection: CarePlanReminderProjection,
     private val sleepMutationMutex: Mutex,
     private val healDuplicateOpenSleeps: suspend (Long) -> Unit,
+    /** Best-effort post-commit GC; same policy as [RecordMutationCoordinator.cleanupCommittedPhotoTombstones]. */
+    private val cleanupCommittedPhotoTombstones: suspend (Set<String>) -> Unit,
     private val requestLocalSync: () -> Unit,
 ) {
     fun observeHasBaby(): Flow<Boolean> =
@@ -168,7 +170,7 @@ internal class BabyFamilyProfileCoordinator(
      *
      * Same Room transaction: Baby tombstone, clear root avatar pointers, and tombstone every
      * active avatar MediaAsset for that baby (legacy multi-active rows included). Physical file
-     * reclaim runs only after commit via [SyncPort.cleanupTombstonedMedia].
+     * reclaim runs only after commit via [cleanupCommittedPhotoTombstones].
      */
     suspend fun deleteBaby(babyId: Long): Boolean {
         requireCanManageBabyProfiles()
@@ -180,11 +182,7 @@ internal class BabyFamilyProfileCoordinator(
             val target = babies.find { it.id == babyId } ?: return@run emptyList()
             val now = nextSyncUpdatedAt(target.updatedAt, System.currentTimeMillis())
             // Tombstone media first so a media write failure never leaves a half-deleted baby.
-            val activeAvatars = mediaAssetDao.listAllIncludingDeleted().filter { asset ->
-                asset.babyId == babyId &&
-                    asset.kind == "avatar" &&
-                    asset.deletedAt == null
-            }
+            val activeAvatars = mediaAssetDao.listActiveAvatarsForBaby(babyId)
             val tombstoned = linkedSetOf<String>()
             activeAvatars.forEach { asset ->
                 val mediaAt = nextSyncUpdatedAt(asset.updatedAt, now)
@@ -216,9 +214,7 @@ internal class BabyFamilyProfileCoordinator(
             remaining.firstOrNull()?.let { settings.setCurrentBabyId(it.id) }
         }
         // Logical writes stay committed when best-effort physical GC must retry.
-        if (cleanupCandidates.isNotEmpty()) {
-            syncPort.cleanupTombstonedMedia(cleanupCandidates)
-        }
+        cleanupCommittedPhotoTombstones(cleanupCandidates)
         requestLocalSync()
         return true
     }

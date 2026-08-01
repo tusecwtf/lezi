@@ -3006,9 +3006,159 @@ class RealSyncPortTest {
         assertThat(babyBundle.media.map(SyncEntity::clientUuid))
             .containsExactly(avatarUuid, legacyUuid)
         assertThat(babyBundle.media.map(SyncEntity::deletedAt)).containsExactly(deletedAt, deletedAt)
-        assertThat(babyBundle.media.none { it.deletedAt == null }).isTrue()
         assertThat(rig.backend.mediaUploads).isEmpty()
         assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
+    }
+
+    @Test
+    fun deletedBabyPackageOmitsLiveOrphanAvatarAndForcesNullPointer() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        rig.babies.seed(
+            localBaby().copy(
+                clientUuid = "baby-keeper-orphan",
+                nickname = "保留",
+                syncDirty = false,
+                updatedAt = 50,
+            ),
+        )
+        val liveOrphanUuid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        val tombstoneUuid = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        val deletedAt = 400L
+        // Pre-fix orphan shape: deleted root still points at a live avatar row.
+        val babyId = rig.babies.seed(
+            localBaby().copy(
+                clientUuid = "baby-deleted-orphan",
+                nickname = "已删孤儿",
+                avatarMediaUuid = liveOrphanUuid,
+                avatarPath = "baby_avatars/orphan-live.jpg",
+                updatedAt = deletedAt,
+                deletedAt = deletedAt,
+                syncDirty = true,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                clientUuid = liveOrphanUuid,
+                kind = "avatar",
+                babyId = babyId,
+                localUri = "baby_avatars/orphan-live.jpg",
+                mime = "image/jpeg",
+                byteSize = 12,
+                createdAt = 100,
+                updatedAt = 200,
+                deletedAt = null,
+                syncDirty = true,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                clientUuid = tombstoneUuid,
+                kind = "avatar",
+                babyId = babyId,
+                localUri = "baby_avatars/orphan-tomb.jpg",
+                mime = "image/jpeg",
+                byteSize = 8,
+                createdAt = 80,
+                updatedAt = deletedAt,
+                deletedAt = deletedAt,
+                syncDirty = true,
+            ),
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        val babyBundle = rig.backend.stagedBundles.single { it.root.clientUuid == "baby-deleted-orphan" }
+        assertThat(babyBundle.root.deletedAt).isEqualTo(deletedAt)
+        val rootPayload = Json.parseToJsonElement(babyBundle.root.payloadJson).jsonObject
+        assertThat(rootPayload["avatar_media_uuid"]).isEqualTo(JsonNull)
+        assertThat(babyBundle.media.map(SyncEntity::clientUuid)).containsExactly(tombstoneUuid)
+        assertThat(babyBundle.media.single().deletedAt).isEqualTo(deletedAt)
+        // Live orphan stays local and dirty until a later domain repair tombstones it.
+        assertThat(rig.media.getByClientUuid(liveOrphanUuid)?.deletedAt).isNull()
+        assertThat(rig.media.getByClientUuid(liveOrphanUuid)?.syncDirty).isTrue()
+    }
+
+    @Test
+    fun deletedBabyAvatarPushFailThenRetryKeepsTombstonesAndNullPointer() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+        rig.babies.seed(
+            localBaby().copy(
+                clientUuid = "baby-keeper-retry",
+                nickname = "保留",
+                syncDirty = false,
+                updatedAt = 50,
+            ),
+        )
+        val avatarUuid = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+        val deletedAt = 500L
+        val babyId = rig.babies.seed(
+            localBaby().copy(
+                clientUuid = "baby-deleted-retry",
+                nickname = "已删重试",
+                avatarMediaUuid = null,
+                avatarPath = null,
+                updatedAt = deletedAt,
+                deletedAt = deletedAt,
+                syncDirty = true,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                clientUuid = avatarUuid,
+                kind = "avatar",
+                babyId = babyId,
+                localUri = "baby_avatars/retry-tomb.jpg",
+                mime = "image/jpeg",
+                byteSize = 4,
+                createdAt = 100,
+                updatedAt = deletedAt,
+                deletedAt = deletedAt,
+                syncDirty = true,
+            ),
+        )
+        val expectedBundleId = AtomicBundleId.forBaby("baby-deleted-retry", deletedAt)
+        rig.backend.afterCommit = {
+            throw IllegalStateException("crash after remote commit before local ack")
+        }
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isFailure).isTrue()
+        assertThat(rig.backend.committedBundles).containsExactly(expectedBundleId)
+        val afterFailBaby = requireNotNull(rig.babies.getIncludingDeleted(babyId))
+        assertThat(afterFailBaby.deletedAt).isEqualTo(deletedAt)
+        assertThat(afterFailBaby.avatarMediaUuid).isNull()
+        assertThat(afterFailBaby.syncDirty).isTrue()
+        val afterFailAvatar = requireNotNull(rig.media.getByClientUuid(avatarUuid))
+        assertThat(afterFailAvatar.deletedAt).isEqualTo(deletedAt)
+        assertThat(afterFailAvatar.syncDirty).isTrue()
+        val failedBundle = rig.backend.stagedBundles.single { it.bundleId == expectedBundleId }
+        assertThat(
+            Json.parseToJsonElement(failedBundle.root.payloadJson).jsonObject["avatar_media_uuid"],
+        ).isEqualTo(JsonNull)
+        assertThat(failedBundle.media.map(SyncEntity::clientUuid)).containsExactly(avatarUuid)
+        assertThat(failedBundle.media.single().deletedAt).isEqualTo(deletedAt)
+
+        rig.backend.afterCommit = null
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        assertThat(rig.backend.committedBundles.count { it == expectedBundleId }).isEqualTo(2)
+        val publishedBaby = requireNotNull(rig.babies.getIncludingDeleted(babyId))
+        assertThat(publishedBaby.deletedAt).isEqualTo(deletedAt)
+        assertThat(publishedBaby.avatarMediaUuid).isNull()
+        assertThat(publishedBaby.syncDirty).isFalse()
+        val publishedAvatar = requireNotNull(rig.media.getByClientUuid(avatarUuid))
+        assertThat(publishedAvatar.deletedAt).isEqualTo(deletedAt)
+        assertThat(publishedAvatar.syncDirty).isFalse()
+        assertThat(rig.outbox.peek("family-a", 10)).isEmpty()
+        val retryBundles = rig.backend.stagedBundles.filter { it.bundleId == expectedBundleId }
+        assertThat(retryBundles).hasSize(2)
+        retryBundles.forEach { bundle ->
+            assertThat(
+                Json.parseToJsonElement(bundle.root.payloadJson).jsonObject["avatar_media_uuid"],
+            ).isEqualTo(JsonNull)
+            assertThat(bundle.media.map(SyncEntity::deletedAt)).containsExactly(deletedAt)
+            assertThat(bundle.media.none { it.deletedAt == null }).isTrue()
+        }
     }
 
     @Test
@@ -9477,6 +9627,10 @@ internal class MemoryMediaDao : MediaAssetDao {
     override suspend fun activeAvatarForBaby(babyId: Long): MediaAssetEntity? =
         rows.filter { it.babyId == babyId && it.kind == "avatar" && it.deletedAt == null }
             .maxWithOrNull(compareBy<MediaAssetEntity> { it.updatedAt }.thenBy { it.id })
+
+    override suspend fun listActiveAvatarsForBaby(babyId: Long): List<MediaAssetEntity> =
+        rows.filter { it.babyId == babyId && it.kind == "avatar" && it.deletedAt == null }
+            .sortedBy(MediaAssetEntity::id)
 
     override suspend fun listAllIncludingDeleted(): List<MediaAssetEntity> =
         rows.sortedBy(MediaAssetEntity::id)

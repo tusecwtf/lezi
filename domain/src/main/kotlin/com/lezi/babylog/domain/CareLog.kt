@@ -233,6 +233,7 @@ class CareLog @Inject constructor(
         reminderProjection = reminderProjection,
         sleepMutationMutex = sleepMutationMutex,
         healDuplicateOpenSleeps = recordMutations::healDuplicateOpenSleeps,
+        cleanupCommittedPhotoTombstones = recordMutations::cleanupCommittedPhotoTombstones,
         requestLocalSync = ::requestLocalSync,
     )
 
