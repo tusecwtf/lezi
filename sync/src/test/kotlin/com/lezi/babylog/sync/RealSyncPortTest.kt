@@ -38,6 +38,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -2940,6 +2941,154 @@ class RealSyncPortTest {
         assertThat(babyBundle.media.map(SyncEntity::clientUuid)).contains(avatarUuid)
         assertThat(rig.outbox.peek("family-a", 300)).isEmpty()
     }
+
+    @Test
+    fun deletedBabyPackagePublishesMediaTombstonesWithoutLiveAvatarPointer() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        // Keeper profile so product "keep at least one" is irrelevant to capture.
+        rig.babies.seed(
+            localBaby().copy(
+                clientUuid = "baby-keeper",
+                nickname = "保留",
+                syncDirty = false,
+                updatedAt = 50,
+            ),
+        )
+        val avatarUuid = "44444444-4444-4444-4444-444444444444"
+        val legacyUuid = "55555555-5555-5555-5555-555555555555"
+        val deletedAt = 300L
+        val babyId = rig.babies.seed(
+            localBaby().copy(
+                clientUuid = "baby-deleted",
+                nickname = "已删",
+                avatarMediaUuid = null,
+                avatarPath = null,
+                updatedAt = deletedAt,
+                deletedAt = deletedAt,
+                syncDirty = true,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                clientUuid = avatarUuid,
+                kind = "avatar",
+                babyId = babyId,
+                localUri = "baby_avatars/deleted.jpg",
+                mime = "image/jpeg",
+                byteSize = 12,
+                createdAt = 100,
+                updatedAt = deletedAt,
+                deletedAt = deletedAt,
+                syncDirty = true,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                clientUuid = legacyUuid,
+                kind = "avatar",
+                babyId = babyId,
+                localUri = "baby_avatars/legacy.jpg",
+                mime = "image/jpeg",
+                byteSize = 8,
+                createdAt = 80,
+                updatedAt = deletedAt,
+                deletedAt = deletedAt,
+                syncDirty = true,
+            ),
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.LocalWrite).isSuccess).isTrue()
+
+        val babyBundle = rig.backend.stagedBundles.single { it.root.clientUuid == "baby-deleted" }
+        assertThat(babyBundle.root.deletedAt).isEqualTo(deletedAt)
+        val rootPayload = Json.parseToJsonElement(babyBundle.root.payloadJson).jsonObject
+        assertThat(rootPayload["avatar_media_uuid"]).isEqualTo(JsonNull)
+        assertThat(babyBundle.media.map(SyncEntity::clientUuid))
+            .containsExactly(avatarUuid, legacyUuid)
+        assertThat(babyBundle.media.map(SyncEntity::deletedAt)).containsExactly(deletedAt, deletedAt)
+        assertThat(babyBundle.media.none { it.deletedAt == null }).isTrue()
+        assertThat(rig.backend.mediaUploads).isEmpty()
+        assertThat(rig.outbox.peek("family-a", 100)).isEmpty()
+    }
+
+    @Test
+    fun pullDeletedBabyWithAvatarTombstoneDoesNotRevivePointer() = runTest {
+        val rig = SyncRig(session = joinedSession("family-a"))
+        val avatarUuid = "66666666-6666-6666-6666-666666666666"
+        val babyId = rig.babies.seed(
+            localBaby().copy(
+                clientUuid = "baby-local",
+                avatarMediaUuid = avatarUuid,
+                avatarPath = "baby_avatars/live.jpg",
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+        rig.media.seed(
+            MediaAssetEntity(
+                clientUuid = avatarUuid,
+                kind = "avatar",
+                babyId = babyId,
+                localUri = "baby_avatars/live.jpg",
+                remoteUri = rig.preferences.current().expectedMediaReceipt(avatarUuid),
+                mime = "image/jpeg",
+                byteSize = 12,
+                createdAt = 100,
+                updatedAt = 100,
+                syncDirty = false,
+            ),
+        )
+        val remoteDeletedAt = 400L
+        rig.backend.nextPull = PullResult(
+            entities = listOf(
+                remoteBaby().copy(
+                    clientUuid = "baby-local",
+                    payloadJson = """
+                        {
+                          "nickname":"服务器宝宝",
+                          "sex":null,
+                          "birthday":"2024-01-01",
+                          "birth_weight_grams":null,
+                          "avatar_media_uuid":null
+                        }
+                    """.trimIndent(),
+                    updatedAt = remoteDeletedAt,
+                    deletedAt = remoteDeletedAt,
+                ),
+                SyncEntity(
+                    type = "media",
+                    clientUuid = avatarUuid,
+                    payloadJson = """
+                        {
+                          "kind":"avatar",
+                          "record_client_uuid":null,
+                          "care_plan_client_uuid":null,
+                          "baby_client_uuid":"baby-local",
+                          "mime":"image/jpeg",
+                          "width":null,
+                          "height":null,
+                          "byte_size":0
+                        }
+                    """.trimIndent(),
+                    updatedAt = remoteDeletedAt,
+                    deletedAt = remoteDeletedAt,
+                ),
+            ),
+            cursor = 1,
+            generation = "current-generation",
+            hasMore = false,
+        )
+
+        assertThat(rig.port.sync(SyncTrigger.PullToRefresh).isSuccess).isTrue()
+
+        val baby = requireNotNull(rig.babies.getIncludingDeleted(babyId))
+        assertThat(baby.deletedAt).isEqualTo(remoteDeletedAt)
+        assertThat(baby.avatarMediaUuid).isNull()
+        val avatar = requireNotNull(rig.media.getByClientUuid(avatarUuid))
+        assertThat(avatar.deletedAt).isEqualTo(remoteDeletedAt)
+        assertThat(avatar.syncDirty).isFalse()
+    }
+
     @Test
     fun familyMemberListUsesTrustedEndpointWithoutTransportIdentity() = runTest {
         val rig = SyncRig(session = joinedSession("family-a"))

@@ -163,23 +163,61 @@ internal class BabyFamilyProfileCoordinator(
         requestLocalSync()
     }
 
-    /** Soft-delete a baby profile. Reassigns current baby if needed. Keeps at least one baby. */
+    /**
+     * Soft-delete a baby profile. Reassigns current baby if needed. Keeps at least one baby.
+     *
+     * Same Room transaction: Baby tombstone, clear root avatar pointers, and tombstone every
+     * active avatar MediaAsset for that baby (legacy multi-active rows included). Physical file
+     * reclaim runs only after commit via [SyncPort.cleanupTombstonedMedia].
+     */
     suspend fun deleteBaby(babyId: Long): Boolean {
         requireCanManageBabyProfiles()
         var deleted = false
+        var cleanupCandidates: Set<String> = emptySet()
         val remaining = transactionRunner.run {
             val babies = babyDao.listAll()
             if (babies.size <= 1) return@run emptyList()
             val target = babies.find { it.id == babyId } ?: return@run emptyList()
             val now = nextSyncUpdatedAt(target.updatedAt, System.currentTimeMillis())
-            babyDao.update(target.copy(deletedAt = now, updatedAt = now, syncDirty = true))
+            // Tombstone media first so a media write failure never leaves a half-deleted baby.
+            val activeAvatars = mediaAssetDao.listAllIncludingDeleted().filter { asset ->
+                asset.babyId == babyId &&
+                    asset.kind == "avatar" &&
+                    asset.deletedAt == null
+            }
+            val tombstoned = linkedSetOf<String>()
+            activeAvatars.forEach { asset ->
+                val mediaAt = nextSyncUpdatedAt(asset.updatedAt, now)
+                mediaAssetDao.update(
+                    asset.copy(
+                        deletedAt = mediaAt,
+                        updatedAt = mediaAt,
+                        syncDirty = true,
+                    ),
+                )
+                tombstoned += asset.clientUuid
+            }
+            babyDao.update(
+                target.copy(
+                    deletedAt = now,
+                    updatedAt = now,
+                    syncDirty = true,
+                    avatarMediaUuid = null,
+                    avatarPath = null,
+                ),
+            )
             deleted = true
+            cleanupCandidates = tombstoned
             babyDao.listAll()
         }
         if (!deleted) return false
         val currentId = settings.currentBabyId.first()
         if (currentId == null || currentId == babyId || remaining.none { it.id == currentId }) {
             remaining.firstOrNull()?.let { settings.setCurrentBabyId(it.id) }
+        }
+        // Logical writes stay committed when best-effort physical GC must retry.
+        if (cleanupCandidates.isNotEmpty()) {
+            syncPort.cleanupTombstonedMedia(cleanupCandidates)
         }
         requestLocalSync()
         return true

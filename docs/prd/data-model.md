@@ -144,8 +144,11 @@ self。新登录设备读取完整家庭历史。不做保育只读角色、不�
 | `family_authority` | 仅本机派生标记：该行来自家庭服务器权威集合；不进 wire，不由普通成员编辑 |
 | `client_uuid` | |
 | `updated_at` / `deleted_at` | 软删；Baby 无独立 `family_published_updated_at` 列。avatar-only 等合成根包在 NAS 抬高 root 修订后，本机以 CAS 前进 `updated_at` 到同一 `rootUpdatedAt` 并清除 dirty 作为等价水印，使下一次档案编辑严格大于已发布根 |
+| `avatar_media_uuid` / `avatar_path` | 可移植头像指针与本机路径；**软删 Baby 时同一事务清零**，不得把 live 指针带进墓碑根包 |
 
 家庭会话中只有 owner 可创建、修改、删除或上传 Baby；member 只 pull/apply 家庭权威宝宝，仍可切换当前宝宝并修改本机 `theme_color` / `sort_order`。member 加入前的本机孤宝宝不上传：若 pull 完整轮次后恰有一个家庭权威宝宝，自动把孤宝宝的 Record、CarePlan 与相关媒体再绑定过去；若有多个权威宝宝，只允许用户显式选择「孤宝宝 → 权威宝宝」，不得按昵称猜测；若没有权威宝宝则保留本机数据并展示等待管理员的空态。再绑定完成前，孤宝宝下的事实、计划与媒体保持本机 dirty，不携带无效宝宝引用上行；合并后再捕获新版。
+
+Owner **软删家庭权威宝宝**时，同一 Room 事务写 Baby tombstone、清 `avatar_media_uuid`/`avatar_path`，并以不倒退的时间 tombstone 该宝宝下**全部** active `kind=avatar` MediaAsset（含 legacy 多 active 行，不只是指针指向的一行）。提交后才走引用感知文件回收；事务失败时 Baby、头像指针、MediaAsset 与文件全部保持原状。Outbox/atomic baby 包发布 deleted Baby root（`avatar_media_uuid = null`）与对应 media tombstone，不得再把 live avatar 带进墓碑包。对端 pull/apply 得到 deleted Baby + 非活跃 avatar 后，pointer repair 不得复活头像。物理文件只在提交后且无其它 active 引用时删除；失败保留 durable cleanup marker 可重试。删除、同步失败重试、commit-response 丢失和进程恢复均不得复活头像或丢 tombstone。产品仍保持「至少保留一个 active 宝宝」。
 
 ### 3.5 Record
 
@@ -272,11 +275,12 @@ NAS 持久化和 pull 的 current MediaAsset payload 固定包含三个归属 UU
 
 MediaAsset 行所有权与物理文件所有权是两层契约：每条 `log` 行仍只归属一个 Record 或
 CarePlan，但多个 active 行可以用相同 `local_uri` 共享同一份本机字节。编辑、整实体删除、
-Record→CarePlan 转换和同步 tombstone 只把精确媒体行标记删除；物理文件须在同一路径已无
-任何 `deleted_at IS NULL` 的媒体行后才可回收，因此待上传的 active dirty 行也会保护文件。
-回收成功（或文件已经缺失）后只清空 tombstone 行的本机 `local_uri`，不删除 MediaAsset
-tombstone 或 Outbox 元数据。删除失败或中断时保留该路径作为重启重试 marker；live 行若有
-`remote_uri` 但本机路径为空，继续按既有下载恢复规则补齐。
+Record→CarePlan 转换、**Owner 删除宝宝时的全部 active avatar** 和同步 tombstone 只把精确
+媒体行标记删除；物理文件须在同一路径已无任何 `deleted_at IS NULL` 的媒体行后才可回收，
+因此待上传的 active dirty 行也会保护文件。回收成功（或文件已经缺失）后只清空 tombstone
+行的本机 `local_uri`，不删除 MediaAsset tombstone 或 Outbox 元数据。删除失败或中断时保留
+该路径作为重启重试 marker；live 行若有 `remote_uri` 但本机路径为空，继续按既有下载恢复
+规则补齐。
 
 #### 原子包 prepare / commit 与 domain revision 的 CAS 边界
 

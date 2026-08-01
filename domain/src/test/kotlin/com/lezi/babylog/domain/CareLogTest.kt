@@ -569,6 +569,208 @@ class CareLogTest {
     }
 
     @Test
+    fun deleteBabyTombstonesAvatarClearsPointersAndHandsCleanupAfterCommit() = runTest {
+        val sync = RecordingSyncPort()
+        val fakes = Fakes(sync)
+        val care = fakes.careLog()
+        care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val targetId = care.addBaby(
+            CreateBabyInput(
+                nickname = "待删",
+                birthdayEpochDay = 2,
+                avatarPath = "baby_avatars/target.jpg",
+            ),
+        )
+        val avatarUuid = "avatar-delete-primary"
+        val avatarUpdatedAt = 5_000L
+        fakes.babies.update(
+            fakes.babies.get(targetId)!!.copy(
+                avatarMediaUuid = avatarUuid,
+                avatarPath = "baby_avatars/target.jpg",
+                updatedAt = avatarUpdatedAt,
+                syncDirty = false,
+            ),
+        )
+        fakes.media.seed(
+            MediaAssetEntity(
+                clientUuid = avatarUuid,
+                kind = "avatar",
+                babyId = targetId,
+                localUri = "baby_avatars/target.jpg",
+                mime = "image/jpeg",
+                byteSize = 128,
+                createdAt = avatarUpdatedAt,
+                updatedAt = avatarUpdatedAt,
+                syncDirty = false,
+            ),
+        )
+
+        assertThat(care.deleteBaby(targetId)).isTrue()
+
+        val tombstone = fakes.babies.getIncludingDeleted(targetId)!!
+        assertThat(tombstone.deletedAt).isNotNull()
+        assertThat(tombstone.updatedAt).isEqualTo(tombstone.deletedAt)
+        assertThat(tombstone.updatedAt).isGreaterThan(avatarUpdatedAt)
+        assertThat(tombstone.avatarMediaUuid).isNull()
+        assertThat(tombstone.avatarPath).isNull()
+        assertThat(tombstone.syncDirty).isTrue()
+
+        val avatar = fakes.media.getByClientUuid(avatarUuid)!!
+        assertThat(avatar.deletedAt).isNotNull()
+        assertThat(avatar.updatedAt).isEqualTo(avatar.deletedAt)
+        assertThat(avatar.updatedAt).isAtLeast(tombstone.updatedAt)
+        assertThat(avatar.syncDirty).isTrue()
+        assertThat(avatar.localUri).isEqualTo("baby_avatars/target.jpg")
+        assertThat(sync.mediaCleanupCandidates).containsExactly(setOf(avatarUuid))
+        assertThat(sync.requests).isGreaterThan(0)
+    }
+
+    @Test
+    fun deleteBabyTombstonesEveryActiveAvatarNotOnlyPointer() = runTest {
+        val sync = RecordingSyncPort()
+        val fakes = Fakes(sync)
+        val care = fakes.careLog()
+        care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val targetId = care.addBaby(CreateBabyInput(nickname = "待删", birthdayEpochDay = 2))
+        val pointedUuid = "avatar-pointed"
+        val legacyUuid = "avatar-legacy-active"
+        fakes.babies.update(
+            fakes.babies.get(targetId)!!.copy(
+                avatarMediaUuid = pointedUuid,
+                avatarPath = "baby_avatars/pointed.jpg",
+                updatedAt = 10L,
+                syncDirty = false,
+            ),
+        )
+        fakes.media.seed(
+            MediaAssetEntity(
+                clientUuid = pointedUuid,
+                kind = "avatar",
+                babyId = targetId,
+                localUri = "baby_avatars/pointed.jpg",
+                createdAt = 10L,
+                updatedAt = 10L,
+                syncDirty = false,
+            ),
+        )
+        fakes.media.seed(
+            MediaAssetEntity(
+                clientUuid = legacyUuid,
+                kind = "avatar",
+                babyId = targetId,
+                localUri = "baby_avatars/legacy.jpg",
+                createdAt = 8L,
+                updatedAt = 8L,
+                syncDirty = false,
+            ),
+        )
+        // Unrelated baby avatar must stay live.
+        val keepId = care.addBaby(CreateBabyInput(nickname = "保留", birthdayEpochDay = 3))
+        fakes.media.seed(
+            MediaAssetEntity(
+                clientUuid = "avatar-other-baby",
+                kind = "avatar",
+                babyId = keepId,
+                localUri = "baby_avatars/other.jpg",
+                createdAt = 1L,
+                updatedAt = 1L,
+                syncDirty = false,
+            ),
+        )
+
+        assertThat(care.deleteBaby(targetId)).isTrue()
+
+        assertThat(fakes.media.getByClientUuid(pointedUuid)?.deletedAt).isNotNull()
+        assertThat(fakes.media.getByClientUuid(legacyUuid)?.deletedAt).isNotNull()
+        assertThat(fakes.media.getByClientUuid("avatar-other-baby")?.deletedAt).isNull()
+        assertThat(sync.mediaCleanupCandidates.single())
+            .containsExactly(pointedUuid, legacyUuid)
+    }
+
+    @Test
+    fun deleteBabyKeepsBabyAvatarAndFilesWhenTransactionFails() = runTest {
+        val sync = RecordingSyncPort()
+        val fakes = Fakes(sync)
+        fakes.wireTransactionalSnapshots()
+        val care = fakes.careLog()
+        care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val targetId = care.addBaby(CreateBabyInput(nickname = "待删", birthdayEpochDay = 2))
+        val avatarUuid = "avatar-tx-fail"
+        val beforeBaby = fakes.babies.get(targetId)!!.copy(
+            avatarMediaUuid = avatarUuid,
+            avatarPath = "baby_avatars/tx.jpg",
+            updatedAt = 42L,
+            syncDirty = false,
+        )
+        fakes.babies.update(beforeBaby)
+        fakes.media.seed(
+            MediaAssetEntity(
+                clientUuid = avatarUuid,
+                kind = "avatar",
+                babyId = targetId,
+                localUri = "baby_avatars/tx.jpg",
+                createdAt = 42L,
+                updatedAt = 42L,
+                syncDirty = false,
+            ),
+        )
+        val mediaBefore = fakes.media.listAllIncludingDeleted()
+        val requestsBefore = sync.requests
+        fakes.media.failUpdateAfterSuccessfulUpdates(0)
+
+        val error = runCatching { care.deleteBaby(targetId) }.exceptionOrNull()
+
+        assertThat(error).isInstanceOf(IllegalStateException::class.java)
+        assertThat(error).hasMessageThat().contains("media update failed")
+        assertThat(fakes.babies.getIncludingDeleted(targetId)).isEqualTo(beforeBaby)
+        assertThat(fakes.media.listAllIncludingDeleted()).containsExactlyElementsIn(mediaBefore)
+        assertThat(sync.mediaCleanupCandidates).isEmpty()
+        assertThat(sync.requests).isEqualTo(requestsBefore)
+    }
+
+    @Test
+    fun deleteBabyCleanupFailureKeepsCommittedTombstonesAndRetryMarker() = runTest {
+        val sync = RecordingSyncPort().apply {
+            mediaCleanupFailures += IllegalStateException("gc retry required")
+        }
+        val fakes = Fakes(sync)
+        val care = fakes.careLog()
+        care.createBaby(CreateBabyInput(nickname = "年年", birthdayEpochDay = 1))
+        val targetId = care.addBaby(CreateBabyInput(nickname = "待删", birthdayEpochDay = 2))
+        val avatarUuid = "avatar-cleanup-retry"
+        val path = "baby_avatars/retry.jpg"
+        fakes.babies.update(
+            fakes.babies.get(targetId)!!.copy(
+                avatarMediaUuid = avatarUuid,
+                avatarPath = path,
+                updatedAt = 7L,
+                syncDirty = false,
+            ),
+        )
+        fakes.media.seed(
+            MediaAssetEntity(
+                clientUuid = avatarUuid,
+                kind = "avatar",
+                babyId = targetId,
+                localUri = path,
+                createdAt = 7L,
+                updatedAt = 7L,
+                syncDirty = false,
+            ),
+        )
+
+        assertThat(care.deleteBaby(targetId)).isTrue()
+
+        assertThat(fakes.babies.getIncludingDeleted(targetId)?.deletedAt).isNotNull()
+        assertThat(fakes.babies.getIncludingDeleted(targetId)?.avatarMediaUuid).isNull()
+        val avatar = fakes.media.getByClientUuid(avatarUuid)!!
+        assertThat(avatar.deletedAt).isNotNull()
+        assertThat(avatar.localUri).isEqualTo(path)
+        assertThat(sync.mediaCleanupCandidates).containsExactly(setOf(avatarUuid))
+        assertThat(sync.requests).isGreaterThan(0)
+    }
+
+    @Test
     fun addRecordRejectsBabyDeletedAfterComposerOpened() = runTest {
         val fakes = Fakes()
         val care = fakes.careLog()
