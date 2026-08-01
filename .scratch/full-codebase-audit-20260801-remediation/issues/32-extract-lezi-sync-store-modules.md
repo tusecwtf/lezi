@@ -5,7 +5,7 @@ bundle/LWW、media 等实现迁入内聚 `store::*` 私有模块；跨表事务�
 
 **Source:** merged directory D2
 **Blocked by:** 05、19、31 — 先闭合 Store 合同与 handler 模块边界
-**Status:** blocked
+**Status:** ready-for-agent
 **Size:** L
 
 ## Acceptance criteria

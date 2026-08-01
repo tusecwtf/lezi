@@ -9,9 +9,9 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 - Canonical records: **33**
 - Executable: **32**
-- Done: **30**（01–31 excluding wontfix 18）
-- Current frontier (ready-for-agent): **0**
-- Blocked by dependency: **2**
+- Done: **30**
+- Current frontier (ready-for-agent): **1**
+- Blocked by dependency: **1**
 - Grill rejected: **1**（18，全面拆 SyncPort capability ports）
 - `architecture-readability-optimization` 与 `directory-structure-clarity` 已并入本 tracker，
   不再保留外部 canonical/once-only 状态。
