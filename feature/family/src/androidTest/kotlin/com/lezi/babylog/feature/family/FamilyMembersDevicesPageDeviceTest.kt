@@ -1,5 +1,11 @@
 package com.lezi.babylog.feature.family
 
+import com.lezi.babylog.feature.family.members.RemoveMemberConfirmDialog
+
+import com.lezi.babylog.feature.family.members.LogoutCurrentDeviceDialog
+
+import com.lezi.babylog.feature.family.members.RevokeFamilyDeviceDialog
+
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.LocalDensity
@@ -20,6 +26,12 @@ import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.unit.Density
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.lezi.babylog.designsystem.LeziTheme
+import com.lezi.babylog.feature.family.members.FamilyMembersListSheet
+import com.lezi.babylog.feature.family.members.MembersDevicesUi
+import com.lezi.babylog.feature.family.FamilyIdentityUi
+import com.lezi.babylog.feature.family.members.LeaveFamilyDialog
+import com.lezi.babylog.feature.family.members.DeleteFamilyDialog
+import com.lezi.babylog.feature.family.components.FamilyDialog
 import com.lezi.babylog.sync.FamilyDevice
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.FamilyRole
@@ -339,10 +351,12 @@ class FamilyMembersDevicesPageDeviceTest {
         pendingRequests: List<PendingMemberLoginRequest> = emptyList(),
         pendingRenameRequests: List<PendingMemberRenameRequest> = emptyList(),
         error: String? = null,
-    ) = FamilyUi(
-        enabled = true,
-        role = role,
-        membershipId = membershipId,
+    ) = MembersDevicesUi(
+        identity = FamilyIdentityUi(
+            enabled = true,
+            role = role,
+            membershipId = membershipId,
+        ),
         members = members,
         membersLoaded = true,
         membersError = error,

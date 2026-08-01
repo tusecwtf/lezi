@@ -1,5 +1,9 @@
 package com.lezi.babylog.feature.family
 
+import com.lezi.babylog.feature.family.wizard.MemberLoginQrConfirmDialog
+
+import com.lezi.babylog.feature.family.wizard.MemberApprovalWaitingDialog
+
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -10,6 +14,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.performClick
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.designsystem.LeziTheme
+import com.lezi.babylog.feature.family.members.FamilyMembersListSheet
+import com.lezi.babylog.feature.family.members.PendingMemberDecisionDialog
+import com.lezi.babylog.feature.family.members.MemberLoginQrCodeDialog
+import com.lezi.babylog.feature.family.members.MembersDevicesUi
+import com.lezi.babylog.feature.family.FamilyIdentityUi
 import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.PendingMemberLogin
@@ -72,9 +81,11 @@ class MemberApprovalWaitingDeviceTest {
         compose.setContent {
             LeziTheme {
                 FamilyMembersListSheet(
-                    ui = FamilyUi(
-                        enabled = true,
-                        role = FamilyRole.Owner,
+                    ui = MembersDevicesUi(
+                        identity = FamilyIdentityUi(
+                            enabled = true,
+                            role = FamilyRole.Owner,
+                        ),
                         membersLoaded = true,
                         pendingMemberRequests = listOf(request),
                     ),
@@ -186,9 +197,11 @@ class MemberApprovalWaitingDeviceTest {
                     MemberLoginQrCodeDialog(payload = payload, onDismiss = {})
                 } else {
                     FamilyMembersListSheet(
-                        ui = FamilyUi(
-                            enabled = true,
-                            role = FamilyRole.Owner,
+                        ui = MembersDevicesUi(
+                            identity = FamilyIdentityUi(
+                                enabled = true,
+                                role = FamilyRole.Owner,
+                            ),
                             membersLoaded = true,
                             members = listOf(
                                 FamilyMember("管理员", FamilyRole.Owner, true, "membership-owner"),

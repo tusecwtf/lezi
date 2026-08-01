@@ -1,4 +1,4 @@
-package com.lezi.babylog.feature.family
+package com.lezi.babylog.feature.family.overview
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
@@ -25,6 +25,14 @@ import com.lezi.babylog.designsystem.LeziSecondaryButton
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.LeziTypography
 import com.lezi.babylog.designsystem.SectionHeading
+import com.lezi.babylog.feature.family.components.FamilyPrimaryCta
+import com.lezi.babylog.feature.family.components.FamilyPrimarySurface
+import com.lezi.babylog.feature.family.components.buildFamilyOverviewCard
+import com.lezi.babylog.feature.family.components.familyMembersForDisplay
+import com.lezi.babylog.feature.family.components.formatLastSuccessAt
+import com.lezi.babylog.feature.family.components.unjoinedFamilyCardSubtitle
+import com.lezi.babylog.feature.family.members.MembersDevicesUi
+import com.lezi.babylog.sync.AppUpdateMetadata
 import com.lezi.babylog.sync.FamilyRole
 
 internal fun familyMemberRosterMinimumTouchHeight() = LeziSpacing.Touch
@@ -37,7 +45,8 @@ internal fun familyMemberRosterMinimumTouchHeight() = LeziSpacing.Touch
  */
 @Composable
 internal fun FamilySharingContent(
-    ui: FamilyUi,
+    overview: AccountOverviewUi,
+    members: MembersDevicesUi,
     primary: FamilyPrimarySurface,
     endpointConfigured: Boolean,
     onOpenMembers: () -> Unit,
@@ -46,35 +55,35 @@ internal fun FamilySharingContent(
     onLogoutCurrentDevice: () -> Unit = {},
     onLeaveFamily: () -> Unit = {},
     onDeleteFamily: () -> Unit = {},
-    onOpenOptionalAppUpdate: (com.lezi.babylog.sync.AppUpdateMetadata) -> Unit = {},
+    onOpenOptionalAppUpdate: (AppUpdateMetadata) -> Unit = {},
     onDismissOptionalAppUpdate: (versionCode: Int) -> Unit = {},
 ) {
-    val visibleMembers = if (ui.enabled) {
+    val visibleMembers = if (overview.enabled) {
         familyMembersForDisplay(
-            ui.members,
-            ui.displayName,
-            ui.role,
-            ui.membershipId,
-            ui.membersLoaded,
+            members.members,
+            overview.displayName,
+            overview.role,
+            overview.membershipId,
+            members.membersLoaded,
         )
     } else {
         emptyList()
     }
     val card = buildFamilyOverviewCard(
-        isJoined = ui.enabled,
-        role = ui.role,
+        isJoined = overview.enabled,
+        role = overview.role,
         endpointConfigured = endpointConfigured,
-        familyName = ui.familyName,
-        babyNickname = ui.current?.nickname,
-        localDisplayName = ui.displayName,
+        familyName = overview.familyName,
+        babyNickname = overview.current?.nickname,
+        localDisplayName = overview.displayName,
         memberCount = visibleMembers.size,
-        membersLoaded = ui.membersLoaded,
-        status = ui.status,
+        membersLoaded = members.membersLoaded,
+        status = overview.status,
     )
 
     SectionHeading(title = "我们家")
     LeziSurfacePanel(modifier = Modifier.fillMaxWidth(), bottomBand = true) {
-        if (ui.enabled) {
+        if (overview.enabled) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -85,7 +94,7 @@ internal fun FamilySharingContent(
                         style = LeziTypography.TitleSm,
                     )
                     Text(
-                        if (ui.role == FamilyRole.Owner) {
+                        if (overview.role == FamilyRole.Owner) {
                             "共享家庭名 · 管理员可改"
                         } else {
                             "共享家庭名"
@@ -115,8 +124,8 @@ internal fun FamilySharingContent(
             Spacer(Modifier.height(LeziSpacing.Sm))
             FamilyMemberRosterEntry(
                 label = card.memberCountLabel,
-                pendingCount = ui.pendingMemberRequests.size.takeIf {
-                    ui.role == FamilyRole.Owner
+                pendingCount = members.pendingMemberRequests.size.takeIf {
+                    overview.role == FamilyRole.Owner
                 } ?: 0,
                 onOpenMembers = onOpenMembers,
             )
@@ -136,22 +145,22 @@ internal fun FamilySharingContent(
         }
 
         FamilySyncStatusEntry(
-            statusLabel = if (ui.pendingMemberLogin != null) {
+            statusLabel = if (overview.pendingMemberLogin != null) {
                 "等待管理员确认"
             } else {
                 card.syncStatusLabel
             },
-            isError = ui.status == com.lezi.babylog.core.model.SyncStatus.Error,
+            isError = overview.status == com.lezi.babylog.core.model.SyncStatus.Error,
         )
-        if (ui.enabled) {
+        if (overview.enabled) {
             Text(
-                formatLastSuccessAt(ui.lastSuccessAt),
+                formatLastSuccessAt(overview.lastSuccessAt),
                 style = LeziTypography.Meta,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        val optionalUpdate = ui.optionalAppUpdate
-        if (ui.enabled && optionalUpdate != null) {
+        val optionalUpdate = overview.optionalAppUpdate
+        if (overview.enabled && optionalUpdate != null) {
             Spacer(Modifier.height(LeziSpacing.Sm))
             OptionalAppUpdateBanner(
                 versionName = optionalUpdate.versionName,
@@ -164,11 +173,11 @@ internal fun FamilySharingContent(
     // Unauthenticated: the wizard and current member-login QR are the only entry points.
     if (primary.showCreateJoin) {
         LeziPrimaryButton(
-            if (ui.pendingMemberLogin != null) "查看加入申请" else FamilyPrimaryCta.CONNECT,
+            if (overview.pendingMemberLogin != null) "查看加入申请" else FamilyPrimaryCta.CONNECT,
             onClick = onConnectFamily,
             modifier = Modifier.fillMaxWidth(),
         )
-        if (ui.pendingMemberLogin == null) {
+        if (overview.pendingMemberLogin == null) {
             LeziSecondaryButton(
                 "扫描成员登录二维码",
                 onClick = onScanMemberLoginQr,
@@ -176,21 +185,21 @@ internal fun FamilySharingContent(
             )
         }
     }
-    if (ui.enabled) {
+    if (overview.enabled) {
         Spacer(Modifier.height(LeziSpacing.Sm))
         LeziSecondaryButton(
             "退出这台设备",
             onClick = onLogoutCurrentDevice,
             modifier = Modifier.fillMaxWidth(),
         )
-        if (ui.role == FamilyRole.Member) {
+        if (overview.role == FamilyRole.Member) {
             Spacer(Modifier.height(LeziSpacing.Xs))
             LeziSecondaryButton(
                 "退出家庭",
                 onClick = onLeaveFamily,
                 modifier = Modifier.fillMaxWidth(),
             )
-        } else if (ui.role == FamilyRole.Owner) {
+        } else if (overview.role == FamilyRole.Owner) {
             Spacer(Modifier.height(LeziSpacing.Xs))
             LeziSecondaryButton(
                 "删除家庭",

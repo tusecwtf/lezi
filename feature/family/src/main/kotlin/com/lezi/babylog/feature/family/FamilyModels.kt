@@ -2,6 +2,8 @@ package com.lezi.babylog.feature.family
 
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.SyncStatus
+import com.lezi.babylog.feature.family.components.LOCAL_FAMILY_DISPLAY_NAME
+import com.lezi.babylog.feature.family.components.displayFamilyName
 import com.lezi.babylog.feature.family.members.MembersDevicesUi
 import com.lezi.babylog.feature.family.overview.AccountOverviewUi
 import com.lezi.babylog.sync.AppUpdateMetadata
@@ -12,28 +14,32 @@ import com.lezi.babylog.sync.PendingMemberLoginRequest
 import com.lezi.babylog.sync.PendingMemberRenameRequest
 
 /**
- * Screen-level family projection composed from [AccountOverviewUi] + [MembersDevicesUi].
- * Hosts own their call-flow slices; the navigation shell may merge them for shared visuals.
+ * Shared session-identity fields for account surfaces.
+ * Overview and members hosts each project this once; the shell does not re-merge
+ * identity from two places when a single host slice is enough.
  */
-data class FamilyUi(
+data class FamilyIdentityUi(
     val displayName: String = LOCAL_FAMILY_DISPLAY_NAME,
-    val status: SyncStatus = SyncStatus.Disabled,
     val enabled: Boolean = false,
-    val hasLocalBaby: Boolean = false,
     val familyId: String = "1",
     val membershipId: String = "",
+    val role: FamilyRole = FamilyRole.None,
+    val familyName: String? = null,
+)
+
+/**
+ * Optional shell merge of overview + members for rare cross-flow visuals.
+ * Prefer typing UI against [AccountOverviewUi] / [MembersDevicesUi] directly.
+ */
+data class FamilyUi(
+    val identity: FamilyIdentityUi = FamilyIdentityUi(),
+    val status: SyncStatus = SyncStatus.Disabled,
+    val hasLocalBaby: Boolean = false,
     val current: Baby? = null,
     val babies: List<Baby> = emptyList(),
     /** Local pre-join profiles kept only as merge sources while this device is a member. */
     val localOrphanBabies: List<Baby> = emptyList(),
-    val baseUrl: String = "",
-    val serverHost: String = "",
-    val serverPort: Int = com.lezi.babylog.sync.DEFAULT_SERVER_PORT,
-    val serverScheme: String = com.lezi.babylog.sync.DEFAULT_SERVER_SCHEME,
-    val role: FamilyRole = FamilyRole.None,
     val lastSuccessAt: Long? = null,
-    /** Raw shared family name from session cache; null when empty/unknown. */
-    val familyName: String? = null,
     val members: List<FamilyMember> = emptyList(),
     val membersLoaded: Boolean = false,
     val membersLoading: Boolean = false,
@@ -47,32 +53,31 @@ data class FamilyUi(
      */
     val optionalAppUpdate: AppUpdateMetadata? = null,
 ) {
+    val displayName: String get() = identity.displayName
+    val enabled: Boolean get() = identity.enabled
+    val familyId: String get() = identity.familyId
+    val membershipId: String get() = identity.membershipId
+    val role: FamilyRole get() = identity.role
+    val familyName: String? get() = identity.familyName
+
     /** Resolved label when the current optional family name is empty. */
     val familyNameLabel: String
         get() = displayFamilyName(familyName, current?.nickname)
 }
 
-/** Merge overview + members hosts for shell composables that still take one projection. */
+/** Merge overview + members for shell visuals that truly need both slices. */
 internal fun familyUiFromHosts(
     overview: AccountOverviewUi,
     members: MembersDevicesUi,
 ): FamilyUi = FamilyUi(
-    displayName = overview.displayName,
+    // Identity: prefer overview session projection (authoritative for account shell).
+    identity = overview.identity,
     status = overview.status,
-    enabled = overview.enabled,
     hasLocalBaby = overview.hasLocalBaby,
-    familyId = overview.familyId,
-    membershipId = overview.membershipId,
     current = overview.current,
     babies = overview.babies,
     localOrphanBabies = overview.localOrphanBabies,
-    baseUrl = overview.baseUrl,
-    serverHost = overview.serverHost,
-    serverPort = overview.serverPort,
-    serverScheme = overview.serverScheme,
-    role = overview.role,
     lastSuccessAt = overview.lastSuccessAt,
-    familyName = overview.familyName,
     members = members.members,
     membersLoaded = members.membersLoaded,
     membersLoading = members.membersLoading,

@@ -1,4 +1,4 @@
-package com.lezi.babylog.feature.family
+package com.lezi.babylog.feature.family.baby
 
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult

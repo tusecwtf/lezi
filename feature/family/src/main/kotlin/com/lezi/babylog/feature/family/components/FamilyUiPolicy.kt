@@ -1,4 +1,4 @@
-package com.lezi.babylog.feature.family
+package com.lezi.babylog.feature.family.components
 
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.SyncStatus
@@ -243,8 +243,6 @@ internal fun canEditFamilyAvatar(role: FamilyRole): Boolean = role != FamilyRole
 
 internal fun canManageFamilyBabies(role: FamilyRole): Boolean = role != FamilyRole.Member
 
-internal fun familyStorageCopy(enabled: Boolean): String =
-    if (enabled) "本机 + 家庭服务器" else "仅本机"
 
 /** Controls for family account operations. */
 internal data class FamilyControlVisibility(

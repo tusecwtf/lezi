@@ -1,4 +1,4 @@
-package com.lezi.babylog.feature.family
+package com.lezi.babylog.feature.family.baby
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -18,6 +18,8 @@ import androidx.compose.ui.unit.dp
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.domain.BabyMergePreview
+import com.lezi.babylog.feature.family.components.FamilyDialog
+import com.lezi.babylog.feature.family.components.FamilyScopeRow
 
 internal data class BabyProfileUpdate(
     val nickname: String,

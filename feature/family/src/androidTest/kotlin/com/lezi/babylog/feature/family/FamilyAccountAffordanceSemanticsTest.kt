@@ -19,6 +19,14 @@ import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.designsystem.LeziTheme
+import com.lezi.babylog.feature.family.overview.FamilySharingContent
+import com.lezi.babylog.feature.family.overview.FamilySyncStatusEntry
+import com.lezi.babylog.feature.family.overview.FamilyMemberRosterEntry
+import com.lezi.babylog.feature.family.overview.AccountOverviewUi
+import com.lezi.babylog.feature.family.members.MembersDevicesUi
+import com.lezi.babylog.feature.family.FamilyIdentityUi
+import com.lezi.babylog.feature.family.components.familyPrimarySurface
+import com.lezi.babylog.feature.family.components.isEndpointConfigured
 import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.FamilyRole
@@ -103,12 +111,22 @@ class FamilyAccountAffordanceSemanticsTest {
         compose.setContent {
             LeziTheme {
                 FamilySharingContent(
-                    ui = FamilyUi(
-                        displayName = "管理员",
-                        enabled = true,
-                        role = FamilyRole.Owner,
-                        familyName = "乐乐一家",
+                    overview = AccountOverviewUi(
+                        identity = FamilyIdentityUi(
+                            displayName = "管理员",
+                            enabled = true,
+                            role = FamilyRole.Owner,
+                            familyName = "乐乐一家",
+                        ),
                         status = SyncStatus.Idle,
+                    ),
+                    members = MembersDevicesUi(
+                        identity = FamilyIdentityUi(
+                            displayName = "管理员",
+                            enabled = true,
+                            role = FamilyRole.Owner,
+                            familyName = "乐乐一家",
+                        ),
                         members = listOf(
                             FamilyMember("管理员", FamilyRole.Owner, true, "membership-owner"),
                         ),
@@ -138,12 +156,22 @@ class FamilyAccountAffordanceSemanticsTest {
         compose.setContent {
             LeziTheme {
                 FamilySharingContent(
-                    ui = FamilyUi(
-                        displayName = "爸爸",
-                        enabled = true,
-                        role = FamilyRole.Member,
-                        familyName = "乐乐一家",
+                    overview = AccountOverviewUi(
+                        identity = FamilyIdentityUi(
+                            displayName = "爸爸",
+                            enabled = true,
+                            role = FamilyRole.Member,
+                            familyName = "乐乐一家",
+                        ),
                         status = SyncStatus.Idle,
+                    ),
+                    members = MembersDevicesUi(
+                        identity = FamilyIdentityUi(
+                            displayName = "爸爸",
+                            enabled = true,
+                            role = FamilyRole.Member,
+                            familyName = "乐乐一家",
+                        ),
                         members = listOf(
                             FamilyMember("爸爸", FamilyRole.Member, true, "membership-member"),
                         ),

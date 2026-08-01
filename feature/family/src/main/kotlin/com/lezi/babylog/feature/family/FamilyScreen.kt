@@ -2,18 +2,12 @@ package com.lezi.babylog.feature.family
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import android.content.Intent
-import android.net.Uri
-import android.provider.Settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -33,25 +27,57 @@ import com.lezi.babylog.designsystem.LeziSpacing
 import com.lezi.babylog.designsystem.PageScaffoldBackground
 import com.lezi.babylog.domain.FamilyWizardOutcome
 import com.lezi.babylog.domain.FamilyWizardState
-import com.lezi.babylog.sync.AppUpdateUiOutcome
-import com.lezi.babylog.sync.FamilyRole
+import com.lezi.babylog.domain.projectMemberLoginQrDialog
+import com.lezi.babylog.feature.family.baby.FamilyBabyDialog
+import com.lezi.babylog.feature.family.components.FamilyDialog
+import com.lezi.babylog.feature.family.components.FamilyWizardJoinRole
+import com.lezi.babylog.feature.family.components.FamilyWizardMode
+import com.lezi.babylog.feature.family.components.FamilyWizardStep
+import com.lezi.babylog.feature.family.components.LOCAL_FAMILY_DISPLAY_NAME
+import com.lezi.babylog.feature.family.components.accountFamilyWizardSnapshot
+import com.lezi.babylog.feature.family.components.canEditFamilyAvatar
+import com.lezi.babylog.feature.family.components.familyControlVisibility
+import com.lezi.babylog.feature.family.components.familyDialogAfterDismiss
+import com.lezi.babylog.feature.family.components.familyPrimarySurface
+import com.lezi.babylog.feature.family.components.familyWizardOutcomeCopy
+import com.lezi.babylog.feature.family.components.isEndpointConfigured
+import com.lezi.babylog.feature.family.components.isWizardSessionDialog
+import com.lezi.babylog.feature.family.components.validateFamilyDisplayNameInput
+import com.lezi.babylog.feature.family.components.validateFamilyNameInput
+import com.lezi.babylog.feature.family.members.FamilyMembersListSheet
+import com.lezi.babylog.feature.family.members.MembersDevicesHost
+import com.lezi.babylog.feature.family.members.DeleteFamilyDialog
+import com.lezi.babylog.feature.family.members.EditMyDisplayNameDialog
+import com.lezi.babylog.feature.family.members.LeaveFamilyDialog
+import com.lezi.babylog.feature.family.members.LogoutCurrentDeviceDialog
+import com.lezi.babylog.feature.family.members.MemberLoginQrCodeDialog
+import com.lezi.babylog.feature.family.members.PendingMemberDecisionDialog
+import com.lezi.babylog.feature.family.members.RemoveMemberConfirmDialog
+import com.lezi.babylog.feature.family.members.RenameFamilyDialog
+import com.lezi.babylog.feature.family.members.RevokeFamilyDeviceDialog
+import com.lezi.babylog.feature.family.overview.AccountOverviewHost
+import com.lezi.babylog.feature.family.overview.FamilyOverview
+import com.lezi.babylog.feature.family.overview.FamilySharingContent
+import com.lezi.babylog.feature.family.overview.OverviewAppUpdateDialogs
+import com.lezi.babylog.feature.family.wizard.AccountFamilyWizardHost
+import com.lezi.babylog.feature.family.wizard.CreateFamilyDialog
+import com.lezi.babylog.feature.family.wizard.FamilyEndpointConnectionDialog
+import com.lezi.babylog.feature.family.wizard.FamilyJoinRoleDialog
+import com.lezi.babylog.feature.family.wizard.FamilyVerifiedEndpointDialog
+import com.lezi.babylog.feature.family.wizard.MemberApprovalWaitingDialog
+import com.lezi.babylog.feature.family.wizard.MemberLoginQrConfirmDialog
+import com.lezi.babylog.feature.family.wizard.MemberLoginRequestDialog
+import com.lezi.babylog.feature.family.wizard.OwnerLoginDialog
+import com.lezi.babylog.feature.family.wizard.OwnerTakeoverConfirmationDialog
+import com.lezi.babylog.feature.family.components.FamilyMessageDialog
 import com.lezi.babylog.sync.FamilyEndpointConfig
 import com.lezi.babylog.sync.FamilyEndpointDraft
+import com.lezi.babylog.sync.FamilyRole
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.MemberLoginQrPayload
 import com.lezi.babylog.sync.MemberLoginQrPayloadCodec
 import com.lezi.babylog.sync.defaultAndroidDeviceName
-import com.lezi.babylog.sync.forcedUpdateDialogBody
-import com.lezi.babylog.sync.forcedUpdatePackageUnknownBody
-import com.lezi.babylog.sync.forcedUpdateRetryCheckLabel
-import com.lezi.babylog.sync.forcedUpdateTitle
-import com.lezi.babylog.sync.optionalUpdateDialogBody
 import com.lezi.babylog.sync.requireDeviceName
-import com.lezi.babylog.domain.projectMemberLoginQrDialog
-import com.lezi.babylog.feature.family.members.MembersDevicesHost
-import com.lezi.babylog.feature.family.overview.AccountOverviewHost
-import com.lezi.babylog.feature.family.wizard.AccountFamilyWizardHost
-import androidx.compose.ui.window.DialogProperties
 
 private val FamilyEndpointDraftSaver = listSaver<FamilyEndpointDraft, String>(
     save = {
@@ -79,10 +105,10 @@ fun FamilyRoute(
 ) {
     val overview by overviewHost.ui.collectAsStateWithLifecycle()
     val members by membersHost.ui.collectAsStateWithLifecycle()
-    val ui = remember(overview, members) { familyUiFromHosts(overview, members) }
     val appUpdateOutcome by overviewHost.appUpdateOutcome.collectAsStateWithLifecycle()
     val checkingAppUpdate by overviewHost.checkingAppUpdate.collectAsStateWithLifecycle()
     val installingAppUpdate by overviewHost.installingAppUpdate.collectAsStateWithLifecycle()
+    val endpointSeed by wizardHost.endpointSeed.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var dialog by remember { mutableStateOf<FamilyDialog?>(null) }
     var retainedWizardMode by rememberSaveable { mutableStateOf<String?>(null) }
@@ -124,38 +150,38 @@ fun FamilyRoute(
 
     val familyWizardState by wizardHost.familyWizardState.collectAsStateWithLifecycle()
     val verifiedEndpoint by wizardHost.verifiedEndpoint.collectAsStateWithLifecycle(initialValue = null)
-    val novice = remember { FamilyEndpointConfig.emptyDraft() }
-    fun draftFromUiOrNovice(): FamilyEndpointDraft {
+    val emptyEndpointDraft = remember { FamilyEndpointConfig.emptyDraft() }
+    fun draftFromEndpointSeed(): FamilyEndpointDraft {
         val saved = when {
-            ui.serverHost.isNotBlank() -> FamilyEndpointConfig(
-                host = ui.serverHost,
-                port = ui.serverPort,
-                scheme = ui.serverScheme,
+            endpointSeed.serverHost.isNotBlank() -> FamilyEndpointConfig(
+                host = endpointSeed.serverHost,
+                port = endpointSeed.serverPort,
+                scheme = endpointSeed.serverScheme,
             )
-            ui.baseUrl.isNotBlank() -> FamilyEndpointConfig.fromBaseUrl(ui.baseUrl)
-            else -> novice
+            endpointSeed.baseUrl.isNotBlank() -> FamilyEndpointConfig.fromBaseUrl(endpointSeed.baseUrl)
+            else -> emptyEndpointDraft
         }
         return FamilyEndpointDraft.fromConfig(saved)
     }
     // Keep in-progress endpoint edits stable while the wizard is active.
     var joinDraft by rememberSaveable(stateSaver = FamilyEndpointDraftSaver) {
-        mutableStateOf(draftFromUiOrNovice())
+        mutableStateOf(draftFromEndpointSeed())
     }
-    val pendingMemberLogin = ui.pendingMemberLogin
+    val pendingMemberLogin = overview.pendingMemberLogin
     val familyWizardBusy = familyWizardState is FamilyWizardState.Submitting ||
         familyWizardState is FamilyWizardState.ProbingEndpoint ||
         familyWizardState is FamilyWizardState.VerifyingMemberLoginQr ||
         familyWizardState is FamilyWizardState.ClaimingMemberLoginQr
     val wizardSessionActive = isWizardSessionDialog(dialog)
     LaunchedEffect(
-        ui.serverHost,
-        ui.serverPort,
-        ui.serverScheme,
-        ui.baseUrl,
+        endpointSeed.serverHost,
+        endpointSeed.serverPort,
+        endpointSeed.serverScheme,
+        endpointSeed.baseUrl,
         wizardSessionActive,
     ) {
         if (wizardSessionActive) return@LaunchedEffect
-        joinDraft = draftFromUiOrNovice()
+        joinDraft = draftFromEndpointSeed()
     }
 
     fun showMessage(copy: String, resume: FamilyDialog? = null) {
@@ -203,10 +229,9 @@ fun FamilyRoute(
         deletingFamily = false
     }
 
-    fun runForegroundAction(action: () -> Unit) = action()
 
-    LaunchedEffect(ui.enabled, ui.familyId) {
-        if (ui.enabled) membersHost.refreshMembers(showErrors = false)
+    LaunchedEffect(overview.enabled, overview.familyId) {
+        if (overview.enabled) membersHost.refreshMembers(showErrors = false)
     }
 
     fun openEndpointConnection() {
@@ -270,15 +295,15 @@ fun FamilyRoute(
         else scanCameraPermission.launch(CameraCapture.PERMISSION)
     }
 
-    val endpointConfigured = remember(ui.serverHost, ui.baseUrl) {
-        isEndpointConfigured(ui.serverHost, ui.baseUrl)
+    val endpointConfigured = remember(endpointSeed.serverHost, endpointSeed.baseUrl) {
+        isEndpointConfigured(endpointSeed.serverHost, endpointSeed.baseUrl)
     }
     val draftEndpointReady = joinDraft.hasEndpoint()
-    val controls = remember(ui.enabled, ui.role) {
-        familyControlVisibility(ui.enabled, ui.role)
+    val controls = remember(overview.enabled, overview.role) {
+        familyControlVisibility(overview.enabled, overview.role)
     }
-    val primary = remember(ui.enabled, ui.role, endpointConfigured) {
-        familyPrimarySurface(ui.enabled, ui.role, endpointConfigured)
+    val primary = remember(overview.enabled, overview.role, endpointConfigured) {
+        familyPrimarySurface(overview.enabled, overview.role, endpointConfigured)
     }
     LaunchedEffect(familyWizardState) {
         when (val state = familyWizardState) {
@@ -378,7 +403,7 @@ fun FamilyRoute(
             verticalArrangement = Arrangement.spacedBy(LeziSpacing.Sm),
         ) {
             FamilyOverview(
-                ui = ui,
+                ui = overview,
                 onAddBaby = onAddBaby,
                 onSetCurrent = overviewHost::setCurrent,
                 onEditBaby = { dialog = FamilyDialog.EditBaby(it) },
@@ -386,14 +411,13 @@ fun FamilyRoute(
                 onDeleteBaby = { dialog = FamilyDialog.DeleteBaby(it) },
             )
             FamilySharingContent(
-                ui = ui,
+                overview = overview,
+                members = members,
                 primary = primary,
                 endpointConfigured = endpointConfigured,
                 onOpenMembers = {
-                    runForegroundAction {
-                        membersHost.refreshMembers(showErrors = true)
+                    membersHost.refreshMembers(showErrors = true)
                         dialog = FamilyDialog.MembersList
-                    }
                 },
                 onConnectFamily = ::openEndpointConnection,
                 onScanMemberLoginQr = ::scanWithPermission,
@@ -410,125 +434,13 @@ fun FamilyRoute(
         }
     }
 
-    when (val outcome = appUpdateOutcome) {
-        is AppUpdateUiOutcome.Message -> {
-            AlertDialog(
-                onDismissRequest = {
-                    if (!installingAppUpdate) overviewHost.dismissAppUpdateOutcome()
-                },
-                title = { Text(outcome.title) },
-                text = { Text(outcome.body) },
-                confirmButton = {
-                    TextButton(
-                        onClick = overviewHost::dismissAppUpdateOutcome,
-                        enabled = !installingAppUpdate,
-                    ) {
-                        Text(if (installingAppUpdate) "请稍候" else "知道了")
-                    }
-                },
-            )
-        }
-        is AppUpdateUiOutcome.OptionalUpdate -> {
-            AlertDialog(
-                onDismissRequest = {
-                    if (!installingAppUpdate) overviewHost.dismissAppUpdateOutcome()
-                },
-                title = { Text("发现新版本") },
-                text = { Text(optionalUpdateDialogBody(outcome.metadata)) },
-                confirmButton = {
-                    TextButton(
-                        onClick = { overviewHost.installOptionalUpdate(outcome.metadata) },
-                        enabled = !installingAppUpdate,
-                    ) {
-                        Text(if (installingAppUpdate) "安装中…" else "立即更新")
-                    }
-                },
-                dismissButton = {
-                    TextButton(
-                        onClick = overviewHost::dismissAppUpdateOutcome,
-                        enabled = !installingAppUpdate,
-                    ) {
-                        Text("稍后")
-                    }
-                },
-            )
-        }
-        is AppUpdateUiOutcome.ForcedUpdate -> {
-            // Secondary to root ForcedAppUpdateState full-screen shell.
-            AlertDialog(
-                onDismissRequest = {},
-                properties = DialogProperties(
-                    dismissOnBackPress = false,
-                    dismissOnClickOutside = false,
-                ),
-                title = { Text(forcedUpdateTitle()) },
-                text = { Text(forcedUpdateDialogBody(outcome.metadata)) },
-                confirmButton = {
-                    TextButton(
-                        onClick = { overviewHost.installOptionalUpdate(outcome.metadata) },
-                        enabled = !installingAppUpdate,
-                    ) {
-                        Text(if (installingAppUpdate) "安装中…" else "立即更新")
-                    }
-                },
-            )
-        }
-        AppUpdateUiOutcome.ForcedUpdatePackageUnknown -> {
-            // Align with Settings / ForcedAppUpdateState.PackageUnknown: retry check only.
-            AlertDialog(
-                onDismissRequest = {},
-                properties = DialogProperties(
-                    dismissOnBackPress = false,
-                    dismissOnClickOutside = false,
-                ),
-                title = { Text(forcedUpdateTitle()) },
-                text = { Text(forcedUpdatePackageUnknownBody()) },
-                confirmButton = {
-                    TextButton(
-                        onClick = overviewHost::checkAppUpdate,
-                        enabled = !checkingAppUpdate && !installingAppUpdate,
-                    ) {
-                        Text(
-                            if (checkingAppUpdate) {
-                                "检查中…"
-                            } else {
-                                forcedUpdateRetryCheckLabel()
-                            },
-                        )
-                    }
-                },
-            )
-        }
-        AppUpdateUiOutcome.NeedsInstallPermission -> {
-            AlertDialog(
-                onDismissRequest = overviewHost::dismissAppUpdateOutcome,
-                title = { Text("需要安装权限") },
-                text = {
-                    Text("请允许乐记安装应用，然后再试一次立即更新。")
-                },
-                confirmButton = {
-                    TextButton(
-                        onClick = {
-                            val intent = Intent(
-                                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                                Uri.parse("package:${context.packageName}"),
-                            )
-                            runCatching { context.startActivity(intent) }
-                            overviewHost.dismissAppUpdateOutcome()
-                        },
-                    ) {
-                        Text("去设置")
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = overviewHost::dismissAppUpdateOutcome) {
-                        Text("取消")
-                    }
-                },
-            )
-        }
-        null -> Unit
-    }
+    OverviewAppUpdateDialogs(
+        host = overviewHost,
+        outcome = appUpdateOutcome,
+        checkingAppUpdate = checkingAppUpdate,
+        installingAppUpdate = installingAppUpdate,
+    )
+
 
     when (val active = dialog) {
         FamilyDialog.ConnectEndpoint -> FamilyEndpointConnectionDialog(
@@ -568,19 +480,19 @@ fun FamilyRoute(
                 dialog = null
             },
         )
-        FamilyDialog.MembersList -> if (ui.enabled) FamilyMembersListSheet(
-            ui = ui,
-            onRefreshMembers = { runForegroundAction { membersHost.refreshMembers(showErrors = true) } },
+        FamilyDialog.MembersList -> if (overview.enabled) FamilyMembersListSheet(
+            ui = members,
+            onRefreshMembers = { membersHost.refreshMembers(showErrors = true) },
             onEditMyDisplayName = {
-                editDisplayName = ui.displayName.takeUnless {
+                editDisplayName = overview.displayName.takeUnless {
                     it == LOCAL_FAMILY_DISPLAY_NAME
                 }.orEmpty()
                 editDisplayNameFeedback = null
                 dialog = FamilyDialog.EditMyDisplayName
             },
-            onRenameFamily = if (ui.role == FamilyRole.Owner) {
+            onRenameFamily = if (overview.role == FamilyRole.Owner) {
                 {
-                    renameFamilyName = ui.familyName.orEmpty()
+                    renameFamilyName = overview.familyName.orEmpty()
                     renameFamilyFeedback = null
                     dialog = FamilyDialog.RenameFamily
                 }
@@ -594,31 +506,31 @@ fun FamilyRoute(
             } else {
                 null
             },
-            onReviewPending = if (ui.role == FamilyRole.Owner) {
+            onReviewPending = if (overview.role == FamilyRole.Owner) {
                 { request -> dialog = FamilyDialog.ReviewPendingMember(request) }
             } else {
                 null
             },
-            onCreateMemberLoginQr = if (ui.role == FamilyRole.Owner) {
+            onCreateMemberLoginQr = if (overview.role == FamilyRole.Owner) {
                 { membershipId ->
-                    runForegroundAction {
-                        membersHost.createMemberLoginQr(membershipId) { result ->
-                            result.fold(
-                                onSuccess = { dialog = FamilyDialog.MemberLoginQrCode(it) },
-                                onFailure = {
-                                    showMessage(
-                                        it.message ?: "生成成员登录二维码失败，请稍后重试",
-                                        resume = FamilyDialog.MembersList,
-                                    )
-                                },
-                            )
-                        }
+                    
+                    membersHost.createMemberLoginQr(membershipId) { result ->
+                        result.fold(
+                            onSuccess = { dialog = FamilyDialog.MemberLoginQrCode(it) },
+                            onFailure = {
+                                showMessage(
+                                    it.message ?: "生成成员登录二维码失败，请稍后重试",
+                                    resume = FamilyDialog.MembersList,
+                                )
+                            },
+                        )
                     }
+                
                 }
             } else {
                 null
             },
-            onAddMember = if (ui.role == FamilyRole.Owner) {
+            onAddMember = if (overview.role == FamilyRole.Owner) {
                 {
                     editDisplayName = ""
                     editDisplayNameFeedback = null
@@ -627,7 +539,7 @@ fun FamilyRoute(
             } else {
                 null
             },
-            onRenameMember = if (ui.role == FamilyRole.Owner) {
+            onRenameMember = if (overview.role == FamilyRole.Owner) {
                 { membershipId, currentDisplayName ->
                     editDisplayName = currentDisplayName
                     editDisplayNameFeedback = null
@@ -644,13 +556,13 @@ fun FamilyRoute(
             onRevokeDevice = { deviceId, deviceName, isCurrent ->
                 dialog = FamilyDialog.ConfirmDeviceRevoke(deviceId, deviceName, isCurrent)
             },
-            onReviewRename = if (ui.role == FamilyRole.Owner) {
+            onReviewRename = if (overview.role == FamilyRole.Owner) {
                 { request, approve ->
-                    runForegroundAction {
-                        membersHost.decideMemberRename(request, approve) { _, copy ->
-                            showMessage(copy, resume = FamilyDialog.MembersList)
-                        }
+                    
+                    membersHost.decideMemberRename(request, approve) { _, copy ->
+                        showMessage(copy, resume = FamilyDialog.MembersList)
                     }
+                
                 }
             } else {
                 null
@@ -661,7 +573,7 @@ fun FamilyRoute(
             payload = active.payload,
             onDismiss = { dialog = FamilyDialog.MembersList },
         )
-        is FamilyDialog.ReviewPendingMember -> if (ui.enabled && ui.role == FamilyRole.Owner) {
+        is FamilyDialog.ReviewPendingMember -> if (overview.enabled && overview.role == FamilyRole.Owner) {
             fun finishDecision(error: String?) {
                 decidingMemberRequest = false
                 dialog = if (error == null) {
@@ -672,7 +584,7 @@ fun FamilyRoute(
             }
             PendingMemberDecisionDialog(
                 request = active.request,
-                members = ui.members,
+                members = members.members,
                 busy = decidingMemberRequest,
                 onBindExisting = { membershipId ->
                     decidingMemberRequest = true
@@ -699,23 +611,23 @@ fun FamilyRoute(
             displayName = active.displayName,
             removing = removingMember,
             onConfirm = {
-                runForegroundAction {
-                    removingMember = true
-                    membersHost.removeMember(
-                        membershipId = active.membershipId,
-                        displayName = active.displayName,
-                    ) { success, copy ->
-                        removingMember = false
-                        if (success) {
-                            dialog = FamilyDialog.Message(
-                                copy,
-                                resume = FamilyDialog.MembersList,
-                            )
-                        } else {
-                            showMessage(copy, resume = FamilyDialog.MembersList)
-                        }
+                
+                removingMember = true
+                membersHost.removeMember(
+                    membershipId = active.membershipId,
+                    displayName = active.displayName,
+                ) { success, copy ->
+                    removingMember = false
+                    if (success) {
+                        dialog = FamilyDialog.Message(
+                            copy,
+                            resume = FamilyDialog.MembersList,
+                        )
+                    } else {
+                        showMessage(copy, resume = FamilyDialog.MembersList)
                     }
                 }
+            
             },
             onDismiss = {
                 if (!removingMember) dialog = FamilyDialog.MembersList
@@ -728,7 +640,7 @@ fun FamilyRoute(
                 feedback = (familyWizardState as? FamilyWizardState.WaitingForMemberApproval)
                     ?.feedback,
                 onCheck = {
-                    runForegroundAction { wizardHost.checkMemberApproval() }
+                    wizardHost.checkMemberApproval()
                 },
                 onCancel = {
                     wizardHost.cancelMemberApproval()
@@ -808,8 +720,7 @@ fun FamilyRoute(
                                 ownerRootPasswordFeedback = "请填写管理员根密码"
                                 return@OwnerLoginDialog
                             }
-                            runForegroundAction {
-                                wizardHost.submitFamilyWizard(
+                            wizardHost.submitFamilyWizard(
                                     snapshot = accountFamilyWizardSnapshot(
                                         mode = FamilyWizardMode.Join,
                                         step = FamilyWizardStep.Identity,
@@ -821,7 +732,6 @@ fun FamilyRoute(
                                     bootstrapSecret = secret,
                                 )
                                 ownerRootPassword = ""
-                            }
                         },
                         onTakeover = {
                             runCatching { requireDeviceName(ownerDeviceName) }
@@ -873,8 +783,7 @@ fun FamilyRoute(
                                 memberDeviceNameError = it
                                 return@MemberLoginRequestDialog
                             }
-                        runForegroundAction {
-                            joinDisplayNameError = null
+                        joinDisplayNameError = null
                             memberDeviceNameError = null
                             wizardHost.submitFamilyWizard(
                                 accountFamilyWizardSnapshot(
@@ -886,7 +795,6 @@ fun FamilyRoute(
                                     joinRole = FamilyWizardJoinRole.Member,
                                 ),
                             )
-                        }
                     },
                     onKeepOffline = {
                         joinDisplayNameError = null
@@ -947,8 +855,7 @@ fun FamilyRoute(
                             bootstrapSecretFeedback = "请填写管理员根密码"
                             return@CreateFamilyDialog
                         }
-                        runForegroundAction {
-                            bootstrapSecretFeedback = null
+                        bootstrapSecretFeedback = null
                             createDisplayNameError = null
                             createFamilyNameError = null
                             wizardHost.submitFamilyWizard(
@@ -963,7 +870,6 @@ fun FamilyRoute(
                                 bootstrapSecret = secret,
                             )
                             bootstrapSecret = ""
-                        }
                     },
                     onDismiss = {
                         bootstrapSecret = ""
@@ -985,8 +891,7 @@ fun FamilyRoute(
                     ownerRootPasswordFeedback = "请填写管理员根密码"
                     showWizard(FamilyWizardMode.Join, FamilyWizardStep.Identity)
                 } else {
-                    runForegroundAction {
-                        wizardHost.submitFamilyWizard(
+                    wizardHost.submitFamilyWizard(
                             snapshot = accountFamilyWizardSnapshot(
                                 mode = FamilyWizardMode.Join,
                                 step = FamilyWizardStep.Identity,
@@ -999,14 +904,13 @@ fun FamilyRoute(
                             ownerTakeover = true,
                         )
                         ownerRootPassword = ""
-                    }
                 }
             },
             onDismiss = {
                 showWizard(FamilyWizardMode.Join, FamilyWizardStep.Identity)
             },
         )
-        FamilyDialog.RenameFamily -> if (ui.enabled && ui.role == FamilyRole.Owner) {
+        FamilyDialog.RenameFamily -> if (overview.enabled && overview.role == FamilyRole.Owner) {
             RenameFamilyDialog(
                 familyName = renameFamilyName,
                 onFamilyNameChange = {
@@ -1020,18 +924,18 @@ fun FamilyRoute(
                         renameFamilyFeedback = it
                         return@RenameFamilyDialog
                     }
-                    runForegroundAction {
-                        savingFamilyName = true
-                        membersHost.renameFamily(renameFamilyName) { success, copy ->
-                            savingFamilyName = false
-                            if (success) {
-                                renameFamilyName = ""
-                                dialog = FamilyDialog.Message(copy)
-                            } else {
-                                renameFamilyFeedback = copy
-                            }
+                    
+                    savingFamilyName = true
+                    membersHost.renameFamily(renameFamilyName) { success, copy ->
+                        savingFamilyName = false
+                        if (success) {
+                            renameFamilyName = ""
+                            dialog = FamilyDialog.Message(copy)
+                        } else {
+                            renameFamilyFeedback = copy
                         }
                     }
+                
                 },
                 onDismiss = {
                     if (!savingFamilyName) {
@@ -1057,18 +961,18 @@ fun FamilyRoute(
                     editDisplayNameFeedback = it
                     return@EditMyDisplayNameDialog
                 }
-                runForegroundAction {
-                    savingDisplayName = true
-                    membersHost.addFamilyMember(editDisplayName) { success, copy ->
-                        savingDisplayName = false
-                        if (success) {
-                            editDisplayName = ""
-                            dialog = FamilyDialog.Message(copy, FamilyDialog.MembersList)
-                        } else {
-                            editDisplayNameFeedback = copy
-                        }
+                
+                savingDisplayName = true
+                membersHost.addFamilyMember(editDisplayName) { success, copy ->
+                    savingDisplayName = false
+                    if (success) {
+                        editDisplayName = ""
+                        dialog = FamilyDialog.Message(copy, FamilyDialog.MembersList)
+                    } else {
+                        editDisplayNameFeedback = copy
                     }
                 }
+            
             },
             onDismiss = {
                 if (!savingDisplayName) {
@@ -1092,17 +996,17 @@ fun FamilyRoute(
                     editDisplayNameFeedback = it
                     return@EditMyDisplayNameDialog
                 }
-                runForegroundAction {
-                    savingDisplayName = true
-                    membersHost.renameFamilyMember(active.membershipId, editDisplayName) { success, copy ->
-                        savingDisplayName = false
-                        if (success) {
-                            dialog = FamilyDialog.Message(copy, FamilyDialog.MembersList)
-                        } else {
-                            editDisplayNameFeedback = copy
-                        }
+                
+                savingDisplayName = true
+                membersHost.renameFamilyMember(active.membershipId, editDisplayName) { success, copy ->
+                    savingDisplayName = false
+                    if (success) {
+                        dialog = FamilyDialog.Message(copy, FamilyDialog.MembersList)
+                    } else {
+                        editDisplayNameFeedback = copy
                     }
                 }
+            
             },
             onDismiss = {
                 if (!savingDisplayName) {
@@ -1127,17 +1031,17 @@ fun FamilyRoute(
                     editDisplayNameFeedback = "请填写设备称呼"
                     return@EditMyDisplayNameDialog
                 }
-                runForegroundAction {
-                    savingDisplayName = true
-                    membersHost.renameFamilyDevice(active.deviceId, editDisplayName) { success, copy ->
-                        savingDisplayName = false
-                        if (success) {
-                            dialog = FamilyDialog.Message(copy, FamilyDialog.MembersList)
-                        } else {
-                            editDisplayNameFeedback = copy
-                        }
+                
+                savingDisplayName = true
+                membersHost.renameFamilyDevice(active.deviceId, editDisplayName) { success, copy ->
+                    savingDisplayName = false
+                    if (success) {
+                        dialog = FamilyDialog.Message(copy, FamilyDialog.MembersList)
+                    } else {
+                        editDisplayNameFeedback = copy
                     }
                 }
+            
             },
             onDismiss = {
                 if (!savingDisplayName) {
@@ -1154,28 +1058,28 @@ fun FamilyRoute(
             },
             feedback = editDisplayNameFeedback,
             saving = savingDisplayName,
-            supportingCopy = if (ui.role == FamilyRole.Member) {
+            supportingCopy = if (overview.role == FamilyRole.Member) {
                 "提交后由管理员确认，确认前继续显示当前称呼"
             } else {
                 "管理员称呼会立即更新"
             },
-            confirmCopy = if (ui.role == FamilyRole.Member) "提交申请" else "保存",
+            confirmCopy = if (overview.role == FamilyRole.Member) "提交申请" else "保存",
             onConfirm = {
                 validateFamilyDisplayNameInput(editDisplayName)?.let {
                     editDisplayNameFeedback = it
                     return@EditMyDisplayNameDialog
                 }
-                runForegroundAction {
-                    savingDisplayName = true
-                    membersHost.updateMyDisplayName(editDisplayName) { success, copy ->
-                        savingDisplayName = false
-                        if (success) {
-                            dialog = FamilyDialog.Message(copy)
-                        } else {
-                            editDisplayNameFeedback = copy
-                        }
+                
+                savingDisplayName = true
+                membersHost.updateMyDisplayName(editDisplayName) { success, copy ->
+                    savingDisplayName = false
+                    if (success) {
+                        dialog = FamilyDialog.Message(copy)
+                    } else {
+                        editDisplayNameFeedback = copy
                     }
                 }
+            
             },
             onDismiss = {
                 if (!savingDisplayName) {
@@ -1187,9 +1091,9 @@ fun FamilyRoute(
         FamilyDialog.ConfirmDeviceLogout -> LogoutCurrentDeviceDialog(
             onConfirm = {
                 dialog = null
-                runForegroundAction {
-                    membersHost.logoutCurrentDevice { _, message -> showMessage(message) }
-                }
+                
+                membersHost.logoutCurrentDevice { _, message -> showMessage(message) }
+            
             },
             onDismiss = { dialog = null },
         )
@@ -1198,26 +1102,26 @@ fun FamilyRoute(
             isCurrent = active.isCurrent,
             onConfirm = {
                 dialog = null
-                runForegroundAction {
-                    membersHost.revokeFamilyDevice(
-                        active.deviceId,
-                        active.deviceName,
-                        active.isCurrent,
-                    ) { _, message -> showMessage(message) }
-                }
+                
+                membersHost.revokeFamilyDevice(
+                    active.deviceId,
+                    active.deviceName,
+                    active.isCurrent,
+                ) { _, message -> showMessage(message) }
+            
             },
             onDismiss = { dialog = null },
         )
         FamilyDialog.ConfirmLeave -> LeaveFamilyDialog(
             onConfirm = {
                 dialog = null
-                runForegroundAction { membersHost.leave { showMessage(it) } }
+                 membersHost.leave { showMessage(it) } 
             },
             onDismiss = { dialog = null },
         )
         is FamilyDialog.DeleteFamily -> DeleteFamilyDialog(
             stage = active.stage,
-            expectedFamilyName = ui.familyName.orEmpty(),
+            expectedFamilyName = overview.familyName.orEmpty(),
             familyNameInput = deleteFamilyName,
             onFamilyNameInputChange = {
                 deleteFamilyName = it
@@ -1232,22 +1136,22 @@ fun FamilyRoute(
             deleting = deletingFamily,
             onContinue = { dialog = FamilyDialog.DeleteFamily(FamilyDialog.DeleteStage.Final) },
             onConfirm = {
-                runForegroundAction {
-                    deletingFamily = true
-                    membersHost.deleteFamily(
-                        deleteFamilyName,
-                        deleteFamilyRootPassword,
-                    ) { success, message ->
-                        deletingFamily = false
-                        if (success) {
-                            resetDeleteFamilyConfirmation()
-                            dialog = null
-                            showMessage(message)
-                        } else {
-                            deleteFamilyFeedback = message
-                        }
+                
+                deletingFamily = true
+                membersHost.deleteFamily(
+                    deleteFamilyName,
+                    deleteFamilyRootPassword,
+                ) { success, message ->
+                    deletingFamily = false
+                    if (success) {
+                        resetDeleteFamilyConfirmation()
+                        dialog = null
+                        showMessage(message)
+                    } else {
+                        deleteFamilyFeedback = message
                     }
                 }
+            
             },
             onRefreshFamilyInfo = {
                 resetDeleteFamilyConfirmation()
@@ -1266,8 +1170,8 @@ fun FamilyRoute(
         is FamilyDialog.EditBaby,
         -> FamilyBabyDialog(
             dialog = active,
-            babies = ui.babies,
-            canEditAvatar = canEditFamilyAvatar(ui.role),
+            babies = overview.babies,
+            canEditAvatar = canEditFamilyAvatar(overview.role),
             onDismiss = { dialog = null },
             onDelete = { id ->
                 dialog = null

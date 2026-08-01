@@ -10,13 +10,30 @@ import com.lezi.babylog.domain.FamilyWizardSnapshot
 import com.lezi.babylog.domain.FamilyWizardState
 import com.lezi.babylog.domain.SyncFamilyWizardGateway
 import com.lezi.babylog.sync.CertificateTrustCandidate
+import com.lezi.babylog.sync.DEFAULT_SERVER_PORT
+import com.lezi.babylog.sync.DEFAULT_SERVER_SCHEME
 import com.lezi.babylog.sync.MemberLoginQrPayload
 import com.lezi.babylog.sync.SyncPort
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+
+/**
+ * Technical endpoint fields for wizard draft seed only.
+ * Kept off [com.lezi.babylog.feature.family.overview.AccountOverviewUi] (技术凭证不回流).
+ */
+data class WizardEndpointSeed(
+    val baseUrl: String = "",
+    val serverHost: String = "",
+    val serverPort: Int = DEFAULT_SERVER_PORT,
+    val serverScheme: String = DEFAULT_SERVER_SCHEME,
+)
 
 /**
  * Thin account-entry host over [FamilyWizardController], including ticket-23
@@ -33,6 +50,16 @@ class AccountFamilyWizardHost @Inject constructor(
     )
     val familyWizardState = familyWizard.state
     val verifiedEndpoint = sync.verifiedEndpoint()
+
+    /** Session endpoint projection for join/create draft seed (not account overview). */
+    val endpointSeed: StateFlow<WizardEndpointSeed> = sync.session().map { session ->
+        WizardEndpointSeed(
+            baseUrl = session.baseUrl,
+            serverHost = session.serverHost,
+            serverPort = session.serverPort,
+            serverScheme = session.serverScheme,
+        )
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), WizardEndpointSeed())
 
     init {
         viewModelScope.launch {
