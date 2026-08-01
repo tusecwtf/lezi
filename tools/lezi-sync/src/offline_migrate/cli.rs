@@ -576,6 +576,8 @@ fn format_report_counters(report: &MigrateReport) -> String {
     format!(
         "families={}\n\
 memberships={}\n\
+discarded_departed_memberships={}\n\
+anonymized_membership_refs={}\n\
 entities={}\n\
 committed_bundles={}\n\
 discarded_staging_bundles={}\n\
@@ -584,6 +586,8 @@ discarded_publications={}\n\
 media_files_copied={}\n",
         report.families,
         report.memberships,
+        report.discarded_departed_memberships,
+        report.anonymized_membership_refs,
         report.entities,
         report.committed_bundles,
         report.discarded_staging_bundles,

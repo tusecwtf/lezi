@@ -23,6 +23,17 @@
 //! password (`LEZI_BOOTSTRAP_SECRET`); members use current request/approve or
 //! login-grant flows. All pre-migration credentials, invites, and device
 //! sessions are void.
+//!
+//! ## Departed memberships (v3 `left_at IS NOT NULL`)
+//!
+//! Inventory row filter drops departed membership rows (hard-delete disposition).
+//! Retained Record / CarePlan / CustomItem / FulfillmentCandidate facts (and
+//! committed bundle roots/stagers) that reference a departed membership have
+//! author/submitter/stager fields anonymized to match live
+//! `hard_delete_membership`. Device/credential/request/session shells stay
+//! TargetOnlyEmpty — never copy departed identity trees. Active Owner uniqueness
+//! and active display-name conflicts remain fail-closed; departed rows do not
+//! participate.
 
 #![allow(dead_code)]
 

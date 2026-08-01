@@ -439,3 +439,18 @@ docker compose start
 
 恢复时同样替换整个数据根并重启容器。数据库回滚会由 cursor/generation
 恢复协议通知 Android 执行全量重新汇合。
+
+### 离线 v3→current 迁移（`lezi-sync offline-migrate`）
+
+一次性 NAS 运维 CLI（**非**服务启动自动升级）。机器可读 inventory 在
+`src/offline_migrate/inventory.rs`。与 live `hard_delete_membership` 对齐：
+
+- **Active membership**（`left_at IS NULL`）才复制到目标库。
+- **Departed membership**（v3 `left_at IS NOT NULL`）按 hard-delete 丢弃：不复制
+  membership 行、不占用 display name、不复制 device/credential/request/session。
+- 保留的 Record / CarePlan / CustomItem / FulfillmentCandidate 以及 committed
+  bundle 的作者/提交者/stager 引用若指向 departed membership，置 null / 空串
+  （匿名事实），禁止悬空 FK 或伪归因。
+- dry-run 与 migrate 共用同一 disposition；报告区分 `memberships`（copied）与
+  `discarded_departed_memberships` / `anonymized_membership_refs`。
+- 迁移后 members API 无需也不能再“清理”旧 departed 行——目标库已无 tombstone。

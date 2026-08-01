@@ -40,6 +40,11 @@ pub(crate) enum RowFilter {
         column: &'static str,
         value: &'static str,
     },
+    /// Discard whole rows when `column` IS NOT NULL (non-authoritative).
+    /// Used for v3 departed memberships (`left_at`): treated as hard-delete, not
+    /// identity tombstones. Counts go to the human report; discard alone does
+    /// **not** fail the run.
+    DiscardRowsWhenNotNull { column: &'static str },
     /// No row filter (Discard / TargetOnlyEmpty tables).
     NotApplicable,
 }
@@ -730,10 +735,28 @@ pub(crate) fn sync_bundles_row_filter() -> RowFilter {
         .expect("sync_bundles disposition")
 }
 
+/// Row filter for `memberships` (must discard departed / `left_at IS NOT NULL`).
+pub(crate) fn memberships_row_filter() -> RowFilter {
+    table_dispositions()
+        .iter()
+        .find(|row| row.source_or_target_name == "memberships")
+        .map(|row| row.row_filter)
+        .expect("memberships disposition")
+}
+
 /// True when a bundle `status` is discarded by the inventory row filter (non-authoritative).
 pub(crate) fn is_discarded_bundle_status(status: &str) -> bool {
     match sync_bundles_row_filter() {
         RowFilter::DiscardRowsWhenEquals { column, value } => column == "status" && status == value,
+        _ => false,
+    }
+}
+
+/// True when a membership row is departed under the inventory row filter
+/// (`left_at IS NOT NULL` → hard-delete + anonymize, not copy).
+pub(crate) fn is_departed_membership_left_at(left_at: Option<i64>) -> bool {
+    match memberships_row_filter() {
+        RowFilter::DiscardRowsWhenNotNull { column } => column == "left_at" && left_at.is_some(),
         _ => false,
     }
 }
@@ -885,8 +908,10 @@ pub(crate) fn table_dispositions() -> &'static [TableDisposition] {
         TableDisposition {
             source_or_target_name: "memberships",
             kind: TableDispositionKind::KeepOrTransform,
-            row_filter: RowFilter::All,
-            note: "Keep role/display_name/left_at; DropColumn device_id; Derive display_name_key",
+            row_filter: RowFilter::DiscardRowsWhenNotNull {
+                column: "left_at",
+            },
+            note: "Active only (left_at IS NULL). Departed rows = hard-delete: drop membership, anonymize author/submitter refs on retained facts; DropColumn device_id; Derive display_name_key",
         },
         TableDisposition {
             source_or_target_name: "membership_credentials",
@@ -1064,7 +1089,7 @@ pub(crate) fn field_mappings() -> &'static [FieldMapping] {
             source_field: Some("left_at"),
             target_field: Some("left_at"),
             disposition: FieldDisposition::Keep,
-            note: "Soft-left timestamp if any",
+            note: "Retained active rows only (row filter drops left_at IS NOT NULL); always NULL on target — never keep departed identity tombstones",
         },
         FieldMapping {
             table: "memberships",
@@ -1517,6 +1542,52 @@ mod tests {
         assert!(!field_mappings().iter().any(|row| {
             row.table == "sync_bundles" && row.disposition == FieldDisposition::Derive
         }));
+    }
+
+    #[test]
+    fn departed_memberships_use_row_filter_hard_delete_not_left_at_keep() {
+        assert_eq!(
+            memberships_row_filter(),
+            RowFilter::DiscardRowsWhenNotNull { column: "left_at" }
+        );
+        assert!(is_departed_membership_left_at(Some(1_700_000_000)));
+        assert!(!is_departed_membership_left_at(None));
+        let memberships = table_dispositions()
+            .iter()
+            .find(|row| row.source_or_target_name == "memberships")
+            .expect("memberships");
+        assert!(
+            memberships
+                .note
+                .to_ascii_lowercase()
+                .contains("hard-delete")
+                || memberships.note.contains("anonymize"),
+            "memberships disposition must document hard-delete + anonymize: {}",
+            memberships.note
+        );
+        assert!(
+            !memberships.note.contains("Keep role/display_name/left_at"),
+            "must not claim left_at keep for departed identity: {}",
+            memberships.note
+        );
+        let left_at = field_mappings()
+            .iter()
+            .find(|row| {
+                row.table == "memberships"
+                    && row.source_field == Some("left_at")
+                    && row.target_field == Some("left_at")
+            })
+            .expect("left_at field map");
+        assert!(
+            left_at.note.contains("active") || left_at.note.contains("NULL"),
+            "left_at map is for retained active rows only: {}",
+            left_at.note
+        );
+        assert!(
+            !left_at.note.to_ascii_lowercase().contains("soft-left"),
+            "must not document soft-left keep: {}",
+            left_at.note
+        );
     }
 
     #[test]

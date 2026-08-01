@@ -3,8 +3,8 @@
 **What to build:** 在 ADR/PRD 明确 `offline-migrate` 是一次已授权维护窗中的离线切割工具，不是 server startup/runtime migration，也不推翻 NAS fresh-current/fail-closed 合同。
 
 **Source:** `AUDIT-20260801-P2-07`  
-**Blocked by:** 14 — document the corrected departed-membership transform  
-**Status:** blocked
+**Blocked by:** 14 — document the corrected departed-membership transform (done)  
+**Status:** ready-for-agent  
 **Size:** S
 
 ## Acceptance criteria

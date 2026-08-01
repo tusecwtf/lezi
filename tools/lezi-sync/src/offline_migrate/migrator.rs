@@ -36,9 +36,9 @@ use crate::{
 };
 
 use super::inventory::{
-    entity_validation_context, is_discarded_bundle_status, payload_validation_policy,
-    source_v3_tables, staging_cascade, target_only_empty_tables, AuthoritativeFailure,
-    StagingCascade, ALLOWED_ENTITY_TYPES, ALLOWED_MEDIA_PUBLICATION_SOURCES,
+    entity_validation_context, is_departed_membership_left_at, is_discarded_bundle_status,
+    payload_validation_policy, source_v3_tables, staging_cascade, target_only_empty_tables,
+    AuthoritativeFailure, StagingCascade, ALLOWED_ENTITY_TYPES, ALLOWED_MEDIA_PUBLICATION_SOURCES,
     BUNDLE_STATUS_COMMITTED, SOURCE_USER_VERSION,
 };
 
@@ -60,7 +60,12 @@ Cutover re-auth (no silent restore):\n\
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct MigrateReport {
     pub families: u64,
+    /// Active memberships copied to the target (`left_at IS NULL` only).
     pub memberships: u64,
+    /// v3 departed memberships (`left_at IS NOT NULL`) dropped — hard-delete disposition.
+    pub discarded_departed_memberships: u64,
+    /// Author/submitter/stager refs on retained facts nulled because they pointed at departed memberships.
+    pub anonymized_membership_refs: u64,
     pub entities: u64,
     pub committed_bundles: u64,
     pub discarded_staging_bundles: u64,
@@ -362,19 +367,29 @@ fn transfer_all(
     let mut report = MigrateReport::default();
 
     let family_ids = copy_families(source, &tx, owner_root_fingerprint, &mut report)?;
-    let membership_ids = copy_memberships(source, &tx, &family_ids, &mut report)?;
+    let MembershipPartition {
+        active_ids: membership_ids,
+        departed_ids,
+    } = copy_memberships(source, &tx, &family_ids, &mut report)?;
     copy_family_meta(source, &tx, &family_ids, &report)?;
-    copy_entities(source, &tx, &family_ids, &mut report)?;
+    copy_entities(source, &tx, &family_ids, &departed_ids, &mut report)?;
 
     let BundlePartition {
         retained,
         discarded_staging,
-    } = partition_bundles(source, &family_ids, &membership_ids, &report)?;
+    } = partition_bundles(source, &family_ids, &membership_ids, &departed_ids, &report)?;
     report.discarded_staging_bundles = discarded_staging.len() as u64;
     // Cleanup evidence: bundle_pending pubs on retained committed bundles (and
     // matching sync_bundle_media) are report-only discards — never file authority.
     let committed_pending_cleanup = collect_committed_pending_cleanup(source, &retained)?;
-    copy_sync_bundles(source, &tx, &retained, &membership_ids, &mut report)?;
+    copy_sync_bundles(
+        source,
+        &tx,
+        &retained,
+        &membership_ids,
+        &departed_ids,
+        &mut report,
+    )?;
     report.discarded_bundle_media = copy_sync_bundle_media(
         source,
         &tx,
@@ -447,12 +462,18 @@ fn copy_families(
     Ok(ids)
 }
 
+/// Active memberships copied vs departed memberships dropped (inventory row filter).
+struct MembershipPartition {
+    active_ids: BTreeSet<String>,
+    departed_ids: BTreeSet<String>,
+}
+
 fn copy_memberships(
     source: &Connection,
     dest: &rusqlite::Transaction<'_>,
     family_ids: &BTreeSet<String>,
     report: &mut MigrateReport,
-) -> Result<BTreeSet<String>, MigrateError> {
+) -> Result<MembershipPartition, MigrateError> {
     let mut stmt = source.prepare(
         "
         SELECT membership_id, family_id, role, display_name, left_at
@@ -470,7 +491,8 @@ fn copy_memberships(
         ))
     })?;
 
-    let mut membership_ids = BTreeSet::new();
+    let mut active_ids = BTreeSet::new();
+    let mut departed_ids = BTreeSet::new();
     let mut active_keys: HashMap<String, HashSet<String>> = HashMap::new();
     let mut active_owners: HashMap<String, u32> = HashMap::new();
 
@@ -490,37 +512,45 @@ fn copy_memberships(
                 report.clone(),
             ));
         }
+
+        // Inventory: DiscardRowsWhenNotNull { left_at } — same disposition as dry-run.
+        if is_departed_membership_left_at(left_at) {
+            departed_ids.insert(membership_id);
+            report.discarded_departed_memberships += 1;
+            continue;
+        }
+
         let display_name_key = normalized_display_name_key(&display_name);
-        if left_at.is_none() {
-            let keys = active_keys.entry(family_id.clone()).or_default();
-            if !keys.insert(display_name_key.clone()) {
+        // Active-only uniqueness (departed rows do not participate).
+        let keys = active_keys.entry(family_id.clone()).or_default();
+        if !keys.insert(display_name_key.clone()) {
+            return Err(MigrateError::authoritative_failure(
+                AuthoritativeFailure::ActiveDisplayNameKeyConflict,
+                format!(
+                    "family `{family_id}` active display_name_key `{display_name_key}` conflict"
+                ),
+                report.clone(),
+            ));
+        }
+        if role == "owner" {
+            // Pre-check before INSERT: target UNIQUE memberships_one_owner would
+            // otherwise surface dual-owner as MigrateError::Sqlite (non-authoritative).
+            let owners = active_owners.entry(family_id.clone()).or_default();
+            *owners += 1;
+            if *owners > 1 {
                 return Err(MigrateError::authoritative_failure(
-                    AuthoritativeFailure::ActiveDisplayNameKeyConflict,
-                    format!(
-                        "family `{family_id}` active display_name_key `{display_name_key}` conflict"
-                    ),
+                    AuthoritativeFailure::NotExactlyOneActiveOwner,
+                    format!("family `{family_id}` has {owners} active owners"),
                     report.clone(),
                 ));
             }
-            if role == "owner" {
-                // Pre-check before INSERT: target UNIQUE memberships_one_owner would
-                // otherwise surface dual-owner as MigrateError::Sqlite (non-authoritative).
-                let owners = active_owners.entry(family_id.clone()).or_default();
-                *owners += 1;
-                if *owners > 1 {
-                    return Err(MigrateError::authoritative_failure(
-                        AuthoritativeFailure::NotExactlyOneActiveOwner,
-                        format!("family `{family_id}` has {owners} active owners"),
-                        report.clone(),
-                    ));
-                }
-            }
         }
+        // Retained active rows: left_at is always NULL on target.
         dest.execute(
             "
             INSERT INTO memberships(
                 membership_id, family_id, role, display_name, display_name_key, left_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, NULL)
             ",
             params![
                 membership_id,
@@ -528,10 +558,9 @@ fn copy_memberships(
                 role,
                 display_name,
                 display_name_key,
-                left_at
             ],
         )?;
-        membership_ids.insert(membership_id);
+        active_ids.insert(membership_id);
         report.memberships += 1;
     }
 
@@ -545,7 +574,30 @@ fn copy_memberships(
             ));
         }
     }
-    Ok(membership_ids)
+    Ok(MembershipPartition {
+        active_ids,
+        departed_ids,
+    })
+}
+
+/// Null `created_by_membership_id` / `submitter_membership_id` when they point at a
+/// departed membership (current hard-delete contract). Returns how many fields cleared.
+fn anonymize_departed_membership_fields(
+    payload: &mut Map<String, Value>,
+    departed_ids: &BTreeSet<String>,
+) -> u64 {
+    let mut cleared = 0u64;
+    for key in ["created_by_membership_id", "submitter_membership_id"] {
+        let points_at_departed = payload
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|id| departed_ids.contains(id));
+        if points_at_departed {
+            payload.insert(key.to_owned(), Value::Null);
+            cleared += 1;
+        }
+    }
+    cleared
 }
 
 fn copy_family_meta(
@@ -590,6 +642,7 @@ fn copy_entities(
     source: &Connection,
     dest: &rusqlite::Transaction<'_>,
     family_ids: &BTreeSet<String>,
+    departed_ids: &BTreeSet<String>,
     report: &mut MigrateReport,
 ) -> Result<(), MigrateError> {
     let policy = payload_validation_policy();
@@ -636,18 +689,22 @@ fn copy_entities(
                 report.clone(),
             )
         })?;
-        let payload: Map<String, Value> = serde_json::from_str(&payload_json).map_err(|e| {
+        let mut payload: Map<String, Value> = serde_json::from_str(&payload_json).map_err(|e| {
             MigrateError::authoritative_failure(
                 AuthoritativeFailure::PayloadValidationFailed,
                 format!("entity `{entity_type}/{client_uuid}` payload parse: {e}"),
                 report.clone(),
             )
         })?;
+        // Hard-delete contract: clear author/submitter refs to departed memberships.
+        report.anonymized_membership_refs +=
+            anonymize_departed_membership_fields(&mut payload, departed_ids);
 
         let is_tombstone = deleted_at.is_some();
         let out_payload = if is_tombstone && !policy.validate_tombstones {
             // Inventory can flip this only by amending payload_validation_policy.
-            payload_json
+            // Still persist anonymized payload when we rewrote authorship.
+            serde_json::to_string(&payload)?
         } else {
             let raw = RawEntity {
                 entity_type: entity_type.clone(),
@@ -666,11 +723,9 @@ fn copy_entities(
                         report.clone(),
                     )
                 })?;
-            if policy.persist_canonical_payload {
-                serde_json::to_string(&validated.payload)?
-            } else {
-                payload_json
-            }
+            // Always persist post-anonymize canonical payload so departed
+            // authorship cannot remain as pseudo-attribution on the target.
+            serde_json::to_string(&validated.payload)?
         };
 
         dest.execute(
@@ -703,7 +758,8 @@ struct BundlePartition {
 fn partition_bundles(
     source: &Connection,
     family_ids: &BTreeSet<String>,
-    membership_ids: &BTreeSet<String>,
+    active_membership_ids: &BTreeSet<String>,
+    departed_membership_ids: &BTreeSet<String>,
     report: &MigrateReport,
 ) -> Result<BundlePartition, MigrateError> {
     let mut stmt = source.prepare(
@@ -742,7 +798,10 @@ fn partition_bundles(
                 report.clone(),
             ));
         }
-        if !membership_ids.contains(&staged_membership_id) {
+        // Stager may be departed (anonymized on copy) but must exist in source partition.
+        let known_stager = active_membership_ids.contains(&staged_membership_id)
+            || departed_membership_ids.contains(&staged_membership_id);
+        if !known_stager {
             return Err(MigrateError::authoritative_failure(
                 AuthoritativeFailure::OrphanAuthoritativeForeignKey,
                 format!(
@@ -763,7 +822,8 @@ fn copy_sync_bundles(
     source: &Connection,
     dest: &rusqlite::Transaction<'_>,
     retained: &BTreeSet<(String, String)>,
-    membership_ids: &BTreeSet<String>,
+    active_membership_ids: &BTreeSet<String>,
+    departed_membership_ids: &BTreeSet<String>,
     report: &mut MigrateReport,
 ) -> Result<(), MigrateError> {
     let policy = payload_validation_policy();
@@ -803,7 +863,9 @@ fn copy_sync_bundles(
         if !retained.contains(&(row.family_id.clone(), row.bundle_id.clone())) {
             continue;
         }
-        if !membership_ids.contains(&row.staged_membership_id) {
+        let known_stager = active_membership_ids.contains(&row.staged_membership_id)
+            || departed_membership_ids.contains(&row.staged_membership_id);
+        if !known_stager {
             return Err(MigrateError::authoritative_failure(
                 AuthoritativeFailure::OrphanAuthoritativeForeignKey,
                 format!(
@@ -813,6 +875,12 @@ fn copy_sync_bundles(
                 report.clone(),
             ));
         }
+        // hard_delete_membership blanks staged_membership_id when stager is deleted.
+        let mut staged_membership_id = row.staged_membership_id.clone();
+        if departed_membership_ids.contains(&staged_membership_id) {
+            staged_membership_id = String::new();
+            report.anonymized_membership_refs += 1;
+        }
 
         let root_uuid = Uuid::parse_str(&row.root_client_uuid).map_err(|e| {
             MigrateError::authoritative_failure(
@@ -821,7 +889,7 @@ fn copy_sync_bundles(
                 report.clone(),
             )
         })?;
-        let root_payload: Map<String, Value> = serde_json::from_str(&row.root_payload_json)
+        let mut root_payload: Map<String, Value> = serde_json::from_str(&row.root_payload_json)
             .map_err(|e| {
                 MigrateError::authoritative_failure(
                     AuthoritativeFailure::PayloadValidationFailed,
@@ -829,13 +897,6 @@ fn copy_sync_bundles(
                     report.clone(),
                 )
             })?;
-        let root_raw = RawEntity {
-            entity_type: row.root_type.clone(),
-            client_uuid: root_uuid,
-            updated_at: row.root_updated_at,
-            deleted_at: row.root_deleted_at,
-            payload: root_payload,
-        };
         let context = entity_validation_context(&row.root_type);
         if matches!(context, EntityValidationContext::AtomicBundleMedia) {
             return Err(MigrateError::authoritative_failure(
@@ -844,7 +905,37 @@ fn copy_sync_bundles(
                 report.clone(),
             ));
         }
-        let canonical_root = root_raw
+        // Source integrity: canonicalize pre-anonymize root for content_hash check.
+        let source_root = RawEntity {
+            entity_type: row.root_type.clone(),
+            client_uuid: root_uuid,
+            updated_at: row.root_updated_at,
+            deleted_at: row.root_deleted_at,
+            payload: root_payload.clone(),
+        }
+        .validate_as(
+            DEFAULT_MAX_MEDIA_BYTES,
+            EntityValidationContext::AtomicBundleRoot,
+        )
+        .map_err(|e| {
+            MigrateError::authoritative_failure(
+                AuthoritativeFailure::PayloadValidationFailed,
+                format!("bundle `{}` root: {e:?}", row.bundle_id),
+                report.clone(),
+            )
+        })?;
+        // Dest write: anonymize author/submitter when pointing at departed memberships.
+        let payload_anonymized =
+            anonymize_departed_membership_fields(&mut root_payload, departed_membership_ids);
+        report.anonymized_membership_refs += payload_anonymized;
+        let canonical_root = if payload_anonymized > 0 {
+            RawEntity {
+                entity_type: row.root_type.clone(),
+                client_uuid: root_uuid,
+                updated_at: row.root_updated_at,
+                deleted_at: row.root_deleted_at,
+                payload: root_payload,
+            }
             .validate_as(
                 DEFAULT_MAX_MEDIA_BYTES,
                 EntityValidationContext::AtomicBundleRoot,
@@ -852,10 +943,13 @@ fn copy_sync_bundles(
             .map_err(|e| {
                 MigrateError::authoritative_failure(
                     AuthoritativeFailure::PayloadValidationFailed,
-                    format!("bundle `{}` root: {e:?}", row.bundle_id),
+                    format!("bundle `{}` root after anonymize: {e:?}", row.bundle_id),
                     report.clone(),
                 )
-            })?;
+            })?
+        } else {
+            source_root.clone()
+        };
 
         let media_value: Value = serde_json::from_str(&row.media_entities_json).map_err(|e| {
             MigrateError::authoritative_failure(
@@ -918,31 +1012,39 @@ fn copy_sync_bundles(
             })?;
         }
 
-        let root_payload_out = if policy.persist_canonical_payload {
-            serde_json::to_string(&canonical_root.payload)?
-        } else {
-            row.root_payload_json.clone()
-        };
+        // Persist canonical root (post-anonymize when needed) so dest has no
+        // departed authorship pseudo-attribution.
+        let root_payload_out = serde_json::to_string(&canonical_root.payload)?;
         let media_out = if policy.persist_canonical_payload {
             serde_json::to_string(&canonical_media)?
         } else {
             row.media_entities_json.clone()
         };
 
-        if policy.recompute_content_hash {
-            let recomputed = store::bundle_content_hash(&canonical_root, &canonical_media)
+        let content_hash_out = if policy.recompute_content_hash {
+            // Always verify source integrity against pre-anonymize canonical form.
+            let source_hash = store::bundle_content_hash(&source_root, &canonical_media)
                 .map_err(|e| MigrateError::Internal(format!("content hash: {e}")))?;
-            if recomputed != row.content_hash {
+            if source_hash != row.content_hash {
                 return Err(MigrateError::authoritative_failure(
                     AuthoritativeFailure::ContentHashMismatchAfterCanonicalize,
                     format!(
                         "bundle `{}` content_hash stored={} recomputed={}",
-                        row.bundle_id, row.content_hash, recomputed
+                        row.bundle_id, row.content_hash, source_hash
                     ),
                     report.clone(),
                 ));
             }
-        }
+            if payload_anonymized > 0 {
+                // hard_delete recomputes after anonymize; dest must match rewritten root.
+                store::bundle_content_hash(&canonical_root, &canonical_media)
+                    .map_err(|e| MigrateError::Internal(format!("content hash: {e}")))?
+            } else {
+                row.content_hash.clone()
+            }
+        } else {
+            row.content_hash.clone()
+        };
 
         dest.execute(
             "
@@ -961,7 +1063,7 @@ fn copy_sync_bundles(
             params![
                 row.family_id,
                 row.bundle_id,
-                row.staged_membership_id,
+                staged_membership_id,
                 row.status,
                 row.root_type,
                 row.root_client_uuid,
@@ -969,7 +1071,7 @@ fn copy_sync_bundles(
                 row.root_deleted_at,
                 root_payload_out,
                 media_out,
-                row.content_hash,
+                content_hash_out,
                 row.created_at,
                 row.committed_at,
                 row.committed_cursor,
@@ -1978,6 +2080,378 @@ mod tests {
             Some(AuthoritativeFailure::ActiveDisplayNameKeyConflict)
         );
         assert!(!dest.exists());
+    }
+
+    /// Ticket 14: departed Member with historical facts + candidate + same-name
+    /// active replacement — drop tombstone, anonymize refs, free the name.
+    #[test]
+    fn migrate_drops_departed_membership_anonymizes_facts_and_frees_display_name() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let dest = dir.path().join("out").join("lezi.db");
+
+        let departed_id = "mem-departed";
+        let active_same_name = "mem-new-grandma";
+        let record_uuid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        let plan_uuid = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        let candidate_uuid = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+        let custom_uuid = "dddddddd-dddd-dddd-dddd-dddddddddddd";
+        let left_at: i64 = 1_700_000_000;
+
+        {
+            let conn = open_v3_fixture(&source);
+            // Owner 爸爸 + member 妈妈 from seed; departed/new share 奶奶.
+            seed_minimal_family(&conn);
+            seed_baby_entity(&conn);
+            // Departed member who shared the display name "奶奶" with an active replacement.
+            conn.execute(
+                "
+                INSERT INTO memberships(membership_id, family_id, role, device_id, display_name, left_at)
+                VALUES (?1, 'fam-1', 'member', 'dev-left', '奶奶', ?2)
+                ",
+                params![departed_id, left_at],
+            )
+            .unwrap();
+            // Active replacement reuses the freed name (would conflict if departed were kept).
+            conn.execute(
+                "
+                INSERT INTO memberships(membership_id, family_id, role, device_id, display_name, left_at)
+                VALUES (?1, 'fam-1', 'member', 'dev-new', '奶奶', NULL)
+                ",
+                params![active_same_name],
+            )
+            .unwrap();
+
+            let record_payload = json!({
+                "baby_client_uuid": "11111111-1111-1111-1111-111111111111",
+                "type": "formula",
+                "custom_item_client_uuid": null,
+                "timestamp": 400,
+                "end_timestamp": null,
+                "note": null,
+                "payload_json": {"amount_ml": 90},
+                "schema_version": 2,
+                "created_by_membership_id": departed_id,
+            });
+            conn.execute(
+                "
+                INSERT INTO entities(
+                    family_id, entity_type, client_uuid, updated_at, deleted_at, payload_json, rev
+                ) VALUES ('fam-1', 'record', ?1, 400, NULL, ?2, 2)
+                ",
+                params![record_uuid, record_payload.to_string()],
+            )
+            .unwrap();
+
+            let plan_payload = json!({
+                "baby_client_uuid": "11111111-1111-1111-1111-111111111111",
+                "type": "formula",
+                "custom_item_client_uuid": null,
+                "scheduled_at": 500,
+                "scheduled_zone_id": "Asia/Shanghai",
+                "note": null,
+                "payload_json": {"amount_ml": 100},
+                "schema_version": 2,
+                "status": "pending",
+                "created_by_membership_id": departed_id,
+                "fulfilled_record_client_uuid": null,
+                "fulfilled_at": null,
+            });
+            conn.execute(
+                "
+                INSERT INTO entities(
+                    family_id, entity_type, client_uuid, updated_at, deleted_at, payload_json, rev
+                ) VALUES ('fam-1', 'care_plan', ?1, 500, NULL, ?2, 3)
+                ",
+                params![plan_uuid, plan_payload.to_string()],
+            )
+            .unwrap();
+
+            let candidate_payload = json!({
+                "care_plan_client_uuid": plan_uuid,
+                "record_client_uuid": record_uuid,
+                "actual_timestamp": 400,
+                "submitter_membership_id": departed_id,
+                "submitter_role": "member",
+                "confirmed_at": 401,
+            });
+            conn.execute(
+                "
+                INSERT INTO entities(
+                    family_id, entity_type, client_uuid, updated_at, deleted_at, payload_json, rev
+                ) VALUES ('fam-1', 'fulfillment_candidate', ?1, 401, NULL, ?2, 4)
+                ",
+                params![candidate_uuid, candidate_payload.to_string()],
+            )
+            .unwrap();
+
+            let custom_payload = json!({
+                "name": "旧项目",
+                "icon_slot": 2,
+                "created_by_membership_id": departed_id,
+            });
+            conn.execute(
+                "
+                INSERT INTO entities(
+                    family_id, entity_type, client_uuid, updated_at, deleted_at, payload_json, rev
+                ) VALUES ('fam-1', 'custom_item', ?1, 402, NULL, ?2, 5)
+                ",
+                params![custom_uuid, custom_payload.to_string()],
+            )
+            .unwrap();
+
+            // Committed bundle staged by departed member with author field.
+            let root_uuid = record_uuid;
+            let raw = RawEntity {
+                entity_type: "record".to_owned(),
+                client_uuid: Uuid::parse_str(root_uuid).unwrap(),
+                updated_at: 400,
+                deleted_at: None,
+                payload: record_payload.as_object().unwrap().clone(),
+            };
+            let canonical = raw
+                .validate_as(
+                    DEFAULT_MAX_MEDIA_BYTES,
+                    EntityValidationContext::AtomicBundleRoot,
+                )
+                .unwrap();
+            let media: Vec<Entity> = vec![];
+            let content_hash = store::bundle_content_hash(&canonical, &media).unwrap();
+            let root_payload_json = serde_json::to_string(&canonical.payload).unwrap();
+            let media_json = serde_json::to_string(&media).unwrap();
+            conn.execute(
+                "
+                INSERT INTO sync_bundles(
+                    family_id, bundle_id, staged_membership_id, status, root_type,
+                    root_client_uuid, root_updated_at, root_deleted_at, root_payload_json,
+                    media_entities_json, content_hash, created_at, committed_at,
+                    committed_cursor, committed_applied
+                ) VALUES (
+                    'fam-1', 'bundle-departed-author', ?1, 'committed', 'record',
+                    ?2, 400, NULL, ?3,
+                    ?4, ?5, 400, 401, 5, 1
+                )
+                ",
+                params![
+                    departed_id,
+                    root_uuid,
+                    root_payload_json,
+                    media_json,
+                    content_hash
+                ],
+            )
+            .unwrap();
+        }
+
+        let report = migrate_v3_database(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect("migrate");
+        // seed_minimal: owner + mem-member + active_same_name = 3 active; 1 departed dropped.
+        assert_eq!(report.memberships, 3);
+        assert_eq!(report.discarded_departed_memberships, 1);
+        // record + plan + candidate + custom + bundle root author + bundle stager
+        assert!(
+            report.anonymized_membership_refs >= 5,
+            "expected anonymized refs, got {}",
+            report.anonymized_membership_refs
+        );
+        assert_eq!(report.entities, 5); // baby + record + plan + candidate + custom
+        assert_eq!(report.committed_bundles, 1);
+
+        let conn = Connection::open(&dest).unwrap();
+        let departed_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memberships WHERE membership_id = ?1",
+                params![departed_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(departed_rows, 0, "departed membership must not be copied");
+
+        let left_at_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memberships WHERE left_at IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            left_at_rows, 0,
+            "target must not keep left_at identity tombstones"
+        );
+
+        let grandma_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memberships WHERE display_name = '奶奶' AND left_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(grandma_count, 1, "only active replacement keeps 奶奶");
+
+        let record_author: Option<String> = conn
+            .query_row(
+                "SELECT json_extract(payload_json, '$.created_by_membership_id') FROM entities WHERE client_uuid = ?1",
+                params![record_uuid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(record_author.is_none(), "record author anonymized");
+
+        let plan_author: Option<String> = conn
+            .query_row(
+                "SELECT json_extract(payload_json, '$.created_by_membership_id') FROM entities WHERE client_uuid = ?1",
+                params![plan_uuid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(plan_author.is_none(), "care_plan author anonymized");
+
+        let candidate_submitter: Option<String> = conn
+            .query_row(
+                "SELECT json_extract(payload_json, '$.submitter_membership_id') FROM entities WHERE client_uuid = ?1",
+                params![candidate_uuid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            candidate_submitter.is_none(),
+            "candidate submitter anonymized"
+        );
+
+        let custom_author: Option<String> = conn
+            .query_row(
+                "SELECT json_extract(payload_json, '$.created_by_membership_id') FROM entities WHERE client_uuid = ?1",
+                params![custom_uuid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(custom_author.is_none(), "custom_item author anonymized");
+
+        let (stager, root_author): (String, Option<String>) = conn
+            .query_row(
+                "
+                SELECT staged_membership_id,
+                       json_extract(root_payload_json, '$.created_by_membership_id')
+                FROM sync_bundles WHERE bundle_id = 'bundle-departed-author'
+                ",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stager, "", "departed stager blanked like hard_delete");
+        assert!(root_author.is_none(), "bundle root author anonymized");
+
+        // Current hard_delete / members API must not need to re-clean departed rows.
+        Store::preflight_existing_schema(&dest).expect("preflight");
+        let store = Store::open(&dest).expect("open");
+        let hard_delete_err = store.hard_delete_membership("fam-1", departed_id, 1_800_000_000);
+        assert!(
+            matches!(
+                hard_delete_err,
+                Err(crate::store::StoreError::MembershipNotFound)
+            ),
+            "departed id is already gone: {hard_delete_err:?}"
+        );
+    }
+
+    #[test]
+    fn migrate_fail_closed_when_only_owner_is_departed() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let dest = dir.path().join("lezi.db");
+        {
+            let conn = open_v3_fixture(&source);
+            conn.execute(
+                "INSERT INTO families(id, created_at, create_request_hash, name) VALUES ('fam-1', 1, NULL, 'x')",
+                [],
+            )
+            .unwrap();
+            // Departed Owner only — illegal source: no active Owner after drop.
+            conn.execute(
+                "
+                INSERT INTO memberships(membership_id, family_id, role, device_id, display_name, left_at)
+                VALUES ('mem-old-owner', 'fam-1', 'owner', 'd1', '爸爸', 1_700_000_000)
+                ",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "
+                INSERT INTO memberships(membership_id, family_id, role, device_id, display_name, left_at)
+                VALUES ('mem-member', 'fam-1', 'member', 'd2', '妈妈', NULL)
+                ",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO family_meta(family_id, rev) VALUES ('fam-1', 0)",
+                [],
+            )
+            .unwrap();
+        }
+        let err =
+            migrate_v3_database(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect_err("must fail");
+        assert_eq!(
+            err.authoritative(),
+            Some(AuthoritativeFailure::NotExactlyOneActiveOwner)
+        );
+        if let Some(report) = err.report() {
+            assert_eq!(report.discarded_departed_memberships, 1);
+            assert_eq!(report.memberships, 1); // member copied before owner count fails
+        }
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn migrate_departed_does_not_count_toward_active_display_name_conflict() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let dest = dir.path().join("out").join("lezi.db");
+        {
+            let conn = open_v3_fixture(&source);
+            conn.execute(
+                "INSERT INTO families(id, created_at, create_request_hash, name) VALUES ('fam-1', 1, NULL, 'x')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "
+                INSERT INTO memberships(membership_id, family_id, role, device_id, display_name, left_at)
+                VALUES ('mem-owner', 'fam-1', 'owner', 'd1', '爸爸', NULL)
+                ",
+                [],
+            )
+            .unwrap();
+            // Departed and active share the same display_name — only active participates.
+            conn.execute(
+                "
+                INSERT INTO memberships(membership_id, family_id, role, device_id, display_name, left_at)
+                VALUES ('mem-left', 'fam-1', 'member', 'd2', '奶奶', 1_700_000_000)
+                ",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "
+                INSERT INTO memberships(membership_id, family_id, role, device_id, display_name, left_at)
+                VALUES ('mem-active', 'fam-1', 'member', 'd3', '奶奶', NULL)
+                ",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO family_meta(family_id, rev) VALUES ('fam-1', 0)",
+                [],
+            )
+            .unwrap();
+        }
+        let report = migrate_v3_database(&source, &dest, TEST_NEW_ROOT_PASSWORD).expect("migrate");
+        assert_eq!(report.memberships, 2);
+        assert_eq!(report.discarded_departed_memberships, 1);
+        let conn = Connection::open(&dest).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memberships", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2);
     }
 
     #[test]

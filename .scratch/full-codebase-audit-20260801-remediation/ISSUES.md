@@ -9,9 +9,9 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 - Canonical records: **33**
 - Executable: **32**
-- Done: **11**（01、02、03、04、05、06、07、08、10、12、13）
+- Done: **12**（01、02、03、04、05、06、07、08、10、12、13、14）
 - Current frontier (ready-for-agent): **9**
-- Blocked by dependency: **11**
+- Blocked by dependency: **10**
 - Grill rejected: **1**（18，全面拆 SyncPort capability ports）
 - `architecture-readability-optimization` 与 `directory-structure-clarity` 已并入本 tracker，
   不再保留外部 canonical/once-only 状态。
@@ -34,7 +34,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 ## Frontier
 
-**11、14、16、17、19、20、22、23、25**
+**11、16、17、19、20、21、22、23、25**
 
 ## Tickets
 
@@ -53,14 +53,14 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 | [11](./issues/11-persist-timer-completion-ui-state.md) | Audit P1-11 | 计时完成态跨配置重建 | 10 | M | ready-for-agent |
 | [12](./issues/12-restore-composer-next-feed-offer.md) | Audit P1-12 | Composer 保存后恢复下次喂养 offer | — | M | done |
 | [13](./issues/13-exclude-future-facts-from-aggregation.md) | Audit P1-13 | 聚合排除尚未发生的点事实 | — | S–M | done |
-| [14](./issues/14-drop-departed-memberships-during-migration.md) | Audit P1-14 | 离线迁移丢弃 departed membership | — | M | ready-for-agent |
+| [14](./issues/14-drop-departed-memberships-during-migration.md) | Audit P1-14 | 离线迁移丢弃 departed membership | — | M | done |
 | [15](./issues/15-delete-media-outside-room-transaction.md) | Audit P2-01 | 媒体文件删除移出 Room 写事务 | 02、07 | M | blocked |
 | [16](./issues/16-prune-dead-syncport-surface.md) | Audit P2-02 + readability 04 | 修剪 SyncPort 死公开表面 | 01 | S–M | ready-for-agent |
 | [17](./issues/17-align-tech-md-current-architecture.md) | Audit P2-03 + readability 05 + directory B3 | tech.md 对齐 current 架构真相 | — | S | ready-for-agent |
 | [18](./issues/18-split-sync-capability-ports.md) | Audit P2-04 | 全面拆 SyncPort/RealSyncPort | — | — | wontfix |
 | [19](./issues/19-guard-next-feed-marker-cross-language.md) | Audit P2-05 | 用跨语言 fixture 锁定 next-feed marker | — | S–M | ready-for-agent |
 | [20](./issues/20-retain-layout-undo-across-recreation.md) | Audit P2-06 | 布局 undo 跨配置重建 | — | S–M | ready-for-agent |
-| [21](./issues/21-document-offline-migrate-boundary.md) | Audit P2-07 | 写清 offline-migrate 架构边界 | 14 | S | blocked |
+| [21](./issues/21-document-offline-migrate-boundary.md) | Audit P2-07 | 写清 offline-migrate 架构边界 | 14 | S | ready-for-agent |
 | [22](./issues/22-delete-source-structure-tests.md) | readability 01 | 删除无契约源码结构测试 | — | S | ready-for-agent |
 | [23](./issues/23-unify-member-login-qr-in-family-wizard.md) | readability 02 | 成员登录 QR 归一到家庭向导 | — | M | ready-for-agent |
 | [24](./issues/24-split-family-hosts-and-align-directories.md) | readability 03 + directory C4 | Family 三 host 与目录对齐 | 23 | M–L | blocked |
