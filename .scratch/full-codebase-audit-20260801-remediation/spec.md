@@ -93,6 +93,13 @@ Initial frontier: **01、02、04、06、08、10、12、13、14、17、19、20、
 只有 frontier ticket 使用 `ready-for-agent`。依赖票保持 `blocked`，由 coordinator 在固定
 current HEAD 上确认 blocker 已闭合后再激活，不能仅因另一个分支“正在做”而提前领取。
 
+## Batch release version (operator)
+
+整批整改 + batch 审查验证通过后、最终验收提交前，版本升到 **`0.3.2`**
+（Android `versionName=0.3.2` / `versionCode=9`；lezi-sync crate+镜像默认 `0.3.2`；
+`app-update.json` 对齐 code 9 与 signed Release APK sha256）。版本 bump 必须是独立
+`release(0.3.2)` 提交，不得混入各票原子实现提交。详见 `ISSUES.md` § Batch closeout。
+
 ## Ticket design rules
 
 - 一个 ticket 只有一个可独立验收的行为或结构结果；重复 finding 只保留一个 canonical owner。

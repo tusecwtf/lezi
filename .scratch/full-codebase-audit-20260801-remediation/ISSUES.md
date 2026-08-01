@@ -9,8 +9,9 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 - Canonical records: **33**
 - Executable: **32**
-- Current frontier: **15**
-- Blocked by dependency: **17**
+- Done: **3**（01、02、04）
+- Current frontier (ready-for-agent): **16**
+- Blocked by dependency: **12**
 - Grill rejected: **1**（18，全面拆 SyncPort capability ports）
 - `architecture-readability-optimization` 与 `directory-structure-clarity` 已并入本 tracker，
   不再保留外部 canonical/once-only 状态。
@@ -33,19 +34,19 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 
 ## Frontier
 
-**01、02、04、06、08、10、12、13、14、17、19、20、22、23、25**
+**03、05、06、07、08、10、12、13、14、16、17、19、20、22、23、25**
 
 ## Tickets
 
 | ID | Source | Ticket | Blocked by | Size | Status |
 |----|--------|--------|------------|------|--------|
-| [01](./issues/01-preserve-forced-update-shell.md) | Audit P1-01 | 保留 CUR 强制更新壳 | — | S–M | implemented |
+| [01](./issues/01-preserve-forced-update-shell.md) | Audit P1-01 | 保留 CUR 强制更新壳 | — | S–M | done |
 | [02](./issues/02-cas-media-commit-receipts.md) | Audit P1-02 | 用条件回写确认媒体 commit | — | M | done |
-| [03](./issues/03-acknowledge-synthetic-bundle-roots.md) | Audit P1-03 | 对齐独立媒体包的根发布回执 | 02 | M | blocked |
+| [03](./issues/03-acknowledge-synthetic-bundle-roots.md) | Audit P1-03 | 对齐独立媒体包的根发布回执 | 02 | M | ready-for-agent |
 | [04](./issues/04-freeze-fulfillment-candidate-evidence.md) | Audit P1-04 | 冻结履行候选业务证据 | — | M | done |
-| [05](./issues/05-require-complete-fulfillment-pair.md) | Audit P1-05 | completed 计划必须原子绑定完整 pair | 04 | S–M | blocked |
+| [05](./issues/05-require-complete-fulfillment-pair.md) | Audit P1-05 | completed 计划必须原子绑定完整 pair | 04 | S–M | ready-for-agent |
 | [06](./issues/06-clear-nursing-timer-with-local-data.md) | Audit P1-06 | 本机清空同步停止并清除计时器 | — | M | ready-for-agent |
-| [07](./issues/07-tombstone-avatar-when-deleting-baby.md) | Audit P1-07 | 删除宝宝同时 tombstone 头像 | 02 | M | blocked |
+| [07](./issues/07-tombstone-avatar-when-deleting-baby.md) | Audit P1-07 | 删除宝宝同时 tombstone 头像 | 02 | M | ready-for-agent |
 | [08](./issues/08-carry-plan-photos-through-timer-fulfillment.md) | Audit P1-08 | 计时履行继承护理计划照片 | — | M | ready-for-agent |
 | [09](./issues/09-transfer-composer-draft-to-timer-safely.md) | Audit P1-09 | Composer→Timer 安全转移草稿 | 08 | M | blocked |
 | [10](./issues/10-handle-all-timer-transition-failures.md) | Audit P1-10 | Timer transition 覆盖全部非取消异常 | — | S–M | ready-for-agent |
@@ -54,7 +55,7 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 | [13](./issues/13-exclude-future-facts-from-aggregation.md) | Audit P1-13 | 聚合排除尚未发生的点事实 | — | S–M | ready-for-agent |
 | [14](./issues/14-drop-departed-memberships-during-migration.md) | Audit P1-14 | 离线迁移丢弃 departed membership | — | M | ready-for-agent |
 | [15](./issues/15-delete-media-outside-room-transaction.md) | Audit P2-01 | 媒体文件删除移出 Room 写事务 | 02、07 | M | blocked |
-| [16](./issues/16-prune-dead-syncport-surface.md) | Audit P2-02 + readability 04 | 修剪 SyncPort 死公开表面 | 01 | S–M | blocked |
+| [16](./issues/16-prune-dead-syncport-surface.md) | Audit P2-02 + readability 04 | 修剪 SyncPort 死公开表面 | 01 | S–M | ready-for-agent |
 | [17](./issues/17-align-tech-md-current-architecture.md) | Audit P2-03 + readability 05 + directory B3 | tech.md 对齐 current 架构真相 | — | S | ready-for-agent |
 | [18](./issues/18-split-sync-capability-ports.md) | Audit P2-04 | 全面拆 SyncPort/RealSyncPort | — | — | wontfix |
 | [19](./issues/19-guard-next-feed-marker-cross-language.md) | Audit P2-05 | 用跨语言 fixture 锁定 next-feed marker | — | S–M | ready-for-agent |
@@ -72,6 +73,34 @@ Tracker replan baseline: `0a908f23ae12984bc97d3e291fd6bcbad4301109`
 | [31](./issues/31-extract-lezi-sync-handler-modules.md) | directory D1 | lezi-sync handler 私有模块化 | 05 | L | blocked |
 | [32](./issues/32-extract-lezi-sync-store-modules.md) | directory D2 | lezi-sync Store 私有模块化 | 05、19、31 | L | blocked |
 | [33](./issues/33-codify-implemented-layout-conventions.md) | directory E1 | 固化已落地目录约定并收口 | 17、22、24、26–32 | S | blocked |
+
+## Batch closeout (operator instruction 2026-08-01)
+
+**在整批票实现 + batch 审查验证通过之后、最终验收/release 提交之前，程序版本必须升级到 `0.3.2`。**
+
+当前基线（HEAD 时）：
+
+| 表面 | 当前 | 收口目标 |
+|------|------|----------|
+| Android `versionName` | `0.3.1` | `0.3.2` |
+| Android `versionCode` | `8` | `9`（单调递增） |
+| lezi-sync crate / 镜像默认 | `0.3.1` | `0.3.2` |
+| `deploy/app-update.json` | code 8 / `0.3.1` | code 9 / `0.3.2` + 签名 Release APK 新 sha256 |
+
+应与历史 `release(0.3.1)` / `release: 0.3.0` 对齐的文件至少包括：
+
+- `app/build.gradle.kts`（`versionCode`/`versionName`）
+- `tools/lezi-sync/Cargo.toml` + `Cargo.lock`
+- `tools/lezi-sync/Dockerfile`、`build-image.sh`、`docker-compose.yml`
+- `tools/lezi-sync/deploy/app-update.json`（装签后 APK 再写 sha256）
+- 权威版本展示文：`README.md`、`docs/prd/tech.md`（及必要的 lezi-sync README/DEPLOY 默认示例）
+
+规则：
+
+- **不要**把版本 bump 混进各整改票的原子提交。
+- 所有 executable 票 + batch 审查验证通过后，再做 **单独** `release(0.3.2): …` 提交。
+- `app-update.json` 的 `sha256` 必须来自真实 signed `app-release.apk`，不得伪造。
+- `min_supported_version_code` 保持 `6`（local-data contract 锚点），除非产品另有决定。
 
 ## Execution discipline
 

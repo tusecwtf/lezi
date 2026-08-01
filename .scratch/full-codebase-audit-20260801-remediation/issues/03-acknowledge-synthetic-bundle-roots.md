@@ -4,7 +4,7 @@
 
 **Source:** `AUDIT-20260801-P1-03`  
 **Blocked by:** 02 — media receipt CAS must be stable first  
-**Status:** blocked
+**Status:** ready-for-agent
 **Size:** M
 
 ## Acceptance criteria

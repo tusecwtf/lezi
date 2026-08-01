@@ -5,7 +5,7 @@
 
 **Source:** `AUDIT-20260801-P2-02` + merged readability 04
 **Blocked by:** 01 — 先固定同一 `RealSyncPort` 强制更新 seam
-**Status:** blocked
+**Status:** ready-for-agent
 **Size:** S–M
 
 ## Acceptance criteria

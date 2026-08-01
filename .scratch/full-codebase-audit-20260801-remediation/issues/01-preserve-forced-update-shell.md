@@ -4,7 +4,7 @@
 
 **Source:** `AUDIT-20260801-P1-01`  
 **Blocked by:** None — can start immediately  
-**Status:** implemented  
+**Status:** done  
 **Size:** S–M
 
 ## Acceptance criteria
