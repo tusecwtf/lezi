@@ -1,14 +1,14 @@
 ---
-status: partially superseded by ADR-0012; NAS offline cutover exception in ADR-0013
+status: partially superseded by ADR-0012 for Android local data; NAS fresh-current and fail-closed startup still apply; sole NAS offline cutover exception is documented in ADR-0013 (does not overturn this ADR’s startup contract)
 ---
 
 # 全产品只支持 fresh-current 契约
 
 > Android 本地持久化部分自 0.3.0 基线起由 [ADR-0012](./0012-preserve-android-local-data-across-in-place-upgrades.md)
 > 取代；NAS schema 与家庭同步 wire 仍按本文 fresh-current、fail-closed。
-> 已授权维护窗中的 **offline-migrate** 离线切割是本文的唯一 NAS 例外，见
-> [ADR-0013](./0013-offline-migrate-is-maintenance-window-cutover.md)；它不是服务启动
-> 自动迁移，也不构成一般滚动 schema 兼容。
+> 已授权 **offline-migrate**（备份上的离线 CLI + 维护窗切割切换）是本文的唯一 NAS
+> 例外，见 [ADR-0013](./0013-offline-migrate-is-maintenance-window-cutover.md)；它不是
+> 服务启动自动迁移，也不构成一般滚动 schema 兼容，**不**推翻本文的 fail-closed 启动合同。
 
 Android、家庭同步协议与 NAS 服务只支持当前版本创建的数据和当前版本之间的交互，
 不再维护从旧 Room schema、旧 payload、旧计时/提醒状态、旧 NAS schema 或旧 wire
@@ -68,8 +68,9 @@ fresh-current 不取消已声明的平台兼容：Android 继续支持 `minSdk` 
 ## NAS 离线切割例外（非启动路径）
 
 家庭 NAS 上若仍存在历史 **v3** 数据根，**不得**靠服务启动自动升级。唯一允许的出路是
-[ADR-0013](./0013-offline-migrate-is-maintenance-window-cutover.md) 规定的已授权维护窗
-离线流水线：显式 `lezi-sync offline-migrate` CLI、停服、固定源 schema→current、独立临时
-目标、`validate` 后再切换 data bind。发布二进制可包含该子命令，**不**表示支持一般滚动
-兼容；普通 CD **不得**执行该子命令。权威步骤见
+[ADR-0013](./0013-offline-migrate-is-maintenance-window-cutover.md) 规定的两阶段路径：
+在独立备份上用显式 `lezi-sync offline-migrate` CLI（dry-run / migrate / validate，
+不触碰 live bind），再经**已授权维护窗** stop → dual backup → copy-back → TLS CD →
+health 切换 data bind。发布二进制可包含该子命令，**不**表示支持一般滚动兼容；
+普通 CD **不得**执行该子命令。权威步骤见
 [`tools/lezi-sync/deploy/copy-back-tls-cutover-runbook.md`](../../tools/lezi-sync/deploy/copy-back-tls-cutover-runbook.md)。

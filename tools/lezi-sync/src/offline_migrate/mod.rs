@@ -16,6 +16,8 @@
 //!   runbook + script pointers (does **not** execute live cutover; see ticket 07).
 //! - **07** — [`live_cutover`]: evidence checklist, APK smoke steps, live-cutover
 //!   help + probe script pointer (execution evidence under tracker `evidence/07/`).
+//! - **21** — [`boundary`]: ADR/README/DEPLOY/PRD + CLI help seams; locks prep-before-
+//!   window vs cutover fixed order (does **not** add a second migrator).
 //!
 //! ## Re-auth after cutover (no silent restore)
 //!

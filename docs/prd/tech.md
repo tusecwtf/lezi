@@ -287,9 +287,9 @@ PackageInstaller；失败清理私有暂存且**不** commit 异包。账户区�
 
 **NAS schema / offline-migrate 边界：** 日常启动只接受精确 current schema（fail closed；
 见 [ADR-0008](../adr/0008-support-only-fresh-current-product-contracts.md)）。历史 v3
-数据根**不得**在 server startup 自动迁移；唯一出路是已授权维护窗中的
-`lezi-sync offline-migrate` 离线切割（[ADR-0013](../adr/0013-offline-migrate-is-maintenance-window-cutover.md)）：
-显式 CLI、停服、固定源→current、临时 `out/`、`validate` 后再切换 data bind。发布二进制
+数据根**不得**在 server startup 自动迁移；唯一出路是 [ADR-0013](../adr/0013-offline-migrate-is-maintenance-window-cutover.md)
+的两阶段路径：维护窗前在备份上用显式 `lezi-sync offline-migrate`（固定源→current、
+独立临时 `out/`、`validate`），再经已授权维护窗 stop/copy-back/TLS CD。发布二进制
 含该子命令 ≠ 滚动兼容；普通 CD 不执行。权威 runbook：
 [`tools/lezi-sync/deploy/copy-back-tls-cutover-runbook.md`](../../tools/lezi-sync/deploy/copy-back-tls-cutover-runbook.md)。
 

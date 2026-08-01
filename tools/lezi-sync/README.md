@@ -6,13 +6,14 @@ Docker 容器和一个持久化目录。
 
 ## 数据目录合同
 
-服务仅支持 fresh-only 部署，当前 SQLite `PRAGMA user_version=11`。空数据目录、
+服务仅支持 **fresh-current** 部署，当前 SQLite `PRAGMA user_version=11`。空数据目录、
 不存在的 `lezi.db` 或零字节空库会初始化为当前 v11 schema；已有数据目录只有在
 `user_version=11` 且表、索引、约束完全匹配当前 schema 时才允许重启并保留数据。
 
 任何非空旧版本、未来版本、或声称 v11 但形状不匹配的数据库都在只读预检阶段
 fail closed；不会原位迁移，不会创建 `media/`、`server.secret`、SQLite sidecar，也不会
-改变数据根或数据库权限。旧版本数据不是受支持的部署输入；部署时必须选择新的空数据根。
+改变数据根或数据库权限。旧版本数据不是受支持的日常部署输入；部署时必须选择新的空数据根
+（历史 v3 仅允许维护窗前的离线 `offline-migrate` + 已授权切割，见下文与 ADR-0013）。
 
 ```text
 $LEZI_DATA_DIR/
@@ -443,7 +444,7 @@ docker compose start
 ### 离线 v3→current 切割（`lezi-sync offline-migrate`）
 
 **架构边界（权威）：** [ADR-0013](../../docs/adr/0013-offline-migrate-is-maintenance-window-cutover.md)
-——已授权**维护窗**中的离线切割工具；**不是** server startup / runtime 自动迁移，也
+——离线 CLI 族 + 已授权**维护窗切割**；**不是** server startup / runtime 自动迁移，也
 **不**推翻 [ADR-0008](../../docs/adr/0008-support-only-fresh-current-product-contracts.md)
 的 NAS fresh-current / fail-closed 合同。日常启动仍只接受精确 current schema
 （`user_version` = `DATABASE_SCHEMA_VERSION` 且形状匹配）；探测旧库后自动迁移、
@@ -454,7 +455,9 @@ destructive fallback 或部分原地改写均被禁止。
 
 | 主题 | 合同 |
 |------|------|
-| 唯一流水线 | 显式 CLI → 停服 → 固定源 v3→current → 独立临时 `--out` → `validate` 后切换 data bind |
+| 阶段 A — 离线准备（维护窗前） | 对独立备份：copy-out → `dry-run` / `migrate` / `validate` 于独立 `--out`；**不** stop 现网、**不**写 live bind |
+| 阶段 B — 维护窗切割（固定顺序，不得重排） | stop → dual backup confirm → copy-back → TLS CD → health/ready（见 runbook / `cutover_maintenance_steps`） |
+| 架构不变量 | 显式 CLI；固定源 v3→current；独立临时 `--out`；`validate` 后再切换；进程只开 current |
 | Secret | 运维选定 `LEZI_MIGRATE_NEW_ROOT_PASSWORD` / `--new-root-password`（≥16）；cutover 后作 `LEZI_BOOTSTRAP_SECRET`；**禁止**文档/日志打印明文；目标 `server.secret` 始终重生成 |
 | Data bind | 宿主路径 bind → `/data`；uid `10001:10001`；stop/rm **不**删宿主目录 |
 | 备份 / 回滚 | 本地 copy-out + NAS 侧双备份；失败恢复 **v3 copy-out** 与 pre-cutover 镜像，非半成品 `out/` |
@@ -467,12 +470,14 @@ copy-out / copy-back 脚本：[`deploy/copy-out-nas-data.sh`](deploy/copy-out-na
 普通发版 CD（不含 offline-migrate）：[`deploy/DEPLOY.md`](deploy/DEPLOY.md)。
 
 ```bash
-# 与 `lezi-sync offline-migrate help` 一致；勿在命令中嵌入真实 secret
+# 阶段 A — 维护窗前（服务可仍运行）；与 `lezi-sync offline-migrate help` 一致
+# 勿在命令中嵌入真实 secret
 export LEZI_MIGRATE_NEW_ROOT_PASSWORD='…ops-chosen ≥16 chars…'
 lezi-sync offline-migrate dry-run  --in "$BACKUP_DIR"
 lezi-sync offline-migrate migrate  --in "$BACKUP_DIR" --out "$OUT_DIR"
 lezi-sync offline-migrate validate --out "$OUT_DIR"
-# 维护窗 copy-back / TLS CD：见权威 runbook；help 指针：
+# 阶段 B — 维护窗切割（stop → dual backup → copy-back → TLS CD → health）：
+# 见权威 runbook；help 指针：
 # lezi-sync offline-migrate copy-out-help | copy-back-help | live-cutover-help
 ```
 
