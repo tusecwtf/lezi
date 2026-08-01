@@ -3,61 +3,49 @@ package com.lezi.babylog.domain
 import com.google.common.truth.Truth.assertThat
 import com.google.common.truth.Truth.assertWithMessage
 import com.lezi.babylog.core.model.NEXT_FEED_PLAN_MARKER
-import java.io.File
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.boolean
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import com.lezi.babylog.core.model.NextFeedPlanMarkerFixture
+import com.lezi.babylog.core.model.encodeNextFeedPlanNote
+import com.lezi.babylog.core.model.isNextFeedPlanNote
+import com.lezi.babylog.core.model.visibleNextFeedPlanNote
 import org.junit.Test
 
 /**
- * Domain recognition + strip seams must follow the shared next-feed marker fixture
- * ([config/next-feed-plan-marker.v1.json]) so Kotlin stays aligned with Rust.
+ * Domain next-feed plan note seams use production core.model helpers
+ * ([isNextFeedPlanNote], [visibleNextFeedPlanNote], [encodeNextFeedPlanNote])
+ * locked by the shared classpath fixture via [NextFeedPlanMarkerFixture].
  */
 class NextFeedPlanMarkerSemanticsTest {
     @Test
-    fun domainSeamsMatchCrossLanguageFixture() {
-        val root = Json.parseToJsonElement(
-            resolveRepoFile("config/next-feed-plan-marker.v1.json").readText(),
-        ).jsonObject
-        assertThat(root.getValue("marker").jsonPrimitive.content)
-            .isEqualTo(NEXT_FEED_PLAN_MARKER)
+    fun domainUsesSharedHelpersAgainstCrossLanguageFixture() {
+        val fixture = NextFeedPlanMarkerFixture.load()
+        assertThat(fixture.marker).isEqualTo(NEXT_FEED_PLAN_MARKER)
+        assertThat(fixture.contract).isEqualTo(NextFeedPlanMarkerFixture.CONTRACT_ID)
 
-        val samples = root.getValue("samples").jsonArray
-        for (element in samples) {
-            val sample = element.jsonObject
-            val id = sample.getValue("id").jsonPrimitive.content
-            val note = sample.getValue("note").jsonPrimitive.content
-            val expectedRecognized = sample.getValue("is_next_feed").jsonPrimitive.boolean
-            val expectedVisible = sample["visible_note"]?.jsonPrimitive?.contentOrNull
+        for (sample in fixture.samples) {
+            assertWithMessage("isNextFeedPlanNote(${sample.id})")
+                .that(isNextFeedPlanNote(sample.note))
+                .isEqualTo(sample.isNextFeed)
 
-            assertWithMessage("isNextFeedPlanNote($id)")
-                .that(isNextFeedPlanNote(note))
-                .isEqualTo(expectedRecognized)
-
-            if (expectedRecognized) {
-                assertWithMessage("visibleCarePlanNote($id)")
-                    .that(visibleCarePlanNote(note))
-                    .isEqualTo(expectedVisible)
+            if (sample.isNextFeed) {
+                assertWithMessage("visibleNextFeedPlanNote(${sample.id})")
+                    .that(visibleNextFeedPlanNote(sample.note))
+                    .isEqualTo(sample.visibleNote)
             }
         }
 
         assertThat(isNextFeedPlanNote(null)).isFalse()
-        assertThat(visibleCarePlanNote(null)).isNull()
-        assertThat(visibleCarePlanNote(NEXT_FEED_PLAN_MARKER)).isNull()
-        assertThat(visibleCarePlanNote("$NEXT_FEED_PLAN_MARKER 带奶瓶")).isEqualTo("带奶瓶")
+        assertThat(visibleNextFeedPlanNote(null)).isNull()
+        assertThat(visibleNextFeedPlanNote(NEXT_FEED_PLAN_MARKER)).isNull()
+        assertThat(visibleNextFeedPlanNote("$NEXT_FEED_PLAN_MARKER 带奶瓶")).isEqualTo("带奶瓶")
     }
 
-    private fun resolveRepoFile(relative: String): File {
-        var dir = File(System.getProperty("user.dir")!!).canonicalFile
-        repeat(10) {
-            val candidate = File(dir, relative)
-            if (candidate.isFile) return candidate
-            dir = dir.parentFile
-                ?: error("Could not locate $relative walking up from user.dir")
-        }
-        error("Could not locate $relative")
+    @Test
+    fun domainEncodeUsesProductionHelper() {
+        // Domain CarePlanCoordinator composes via encodeNextFeedPlanNote — lock the seam.
+        assertThat(encodeNextFeedPlanNote(null)).isEqualTo(NEXT_FEED_PLAN_MARKER)
+        assertThat(encodeNextFeedPlanNote("带奶瓶")).isEqualTo("$NEXT_FEED_PLAN_MARKER 带奶瓶")
+        assertThat(encodeNextFeedPlanNote("  bottle  ")).isEqualTo("$NEXT_FEED_PLAN_MARKER bottle")
+        assertThat(isNextFeedPlanNote(encodeNextFeedPlanNote("带奶瓶"))).isTrue()
+        assertThat(visibleNextFeedPlanNote(encodeNextFeedPlanNote("带奶瓶"))).isEqualTo("带奶瓶")
     }
 }

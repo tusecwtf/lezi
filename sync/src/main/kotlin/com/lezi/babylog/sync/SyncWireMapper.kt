@@ -7,9 +7,9 @@ import com.lezi.babylog.core.database.FulfillmentCandidateEntity
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.model.CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION
-import com.lezi.babylog.core.model.NEXT_FEED_PLAN_MARKER
 import com.lezi.babylog.core.model.RecordPayloadCodec
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.isNextFeedPlanNote
 import java.time.LocalDate
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -171,7 +171,7 @@ object SyncWireMapper {
             type = type,
             localCustomItemId = entity.customItemId,
             customItemClientUuid = customItemClientUuid,
-            allowIntentOnlyFeed = entity.note?.startsWith(NEXT_FEED_PLAN_MARKER) == true,
+            allowIntentOnlyFeed = isNextFeedPlanNote(entity.note),
         )
         return SyncEntity(
         type = "care_plan",

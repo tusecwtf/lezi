@@ -40,5 +40,6 @@ dependencies {
     androidTestImplementation(libs.androidx.test.runner)
     testImplementation(libs.truth)
     testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(testFixtures(project(":core:model")))
 
 }

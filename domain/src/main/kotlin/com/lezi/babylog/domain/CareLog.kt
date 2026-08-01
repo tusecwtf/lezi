@@ -34,6 +34,7 @@ import com.lezi.babylog.core.model.RecordPayloadDocument
 import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.CustomPayload
 import com.lezi.babylog.core.model.Sex
+import com.lezi.babylog.core.model.visibleNextFeedPlanNote
 import java.time.LocalDate
 import java.time.ZoneId
 import javax.inject.Inject
@@ -859,7 +860,7 @@ internal fun CarePlanEntity.toModel(): CarePlan =
         customItemId = customItemId,
         scheduledAt = scheduledAt,
         scheduledZoneId = scheduledZoneId,
-        note = visibleCarePlanNote(note),
+        note = visibleNextFeedPlanNote(note),
         payloadJson = payloadJson,
         schemaVersion = schemaVersion,
         status = CarePlanStatus.fromStorage(status),

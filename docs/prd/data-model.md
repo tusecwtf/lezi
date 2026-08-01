@@ -454,11 +454,13 @@ tombstone marker 不属于开放计划。
 **Next-feed note 协议 marker（内部版本化，非用户备注格式）：** CarePlan `note` 以
 `[[lezi:next-feed:v1]]` 为前缀时表示家庭共享的下次喂养意图（`startsWith` 识别；可见备注
 在 marker 后可选，strip 规则与客户端一致）。该前缀是内部 wire/data-model 协议，不是用户
-可编辑的备注语法；履行生成的 Record 不得携带该前缀。Kotlin 生产常量
-`NEXT_FEED_PLAN_MARKER`、Rust crate 内 `NEXT_FEED_PLAN_MARKER`（`model.rs`）保持硬编码；
+可编辑的备注语法；履行生成的 Record 不得携带该前缀。Kotlin 经 `core.model` 的
+`NEXT_FEED_PLAN_MARKER` + `isNextFeedPlanNote` / `visibleNextFeedPlanNote`（domain 与
+sync 共用），Rust crate 内经 `NEXT_FEED_PLAN_MARKER` + `is_next_feed_plan_note`；
 跨语言 build/test 合同见版本化 fixture
 [`config/next-feed-plan-marker.v1.json`](../../config/next-feed-plan-marker.v1.json)
-（marker 字面量与 marker-only / marker+可见备注 / 相似非法 prefix 样例）。运行时不从磁盘
+（marker 字面量与 marker-only / marker+可见备注 / 相似非法 prefix 样例）。客户端 compose
+（`encodeNextFeedPlanNote`）是 Kotlin 侧规则，不进入共享 fixture 语义。运行时不从磁盘
 加载该 fixture。
 
 ### 3.11.1 FulfillmentCandidate（NAS 契约 + 本机）

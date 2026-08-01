@@ -13,7 +13,7 @@ import com.lezi.babylog.core.database.FulfillmentCandidateEntity
 import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.FulfillmentAuthority
 import com.lezi.babylog.core.model.FulfillmentCandidateEvidence
-import com.lezi.babylog.core.model.NEXT_FEED_PLAN_MARKER
+import com.lezi.babylog.core.model.isNextFeedPlanNote
 import com.lezi.babylog.core.database.MediaAssetDao
 import com.lezi.babylog.core.database.MediaAssetEntity
 import com.lezi.babylog.core.database.OutboxDao
@@ -356,8 +356,8 @@ internal class ReplicaSyncEngine(
                 existing.syncDirty ||
                     session.isCreatorAcknowledgementPending("care_plan", entity.clientUuid)
             ) &&
-            existing.note?.startsWith(NEXT_FEED_PLAN_MARKER) == true &&
-            wire.note?.startsWith(NEXT_FEED_PLAN_MARKER) == true &&
+            isNextFeedPlanNote(existing.note) &&
+            isNextFeedPlanNote(wire.note) &&
             existing.createdByMembershipId.isNotBlank() &&
             existing.createdByMembershipId != wire.createdByMembershipId
         // A deterministic next-feed UUID lets the NAS choose one creator when two
@@ -402,7 +402,7 @@ internal class ReplicaSyncEngine(
             wire.type,
             wire.payload,
             customItemId,
-            allowIntentOnlyFeed = wire.note?.startsWith(NEXT_FEED_PLAN_MARKER) == true,
+            allowIntentOnlyFeed = isNextFeedPlanNote(wire.note),
         )
         val terminal = entity.deletedAt != null ||
             wire.status == CarePlanStatus.COMPLETED.storageKey ||
@@ -1354,7 +1354,7 @@ internal class ReplicaSyncEngine(
                     CarePlanStatus.PENDING.storageKey,
                     CarePlanStatus.MISSED.storageKey,
                 ) &&
-                plan.note?.startsWith(NEXT_FEED_PLAN_MARKER) == true
+                isNextFeedPlanNote(plan.note)
             if (plan.createdByMembershipId.isBlank() || memberNextFeedNeedsNasWinner) {
                 capturedPendingCreatorAcknowledgements += CreatorAcknowledgementRef(
                     entityType = "care_plan",

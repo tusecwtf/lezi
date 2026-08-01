@@ -36,6 +36,7 @@ import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.Sex
 import com.lezi.babylog.core.model.SettingsLocal
 import com.lezi.babylog.core.model.displayLabel
+import com.lezi.babylog.core.model.isNextFeedPlanNote
 import com.lezi.babylog.core.model.isPlanableNonStateful
 import com.lezi.babylog.core.model.itemIdentity
 import java.time.LocalDate

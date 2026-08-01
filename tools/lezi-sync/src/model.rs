@@ -2257,11 +2257,6 @@ mod tests {
                 expected,
                 "recognition mismatch for sample {id}"
             );
-            assert_eq!(
-                note.starts_with(NEXT_FEED_PLAN_MARKER),
-                expected,
-                "starts_with must match is_next_feed for sample {id}"
-            );
             if expected {
                 let expected_visible = sample["visible_note"].as_str();
                 assert_eq!(
@@ -2289,21 +2284,28 @@ mod tests {
         assert!(ids.contains("illegal_embedded_not_prefix"));
         assert!(saw_marker_only && saw_marker_plus_visible && saw_illegal);
 
-        // Illegal similar prefixes must not unlock intent-only feed validation.
-        for illegal in [
-            "[[lezi:next-feed:v2]]",
-            "[lezi:next-feed:v1]",
-            "note [[lezi:next-feed:v1]]",
-        ] {
+        // Illegal fixture samples must not unlock intent-only feed validation.
+        for sample in samples {
+            let id = sample["id"].as_str().expect("sample id");
+            let expected = sample["is_next_feed"]
+                .as_bool()
+                .expect("sample is_next_feed");
+            if expected {
+                continue;
+            }
+            let note = sample["note"].as_str().expect("sample note");
+            if note.is_empty() {
+                continue;
+            }
             let mut plan_payload = care_plan_payload();
             plan_payload["type"] = json!("formula");
             plan_payload["payload_json"] = json!({"amount_ml": 0});
-            plan_payload["note"] = json!(illegal);
+            plan_payload["note"] = json!(note);
             assert!(
                 care_plan(plan_payload)
                     .validate_as(1024, EntityValidationContext::AtomicBundleRoot)
                     .is_err(),
-                "illegal note {illegal:?} must not allow intent-only feed"
+                "illegal fixture sample {id} note {note:?} must not allow intent-only feed"
             );
         }
     }

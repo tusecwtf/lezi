@@ -16,8 +16,34 @@ import kotlinx.serialization.json.put
  * Internal CarePlan `note` prefix for family-shared next-feed intent (v1).
  * Not a user-facing note format. Hardcoded at runtime; the versioned build/test
  * contract is `config/next-feed-plan-marker.v1.json` (Kotlin + Rust).
+ *
+ * Recognition, strip, and encode live beside this constant so domain and sync
+ * share one startsWith-based parse surface; the fixture locks samples for CI.
  */
 const val NEXT_FEED_PLAN_MARKER = "[[lezi:next-feed:v1]]"
+
+/** True when [note] carries the next-feed protocol marker as a strict prefix. */
+fun isNextFeedPlanNote(note: String?): Boolean =
+    note?.startsWith(NEXT_FEED_PLAN_MARKER) == true
+
+/**
+ * Visible remainder after stripping the next-feed marker.
+ * Only meaningful when [isNextFeedPlanNote] is true (non-marker notes are not stripped).
+ */
+fun visibleNextFeedPlanNote(note: String?): String? = note
+    ?.removePrefix(NEXT_FEED_PLAN_MARKER)
+    ?.trimStart()
+    ?.takeIf(String::isNotBlank)
+
+/**
+ * Compose a CarePlan note that carries next-feed intent.
+ * Blank/null visible text → marker only; otherwise marker + single ASCII space + trimmed visible.
+ * Encode is a client compose rule (domain uses this helper); recognition/strip are the shared wire contract.
+ */
+fun encodeNextFeedPlanNote(visibleNote: String?): String = buildString {
+    append(NEXT_FEED_PLAN_MARKER)
+    visibleNote?.trim()?.takeIf(String::isNotBlank)?.let { append(' ').append(it) }
+}
 
 const val CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION = 2
 

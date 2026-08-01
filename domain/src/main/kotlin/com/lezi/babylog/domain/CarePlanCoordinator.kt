@@ -22,7 +22,6 @@ import com.lezi.babylog.core.model.FulfillmentAuthority
 import com.lezi.babylog.core.model.FulfillmentCandidate
 import com.lezi.babylog.core.model.FulfillmentCandidateEvidence
 import com.lezi.babylog.core.model.MilkPayload
-import com.lezi.babylog.core.model.NEXT_FEED_PLAN_MARKER
 import com.lezi.babylog.core.model.NextFeedPlanReconciliation
 import com.lezi.babylog.core.model.NursingPayload
 import com.lezi.babylog.core.model.Record
@@ -30,7 +29,10 @@ import com.lezi.babylog.core.model.RecordPayloadCodec
 import com.lezi.babylog.core.model.RecordPayloadDocument
 import com.lezi.babylog.core.model.RecordTime
 import com.lezi.babylog.core.model.RecordType
+import com.lezi.babylog.core.model.encodeNextFeedPlanNote
+import com.lezi.babylog.core.model.isNextFeedPlanNote
 import com.lezi.babylog.core.model.isPlanableCarePlanType
+import com.lezi.babylog.core.model.visibleNextFeedPlanNote
 import com.lezi.babylog.sync.SyncPort
 import java.nio.charset.StandardCharsets
 import java.time.ZoneId
@@ -44,19 +46,6 @@ private val NEXT_FEED_TYPES = setOf(
     RecordType.FORMULA,
     RecordType.PUMPED_FEED,
 )
-
-internal fun isNextFeedPlanNote(note: String?): Boolean =
-    note?.startsWith(NEXT_FEED_PLAN_MARKER) == true
-
-internal fun visibleCarePlanNote(note: String?): String? = note
-    ?.removePrefix(NEXT_FEED_PLAN_MARKER)
-    ?.trimStart()
-    ?.takeIf(String::isNotBlank)
-
-private fun nextFeedPlanNote(visibleNote: String?): String = buildString {
-    append(NEXT_FEED_PLAN_MARKER)
-    visibleNote?.trim()?.takeIf(String::isNotBlank)?.let { append(' ').append(it) }
-}
 
 internal fun nextFeedPlanClientUuid(babyClientUuid: String, generationSeed: String): String =
     UUID.nameUUIDFromBytes(
@@ -264,7 +253,7 @@ internal class CarePlanCoordinator(
                         type = feedType.key,
                         scheduledAt = scheduledAt,
                         scheduledZoneId = zone.id,
-                        note = nextFeedPlanNote(null),
+                        note = encodeNextFeedPlanNote(null),
                         payloadJson = payloadJson,
                         schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
                         status = CarePlanStatus.PENDING.storageKey,
@@ -278,7 +267,7 @@ internal class CarePlanCoordinator(
                         type = feedType.key,
                         scheduledAt = scheduledAt,
                         scheduledZoneId = zone.id,
-                        note = nextFeedPlanNote(visibleCarePlanNote(existing.note)),
+                        note = encodeNextFeedPlanNote(visibleNextFeedPlanNote(existing.note)),
                         payloadJson = payloadJson,
                         schemaVersion = CURRENT_RECORD_PAYLOAD_SCHEMA_VERSION,
                         status = CarePlanStatus.PENDING.storageKey,
@@ -420,7 +409,7 @@ internal class CarePlanCoordinator(
                 // plan is a next-feed plan (never invent a marker; never leave one on the fact).
                 // Non-next-feed plans keep note ?: plan.note without incidental trim/null.
                 val recordNote = if (isNextFeedPlanNote(plan.note)) {
-                    visibleCarePlanNote(note ?: plan.note)
+                    visibleNextFeedPlanNote(note ?: plan.note)
                 } else {
                     note ?: plan.note
                 }
@@ -900,7 +889,7 @@ internal class CarePlanCoordinator(
                 val desiredProjection =
                     projectToSystemCalendar ?: plan.systemCalendarProjectionEnabled
                 val persistedNote = if (isNextFeedPlanNote(plan.note)) {
-                    nextFeedPlanNote(note)
+                    encodeNextFeedPlanNote(note)
                 } else {
                     note
                 }

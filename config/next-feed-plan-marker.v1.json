@@ -4,9 +4,8 @@
   "description": "Internal CarePlan note protocol marker for family-shared next-feed intent. Not a user-facing note format. Production constants stay hardcoded; this file is the build/test contract only.",
   "marker": "[[lezi:next-feed:v1]]",
   "semantics": {
-    "recognition": "note.startsWith(marker)",
-    "strip_visible": "when recognized: removePrefix(marker).trimStart(); blank becomes null. Non-recognized notes do not use strip.",
-    "encode_visible": "marker when visible blank; otherwise marker + single ASCII space + trimmed visible"
+    "recognition": "note.startsWith(marker) — Kotlin isNextFeedPlanNote / Rust is_next_feed_plan_note",
+    "strip_visible": "when recognized: removePrefix(marker).trimStart(); blank becomes null. Non-recognized notes do not use strip."
   },
   "samples": [
     {

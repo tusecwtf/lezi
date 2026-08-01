@@ -18,6 +18,7 @@ import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.core.model.Baby
 import com.lezi.babylog.core.model.CarePlanStatus
 import com.lezi.babylog.core.model.birthWeightValidationError
+import com.lezi.babylog.core.model.isNextFeedPlanNote
 import com.lezi.babylog.core.model.normalizeBabyNickname
 import com.lezi.babylog.sync.SyncPort
 import java.util.UUID
