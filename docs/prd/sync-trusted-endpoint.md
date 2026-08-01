@@ -274,7 +274,7 @@ In-App Updates。完整产品合同见 [tech.md §4.2](./tech.md)。
 | 错误语义 | HTTP 失败 body 含稳定 `code=client_update_required`；客户端映射强制升级，不重试当普通网络错误 |
 | 放行 | 同一有效会话下 `GET /v1/app-update` 与 `GET /v1/app-update/apk` **不**走门槛拒绝，避免升级死锁 |
 | 缺元数据 | 未部署 `app-update.json` 时同步** fail-open**（不砖掉家庭）；元数据/APK 路由对已鉴权调用诚实 404 |
-| 客户端强制壳 | 权威路径已返回 `client_update_required` 时：拉到元数据且 local &lt; min → 可安装强制全屏；拉元数据失败或分类非强制 → 仍发布 **PackageUnknown** 强制壳（重试检查更新），`SyncStatus` 保持 Idle，文案区分于泛同步故障。强制壳上的「重试检查更新」走同一 `checkAppUpdate`：已有 `PackageUnknown`/`WithPackage` 时非 Forced 元数据不得拆壳或展示 optional；仅新的合法 Forced 可替换已验证包 |
+| 客户端强制壳 | 权威路径已返回 `client_update_required` 时：拉到元数据且 local &lt; min → 可安装强制全屏；拉元数据失败或分类非强制 → 仍发布 **PackageUnknown** 强制壳（重试检查更新），`SyncStatus` 保持 Idle，文案区分于泛同步故障。强制壳上的「重试检查更新」走同一 `checkAppUpdate`：已有 `PackageUnknown`/`WithPackage` 时非 Forced 元数据不得拆壳或展示 optional；Result 通道与 `availableForcedAppUpdate` 同为 force-honest（`ForcedPackageUnknown` / 保留的 `ForcedUpdate`），不得 bare UpToDate/Optional 文案；失败同步（网络/5xx）不得 piggyback 拆壳；仅新的合法 Forced 可替换已验证包；权威同步成功后的 piggyback 才可清过期壳 |
 | 资格 | 仅已加入且会话有效；无匿名/未信任 endpoint 的 APK 通道 |
 | 发现 | 前台握手/同步顺带 best-effort 检查；菜单关于区手动检查；可选更新可横幅提示（会话内稍后抑制） |
 

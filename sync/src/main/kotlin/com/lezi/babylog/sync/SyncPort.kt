@@ -181,10 +181,20 @@ data class AppUpdateMetadata(
 /**
  * High-level outcome of [SyncPort.checkAppUpdate].
  *
- * Dual tier on integer versionCode only:
+ * Version classification on integer versionCode only when **no force shell is active**:
  * - local &lt; minSupported → [ForcedUpdate]
  * - minSupported ≤ local &lt; latest → [OptionalUpdate]
  * - local ≥ latest → [UpToDate]
+ *
+ * **Force-shell retention (dual channel):** [availableForcedAppUpdate] is the root
+ * non-dismissible surface after `client_update_required` (CUR). While that flow is
+ * non-null, a metadata re-check that does **not** classify as Forced must **not**
+ * return bare [UpToDate] / [OptionalUpdate] — those would let Settings/Family/retry
+ * UI claim "already latest" or a dismissible optional dialog while the shell still
+ * blocks the app. Instead the check returns [ForcedUpdate] (kept installable package)
+ * or [ForcedPackageUnknown] (shell retained without package). Shell clears only on
+ * NotJoined, a successful non-gated sync piggyback that classifies without preserve,
+ * or a new Forced replacement of package metadata.
  */
 sealed interface AppUpdateCheckResult {
     /** Device has no usable family session; no anonymous update request is made. */
@@ -194,10 +204,17 @@ sealed interface AppUpdateCheckResult {
     /** Server advertises a newer package; user may download and install later. */
     data class OptionalUpdate(val metadata: AppUpdateMetadata) : AppUpdateCheckResult
     /**
-     * Local versionCode is below [AppUpdateMetadata.minSupportedVersionCode].
+     * Local versionCode is below [AppUpdateMetadata.minSupportedVersionCode], or an
+     * existing installable force package is retained after non-Forced metadata.
      * Must surface non-dismissible force UI; optional "稍后" is not allowed.
      */
     data class ForcedUpdate(val metadata: AppUpdateMetadata) : AppUpdateCheckResult
+    /**
+     * Force shell retained after CUR (or equivalent) without installable package
+     * metadata. Maps to [ForcedAppUpdateState.PackageUnknown]; UI must keep
+     * non-dismissible force copy + retry — never "当前已是最新版本" or optional.
+     */
+    data object ForcedPackageUnknown : AppUpdateCheckResult
 }
 
 /**
@@ -350,9 +367,17 @@ interface SyncPort {
     /**
      * Checks whether the trusted family server advertises a newer release APK.
      *
-     * Not joined → [AppUpdateCheckResult.NotJoined] without network I/O.
+     * Not joined → [AppUpdateCheckResult.NotJoined] without network I/O (also clears
+     * optional/forced surfaces).
      * Joined → authenticated metadata fetch; compares integer versionCode only.
      * Failures do not change [status] (update checks must not look like sync errors).
+     *
+     * **Force shell vs Result:** When [availableForcedAppUpdate] is already non-null
+     * (CUR history / PackageUnknown / WithPackage), non-Forced metadata does **not**
+     * demote the shell or publish an optional banner. The returned [AppUpdateCheckResult]
+     * stays force-honest: [AppUpdateCheckResult.ForcedUpdate] for a retained installable
+     * package, [AppUpdateCheckResult.ForcedPackageUnknown] when the shell has no package
+     * yet — never bare UpToDate/Optional while the force surface remains.
      */
     suspend fun checkAppUpdate(): Result<AppUpdateCheckResult> =
         Result.success(AppUpdateCheckResult.NotJoined)

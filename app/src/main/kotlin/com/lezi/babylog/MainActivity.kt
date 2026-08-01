@@ -441,7 +441,8 @@ class RootViewModel @Inject constructor(
 
     /**
      * Re-check update metadata while under a force shell (especially [ForcedAppUpdateState.PackageUnknown]).
-     * Does not dismiss the force surface; successful metadata upgrades it via [forcedAppUpdate].
+     * Does not dismiss the force surface; successful Forced metadata upgrades it via [forcedAppUpdate].
+     * Never surfaces "当前已是最新版本" while a force shell remains (Result and shell stay force-honest).
      */
     fun retryForcedAppUpdateCheck() {
         if (_forcedUpdateBusy.value) return
@@ -451,18 +452,30 @@ class RootViewModel @Inject constructor(
             _forcedUpdateMessage.value = "正在检查更新…"
             try {
                 val result = syncPort.checkAppUpdate()
+                // Prefer live port state after classify (StateFlow may lag one frame).
+                val shellAfter = syncPort.availableForcedAppUpdate().first()
                 result.fold(
                     onSuccess = { check ->
-                        _forcedUpdateMessage.value = when (check) {
-                            is AppUpdateCheckResult.ForcedUpdate -> null
-                            AppUpdateCheckResult.UpToDate -> "当前已是最新版本"
-                            is AppUpdateCheckResult.OptionalUpdate -> null
-                            AppUpdateCheckResult.NotJoined -> "请先连接家庭服务器后再检查更新"
+                        _forcedUpdateMessage.value = when {
+                            // Installable forced package upgraded or retained — clear busy copy.
+                            check is AppUpdateCheckResult.ForcedUpdate -> null
+                            shellAfter is ForcedAppUpdateState.WithPackage -> null
+                            // PackageUnknown retained / force-honest Result — never "already latest".
+                            check is AppUpdateCheckResult.ForcedPackageUnknown ||
+                                shellAfter is ForcedAppUpdateState.PackageUnknown ->
+                                "仍须更新乐记，但暂时无法从家庭服务器获取更新包，请再试「重试检查更新」。"
+                            check is AppUpdateCheckResult.NotJoined ->
+                                "请先连接家庭服务器后再检查更新"
+                            // Shell cleared (should be rare on retry path).
+                            check is AppUpdateCheckResult.UpToDate -> "当前已是最新版本"
+                            check is AppUpdateCheckResult.OptionalUpdate -> null
+                            else -> null
                         }
                     },
                     onFailure = { error ->
-                        _forcedUpdateMessage.value = when (error) {
-                            is ClientUpdateRequiredException ->
+                        _forcedUpdateMessage.value = when {
+                            error is ClientUpdateRequiredException ||
+                                shellAfter != null ->
                                 "仍须更新乐记，但暂时无法从家庭服务器获取更新包，请再试「重试检查更新」。"
                             else -> productUiError(error, "检查更新失败，请稍后重试")
                         }

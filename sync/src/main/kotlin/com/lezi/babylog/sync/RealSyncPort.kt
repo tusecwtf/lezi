@@ -533,9 +533,15 @@ class RealSyncPort @Inject constructor(
         }
         // Piggyback update discovery on user-facing sync/handshake only
         // (not LocalWrite spam). Failures never change SyncStatus.
-        // Skip after client_update_required: handle already classified metadata (or shell);
-        // a second discover can demote PackageUnknown to optional/null (假正常).
-        if (trigger != SyncTrigger.LocalWrite && !handledClientUpdateRequired) {
+        // Skip after client_update_required: handle already classified metadata (or shell).
+        // Only discover after a *successful* sync: a failed PullToRefresh (network/5xx)
+        // must not run non-preserving classify and tear an existing force shell via
+        // temporary non-Forced metadata (AUDIT-20260801-P1-01 假正常 demotion).
+        if (
+            trigger != SyncTrigger.LocalWrite &&
+            !handledClientUpdateRequired &&
+            mapped.isSuccess
+        ) {
             discoverAppUpdateBestEffort(publishWhenDismissed = false)
         }
         return mapped
@@ -796,8 +802,10 @@ class RealSyncPort @Inject constructor(
      * never offers install of a different app.
      *
      * When [preserveExistingForceShell] is true and classification is not Forced,
-     * an existing force surface is left intact and optional is not published —
-     * callers that already observed CUR must not demote via bare UpToDate/Optional.
+     * an existing force surface is left intact, optional is not published, and the
+     * **returned** [AppUpdateCheckResult] stays force-honest ([ForcedUpdate] for a
+     * retained package, [ForcedPackageUnknown] otherwise) — never bare UpToDate/
+     * Optional, so Settings/Family/retry UI cannot claim 假正常 while the shell blocks.
      * Handshake piggyback after a successful sync keeps the default (false) so a
      * genuine non-gated client can clear a stale shell.
      */
@@ -816,13 +824,20 @@ class RealSyncPort @Inject constructor(
             forcedAppUpdateState.value = ForcedAppUpdateState.WithPackage(metadata)
             return AppUpdateCheckResult.ForcedUpdate(metadata)
         }
-        if (preserveExistingForceShell && forcedAppUpdateState.value != null) {
-            // Fail closed: keep PackageUnknown / last WithPackage; never optional banner.
-            optionalAppUpdateState.value = null
-            return if (local >= metadata.versionCode) {
-                AppUpdateCheckResult.UpToDate
-            } else {
-                AppUpdateCheckResult.OptionalUpdate(metadata)
+        if (preserveExistingForceShell) {
+            when (val existing = forcedAppUpdateState.value) {
+                is ForcedAppUpdateState.WithPackage -> {
+                    // Fail closed: keep last installable package; Result matches shell.
+                    optionalAppUpdateState.value = null
+                    return AppUpdateCheckResult.ForcedUpdate(existing.metadata)
+                }
+                ForcedAppUpdateState.PackageUnknown -> {
+                    optionalAppUpdateState.value = null
+                    return AppUpdateCheckResult.ForcedPackageUnknown
+                }
+                null -> {
+                    // No shell to preserve — fall through to normal dual-tier.
+                }
             }
         }
         forcedAppUpdateState.value = null

@@ -220,9 +220,16 @@ class SettingsViewModel @Inject constructor(
             _checkingAppUpdate.value = true
             try {
                 val result = syncPort.checkAppUpdate()
-                _appUpdateOutcome.value = appUpdateUiOutcome(result) { error ->
-                    productUiError(error, "检查更新失败，请稍后重试")
-                }
+                // Pass live force shell so secondary dialog never claims Optional/UpToDate
+                // while root ForcedAppUpdateState is retained (AUDIT-20260801-P1-01).
+                val activeForce = syncPort.availableForcedAppUpdate().first()
+                _appUpdateOutcome.value = appUpdateUiOutcome(
+                    result = result,
+                    failureCopy = { error ->
+                        productUiError(error, "检查更新失败，请稍后重试")
+                    },
+                    activeForcedAppUpdate = activeForce,
+                )
             } finally {
                 _checkingAppUpdate.value = false
             }

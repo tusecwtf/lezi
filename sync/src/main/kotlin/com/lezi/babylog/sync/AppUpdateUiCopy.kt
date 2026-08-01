@@ -49,10 +49,16 @@ sealed interface AppUpdateUiOutcome {
 
 /**
  * Maps high-level [AppUpdateCheckResult] (and transport failures) to dialog copy.
+ *
+ * When a root force shell is active ([availableForcedAppUpdate] non-null), callers
+ * should pass [activeForcedAppUpdate] so Optional/UpToDate cannot surface as a
+ * dismissible dialog or "当前已是最新版本" Message (belt-and-suspenders with
+ * force-honest [AppUpdateCheckResult] from [SyncPort.checkAppUpdate]).
  */
 fun appUpdateUiOutcome(
     result: Result<AppUpdateCheckResult>,
     failureCopy: (Throwable) -> String,
+    activeForcedAppUpdate: ForcedAppUpdateState? = null,
 ): AppUpdateUiOutcome {
     val value = result.getOrElse { error ->
         if (error is ClientUpdateRequiredException ||
@@ -63,10 +69,40 @@ fun appUpdateUiOutcome(
             // dismissible "network" Message. Root overlay remains authoritative.
             return AppUpdateUiOutcome.ForcedUpdatePackageUnknown
         }
+        // Transport failure while force shell is up: keep force-honest outcome.
+        if (activeForcedAppUpdate != null) {
+            return when (activeForcedAppUpdate) {
+                is ForcedAppUpdateState.WithPackage ->
+                    AppUpdateUiOutcome.ForcedUpdate(activeForcedAppUpdate.metadata)
+                ForcedAppUpdateState.PackageUnknown ->
+                    AppUpdateUiOutcome.ForcedUpdatePackageUnknown
+            }
+        }
         return AppUpdateUiOutcome.Message(
             title = "检查更新",
             body = failureCopy(error),
         )
+    }
+    // Force shell wins over bare dual-tier Result if channels ever disagree.
+    if (activeForcedAppUpdate != null) {
+        when (value) {
+            is AppUpdateCheckResult.ForcedUpdate ->
+                return AppUpdateUiOutcome.ForcedUpdate(value.metadata)
+            AppUpdateCheckResult.ForcedPackageUnknown,
+            AppUpdateCheckResult.UpToDate,
+            is AppUpdateCheckResult.OptionalUpdate,
+            -> {
+                return when (activeForcedAppUpdate) {
+                    is ForcedAppUpdateState.WithPackage ->
+                        AppUpdateUiOutcome.ForcedUpdate(activeForcedAppUpdate.metadata)
+                    ForcedAppUpdateState.PackageUnknown ->
+                        AppUpdateUiOutcome.ForcedUpdatePackageUnknown
+                }
+            }
+            AppUpdateCheckResult.NotJoined -> {
+                // NotJoined clears shell in port; still do not claim "latest".
+            }
+        }
     }
     return when (value) {
         AppUpdateCheckResult.NotJoined -> AppUpdateUiOutcome.Message(
@@ -81,6 +117,8 @@ fun appUpdateUiOutcome(
             AppUpdateUiOutcome.OptionalUpdate(value.metadata)
         is AppUpdateCheckResult.ForcedUpdate ->
             AppUpdateUiOutcome.ForcedUpdate(value.metadata)
+        AppUpdateCheckResult.ForcedPackageUnknown ->
+            AppUpdateUiOutcome.ForcedUpdatePackageUnknown
     }
 }
 

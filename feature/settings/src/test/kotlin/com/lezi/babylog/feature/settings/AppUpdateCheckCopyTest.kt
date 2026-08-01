@@ -10,6 +10,7 @@ import com.lezi.babylog.sync.AppUpdateInstallResult
 import com.lezi.babylog.sync.AppUpdateMetadata
 import com.lezi.babylog.sync.AppUpdateUiOutcome
 import com.lezi.babylog.sync.ClientUpdateRequiredException
+import com.lezi.babylog.sync.ForcedAppUpdateState
 import com.lezi.babylog.sync.appUpdateInstallUiOutcome
 import com.lezi.babylog.sync.appUpdateUiOutcome
 import com.lezi.babylog.sync.familySyncError
@@ -118,6 +119,51 @@ class AppUpdateCheckCopyTest {
         )
 
         assertEquals(AppUpdateUiOutcome.ForcedUpdatePackageUnknown, outcome)
+    }
+
+    @Test
+    fun forcedPackageUnknownResultMapsToForcePackageUnknownNotUpToDate() {
+        val outcome = appUpdateUiOutcome(
+            Result.success(AppUpdateCheckResult.ForcedPackageUnknown),
+            failureCopy = { "网络错误" },
+        )
+
+        assertEquals(AppUpdateUiOutcome.ForcedUpdatePackageUnknown, outcome)
+    }
+
+    @Test
+    fun activeForceShellOverridesBareUpToDateResult() {
+        val outcome = appUpdateUiOutcome(
+            result = Result.success(AppUpdateCheckResult.UpToDate),
+            failureCopy = { "网络错误" },
+            activeForcedAppUpdate = ForcedAppUpdateState.PackageUnknown,
+        )
+
+        assertEquals(AppUpdateUiOutcome.ForcedUpdatePackageUnknown, outcome)
+    }
+
+    @Test
+    fun activeForceShellOverridesBareOptionalResult() {
+        val forced = AppUpdateMetadata(
+            packageName = "com.lezi.babylog",
+            versionCode = 9,
+            versionName = "0.4.0",
+            minSupportedVersionCode = 8,
+            sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            releaseNotes = null,
+        )
+        val optional = forced.copy(
+            versionCode = 10,
+            versionName = "0.4.1",
+            minSupportedVersionCode = 1,
+        )
+        val outcome = appUpdateUiOutcome(
+            result = Result.success(AppUpdateCheckResult.OptionalUpdate(optional)),
+            failureCopy = { "网络错误" },
+            activeForcedAppUpdate = ForcedAppUpdateState.WithPackage(forced),
+        )
+
+        assertEquals(AppUpdateUiOutcome.ForcedUpdate(forced), outcome)
     }
 
     @Test
