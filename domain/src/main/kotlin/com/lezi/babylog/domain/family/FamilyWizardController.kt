@@ -1,25 +1,25 @@
 package com.lezi.babylog.domain.family
 import com.lezi.babylog.sync.CreateFamilyResult
-import com.lezi.babylog.sync.CertificateTrustCandidate
-import com.lezi.babylog.sync.FamilyEndpointConfig
+import com.lezi.babylog.sync.session.CertificateTrustCandidate
+import com.lezi.babylog.sync.session.FamilyEndpointConfig
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.OwnerLoginResult
 import com.lezi.babylog.sync.MemberLoginCheckResult
-import com.lezi.babylog.sync.MemberLoginQrPayload
+import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import com.lezi.babylog.sync.MemberLoginQrResult
 import com.lezi.babylog.sync.MemberLoginQrTrustChangedException
 import com.lezi.babylog.sync.MemberLoginQrUnavailableException
-import com.lezi.babylog.sync.MemberLoginStatus
+import com.lezi.babylog.sync.backend.MemberLoginStatus
 import com.lezi.babylog.sync.PendingMemberLogin
-import com.lezi.babylog.sync.FamilyEndpointDraft
+import com.lezi.babylog.sync.session.FamilyEndpointDraft
 import com.lezi.babylog.sync.SyncPort
-import com.lezi.babylog.sync.SyncSession
+import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.SyncTrigger
-import com.lezi.babylog.sync.SetupFamilyState
-import com.lezi.babylog.sync.SetupProbeResult
-import com.lezi.babylog.sync.TrustedEndpointProfile
-import com.lezi.babylog.sync.familySyncError
-import com.lezi.babylog.sync.memberDisplayNameValidationError
+import com.lezi.babylog.sync.session.SetupFamilyState
+import com.lezi.babylog.sync.session.SetupProbeResult
+import com.lezi.babylog.sync.session.TrustedEndpointProfile
+import com.lezi.babylog.sync.session.familySyncError
+import com.lezi.babylog.sync.session.memberDisplayNameValidationError
 import java.io.Serializable
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
@@ -52,8 +52,8 @@ data class FamilyWizardSnapshot(
     val mode: FamilyWizardMode,
     val step: FamilyWizardStep,
     val host: String = "",
-    val portText: String = com.lezi.babylog.sync.DEFAULT_SERVER_PORT.toString(),
-    val scheme: String = com.lezi.babylog.sync.DEFAULT_SERVER_SCHEME,
+    val portText: String = com.lezi.babylog.sync.session.DEFAULT_SERVER_PORT.toString(),
+    val scheme: String = com.lezi.babylog.sync.session.DEFAULT_SERVER_SCHEME,
     val displayName: String = "",
     val familyName: String = "",
     val deviceName: String = "",
@@ -665,7 +665,7 @@ class FamilyWizardController(
             flushPendingMemberLoginQrForget()
             val requestVersion = memberLoginQrRequestVersion.incrementAndGet()
             val normalizedDeviceName = runCatching {
-                com.lezi.babylog.sync.requireDeviceName(deviceName)
+                com.lezi.babylog.sync.backend.requireDeviceName(deviceName)
             }.getOrElse { error ->
                 mutableState.value = FamilyWizardState.MemberLoginQrReady(
                     snapshot = snapshot,
@@ -848,7 +848,7 @@ class FamilyWizardController(
             return
         }
         val deviceNameError = runCatching {
-            com.lezi.babylog.sync.requireDeviceName(snapshot.deviceName)
+            com.lezi.babylog.sync.backend.requireDeviceName(snapshot.deviceName)
         }.exceptionOrNull()?.message
         if (deviceNameError != null) {
             mutableState.value = FamilyWizardState.RetryableFailure(identity, deviceNameError)
@@ -912,7 +912,7 @@ class FamilyWizardController(
             return
         }
         val deviceNameError = runCatching {
-            com.lezi.babylog.sync.requireDeviceName(snapshot.deviceName)
+            com.lezi.babylog.sync.backend.requireDeviceName(snapshot.deviceName)
         }.exceptionOrNull()?.message
         if (deviceNameError != null) {
             mutableState.value = FamilyWizardState.RetryableFailure(identity, deviceNameError)
@@ -1049,7 +1049,7 @@ class FamilyWizardController(
     ) {
         val identity = snapshot.copy(step = FamilyWizardStep.Identity)
         val deviceNameError = runCatching {
-            com.lezi.babylog.sync.requireDeviceName(snapshot.deviceName)
+            com.lezi.babylog.sync.backend.requireDeviceName(snapshot.deviceName)
         }.exceptionOrNull()?.message
         if (deviceNameError != null) {
             mutableState.value = FamilyWizardState.RetryableFailure(identity, deviceNameError)

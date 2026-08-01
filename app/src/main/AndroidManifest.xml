@@ -96,7 +96,7 @@
             </intent-filter>
         </receiver>
         <receiver
-            android:name="com.lezi.babylog.sync.AppUpdateInstallStatusReceiver"
+            android:name="com.lezi.babylog.sync.appupdate.AppUpdateInstallStatusReceiver"
             android:exported="false">
             <intent-filter>
                 <action android:name="com.lezi.babylog.sync.APP_UPDATE_INSTALL_STATUS" />

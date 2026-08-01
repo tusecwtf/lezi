@@ -9,13 +9,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.window.DialogProperties
-import com.lezi.babylog.sync.AppUpdateUiOutcome
-import com.lezi.babylog.sync.forcedUpdateDialogBody
-import com.lezi.babylog.sync.forcedUpdatePackageUnknownBody
-import com.lezi.babylog.sync.forcedUpdateRetryCheckLabel
-import com.lezi.babylog.sync.forcedUpdateTitle
-import com.lezi.babylog.sync.optionalUpdateDialogBody
-
+import com.lezi.babylog.sync.appupdate.AppUpdateUiOutcome
+import com.lezi.babylog.sync.appupdate.forcedUpdateDialogBody
+import com.lezi.babylog.sync.appupdate.forcedUpdatePackageUnknownBody
+import com.lezi.babylog.sync.appupdate.forcedUpdateRetryCheckLabel
+import com.lezi.babylog.sync.appupdate.forcedUpdateTitle
+import com.lezi.babylog.sync.appupdate.optionalUpdateDialogBody
 /** App-update secondary dialogs owned by the account overview host. */
 @Composable
 internal fun OverviewAppUpdateDialogs(

@@ -75,7 +75,7 @@ internal class ConflictAuditQueries(
         val byMembership = members.mapNotNull { member ->
             val id = member.membershipId?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
             val name = member.displayName?.trim()?.takeIf { it.isNotEmpty() }
-                ?: com.lezi.babylog.sync.familyRoleFallbackLabel(member.role)
+                ?: com.lezi.babylog.sync.session.familyRoleFallbackLabel(member.role)
             id to name
         }.toMap()
         // Ensure every candidate membership key exists for fallback labels.
@@ -86,12 +86,12 @@ internal class ConflictAuditQueries(
                     ?: when {
                         mid.isEmpty() -> "未知提交者"
                         FulfillmentAuthority.isAdminRole(candidate.submitterRole) ->
-                            com.lezi.babylog.sync.familyRoleFallbackLabel(
-                                com.lezi.babylog.sync.FamilyRole.Owner,
+                            com.lezi.babylog.sync.session.familyRoleFallbackLabel(
+                                com.lezi.babylog.sync.session.FamilyRole.Owner,
                             )
                         candidate.submitterRole.isNotBlank() ->
-                            com.lezi.babylog.sync.familyRoleFallbackLabel(
-                                com.lezi.babylog.sync.FamilyRole.Member,
+                            com.lezi.babylog.sync.session.familyRoleFallbackLabel(
+                                com.lezi.babylog.sync.session.FamilyRole.Member,
                             )
                         else -> mid
                     }
@@ -172,6 +172,6 @@ internal class ConflictAuditQueries(
 
     private suspend fun isFamilyAdmin(): Boolean {
         val session = syncPort.session().first()
-        return session.role == com.lezi.babylog.sync.FamilyRole.Owner
+        return session.role == com.lezi.babylog.sync.session.FamilyRole.Owner
     }
 }

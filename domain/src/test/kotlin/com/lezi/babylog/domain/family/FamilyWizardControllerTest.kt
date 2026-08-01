@@ -1,20 +1,20 @@
 package com.lezi.babylog.domain.family
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.sync.CreateFamilyResult
-import com.lezi.babylog.sync.CertificateTrustCandidate
-import com.lezi.babylog.sync.FamilyEndpointConfig
+import com.lezi.babylog.sync.session.CertificateTrustCandidate
+import com.lezi.babylog.sync.session.FamilyEndpointConfig
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.OwnerLoginResult
 import com.lezi.babylog.sync.MemberLoginCheckResult
-import com.lezi.babylog.sync.MemberLoginQrPayload
+import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import com.lezi.babylog.sync.MemberLoginQrResult
 import com.lezi.babylog.sync.MemberLoginQrUnavailableException
-import com.lezi.babylog.sync.MemberLoginStatus
+import com.lezi.babylog.sync.backend.MemberLoginStatus
 import com.lezi.babylog.sync.PendingMemberLogin
-import com.lezi.babylog.sync.SetupFamilyState
-import com.lezi.babylog.sync.SetupProbeResult
-import com.lezi.babylog.sync.SyncSession
-import com.lezi.babylog.sync.TrustedEndpointProfile
+import com.lezi.babylog.sync.session.SetupFamilyState
+import com.lezi.babylog.sync.session.SetupProbeResult
+import com.lezi.babylog.sync.session.SyncSession
+import com.lezi.babylog.sync.session.TrustedEndpointProfile
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
@@ -1190,7 +1190,7 @@ private class BlockingFamilyWizardGateway : FamilyWizardGateway {
 private fun ownerSession() = SyncSession(
     familyId = "family-owner",
     accessToken = "owner-token",
-    role = com.lezi.babylog.sync.FamilyRole.Owner,
+    role = com.lezi.babylog.sync.session.FamilyRole.Owner,
     membershipId = "owner-membership",
     serverHost = "nas.home",
 )
@@ -1198,7 +1198,7 @@ private fun ownerSession() = SyncSession(
 private fun memberSession() = SyncSession(
     familyId = "family-member",
     accessToken = "member-token",
-    role = com.lezi.babylog.sync.FamilyRole.Member,
+    role = com.lezi.babylog.sync.session.FamilyRole.Member,
     membershipId = "member-membership",
     serverHost = "nas.home",
 )

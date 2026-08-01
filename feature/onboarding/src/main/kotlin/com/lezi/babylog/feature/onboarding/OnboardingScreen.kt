@@ -96,14 +96,14 @@ import com.lezi.babylog.domain.family.FamilyWizardState
 import com.lezi.babylog.domain.family.FamilyWizardStep
 import com.lezi.babylog.domain.family.SyncFamilyWizardGateway
 import com.lezi.babylog.domain.family.projectMemberLoginQrDialog
-import com.lezi.babylog.sync.FamilyEndpointConfig
-import com.lezi.babylog.sync.CertificateTrustCandidate
-import com.lezi.babylog.sync.FamilyEndpointDraft
-import com.lezi.babylog.sync.MemberLoginQrPayload
-import com.lezi.babylog.sync.MemberLoginQrPayloadCodec
+import com.lezi.babylog.sync.session.FamilyEndpointConfig
+import com.lezi.babylog.sync.session.CertificateTrustCandidate
+import com.lezi.babylog.sync.session.FamilyEndpointDraft
+import com.lezi.babylog.sync.qr.MemberLoginQrPayload
+import com.lezi.babylog.sync.qr.MemberLoginQrPayloadCodec
 import com.lezi.babylog.sync.SyncPort
-import com.lezi.babylog.sync.defaultAndroidDeviceName
-import com.lezi.babylog.sync.requireDeviceName
+import com.lezi.babylog.sync.session.defaultAndroidDeviceName
+import com.lezi.babylog.sync.backend.requireDeviceName
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate
@@ -742,7 +742,7 @@ fun OnboardingRoute(
                 val ready = familyWizardState as? FamilyWizardState.EndpointReady
                 val failure = familyWizardState as? FamilyWizardState.EndpointFailure
                 val certificateChanged =
-                    failure?.reason == com.lezi.babylog.sync.SetupProbeResult.Failed.CertificateChanged
+                    failure?.reason == com.lezi.babylog.sync.session.SetupProbeResult.Failed.CertificateChanged
                 Text(
                     when {
                         familyWizardState is FamilyWizardState.ProbingEndpoint ->

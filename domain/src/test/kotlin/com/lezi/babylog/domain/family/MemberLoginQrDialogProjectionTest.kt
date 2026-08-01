@@ -1,10 +1,10 @@
 package com.lezi.babylog.domain.family
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
-import com.lezi.babylog.sync.MemberLoginQrPayload
-import com.lezi.babylog.sync.FamilyRole
-import com.lezi.babylog.sync.SyncSession
-import com.lezi.babylog.sync.TrustedEndpointProfile
+import com.lezi.babylog.sync.qr.MemberLoginQrPayload
+import com.lezi.babylog.sync.session.FamilyRole
+import com.lezi.babylog.sync.session.SyncSession
+import com.lezi.babylog.sync.session.TrustedEndpointProfile
 import org.junit.Test
 
 class MemberLoginQrDialogProjectionTest {

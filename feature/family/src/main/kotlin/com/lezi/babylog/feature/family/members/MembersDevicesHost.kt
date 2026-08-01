@@ -8,12 +8,12 @@ import com.lezi.babylog.feature.family.FamilyIdentityUi
 import com.lezi.babylog.feature.family.components.familySyncError
 import com.lezi.babylog.feature.family.components.validateFamilyDisplayNameInput
 import com.lezi.babylog.feature.family.components.validateFamilyNameInput
-import com.lezi.babylog.sync.DisplayNameUpdateResult
+import com.lezi.babylog.sync.backend.DisplayNameUpdateResult
 import com.lezi.babylog.sync.FamilyMember
-import com.lezi.babylog.sync.FamilyRole
-import com.lezi.babylog.sync.MemberLoginQrPayload
-import com.lezi.babylog.sync.PendingMemberLoginRequest
-import com.lezi.babylog.sync.PendingMemberRenameRequest
+import com.lezi.babylog.sync.session.FamilyRole
+import com.lezi.babylog.sync.qr.MemberLoginQrPayload
+import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
+import com.lezi.babylog.sync.backend.PendingMemberRenameRequest
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
 import dagger.hilt.android.lifecycle.HiltViewModel

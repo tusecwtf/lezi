@@ -39,9 +39,9 @@ import com.lezi.babylog.feature.family.components.familyRoleLabel
 import com.lezi.babylog.feature.family.components.normalizedFamilyDisplayNameKey
 import com.lezi.babylog.sync.FamilyDevice
 import com.lezi.babylog.sync.FamilyMember
-import com.lezi.babylog.sync.FamilyRole
-import com.lezi.babylog.sync.PendingMemberLoginRequest
-import com.lezi.babylog.sync.PendingMemberRenameRequest
+import com.lezi.babylog.sync.session.FamilyRole
+import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
+import com.lezi.babylog.sync.backend.PendingMemberRenameRequest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale

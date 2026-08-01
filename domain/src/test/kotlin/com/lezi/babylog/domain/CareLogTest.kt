@@ -288,7 +288,7 @@ class CareLogTest {
     fun nextFeedCarePlanDoesNotRewriteAnotherMembersOpenPlan() = runTest {
         val sync = RecordingSyncPort(
             membershipId = "member-local",
-            role = com.lezi.babylog.sync.FamilyRole.Member,
+            role = com.lezi.babylog.sync.session.FamilyRole.Member,
             familyId = "family",
         )
         val fakes = Fakes(sync)
@@ -899,11 +899,11 @@ class CareLogTest {
             ),
         )
         sync.replaceSession(
-            com.lezi.babylog.sync.SyncSession(
+            com.lezi.babylog.sync.session.SyncSession(
                 familyId = "family",
                 deviceId = "member-device",
                 membershipId = "member",
-                role = com.lezi.babylog.sync.FamilyRole.Member,
+                role = com.lezi.babylog.sync.session.FamilyRole.Member,
             ),
         )
 
@@ -958,11 +958,11 @@ class CareLogTest {
             ),
         )
         sync.replaceSession(
-            com.lezi.babylog.sync.SyncSession(
+            com.lezi.babylog.sync.session.SyncSession(
                 familyId = "family",
                 deviceId = "member-device",
                 membershipId = "member",
-                role = com.lezi.babylog.sync.FamilyRole.Member,
+                role = com.lezi.babylog.sync.session.FamilyRole.Member,
             ),
         )
 
@@ -1190,11 +1190,11 @@ class CareLogTest {
                 clientUuid = "authority-b", updatedAt = 11, syncDirty = false, familyAuthority = true),
         )
         sync.replaceSession(
-            com.lezi.babylog.sync.SyncSession(
+            com.lezi.babylog.sync.session.SyncSession(
                 familyId = "family",
                 deviceId = "member-device",
                 membershipId = "member",
-                role = com.lezi.babylog.sync.FamilyRole.Member,
+                role = com.lezi.babylog.sync.session.FamilyRole.Member,
             ),
         )
 
@@ -2269,22 +2269,22 @@ class CareLogTest {
     @Test
     fun pendingCreatorAcknowledgementAllowsOnlyTheExactLocalBlankEntities() = runTest {
         val pending = setOf(
-            com.lezi.babylog.sync.CreatorAcknowledgementRef(
+            com.lezi.babylog.sync.session.CreatorAcknowledgementRef(
                 entityType = "custom_item",
                 clientUuid = "item-local-pending",
             ),
-            com.lezi.babylog.sync.CreatorAcknowledgementRef(
+            com.lezi.babylog.sync.session.CreatorAcknowledgementRef(
                 entityType = "care_plan",
                 clientUuid = "plan-local-pending",
             ),
-            com.lezi.babylog.sync.CreatorAcknowledgementRef(
+            com.lezi.babylog.sync.session.CreatorAcknowledgementRef(
                 entityType = "record",
                 clientUuid = "record-local-pending",
             ),
         )
         val sync = RecordingSyncPort(
             membershipId = "m-canonical",
-            role = com.lezi.babylog.sync.FamilyRole.Member,
+            role = com.lezi.babylog.sync.session.FamilyRole.Member,
             familyId = "fam-1",
             deviceId = "dev-1",
             pendingCreatorAcknowledgements = pending,
@@ -2352,15 +2352,15 @@ class CareLogTest {
     fun pendingCreatorAcknowledgementEnforcesExactEditAndDeletePermissions() = runTest {
         val sync = RecordingSyncPort(
             membershipId = "m-canonical",
-            role = com.lezi.babylog.sync.FamilyRole.Member,
+            role = com.lezi.babylog.sync.session.FamilyRole.Member,
             familyId = "fam-1",
             deviceId = "dev-1",
             pendingCreatorAcknowledgements = setOf(
-                com.lezi.babylog.sync.CreatorAcknowledgementRef(
+                com.lezi.babylog.sync.session.CreatorAcknowledgementRef(
                     "custom_item",
                     "item-local-pending",
                 ),
-                com.lezi.babylog.sync.CreatorAcknowledgementRef(
+                com.lezi.babylog.sync.session.CreatorAcknowledgementRef(
                     "care_plan",
                     "plan-local-pending",
                 ),
@@ -2455,7 +2455,7 @@ class CareLogTest {
     fun customItemStampsCreatorMembershipAndRejectsNonOwnerEdit() = runTest {
         val memberSync = RecordingSyncPort(
             membershipId = "m-member",
-            role = com.lezi.babylog.sync.FamilyRole.Member,
+            role = com.lezi.babylog.sync.session.FamilyRole.Member,
             familyId = "fam-1",
             deviceId = "dev-1",
         )
@@ -2491,7 +2491,7 @@ class CareLogTest {
         // Owner may manage the foreign definition (leave takeover).
         val adminSync = RecordingSyncPort(
             membershipId = "m-admin",
-            role = com.lezi.babylog.sync.FamilyRole.Owner,
+            role = com.lezi.babylog.sync.session.FamilyRole.Owner,
             familyId = "fam-1",
             deviceId = "dev-admin",
         )
@@ -2987,7 +2987,7 @@ class CareLogTest {
     fun recordManagePermissionMatchesMembershipAcl() = runTest {
         val creatorSync = RecordingSyncPort(
             membershipId = "m-creator",
-            role = com.lezi.babylog.sync.FamilyRole.Member,
+            role = com.lezi.babylog.sync.session.FamilyRole.Member,
             familyId = "fam-1",
             deviceId = "dev-1",
         )
@@ -3009,7 +3009,7 @@ class CareLogTest {
         // Foreign ordinary member cannot update/delete/convert.
         val foreignSync = RecordingSyncPort(
             membershipId = "m-other",
-            role = com.lezi.babylog.sync.FamilyRole.Member,
+            role = com.lezi.babylog.sync.session.FamilyRole.Member,
             familyId = "fam-1",
             deviceId = "dev-2",
         )
@@ -3071,7 +3071,7 @@ class CareLogTest {
         // Owner may manage others' records.
         val adminSync = RecordingSyncPort(
             membershipId = "m-admin",
-            role = com.lezi.babylog.sync.FamilyRole.Owner,
+            role = com.lezi.babylog.sync.session.FamilyRole.Owner,
             familyId = "fam-1",
             deviceId = "dev-admin",
         )
@@ -3135,7 +3135,7 @@ class CareLogTest {
     fun carePlanManagePermissionMatchesMembershipAcl() = runTest {
         val creatorSync = RecordingSyncPort(
             membershipId = "m-creator",
-            role = com.lezi.babylog.sync.FamilyRole.Member,
+            role = com.lezi.babylog.sync.session.FamilyRole.Member,
             familyId = "fam-1",
             deviceId = "dev-1",
         )
@@ -3155,7 +3155,7 @@ class CareLogTest {
         // Foreign member cannot skip/edit/delete.
         val foreignSync = RecordingSyncPort(
             membershipId = "m-other",
-            role = com.lezi.babylog.sync.FamilyRole.Member,
+            role = com.lezi.babylog.sync.session.FamilyRole.Member,
             familyId = "fam-1",
             deviceId = "dev-2",
         )
@@ -3192,7 +3192,7 @@ class CareLogTest {
         // Owner can manage others' plans.
         val adminSync = RecordingSyncPort(
             membershipId = "m-admin",
-            role = com.lezi.babylog.sync.FamilyRole.Owner,
+            role = com.lezi.babylog.sync.session.FamilyRole.Owner,
             familyId = "fam-1",
             deviceId = "dev-admin",
         )
@@ -3220,7 +3220,7 @@ class CareLogTest {
     fun foreignMemberCanFulfillOthersPlanWithoutGainingManageRights() = runTest {
         val creatorSync = RecordingSyncPort(
             membershipId = "m-creator",
-            role = com.lezi.babylog.sync.FamilyRole.Member,
+            role = com.lezi.babylog.sync.session.FamilyRole.Member,
             familyId = "fam-1",
             deviceId = "dev-1",
         )
@@ -3240,7 +3240,7 @@ class CareLogTest {
         // Foreign ordinary member fulfills the creator's plan.
         val foreignSync = RecordingSyncPort(
             membershipId = "m-other",
-            role = com.lezi.babylog.sync.FamilyRole.Member,
+            role = com.lezi.babylog.sync.session.FamilyRole.Member,
             familyId = "fam-1",
             deviceId = "dev-2",
         )
@@ -3314,7 +3314,7 @@ class CareLogTest {
         // (ticket 26 residual: originator adjudication before server freeze pull).
         val memberSync = RecordingSyncPort(
             membershipId = "m-member",
-            role = com.lezi.babylog.sync.FamilyRole.Member,
+            role = com.lezi.babylog.sync.session.FamilyRole.Member,
             familyId = "fam-1",
             deviceId = "dev-member",
         )
@@ -3416,7 +3416,7 @@ class CareLogTest {
     fun conflictAuditListAndConvertAreAdminOnlyAndIdempotent() = runTest {
         val memberSync = RecordingSyncPort(
             membershipId = "m-member",
-            role = com.lezi.babylog.sync.FamilyRole.Member,
+            role = com.lezi.babylog.sync.session.FamilyRole.Member,
             familyId = "fam-audit",
             deviceId = "dev-member",
         )
@@ -3484,7 +3484,7 @@ class CareLogTest {
         // Admin path on same data (rebind CareLog with owner session).
         val adminSync = RecordingSyncPort(
             membershipId = "m-owner",
-            role = com.lezi.babylog.sync.FamilyRole.Owner,
+            role = com.lezi.babylog.sync.session.FamilyRole.Owner,
             familyId = "fam-audit",
             deviceId = "dev-owner",
         )
@@ -3567,7 +3567,7 @@ class CareLogTest {
     fun fulfillCarePlanStampsLocalSubmitterTrailFromJoinedSession() = runTest {
         val ownerSync = RecordingSyncPort(
             membershipId = "m-owner-local",
-            role = com.lezi.babylog.sync.FamilyRole.Owner,
+            role = com.lezi.babylog.sync.session.FamilyRole.Owner,
             familyId = "fam-stamp",
             deviceId = "dev-owner",
         )
@@ -6568,7 +6568,7 @@ private class Fakes(
     )
 }
 
-private class FakePolicyClock(var now: Long = 1_000L) : com.lezi.babylog.sync.PolicyClock {
+private class FakePolicyClock(var now: Long = 1_000L) : com.lezi.babylog.sync.session.PolicyClock {
     override fun nowMillis(): Long = now
 }
 
@@ -6785,8 +6785,8 @@ private class RecordingSyncPort(
     private val deviceId: String = "",
     private val familyId: String = "",
     private val membershipId: String = "",
-    private val role: com.lezi.babylog.sync.FamilyRole = com.lezi.babylog.sync.FamilyRole.None,
-    pendingCreatorAcknowledgements: Set<com.lezi.babylog.sync.CreatorAcknowledgementRef> =
+    private val role: com.lezi.babylog.sync.session.FamilyRole = com.lezi.babylog.sync.session.FamilyRole.None,
+    pendingCreatorAcknowledgements: Set<com.lezi.babylog.sync.session.CreatorAcknowledgementRef> =
         emptySet(),
 ) : com.lezi.babylog.sync.SyncPort by delegate {
     var requests = 0
@@ -6796,7 +6796,7 @@ private class RecordingSyncPort(
     val mediaCleanupFailures = ArrayDeque<Throwable>()
 
     private val sessionState = MutableStateFlow(
-        com.lezi.babylog.sync.SyncSession(
+        com.lezi.babylog.sync.session.SyncSession(
             familyId = familyId,
             deviceId = deviceId,
             membershipId = membershipId,
@@ -6805,11 +6805,11 @@ private class RecordingSyncPort(
         ),
     )
 
-    override fun session(): Flow<com.lezi.babylog.sync.SyncSession> = sessionState
+    override fun session(): Flow<com.lezi.babylog.sync.session.SyncSession> = sessionState
 
-    fun currentSession(): com.lezi.babylog.sync.SyncSession = sessionState.value
+    fun currentSession(): com.lezi.babylog.sync.session.SyncSession = sessionState.value
 
-    fun replaceSession(session: com.lezi.babylog.sync.SyncSession) {
+    fun replaceSession(session: com.lezi.babylog.sync.session.SyncSession) {
         sessionState.value = session
     }
 

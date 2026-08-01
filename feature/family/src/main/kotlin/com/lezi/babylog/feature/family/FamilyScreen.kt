@@ -70,15 +70,14 @@ import com.lezi.babylog.feature.family.wizard.MemberLoginRequestDialog
 import com.lezi.babylog.feature.family.wizard.OwnerLoginDialog
 import com.lezi.babylog.feature.family.wizard.OwnerTakeoverConfirmationDialog
 import com.lezi.babylog.feature.family.components.FamilyMessageDialog
-import com.lezi.babylog.sync.FamilyEndpointConfig
-import com.lezi.babylog.sync.FamilyEndpointDraft
-import com.lezi.babylog.sync.FamilyRole
+import com.lezi.babylog.sync.session.FamilyEndpointConfig
+import com.lezi.babylog.sync.session.FamilyEndpointDraft
+import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
-import com.lezi.babylog.sync.MemberLoginQrPayload
-import com.lezi.babylog.sync.MemberLoginQrPayloadCodec
-import com.lezi.babylog.sync.defaultAndroidDeviceName
-import com.lezi.babylog.sync.requireDeviceName
-
+import com.lezi.babylog.sync.qr.MemberLoginQrPayload
+import com.lezi.babylog.sync.qr.MemberLoginQrPayloadCodec
+import com.lezi.babylog.sync.session.defaultAndroidDeviceName
+import com.lezi.babylog.sync.backend.requireDeviceName
 private val FamilyEndpointDraftSaver = listSaver<FamilyEndpointDraft, String>(
     save = {
         listOf(it.host, it.portText, it.scheme)

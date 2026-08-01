@@ -1,7 +1,7 @@
 package com.lezi.babylog.sync
-
 import com.google.common.truth.Truth.assertThat
 import org.junit.Test
+import com.lezi.babylog.sync.backend.SyncBackend
 
 /**
  * Public SyncPort surface contract (ticket 16): production zero-call and

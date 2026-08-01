@@ -1,5 +1,4 @@
 package com.lezi.babylog.sync
-
 import com.lezi.babylog.core.database.BabyDao
 import com.lezi.babylog.core.database.CarePlanDao
 import com.lezi.babylog.core.database.CustomItemDao
@@ -35,6 +34,54 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import com.lezi.babylog.sync.appupdate.APP_UPDATE_METADATA_PACKAGE_MISMATCH_MESSAGE
+import com.lezi.babylog.sync.appupdate.AppUpdateApkIdentityReader
+import com.lezi.babylog.sync.appupdate.AppUpdateInstaller
+import com.lezi.babylog.sync.appupdate.UnreadableAppUpdateApkIdentityReader
+import com.lezi.babylog.sync.appupdate.appUpdateStagingApk
+import com.lezi.babylog.sync.appupdate.appUpdateStagingDir
+import com.lezi.babylog.sync.appupdate.cleanupAppUpdateStagingFiles
+import com.lezi.babylog.sync.appupdate.sha256Hex
+import com.lezi.babylog.sync.appupdate.verifyStagedApkIdentity
+import com.lezi.babylog.sync.backend.ClientUpdateRequiredException
+import com.lezi.babylog.sync.backend.DisplayNameUpdateResult
+import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
+import com.lezi.babylog.sync.backend.PendingMemberRenameRequest
+import com.lezi.babylog.sync.backend.ReauthRequiredException
+import com.lezi.babylog.sync.backend.RemoteDeviceRemovedException
+import com.lezi.babylog.sync.backend.RemoteFamilyDeletedException
+import com.lezi.babylog.sync.backend.RemoteMembershipDeletedException
+import com.lezi.babylog.sync.backend.SyncBackend
+import com.lezi.babylog.sync.backend.SyncHttpException
+import com.lezi.babylog.sync.backend.syncHttpCodeOrNull
+import com.lezi.babylog.sync.clear.LocalReplicaClearCoordinator
+import com.lezi.babylog.sync.engine.CarePlanFamilyAppliedListener
+import com.lezi.babylog.sync.engine.FamilyBabyAuthorityAppliedListener
+import com.lezi.babylog.sync.engine.ForegroundSyncDecision
+import com.lezi.babylog.sync.engine.ForegroundSyncGate
+import com.lezi.babylog.sync.engine.ForegroundSyncRetryPolicy
+import com.lezi.babylog.sync.engine.NoOpCarePlanFamilyAppliedListener
+import com.lezi.babylog.sync.engine.NoOpFamilyBabyAuthorityAppliedListener
+import com.lezi.babylog.sync.engine.ReplicaSyncEngine
+import com.lezi.babylog.sync.engine.ReplicaSyncOutcome
+import com.lezi.babylog.sync.media.ReferenceAwareMediaFileCleanup
+import com.lezi.babylog.sync.media.SyncMediaFileStore
+import com.lezi.babylog.sync.qr.MemberLoginQrPayload
+import com.lezi.babylog.sync.session.CertificateTrustCandidate
+import com.lezi.babylog.sync.session.FamilyEndpointConfig
+import com.lezi.babylog.sync.session.FamilySessionCommand
+import com.lezi.babylog.sync.session.FamilySessionCoordinator
+import com.lezi.babylog.sync.session.FamilySessionOutcome
+import com.lezi.babylog.sync.session.ForegroundState
+import com.lezi.babylog.sync.session.PolicyClock
+import com.lezi.babylog.sync.session.SetupProbe
+import com.lezi.babylog.sync.session.SetupProbeResult
+import com.lezi.babylog.sync.session.SpkiPinMismatchException
+import com.lezi.babylog.sync.session.SyncPreferences
+import com.lezi.babylog.sync.session.SyncSession
+import com.lezi.babylog.sync.session.TrustedEndpointProfile
+import com.lezi.babylog.sync.session.matchesOrigin
+import com.lezi.babylog.sync.backend.clientUpdateRequiredOrNull
 
 @Singleton
 class RealSyncPort @Inject constructor(

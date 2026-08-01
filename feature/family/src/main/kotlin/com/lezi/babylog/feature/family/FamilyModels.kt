@@ -8,11 +8,10 @@ import com.lezi.babylog.feature.family.members.MembersDevicesUi
 import com.lezi.babylog.feature.family.overview.AccountOverviewUi
 import com.lezi.babylog.sync.AppUpdateMetadata
 import com.lezi.babylog.sync.FamilyMember
-import com.lezi.babylog.sync.FamilyRole
+import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.PendingMemberLogin
-import com.lezi.babylog.sync.PendingMemberLoginRequest
-import com.lezi.babylog.sync.PendingMemberRenameRequest
-
+import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
+import com.lezi.babylog.sync.backend.PendingMemberRenameRequest
 /**
  * Shared session-identity fields for account surfaces.
  * Overview and members hosts each project this once; the shell does not re-merge

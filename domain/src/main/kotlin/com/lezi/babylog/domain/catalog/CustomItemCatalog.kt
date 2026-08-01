@@ -138,7 +138,7 @@ internal class CustomItemCatalog(
         return canManageCreatorOwnedFamilyEntity(
             creatorMembershipId = item.createdByMembershipId,
             actorMembershipId = session.membershipId.trim(),
-            actorIsAdmin = session.role == com.lezi.babylog.sync.FamilyRole.Owner,
+            actorIsAdmin = session.role == com.lezi.babylog.sync.session.FamilyRole.Owner,
             creatorAcknowledgementPending = session.isCreatorAcknowledgementPending(
                 entityType = "custom_item",
                 clientUuid = item.clientUuid,
@@ -151,7 +151,7 @@ internal class CustomItemCatalog(
         val allowed = canManageCreatorOwnedFamilyEntity(
             creatorMembershipId = existing.createdByMembershipId,
             actorMembershipId = session.membershipId.trim(),
-            actorIsAdmin = session.role == com.lezi.babylog.sync.FamilyRole.Owner,
+            actorIsAdmin = session.role == com.lezi.babylog.sync.session.FamilyRole.Owner,
             creatorAcknowledgementPending = session.isCreatorAcknowledgementPending(
                 entityType = "custom_item",
                 clientUuid = existing.clientUuid,

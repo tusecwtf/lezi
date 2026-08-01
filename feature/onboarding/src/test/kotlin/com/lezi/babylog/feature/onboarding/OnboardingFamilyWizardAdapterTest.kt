@@ -6,11 +6,11 @@ import com.lezi.babylog.domain.family.FamilyWizardJoinRole
 import com.lezi.babylog.domain.family.FamilyWizardOutcome
 import com.lezi.babylog.domain.family.FamilyWizardState
 import com.lezi.babylog.domain.family.FamilyWizardStep
-import com.lezi.babylog.sync.FamilyRole
-import com.lezi.babylog.sync.FamilyEndpointConfig
+import com.lezi.babylog.sync.session.FamilyRole
+import com.lezi.babylog.sync.session.FamilyEndpointConfig
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
-import com.lezi.babylog.sync.FamilyEndpointDraft
-import com.lezi.babylog.sync.SyncSession
+import com.lezi.babylog.sync.session.FamilyEndpointDraft
+import com.lezi.babylog.sync.session.SyncSession
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -193,8 +193,8 @@ class OnboardingFamilyWizardAdapterTest {
 
     @Test
     fun memberLoginQrVerificationFailedAndReadyFeedbackProjectSharedRetryPolicy() {
-        val payload = com.lezi.babylog.sync.MemberLoginQrPayload(
-            endpoint = com.lezi.babylog.sync.TrustedEndpointProfile.systemPki("https://nas.home"),
+        val payload = com.lezi.babylog.sync.qr.MemberLoginQrPayload(
+            endpoint = com.lezi.babylog.sync.session.TrustedEndpointProfile.systemPki("https://nas.home"),
             grant = "grant-0000000000000000000000000000000000000",
             familyName = "乐乐一家",
             memberDisplayName = "妈妈",

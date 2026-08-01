@@ -17,7 +17,7 @@ import com.lezi.babylog.core.database.MembershipDao
 import com.lezi.babylog.core.database.RecordDao
 import com.lezi.babylog.core.database.RecordEntity
 import com.lezi.babylog.core.datastore.SettingsStore
-import com.lezi.babylog.sync.PolicyClock
+import com.lezi.babylog.sync.session.PolicyClock
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
 import com.lezi.babylog.core.model.Baby

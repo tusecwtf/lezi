@@ -11,7 +11,7 @@ import com.lezi.babylog.feature.family.baby.BabyAvatarFileStore
 import com.lezi.babylog.feature.family.components.canEditFamilyAvatar
 import com.lezi.babylog.feature.family.components.displayFamilyName
 import com.lezi.babylog.sync.AppUpdateMetadata
-import com.lezi.babylog.sync.AppUpdateUiOutcome
+import com.lezi.babylog.sync.appupdate.AppUpdateUiOutcome
 import com.lezi.babylog.sync.PendingMemberLogin
 import com.lezi.babylog.sync.SyncPort
 import dagger.hilt.android.lifecycle.HiltViewModel

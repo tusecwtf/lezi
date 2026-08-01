@@ -10,8 +10,8 @@ import com.lezi.babylog.core.model.shouldStopCapturedNursingTimerSession
 import com.lezi.babylog.sync.LocalClearWorkflow
 import com.lezi.babylog.sync.NoOpSyncPort
 import com.lezi.babylog.sync.SyncPort
-import com.lezi.babylog.sync.SyncSession
-import com.lezi.babylog.sync.localClearCommittedFailure
+import com.lezi.babylog.sync.session.SyncSession
+import com.lezi.babylog.sync.clear.localClearCommittedFailure
 import java.util.concurrent.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.Flow

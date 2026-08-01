@@ -560,9 +560,9 @@ internal class CarePlanCoordinator(
         // stamp local role so admin fulfills adjudicate correctly on the originator.
         val localMembershipId = session.membershipId.trim()
         val localRole = when (session.role) {
-            com.lezi.babylog.sync.FamilyRole.Owner -> "owner"
-            com.lezi.babylog.sync.FamilyRole.Member -> "member"
-            com.lezi.babylog.sync.FamilyRole.None -> ""
+            com.lezi.babylog.sync.session.FamilyRole.Owner -> "owner"
+            com.lezi.babylog.sync.session.FamilyRole.Member -> "member"
+            com.lezi.babylog.sync.session.FamilyRole.None -> ""
         }
         val existing = fulfillmentCandidateDao.listForCarePlan(carePlanClientUuid)
             .firstOrNull { it.recordClientUuid == recordClientUuid && it.deletedAt == null }
@@ -664,7 +664,7 @@ internal class CarePlanCoordinator(
     /** True when the joined session is family owner/admin. */
     suspend fun isFamilyAdmin(): Boolean {
         val session = syncPort.session().first()
-        return session.role == com.lezi.babylog.sync.FamilyRole.Owner
+        return session.role == com.lezi.babylog.sync.session.FamilyRole.Owner
     }
 
 
@@ -816,7 +816,7 @@ internal class CarePlanCoordinator(
         return canManageCreatorOwnedFamilyEntity(
             creatorMembershipId = plan.createdByMembershipId,
             actorMembershipId = session.membershipId.trim(),
-            actorIsAdmin = session.role == com.lezi.babylog.sync.FamilyRole.Owner,
+            actorIsAdmin = session.role == com.lezi.babylog.sync.session.FamilyRole.Owner,
             creatorAcknowledgementPending = session.isCreatorAcknowledgementPending(
                 entityType = "care_plan",
                 clientUuid = plan.clientUuid,
@@ -829,7 +829,7 @@ internal class CarePlanCoordinator(
         return canManageCreatorOwnedFamilyEntity(
             creatorMembershipId = plan.createdByMembershipId,
             actorMembershipId = session.membershipId.trim(),
-            actorIsAdmin = session.role == com.lezi.babylog.sync.FamilyRole.Owner,
+            actorIsAdmin = session.role == com.lezi.babylog.sync.session.FamilyRole.Owner,
             creatorAcknowledgementPending = session.isCreatorAcknowledgementPending(
                 entityType = "care_plan",
                 clientUuid = plan.clientUuid,

@@ -1,13 +1,13 @@
 package com.lezi.babylog.domain.family
 import com.google.common.truth.Truth.assertThat
 import com.lezi.babylog.sync.CreateFamilyResult
-import com.lezi.babylog.sync.FamilyRole
-import com.lezi.babylog.sync.FamilyEndpointConfig
+import com.lezi.babylog.sync.session.FamilyRole
+import com.lezi.babylog.sync.session.FamilyEndpointConfig
 import com.lezi.babylog.sync.NoOpSyncPort
 import com.lezi.babylog.sync.OwnerLoginResult
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
 import com.lezi.babylog.sync.SyncPort
-import com.lezi.babylog.sync.SyncSession
+import com.lezi.babylog.sync.session.SyncSession
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
 

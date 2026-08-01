@@ -85,17 +85,17 @@ import com.lezi.babylog.domain.localdata.LocalDataClearScope
 import com.lezi.babylog.domain.calendar.SystemCalendarConfigurationCoordinator
 import com.lezi.babylog.domain.calendar.SystemCalendarPort
 import com.lezi.babylog.sync.AppUpdateMetadata
-import com.lezi.babylog.sync.AppUpdateUiOutcome
+import com.lezi.babylog.sync.appupdate.AppUpdateUiOutcome
 import com.lezi.babylog.sync.ClientAppVersion
 import com.lezi.babylog.sync.SyncPort
-import com.lezi.babylog.sync.appUpdateInstallUiOutcome
-import com.lezi.babylog.sync.appUpdateUiOutcome
-import com.lezi.babylog.sync.forcedUpdateDialogBody
-import com.lezi.babylog.sync.forcedUpdatePackageUnknownBody
-import com.lezi.babylog.sync.forcedUpdateRetryCheckLabel
-import com.lezi.babylog.sync.forcedUpdateTitle
-import com.lezi.babylog.sync.localAppVersionLabel
-import com.lezi.babylog.sync.optionalUpdateDialogBody
+import com.lezi.babylog.sync.appupdate.appUpdateInstallUiOutcome
+import com.lezi.babylog.sync.appupdate.appUpdateUiOutcome
+import com.lezi.babylog.sync.appupdate.forcedUpdateDialogBody
+import com.lezi.babylog.sync.appupdate.forcedUpdatePackageUnknownBody
+import com.lezi.babylog.sync.appupdate.forcedUpdateRetryCheckLabel
+import com.lezi.babylog.sync.appupdate.forcedUpdateTitle
+import com.lezi.babylog.sync.appupdate.localAppVersionLabel
+import com.lezi.babylog.sync.appupdate.optionalUpdateDialogBody
 import dagger.hilt.android.lifecycle.HiltViewModel
 import java.time.Instant
 import java.time.LocalDate
@@ -132,12 +132,12 @@ data class SettingsUi(
     val current: Baby? = null,
     val customItems: List<CustomRecordItem> = emptyList(),
     val isFamilyJoined: Boolean = false,
-    val familyRole: com.lezi.babylog.sync.FamilyRole = com.lezi.babylog.sync.FamilyRole.None,
+    val familyRole: com.lezi.babylog.sync.session.FamilyRole = com.lezi.babylog.sync.session.FamilyRole.None,
     val systemCalendarTargetSummary: String = "未配置",
     val appVersionName: String = ClientAppVersion.FALLBACK.versionName,
 ) {
     val canManageBabyProfiles: Boolean
-        get() = familyRole != com.lezi.babylog.sync.FamilyRole.Member
+        get() = familyRole != com.lezi.babylog.sync.session.FamilyRole.Member
 
     val appVersionLabel: String
         get() = localAppVersionLabel(appVersionName)

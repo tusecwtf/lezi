@@ -7,9 +7,9 @@ import com.lezi.babylog.feature.family.components.*
 import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.domain.family.FamilyWizardOutcome
 import com.lezi.babylog.sync.FamilyMember
-import com.lezi.babylog.sync.FamilyRole
+import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
-import com.lezi.babylog.sync.SyncSession
+import com.lezi.babylog.sync.session.SyncSession
 import com.lezi.babylog.sync.SyncNotEnabledException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse

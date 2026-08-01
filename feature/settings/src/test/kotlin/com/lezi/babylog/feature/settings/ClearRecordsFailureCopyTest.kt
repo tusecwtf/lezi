@@ -1,6 +1,6 @@
 package com.lezi.babylog.feature.settings
 
-import com.lezi.babylog.sync.localClearCommittedFailure
+import com.lezi.babylog.sync.clear.localClearCommittedFailure
 import org.junit.Assert.assertEquals
 import org.junit.Test
 

@@ -1,6 +1,7 @@
 package com.lezi.babylog.domain
-import com.lezi.babylog.sync.CarePlanFamilyAppliedListener
-import com.lezi.babylog.sync.FamilyBabyAuthorityAppliedListener
+
+import com.lezi.babylog.sync.engine.CarePlanFamilyAppliedListener
+import com.lezi.babylog.sync.engine.FamilyBabyAuthorityAppliedListener
 import com.lezi.babylog.sync.LocalClearRecoveryGate
 import com.lezi.babylog.sync.RemovedDeviceLocalClearGate
 import dagger.Binds

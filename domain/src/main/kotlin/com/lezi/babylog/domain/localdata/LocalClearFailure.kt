@@ -1,5 +1,6 @@
 package com.lezi.babylog.domain.localdata
-import com.lezi.babylog.sync.LocalClearCommittedException
+
+import com.lezi.babylog.sync.clear.LocalClearCommittedException
 
 /**
  * Single committed-clear failure type shared across domain UI and sync cleanup.

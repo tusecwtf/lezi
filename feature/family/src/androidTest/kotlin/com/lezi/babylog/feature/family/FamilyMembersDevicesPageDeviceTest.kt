@@ -34,9 +34,9 @@ import com.lezi.babylog.feature.family.members.DeleteFamilyDialog
 import com.lezi.babylog.feature.family.components.FamilyDialog
 import com.lezi.babylog.sync.FamilyDevice
 import com.lezi.babylog.sync.FamilyMember
-import com.lezi.babylog.sync.FamilyRole
-import com.lezi.babylog.sync.PendingMemberLoginRequest
-import com.lezi.babylog.sync.PendingMemberRenameRequest
+import com.lezi.babylog.sync.session.FamilyRole
+import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
+import com.lezi.babylog.sync.backend.PendingMemberRenameRequest
 import com.google.common.truth.Truth.assertThat
 import org.junit.Rule
 import org.junit.Test

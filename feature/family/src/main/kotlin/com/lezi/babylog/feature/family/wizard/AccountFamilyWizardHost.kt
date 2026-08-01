@@ -9,10 +9,10 @@ import com.lezi.babylog.domain.family.FamilyWizardOutcome
 import com.lezi.babylog.domain.family.FamilyWizardSnapshot
 import com.lezi.babylog.domain.family.FamilyWizardState
 import com.lezi.babylog.domain.family.SyncFamilyWizardGateway
-import com.lezi.babylog.sync.CertificateTrustCandidate
-import com.lezi.babylog.sync.DEFAULT_SERVER_PORT
-import com.lezi.babylog.sync.DEFAULT_SERVER_SCHEME
-import com.lezi.babylog.sync.MemberLoginQrPayload
+import com.lezi.babylog.sync.session.CertificateTrustCandidate
+import com.lezi.babylog.sync.session.DEFAULT_SERVER_PORT
+import com.lezi.babylog.sync.session.DEFAULT_SERVER_SCHEME
+import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import com.lezi.babylog.sync.SyncPort
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject

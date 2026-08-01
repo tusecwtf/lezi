@@ -5,7 +5,7 @@ import android.graphics.Color
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.lezi.babylog.core.model.RecordPhotoResourcePolicy
-import com.lezi.babylog.sync.AndroidSyncMediaFileStore
+import com.lezi.babylog.sync.media.AndroidSyncMediaFileStore
 import java.io.File
 import java.io.RandomAccessFile
 import java.util.UUID

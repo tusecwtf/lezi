@@ -7,11 +7,11 @@ import com.lezi.babylog.domain.family.FamilyWizardEntry
 import com.lezi.babylog.domain.family.FamilyWizardOutcome
 import com.lezi.babylog.domain.family.FamilyWizardSnapshot
 import com.lezi.babylog.sync.FamilyMember
-import com.lezi.babylog.sync.FamilyRole
+import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.InitialFamilyDataRecovery
-import com.lezi.babylog.sync.LOCAL_DEVICE_DISPLAY_NAME
-import com.lezi.babylog.sync.PendingMemberLoginRequest
-import com.lezi.babylog.sync.MemberLoginQrPayload
+import com.lezi.babylog.sync.backend.LOCAL_DEVICE_DISPLAY_NAME
+import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
+import com.lezi.babylog.sync.qr.MemberLoginQrPayload
 import java.text.Normalizer
 import java.util.Locale
 
@@ -31,7 +31,7 @@ internal fun accountFamilyActions(): List<String> = listOf(FamilyPrimaryCta.CONN
 internal fun accountFamilyWizardSnapshot(
     mode: FamilyWizardMode,
     step: FamilyWizardStep,
-    draft: com.lezi.babylog.sync.FamilyEndpointDraft,
+    draft: com.lezi.babylog.sync.session.FamilyEndpointDraft,
     displayName: String,
     familyName: String = "",
     deviceName: String = "",
@@ -216,7 +216,7 @@ internal fun familyDialogAfterDismiss(dialog: FamilyDialog): FamilyDialog? = whe
 }
 
 internal fun familySyncError(error: Throwable, fallback: String): String =
-    com.lezi.babylog.sync.familySyncError(error, fallback)
+    com.lezi.babylog.sync.session.familySyncError(error, fallback)
 
 /**
  * Result-oriented sync phrase for the account **overview** family card (S1).
@@ -383,11 +383,11 @@ internal fun overviewSelfTitle(displayName: String, role: FamilyRole): String {
 
 /**
  * Client-side gate for create/member-request/self-rename free-text 称呼.
- * Delegates to sync [com.lezi.babylog.sync.memberDisplayNameValidationError] so account
+ * Delegates to sync [com.lezi.babylog.sync.session.memberDisplayNameValidationError] so account
  * wizard and onboarding share one rule set (no third form stack).
  */
 internal fun validateFamilyDisplayNameInput(raw: String): String? =
-    com.lezi.babylog.sync.memberDisplayNameValidationError(raw)
+    com.lezi.babylog.sync.session.memberDisplayNameValidationError(raw)
 
 /**
  * Shared family name for display. Empty →「我的家庭」or「{宝宝昵称}的家庭」.

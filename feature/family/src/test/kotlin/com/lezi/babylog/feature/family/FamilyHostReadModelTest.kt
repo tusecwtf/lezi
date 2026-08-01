@@ -5,7 +5,7 @@ import com.lezi.babylog.core.model.SyncStatus
 import com.lezi.babylog.feature.family.members.MembersDevicesUi
 import com.lezi.babylog.feature.family.overview.AccountOverviewUi
 import com.lezi.babylog.sync.FamilyMember
-import com.lezi.babylog.sync.FamilyRole
+import com.lezi.babylog.sync.session.FamilyRole
 import org.junit.Test
 
 /**

@@ -3,9 +3,9 @@ package com.lezi.babylog.feature.family
 import com.lezi.babylog.feature.family.components.*
 
 import com.lezi.babylog.sync.AppUpdateMetadata
-import com.lezi.babylog.sync.optionalAppUpdateBannerContentDescription
-import com.lezi.babylog.sync.optionalAppUpdateBannerLabel
-import com.lezi.babylog.sync.optionalUpdateDialogBody
+import com.lezi.babylog.sync.appupdate.optionalAppUpdateBannerContentDescription
+import com.lezi.babylog.sync.appupdate.optionalAppUpdateBannerLabel
+import com.lezi.babylog.sync.appupdate.optionalUpdateDialogBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue

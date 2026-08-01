@@ -20,8 +20,8 @@ import com.lezi.babylog.core.model.RecordType
 import com.lezi.babylog.core.model.SleepPayload
 import com.lezi.babylog.core.model.isPlanableCarePlanType
 import com.lezi.babylog.core.model.normalizeOpenSleeps
-import com.lezi.babylog.sync.FamilyRole
-import com.lezi.babylog.sync.PolicyClock
+import com.lezi.babylog.sync.session.FamilyRole
+import com.lezi.babylog.sync.session.PolicyClock
 import com.lezi.babylog.sync.SyncPort
 import java.time.ZoneId
 import kotlinx.coroutines.flow.first

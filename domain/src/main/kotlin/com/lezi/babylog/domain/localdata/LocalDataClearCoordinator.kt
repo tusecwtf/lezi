@@ -14,7 +14,7 @@ import com.lezi.babylog.core.datastore.LocalClearSettingsSnapshot
 import com.lezi.babylog.core.datastore.SettingsStore
 import com.lezi.babylog.sync.LocalClearWorkflow
 import com.lezi.babylog.sync.SyncPort
-import com.lezi.babylog.sync.localClearCommittedFailure
+import com.lezi.babylog.sync.clear.localClearCommittedFailure
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CancellationException

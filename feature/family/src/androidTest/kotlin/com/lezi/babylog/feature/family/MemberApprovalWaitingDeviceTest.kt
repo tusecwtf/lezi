@@ -19,12 +19,12 @@ import com.lezi.babylog.feature.family.members.PendingMemberDecisionDialog
 import com.lezi.babylog.feature.family.members.MemberLoginQrCodeDialog
 import com.lezi.babylog.feature.family.members.MembersDevicesUi
 import com.lezi.babylog.feature.family.FamilyIdentityUi
-import com.lezi.babylog.sync.FamilyRole
+import com.lezi.babylog.sync.session.FamilyRole
 import com.lezi.babylog.sync.FamilyMember
 import com.lezi.babylog.sync.PendingMemberLogin
-import com.lezi.babylog.sync.PendingMemberLoginRequest
-import com.lezi.babylog.sync.MemberLoginQrPayload
-import com.lezi.babylog.sync.TrustedEndpointProfile
+import com.lezi.babylog.sync.backend.PendingMemberLoginRequest
+import com.lezi.babylog.sync.qr.MemberLoginQrPayload
+import com.lezi.babylog.sync.session.TrustedEndpointProfile
 import org.junit.Rule
 import org.junit.Test
 

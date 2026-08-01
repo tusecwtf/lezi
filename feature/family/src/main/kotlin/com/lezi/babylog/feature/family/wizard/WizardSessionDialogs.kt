@@ -54,12 +54,11 @@ import com.lezi.babylog.feature.family.components.FamilyWizardStep
 import com.lezi.babylog.feature.family.components.SecureWindowWhileVisible
 import com.lezi.babylog.feature.family.components.familyWizardProgress
 import com.lezi.babylog.feature.family.components.familyWizardTitle
-import com.lezi.babylog.sync.CertificateTrustCandidate
+import com.lezi.babylog.sync.session.CertificateTrustCandidate
 import com.lezi.babylog.sync.PendingMemberLogin
-import com.lezi.babylog.sync.MemberLoginQrPayload
-import com.lezi.babylog.sync.MemberLoginQrPayloadCodec
-import com.lezi.babylog.sync.SetupProbeResult
-
+import com.lezi.babylog.sync.qr.MemberLoginQrPayload
+import com.lezi.babylog.sync.qr.MemberLoginQrPayloadCodec
+import com.lezi.babylog.sync.session.SetupProbeResult
 @Composable
 internal fun FamilyEndpointConnectionDialog(
     state: FamilyWizardState,

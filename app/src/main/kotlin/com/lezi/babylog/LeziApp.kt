@@ -9,7 +9,7 @@ import com.lezi.babylog.domain.localdata.LocalDataClearCoordinator
 import com.lezi.babylog.core.common.LocalDataGate
 import com.lezi.babylog.feature.export.ExportCacheCleanup
 import com.lezi.babylog.feature.widget.CareWidgetAutoRefresh
-import com.lezi.babylog.sync.ForegroundState
+import com.lezi.babylog.sync.session.ForegroundState
 import com.lezi.babylog.sync.SyncPort
 import com.lezi.babylog.sync.SyncTrigger
 import dagger.hilt.android.HiltAndroidApp

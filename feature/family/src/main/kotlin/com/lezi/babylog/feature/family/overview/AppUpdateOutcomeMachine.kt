@@ -2,10 +2,10 @@ package com.lezi.babylog.feature.family.overview
 
 import com.lezi.babylog.core.common.productUiError
 import com.lezi.babylog.sync.AppUpdateMetadata
-import com.lezi.babylog.sync.AppUpdateUiOutcome
+import com.lezi.babylog.sync.appupdate.AppUpdateUiOutcome
 import com.lezi.babylog.sync.SyncPort
-import com.lezi.babylog.sync.appUpdateInstallUiOutcome
-import com.lezi.babylog.sync.appUpdateUiOutcome
+import com.lezi.babylog.sync.appupdate.appUpdateInstallUiOutcome
+import com.lezi.babylog.sync.appupdate.appUpdateUiOutcome
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow

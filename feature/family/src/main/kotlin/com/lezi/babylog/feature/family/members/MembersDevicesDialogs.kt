@@ -42,9 +42,8 @@ import com.lezi.babylog.designsystem.dismissKeyboardOnTap
 import com.lezi.babylog.feature.family.components.FamilyDialog
 import com.lezi.babylog.feature.family.components.SecureWindowWhileVisible
 import com.lezi.babylog.feature.family.components.canConfirmFamilyDeletion
-import com.lezi.babylog.sync.MemberLoginQrPayload
-import com.lezi.babylog.sync.MemberLoginQrPayloadCodec
-
+import com.lezi.babylog.sync.qr.MemberLoginQrPayload
+import com.lezi.babylog.sync.qr.MemberLoginQrPayloadCodec
 @Composable
 internal fun RenameFamilyDialog(
     familyName: String,

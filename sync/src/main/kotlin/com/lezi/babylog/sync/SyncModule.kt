@@ -1,5 +1,4 @@
 package com.lezi.babylog.sync
-
 import android.content.Context
 import android.content.pm.PackageManager
 import dagger.Binds
@@ -11,6 +10,28 @@ import dagger.hilt.components.SingletonComponent
 import java.io.File
 import javax.inject.Named
 import javax.inject.Singleton
+import com.lezi.babylog.sync.appupdate.AndroidAppUpdateApkIdentityReader
+import com.lezi.babylog.sync.appupdate.AndroidAppUpdateInstaller
+import com.lezi.babylog.sync.appupdate.AppUpdateApkIdentityReader
+import com.lezi.babylog.sync.appupdate.AppUpdateInstaller
+import com.lezi.babylog.sync.appupdate.LOCAL_DATA_CONTRACT_VERSION_METADATA
+import com.lezi.babylog.sync.backend.HttpSyncBackend
+import com.lezi.babylog.sync.backend.RefreshingSyncBackend
+import com.lezi.babylog.sync.backend.SyncBackend
+import com.lezi.babylog.sync.media.AndroidSyncMediaFileStore
+import com.lezi.babylog.sync.media.SyncMediaFileStore
+import com.lezi.babylog.sync.session.DataStoreSyncPreferences
+import com.lezi.babylog.sync.session.EncryptedSecureRefreshTokenStore
+import com.lezi.babylog.sync.session.ForegroundState
+import com.lezi.babylog.sync.session.HttpSetupProbe
+import com.lezi.babylog.sync.session.PolicyClock
+import com.lezi.babylog.sync.session.ProcessForegroundState
+import com.lezi.babylog.sync.session.SecureRefreshTokenStore
+import com.lezi.babylog.sync.session.SetupProbe
+import com.lezi.babylog.sync.session.SyncPreferences
+import com.lezi.babylog.sync.session.SystemPolicyClock
+import com.lezi.babylog.sync.appupdate.getPackageInfoCompat
+import com.lezi.babylog.sync.appupdate.versionCodeCompat
 
 @Module
 @InstallIn(SingletonComponent::class)

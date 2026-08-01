@@ -87,7 +87,7 @@ internal class BabyFamilyProfileCoordinator(
 
     fun observeMemberLocalBabyOrphans(): Flow<List<Baby>> =
         combine(babyDao.observeAll(), syncPort.session()) { babies, session ->
-            if (session.role == com.lezi.babylog.sync.FamilyRole.Member) {
+            if (session.role == com.lezi.babylog.sync.session.FamilyRole.Member) {
                 babies.filterNot(BabyEntity::familyAuthority).map { it.toModel() }
             } else {
                 emptyList()
@@ -264,7 +264,7 @@ internal class BabyFamilyProfileCoordinator(
             deviceId = user?.deviceId ?: "—",
             // Cache of membership 家庭称呼 when joined; local-only placeholder otherwise.
             displayName = user?.displayName?.takeIf { it.isNotBlank() }
-                ?: com.lezi.babylog.sync.LOCAL_DEVICE_DISPLAY_NAME,
+                ?: com.lezi.babylog.sync.backend.LOCAL_DEVICE_DISPLAY_NAME,
             familyId = family?.id ?: 1L,
         )
     }
@@ -277,7 +277,7 @@ internal class BabyFamilyProfileCoordinator(
         val existing = localUserDao.get() ?: return
         val normalized = displayName?.trim().orEmpty()
         val stored = normalized.takeIf {
-            it.isNotEmpty() && it != com.lezi.babylog.sync.LOCAL_DEVICE_DISPLAY_NAME
+            it.isNotEmpty() && it != com.lezi.babylog.sync.backend.LOCAL_DEVICE_DISPLAY_NAME
         }
         localUserDao.upsert(existing.copy(displayName = stored))
     }
@@ -285,7 +285,7 @@ internal class BabyFamilyProfileCoordinator(
     suspend fun setCurrentBaby(babyId: Long) {
         val baby = babyDao.get(babyId) ?: return
         if (
-            syncPort.session().first().role == com.lezi.babylog.sync.FamilyRole.Member &&
+            syncPort.session().first().role == com.lezi.babylog.sync.session.FamilyRole.Member &&
             !baby.familyAuthority
         ) {
             throw BabyProfilePermissionException()
@@ -301,7 +301,7 @@ internal class BabyFamilyProfileCoordinator(
     ) {
         val baby = babyDao.get(babyId) ?: return
         if (
-            syncPort.session().first().role == com.lezi.babylog.sync.FamilyRole.Member &&
+            syncPort.session().first().role == com.lezi.babylog.sync.session.FamilyRole.Member &&
             !baby.familyAuthority
         ) {
             throw BabyProfilePermissionException()
@@ -554,7 +554,7 @@ internal class BabyFamilyProfileCoordinator(
     private suspend fun reconcileMemberLocalBabies(forceMemberRules: Boolean): Int {
         if (
             !forceMemberRules &&
-            syncPort.session().first().role != com.lezi.babylog.sync.FamilyRole.Member
+            syncPort.session().first().role != com.lezi.babylog.sync.session.FamilyRole.Member
         ) return 0
         val active = babyDao.listAll()
         val authorities = active.filter(BabyEntity::familyAuthority)
@@ -585,7 +585,7 @@ internal class BabyFamilyProfileCoordinator(
     internal suspend fun requireActiveBaby(babyId: Long): BabyEntity =
         requireNotNull(babyDao.get(babyId)) { "宝宝档案不存在，请返回后重试" }.also { baby ->
             if (
-                syncPort.session().first().role == com.lezi.babylog.sync.FamilyRole.Member &&
+                syncPort.session().first().role == com.lezi.babylog.sync.session.FamilyRole.Member &&
                 !baby.familyAuthority
             ) {
                 throw BabyProfilePermissionException()
@@ -593,7 +593,7 @@ internal class BabyFamilyProfileCoordinator(
         }
 
     private suspend fun requireCanManageBabyProfiles() {
-        if (syncPort.session().first().role == com.lezi.babylog.sync.FamilyRole.Member) {
+        if (syncPort.session().first().role == com.lezi.babylog.sync.session.FamilyRole.Member) {
             throw BabyProfilePermissionException()
         }
     }
@@ -605,7 +605,7 @@ internal class BabyFamilyProfileCoordinator(
         forceMemberRules: Boolean = false,
     ): Boolean {
         val member = forceMemberRules ||
-            syncPort.session().first().role == com.lezi.babylog.sync.FamilyRole.Member
+            syncPort.session().first().role == com.lezi.babylog.sync.session.FamilyRole.Member
         if (member && (source.familyAuthority || !target.familyAuthority)) {
             throw BabyProfilePermissionException()
         }
@@ -614,8 +614,8 @@ internal class BabyFamilyProfileCoordinator(
 
     private fun visibleBabyEntities(
         babies: List<BabyEntity>,
-        role: com.lezi.babylog.sync.FamilyRole,
-    ): List<BabyEntity> = if (role == com.lezi.babylog.sync.FamilyRole.Member) {
+        role: com.lezi.babylog.sync.session.FamilyRole,
+    ): List<BabyEntity> = if (role == com.lezi.babylog.sync.session.FamilyRole.Member) {
         babies.filter(BabyEntity::familyAuthority)
     } else {
         babies

@@ -33,8 +33,7 @@ import com.lezi.babylog.feature.family.components.formatLastSuccessAt
 import com.lezi.babylog.feature.family.components.unjoinedFamilyCardSubtitle
 import com.lezi.babylog.feature.family.members.MembersDevicesUi
 import com.lezi.babylog.sync.AppUpdateMetadata
-import com.lezi.babylog.sync.FamilyRole
-
+import com.lezi.babylog.sync.session.FamilyRole
 internal fun familyMemberRosterMinimumTouchHeight() = LeziSpacing.Touch
 
 /**
@@ -297,9 +296,9 @@ internal fun OptionalAppUpdateBanner(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val label = com.lezi.babylog.sync.optionalAppUpdateBannerLabel(versionName)
+    val label = com.lezi.babylog.sync.appupdate.optionalAppUpdateBannerLabel(versionName)
     val description =
-        com.lezi.babylog.sync.optionalAppUpdateBannerContentDescription(versionName)
+        com.lezi.babylog.sync.appupdate.optionalAppUpdateBannerContentDescription(versionName)
     Surface(
         modifier = modifier
             .fillMaxWidth()

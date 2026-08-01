@@ -1,8 +1,8 @@
 package com.lezi.babylog.feature.onboarding
 
-import com.lezi.babylog.sync.FamilyEndpointDraft
-import com.lezi.babylog.sync.FamilyEndpointConfig
-import com.lezi.babylog.sync.memberDisplayNameValidationError
+import com.lezi.babylog.sync.session.FamilyEndpointDraft
+import com.lezi.babylog.sync.session.FamilyEndpointConfig
+import com.lezi.babylog.sync.session.memberDisplayNameValidationError
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test

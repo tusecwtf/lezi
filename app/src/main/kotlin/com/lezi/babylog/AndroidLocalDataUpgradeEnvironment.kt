@@ -11,7 +11,7 @@ import com.lezi.babylog.core.common.LocalDataUpgradeBlockReason
 import com.lezi.babylog.core.common.LocalDataUpgradeEnvironment
 import com.lezi.babylog.core.common.LocalDataUpgradeFailure
 import com.lezi.babylog.core.common.LocalDataUpgradeStep
-import com.lezi.babylog.sync.SecureRefreshTokenStore
+import com.lezi.babylog.sync.session.SecureRefreshTokenStore
 import dagger.Lazy
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
